@@ -971,3 +971,191 @@ class TestProviderLaneReapClassification:
         assert branch_name in branches, (
             "L3 FAIL: branch was deleted — missing base_sha must fail-closed"
         )
+
+
+# ---------------------------------------------------------------------------
+# OI-1106: the envelope push+PR guard must classify against the worktree's
+# RECORDED base (the allocator's origin/main), not a lane-local plan.base_ref
+# that can name a stale local `main` or a PR merge-commit checkout. Two
+# independent sources for "the base" is what made the envelope test family
+# flake: a commit-less worktree was misclassified committed/pushed and a real
+# success was rewritten to status="failure" on a different test each run.
+# ---------------------------------------------------------------------------
+
+
+class TestOi1106BaseFromClaimNotPlanBaseRef:
+    """The base SHA for classification comes from the worktree claim, never
+    re-derived from plan.base_ref. Pinned here so the flake cannot return."""
+
+    def test_read_worktree_base_sha_returns_allocator_recorded_sha(
+        self, tmp_path, monkeypatch
+    ):
+        """read_worktree_base_sha reads base_sha from the claim the allocator
+        wrote — the same source remove_dispatch_worktree uses for L3 reap."""
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            read_worktree_base_sha,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "oi1106-claim-1"
+        create_dispatch_worktree(dispatch_id, project_root=local)
+
+        origin_main_sha = subprocess.check_output(
+            ["git", "-C", str(local), "rev-parse", "origin/main"], text=True
+        ).strip()
+
+        base_sha, base_ref = read_worktree_base_sha(dispatch_id, project_root=local)
+        assert base_sha == origin_main_sha, (
+            f"read_worktree_base_sha must return the allocator's recorded "
+            f"origin/main SHA {origin_main_sha[:12]}, got {base_sha!r}"
+        )
+        assert base_ref == "origin/main"
+
+    def test_enforce_push_pr_clean_when_local_main_stale(
+        self, tmp_path, monkeypatch
+    ):
+        """OI-1106 repro + fix: a stale local `main` behind `origin/main` must
+        NOT misclassify a commit-less worktree as committed/pushed.
+
+        Before the fix, _enforce_push_pr resolved base_sha from plan.base_ref
+        ("main") while the worktree was based on origin/main; when local main
+        lagged origin/main, base_sha != HEAD and a clean worktree was
+        misclassified committed -> push -> gh pr create ("No commits between
+        main and dispatch/...") -> status="failure". With the fix, base_sha
+        comes from the claim (origin/main == HEAD) -> clean -> no rejection.
+        """
+        from dispatch_envelope import _AdapterResult, _enforce_push_pr
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+        import tmux_worktree
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        # Advance origin/main by one commit so a stale local `main` lags it.
+        (local / "advance.txt").write_text("advance\n")
+        subprocess.run(["git", "-C", str(local), "add", "advance.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(local), "commit", "-m", "advance main"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(local), "push", "origin", "main"], check=True, capture_output=True)
+        origin_main_sha = subprocess.check_output(
+            ["git", "-C", str(local), "rev-parse", "origin/main"], text=True
+        ).strip()
+        stale_main_sha = subprocess.check_output(
+            ["git", "-C", str(local), "rev-parse", "main~1"], text=True
+        ).strip()
+        assert origin_main_sha != stale_main_sha, "fixture: origin/main must be ahead of stale main"
+
+        dispatch_id = "oi1106-stale-main-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+        # Worktree is commit-less (clean), based on origin/main.
+        wt_head = subprocess.check_output(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert wt_head == origin_main_sha
+
+        branch = f"dispatch/{dispatch_id}"
+        receipts_file = tmp_path / "receipts.ndjson"
+        receipts_file.touch()
+
+        # Spy classify_path to record the verdict the guard actually used.
+        verdicts: list = []
+        orig_classify = tmux_worktree.classify_path
+
+        def spy(**kw):
+            v = orig_classify(**kw)
+            verdicts.append((kw.get("base_sha"), v))
+            return v
+
+        monkeypatch.setattr(tmux_worktree, "classify_path", spy)
+        # Also patch the name pr_enforcement imported, if any — the envelope
+        # guard imports classify_path lazily inside _enforce_push_pr.
+        import pr_enforcement as _pe
+        if hasattr(_pe, "classify_path"):
+            monkeypatch.setattr(_pe, "classify_path", spy)
+
+        result = _enforce_push_pr(
+            dispatch_id=dispatch_id,
+            branch=branch,
+            wt_path=wt_path,
+            repo_root=local,
+            receipts_file=receipts_file,
+            result=_AdapterResult(returncode=0, completion_text="done", status="success"),
+            # plan.base_ref would resolve this stale local main — the exact
+            # trap. The claim must win over it.
+            base_ref="main",
+        )
+
+        try:
+            # The guard must NOT rewrite a clean success to failure.
+            assert result.status == "success", (
+                f"OI-1106 regression: clean worktree rewritten to "
+                f"status={result.status!r} ({result.error})"
+            )
+            # And classify must have seen base_sha == origin/main (the claim),
+            # NOT the stale local main.
+            assert verdicts, "classify_path was never called"
+            used_base_sha, verdict = verdicts[0]
+            assert used_base_sha == origin_main_sha, (
+                f"OI-1106: classify used base_sha={used_base_sha!r} "
+                f"(stale main={stale_main_sha[:12]}?) instead of the claim's "
+                f"origin/main={origin_main_sha[:12]}"
+            )
+            assert verdict == "clean", (
+                f"commit-less worktree classified {verdict!r}, expected 'clean'"
+            )
+        finally:
+            remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+    def test_enforce_push_pr_degrades_loud_when_no_claim(self, tmp_path, monkeypatch):
+        """When the claim is unavailable (stubbed allocator), _enforce_push_pr
+        falls back to base_ref with a loud warning — never silently guesses
+        committed. classify_path degrades clean-safe when even that fails."""
+        import logging
+        from dispatch_envelope import _AdapterResult, _enforce_push_pr
+        import tmux_worktree
+
+        # A tmp_path that is NOT a git repo: rev-parse of any ref fails, so
+        # the fallback _resolve_base_sha returns None -> classify_path logs
+        # its 'base unresolvable' warning and returns 'clean' (degraded).
+        wt_path = tmp_path / "fake-wt"
+        wt_path.mkdir()
+        monkeypatch.setattr(
+            tmux_worktree, "classify_path",
+            lambda **kw: "clean",
+        )
+
+        records: list = []
+        handler = logging.Handler()
+        handler.emit = lambda r: records.append(r)  # type: ignore[method-assign]
+        logger = logging.getLogger("dispatch_envelope")
+        logger.addHandler(handler)
+        prev_level = logger.level
+        logger.setLevel(logging.WARNING)
+        try:
+            result = _enforce_push_pr(
+                dispatch_id="oi1106-noclaim-1",
+                branch="dispatch/oi1106-noclaim-1",
+                wt_path=wt_path,
+                repo_root=tmp_path,
+                receipts_file=tmp_path / "r.ndjson",
+                result=_AdapterResult(returncode=0, completion_text="done", status="success"),
+                base_ref="main",
+            )
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(prev_level)
+
+        # No claim + unresolvable base -> clean (degraded) -> guard skips -> success.
+        assert result.status == "success"
+        assert any("claim" in (r.getMessage() or "").lower() for r in records), (
+            "expected a loud degradation log mentioning the claim fallback"
+        )

@@ -397,6 +397,47 @@ def resolve_consumer_project_root() -> Path:
     return Path(resolve_paths()["PROJECT_ROOT"]).resolve()
 
 
+def read_worktree_base_sha(
+    dispatch_id: str, *, project_root: Optional[Path] = None
+) -> "tuple[str | None, str]":
+    """Return the (base_sha, base_ref) ``create_dispatch_worktree`` actually used.
+
+    This is the ONE authoritative source for "the commit the dispatch worktree
+    was based on" — read from the O_EXCL claim the worktree allocator writes,
+    NOT re-derived from a lane's own ``plan.base_ref`` (which can name a
+    different ref than the allocator's ``origin/main`` / ``VNX_BENCH_WORKTREE_BASE_REF``,
+    e.g. a stale local ``main`` behind ``origin/main``, or a PR merge-commit
+    checkout). Re-deriving is the root cause of OI-1106: the envelope lanes
+    resolved ``base_sha`` from ``plan.base_ref`` while the worktree was based
+    on ``origin/main``; when the two refs disagreed, a commit-less worktree was
+    misclassified ``committed``/``pushed`` and the push+PR guard rejected a
+    real success with ``status="failure"`` — a guard that flips a different
+    test each run teaches the operator to ignore red CI.
+
+    Mirrors ``remove_dispatch_worktree``'s own claim read (the L3 reap path),
+    so the allocator's recorded base is the single classification input for
+    every lane, never a second independently-drifting resolution.
+
+    Returns ``(None, "<reason>")`` when no claim exists (the allocator never
+    wrote one, or it predates the base_sha field): the caller degrades to a
+    conservative ``classify_path`` result (clean-safe when base_sha is None)
+    and the degradation is surfaced, never guessed into a false ``committed``.
+    Never raises.
+    """
+    try:
+        root = _resolve_project_root(project_root)
+        claim = _read_claim(dispatch_id, root)
+    except Exception as exc:  # noqa: BLE001 — claim read must never break enforcement
+        return None, f"claim read raised: {exc}"
+    if claim is None:
+        return None, "no claim (worktree not created via create_dispatch_worktree)"
+    base_sha = (claim.get("base_sha") or "").strip() or None
+    base_ref = (claim.get("base_ref") or "").strip() or "origin/main"
+    if base_sha is None:
+        return None, f"claim has no base_sha (base_ref={base_ref!r})"
+    return base_sha, base_ref
+
+
 @contextmanager
 def _worktree_lock(root: Path):
     """Serialize `git worktree` add/remove via an exclusive fcntl lock.

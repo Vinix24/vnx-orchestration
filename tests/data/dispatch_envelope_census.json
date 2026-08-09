@@ -967,6 +967,41 @@
       "symbol": "EnvelopeSpec"
     },
     {
+      "file": "tests/test_provider_dispatch_worktree_isolation.py",
+      "line": 1032,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_provider_dispatch_worktree_isolation.py",
+      "line": 1032,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_provider_dispatch_worktree_isolation.py",
+      "line": 1123,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_provider_dispatch_worktree_isolation.py",
+      "line": 1123,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_provider_dispatch_worktree_isolation.py",
+      "line": 1139,
+      "mechanism": "logger-name",
+      "module_target": "dispatch_envelope",
+      "symbol": ""
+    },
+    {
       "file": "tests/test_receipt_v2_pr4_wiring.py",
       "line": 398,
       "mechanism": "direct-call",
@@ -1103,6 +1138,7 @@
     "dispatch_envelope::_dispatch_branch_name",
     "dispatch_envelope::_enforce_push_pr",
     "dispatch_envelope::_receipts_file_for",
+    "dispatch_envelope::_resolve_base_sha",
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
     "dispatch_envelope::run_envelope_plan",
