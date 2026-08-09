@@ -73,6 +73,49 @@ def _get_imported_names(filepath: Path) -> Set[str]:
     return names
 
 
+def _get_docstring_and_multiline_string_lines(source: str) -> set[int]:
+    """Return line numbers inside docstrings and multi-line string literals.
+
+    Parses the source via AST and collects line ranges for every
+    ``Expr(Constant(str))`` node (docstrings) and every multi-line
+    ``Constant(str)`` node (standalone multi-line string literals used
+    outside docstrings).  Single-line string literals inside code lines
+    are deliberately NOT included so that genuine coupling like
+    ``subprocess.run(["tmux"])`` is still caught.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+
+    covered: set[int] = set()
+
+    for node in ast.walk(tree):
+        start = getattr(node, "lineno", None)
+        end = getattr(node, "end_lineno", None)
+        if start is None or end is None:
+            continue
+
+        # Docstrings: Expr wrapping a Constant(str).  Single-line
+        # docstrings (start == end) are included — the entire line is
+        # prose, not code.
+        if isinstance(node, ast.Expr):
+            if isinstance(node.value, ast.Constant) and isinstance(
+                node.value.value, str
+            ):
+                for ln in range(start, end + 1):
+                    covered.add(ln)
+        # Multi-line string literals used outside docstrings (e.g. a
+        # module-level triple-quoted constant).  Single-line strings are
+        # intentionaly excluded — they sit on lines that also carry code.
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if end > start:
+                for ln in range(start, end + 1):
+                    covered.add(ln)
+
+    return covered
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -232,9 +275,12 @@ class TestDirectCouplingFreeze:
             if py_file.name in self.ADAPTER_FILES:
                 continue
             content = py_file.read_text(encoding="utf-8")
+            string_covered = _get_docstring_and_multiline_string_lines(content)
             for i, line in enumerate(content.splitlines(), 1):
                 stripped = line.lstrip()
                 if stripped.startswith("#"):
+                    continue
+                if i in string_covered:
                     continue
                 if "subprocess" in line and "tmux" in line:
                     violations.append(f"{py_file.name}:{i}: {line.strip()}")
@@ -300,14 +346,94 @@ class TestDirectCouplingFreeze:
             if py_file.name in self.ADAPTER_FILES:
                 continue
             content = py_file.read_text(encoding="utf-8")
-            for line in content.splitlines():
+            string_covered = _get_docstring_and_multiline_string_lines(content)
+            for i, line in enumerate(content.splitlines(), 1):
                 if line.lstrip().startswith("#"):
+                    continue
+                if i in string_covered:
                     continue
                 if "subprocess" in line and "tmux" in line:
                     found.add(py_file.name)
                     break
         assert found <= known_files, (
             f"New files with direct tmux coupling: {found - known_files}"
+        )
+
+    def test_real_tmux_subprocess_coupling_still_caught(
+        self, tmp_path: Path
+    ) -> None:
+        """Gate must still flag ``subprocess.run(["tmux", ...])`` in real code.
+
+        Regression for the fix-forward on #1426: the gate got a
+        docstring-aware skip but must still detect genuine
+        subprocess-to-tmux coupling in executable code.
+        """
+        test_file = tmp_path / "test_real_coupling.py"
+        test_file.write_text(
+            '"""Module with real tmux coupling."""\n'
+            "import subprocess\n"
+            "\n"
+            "def send_command():\n"
+            '    """Send a command via tmux."""\n'
+            '    subprocess.run(["tmux", "send-keys", "Enter"], check=True)\n'
+        )
+        content = test_file.read_text(encoding="utf-8")
+        string_covered = _get_docstring_and_multiline_string_lines(content)
+
+        violations: list[str] = []
+        for i, line in enumerate(content.splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if i in string_covered:
+                continue
+            if "subprocess" in line and "tmux" in line:
+                violations.append(line.strip())
+
+        assert len(violations) == 1, (
+            f"Gate must catch real coupling; got {len(violations)}: {violations}"
+        )
+        assert "subprocess.run" in violations[0], (
+            f"Violation should be the subprocess.run call, got: {violations[0]}"
+        )
+
+    def test_docstring_only_mentions_not_caught(
+        self, tmp_path: Path
+    ) -> None:
+        """Gate must NOT flag subprocess+tmux when they only appear in docstrings.
+
+        Regression for the fix-forward on #1426: the docstring that
+        triggered the false-positive in report_to_receipt_converter.py
+        must now pass through the gate cleanly.
+        """
+        test_file = tmp_path / "test_docstring_only.py"
+        test_file.write_text(
+            '"""This module discusses the four lane types.\n'
+            "\n"
+            "The four lane types (tmux-spawn, provider, envelope, and the\n"
+            "subprocess adapter) are all dispatched through the single-entry\n"
+            'door.\n'
+            '"""\n'
+            "\n"
+            "def some_function():\n"
+            '    """Docs mentioning subprocess and tmux together."""\n'
+            "    return 42\n"
+        )
+        content = test_file.read_text(encoding="utf-8")
+        string_covered = _get_docstring_and_multiline_string_lines(content)
+
+        violations: list[str] = []
+        for i, line in enumerate(content.splitlines(), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if i in string_covered:
+                continue
+            if "subprocess" in line and "tmux" in line:
+                violations.append(line.strip())
+
+        assert violations == [], (
+            f"Gate must skip docstring mentions; got: {violations}"
         )
 
 
