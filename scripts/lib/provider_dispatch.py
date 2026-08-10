@@ -1348,6 +1348,14 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error or result.timed_out:
             status = "timeout" if result.timed_out else "failure"
             _emit_governance(
@@ -1368,8 +1376,13 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         )
         return 0
     finally:
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_claude(args: argparse.Namespace) -> int:
@@ -1377,6 +1390,9 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
 
     Produces byte-identical NDJSON + receipt as direct subprocess_dispatch
     invocation — the delegation preserves all argument semantics unchanged.
+
+    OI-1090: always creates an isolated worktree so the worker never runs in
+    the main checkout, even when called outside the dispatch door.
     """
     # Benchmark mode (VNX_BENCH_SEED_MATERIALIZE=1): route claude through the
     # materialized-cell `claude -p` path so the benchmark scores it like the provider
@@ -1385,61 +1401,79 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
         return _dispatch_claude_benchmark(args)
 
     import subprocess_dispatch as sd
+    from subprocess_dispatch_internals.git_helpers import _set_active_worktree  # noqa: PLC0415
 
-    # OI-1107: fall back to Role: header in instruction, then to documented default.
-    role = args.role
-    if role is None:
-        role = sd._extract_role_from_instruction(args.instruction) or sd._ROLE_FALLBACK
-
-    dispatch_paths: list[str] | None = None
-    if args.dispatch_paths.strip():
-        dispatch_paths = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
-
-    start_time = datetime.now(timezone.utc)
-    ok = sd.deliver_with_recovery(
-        terminal_id=args.terminal_id,
-        instruction=args.instruction,
-        model=args.model,
-        dispatch_id=args.dispatch_id,
-        role=role,
-        max_retries=args.max_retries,
-        auto_commit=not args.no_auto_commit,
-        gate=args.gate,
-        dispatch_paths=dispatch_paths,
-        pr_id=args.pr_id,
-        total_deadline=float(args.deadline_seconds),
-    )
-    end_time = datetime.now(timezone.utc)
-
-    # Read token_usage and completion_text from delivery side-channels (populated by spawn_claude).
-    # recovery._resolve_token_usage_and_cost uses .get() to leave the entry
-    # available for this governance-receipt path; we .pop() here to clean up.
-    _claude_token_usage = None
-    _claude_completion_text = ""
+    # OI-1090: always create an isolated worktree before delegating to
+    # deliver_with_recovery, which resolves its CWD via _get_active_worktree().
+    isolation_worktree = None
     try:
-        from subprocess_dispatch_internals.delivery import (
-            _dispatch_completion_text as _ct_cache,
-            _dispatch_token_usage as _tu_cache,
+        isolation_worktree, _ = _prepare_provider_workdir(args)
+        _set_active_worktree(isolation_worktree)
+    except RuntimeError:
+        logger.error(
+            "claude dispatch isolation failed for %s — aborting", args.dispatch_id,
         )
-        _claude_token_usage = _tu_cache.pop(args.dispatch_id, None)
-        _claude_completion_text = _ct_cache.pop(args.dispatch_id, "")
-    except Exception as _tu_exc:
-        logger.debug("_dispatch_claude: side-channel read failed: %s", _tu_exc)
+        return 1
 
-    class _ClaudeResult:
-        completion_text = _claude_completion_text
-        token_usage = _claude_token_usage
+    try:
+        # OI-1107: fall back to Role: header in instruction, then to documented default.
+        role = args.role
+        if role is None:
+            role = sd._extract_role_from_instruction(args.instruction) or sd._ROLE_FALLBACK
 
-    status = "success" if ok else "failure"
-    _emit_governance(args, "claude", args.model, _ClaudeResult(), start_time, end_time, status)
-    return 0 if ok else 1
+        dispatch_paths: list[str] | None = None
+        if args.dispatch_paths.strip():
+            dispatch_paths = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
+
+        start_time = datetime.now(timezone.utc)
+        ok = sd.deliver_with_recovery(
+            terminal_id=args.terminal_id,
+            instruction=args.instruction,
+            model=args.model,
+            dispatch_id=args.dispatch_id,
+            role=role,
+            max_retries=args.max_retries,
+            auto_commit=not args.no_auto_commit,
+            gate=args.gate,
+            dispatch_paths=dispatch_paths,
+            pr_id=args.pr_id,
+            total_deadline=float(args.deadline_seconds),
+        )
+        end_time = datetime.now(timezone.utc)
+
+        # Read token_usage and completion_text from delivery side-channels (populated by spawn_claude).
+        # recovery._resolve_token_usage_and_cost uses .get() to leave the entry
+        # available for this governance-receipt path; we .pop() here to clean up.
+        _claude_token_usage = None
+        _claude_completion_text = ""
+        try:
+            from subprocess_dispatch_internals.delivery import (
+                _dispatch_completion_text as _ct_cache,
+                _dispatch_token_usage as _tu_cache,
+            )
+            _claude_token_usage = _tu_cache.pop(args.dispatch_id, None)
+            _claude_completion_text = _ct_cache.pop(args.dispatch_id, "")
+        except Exception as _tu_exc:
+            logger.debug("_dispatch_claude: side-channel read failed: %s", _tu_exc)
+
+        class _ClaudeResult:
+            completion_text = _claude_completion_text
+            token_usage = _claude_token_usage
+
+        status = "success" if ok else "failure"
+        _emit_governance(args, "claude", args.model, _ClaudeResult(), start_time, end_time, status)
+        return 0 if ok else 1
+    finally:
+        _set_active_worktree(None)
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
 def _create_provider_worktree(dispatch_id: str) -> Path:
     """Create an isolated worktree for a provider dispatch.
 
-    Only called when VNX_ISOLATED_WORKTREE=1.  Returns the worktree Path on
-    success, raises RuntimeError on failure — no shared-checkout fallback.
+    Always called (isolation default-on since OI-1090).  Returns the worktree
+    Path on success, raises RuntimeError on failure — no shared-checkout
+    fallback.
 
     Resolves the CONSUMER project root explicitly (dispatch_worktree_isolation.
     resolve_consumer_project_root) and threads it into create_dispatch_worktree
@@ -1461,26 +1495,28 @@ def _create_provider_worktree(dispatch_id: str) -> Path:
 def _prepare_provider_workdir(
     args: argparse.Namespace,
 ) -> tuple[Optional[Path], Optional[Path]]:
-    """Create isolation and, for benchmark cells, materialize the seed at CWD."""
-    isolation_worktree: Optional[Path] = None
-    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
-        isolation_worktree = _create_provider_worktree(args.dispatch_id)
+    """Create isolation and, for benchmark cells, materialize the seed at CWD.
 
+    Always creates an isolated worktree (default-on since OI-1090).
+    Raises RuntimeError on failure — no shared-checkout fallback.
+    """
+    isolation_worktree = _create_provider_worktree(args.dispatch_id)
+
+    # VNX_BENCH_REQUIRE_ISOLATION: the benchmark's fail-closed assertion that
+    # isolation must be active.  Since isolation is now unconditional, this
+    # check is a belt-and-suspenders guard — it only fires when _create_provider_worktree
+    # returned without raising but somehow produced None (an invariant violation).
     if (
         os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1"
         and isolation_worktree is None
     ):
         raise RuntimeError(
-            "benchmark provider isolation required but worktree creation failed; "
-            "refusing shared main checkout"
+            "benchmark provider isolation required but worktree creation returned None; "
+            "refusing shared main checkout (invariant violation)"
         )
 
     worker_cwd = isolation_worktree
     if os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1":
-        if isolation_worktree is None:
-            raise RuntimeError(
-                "benchmark seed materialization requires an isolated provider worktree"
-            )
         from benchmark_worker_isolation import materialize_benchmark_seed  # noqa: PLC0415
 
         worker_cwd = materialize_benchmark_seed(
@@ -1488,10 +1524,7 @@ def _prepare_provider_workdir(
             _resolve_dispatch_paths(args.dispatch_paths),
         )
 
-    if (
-        isolation_worktree is not None
-        and os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1"
-    ):
+    if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
         print(f"VNX_PROVIDER_WORKDIR={isolation_worktree}", file=sys.stderr)
     return isolation_worktree, worker_cwd
 
@@ -1575,7 +1608,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
             raise
         logger.error(
-            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "isolation required but worktree creation failed "
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
@@ -1592,6 +1625,14 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
+
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
 
         if result.error:
             _emit_governance(args, "codex", model, result, start_time, end_time, "failure", event_store=event_store)
@@ -1614,10 +1655,13 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         _emit_governance(args, "codex", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
@@ -2006,7 +2050,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
             raise
         logger.error(
-            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "isolation required but worktree creation failed "
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
@@ -2043,6 +2087,14 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
@@ -2064,10 +2116,13 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -2112,7 +2167,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
             raise
         logger.error(
-            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "isolation required but worktree creation failed "
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
@@ -2138,6 +2193,14 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_kimi failed: {result.error}", file=sys.stderr)
@@ -2159,10 +2222,13 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
@@ -2236,7 +2302,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
             raise
         logger.error(
-            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "isolation required but worktree creation failed "
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
@@ -2255,6 +2321,14 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_deepseek_harness failed: {result.error}", file=sys.stderr)
@@ -2269,10 +2343,13 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_glm_harness(args: argparse.Namespace) -> int:
@@ -2299,7 +2376,7 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
             raise
         logger.error(
-            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "isolation required but worktree creation failed "
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
@@ -2318,6 +2395,15 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
+
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_glm_harness failed: {result.error}", file=sys.stderr)
@@ -2332,8 +2418,13 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -2366,7 +2457,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         if os.environ.get("VNX_BENCH_REQUIRE_ISOLATION") == "1":
             raise
         logger.error(
-            "isolation required (VNX_ISOLATED_WORKTREE=1) but worktree creation failed "
+            "isolation required but worktree creation failed "
             "for %s: %s - aborting dispatch; no shared-checkout fallback",
             args.dispatch_id, _wt_exc,
         )
@@ -2383,6 +2474,14 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             cwd=worker_cwd,
         )
         end_time = datetime.now(timezone.utc)
+
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
 
         if result.error:
             _emit_governance(args, "gemini", model, result, start_time, end_time, "failure", event_store=event_store)
@@ -2405,10 +2504,13 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         _emit_governance(args, "gemini", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 _MLX_MODEL_MAP: dict[str, str] = {
