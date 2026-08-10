@@ -1475,6 +1475,66 @@ def _persist_route_decision(
 
 
 # ---------------------------------------------------------------------------
+# OI-1120 part 2 — fill the dispatch register at fire time
+# ---------------------------------------------------------------------------
+
+def _register_dispatch_created(
+    plan: ExecutionPlan,
+    vspec: ValidatedSpec,
+    *,
+    project_id: str,
+    state_dir: Path,
+) -> None:
+    """Emit a ``dispatch_created`` register event the moment the door commits
+    to firing. No lane writes this event today (dispatch_register.py's
+    OI-1105 note): one write site here covers every lane the door can select
+    (provider/envelope, claude_tmux_subscription, claude_headless→subprocess
+    adapter) since they all funnel through ``run_dispatch`` after the permit
+    is issued — a new lane inherits the write for free.
+
+    Best-effort: a register write problem is an observability gap, never a
+    reason to refuse work. Idempotent via ``dispatch_register.append_event_once``
+    so a retried fire for the same dispatch_id does not add a second row.
+    """
+    try:
+        import dispatch_register  # noqa: PLC0415
+
+        pr_number: Optional[int] = None
+        if plan.pr_id:
+            try:
+                pr_number = int(plan.pr_id)
+            except (TypeError, ValueError):
+                pr_number = None
+
+        dispatch_register.append_event_once(
+            "dispatch_created",
+            dispatch_id=plan.dispatch_id,
+            terminal=vspec.spec.target_slot,
+            gate=vspec.spec.gate,
+            feature_id=vspec.spec.track_id or "",
+            pr_number=pr_number,
+            project_id=project_id,
+            state_dir=state_dir,
+            extra={
+                "provider": plan.provider.value,
+                "model": plan.model,
+                "lane": plan.lane,
+            },
+        )
+    except Exception as exc:  # vnx-silent-except: register fill is observability-only, must never block the door
+        from vnx_paths import TestIsolationGuardError  # noqa: PLC0415
+        if isinstance(exc, TestIsolationGuardError):
+            # OI-1079: a test-isolation violation must fail loud, not degrade to a
+            # log line. This can only ever fire under pytest (the guard is a no-op
+            # in production), so re-raising never blocks a real dispatch.
+            raise
+        logger.warning(
+            "[dispatch_cli] WARN dispatch_register dispatch_created write failed for dispatch=%s: %s",
+            plan.dispatch_id, exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # run_dispatch — the single door
 # ---------------------------------------------------------------------------
 
@@ -1655,6 +1715,7 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         # answerable after the fact. Best-effort — never blocks the door.
         if not dry_run:
             _persist_route_decision(plan, permit, state_dir=state_dir)
+            _register_dispatch_created(plan, vspec, project_id=project_id, state_dir=state_dir)
 
         if dry_run:
             _print_plan(plan, fp)

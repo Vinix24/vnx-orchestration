@@ -33,7 +33,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
 import dispatch_register
-from dispatch_register import append_event, read_events
+from dispatch_register import append_event, append_event_once, read_events
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "lib" / "dispatch_register.py"
 
@@ -424,6 +424,48 @@ class TestAppendEventIdRequirement:
         """feature_id alone satisfies the ID requirement."""
         result = append_event("dispatch_created", feature_id="F-55")
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# OI-1120 part 2 — append_event_once idempotency + state_dir override
+# ---------------------------------------------------------------------------
+
+class TestAppendEventOnce:
+    def test_writes_when_absent(self, isolated_data_dir):
+        result = append_event_once("dispatch_created", dispatch_id="d-once-1")
+        assert result is True
+        reg = _reg_path(isolated_data_dir)
+        assert len(reg.read_text().splitlines()) == 1
+
+    def test_second_call_same_dispatch_id_is_noop(self, isolated_data_dir):
+        """Firing the same dispatch id twice must not create a duplicate entry."""
+        first = append_event_once("dispatch_created", dispatch_id="d-once-2")
+        second = append_event_once("dispatch_created", dispatch_id="d-once-2")
+        assert first is True
+        assert second is True
+        reg = _reg_path(isolated_data_dir)
+        lines = reg.read_text().splitlines()
+        assert len(lines) == 1, f"expected exactly one register entry, got {len(lines)}: {lines}"
+
+    def test_different_dispatch_id_adds_second_entry(self, isolated_data_dir):
+        append_event_once("dispatch_created", dispatch_id="d-once-3a")
+        append_event_once("dispatch_created", dispatch_id="d-once-3b")
+        reg = _reg_path(isolated_data_dir)
+        ids = {json.loads(ln)["dispatch_id"] for ln in reg.read_text().splitlines()}
+        assert ids == {"d-once-3a", "d-once-3b"}
+
+    def test_state_dir_override_writes_to_explicit_path(self, isolated_data_dir, tmp_path):
+        """An explicit state_dir must be honoured over ambient VNX_STATE_DIR —
+        the door derives state_dir from the staged bundle's physical location,
+        which can differ from ambient env in central-install mode."""
+        explicit_dir = tmp_path / "explicit-state"
+        result = append_event_once(
+            "dispatch_created", dispatch_id="d-once-explicit", state_dir=explicit_dir,
+        )
+        assert result is True
+        explicit_reg = explicit_dir / "dispatch_register.ndjson"
+        assert explicit_reg.exists()
+        assert not _reg_path(isolated_data_dir).exists()
 
 
 # ---------------------------------------------------------------------------

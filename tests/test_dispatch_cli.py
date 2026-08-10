@@ -31,6 +31,7 @@ from dispatch_cli import (
     _load_model_pins_from_yaml,
     _persist_route_decision,
     _persist_track_id,
+    _register_dispatch_created,
     _tracks_db_path,
     build_runtime_snapshot,
     fingerprint,
@@ -66,6 +67,23 @@ from dispatch_spec import (
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _oi1120_isolate_register_central_mirror(monkeypatch, tmp_path):
+    """OI-1120 part 2: run_dispatch's new dispatch_created write resolves
+    project_id ambiently — this repo's own .vnx-project-id marker resolves to
+    'vnx-dev' from any CWD inside the checkout — so without this, every
+    non-dry-run run_dispatch() test in this module would attempt to mirror into
+    the REAL ~/.vnx-data/vnx-dev central store. The OI-1079 guard blocks the
+    actual write under pytest, but redirecting the seam means the guard never
+    needs to fire during routine tests (same precedent as
+    test_dispatch_register_dual_write.py's isolated_central_mirror fixture)."""
+    import dispatch_register
+    monkeypatch.setattr(
+        dispatch_register, "_resolve_central_data_dir",
+        lambda project_id: tmp_path / "oi1120-central-mirror" / project_id,
+    )
 
 
 def _make_instruction(tmp_path: Path) -> Path:
@@ -2781,6 +2799,174 @@ class TestPersistRouteDecision:
         assert record["decision"]["provider"] == "codex"
         assert record["decision"]["lane"] == "provider"
         assert record["decision"]["billing"] == "provider_metered"
+
+
+# ---------------------------------------------------------------------------
+# OI-1120 part 2 — the door fills dispatch_register at fire time
+# ---------------------------------------------------------------------------
+
+def _make_validated_spec(*, dispatch_id: str, target_slot: str = "T1", gate: str = "human-promoted",
+                          track_id: str | None = None, pr_id: str | None = None) -> ValidatedSpec:
+    spec = DispatchSpec(
+        schema_version=1,
+        project_id="vnx-dev",
+        dispatch_id=dispatch_id,
+        staging_id="stage-oi1120",
+        instruction_file=Path("/tmp/instruction.md"),
+        role="backend-developer",
+        target_slot=target_slot,
+        gate=gate,
+        dispatch_paths=(),
+        provider=Provider.CLAUDE,
+        track_id=track_id,
+        pr_id=pr_id,
+    )
+    return ValidatedSpec(
+        spec=spec, instruction_text="do something", normalized_paths=(),
+        instruction_sha256="0" * 64,
+    )
+
+
+class TestRegisterDispatchCreated:
+    """OI-1120 part 2: the door writes a dispatch_created register event at the
+    moment it commits to firing — no lane wrote one before this fix."""
+
+    def test_writes_dispatch_created_event(self, tmp_path):
+        import dataclasses
+        plan = dataclasses.replace(
+            _make_minimal_plan(dispatch_id="20260810-oi1120-reg"), pr_id="1440",
+        )
+        vspec = _make_validated_spec(dispatch_id="20260810-oi1120-reg", target_slot="T1",
+                                      gate="human-promoted", track_id="TRK-1", pr_id="1440")
+        state_dir = tmp_path / "state"
+
+        _register_dispatch_created(plan, vspec, project_id="vnx-dev", state_dir=state_dir)
+
+        reg_path = state_dir / "dispatch_register.ndjson"
+        assert reg_path.exists()
+        lines = reg_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["event"] == "dispatch_created"
+        assert record["dispatch_id"] == "20260810-oi1120-reg"
+        assert record["terminal"] == "T1"
+        assert record["gate"] == "human-promoted"
+        assert record["feature_id"] == "TRK-1"
+        assert record["pr_number"] == 1440
+        assert record["extra"]["provider"] == "claude"
+        assert record["extra"]["model"] == "sonnet"
+        assert record["extra"]["lane"] == "claude_tmux_subscription"
+
+    def test_dispatch_completes_when_register_write_fails(self, tmp_path, monkeypatch, caplog):
+        """A register write problem is an observability gap, never a reason to
+        refuse work: simulate the register write raising, and prove the FULL
+        dispatch (not just the helper in isolation) still completes — the
+        lane still runs and run_dispatch still returns 0."""
+        import logging
+
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# OI-1120 register-failure resilience\n\nDo something safe.\n",
+            staging_id="20260810-staging-oi1120-fail",
+            dispatch_id="20260810-oi1120-fail",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_register.append_event_once", side_effect=RuntimeError("disk full")):
+            with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+                with caplog.at_level(logging.WARNING):
+                    rc = run_dispatch(spec_file)
+
+        assert rc == 0, "a register write failure must not block the dispatch"
+        mock_exec.assert_called_once()
+        assert any(
+            "WARN dispatch_register dispatch_created write failed" in rec.message
+            for rec in caplog.records
+        ), "write failure must log a WARN — silence hides the same gap this fix closes"
+
+    def test_called_during_run_dispatch_live(self, tmp_path, monkeypatch):
+        """run_dispatch (non-dry-run) writes dispatch_created to the real
+        register — proves the fire path end to end (lane execution mocked so
+        no tmux/worktree spawns)."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# OI-1120 register fill\n\nDo something safe.\n",
+            staging_id="20260810-staging-oi1120",
+            dispatch_id="20260810-oi1120-live",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_exec.assert_called_once()
+
+        reg_path = data_dir / "state" / "dispatch_register.ndjson"
+        assert reg_path.exists(), "run_dispatch must have filled dispatch_register.ndjson"
+        records = [json.loads(ln) for ln in reg_path.read_text(encoding="utf-8").splitlines()]
+        created = [r for r in records if r["event"] == "dispatch_created"
+                   and r["dispatch_id"] == "20260810-oi1120-live"]
+        assert len(created) == 1
+
+    def test_fired_twice_via_run_dispatch_one_entry(self, tmp_path, monkeypatch):
+        """Real end-to-end idempotency proof: firing the same dispatch id
+        through run_dispatch twice must leave exactly one dispatch_created row
+        for the guard to find."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# OI-1120 double fire\n\nDo something safe.\n",
+            staging_id="20260810-staging-oi1120-twice",
+            dispatch_id="20260810-oi1120-doublefire",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+            rc1 = run_dispatch(spec_file)
+            rc2 = run_dispatch(spec_file)
+
+        assert rc1 == 0 and rc2 == 0
+        assert mock_exec.call_count == 2
+
+        reg_path = data_dir / "state" / "dispatch_register.ndjson"
+        records = [json.loads(ln) for ln in reg_path.read_text(encoding="utf-8").splitlines()]
+        created = [r for r in records if r["event"] == "dispatch_created"
+                   and r["dispatch_id"] == "20260810-oi1120-doublefire"]
+        assert len(created) == 1, f"expected exactly one created row, got {len(created)}: {created}"
+
+    def test_not_written_during_dry_run(self, tmp_path):
+        """--dry-run must spawn nothing and write nothing to the register."""
+        spec_file = _make_spec_file(tmp_path, provider="claude")
+        state_dir_marker = tmp_path / "vnx-data" / "state" / "dispatch_register.ndjson"
+
+        with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()):
+            with patch("dispatch_cli._register_dispatch_created") as mock_register:
+                rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0
+        mock_register.assert_not_called()
+        assert not state_dir_marker.exists()
+
+    def test_provider_lane_also_registers(self, tmp_path):
+        """A provider-lane (codex) plan must also register — the write site is
+        lane-agnostic, matching every lane the door can select."""
+        plan = _make_minimal_plan(provider=Provider.CODEX, dispatch_id="20260810-oi1120-codex")
+        vspec = _make_validated_spec(dispatch_id="20260810-oi1120-codex")
+        state_dir = tmp_path / "state"
+
+        _register_dispatch_created(plan, vspec, project_id="vnx-dev", state_dir=state_dir)
+
+        reg_path = state_dir / "dispatch_register.ndjson"
+        record = json.loads(reg_path.read_text(encoding="utf-8").strip())
+        assert record["dispatch_id"] == "20260810-oi1120-codex"
+        assert record["extra"]["lane"] == "provider"
+        assert record["extra"]["provider"] == "codex"
 
 
 # ---------------------------------------------------------------------------

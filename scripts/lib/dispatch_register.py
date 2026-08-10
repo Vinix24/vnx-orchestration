@@ -312,6 +312,7 @@ def append_event(
     project_id: Optional[str] = None,
     orchestrator_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
 ) -> bool:
     """Append a lifecycle event. Returns True on success, False on any failure.
 
@@ -324,6 +325,13 @@ def append_event(
     if resolution fails the event is written without those fields (legacy
     behaviour). Existing callers that pass none of these arguments continue
     to work unchanged.
+
+    ``state_dir``, when given, overrides the ambient-env path resolution
+    (``_resolve_register_path``) — for a caller that already derived the
+    tenant's state_dir from an authority other than ambient env/CWD (e.g. the
+    dispatch door deriving it from a staged bundle's physical location, see
+    ``dispatch_cli._authority_from_spec_path``), writing through the ambient
+    resolver could land the event in the wrong project's register.
     """
     if event not in VALID_EVENTS:
         return False
@@ -347,7 +355,11 @@ def append_event(
         agent_id=agent_id,
     )
     try:
-        primary_path = _resolve_register_path()
+        if state_dir is not None:
+            primary_path = Path(state_dir) / "dispatch_register.ndjson"
+            primary_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            primary_path = _resolve_register_path()
         _write_event_locked(primary_path, record)
         _mirror_to_decision_log(event, record, extra=extra)
         # Phase 6 P3 dual-write: mirror to central when project_id is known
@@ -361,6 +373,66 @@ def append_event(
         raise
     except Exception:
         return False
+
+
+def append_event_once(
+    event: str,
+    *,
+    dispatch_id: str = "",
+    pr_number: Optional[int] = None,
+    feature_id: str = "",
+    terminal: str = "",
+    gate: str = "",
+    extra: Optional[dict] = None,
+    operator_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    orchestrator_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
+) -> bool:
+    """Idempotent variant of ``append_event``: skips the write when an event
+    with the same identity already exists in the register.
+
+    OI-1120 part 2: the single-entry dispatch door calls this at fire time
+    (after the permit is issued, before the lane runs), and a retried fire for
+    the same dispatch_id must not add a second ``dispatch_created`` row for the
+    register-presence guard (``report_to_receipt_converter._is_known_dispatch``)
+    to reason about. Identity reuses ``_merge_dedup_key``'s
+    ``(event, dispatch_id, pr_number, feature_id)`` fields with the
+    always-varying timestamp component dropped, so a retry that writes at a
+    different instant is still recognised as the same logical event.
+
+    Same best-effort contract as ``append_event``: returns ``False`` on
+    failure, never raises except the OI-1079 isolation-guard re-raise
+    (surfaced by the underlying write).
+    """
+    if event not in VALID_EVENTS:
+        return False
+    if not dispatch_id and pr_number is None and not feature_id:
+        return False
+    probe_key = _merge_dedup_key(
+        {"event": event, "dispatch_id": dispatch_id, "pr_number": pr_number, "feature_id": feature_id}
+    )[1:]
+    try:
+        for rec in read_events(state_dir=state_dir):
+            if _merge_dedup_key(rec)[1:] == probe_key:
+                return True  # already registered — idempotent no-op
+    except Exception:
+        pass  # best-effort presence check; fall through to the write attempt
+    return append_event(
+        event,
+        dispatch_id=dispatch_id,
+        pr_number=pr_number,
+        feature_id=feature_id,
+        terminal=terminal,
+        gate=gate,
+        extra=extra,
+        operator_id=operator_id,
+        project_id=project_id,
+        orchestrator_id=orchestrator_id,
+        agent_id=agent_id,
+        state_dir=state_dir,
+    )
 
 
 def _log_dispatch_created(log_fn, record: dict, extra_dict: dict) -> None:
