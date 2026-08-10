@@ -910,6 +910,37 @@ def _panel_retry_count() -> int:
         return 1
 
 
+# The per-seat deadline default. Before OI-1068 this was a bare literal (900) baked into
+# run_panel's signature with no override knob, so a seat that could not meet a 900s deadline
+# booked a fabricated abstention with no way to widen it — on mission-control the opus lane
+# hit three consecutive timeouts in one afternoon. VNX_PLAN_GATE_SEAT_TIMEOUT is the knob, in
+# the same env-var style as VNX_PANEL_RETRY; run_panel resolves to this when the caller does
+# not pass an explicit timeout (CLI flag / direct kwarg).
+DEFAULT_SEAT_TIMEOUT_SECONDS = 900
+
+
+def _seat_timeout(explicit: "int | None" = None) -> int:
+    """Resolve a panelist's per-seat deadline (``VNX_PLAN_GATE_SEAT_TIMEOUT``, default 900).
+
+    Same env-var style as ``_panel_retry_count`` (``VNX_PANEL_RETRY``): a caller that already
+    resolved a value — the CLI flag ``--seat-timeout`` — passes it as ``explicit`` and it wins
+    outright (None means "no explicit value, read the env"). The env var, when set and a valid
+    positive int, overrides the default; a malformed or non-positive value falls back to the
+    default rather than silently widening the deadline to infinity or clamping a real value
+    away. Returned value is always a positive int (>= 1).
+    """
+    if explicit is not None:
+        return max(1, int(explicit))
+    raw = os.environ.get("VNX_PLAN_GATE_SEAT_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_SEAT_TIMEOUT_SECONDS
+    try:
+        val = int(raw)
+    except ValueError:
+        return DEFAULT_SEAT_TIMEOUT_SECONDS
+    return val if val >= 1 else DEFAULT_SEAT_TIMEOUT_SECONDS
+
+
 def _dispatch_one(
     dispatcher: DispatcherFn, member: Dict[str, str], instruction: str, dispatch_id: str,
 ) -> PanelistResult:
@@ -1068,7 +1099,7 @@ def run_panel(
     panel: Optional[List[Dict[str, str]]] = None,
     dispatcher: Optional[DispatcherFn] = None,
     data_dir: Optional[str] = None,
-    timeout_seconds: int = 900,
+    timeout_seconds: Optional[int] = None,
     seat_ledger_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run the plan-first panel over ``doc_path`` and return the verdict.
@@ -1078,9 +1109,17 @@ def run_panel(
     (PASS|REVISE|BLOCK, or INFRA_FAIL when no lane produced a readable verdict —
     an infrastructure failure, not a plan judgment), the rule ``summary``, and
     per-panelist detail.
+
+    ``timeout_seconds`` (OI-1068): the per-seat deadline a panelist has before its
+    lane times out and the seat books a fabricated abstention. ``None`` (the
+    default) resolves to ``VNX_PLAN_GATE_SEAT_TIMEOUT`` (default 900) via
+    ``_seat_timeout`` — the same env-var-knob style as ``VNX_PANEL_RETRY``. An
+    explicit kwarg (the ``--seat-timeout`` CLI flag) wins outright. Only the
+    default dispatcher consumes it; an injected ``dispatcher`` ignores it.
     """
     panel = panel or DEFAULT_PANEL
-    dispatcher = dispatcher or _make_default_dispatcher(data_dir, timeout_seconds)
+    resolved_timeout = _seat_timeout(timeout_seconds)
+    dispatcher = dispatcher or _make_default_dispatcher(data_dir, resolved_timeout)
     doc_text = Path(doc_path).read_text(encoding="utf-8")
     doc_truncation = _doc_truncation_info(doc_text)
     instruction = build_plan_review_instruction(doc_text, track_id)

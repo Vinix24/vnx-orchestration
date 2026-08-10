@@ -219,3 +219,103 @@ class TestDoorEnforcement:
         v = _check_track_link_verdict(_spec("t"), state_dir=state)
         assert v is not None
         assert v.code == "bad-track-link"
+
+
+# --------------------------------------------------------------- complex_only_active
+class TestComplexOnlyActive:
+    """OI-1096: a NOT-SET flag stays silent; an UNREADABLE one logs.
+
+    ``complex_only_active`` must distinguish two cases that the bare
+    ``except Exception: return False`` conflated:
+
+      - NOT-SET (flag absent, store missing): the config-plane returns False on its
+        own; the lookup is silent. This is the legitimate default — an un-set flag
+        always read False.
+      - UNREADABLE (the import or read raised): the fallback is still False
+        (fail-safe: False = the FULL panel = more review, never less), but it is
+        LOGGED. An operator who turns the flag on and hits a config-plane fault
+        would otherwise see everything keep running heavy with no signal.
+    """
+
+    def test_env_true_is_true(self, monkeypatch):
+        monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "1")
+        assert pge.complex_only_active() is True
+
+    def test_env_false_is_false(self, monkeypatch):
+        monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "0")
+        assert pge.complex_only_active() is False
+
+    def test_not_set_is_false_and_silent(self, monkeypatch, caplog):
+        """NOT-SET (no env, no raising read) -> False, NO warning logged."""
+        monkeypatch.delenv("VNX_PLAN_GATE_COMPLEX_ONLY", raising=False)
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get_bool", lambda k: False)
+        with caplog.at_level("WARNING", logger="plan_gate_enforcement"):
+            assert pge.complex_only_active() is False
+        assert not any(
+            "VNX_PLAN_GATE_COMPLEX_ONLY config read failed" in r.message
+            for r in caplog.records
+        ), "a NOT-SET flag must stay silent, not log a config-read-failure warning"
+
+    def test_unreadable_config_is_false_but_logs(self, monkeypatch, caplog):
+        """UNREADABLE (the read raises) -> False (fail-safe), AND a warning is logged.
+
+        This is the bind: without the log line, this test goes RED on the caplog
+        assertion. Fail-safe direction (False = full panel) is unchanged.
+        """
+        monkeypatch.delenv("VNX_PLAN_GATE_COMPLEX_ONLY", raising=False)
+        import config_runtime
+
+        def _boom(key):
+            raise RuntimeError("broken config row")
+
+        monkeypatch.setattr(config_runtime, "get_bool", _boom)
+        with caplog.at_level("WARNING", logger="plan_gate_enforcement"):
+            assert pge.complex_only_active() is False
+        assert any(
+            "VNX_PLAN_GATE_COMPLEX_ONLY config read failed" in r.message
+            for r in caplog.records
+        ), "an UNREADABLE config must log a warning, not fail silently"
+
+    def test_env_wins_over_unreadable_config_no_log(self, monkeypatch, caplog):
+        """Env var set -> config plane is not read at all, so no failure log."""
+        monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "true")
+        import config_runtime
+        # A raising get_bool must never be called when the env var wins.
+        monkeypatch.setattr(config_runtime, "get_bool", lambda k: (_ for _ in ()).throw(RuntimeError("x")))
+        with caplog.at_level("WARNING", logger="plan_gate_enforcement"):
+            assert pge.complex_only_active() is True
+        assert not any(
+            "config read failed" in r.message for r in caplog.records
+        )
+
+
+class TestEnforceModeFailureLogs:
+    """OI-1096 companion: enforce_mode's config read is the SAME silent-except class
+    in this file. A raising config layer still falls back to advisory (fail-soft), but
+    now logs a warning instead of swallowing the fault silently."""
+
+    def test_raising_config_logs_and_falls_back_to_advisory(self, monkeypatch, caplog):
+        monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
+        import config_runtime
+
+        def _boom(k):
+            raise RuntimeError("no store")
+
+        monkeypatch.setattr(config_runtime, "get", _boom)
+        with caplog.at_level("WARNING", logger="plan_gate_enforcement"):
+            assert pge.enforce_mode() == "advisory"
+        assert any(
+            "VNX_PLAN_GATE_ENFORCE config read failed" in r.message
+            for r in caplog.records
+        ), "an UNREADABLE VNX_PLAN_GATE_ENFORCE config must log, not stay silent"
+
+    def test_not_set_enforce_is_advisory_and_silent(self, monkeypatch, caplog):
+        monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
+        import config_runtime
+        monkeypatch.setattr(config_runtime, "get", lambda k: None)
+        with caplog.at_level("WARNING", logger="plan_gate_enforcement"):
+            assert pge.enforce_mode() == "advisory"
+        assert not any(
+            "config read failed" in r.message for r in caplog.records
+        ), "a NOT-SET enforce flag must stay silent"
