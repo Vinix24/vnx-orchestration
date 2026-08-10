@@ -98,6 +98,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _is_dispatch_branch_ref(base_ref: str) -> bool:
+    """Return True when *base_ref* names a dispatch branch on origin.
+
+    A dispatch branch has the form ``origin/dispatch/<id>``.  When the
+    dispatch's base_ref is a dispatch branch, the lane must NOT create a
+    second auto-PR alongside the existing one (OI-1115).
+    """
+    return base_ref.startswith("origin/dispatch/")
+
+
 def _enforce_push_pr(
     *,
     dispatch_id: str,
@@ -107,6 +117,8 @@ def _enforce_push_pr(
     receipts_file: "str | Path",
     result: "_AdapterResult",
     base_ref: str = "origin/main",
+    target_remote_head: "Optional[str]" = None,
+    skip_pr: bool = False,
 ) -> "_AdapterResult":
     """Enforce the rij-7 push+PR obligation on an envelope-lane worktree.
 
@@ -115,6 +127,13 @@ def _enforce_push_pr(
     enforcement is applicable and fails (push or PR), the adapter result is
     rewritten to status="failure" so the governed EnvelopeResult is non-zero.
     pr_enforcement appends the corrective receipt itself.
+
+    *target_remote_head* (OI-1113): the remote HEAD of *branch* captured BEFORE
+    the worker started.  Passed through to enforce_pr_exists for containment
+    verification after push.
+
+    *skip_pr* (OI-1115): when True, the auto-PR creation is skipped.  Set when
+    *base_ref* is a dispatch branch (the PR already exists).
 
     A non-applicable state (clean/dirty) leaves *result* unchanged. Never raises:
     an internal error fails open (the worktree is still torn down by the caller's
@@ -173,6 +192,8 @@ def _enforce_push_pr(
                 f"(dispatch `{dispatch_id}`) — the worker left this branch "
                 "without an open PR. Please review before merging."
             ),
+            target_remote_head=target_remote_head,
+            skip_pr=skip_pr,
         )
     except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
         logger.error(
@@ -519,6 +540,23 @@ def run_envelope_plan(
             error=_isolation_error,
         )
 
+    # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
+    # BEFORE the worker runs, so we can verify after the push that the new HEAD
+    # contains this one.  For a new branch (first dispatch), there is no remote
+    # HEAD — target_remote_head stays None and containment is skipped.  The
+    # capture runs BEFORE the worker so a force-push during the run is detectable.
+    _target_branch = _dispatch_branch_name(plan.dispatch_id)
+    _target_remote_head: Optional[str] = None
+    try:
+        from pr_enforcement import _get_remote_head  # noqa: PLC0415
+        _target_remote_head = _get_remote_head(branch=_target_branch, repo_root=_consumer_project_root)
+    except Exception:  # noqa: BLE001 — best-effort; None → containment skipped
+        _target_remote_head = None
+
+    # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
+    _base_ref = plan.base_ref or "origin/main"
+    _skip_pr = _is_dispatch_branch_ref(_base_ref)
+
     _phantom_diff: Optional[str] = None
     try:
         start = datetime.now(timezone.utc)
@@ -535,7 +573,7 @@ def run_envelope_plan(
         try:
             _phantom_diff = _resolve_phantom_diff(
                 plan.dispatch_id,
-                base_ref=plan.base_ref or "origin/main",
+                base_ref=_base_ref,
                 wt_path=wt_path,
                 repo=_consumer_project_root,
             )
@@ -548,19 +586,21 @@ def run_envelope_plan(
         if result.status == "success":
             result = _enforce_push_pr(
                 dispatch_id=plan.dispatch_id,
-                branch=_dispatch_branch_name(plan.dispatch_id),
+                branch=_target_branch,
                 wt_path=wt_path,
                 repo_root=_consumer_project_root,
                 receipts_file=_receipts_file_for(state_dir),
                 result=result,
-                base_ref=plan.base_ref or "origin/main",
+                base_ref=_base_ref,
+                target_remote_head=_target_remote_head,
+                skip_pr=_skip_pr,
             )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
     report_path, receipt_path = _govern(
         enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
-        base_ref=plan.base_ref or "origin/main",
+        base_ref=_base_ref,
     )
 
     return EnvelopeResult(
@@ -712,6 +752,22 @@ def run_envelope_headless_plan(
             error=_isolation_error,
         )
 
+    # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
+    # BEFORE the worker runs, so we can verify after the push that the new HEAD
+    # contains this one.  For a new branch (first dispatch), there is no remote
+    # HEAD — target_remote_head stays None and containment is skipped.
+    _target_branch = _dispatch_branch_name(plan.dispatch_id)
+    _target_remote_head: Optional[str] = None
+    try:
+        from pr_enforcement import _get_remote_head  # noqa: PLC0415
+        _target_remote_head = _get_remote_head(branch=_target_branch, repo_root=_consumer_project_root)
+    except Exception:  # noqa: BLE001 — best-effort; None → containment skipped
+        _target_remote_head = None
+
+    # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
+    _base_ref = plan.base_ref or "origin/main"
+    _skip_pr = _is_dispatch_branch_ref(_base_ref)
+
     _phantom_diff: Optional[str] = None
     try:
         start = datetime.now(timezone.utc)
@@ -720,7 +776,7 @@ def run_envelope_headless_plan(
         try:
             _phantom_diff = _resolve_phantom_diff(
                 plan.dispatch_id,
-                base_ref=plan.base_ref or "origin/main",
+                base_ref=_base_ref,
                 wt_path=wt_path,
                 repo=_consumer_project_root,
             )
@@ -733,19 +789,21 @@ def run_envelope_headless_plan(
         if result.status == "success":
             result = _enforce_push_pr(
                 dispatch_id=plan.dispatch_id,
-                branch=_dispatch_branch_name(plan.dispatch_id),
+                branch=_target_branch,
                 wt_path=wt_path,
                 repo_root=_consumer_project_root,
                 receipts_file=_receipts_file_for(state_dir),
                 result=result,
-                base_ref=plan.base_ref or "origin/main",
+                base_ref=_base_ref,
+                target_remote_head=_target_remote_head,
+                skip_pr=_skip_pr,
             )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
     report_path, receipt_path = _govern(
         enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
-        base_ref=plan.base_ref or "origin/main",
+        base_ref=_base_ref,
     )
 
     return EnvelopeResult(
