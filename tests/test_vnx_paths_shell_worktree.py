@@ -72,12 +72,12 @@ printf 'VNX_INTELLIGENCE_DIR=%s\n' "$VNX_INTELLIGENCE_DIR"
     assert Path(lines["PROJECT_ROOT"]).resolve() == worktree_root.resolve()
     assert Path(lines["VNX_CANONICAL_ROOT"]).resolve() == canonical_root.resolve()
     # With a resolvable project_id but no local/central store, runtime resolves
-    # to the per-project data home (XDG: $HOME/.local/share/vnx/<pid>) — the
+    # to the central per-project data dir (~/.vnx-data/<pid>) — the
     # central-store model shares project state across worktrees rather than
     # keeping a separate per-worktree .vnx-data. HOME is isolated above so this
     # never touches the operator's real profile or live store.
     assert Path(lines["VNX_DATA_DIR"]).resolve() == (
-        fake_home / ".local" / "share" / "vnx" / "vnx-dev"
+        fake_home / ".vnx-data" / "vnx-dev"
     ).resolve()
     # Intelligence stays anchored to the canonical root regardless.
     assert Path(lines["VNX_INTELLIGENCE_DIR"]).resolve() == (canonical_root / ".vnx-intelligence").resolve()

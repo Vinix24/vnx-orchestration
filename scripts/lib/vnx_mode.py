@@ -208,7 +208,7 @@ def _guard_mode_write_target(target_dir: Path) -> None:
     try:
         rel = target.relative_to(home_vnx)
     except ValueError:
-        return  # repo-local / scratch / XDG — not a central-store path
+        return  # repo-local / scratch — not a central-store path
 
     from project_root import resolve_project_id
     from vnx_paths import refuse_real_central_store_write_under_pytest

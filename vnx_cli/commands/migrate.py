@@ -110,7 +110,7 @@ def _run_future_system_pipeline(data_root: Path, project_id: str) -> None:
     # Anchor the tenant on disk (not via a global env mutation that would leak across
     # a fleet sweep or a shared test process): write the canonical .vnx-project-id
     # marker in the data root when absent, so the fail-closed resolver in the runner
-    # resolves THIS store's project_id even for a non-central (XDG/local) layout the
+    # resolves THIS store's project_id even for a non-central (project-local) layout the
     # DB-path anchor can't cover. Never overwrites an existing marker (reconciled above).
     marker = data_root / ".vnx-project-id"
     if not marker.exists():
@@ -191,7 +191,7 @@ def vnx_migrate(args) -> int:
     """Run the full migration chain against the project's runtime DBs."""
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
 
-    # Resolve data root via canonical chain (explicit > VNX_DATA_HOME > XDG).
+    # Resolve data root via canonical chain (explicit > VNX_DATA_HOME > default).
     # ensure_engine_on_path is called inside resolve_data_root.
     try:
         data_root = _engine.resolve_data_root(project_dir)

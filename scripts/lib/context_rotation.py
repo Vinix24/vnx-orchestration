@@ -105,7 +105,7 @@ def _validate_terminal(terminal: str) -> str:
 # anchored on `project_root`. This deliberately does NOT hardcode
 # ~/.vnx-data/<project_id>: that central path is only used when this project
 # ALREADY resolves there (existing central install). For a project that
-# currently lives in project-local or XDG state, forcing the central path
+# currently lives in project-local state, forcing the central path
 # would create ~/.vnx-data/<project_id> as a side effect of the FIRST
 # rotation call — after which vnx_paths' existence-gated central branch
 # would prefer that now-existing (but empty) dir over the project's real
@@ -118,7 +118,7 @@ def _validate_terminal(terminal: str) -> str:
 
 def _project_data_root(project_id: str, project_root: Optional[Path] = None) -> Path:
     """Resolve the data root THIS project already uses (central, project-local,
-    or XDG) — never forces ~/.vnx-data/<project_id> into existence when the
+    or project-local) — never forces ~/.vnx-data/<project_id> into existence when the
     project doesn't already resolve there. `project_root` defaults to the
     current working directory (matching checkpoint()'s own default) when not
     supplied.

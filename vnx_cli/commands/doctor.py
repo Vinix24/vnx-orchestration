@@ -275,7 +275,7 @@ def _check_state_root_location(data_root: Path) -> Check:
 
     PR-PIP-2 mitigation of the "state in immutable package" risk: a pip install
     must not write runtime state under site-packages or VNX_HOME. If it does,
-    point the operator at VNX_DATA_HOME / the XDG default.
+    point the operator at VNX_DATA_HOME / the central default.
     """
     engine_root = _engine.engine_root()
     candidates = [engine_root]
@@ -300,8 +300,8 @@ def _check_state_root_location(data_root: Path) -> Check:
             status=WARN,
             detail=(
                 f"runtime state root resolves inside the package/VNX_HOME ({data_root}) "
-                "— set VNX_DATA_HOME or rely on the XDG default "
-                "(~/.local/share/vnx/<project_id>) to keep state writable and out of the wheel"
+                "— set VNX_DATA_HOME or the default "
+                "(~/.vnx-data/<project_id>) to keep state writable and out of the wheel"
             ),
         )
     return Check(
@@ -887,7 +887,7 @@ def vnx_doctor(args) -> int:
     strict = getattr(args, "strict", False)
 
     # PR-PIP-2: resolve the runtime data root once (explicit > VNX_DATA_HOME >
-    # existing ~/.vnx-data/<id> > existing project-local > XDG default) and
+    # existing ~/.vnx-data/<id> > existing project-local > fresh default) and
     # thread it through the runtime-tree checks so a clean (state-outside-project)
     # install validates against where state actually lives.
     data_root = _engine.resolve_data_root(project_dir)

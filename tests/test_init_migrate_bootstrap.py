@@ -191,7 +191,7 @@ class TestInitBootstrapsDb:
 
         db = tmp_path / ".vnx-data" / "state" / "runtime_coordination.db"
         if not db.exists():
-            # XDG path — look under the env-set path
+            # look under the env-set path
             db = Path(tmp_path / ".vnx-data") / "state" / "runtime_coordination.db"
 
         assert db.exists(), "runtime_coordination.db not created by vnx init"
@@ -303,20 +303,20 @@ class TestPoolStatusErrorMessage:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Fresh pip install: data root outside project dir (XDG / VNX_DATA_HOME)
+# Fresh pip install: data root outside project dir
 # ---------------------------------------------------------------------------
 
 class TestFreshInstallPathResolution:
     """track list and pool_manager must use the canonical data root, not hardcoded .vnx-data/.
 
-    Regression for: fresh pip install where data root is the XDG path
-    (~/.local/share/vnx/<project_id>/) rather than <project_dir>/.vnx-data/.
-    Both vnx track list and vnx pool status were looking in the hardcoded
-    project-local path and failing with "unable to open database file".
+    Regression for: fresh pip install where data root is outside the project map
+    rather than <project_dir>/.vnx-data/. Both vnx track list and vnx pool status
+    were looking in the hardcoded project-local path and failing with
+    "unable to open database file".
     """
 
     def test_track_list_returns_empty_when_data_root_outside_project(self, tmp_path, monkeypatch):
-        """vnx track list must not error when the DB is at an XDG-style data root."""
+        """vnx track list must not error when the DB is at an external data root."""
         xdg_data_root = tmp_path / "xdg_data"
         project_dir = tmp_path / "my_project"
         project_dir.mkdir()

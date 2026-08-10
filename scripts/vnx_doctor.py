@@ -709,7 +709,7 @@ def check_state_root_location(paths: Dict[str, str]) -> List[CheckResult]:
 
     PR-PIP-2 parity with the vnx_cli doctor: a pip-installed engine must not
     write runtime state under site-packages or VNX_HOME. If VNX_DATA_DIR lands
-    there, point the operator at VNX_DATA_HOME / the XDG default. Always WARN,
+    there, point the operator at VNX_DATA_HOME / the central default. Always WARN,
     never FAIL — an operator may deliberately override paths.
     """
     data_dir = Path(paths["VNX_DATA_DIR"]).resolve()
@@ -729,8 +729,8 @@ def check_state_root_location(paths: Dict[str, str]) -> List[CheckResult]:
         return [CheckResult(
             "state", WARN,
             f"Runtime data root inside package/VNX_HOME: {data_dir}",
-            remediation="Set VNX_DATA_HOME or rely on the XDG default "
-                        "(~/.local/share/vnx/<project_id>) to keep state out of the wheel",
+            remediation="Set VNX_DATA_HOME or the default "
+                        "(~/.vnx-data/<project_id>) to keep state out of the wheel",
         )]
     return [CheckResult("state", PASS, f"Runtime data root outside package: {data_dir}")]
 
