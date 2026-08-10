@@ -707,6 +707,15 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         help="comma-separated seat labels to run (subset of the configured panel); "
              "unknown labels fail loud. Defaults to the full configured panel.",
     )
+    p_prun.add_argument(
+        "--seat-timeout",
+        dest="seat_timeout",
+        type=int,
+        default=None,
+        help="per-seat deadline in seconds before a panelist times out and books a "
+             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
+             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
+    )
 
     p_pstat = subs.add_parser(
         "status", help="show a track's plan-gate state + derived_status",
