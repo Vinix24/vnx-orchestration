@@ -32,6 +32,30 @@ from vnx_identity import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_central_mirror(monkeypatch, tmp_path):
+    """Redirect the dispatch_register central-mirror target into tmp_path (OI-1079).
+
+    resolve_central_data_dir() hardcodes ``~/.vnx-data/<project_id>`` and
+    consults no env var, so neither the conftest ``_vnx_data_dir_isolation``
+    pin nor this module's ``_build_env`` subprocess env can reach the mirror
+    target of an in-process ``append_event`` call with a known project_id.
+
+    The redirect is applied on ``vnx_paths.resolve_central_data_dir`` rather
+    than the usual ``dispatch_register._resolve_central_data_dir`` seam
+    because the in-process tests below pop ``dispatch_register`` from
+    ``sys.modules`` and re-import it — discarding any attribute patched on
+    the old module object — while ``_resolve_central_data_dir`` imports from
+    ``vnx_paths`` at call time. Subprocess-based tests are unaffected: they
+    run a fresh interpreter with their own HOME inside tmp_path.
+    """
+    central_root = tmp_path / "central-store"
+    monkeypatch.setattr(
+        "vnx_paths.resolve_central_data_dir",
+        lambda project_id: central_root / project_id,
+    )
+
+
 def _build_env(tmp_path: Path) -> dict:
     env = os.environ.copy()
     data_dir = tmp_path / "data"

@@ -134,3 +134,82 @@ class TestCorruptStateLogsWarning:
         assert result == ""
         debug_messages = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
         assert any("_project_id_from_state_dir" in m for m in debug_messages)
+
+
+# ---------------------------------------------------------------------------
+# OI-1079 Guard 1: TestIsolationGuardError re-raise in _mirror_event_to_central
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_event_to_central_reraises_isolation_guard(tmp_path):
+    """_mirror_event_to_central must re-raise TestIsolationGuardError.
+
+    OI-1079: a test-isolation violation is not a routine mirror failure —
+    it must fail the test, not be swallowed as a debug log line.  The
+    except-clause that catches the error class and re-raises it is at
+    dispatch_register.py lines 294-297.
+
+    RED if the ``except _isolation_guard_error_class(): raise`` block
+    is removed from _mirror_event_to_central.
+
+    Mirrors the receipt seam test at:
+    test_payload_exception_handling.py::test_mirror_receipt_to_central_reraises_isolation_guard
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+    from vnx_paths import TestIsolationGuardError
+
+    record = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "event": "dispatch_created",
+        "dispatch_id": "test-guard-001",
+    }
+    primary_path = tmp_path / "primary" / "dispatch_register.ndjson"
+    primary_path.parent.mkdir(parents=True)
+
+    with patch.object(
+        dispatch_register,
+        "_refuse_real_store_write_under_pytest",
+        side_effect=TestIsolationGuardError("test isolation violation"),
+    ):
+        with pytest.raises(TestIsolationGuardError, match="test isolation violation"):
+            dispatch_register._mirror_event_to_central(
+                record, primary_path, "test-proj"
+            )
+
+
+# ---------------------------------------------------------------------------
+# OI-1079 Guard 2: TestIsolationGuardError re-raise in append_event
+# ---------------------------------------------------------------------------
+
+
+def test_append_event_reraises_isolation_guard(isolated_env):
+    """append_event must re-raise TestIsolationGuardError, never swallow it.
+
+    OI-1079: the except-clause at dispatch_register.py lines 357-361
+    catches TestIsolationGuardError specifically and re-raises it so a
+    test-isolation violation fails the test instead of degrading to a
+    ``return False`` that silently passes.
+
+    Other exceptions are still swallowed as best-effort — only the
+    isolation guard must propagate.
+
+    RED if the ``except _isolation_guard_error_class(): raise`` block
+    is removed from append_event.
+
+    Mirrors the receipt seam test at:
+    test_dispatch_govern.py::test_ensure_receipt_reraises_test_isolation_guard_error
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+    from vnx_paths import TestIsolationGuardError
+
+    with patch.object(
+        dispatch_register,
+        "_mirror_event_to_central",
+        side_effect=TestIsolationGuardError("test isolation violation"),
+    ):
+        with pytest.raises(TestIsolationGuardError, match="test isolation violation"):
+            append_event(
+                "dispatch_created",
+                dispatch_id="test-guard-append-001",
+                project_id="test-proj",
+            )

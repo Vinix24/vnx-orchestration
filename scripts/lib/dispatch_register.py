@@ -234,6 +234,34 @@ def _write_event_locked(path: Path, record: dict) -> None:
     state_writer.append_locked(path, record)
 
 
+def _isolation_guard_error_class():
+    """Lazy import: TestIsolationGuardError for except-clauses (keeps the
+    vnx_paths import off the module import path). Mirrors the same helper in
+    append_receipt_internals.payload so both mirrors share one re-raise shape."""
+    scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
+    if scripts_lib not in sys.path:
+        sys.path.insert(0, scripts_lib)
+    from vnx_paths import TestIsolationGuardError
+    return TestIsolationGuardError
+
+
+def _refuse_real_store_write_under_pytest(target: Path) -> None:
+    """OI-1079 guard seam: refuse an imminent WRITE into the real central
+    store (~/.vnx-data) while running under pytest. No-op outside pytest.
+
+    Same guard the receipt mirror carries (append_receipt_internals.payload,
+    shipped with #1397). The register mirror lacked it, so an isolated test
+    that lost its pin and reached append_event wrote through this path into
+    the real ``~/.vnx-data/<project_id>/state/dispatch_register.ndjson`` —
+    the exact leak class #1397 closed for t0_receipts.ndjson.
+    """
+    scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
+    if scripts_lib not in sys.path:
+        sys.path.insert(0, scripts_lib)
+    from vnx_paths import refuse_real_central_store_write_under_pytest as _refuse
+    _refuse(target)
+
+
 def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) -> None:
     """Best-effort mirror of a register event to the central path. Never raises.
 
@@ -243,18 +271,30 @@ def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) 
     dual-write sites (receipts + register events) share one fcntl/atomicity
     implementation.
     P5 cutover guard: skips when primary_path resolves to the central file.
+
+    OI-1079: raises ``TestIsolationGuardError`` when the resolved central
+    target is the real central store and the process runs under pytest —
+    that is an isolation violation, not a routine mirror failure, so the
+    caller (append_event) must re-raise it rather than swallow it as the
+    generic best-effort ``except`` otherwise would. Mirrors the receipt
+    seam shipped with #1397.
     """
     try:
         central_base = _resolve_central_data_dir(project_id)
         central_path = central_base / "state" / "dispatch_register.ndjson"
         if central_path.resolve() == primary_path.resolve():
             return
+        _refuse_real_store_write_under_pytest(central_path)
         try:
             from dual_writer import append_record_locked
             append_record_locked(central_path, record)
         except Exception:
             central_path.parent.mkdir(parents=True, exist_ok=True)
             _write_event_locked(central_path, record)
+    except _isolation_guard_error_class():
+        # OI-1079: a test-isolation violation must fail the test, not be
+        # swallowed as a debug log line.
+        raise
     except (ImportError, OSError) as e:
         log.debug("Mirror to central register failed: %s", e)
 
@@ -314,6 +354,11 @@ def append_event(
         if project_id:
             _mirror_event_to_central(record, primary_path, project_id)
         return True
+    except _isolation_guard_error_class():
+        # OI-1079: never swallow a test-isolation violation as a generic
+        # best-effort failure — the mirror seam must fail the test so the
+        # leak is visible, not silently return False.
+        raise
     except Exception:
         return False
 
