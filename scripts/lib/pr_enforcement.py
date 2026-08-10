@@ -28,6 +28,13 @@ Per-state decision (one binding site, never duplicated across lanes):
   niet-gecommit werk), niet rij-7. Blijft ok=True, applicable=False, met een reden
   die de caller laat zien dat er nog dirty werk is.
 
+Containment (OI-1113): when *target_remote_head* is provided (the remote HEAD of
+the target branch captured BEFORE the worker started), this module verifies after
+the push that the new remote HEAD contains the old one via
+``git merge-base --is-ancestor``.  A non-fast-forward replacement (force-push that
+dropped commits) is refused with a receipt-visible ``containment_failed`` corrective
+receipt — the same loud failure pattern as ``push_failed`` and ``pr_failed``.
+
 Enforcement, not best-effort: when the branch was committed (or pushed) and the
 push or PR creation fails, this is recorded as a receipt-visible failure — a
 corrective 'failed' completion receipt is appended to the ndjson ledger, mirroring
@@ -66,8 +73,9 @@ class PrEnforcementResult:
     applicable=True, ok=True: the branch is on origin AND a PR exists (found or
         just created). When the state was ``committed``, the branch was pushed
         first (pushed=True records that the push step ran).
-    applicable=True, ok=False: the branch was committed (or pushed) but the push
-        or PR creation failed — a corrective receipt has already been appended.
+    applicable=True, ok=False: the branch was committed (or pushed) but the push,
+        PR creation, or containment check failed — a corrective receipt has
+        already been appended.
     """
     applicable: bool
     ok: bool
@@ -75,6 +83,55 @@ class PrEnforcementResult:
     created: bool = False
     pushed: bool = False
     reason: Optional[str] = None
+
+
+def _get_remote_head(*, branch: str, repo_root: Path) -> "Optional[str]":
+    """Return the remote HEAD SHA of *branch* on origin, or None.
+
+    Uses ``git ls-remote origin refs/heads/<branch>``.  Returns None when the
+    branch does not exist on origin or when the lookup fails (network error,
+    timeout).  Never raises: a lookup failure is a degraded skip, not a crash.
+    """
+    remote_ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-remote", "origin", remote_ref],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, Exception):
+        return None
+    if proc.returncode != 0:
+        return None
+    output = proc.stdout.strip()
+    if not output:
+        return None
+    return output.split()[0]
+
+
+def _check_containment(*, branch: str, old_head: str, repo_root: Path) -> "tuple[bool, Optional[str]]":
+    """Verify *old_head* is an ancestor of the current remote HEAD of *branch*.
+
+    Returns ``(True, None)`` when containment holds (fast-forward or merge).
+    Returns ``(False, reason)`` when the check fails or the new HEAD cannot be
+    resolved.  Never raises.
+    """
+    new_head = _get_remote_head(branch=branch, repo_root=repo_root)
+    if new_head is None:
+        return False, f"cannot resolve remote HEAD of {branch!r} for containment check"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", old_head, new_head],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, Exception) as exc:
+        return False, f"containment check raised for {branch!r}: {exc}"
+    if proc.returncode == 0:
+        return True, None
+    return False, (
+        f"containment violated: remote HEAD of {branch!r} ({new_head[:12]}) "
+        f"does not contain the pre-worker HEAD ({old_head[:12]}) — "
+        f"the branch history was replaced (force-push detected)"
+    )
 
 
 def enforce_pr_exists(
@@ -86,6 +143,8 @@ def enforce_pr_exists(
     receipts_file: "str | Path",
     pr_title: str,
     pr_body: str,
+    target_remote_head: "Optional[str]" = None,
+    skip_pr: bool = False,
 ) -> PrEnforcementResult:
     """Ensure *branch* is pushed to origin AND has an open PR.
 
@@ -98,6 +157,20 @@ def enforce_pr_exists(
     - ``committed`` → pushen, dan PR afdwingen.
     - ``clean``    → niets om te pushen → applicable=False, ok=True.
     - ``dirty``    → niet hier; phantom_guard's domein → applicable=False, ok=True.
+
+    *target_remote_head* (OI-1113): the remote HEAD SHA of *branch* captured
+    BEFORE the worker started.  When set, containment is verified after the
+    push: the new remote HEAD must contain *target_remote_head* (fast-forward or
+    merge).  A non-fast-forward replacement is refused with a receipt-visible
+    ``containment_failed`` corrective receipt.  When ``None`` (new branch, no
+    prior remote HEAD), the containment check is skipped — there is nothing to
+    contain.
+
+    *skip_pr* (OI-1115): when ``True``, the PR creation step is skipped.  The
+    push still runs for the ``committed`` state.  This is used when the dispatch
+    operates on an existing dispatch branch (``base_ref`` starts with
+    ``origin/dispatch/``) — the PR already exists, and creating a second one is
+    a duplicate destination.
 
     Never raises: a push or gh_pr_ensure exception is treated as a failure (still
     enforced — reported via PrEnforcementResult.ok=False + corrective receipt), not
@@ -138,6 +211,40 @@ def enforce_pr_exists(
             )
             return PrEnforcementResult(applicable=True, ok=False, pushed=False, reason=reason)
         pushed = True
+
+    # ── OI-1113: containment check ──────────────────────────────────────────
+    # After the branch is on origin (our push or the worker's own), verify the
+    # new remote HEAD contains the pre-worker HEAD.  A non-fast-forward
+    # replacement means the worker (or something else) force-pushed and dropped
+    # commits — refuse with a receipt-visible failure.
+    if target_remote_head is not None:
+        contained, containment_reason = _check_containment(
+            branch=branch, old_head=target_remote_head, repo_root=repo_root,
+        )
+        if not contained:
+            logger.warning(
+                "pr_enforcement: containment FAILED dispatch=%s branch=%s — %s",
+                dispatch_id, branch, containment_reason,
+            )
+            _record_corrective_receipt(
+                dispatch_id=dispatch_id, branch=branch, reason=containment_reason,
+                receipts_file=receipts_file, kind="containment_failed",
+            )
+            return PrEnforcementResult(
+                applicable=True, ok=False, pushed=pushed, reason=containment_reason,
+            )
+
+    # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
+    if skip_pr:
+        logger.info(
+            "pr_enforcement: PR skipped for dispatch=%s branch=%s (skip_pr=True) — "
+            "branch is on origin, no auto-PR created",
+            dispatch_id, branch,
+        )
+        return PrEnforcementResult(
+            applicable=True, ok=True, pushed=pushed, pr_number=None, created=False,
+            reason="skip_pr=True — branch pushed, auto-PR suppressed (existing dispatch branch)",
+        )
 
     try:
         from gh_pr_ensure import ensure_pr  # noqa: PLC0415

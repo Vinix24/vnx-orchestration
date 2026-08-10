@@ -391,7 +391,7 @@ class TestCheckpoint:
 class TestRotationUsesCanonicalDataRoot:
     """A prior version hardcoded resolve_central_data_dir(project_id) in the
     rotation path helpers. For a project that doesn't already have a central
-    ~/.vnx-data/<project_id> (i.e. it resolves to project-local or XDG
+    ~/.vnx-data/<project_id> (i.e. it resolves to project-local
     state), the FIRST checkpoint() call would nonetheless CREATE
     ~/.vnx-data/<project_id> as a side effect (via state_dir.mkdir()) —
     after which vnx_paths._resolve_state_root's existence-gated central
@@ -407,7 +407,7 @@ class TestRotationUsesCanonicalDataRoot:
     ) -> None:
         # Opt out of the autouse VNX_DATA_DIR_EXPLICIT override (see the
         # comment in test_project_id_scoped_across_two_projects above) — this
-        # test exercises the default central/local/XDG resolution, which the
+        # test exercises the default central/local resolution, which the
         # explicit override would otherwise short-circuit.
         monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
 
@@ -421,15 +421,16 @@ class TestRotationUsesCanonicalDataRoot:
 
         repo = tmp_path / "repo"
         _make_git_repo(repo)
-        project_id = "xdg-only-project"
+        project_id = "fresh-only-project"
 
         central_dir = Path.home() / ".vnx-data" / project_id
         assert not central_dir.exists()
 
         expected_root = vnx_paths._resolve_state_root(project_id, repo)
-        # Sanity check on the fixture: with no existing central/local store,
-        # the canonical resolver itself lands on the XDG default, not central.
-        assert not str(expected_root).startswith(str(Path.home() / ".vnx-data"))
+        # OI-1055: with no existing central/local store, a fresh project
+        # resolves to the canonical central dir — same as
+        # resolve_central_data_dir, preventing split-brain from the start.
+        assert str(expected_root).startswith(str(Path.home() / ".vnx-data"))
 
         policy = _enabled_policy(min_boundaries_between_rotations=0, respawn="off")
         out = cr.checkpoint(project_id=project_id, policy=policy, project_root=str(repo))
@@ -440,10 +441,14 @@ class TestRotationUsesCanonicalDataRoot:
         assert str(out.handoff_path.resolve()).startswith(str(expected_root.resolve()))
         assert str(out.marker_path.resolve()).startswith(str(expected_root.resolve()))
 
-        # The P1 bug: checkpoint() must NEVER create a competing
-        # ~/.vnx-data/<project_id> rotation/state tree as a side effect when
-        # the project doesn't already resolve there.
-        assert not central_dir.exists()
+        # OI-1055: since the resolver now lands on ~/.vnx-data/<id> for fresh
+        # installs (same as resolve_central_data_dir), checkpoint() legitimately
+        # creates the central dir under the same path the rest of VNX uses —
+        # there is no "competing" store to worry about. What matters is that
+        # the handoff landed under expected_root, not a hardcoded path.
+        assert central_dir.exists(), (
+            "checkpoint must create state under the resolved root (now central)"
+        )
 
         # The store the rest of VNX sees for this project is unchanged
         # before/after the rotation call.
@@ -454,15 +459,15 @@ class TestRotationUsesCanonicalDataRoot:
     ) -> None:
         """The handoff's horizon section must read tracks from the SAME
         store checkpoint()/write_t0_handoff() resolves to — not a
-        hardcoded central dir the project never actually uses (the exact
-        failure mode described in the P1 finding: the handoff missed the
-        real NOW/NEXT tracks because it read from the wrong, freshly-created
-        empty central store)."""
+        hardcoded central dir the project never actually uses. OI-1055:
+        since a fresh project resolves to the central dir (~/.vnx-data/<id>),
+        the handoff writes there legitimately — the invariant is that the
+        resolver and the writer agree, not that central stays absent."""
         monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
 
         repo = tmp_path / "repo"
         _make_git_repo(repo)
-        project_id = "xdg-horizon-project"
+        project_id = "fresh-horizon-project"
 
         resolved_root = vnx_paths._resolve_state_root(project_id, repo)
         assert not resolved_root.exists()
@@ -471,10 +476,10 @@ class TestRotationUsesCanonicalDataRoot:
         handoff_path = cr.write_t0_handoff(logdir=logdir, project_root=repo, project_id=project_id)
 
         # write_t0_handoff must have looked for tracks under resolved_root
-        # (which it just created via mkdir-on-demand inside tracks setup, or
-        # left absent if tracks lazily no-ops) — never under a central dir
-        # this project doesn't use.
-        assert not (Path.home() / ".vnx-data" / project_id).exists()
+        # (which it just created via mkdir-on-demand inside tracks setup).
+        # OI-1055: a fresh project resolves to ~/.vnx-data/<id>, so the
+        # handoff writes there — what matters is that the writer and resolver
+        # agree, not that the central path stays empty.
         assert handoff_path.is_file()
 
 

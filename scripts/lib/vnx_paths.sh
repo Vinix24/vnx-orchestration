@@ -78,7 +78,7 @@ _vnx_state_project_id() {
 # Step 1 (explicit VNX_DATA_DIR_EXPLICIT) is handled by the caller before this
 # runs. Prints the resolved data root. Always returns 0.
 _vnx_resolve_state_root() {
-  local pid="$1" proot="$2" xdg
+  local pid="$1" proot="$2"
   # 2. VNX_DATA_HOME — operator-chosen data home, per-project subdir.
   if [ -n "${VNX_DATA_HOME:-}" ] && [ -n "$pid" ]; then
     printf '%s/%s' "${VNX_DATA_HOME%/}" "$pid"
@@ -94,10 +94,9 @@ _vnx_resolve_state_root() {
     printf '%s/.vnx-data' "$proot"
     return 0
   fi
-  # 5. Fresh install (clean footprint): XDG user-data-dir.
+  # 5. Fresh install: central per-project data directory.
   if [ -n "$pid" ]; then
-    xdg="${XDG_DATA_HOME:-$HOME/.local/share}"
-    printf '%s/vnx/%s' "${xdg%/}" "$pid"
+    printf '%s/.vnx-data/%s' "$HOME" "$pid"
     return 0
   fi
   # Collision-safety: no resolvable project_id → stay project-local, never guess.
@@ -253,7 +252,7 @@ export VNX_CANONICAL_ROOT="${VNX_CANONICAL_ROOT:-$VNX_CANONICAL_ROOT_DEFAULT}"
 
 # Data directory (runtime root). PR-PIP-2: when not explicitly set, resolve via
 # the ordered state-root resolver (explicit > VNX_DATA_HOME > ~/.vnx-data/<id>
-# if exists > project-local if exists > XDG default). Lockstep with vnx_paths.py.
+# if exists > project-local if exists > fresh default). Lockstep with vnx_paths.py.
 if [ -z "${VNX_DATA_DIR:-}" ]; then
   _vnx_state_pid="$(_vnx_state_project_id "$PROJECT_ROOT")"
   VNX_DATA_DIR="$(_vnx_resolve_state_root "$_vnx_state_pid" "$PROJECT_ROOT")"

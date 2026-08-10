@@ -207,8 +207,8 @@ class TestGlmModelAliasResolution:
         assert model.litellm_name == "openrouter/z-ai/glm-5.2", (
             f"unexpected litellm_name: {model.litellm_name!r}"
         )
-        assert model.cost_input_per_mtok == pytest.approx(0.60)
-        assert model.cost_output_per_mtok == pytest.approx(1.92)
+        assert model.cost_input_per_mtok == pytest.approx(0.76)  # OI-1083: re-measured 2026-08-10
+        assert model.cost_output_per_mtok == pytest.approx(2.42)
         assert model.max_tokens == 8192
         assert model.supports_streaming is True
         assert model.supports_tool_calls is True

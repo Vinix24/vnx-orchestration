@@ -85,8 +85,9 @@ def ensure_runtime_layout(paths: Dict[str, str]) -> StepResult:
 
     PR-PIP-2: VNX_DATA_DIR is resolved by vnx_paths (explicit override >
     VNX_DATA_HOME > existing ~/.vnx-data/<id> > existing project-local
-    .vnx-data > XDG user-data-dir), so a fresh install lands outside the
-    project map while existing dev checkouts keep their project-local tree.
+    .vnx-data > central default ~/.vnx-data/<id>), so a fresh install lands
+    outside the project map while existing dev checkouts keep their
+    project-local tree.
     """
     data_dir = Path(paths["VNX_DATA_DIR"])
     dispatch_dir = Path(paths["VNX_DISPATCH_DIR"])
