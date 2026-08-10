@@ -435,6 +435,86 @@ def test_panel_retry_count_malformed_falls_back_to_one(monkeypatch):
     assert pgp._panel_retry_count() == 0
 
 
+# --------------------------------------------------------------------------
+# OI-1068: VNX_PLAN_GATE_SEAT_TIMEOUT — the per-seat deadline knob, in the
+# same env-var style as VNX_PANEL_RETRY. Before this the deadline was a bare 900
+# baked into run_panel's signature with no override, so a seat that could not
+# meet 900s booked a fabricated abstention with no way to widen it.
+# --------------------------------------------------------------------------
+
+def test_seat_timeout_default_is_900(monkeypatch):
+    monkeypatch.delenv("VNX_PLAN_GATE_SEAT_TIMEOUT", raising=False)
+    assert pgp._seat_timeout() == 900
+
+
+def test_seat_timeout_honors_env(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1800")
+    assert pgp._seat_timeout() == 1800
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "300")
+    assert pgp._seat_timeout() == 300
+
+
+def test_seat_timeout_explicit_wins_over_env(monkeypatch):
+    """An explicit caller value (the --seat-timeout CLI flag) wins outright over the env var."""
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1800")
+    assert pgp._seat_timeout(600) == 600
+    assert pgp._seat_timeout(1) == 1
+
+
+def test_seat_timeout_malformed_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "not-a-number")
+    assert pgp._seat_timeout() == 900
+
+
+def test_seat_timeout_nonpositive_falls_back_to_default(monkeypatch):
+    # 0 or negative would let the lane run forever / invert the deadline — fall back
+    # to the default rather than silently widening the window to infinity.
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "0")
+    assert pgp._seat_timeout() == 900
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "-30")
+    assert pgp._seat_timeout() == 900
+
+
+def test_seat_timeout_explicit_clamped_to_at_least_one(monkeypatch):
+    """A non-positive explicit value (a bad CLI flag) is clamped to 1, never 0."""
+    monkeypatch.delenv("VNX_PLAN_GATE_SEAT_TIMEOUT", raising=False)
+    assert pgp._seat_timeout(0) == 1
+    assert pgp._seat_timeout(-5) == 1
+
+
+def test_run_panel_passes_resolved_seat_timeout_to_default_dispatcher(tmp_path, monkeypatch):
+    """run_panel (no explicit timeout, no injected dispatcher) resolves the env var and
+    passes it to _make_default_dispatcher — the knob actually reaches the lane."""
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1234")
+    seen_timeouts: list[int] = []
+
+    def _capturing_make_dispatcher(data_dir, timeout_seconds, *, role="plan-reviewer"):
+        seen_timeouts.append(timeout_seconds)
+        return lambda provider, model_arg, instruction, dispatch_id: _make_report_with_fence("pass")
+
+    monkeypatch.setattr(pgp, "_make_default_dispatcher", _capturing_make_dispatcher)
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
+    pgp.run_panel(doc, track_id="feat-x", project_id="p1")
+    assert seen_timeouts == [1234]
+
+
+def test_run_panel_explicit_timeout_overrides_env(tmp_path, monkeypatch):
+    """An explicit timeout_seconds kwarg wins over the env var."""
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1234")
+    seen_timeouts: list[int] = []
+
+    def _capturing_make_dispatcher(data_dir, timeout_seconds, *, role="plan-reviewer"):
+        seen_timeouts.append(timeout_seconds)
+        return lambda provider, model_arg, instruction, dispatch_id: _make_report_with_fence("pass")
+
+    monkeypatch.setattr(pgp, "_make_default_dispatcher", _capturing_make_dispatcher)
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
+    pgp.run_panel(doc, track_id="feat-x", project_id="p1", timeout_seconds=700)
+    assert seen_timeouts == [700]
+
+
 def test_run_panel_first_flake_then_success_recovers(tmp_path, monkeypatch):
     # A panelist that flakes once (no verdict fence) then succeeds must recover to a SCORING
     # verdict via the single retry — the codex verdict-JSON / glm parse flake case.
@@ -1935,6 +2015,68 @@ def test_cmd_plan_gate_run_light_plan_runs_fewer_seats_than_heavy(tmp_path, monk
     ))
     assert rc == 0
     assert [s["label"] for s in seen_panels[1]] == [m["label"] for m in pgp.DEFAULT_PANEL]
+
+
+def test_cmd_plan_gate_run_passes_seat_timeout_flag_to_run_panel(tmp_path, monkeypatch):
+    """OI-1068: the --seat-timeout CLI flag (args.seat_timeout) flows through
+    cmd_plan_gate_run into run_panel's timeout_seconds — the override knob reaches
+    the lane, not just the default 900."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.delenv("VNX_PLAN_GATE_SEAT_TIMEOUT", raising=False)
+    seen_timeouts: list = []
+
+    def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen_timeouts.append(kw.get("timeout_seconds"))
+        return _fake_pass_run_panel(doc_path, track_id=track_id, project_id=project_id,
+                                    panel=panel, data_dir=data_dir, **kw)
+
+    monkeypatch.setattr(pgp, "run_panel", _capturing_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-to", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-to", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None, seat_timeout=1800,
+    ))
+    assert rc == 0
+    assert seen_timeouts == [1800]
+
+
+def test_cmd_plan_gate_run_no_flag_falls_back_to_env_via_run_panel(tmp_path, monkeypatch):
+    """With no --seat-timeout flag (seat_timeout=None), cmd_plan_gate_run passes None
+    so run_panel resolves VNX_PLAN_GATE_SEAT_TIMEOUT itself (env var is the knob)."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "2700")
+    seen_timeouts: list = []
+
+    def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen_timeouts.append(kw.get("timeout_seconds"))
+        return _fake_pass_run_panel(doc_path, track_id=track_id, project_id=project_id,
+                                    panel=panel, data_dir=data_dir, **kw)
+
+    monkeypatch.setattr(pgp, "run_panel", _capturing_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-env", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-env", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None, seat_timeout=None,
+    ))
+    assert rc == 0
+    # cmd_plan_gate_run passes None; run_panel's _seat_timeout(None) resolves the env var.
+    assert seen_timeouts == [None]
 
 
 def test_cmd_plan_gate_run_light_pass_writes_run_evidence_with_seats(tmp_path, monkeypatch):

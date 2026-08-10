@@ -2229,6 +2229,7 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
         result = plan_gate_panel.run_panel(
             doc, track_id=args.track_id, project_id=args.project_id, data_dir=data_dir,
             panel=panel,
+            timeout_seconds=getattr(args, "seat_timeout", None),
         )
     except Exception as exc:
         print(f"plan-gate run failed: {exc}", file=sys.stderr)
@@ -2732,6 +2733,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="comma-separated seat labels to run (subset of the configured panel); "
              "unknown labels fail loud. Defaults to the full configured panel.",
+    )
+    p_prun.add_argument(
+        "--seat-timeout",
+        dest="seat_timeout",
+        type=int,
+        default=None,
+        help="per-seat deadline in seconds before a panelist times out and books a "
+             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
+             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
     )
     p_prun.set_defaults(func=cmd_plan_gate_run)
 

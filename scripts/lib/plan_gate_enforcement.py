@@ -61,7 +61,13 @@ def enforce_mode() -> str:
         try:
             import config_runtime  # noqa: PLC0415
             raw = config_runtime.get("VNX_PLAN_GATE_ENFORCE")
-        except Exception:
+        except Exception as exc:  # vnx-silent-except: UNREADABLE config -> log + fail-soft to advisory
+            import logging  # noqa: PLC0415
+
+            logging.getLogger(__name__).warning(
+                "plan_gate_enforcement: VNX_PLAN_GATE_ENFORCE config read failed "
+                "(falling back to advisory, fail-soft direction): %s", exc
+            )
             raw = None
     raw = (raw or "advisory").strip().lower()
     return raw if raw in _ENFORCE_MODES else "off"
@@ -212,8 +218,24 @@ def complex_only_active() -> bool:
     Precedence mirrors enforce_mode: the process env var (a per-session
     override) wins; then the persisted config-plane value via config_runtime
     (the ``/operator/config`` surface, audited + revertible); then the registry
-    default (off). The config lookup is best-effort — a missing store leaves
-    the env/default behaviour unchanged.
+    default (off). The config lookup is best-effort, but best-effort has TWO
+    cases that must not be conflated: a NOT-SET flag and a UNREADABLE one.
+
+    - NOT-SET (the flag is simply absent, or the store is missing): the
+      config-plane returns False on its own and the lookup stays silent —
+      this is the legitimate default, the behaviour an un-set flag always had.
+      A missing store leaves the env/default behaviour unchanged.
+    - UNREADABLE (the import or the read itself raised — an import fault, a
+      broken row the façade did not catch): the fallback is still False, so
+      the fail-safe direction is preserved (False = the FULL panel = more
+      review, never less), but it is LOGGED. An operator who turns the flag
+      on via /operator/config and hits a config-plane fault would otherwise
+      see everything keep running heavy with no signal that the read failed —
+      hunting the scope classifier while the fault is in the config read.
+
+    The same loud-on-failure discipline the plan-gate-pass record adopted
+    (commit 9e7ad79d: a control that cannot fail reported every dropped record
+    as success); this is the second read-site of that class in this file pair.
     """
     raw = os.environ.get("VNX_PLAN_GATE_COMPLEX_ONLY")
     if raw:
@@ -221,7 +243,13 @@ def complex_only_active() -> bool:
     try:
         import config_runtime  # noqa: PLC0415
         return bool(config_runtime.get_bool("VNX_PLAN_GATE_COMPLEX_ONLY"))
-    except Exception:
+    except Exception as exc:  # vnx-silent-except: UNREADABLE config -> log + fail-closed to False (full panel)
+        import logging  # noqa: PLC0415
+
+        logging.getLogger(__name__).warning(
+            "plan_gate_enforcement: VNX_PLAN_GATE_COMPLEX_ONLY config read failed "
+            "(falling back to False = full panel, fail-safe direction): %s", exc
+        )
         return False
 
 
