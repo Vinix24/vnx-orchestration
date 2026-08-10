@@ -59,6 +59,63 @@ def _is_valid_model_name(value: str) -> bool:
     return True
 
 
+def _resolve_work_timestamp(metadata: Dict[str, str], report_path: str) -> Optional[str]:
+    """Resolve the time the work was done, not the time the report was processed.
+
+    OI-1092: a receipt processed today for work done last week must carry last
+    week's date. A processed-now timestamp silently corrupts every time series
+    that groups by date. Resolution order:
+
+      1. Explicit date field in the report (``datum``, ``date``, ``timestamp``,
+         ``recorded_at``) — already captured by ``extract_metadata``.
+      2. File mtime of the report on disk.
+      3. Fail-closed: return None when neither is determinable, so the caller
+         can refuse to emit a receipt rather than write one with a false date.
+
+    Returns an ISO-8601 timestamp string (UTC) or None.
+    """
+    # Tier 1: explicit date field from the report metadata.
+    for key in ('datum', 'date', 'timestamp', 'recorded_at', 'created_at'):
+        raw = str(metadata.get(key) or '').strip()
+        if not raw or raw.lower() in ('unknown', 'none', 'null', 'n/a', ''):
+            continue
+        try:
+            # Accept common ISO-8601 variants; normalise to full UTC form.
+            from dateutil.parser import parse as _parse_dt
+        except ImportError:
+            _parse_dt = None
+        if _parse_dt is not None:
+            try:
+                dt = _parse_dt(raw)
+                if dt.tzinfo is None:
+                    from datetime import timezone
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.isoformat()
+            except Exception:
+                pass
+        # Fallback: try fromisoformat for strict ISO-8601.
+        try:
+            from datetime import datetime as _datetime, timezone as _timezone
+            dt = _datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_timezone.utc)
+            return dt.isoformat()
+        except Exception:
+            pass
+
+    # Tier 2: file modification time.
+    try:
+        from datetime import datetime as _datetime, timezone as _timezone
+        mtime = os.path.getmtime(report_path)
+        dt = _datetime.fromtimestamp(mtime, tz=_timezone.utc)
+        return dt.isoformat()
+    except OSError:
+        pass
+
+    # Tier 3: fail-closed — no receipt with a false date.
+    return None
+
+
 class ReportParser:
     """Extract structured intelligence from markdown reports"""
 
@@ -623,6 +680,21 @@ class ReportParser:
             _event_type = 'task_complete'
             _receipt_status = metadata.get('status', 'unknown')
 
+        # OI-1092: the receipt timestamp must be the time the WORK was done,
+        # not the time the report was PROCESSED. A backlog of 103 previously
+        # refused reports processed today would otherwise write 103 receipts
+        # with today's date for work done 3–7 August — worse than the gap
+        # itself, because a missing receipt is visibly absent while a receipt
+        # with the wrong date silently corrupts every time series.
+        #
+        # Resolution order:
+        #   1. Explicit date field in the report (datum, date, timestamp, recorded_at)
+        #   2. File mtime of the report on disk
+        #   3. Fail-closed: neither available → no receipt emitted
+        _work_ts = _resolve_work_timestamp(metadata, report_path)
+        if _work_ts is None:
+            return {'error': f'Cannot resolve work timestamp for: {report_path}'}
+
         # Start with comprehensive structure including all new fields
         receipt = {
             'event_type': _event_type,  # Primary field for structured processing
@@ -630,7 +702,7 @@ class ReportParser:
             # Receipt-quality PR-3: report-derived receipts are dispatch-lane
             # outcomes (closed-set kind; role propagates via PR-1/2 lanes).
             'receipt_kind': 'dispatch',
-            'timestamp': datetime.utcnow().isoformat(),  # FIX: Use UTC, not local time
+            'timestamp': _work_ts,
             'terminal': metadata.get('terminal', 'unknown'),
             'track': metadata.get('track'),  # Include track field for terminal routing
             'type': metadata.get('type', 'UNKNOWN'),
