@@ -62,7 +62,7 @@ _PROVIDER_RATES: dict[tuple[str, str], tuple[float, float, bool]] = {
     ("litellm:deepseek", "deepseek-v4-pro"):   (0.14,  0.28,  False),
     ("litellm:moonshot", "kimi-k2-0905-default"): (0.0, 0.0,  True),
     ("litellm:moonshot", "kimi-k2-0905-preview"):  (0.0, 0.0,  True),
-    ("litellm:zai", "glm-5.2"):        (0.60,  1.92,  False),
+    ("litellm:zai", "glm-5.2"):        (0.76,  2.42,  False),  # re-measured 2026-08-10 against live OpenRouter /api/v1/models
     ("litellm:ollama", "llama3"):              (0.0,   0.0,   True),
     # openrouter-arbitrary lane (PR-1 skeleton) — the one proven model
     # (openrouter/openai/gpt-4o-mini); OpenRouter pass-through pricing.

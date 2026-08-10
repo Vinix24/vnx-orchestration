@@ -79,6 +79,11 @@ producers:
     key_transform: prefix
     timestamp_column: created_at
     cadence_seconds: 604800
+    kind: one_shot  # OI-1112: keys are date prefixes (key_transform: prefix), each
+    # date is a one-shot family — once a day passes no new dispatch carries that
+    # prefix, so cadence-based staleness flags every past date forever. Same defect
+    # class as OI-1041 (per-PR artefacts), growing one key per day instead of two
+    # per PR. Only expected_keys (dlv, DISP) that never wrote are reported.
     expected_keys:
       - dlv
       - DISP
