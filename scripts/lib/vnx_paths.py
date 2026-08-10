@@ -383,6 +383,43 @@ def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
         )
 
 
+def refuse_real_launch_agents_write_under_pytest(dest_dir: Path) -> None:
+    """Fail loud when code is ABOUT TO WRITE under the real
+    ``~/Library/LaunchAgents`` while running under pytest
+    (OI-1117 / launchd-test-isolation class guard).
+
+    Call this from write surfaces right before any plist or file gets
+    created in ``~/Library/LaunchAgents``. The guard is placed at the write
+    surface, not inside a generic path resolver: the LaunchAgents dir is a
+    legitimate production write target outside of tests; only an imminent
+    WRITE to it during pytest is the isolation hazard.
+
+    Production is unaffected: pytest is never in ``sys.modules`` outside a
+    test run.
+
+    Pattern mirrors ``refuse_real_central_store_write_under_pytest`` — the
+    two guards share the same shape so the class of test-isolation guard is
+    recognisable as a single idiom across the codebase.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in _sys.modules:
+        return
+    real_la = (
+        Path(os.path.expanduser("~")) / "Library" / "LaunchAgents"
+    ).resolve()
+    resolved = dest_dir.resolve()
+    sep = os.sep
+    if str(resolved) == str(real_la) or str(resolved).startswith(
+        str(real_la) + sep
+    ):
+        raise TestIsolationGuardError(
+            f"[TEST ISOLATION GUARD] about to write under the real "
+            f"LaunchAgents dir '{resolved}' while running under pytest. "
+            "A test lost its isolation. Mock Path.home to a tmp_path-based "
+            "fake home before calling code that installs launchd plists, "
+            "or monkeypatch subprocess.run to intercept launchctl calls."
+        )
+
+
 def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
     """Resolve the VNX runtime data root (the ``.vnx-data`` equivalent).
 
