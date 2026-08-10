@@ -509,6 +509,7 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
 _HORIZON_CHOICES = ("now", "next", "later")
 _PHASE_CHOICES = ("queued", "active", "parked", "done")
 _OUTPUT_KIND_CHOICES = ("pr", "post", "deal", "doc")
+_LANE_HINT_CHOICES = ("direct", "governed", "unset")
 
 
 def _common_horizon_args(p: argparse.ArgumentParser) -> None:
@@ -533,6 +534,11 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     p_add.add_argument("goal_state", metavar="GOAL_STATE", help="what 'done' looks like")
     p_add.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
     p_add.add_argument("--priority", default=None)
+    p_add.add_argument(
+        "--lane-hint", choices=_LANE_HINT_CHOICES, default=None, dest="lane_hint",
+        metavar="LANE_HINT",
+        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
+    )
 
     p_list = subs.add_parser("list", help="list objectives grouped by horizon")
     _common_horizon_args(p_list)
@@ -624,6 +630,24 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
         help="project repo root for the ROADMAP.yaml (Source-3) evidence "
              "(default: resolved --project-dir)",
     )
+    p_close.add_argument(
+        "--attest", default=None, metavar="REASON",
+        help="operator attestation for ops-tracks with no PR evidence (requires --apply "
+             "--approval-id). Records the real PR via --pr when given, else fails open to "
+             "ops-attest:<date>",
+    )
+    p_close.add_argument(
+        "--pr", action="append", default=None, metavar="NNN",
+        help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
+             "with --attest: records the real PR as pr_ref instead of ops-attest:<date>. "
+             "Without --attest, use `vnx objective link-pr` instead.",
+    )
+    p_close.add_argument(
+        "--max-gh-calls", type=int, default=50, dest="max_gh_calls", metavar="N",
+        help="cap live gh pr view calls for the track's pr_ref (default 50; a single "
+             "close handles one track so the cap is rarely reached). Bounds the "
+             "evidence gather so it is explicit rather than unbounded.",
+    )
 
     p_reopen = subs.add_parser(
         "reopen", help="reopen a done track: done -> active (operator-gated, audited)",
@@ -659,7 +683,7 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     _common_horizon_args(p_lane_hint)
     p_lane_hint.add_argument("track_id", metavar="TRACK_ID")
     p_lane_hint.add_argument(
-        "lane_hint", choices=("direct", "governed", "unset"), metavar="LANE_HINT",
+        "lane_hint", choices=_LANE_HINT_CHOICES, metavar="LANE_HINT",
         help="descriptive dispatch-routing hint (governed|direct|unset)",
     )
 
