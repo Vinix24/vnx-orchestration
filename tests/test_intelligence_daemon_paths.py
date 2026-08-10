@@ -14,7 +14,19 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 
+_STUB_NAMES = ("gather_intelligence", "learning_loop", "cached_intelligence")
+
+
 def _install_stub_modules():
+    """Install ``types.ModuleType`` stubs into ``sys.modules`` for the three
+    intelligence modules that ``intelligence_daemon`` imports at module level.
+
+    Returns a dict of ``{name: original_module_or_None}`` so the caller can
+    restore ``sys.modules`` after the test — without teardown these stubs
+    survive and win every later ``import learning_loop`` (including lazy
+    imports inside ``vnx_cli/commands/learning.py``), causing
+    ``AttributeError`` on any attribute the stub does not carry (OI-1114).
+    """
     gather_mod = types.ModuleType("gather_intelligence")
     learning_mod = types.ModuleType("learning_loop")
     cached_mod = types.ModuleType("cached_intelligence")
@@ -35,15 +47,34 @@ def _install_stub_modules():
     learning_mod.LearningLoop = DummyLearningLoop
     cached_mod.CachedIntelligence = DummyCachedIntelligence
 
-    sys.modules["gather_intelligence"] = gather_mod
-    sys.modules["learning_loop"] = learning_mod
-    sys.modules["cached_intelligence"] = cached_mod
+    _saved = {}
+    for name, mod in ((_STUB_NAMES[0], gather_mod),
+                       (_STUB_NAMES[1], learning_mod),
+                       (_STUB_NAMES[2], cached_mod)):
+        _saved[name] = sys.modules.get(name)
+        sys.modules[name] = mod
+    return _saved
 
 
 def _load_daemon_module():
-    _install_stub_modules()
-    module = importlib.import_module("intelligence_daemon")
-    return importlib.reload(module)
+    """Import (or reload) ``intelligence_daemon`` with stubs in place, then
+    restore ``sys.modules`` to its pre-stub state so the stubs do not
+    contaminate later tests.
+
+    The returned daemon module object retains its internal references to the
+    stubs; only ``sys.modules`` is cleaned up so that later ``import``
+    statements in other test files resolve the real modules.
+    """
+    _saved = _install_stub_modules()
+    try:
+        module = importlib.import_module("intelligence_daemon")
+        return importlib.reload(module)
+    finally:
+        for name, original in _saved.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
 
 def test_intelligence_health_writes_canonical_only_by_default(tmp_path, monkeypatch):
@@ -177,3 +208,43 @@ def test_dashboard_reads_legacy_brief_only_in_rollback_mode(tmp_path, monkeypatc
 
     payload = json.loads((canonical_state / "dashboard_status.json").read_text(encoding="utf-8"))
     assert payload.get("pr_queue", {}).get("total_prs", 0) >= 1
+
+
+def test_stub_modules_cleaned_up_after_load_daemon_module(tmp_path, monkeypatch):
+    """OI-1114: _load_daemon_module must restore sys.modules after returning.
+
+    Without teardown the three stub modules survive in sys.modules and pollute
+    every later ``import learning_loop`` (including lazy imports inside
+    ``vnx_cli/commands/learning.py``).  This test asserts the cleanup: after
+    _load_daemon_module returns the stubs are gone and a fresh import of
+    learning_loop resolves the real module.
+    """
+    vnx_home = tmp_path / "vnx-home"
+    state_dir = tmp_path / "data" / "state"
+    vnx_home.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("VNX_HOME", str(vnx_home))
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+
+    # Pop any cached real modules so we can verify the stub → real transition.
+    for name in _STUB_NAMES:
+        sys.modules.pop(name, None)
+
+    # Install stubs + import daemon → stubs must be gone afterwards.
+    _load_daemon_module()
+
+    for name in _STUB_NAMES:
+        assert name not in sys.modules, (
+            f"_load_daemon_module left '{name}' in sys.modules; "
+            "teardown must restore sys.modules (OI-1114)"
+        )
+
+    # A fresh import must resolve the real module, not a stub.
+    import learning_loop as fresh_ll
+    assert hasattr(fresh_ll, "apply_archival_decision"), (
+        "import learning_loop after _load_daemon_module resolved a stub "
+        "instead of the real module — teardown is incomplete (OI-1114)"
+    )

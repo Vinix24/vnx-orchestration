@@ -14,7 +14,6 @@ every test runs against a tmp_path state dir and a tmp quality_intelligence.db.
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sqlite3
 import sys
@@ -28,50 +27,9 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(_REPO_ROOT))
 
-# OI-1051 / OI-1076: guard against a stubbed sys.modules["learning_loop"].
-# Other suites (notably test_intelligence_daemon_paths._install_stub_modules
-# and test_governance_digest_certification) replace sys.modules["learning_loop"]
-# with a types.ModuleType stub carrying only LearningLoop, and never restore
-# it. In collection order that stub wins: a bare `import learning_loop` (and
-# the lazy `import learning_loop as ll` inside vnx_cli/commands/learning.py)
-# then returns the stub, which lacks apply_archival_decision /
-# ArchivalDispositionError — the three TestCliVerbs cases fail.
-#
-# We pop any stale cache entry and re-import the genuine module via the normal
-# import mechanism (NOT spec_from_file_location, which creates a second module
-# object and trips isinstance/__module__ identity in sibling learning tests).
-# This is the same sys.modules-pop idiom test_append_receipt_identity uses to
-# force a re-import. No teardown: leaving the real module cached is the
-# correct end state — the stub installers re-stub on their own next use, so we
-# do not pollute them, and every other learning test wants the real module.
-_cached = sys.modules.get("learning_loop")
-if _cached is None or not hasattr(_cached, "apply_archival_decision"):
-    sys.modules.pop("learning_loop", None)
-    import learning_loop as ll  # noqa: E402
-else:
-    ll = _cached
+import learning_loop as ll  # noqa: E402
 
 from vnx_cli.commands import learning  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _ensure_real_learning_loop_module():
-    """Re-import the real learning_loop if a prior test stubbed sys.modules.
-
-    The module-level guard above covers collection time. But a sibling test in
-    the same session can re-stub sys.modules["learning_loop"] between our tests
-    (the stub installers have no teardown). The CLI verb does a lazy
-    `import learning_loop as ll` at call time, so it would pick up a re-stub.
-    This fixture guarantees the cached entry is the real module before each
-    test in this file runs. It leaves the real module cached on exit — the
-    correct end state for every downstream learning test.
-    """
-    _mod = sys.modules.get("learning_loop")
-    if _mod is None or not hasattr(_mod, "apply_archival_decision"):
-        sys.modules.pop("learning_loop", None)
-        sys.modules["learning_loop"] = importlib.import_module("learning_loop")
-    yield
-
 
 
 # ---------------------------------------------------------------------------
