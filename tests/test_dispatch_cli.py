@@ -2928,6 +2928,87 @@ class TestSmartRouterPreValidate:
             f"T0 must not be routed away from claude, got {plan_arg.provider}"
         )
 
+    def test_tier_mid_auto_fallback_sets_matching_provider_and_model(self, tmp_path, monkeypatch, capsys):
+        """OI-1050 regression: provider=auto classified tier-mid must not dead-end.
+
+        tier_routing.resolve_tier_route(tier-mid) returns provider="claude", which
+        has no entry in door_routing._TIER_PROVIDER_TO_ENUM, so the router declines
+        and run_dispatch's own fallback (the `else` branch right after the router
+        call) sets spec.provider=CLAUDE. Before the fix, that fallback left
+        spec.model=None; downstream, workers-kimi-pinned's "default" pin semantics
+        then filled effective_model from ITS OWN pin (kimi-k3) whenever spec.model
+        was empty — producing a provider=claude/model=kimi-k3 spec that
+        kimi-via-cli-only correctly rejects. This exercises the REAL (unmocked)
+        build_runtime_snapshot/compile_plan pipeline so the actual constraint
+        check runs, not a mock that would hide the mismatch.
+        """
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            # "schema" is a _SCHEMA_KEYWORDS hit -> classify_dispatch returns
+            # tier-mid regardless of LOC/file-count (cost_tier.py rule 4).
+            instruction_text=(
+                "# Add a schema migration\n\n"
+                "Design a database migration that adds a new schema column with "
+                "an index, touching multiple files.\n"
+            ),
+            staging_id="20260810-oi1050-mid",
+            dispatch_id="20260810-oi1050-mid",
+            provider="auto",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        rc = run_dispatch(spec_file, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0, (
+            f"tier-mid provider=auto must produce an executable plan, got rc={rc}\n"
+            f"stdout:\n{captured.out}\nstderr:\n{captured.err}"
+        )
+        assert "REJECT" not in captured.out, f"unexpected reject:\n{captured.out}"
+        assert "provider:     claude" in captured.out, captured.out
+        assert "model:        sonnet" in captured.out, (
+            f"model must be a claude-compatible default, not left empty for a "
+            f"different provider's pin to fill in:\n{captured.out}"
+        )
+        assert "lane:         claude_tmux_subscription" in captured.out, (
+            f"claude must route via the tmux-spawn subscription lane, never "
+            f"provider_dispatch:\n{captured.out}"
+        )
+
+    def test_router_disabled_auto_fallback_sets_matching_provider_and_model(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """OI-1050 regression, second trigger: the fallback bug was not tier-mid-
+        specific — VNX_SMART_ROUTER_DISABLE=1 makes resolve_door_route return None
+        via a different gate, landing on the exact same fallback line. A fix
+        that only special-cased tier-mid (e.g. adding "claude" to
+        _TIER_PROVIDER_TO_ENUM) would leave this path broken; the fallback itself
+        must set provider and model together."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Fix typo in docstring\n\nCorrect a spelling error.\n",
+            staging_id="20260810-oi1050-disabled",
+            dispatch_id="20260810-oi1050-disabled",
+            provider="auto",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_SMART_ROUTER_DISABLE", "1")
+
+        rc = run_dispatch(spec_file, dry_run=True)
+        captured = capsys.readouterr()
+
+        assert rc == 0, (
+            f"router-disabled provider=auto must still produce an executable plan, "
+            f"got rc={rc}\nstdout:\n{captured.out}\nstderr:\n{captured.err}"
+        )
+        assert "REJECT" not in captured.out, f"unexpected reject:\n{captured.out}"
+        assert "provider:     claude" in captured.out, captured.out
+        assert "model:        sonnet" in captured.out, captured.out
+
     def test_explicit_provider_overrides_router(self, tmp_path, monkeypatch):
         """An explicit provider+model in the spec must NOT be touched by the router
         (worker-provider-free-choice, pin_semantics=default)."""
