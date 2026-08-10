@@ -75,7 +75,7 @@ def _resolve_data_dir() -> Path:
     try:
         from vnx_paths import resolve_paths
         return Path(resolve_paths()["VNX_DATA_DIR"])
-    except Exception:
+    except Exception:  # vnx-silent-except: resolver probe — any failure (import, DB, missing state) falls through to the git-root probe below by design
         pass
     try:
         result = __import__("subprocess").run(
@@ -84,7 +84,7 @@ def _resolve_data_dir() -> Path:
         )
         if result.returncode == 0:
             return Path(result.stdout.strip()) / ".vnx-data"
-    except Exception:
+    except Exception:  # vnx-silent-except: git-root probe — outside a repo or git missing falls through to the cwd fallback below by design
         pass
     return Path.cwd() / ".vnx-data"
 

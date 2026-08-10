@@ -226,7 +226,11 @@ class TestDeadlineSecondsReachesStagedSpec:
             deadline_seconds=deadline_seconds,
         )
         assert ok is True
-        bundle = tmp_path / "dispatches" / "pending" / dispatch_id
+        # OI-1072: bridge_dispatch MOVES the bundle out of pending/ once the door
+        # has processed it — completed/ on rc == 0 (the mocked run_dispatch here),
+        # failed/ otherwise. Read-after-completion follows the bundle to its
+        # settled location; the spec must still be intact there.
+        bundle = tmp_path / "dispatches" / "completed" / dispatch_id
         return json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
 
     def test_explicit_deadline_written_into_spec(self, tmp_path, monkeypatch):
