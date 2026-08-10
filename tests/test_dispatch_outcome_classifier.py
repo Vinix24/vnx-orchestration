@@ -627,8 +627,8 @@ def test_bulk_run_does_one_batched_lsremote_for_n_dispatches(tmp_path, monkeypat
     state_dir, data_dir = _build_state(tmp_path)
     monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
     for i in range(5):
-        _insert_dispatch(state_dir, f"d-{i}", state="completed")
-        _write_receipt(state_dir, f"d-{i}", "done")
+        _insert_dispatch(state_dir, f"dispatch-{i:05d}", state="completed")
+        _write_receipt(state_dir, f"dispatch-{i:05d}", "done")
 
     fetch_calls = []
 
@@ -677,16 +677,16 @@ def test_reconcile_all_dispatch_outcomes_bulk(tmp_path, monkeypatch):
     state_dir, data_dir = _build_state(tmp_path)
     monkeypatch.setattr(doc, "_load_merged_pr_numbers", lambda sd, rr: frozenset())
 
-    _insert_dispatch(state_dir, "d-a", state="completed")
-    _write_receipt(state_dir, "d-a", "done")
-    _insert_dispatch(state_dir, "d-b", state="expired")
-    _insert_dispatch(state_dir, "d-c", state="active")  # no evidence -> None
+    _insert_dispatch(state_dir, "dispatch-a", state="completed")
+    _write_receipt(state_dir, "dispatch-a", "done")
+    _insert_dispatch(state_dir, "dispatch-b", state="expired")
+    _insert_dispatch(state_dir, "dispatch-c", state="active")  # no evidence -> None
 
     results = doc.reconcile_all_dispatch_outcomes(state_dir, data_dir, PROJECT_ID, now=NOW)
     by_id = {r["dispatch_id"]: r["outcome"] for r in results}
-    assert by_id["d-a"] == "completed-no-pr"
-    assert by_id["d-b"] == "failed⟨deadline-kill⟩"
-    assert by_id["d-c"] is None
+    assert by_id["dispatch-a"] == "completed-no-pr"
+    assert by_id["dispatch-b"] == "failed⟨deadline-kill⟩"
+    assert by_id["dispatch-c"] is None
 
     conn = sqlite3.connect(str(state_dir / doc.QI_DB_FILENAME))
     rows = conn.execute(
@@ -694,7 +694,7 @@ def test_reconcile_all_dispatch_outcomes_bulk(tmp_path, monkeypatch):
     ).fetchall()
     conn.close()
     ids = {r[0] for r in rows}
-    assert ids == {"d-a", "d-b"}, "only closed outcomes are persisted; d-c stays absent"
+    assert ids == {"dispatch-a", "dispatch-b"}, "only closed outcomes are persisted; dispatch-c stays absent"
 
 
 # ---------------------------------------------------------------------------

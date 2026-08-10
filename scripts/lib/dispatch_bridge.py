@@ -31,6 +31,7 @@ owns lane selection (claude→tmux unless allow_headless). No Anthropic SDK impo
 from __future__ import annotations
 
 import hashlib
+import shutil
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Optional
@@ -316,8 +317,26 @@ def bridge_dispatch(*, dry_run: bool = False, **stage_kwargs) -> int:
     except (ValueError, OSError) as exc:
         print(f"[dispatch_bridge] REJECT [staging-error]: {exc}", file=sys.stderr)
         return 1
+
     from dispatch_cli import run_dispatch  # noqa: PLC0415
-    return run_dispatch(spec_file, dry_run=dry_run)
+    rc = run_dispatch(spec_file, dry_run=dry_run)
+
+    # OI-1072: clean up the staged bundle directory after the door processes it.
+    # Without this, every dispatch through the bridge leaves a directory behind in
+    # pending/ — the daemon can't pick them up (it expects flat .md files, not
+    # directory bundles), so they accumulate forever. Cleanup is best-effort:
+    # a failure here must not change the dispatch's exit code.
+    bundle_dir = spec_file.parent
+    try:
+        if bundle_dir.exists():
+            shutil.rmtree(str(bundle_dir))
+    except OSError as exc:
+        print(
+            f"[dispatch_bridge] WARN bundle cleanup failed for {bundle_dir}: {exc}",
+            file=sys.stderr,
+        )
+
+    return rc
 
 
 def deliver_via_door(

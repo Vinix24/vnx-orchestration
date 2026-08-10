@@ -65,6 +65,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sqlite3
 import sys
@@ -351,6 +352,47 @@ def _receipt_belongs_to_project(rec: Dict[str, Any], project_id: str) -> bool:
         return project_id == _LEGACY_RECEIPT_PROJECT_ID
     return rec_project_id == project_id
 
+
+# ── OI-1104: dispatch-ID exclusion patterns for phantom/non-dispatch IDs ──────
+# The receipts ledger contains IDs that are not real dispatch IDs: benchmark
+# runs (``bench-*``), git commit hashes (12+ hex chars), markdown parsing
+# artifacts, and random strings too short to be valid dispatch IDs.  These
+# phantom IDs distort FPY, rework rate, and CQS when counted as "dispatches."
+# The ledger is append-only — we never mutate it.  Instead, we exclude known
+# non-dispatch patterns from the counter population at read time.
+#
+# Categories (measured 2026-08-10 on the central grootboek, 5757 phantom IDs):
+#   bench            1793  (31.1%)  ``^bench-`` prefix
+#   hex/short         448  ( 7.8%)  12+ hex chars or <10 chars total
+#   markdown artifact ~100  ( 1.7%)  contains ``**`` (bold-marker leakage)
+#   other non-dispatch ~varies     date-only, random strings, worktree stray IDs
+#
+# Each pattern is compiled; an ID matching ANY pattern is excluded.
+
+_NON_DISPATCH_ID_PATTERNS: List[re.Pattern] = [
+    re.compile(r"^bench-", re.IGNORECASE),         # benchmark runs
+    re.compile(r"^[0-9a-f]{12,}$", re.IGNORECASE), # git hashes / hex strings
+    re.compile(r"\*\*"),                            # markdown bold-marker leakage
+    re.compile(r"^.{1,4}$"),                        # too short to be a dispatch ID
+]
+
+
+def _is_valid_dispatch_id(dispatch_id: str) -> bool:
+    """Return False for IDs matching known non-dispatch patterns (OI-1104).
+
+    These IDs exist in the append-only receipts ledger but are not real
+    dispatches — counting them as such distorts FPY, rework rate, and CQS.
+    The ledger is never mutated; exclusion happens at the counter level.
+    """
+    if not dispatch_id or not dispatch_id.strip():
+        return False
+    for pat in _NON_DISPATCH_ID_PATTERNS:
+        if pat.search(dispatch_id):
+            return False
+    return True
+
+
+# ── receipt helpers ──────────────────────────────────────────────────────────
 
 def _receipt_dispatch_ids_for_project(
     receipts_index: Dict[str, List[Dict[str, Any]]], project_id: str,
@@ -887,7 +929,18 @@ def reconcile_all_dispatch_outcomes(
 
     receipts_index = load_receipts_index(state_dir)
     receipt_dispatch_ids = _receipt_dispatch_ids_for_project(receipts_index, project_id)
-    dispatch_ids = sorted(set(dispatch_ids_from_table) | receipt_dispatch_ids)
+    all_candidate_ids = sorted(set(dispatch_ids_from_table) | receipt_dispatch_ids)
+    # OI-1104: exclude non-dispatch IDs (benchmark runs, git hashes, parse
+    # artifacts) from the counter population so FPY/rework-rate/CQS are not
+    # distorted by phantom IDs. The ledger is append-only — we never mutate it.
+    dispatch_ids = [did for did in all_candidate_ids if _is_valid_dispatch_id(did)]
+    phantom_count = len(all_candidate_ids) - len(dispatch_ids)
+    if phantom_count:
+        logger.info(
+            "dispatch_outcome_classifier: excluded %d phantom/non-dispatch IDs "
+            "from reconciliation (OI-1104, project=%s)",
+            phantom_count, project_id,
+        )
     if not dispatch_ids:
         return results
 

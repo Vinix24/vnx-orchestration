@@ -215,10 +215,24 @@ def test_bridge_headless_wrong_override_value_still_blocked(tmp_path, monkeypatc
 
 def test_bridge_headless_override_reaches_staging(tmp_path, monkeypatch):
     """allow_headless=True + VNX_OVERRIDE_CLAUDE_HEADLESS=1: the gate is lifted and
-    execution proceeds into stage_spec_bundle (a real bundle gets written)."""
+    execution proceeds into stage_spec_bundle (a real bundle gets written).
+
+    OI-1072: the bundle directory is cleaned up after run_dispatch returns,
+    so the bundle must NOT exist after bridge_dispatch()."""
     monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "1")
     import dispatch_cli
-    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+    captured_spec = {}
+
+    def _mock_run_dispatch(spec_file, dry_run=False):
+        # Capture and verify the bundle was correctly formed BEFORE cleanup
+        bundle = spec_file.parent
+        payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
+        captured_spec["allow_headless"] = payload["allow_headless"]
+        captured_spec["bundle"] = bundle
+        return 0
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", _mock_run_dispatch)
 
     rc = dispatch_bridge.bridge_dispatch(
         instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
@@ -227,17 +241,31 @@ def test_bridge_headless_override_reaches_staging(tmp_path, monkeypatch):
     )
 
     assert rc == 0
-    bundle = tmp_path / "dispatches" / "pending" / _GOOD_ID
-    payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
-    assert payload["allow_headless"] is True
+    assert captured_spec.get("allow_headless") is True
+    # OI-1072: bundle must be cleaned up after dispatch
+    assert not captured_spec["bundle"].exists()
 
 
 def test_bridge_non_headless_dispatch_never_consults_the_gate(tmp_path, monkeypatch):
     """allow_headless absent (default False): the claude tmux subscription lane is
-    unaffected — staging proceeds without the headless gate firing at all."""
+    unaffected — staging proceeds without the headless gate firing at all.
+
+    OI-1072: the bundle directory is cleaned up after run_dispatch returns,
+    so the bundle must NOT exist after bridge_dispatch()."""
     monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
     import dispatch_cli
-    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+    captured_spec = {}
+
+    def _mock_run_dispatch(spec_file, dry_run=False):
+        # Capture and verify the bundle was correctly formed BEFORE cleanup
+        bundle = spec_file.parent
+        payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
+        captured_spec["allow_headless"] = payload["allow_headless"]
+        captured_spec["bundle"] = bundle
+        return 0
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", _mock_run_dispatch)
 
     rc = dispatch_bridge.bridge_dispatch(
         instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
@@ -245,6 +273,6 @@ def test_bridge_non_headless_dispatch_never_consults_the_gate(tmp_path, monkeypa
     )
 
     assert rc == 0
-    bundle = tmp_path / "dispatches" / "pending" / _GOOD_ID
-    payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
-    assert payload["allow_headless"] is False
+    assert captured_spec.get("allow_headless") is False
+    # OI-1072: bundle must be cleaned up after dispatch
+    assert not captured_spec["bundle"].exists()
