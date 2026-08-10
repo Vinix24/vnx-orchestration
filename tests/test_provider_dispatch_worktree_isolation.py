@@ -1,13 +1,13 @@
-"""test_provider_dispatch_worktree_isolation.py — VNX_ISOLATED_WORKTREE for providers.
+"""test_provider_dispatch_worktree_isolation.py — provider dispatch isolation (default-on since OI-1090).
 
-Verifies (PR-PROVIDER-ISO / PR-7):
-1. With VNX_ISOLATED_WORKTREE=1, each provider dispatch (codex/kimi/gemini/litellm):
+Verifies:
+1. Every provider dispatch (codex/kimi/gemini/litellm) always creates a worktree:
    - calls create_dispatch_worktree with the dispatch_id
    - passes the worktree path as cwd to the spawn function
    - calls remove_dispatch_worktree after (success and failure paths)
-2. Without VNX_ISOLATED_WORKTREE, spawn functions receive cwd=None (no isolation).
-3. create_dispatch_worktree failure (VNX_ISOLATED_WORKTREE=1): dispatch ABORTS (returns 1),
-   spawn NOT called — no silent shared-checkout fallback (PR-7 fail-loud).
+2. Worktree is created even without VNX_ISOLATED_WORKTREE set (default-on).
+3. create_dispatch_worktree failure: dispatch ABORTS (returns 1),
+   spawn NOT called — no silent shared-checkout fallback.
 """
 
 from __future__ import annotations
@@ -125,7 +125,8 @@ class TestCodexIsolation:
         mock_remove.assert_called_once_with("iso-codex-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
-    def test_no_isolation_when_env_unset(self):
+    def test_isolation_without_env_var(self):
+        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
         env = {k: v for k, v in __import__("os").environ.items() if k != "VNX_ISOLATED_WORKTREE"}
         result = _make_spawn_result()
         captured = {}
@@ -144,16 +145,16 @@ class TestCodexIsolation:
              patch("provider_dispatch._resolve_codex_model", return_value="gpt-test"), \
              patch("event_store.EventStore", return_value=mock_event_store), \
              patch("provider_spawns.codex_spawn.spawn_codex", side_effect=fake_spawn), \
-             patch("provider_dispatch._create_provider_worktree") as mock_create, \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_WT_PATH) as mock_create, \
              patch("provider_dispatch._remove_provider_worktree") as mock_remove:
 
-            args = provider_dispatch._build_parser().parse_args(_base_argv("codex", "no-iso-codex"))
+            args = provider_dispatch._build_parser().parse_args(_base_argv("codex", "default-iso-codex"))
             exit_code = provider_dispatch._dispatch_codex(args)
 
         assert exit_code == 0
-        mock_create.assert_not_called()
-        mock_remove.assert_not_called()
-        assert captured.get("cwd") is None
+        mock_create.assert_called_once_with("default-iso-codex")
+        mock_remove.assert_called_once_with("default-iso-codex", terminal_id="T1")
+        assert captured.get("cwd") == _FAKE_WT_PATH
 
     def test_worktree_removed_on_spawn_failure(self):
         """remove_dispatch_worktree must be called even when spawn raises."""
@@ -210,7 +211,8 @@ class TestGeminiIsolation:
         mock_remove.assert_called_once_with("iso-gemini-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
-    def test_no_isolation_when_env_unset(self):
+    def test_isolation_without_env_var(self):
+        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
         captured = {}
         result = _make_spawn_result()
 
@@ -227,16 +229,16 @@ class TestGeminiIsolation:
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("event_store.EventStore", return_value=mock_event_store), \
              patch("provider_spawns.gemini_spawn.spawn_gemini", side_effect=fake_spawn), \
-             patch("provider_dispatch._create_provider_worktree") as mock_create, \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_WT_PATH) as mock_create, \
              patch("provider_dispatch._remove_provider_worktree") as mock_remove:
 
-            args = provider_dispatch._build_parser().parse_args(_base_argv("gemini", "no-iso-gemini"))
+            args = provider_dispatch._build_parser().parse_args(_base_argv("gemini", "default-iso-gemini"))
             exit_code = provider_dispatch._dispatch_gemini(args)
 
         assert exit_code == 0
-        mock_create.assert_not_called()
-        mock_remove.assert_not_called()
-        assert captured.get("cwd") is None
+        mock_create.assert_called_once_with("default-iso-gemini")
+        mock_remove.assert_called_once_with("default-iso-gemini", terminal_id="T1")
+        assert captured.get("cwd") == _FAKE_WT_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +275,8 @@ class TestKimiIsolation:
         mock_remove.assert_called_once_with("iso-kimi-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
-    def test_no_isolation_when_env_unset(self):
+    def test_isolation_without_env_var(self):
+        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
         captured = {}
         result = _make_spawn_result()
 
@@ -291,16 +294,16 @@ class TestKimiIsolation:
              patch("provider_dispatch._resolve_kimi_model_label", return_value="kimi-default"), \
              patch("event_store.EventStore", return_value=mock_event_store), \
              patch("provider_spawns.kimi_spawn.spawn_kimi", side_effect=fake_spawn), \
-             patch("provider_dispatch._create_provider_worktree") as mock_create, \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_WT_PATH) as mock_create, \
              patch("provider_dispatch._remove_provider_worktree") as mock_remove:
 
-            args = provider_dispatch._build_parser().parse_args(_base_argv("kimi", "no-iso-kimi"))
+            args = provider_dispatch._build_parser().parse_args(_base_argv("kimi", "default-iso-kimi"))
             exit_code = provider_dispatch._dispatch_kimi(args)
 
         assert exit_code == 0
-        mock_create.assert_not_called()
-        mock_remove.assert_not_called()
-        assert captured.get("cwd") is None
+        mock_create.assert_called_once_with("default-iso-kimi")
+        mock_remove.assert_called_once_with("default-iso-kimi", terminal_id="T1")
+        assert captured.get("cwd") == _FAKE_WT_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +345,8 @@ class TestLiteLLMIsolation:
         mock_remove.assert_called_once_with("iso-litellm-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
-    def test_no_isolation_when_env_unset(self):
+    def test_isolation_without_env_var(self):
+        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
         captured = {}
         result = _make_spawn_result()
 
@@ -363,18 +367,18 @@ class TestLiteLLMIsolation:
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("event_store.EventStore", return_value=mock_event_store), \
              patch("provider_spawns.litellm_spawn.spawn_litellm", side_effect=fake_spawn), \
-             patch("provider_dispatch._create_provider_worktree") as mock_create, \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_WT_PATH) as mock_create, \
              patch("provider_dispatch._remove_provider_worktree") as mock_remove:
 
             args = provider_dispatch._build_parser().parse_args(
-                _base_argv("litellm:deepseek", "no-iso-litellm")
+                _base_argv("litellm:deepseek", "default-iso-litellm")
             )
             exit_code = provider_dispatch._dispatch_litellm(args)
 
         assert exit_code == 0
-        mock_create.assert_not_called()
-        mock_remove.assert_not_called()
-        assert captured.get("cwd") is None
+        mock_create.assert_called_once_with("default-iso-litellm")
+        mock_remove.assert_called_once_with("default-iso-litellm", terminal_id="T1")
+        assert captured.get("cwd") == _FAKE_WT_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -436,12 +440,12 @@ class TestResolveConsumerProjectRoot:
 
 
 # ---------------------------------------------------------------------------
-# PR-7: fail-loud — VNX_ISOLATED_WORKTREE=1 + create failure → ABORT, no spawn
+# PR-7: fail-loud — create failure → ABORT, no spawn
 # ---------------------------------------------------------------------------
 
 class TestCodexIsolationFailLoud:
     def test_isolation_create_failure_aborts_dispatch(self):
-        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        """Worktree creation failure: return 1, spawn NOT called."""
         spawn_called = []
 
         def fake_spawn(*a, **kw):
@@ -470,7 +474,7 @@ class TestCodexIsolationFailLoud:
 
 class TestGeminiIsolationFailLoud:
     def test_isolation_create_failure_aborts_dispatch(self):
-        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        """Worktree creation failure: return 1, spawn NOT called."""
         spawn_called = []
 
         def fake_spawn(*a, **kw):
@@ -498,7 +502,7 @@ class TestGeminiIsolationFailLoud:
 
 class TestKimiIsolationFailLoud:
     def test_isolation_create_failure_aborts_dispatch(self):
-        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        """Worktree creation failure: return 1, spawn NOT called."""
         spawn_called = []
 
         def fake_spawn(*a, **kw):
@@ -527,7 +531,7 @@ class TestKimiIsolationFailLoud:
 
 class TestLiteLLMIsolationFailLoud:
     def test_isolation_create_failure_aborts_dispatch(self):
-        """VNX_ISOLATED_WORKTREE=1 + create failure: return 1, spawn NOT called."""
+        """Worktree creation failure: return 1, spawn NOT called."""
         spawn_called = []
 
         def fake_spawn(*a, **kw):

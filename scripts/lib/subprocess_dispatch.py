@@ -718,46 +718,45 @@ if __name__ == "__main__":
     from subprocess_dispatch_internals.runtime_overrides import complexity_timeout_defaults
     _chunk_timeout, _total_deadline = complexity_timeout_defaults(args.complexity)
 
-    # VNX_ISOLATED_WORKTREE=1: create a per-dispatch ephemeral worktree so
-    # concurrent workers operate on independent file trees and never share HEAD.
-    # Default (unset): no change — proven path runs exactly as before.
-    _isolated = os.environ.get("VNX_ISOLATED_WORKTREE") == "1"
+    # OI-1090: always create a per-dispatch ephemeral worktree — isolation is
+    # default-on since 2026-08-10.  Every worker runs in its own checkout so
+    # concurrent dispatches never share HEAD and a worker can never write to the
+    # main checkout.  Fail-loud on creation failure: no shared-checkout fallback.
     _isolation_wt_path = None
     _isolation_project_root = None
-    if _isolated:
-        try:
-            import logging as _log_mod
-            _log_mod.getLogger(__name__).info(
-                "VNX_ISOLATED_WORKTREE=1: creating dispatch worktree for %s",
-                args.dispatch_id,
-            )
-            from dispatch_worktree_isolation import (
-                create_dispatch_worktree as _create_wt,
-                remove_dispatch_worktree as _remove_wt,
-                resolve_consumer_project_root as _resolve_consumer_root,
-            )
-            # Resolve the CONSUMER project root (VNX_PROJECT_ROOT / CWD-git,
-            # never __file__) so a central-install consumer gets its worktree
-            # under ITS OWN project — not the shared ~/.vnx-system checkout
-            # this lane code lives under in a central install (P0
-            # provider-worktree-root-fix). Any resolution failure is handled
-            # by the same fail-loud abort below as a worktree-creation failure.
-            _isolation_project_root = _resolve_consumer_root()
-            _isolation_wt_path = _create_wt(
-                args.dispatch_id,
-                project_root=_isolation_project_root,
-            )
-            _set_active_worktree(_isolation_wt_path)
-        except Exception as _wt_exc:
-            import logging as _log_mod
-            _log_mod.getLogger(__name__).error(
-                "VNX_ISOLATED_WORKTREE=1 worktree creation failed for %s: %s — "
-                "aborting dispatch; no shared-checkout fallback",
-                args.dispatch_id, _wt_exc,
-            )
-            _hb_stop.set()
-            _hb_thread.join(timeout=5)
-            sys.exit(1)
+    try:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).info(
+            "creating dispatch worktree for %s (isolation default-on, OI-1090)",
+            args.dispatch_id,
+        )
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree as _create_wt,
+            remove_dispatch_worktree as _remove_wt,
+            resolve_consumer_project_root as _resolve_consumer_root,
+        )
+        # Resolve the CONSUMER project root (VNX_PROJECT_ROOT / CWD-git,
+        # never __file__) so a central-install consumer gets its worktree
+        # under ITS OWN project — not the shared ~/.vnx-system checkout
+        # this lane code lives under in a central install (P0
+        # provider-worktree-root-fix). Any resolution failure is handled
+        # by the same fail-loud abort below as a worktree-creation failure.
+        _isolation_project_root = _resolve_consumer_root()
+        _isolation_wt_path = _create_wt(
+            args.dispatch_id,
+            project_root=_isolation_project_root,
+        )
+        _set_active_worktree(_isolation_wt_path)
+    except Exception as _wt_exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).error(
+            "worktree creation failed for %s: %s — "
+            "aborting dispatch; no shared-checkout fallback (isolation default-on, OI-1090)",
+            args.dispatch_id, _wt_exc,
+        )
+        _hb_stop.set()
+        _hb_thread.join(timeout=5)
+        sys.exit(1)
 
     try:
         ok = deliver_with_recovery(
@@ -779,14 +778,14 @@ if __name__ == "__main__":
     finally:
         _hb_stop.set()
         _hb_thread.join(timeout=5)
-        if _isolated and _isolation_wt_path is not None:
+        if _isolation_wt_path is not None:
             _set_active_worktree(None)
             try:
                 _remove_wt(args.dispatch_id, project_root=_isolation_project_root, terminal_id=args.terminal_id)
             except Exception as _rm_exc:
                 import logging as _log_mod
                 _log_mod.getLogger(__name__).warning(
-                    "VNX_ISOLATED_WORKTREE: worktree cleanup failed: %s", _rm_exc,
+                    "worktree cleanup failed: %s", _rm_exc,
                 )
 
     sys.exit(0 if ok else 1)
