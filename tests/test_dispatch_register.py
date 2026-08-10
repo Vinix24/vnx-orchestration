@@ -427,6 +427,71 @@ class TestAppendEventIdRequirement:
 
 
 # ---------------------------------------------------------------------------
+# OI-1120 part 2 — append_event_idempotent + state_dir override
+# ---------------------------------------------------------------------------
+
+class TestAppendEventStateDirOverride:
+    """``state_dir`` bypasses ambient resolution for both write and read."""
+
+    def test_writes_to_explicit_state_dir_not_ambient(self, isolated_data_dir, tmp_path):
+        """An explicit state_dir writes there, NOT to the env-resolved ambient path."""
+        explicit_dir = tmp_path / "explicit-state"
+        result = append_event("dispatch_created", dispatch_id="d-explicit", state_dir=explicit_dir)
+        assert result is True
+        assert (explicit_dir / "dispatch_register.ndjson").exists()
+        assert not _reg_path(isolated_data_dir).exists()
+
+
+class TestAppendEventIdempotent:
+    """append_event_idempotent: a retry for the same identity is a no-op."""
+
+    def test_first_call_writes(self, isolated_data_dir):
+        result = dispatch_register.append_event_idempotent(
+            "dispatch_created", dispatch_id="d-idem-001",
+        )
+        assert result is True
+        reg = _reg_path(isolated_data_dir)
+        assert len(reg.read_text().splitlines()) == 1
+
+    def test_second_call_same_dispatch_id_is_noop(self, isolated_data_dir):
+        """OI-1120: firing the same dispatch id twice must not create a
+        duplicate dispatch_created record — this IS the idempotency proof."""
+        first = dispatch_register.append_event_idempotent(
+            "dispatch_created", dispatch_id="d-idem-002",
+        )
+        second = dispatch_register.append_event_idempotent(
+            "dispatch_created", dispatch_id="d-idem-002",
+        )
+        assert first is True
+        assert second is True
+        reg = _reg_path(isolated_data_dir)
+        lines = reg.read_text().splitlines()
+        assert len(lines) == 1, f"expected exactly one record, got {len(lines)}: {lines}"
+        rec = json.loads(lines[0])
+        assert rec["dispatch_id"] == "d-idem-002"
+
+    def test_different_dispatch_id_writes_separately(self, isolated_data_dir):
+        """Idempotency is per-identity, not global — a different dispatch_id
+        still gets its own record."""
+        dispatch_register.append_event_idempotent("dispatch_created", dispatch_id="d-idem-a")
+        dispatch_register.append_event_idempotent("dispatch_created", dispatch_id="d-idem-b")
+        reg = _reg_path(isolated_data_dir)
+        ids = {json.loads(line)["dispatch_id"] for line in reg.read_text().splitlines()}
+        assert ids == {"d-idem-a", "d-idem-b"}
+
+    def test_precheck_read_failure_falls_through_to_append(self, isolated_data_dir):
+        """A broken pre-check read must not block the write — better a
+        possible duplicate than a lost event."""
+        with patch("dispatch_register.read_events", side_effect=OSError("boom")):
+            result = dispatch_register.append_event_idempotent(
+                "dispatch_created", dispatch_id="d-idem-preread-fail",
+            )
+        assert result is True
+        reg = _reg_path(isolated_data_dir)
+        assert len(reg.read_text().splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
 # Wave 1 shadow-mode tests — VNX_USE_CENTRAL_DB flag (PR-W1.4)
 # ---------------------------------------------------------------------------
 

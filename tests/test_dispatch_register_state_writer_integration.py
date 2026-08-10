@@ -19,7 +19,7 @@ def test_append_event_delegates_to_state_writer(
     path = tmp_path / "dispatch_register.ndjson"
     captured: list[tuple[Path, dict]] = []
 
-    monkeypatch.setattr(dispatch_register, "_resolve_register_path", lambda: path)
+    monkeypatch.setattr(dispatch_register, "_resolve_register_path", lambda state_dir=None: path)
     monkeypatch.setattr(dispatch_register, "_resolve_identity_for_register", lambda: {})
     monkeypatch.setattr(dispatch_register, "_mirror_to_decision_log", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -45,7 +45,7 @@ def test_dispatch_register_public_api_preserved(
 ) -> None:
     path = tmp_path / "dispatch_register.ndjson"
 
-    monkeypatch.setattr(dispatch_register, "_resolve_register_path", lambda: path)
+    monkeypatch.setattr(dispatch_register, "_resolve_register_path", lambda state_dir=None: path)
     monkeypatch.setattr(dispatch_register, "_resolve_identity_for_register", lambda: {})
     monkeypatch.setattr(dispatch_register, "_mirror_to_decision_log", lambda *args, **kwargs: None)
 
@@ -63,6 +63,8 @@ def test_dispatch_register_public_api_preserved(
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     record = json.loads(lines[0])
+    record_id = record.pop("record_id", None)
+    assert isinstance(record_id, str) and record_id
     assert record == {
         "timestamp": record["timestamp"],
         "event": "gate_passed",

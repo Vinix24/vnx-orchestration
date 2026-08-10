@@ -31,6 +31,7 @@ from dispatch_cli import (
     _load_model_pins_from_yaml,
     _persist_route_decision,
     _persist_track_id,
+    _register_dispatch_created,
     _tracks_db_path,
     build_runtime_snapshot,
     fingerprint,
@@ -2781,6 +2782,152 @@ class TestPersistRouteDecision:
         assert record["decision"]["provider"] == "codex"
         assert record["decision"]["lane"] == "provider"
         assert record["decision"]["billing"] == "provider_metered"
+
+
+# ---------------------------------------------------------------------------
+# OI-1120 part 2 — dispatch register fill (the guard's reference source)
+# ---------------------------------------------------------------------------
+
+class TestRegisterDispatchCreated:
+    """_register_dispatch_created fills the register at the moment the door
+    commits to firing — the fix for the vacuous _is_known_dispatch guard."""
+
+    def _reg_lines(self, state_dir: Path) -> list[dict]:
+        reg = state_dir / "dispatch_register.ndjson"
+        if not reg.exists():
+            return []
+        return [json.loads(ln) for ln in reg.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    def _make_spec(self, plan: ExecutionPlan, **overrides) -> DispatchSpec:
+        kwargs = dict(
+            schema_version=1, project_id="vnx-dev", dispatch_id=plan.dispatch_id,
+            staging_id="s", instruction_file=Path("/tmp/i.md"), role="backend-developer",
+            target_slot="T1", gate="human-promoted", dispatch_paths=(),
+        )
+        kwargs.update(overrides)
+        return DispatchSpec(**kwargs)
+
+    def test_writes_dispatch_created_record(self, tmp_path):
+        """Direct-drive proof: a real write lands on disk, not just a call."""
+        plan = _make_minimal_plan(dispatch_id="20260810-oi1120-direct")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _register_dispatch_created(plan, permit, self._make_spec(plan), state_dir=state_dir)
+
+        recs = self._reg_lines(state_dir)
+        assert len(recs) == 1
+        assert recs[0]["event"] == "dispatch_created"
+        assert recs[0]["dispatch_id"] == "20260810-oi1120-direct"
+        assert recs[0]["terminal"] == "T1"
+        assert recs[0]["extra"]["lane"] == "claude_tmux_subscription"
+        assert recs[0]["extra"]["provider"] == "claude"
+        assert recs[0]["extra"]["model"] == "sonnet"
+        assert recs[0]["extra"]["permit_fingerprint"] == f"{permit.plan_digest[:12]}-{permit.dispatch_id}"
+
+    def test_idempotent_across_two_calls(self, tmp_path):
+        """Proof of idempotency at the door-hook level: firing the same
+        dispatch id twice (retry / fix-forward) holds one created-event."""
+        plan = _make_minimal_plan(dispatch_id="20260810-oi1120-retry")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+        spec = self._make_spec(plan)
+
+        _register_dispatch_created(plan, permit, spec, state_dir=state_dir)
+        _register_dispatch_created(plan, permit, spec, state_dir=state_dir)
+
+        recs = [r for r in self._reg_lines(state_dir) if r["dispatch_id"] == "20260810-oi1120-retry"]
+        assert len(recs) == 1, f"expected exactly one record, got {len(recs)}: {recs}"
+
+    def test_write_failure_does_not_raise(self, caplog):
+        """A register-write problem is an observability gap, not a reason to
+        refuse work — the door must proceed regardless."""
+        import logging
+
+        plan = _make_minimal_plan(dispatch_id="20260810-oi1120-fail")
+        permit = issue_permit(plan)
+
+        with patch("dispatch_register.append_event_idempotent", side_effect=OSError("disk full")):
+            with caplog.at_level(logging.WARNING):
+                _register_dispatch_created(
+                    plan, permit, self._make_spec(plan), state_dir=Path("/nonexistent"),
+                )
+
+        assert any("dispatch_created register emit failed" in rec.message for rec in caplog.records), (
+            "write failure must log a WARN — silence hides the same class of "
+            "gap OI-1105 already found once"
+        )
+
+    def test_called_during_run_dispatch_claude_lane(self, tmp_path, monkeypatch):
+        """run_dispatch (non-dry-run, claude_tmux_subscription lane) fires the
+        register hook and a real record lands under the door's own state_dir."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Register fill test\n\nDo something safe.\n",
+            staging_id="20260810-staging-oi1120",
+            dispatch_id="20260810-oi1120-integration",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_exec.assert_called_once()
+        recs = self._reg_lines(data_dir / "state")
+        created = [r for r in recs if r["event"] == "dispatch_created"
+                   and r["dispatch_id"] == "20260810-oi1120-integration"]
+        assert len(created) == 1
+
+    def test_run_dispatch_completes_when_register_write_fails(self, tmp_path, monkeypatch):
+        """A broken register write must not fail the dispatch itself — the
+        lane still runs and run_dispatch still returns 0."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Register fill failure test\n\nDo something safe.\n",
+            staging_id="20260810-staging-oi1120-fail",
+            dispatch_id="20260810-oi1120-write-fail",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_register.append_event_idempotent", side_effect=OSError("disk full")):
+            with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+                rc = run_dispatch(spec_file)
+
+        assert rc == 0, "a register-write failure must not block the dispatch"
+        mock_exec.assert_called_once()
+
+    def test_provider_lane_also_registers(self, tmp_path):
+        """Lane-agnostic: a provider-lane (codex) dispatch registers too — the
+        write site sits before the lane branch, not inside one lane's code."""
+        plan = _make_minimal_plan(provider=Provider.CODEX, dispatch_id="20260810-oi1120-codex")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+
+        _register_dispatch_created(
+            plan, permit, self._make_spec(plan, provider=Provider.CODEX), state_dir=state_dir,
+        )
+
+        recs = self._reg_lines(state_dir)
+        assert len(recs) == 1
+        assert recs[0]["extra"]["lane"] == "provider"
+        assert recs[0]["extra"]["provider"] == "codex"
+
+    def test_not_called_during_dry_run(self, tmp_path):
+        """Dry-run dispatches must NOT write a register entry — only live
+        dispatches should persist state (mirrors _persist_route_decision)."""
+        spec_file = _make_spec_file(tmp_path, provider="claude")
+
+        with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()):
+            with patch("dispatch_cli._register_dispatch_created") as mock_register:
+                rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0
+        mock_register.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

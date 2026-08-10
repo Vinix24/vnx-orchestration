@@ -71,14 +71,25 @@ VALID_EVENTS = {
 }
 
 
-def _register_path() -> Path:
+def _register_path(state_dir: Optional[Path] = None) -> Path:
     """Resolve dispatch_register.ndjson via canonical vnx_paths resolver.
 
-    Fallback precedence (when canonical resolver unavailable):
+    ``state_dir``, when given, is authoritative and skips ambient resolution
+    entirely — mirrors the override ``read_events`` already accepts (OI-1120
+    part 2), so a caller that has already resolved its own state_dir (e.g. the
+    dispatch door, which derives it from the staged bundle's physical
+    location per ADR-026) writes to the exact same path it reads from,
+    instead of risking a second, independent ambient resolution drifting
+    from the first.
+
+    Fallback precedence (when state_dir is not given and the canonical
+    resolver is unavailable):
     1. VNX_STATE_DIR (if set) — use directly as state dir
     2. VNX_DATA_DIR + state subdir (only when VNX_DATA_DIR_EXPLICIT=1)
     3. Repo-relative .vnx-data/state
     """
+    if state_dir is not None:
+        return Path(state_dir) / "dispatch_register.ndjson"
     try:
         scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
         if scripts_lib not in sys.path:
@@ -123,8 +134,8 @@ def _parse_iso(ts: str) -> Optional[_dt.datetime]:
         return None
 
 
-def _resolve_register_path() -> Path:
-    path = _register_path()
+def _resolve_register_path(state_dir: Optional[Path] = None) -> Path:
+    path = _register_path(state_dir=state_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -312,11 +323,13 @@ def append_event(
     project_id: Optional[str] = None,
     orchestrator_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
 ) -> bool:
     """Append a lifecycle event. Returns True on success, False on any failure.
 
-    Best-effort: never raises. Intended for use as a fire-and-forget hook
-    where caller flow must not break on register write failure.
+    Best-effort: never raises (except ``TestIsolationGuardError`` — see
+    below). Intended for use as a fire-and-forget hook where caller flow
+    must not break on register write failure.
 
     Optional ``operator_id`` / ``project_id`` / ``orchestrator_id`` /
     ``agent_id`` arguments stamp a four-tuple identity onto the event.
@@ -324,6 +337,10 @@ def append_event(
     if resolution fails the event is written without those fields (legacy
     behaviour). Existing callers that pass none of these arguments continue
     to work unchanged.
+
+    ``state_dir``, when given, overrides ambient path resolution for the
+    primary write (see ``_register_path``) — the same override ``read_events``
+    already accepts.
     """
     if event not in VALID_EVENTS:
         return False
@@ -347,7 +364,7 @@ def append_event(
         agent_id=agent_id,
     )
     try:
-        primary_path = _resolve_register_path()
+        primary_path = _resolve_register_path(state_dir=state_dir)
         _write_event_locked(primary_path, record)
         _mirror_to_decision_log(event, record, extra=extra)
         # Phase 6 P3 dual-write: mirror to central when project_id is known
@@ -361,6 +378,74 @@ def append_event(
         raise
     except Exception:
         return False
+
+
+def _event_identity(event: dict) -> tuple[str, str, str]:
+    """The non-timestamp portion of ``_merge_dedup_key``.
+
+    Two records sharing this identity describe the same real-world
+    occurrence regardless of when each was written — the timestamp is the
+    only field ``_merge_dedup_key`` includes that a retry naturally varies.
+    """
+    return _merge_dedup_key(event)[1:]
+
+
+def append_event_idempotent(
+    event: str,
+    *,
+    dispatch_id: str = "",
+    pr_number: Optional[int] = None,
+    feature_id: str = "",
+    terminal: str = "",
+    gate: str = "",
+    extra: Optional[dict] = None,
+    operator_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    orchestrator_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
+) -> bool:
+    """``append_event``, but a no-op when an equivalent event already exists.
+
+    OI-1120 part 2: a retry or fix-forward that fires the same dispatch_id
+    twice through the door must not create a second ``dispatch_created``
+    record — that would give ``report_to_receipt_converter._is_known_dispatch``
+    two rows to reconcile per id instead of one. Reuses the identity
+    ``_merge_dedup_key`` already defines for read-side merge-dedup
+    (event, dispatch_id, pr_number, feature_id), evaluated at write time
+    instead of read time, rather than inventing a second dedup scheme.
+
+    The pre-check is best-effort: a failed read falls through to the normal
+    ``append_event`` attempt (better a possible duplicate than a lost event).
+    Returns True when the event is present after the call — whether it was
+    already there or newly written — False only on a genuine write failure.
+    """
+    identity = _event_identity({
+        "event": event,
+        "dispatch_id": dispatch_id,
+        "pr_number": pr_number,
+        "feature_id": feature_id,
+    })
+    try:
+        for existing in read_events(state_dir=state_dir):
+            if _event_identity(existing) == identity:
+                return True
+    except Exception:  # vnx-silent-except: pre-check is best-effort; fall through to the real append attempt
+        pass
+    return append_event(
+        event,
+        dispatch_id=dispatch_id,
+        pr_number=pr_number,
+        feature_id=feature_id,
+        terminal=terminal,
+        gate=gate,
+        extra=extra,
+        operator_id=operator_id,
+        project_id=project_id,
+        orchestrator_id=orchestrator_id,
+        agent_id=agent_id,
+        state_dir=state_dir,
+    )
 
 
 def _log_dispatch_created(log_fn, record: dict, extra_dict: dict) -> None:
