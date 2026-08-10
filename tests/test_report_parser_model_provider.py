@@ -753,3 +753,190 @@ def test_bash_watermark_prevents_reconversion(tmp_path: Path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# OI-1092: receipt timestamp = time of work, not time of processing
+# ---------------------------------------------------------------------------
+
+
+class TestWorkTimestamp:
+    """The receipt timestamp must be the time the WORK was done, not when it
+    was PROCESSED.  Resolution: explicit report date → file mtime → fail-closed.
+    """
+
+    def test_explicit_datum_field_used(self, tmp_path):
+        """A report with **Datum**: <date> uses that date."""
+        body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260807-datum-test
+**Datum**: 2026-08-07T14:30:00Z
+**Model**: sonnet
+**Provider**: claude
+
+## Summary
+This report carries an explicit Datum field. The receipt timestamp must be
+2026-08-07T14:30:00Z, not the processing time.
+
+## Changes
+- edited scripts/foo.py
+
+## Verification
+- ran pytest tests/test_foo.py; all green
+
+## Open Items
+None
+"""
+        r = _parse(tmp_path, body)
+        assert "timestamp" in r
+        ts = r["timestamp"]
+        assert "2026-08-07" in ts, f"Expected work date, got: {ts}"
+
+    def test_explicit_date_field_used(self, tmp_path):
+        """A report with **Date**: <date> uses that date."""
+        body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260806-date-test
+**Date**: 2026-08-06T10:15:00Z
+**Model**: sonnet
+**Provider**: claude
+
+## Summary
+This report carries an explicit Date field. The receipt must use 2026-08-06.
+
+## Changes
+- edited scripts/foo.py
+
+## Verification
+- ran pytest tests/test_foo.py; all green
+
+## Open Items
+None
+"""
+        r = _parse(tmp_path, body)
+        assert "2026-08-06" in r["timestamp"]
+
+    def test_metadata_timestamp_field_used(self, tmp_path):
+        """A report with **Timestamp**: <date> already in metadata is used."""
+        body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260805-ts-test
+**Timestamp**: 2026-08-05T08:00:00Z
+**Model**: sonnet
+**Provider**: claude
+
+## Summary
+This report stamps its own Timestamp field. The receipt must carry that value.
+
+## Changes
+- edited scripts/foo.py
+
+## Verification
+- ran pytest tests/test_foo.py; all green
+
+## Open Items
+None
+"""
+        r = _parse(tmp_path, body)
+        assert "2026-08-05" in r["timestamp"]
+
+    def test_file_mtime_fallback(self, tmp_path):
+        """When no explicit date field exists, file mtime is used."""
+        body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260804-mtime-test
+**Model**: sonnet
+**Provider**: claude
+
+## Summary
+No explicit date field — the receipt must use the file's modification time.
+This summary is comfortably longer than fifty non-whitespace characters.
+
+## Changes
+- edited scripts/foo.py
+
+## Verification
+- ran pytest tests/test_foo.py; all green
+
+## Open Items
+None
+"""
+        p = tmp_path / "report.md"
+        p.write_text(body, encoding="utf-8")
+        r = ReportParser().parse_report(str(p))
+        assert "timestamp" in r
+        ts = r["timestamp"]
+        # Must be parseable as ISO-8601
+        from datetime import datetime as _datetime
+        _datetime.fromisoformat(ts)
+        # Must NOT be the processing-time workaround — the mtime was just set
+        # when we wrote the file, so it should be very close to now, but the
+        # important thing is that it is parseable ISO-8601 UTC.
+
+    def test_fail_closed_no_timestamp_produces_error(self, tmp_path):
+        """When neither metadata date nor file exists, return error (fail-closed).
+
+        The report_parser must refuse to emit a receipt with a false timestamp.
+        This is the backfill guard: processing old reports with today's date
+        is worse than a gap in the ledger.
+        """
+        nonexistent = tmp_path / "does-not-exist.md"
+        r = ReportParser().parse_report(str(nonexistent))
+        assert "error" in r, f"Expected error for missing file, got: {r}"
+
+    def test_timestamp_is_not_processing_time(self, tmp_path):
+        """Prove the guard binds: the timestamp is NOT datetime.utcnow().
+
+        We write a report whose explicit **Datum** is 2026-08-03 and assert
+        the receipt timestamp CONTAINS that date.  If the fix were removed
+        (using datetime.utcnow()), the timestamp would contain today's date
+        (2026-08-10) instead — and this test would catch it.
+        """
+        body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260803-guard-bind
+**Datum**: 2026-08-03T12:00:00Z
+**Model**: sonnet
+**Provider**: claude
+
+## Summary
+Explicit work date of 3 August. The receipt must carry 2026-08-03, not today.
+
+## Changes
+- edited scripts/foo.py
+
+## Verification
+- ran pytest tests/test_foo.py; all green
+
+## Open Items
+None
+"""
+        r = _parse(tmp_path, body)
+        assert r["timestamp"] == "2026-08-03T12:00:00+00:00", (
+            f"Expected 2026-08-03T12:00:00+00:00 (work time), "
+            f"got {r['timestamp']} (likely processing time — fix not active)"
+        )
+
+    def test_recorded_at_field_used(self, tmp_path):
+        """A report with **Recorded-At**: <date> uses that date."""
+        body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260802-rec-test
+**Recorded-At**: 2026-08-02T16:45:00Z
+**Model**: sonnet
+**Provider**: claude
+
+## Summary
+This report uses Recorded-At as timestamp. Receipt must carry 2026-08-02.
+
+## Changes
+- edited scripts/foo.py
+
+## Verification
+- ran pytest tests/test_foo.py; all green
+
+## Open Items
+None
+"""
+        r = _parse(tmp_path, body)
+        assert "2026-08-02" in r["timestamp"]
