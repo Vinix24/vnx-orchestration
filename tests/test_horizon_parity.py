@@ -330,6 +330,7 @@ _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],
     "run": ["delegate-track", "--doc", "some/plan-doc.md"],
     "status": ["delegate-track"],
+    "attest": ["delegate-track", "--reason", "operator override", "--approval-id", "token-xyz"],
 }
 
 

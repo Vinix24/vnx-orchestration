@@ -103,7 +103,11 @@ tests/test_governance_digest_certification.py
 tests/test_governance_digest_runner.py
 tests/test_headless_dispatch_daemon_wave5.py
 tests/test_headless_inspect.py
-tests/test_horizon_parity.py
+# tests/test_horizon_parity.py — REPAIRED (OI-1065): the pip-CLI/engine flag drift
+# (vnx horizon add --lane-hint, close --attest/--pr/--max-gh-calls, plan-gate
+# attest delegation) was the red this exclusion hid. Suite is 85/85 green and
+# now rejoins the Profile A sweep so new drift fails the PR, not a red suite
+# nobody reads. No heavy-dep stack (sqlite3 + in-repo modules only).
 tests/test_horizon_schema_migration_fix.py
 tests/test_horizon_skill_alias.py  # OI-951: doc/content drift the test already asserts against, red on main too
 tests/test_init_migrate_bootstrap.py
