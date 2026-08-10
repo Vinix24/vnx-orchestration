@@ -22,11 +22,20 @@ Per-state decision (one binding site, never duplicated across lanes):
   receipt-zichtbare uitkomst (ok=False + corrective receipt), geen ``exit 0``.
 - ``clean``    → niet van toepassing; er is niets om te pushen of een PR voor te
   openen. Blijft ok=True, applicable=False.
-- ``dirty``    → niet van toepassing hier. De worktree heeft uncommitted wijzigingen
-  die de worker zelf had moeten committen; een push hiervan kan niet deterministisch
-  (er is niets om te pushen). Dit is phantom_guard's domein (lege extractie /
-  niet-gecommit werk), niet rij-7. Blijft ok=True, applicable=False, met een reden
-  die de caller laat zien dat er nog dirty werk is.
+- ``dirty``    → gesplitst (OI-1119). ``git status --porcelain`` on a dirty tree
+  mixes two very different things: a worker's own scratch/editor droppings
+  (untracked, ``??``) and real tracked source/test edits it simply never
+  committed. The former stays what it always was — phantom_guard's domain,
+  ok=True, applicable=False. The latter is a delivery failure exactly like an
+  unpushed ``committed`` branch (the reaper destroys it the same way): loud,
+  receipt-visible (ok=False, corrective receipt), AND — when ``wt_path`` is
+  supplied — salvaged: the tracked changes are committed onto *branch* under an
+  unmistakable ``[SALVAGED, UNREVIEWED]`` marker, pushed, and (unless
+  ``skip_pr``) opened as a **draft** PR so it can never be mistaken for a
+  worker-vouched, ready-for-review delivery. See ``_classify_dirty_worktree``
+  and ``_handle_dirty_substantive``. Callers that do not pass ``wt_path`` keep
+  the pre-OI-1119 behaviour unchanged (ok=True, applicable=False) — this is an
+  opt-in upgrade, not a silent behavior change for every caller.
 
 Containment (OI-1113): when *target_remote_head* is provided (the remote HEAD of
 the target branch captured BEFORE the worker started), this module verifies after
@@ -134,6 +143,90 @@ def _check_containment(*, branch: str, old_head: str, repo_root: Path) -> "tuple
     )
 
 
+@dataclass(frozen=True)
+class _DirtyClassification:
+    """Verdict of _classify_dirty_worktree(): whether a ``dirty`` tree carries
+    real (tracked) uncommitted work, or only untracked scratch."""
+    substantive: bool
+    evidence: str
+    tracked_paths: "tuple[str, ...]" = ()
+
+
+def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
+    """Split the ``dirty`` verdict (OI-1119) into the two cases it conflates.
+
+    Rule, evidence-based: a change is substantive when git already knows the
+    path — modified, staged, deleted, renamed, copied, or conflicted (any
+    ``git status --porcelain`` code other than ``??``). Untracked paths are
+    scratch files, editor droppings, and generated artefacts by definition:
+    they were never part of the branch's tracked history and a targeted
+    ``git add`` never staged them, so their mere presence is not evidence a
+    worker left real work behind. This re-derives file-level detail from the
+    same git flags tmux_worktree.classify_path uses for its yes/no verdict,
+    without duplicating that verdict itself — classify_path still owns
+    clean/committed/pushed/dirty; this only refines what "dirty" means.
+
+    Never raises: a git failure degrades to substantive=False (the existing
+    safe not-applicable behaviour) — a broken git invocation must never turn
+    into a false-positive loud failure or a hung/crashed dispatch.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "git", "-c", "core.fileMode=false", "-c", "core.autocrlf=input",
+                "-c", "core.quotePath=false",
+                "-C", str(wt_path), "status", "--porcelain",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade, never crash the lane
+        return _DirtyClassification(
+            substantive=False, evidence=f"dirty-classification git status raised: {exc}",
+        )
+    if proc.returncode != 0:
+        return _DirtyClassification(
+            substantive=False,
+            evidence=(
+                f"dirty-classification git status failed (rc={proc.returncode}): "
+                f"{(proc.stderr or '').strip()}"
+            ),
+        )
+
+    tracked_paths: "list[str]" = []
+    untracked = 0
+    for line in proc.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        code, path_part = line[:2], line[3:]
+        if code == "??":
+            untracked += 1
+            continue
+        path = path_part.split(" -> ")[-1].strip()
+        if path:
+            tracked_paths.append(path)
+
+    if not tracked_paths:
+        return _DirtyClassification(
+            substantive=False,
+            evidence=(
+                f"dirty worktree has only untracked paths ({untracked} file(s)) — "
+                "no tracked source/test changes; treated as scratch/non-substantive"
+            ),
+        )
+
+    shown = tracked_paths[:10]
+    more = len(tracked_paths) - len(shown)
+    listing = ", ".join(shown) + (f", +{more} more" if more else "")
+    return _DirtyClassification(
+        substantive=True,
+        evidence=(
+            f"dirty worktree has {len(tracked_paths)} tracked file(s) with uncommitted "
+            f"changes the worker never committed: {listing}"
+        ),
+        tracked_paths=tuple(tracked_paths),
+    )
+
+
 def enforce_pr_exists(
     *,
     dispatch_id: str,
@@ -145,6 +238,7 @@ def enforce_pr_exists(
     pr_body: str,
     target_remote_head: "Optional[str]" = None,
     skip_pr: bool = False,
+    wt_path: "Optional[Path | str]" = None,
 ) -> PrEnforcementResult:
     """Ensure *branch* is pushed to origin AND has an open PR.
 
@@ -172,6 +266,13 @@ def enforce_pr_exists(
     ``origin/dispatch/``) — the PR already exists, and creating a second one is
     a duplicate destination.
 
+    *wt_path* (OI-1119): the worktree's filesystem path.  Required to split a
+    ``dirty`` verdict into substantive (real tracked edits, never committed)
+    vs non-substantive (scratch/untracked only) — see
+    ``_classify_dirty_worktree``.  When ``None`` (a caller that hasn't wired
+    this through yet), a ``dirty`` verdict keeps the pre-OI-1119 behaviour:
+    applicable=False, ok=True.
+
     Never raises: a push or gh_pr_ensure exception is treated as a failure (still
     enforced — reported via PrEnforcementResult.ok=False + corrective receipt), not
     propagated, so a transient git/GitHub/network error never crashes the dispatch
@@ -183,16 +284,26 @@ def enforce_pr_exists(
             reason=f"worktree_state={worktree_state!r} — no changes to push or open a PR for",
         )
     if worktree_state == "dirty":
-        # Uncommitted changes are the worker's own unhandled working tree — there
-        # is nothing deterministically pushable here, and a "push" of a dirty tree
-        # cannot land. phantom_guard owns the not-committed-work failure mode; rij-7
-        # binds only on committed-or-pushed work.
-        return PrEnforcementResult(
-            applicable=False, ok=True,
-            reason=(
-                f"worktree_state={worktree_state!r} — uncommitted changes left in the "
-                f"worktree; nothing deterministically pushable (phantom_guard's domain)"
-            ),
+        if wt_path is None:
+            # Back-compat: a caller that has not wired the worktree path through
+            # yet gets the original degraded-safe behaviour, not a silent upgrade
+            # to a check it never opted into.
+            return PrEnforcementResult(
+                applicable=False, ok=True,
+                reason=(
+                    f"worktree_state={worktree_state!r} — uncommitted changes left in the "
+                    f"worktree; wt_path not provided, cannot classify substantive vs "
+                    "scratch (phantom_guard's domain)"
+                ),
+            )
+        classification = _classify_dirty_worktree(wt_path=wt_path)
+        if not classification.substantive:
+            return PrEnforcementResult(applicable=False, ok=True, reason=classification.evidence)
+        return _handle_dirty_substantive(
+            dispatch_id=dispatch_id, branch=branch, wt_path=Path(wt_path),
+            repo_root=repo_root, receipts_file=receipts_file,
+            tracked_paths=classification.tracked_paths, evidence=classification.evidence,
+            pr_title=pr_title, pr_body=pr_body, skip_pr=skip_pr,
         )
 
     # committed or pushed are the two states with work that must reach a PR.
@@ -271,6 +382,131 @@ def enforce_pr_exists(
     return PrEnforcementResult(applicable=True, ok=False, pushed=pushed, reason=reason)
 
 
+def _handle_dirty_substantive(
+    *,
+    dispatch_id: str,
+    branch: str,
+    wt_path: Path,
+    repo_root: Path,
+    receipts_file: "str | Path",
+    tracked_paths: "tuple[str, ...]",
+    evidence: str,
+    pr_title: str,
+    pr_body: str,
+    skip_pr: bool,
+) -> PrEnforcementResult:
+    """OI-1119: a ``dirty`` tree with substantive uncommitted work — loud AND salvaged.
+
+    Decision (see the dispatch report for the full defence): reporting loudly
+    alone leaves the work itself to be destroyed by the reaper — it only makes
+    the loss visible after the fact. Salvaging alone would silently promote a
+    diff no worker ever reviewed into normal history. Doing both keeps the
+    review boundary (the dispatch still resolves ok=False, exactly like a
+    failed push) while preventing the data loss T0 was hand-salvaging.
+
+    Salvage commits ONLY the tracked paths this call already classified as
+    substantive (never ``git add -A`` — that would sweep in the same
+    untracked scratch the classifier just excluded), under a commit message
+    unmistakably marked ``[SALVAGED, UNREVIEWED]`` (mirrors the existing
+    fleet convention, e.g. PR #1444), pushes it, and — unless ``skip_pr``
+    (an existing PR already covers this branch) — opens a **draft** PR with a
+    title/body banner saying the same thing, so it can never be mistaken for
+    a normal, ready-for-review delivery.
+
+    Never raises: every git/gh step is wrapped; a failure at any stage still
+    reaches the corrective receipt below (kind="dirty_substantive_unsalvaged")
+    instead of crashing or hanging the dispatch teardown.
+    """
+    reason = evidence
+    committed = False
+    pushed = False
+    pr_number: "Optional[int]" = None
+
+    try:
+        add_proc = subprocess.run(
+            ["git", "-C", str(wt_path), "add", "--", *tracked_paths],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to unsalvaged, still loud
+        add_proc = None
+        reason = f"{evidence}; salvage git-add raised: {exc}"
+
+    if add_proc is not None and add_proc.returncode != 0:
+        reason = f"{evidence}; salvage git-add failed: {(add_proc.stderr or '').strip()}"
+        add_proc = None
+
+    if add_proc is not None:
+        commit_message = (
+            f"chore(salvage): unvouched auto-salvage of uncommitted work [SALVAGED, UNREVIEWED]\n\n"
+            f"Auto-committed by pr_enforcement (OI-1119) because dispatch {dispatch_id} left "
+            "substantive tracked changes uncommitted when the worktree was about to be reaped. "
+            "No worker reviewed or vouched for this diff — treat with elevated scrutiny before "
+            "merging.\n\n"
+            f"Dispatch-ID: {dispatch_id}"
+        )
+        try:
+            commit_proc = subprocess.run(
+                ["git", "-C", str(wt_path), "commit", "-m", commit_message],
+                capture_output=True, text=True, timeout=30,
+            )
+            committed = commit_proc.returncode == 0
+            if not committed:
+                reason = f"{evidence}; salvage git-commit failed: {(commit_proc.stderr or '').strip()}"
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{evidence}; salvage git-commit raised: {exc}"
+
+    if committed:
+        push_outcome = _push_branch(branch=branch, repo_root=repo_root)
+        pushed = push_outcome.ok
+        if not pushed:
+            reason = f"{evidence}; salvage committed locally but push failed: {push_outcome.reason}"
+
+    if pushed and not skip_pr:
+        try:
+            from gh_pr_ensure import ensure_pr  # noqa: PLC0415
+            salvage_title = f"[SALVAGED-UNVOUCHED] {pr_title}"
+            salvage_body = (
+                "**Auto-generated by push-enforcement salvage (OI-1119). No worker committed "
+                "or reviewed this diff** — it was recovered from a dirty worktree about to be "
+                "reaped. Do not merge without review; verify the diff matches the dispatch "
+                "instruction before treating this as a normal delivery.\n\n---\n\n" + pr_body
+            )
+            pr_result = ensure_pr(branch, repo_root, title=salvage_title, body=salvage_body, draft=True)
+            pr_number = pr_result.get("pr_number")
+            if pr_number is None:
+                reason = f"{evidence}; salvage pushed but PR creation failed: {pr_result.get('reason')}"
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{evidence}; salvage pushed but PR creation raised: {exc}"
+
+    if pushed:
+        kind = "dirty_substantive_salvaged"
+        reason = (
+            f"{evidence}; SALVAGED as unvouched [SALVAGED, UNREVIEWED] commit on {branch!r}"
+            + (f", draft PR #{pr_number}" if pr_number else "")
+        )
+    else:
+        kind = "dirty_substantive_unsalvaged"
+
+    logger.warning(
+        "pr_enforcement: DIRTY-SUBSTANTIVE dispatch=%s branch=%s salvaged=%s — %s",
+        dispatch_id, branch, pushed, reason,
+    )
+    _record_corrective_receipt(
+        dispatch_id=dispatch_id, branch=branch, reason=reason, receipts_file=receipts_file,
+        kind=kind,
+        extra_fields={
+            "dirty_substantive": True,
+            "dirty_files": list(tracked_paths[:25]),
+            "dirty_file_count": len(tracked_paths),
+            "salvaged": pushed,
+            "salvage_pr_number": pr_number,
+        },
+    )
+    return PrEnforcementResult(
+        applicable=True, ok=False, pushed=pushed, pr_number=pr_number, reason=reason,
+    )
+
+
 @dataclass(frozen=True)
 class _PushOutcome:
     ok: bool
@@ -305,30 +541,40 @@ def _push_branch(*, branch: str, repo_root: Path) -> "_PushOutcome":
 def _record_corrective_receipt(
     *, dispatch_id: str, branch: str, reason: str, receipts_file: "str | Path",
     kind: str = "pr_failed",
+    extra_fields: "Optional[dict]" = None,
 ) -> None:
     """Append a corrective 'failed' completion receipt — the loud, receipt-visible
-    signal that a committed-but-not-PR'd dispatch is incomplete. Never raises."""
+    signal that a committed-but-not-PR'd dispatch is incomplete. Never raises.
+
+    *extra_fields* (OI-1119): merged into the payload after the base fields
+    below, so a caller (e.g. the dirty-substantive path) can attach
+    kind-specific evidence — file lists, salvage outcome — without every
+    other corrective-receipt caller needing to know about it.
+    """
     try:
         if _SCRIPTS_DIR not in sys.path:
             sys.path.insert(0, _SCRIPTS_DIR)
         from append_receipt import append_receipt_payload  # noqa: PLC0415
+        payload = {
+            "event_type": "subprocess_completion",
+            "receipt_kind": "dispatch",
+            "dispatch_id": dispatch_id,
+            "status": "failed",
+            "autopr_rejected": True,
+            "autopr_reason": reason,
+            "autopr_kind": kind,
+            "branch": branch,
+            "source": "pr_enforcement",
+            "synthesized": False,
+            # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
+            # model when the door exported it (best-effort; exempt source).
+            "model": os.environ.get("VNX_CURRENT_MODEL") or None,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if extra_fields:
+            payload.update(extra_fields)
         append_receipt_payload(
-            {
-                "event_type": "subprocess_completion",
-                "receipt_kind": "dispatch",
-                "dispatch_id": dispatch_id,
-                "status": "failed",
-                "autopr_rejected": True,
-                "autopr_reason": reason,
-                "autopr_kind": kind,
-                "branch": branch,
-                "source": "pr_enforcement",
-                "synthesized": False,
-                # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
-                # model when the door exported it (best-effort; exempt source).
-                "model": os.environ.get("VNX_CURRENT_MODEL") or None,
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
+            payload,
             receipts_file=str(receipts_file),
             cache_window_seconds=0,
         )
