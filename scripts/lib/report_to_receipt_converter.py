@@ -58,12 +58,73 @@ _BASH_WATERMARK_FILENAME = "processed_receipts.txt"
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _BOLD_KV_RE = re.compile(r"\*\*([^*]+)\*\*:\s*(.+)", re.MULTILINE)
+# OI-1120: the report contract tells workers to stamp the id "as a plain-text
+# or bold field" — a markdown list item (`- Dispatch-ID: x`) is plainly within
+# that instruction, so the optional leading marker must be tolerated. `+` is
+# deliberately excluded from the marker class: it is also the unified-diff
+# addition prefix, and reports routinely quote diffs in their body — e.g.
+# `+        dispatch_id: str,` (a pasted function signature) matched with `+`
+# included, which is not a real id stamp. `-`/`*` cover every genuine
+# list-item occurrence observed in the corpus (grep across 4411 real reports:
+# 5 genuine `- Dispatch-ID:` stamps, 0 false positives) with no such collision.
 _DISPATCH_PLAIN_RE = re.compile(
-    r"^\s*Dispatch-ID:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
+    r"^\s*(?:[-*]\s+)?Dispatch-ID:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
 )
 _DISPATCH_ID_KEY_RE = re.compile(
-    r"^\s*dispatch_id:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
+    r"^\s*(?:[-*]\s+)?dispatch_id:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
 )
+
+
+# ---------------------------------------------------------------------------
+# OI-1120: non-dispatch report classification — scope the register
+# cross-check to dispatch reports only
+# ---------------------------------------------------------------------------
+
+# Producer-controlled: review_gate_manager.headless_reports_dir is set from
+# VNX_HEADLESS_REPORTS_DIR, which defaults to <reports_dir>/headless
+# (vnx_paths.py:543-544) and is the ONLY directory review_gate_manager writes
+# HEADLESS-*.md reports into (review_gate_manager.py:61, :129-141). scan_and_
+# convert() / main() already walk this directory as a dedicated scan target
+# (this module, main()) alongside the top-level unified_reports/ — a report
+# living there is, by construction, never a dispatch report.
+_HEADLESS_REPORTS_DIRNAME = "headless"
+
+# Producer-controlled: panel.py and worktree_release.py both write into the
+# top-level unified_reports/ directory (same directory real dispatch reports
+# land in), so directory placement cannot distinguish them. Each prefix below
+# is the literal filename template the writer hardcodes for every report it
+# produces — not a guessed shape:
+#   scripts/panel.py:101           f"panel-{args.mode}-{uuid4().hex[:8]}.md"
+#   scripts/lib/worktree_release.py:632  f"worktree-release-{ts}.md"
+# Neither writer ever emits a Dispatch-ID/dispatch_id field or the dispatch
+# report body-contract headings (## Summary/## Changes/## Verification/
+# ## Open Items) — both are tool-output reports, not dispatch reports, and a
+# filename prefix owned by the producer is the only signal available to key
+# on. Measured against the live dead-letter directory (2026-08-10, 221
+# files): 3 panel-*.md + 5 worktree-release-*.md, both prefixes fully
+# disjoint from the 15 real dispatch report filenames present in that corpus.
+_NON_DISPATCH_FILENAME_PREFIXES = (
+    "panel-",
+    "worktree-release-",
+)
+
+
+def _classify_non_dispatch_report(report_path: Path) -> Optional[str]:
+    """Return a skip reason when *report_path* is a known non-dispatch report.
+
+    Returns None when the report is a dispatch-report candidate and must go
+    through the normal pipeline (including the register cross-check below).
+    A non-None return means: this file was never a dispatch report to begin
+    with, so it must never be judged against the dispatch register and must
+    never be dead-lettered as ``unknown_dispatch``.
+    """
+    if report_path.parent.name == _HEADLESS_REPORTS_DIRNAME:
+        return "headless_gate_report"
+    name = report_path.name
+    for prefix in _NON_DISPATCH_FILENAME_PREFIXES:
+        if name.startswith(prefix):
+            return "non_dispatch_tool_output"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +810,9 @@ def build_receipt_from_report(
 #   "malformed" — file unreadable, or no dispatch_id resolvable at all.
 #   "error"     — anything else: a crash while parsing/building the receipt,
 #                 or an append failure other than the fail-closed rejection.
+#   "skipped_non_dispatch" — OI-1120: report classified as a known non-dispatch
+#                 producer (HEADLESS gate report, panel output, worktree-release
+#                 output) — never a receipt candidate, never dead-lettered.
 
 def _convert_one_detailed(
     report_path: Path,
@@ -763,6 +827,18 @@ def _convert_one_detailed(
     into a (None, outcome_tag) result so a single poisoned report can never
     propagate an exception into a caller's batch loop.
     """
+    # OI-1120: classify BEFORE any receipt-building work. A known non-dispatch
+    # report (HEADLESS gate output, panel output, worktree-release output) is
+    # never a receipt candidate — it must not reach the register cross-check
+    # in build_receipt_from_report() and must not be dead-lettered.
+    skip_reason = _classify_non_dispatch_report(report_path)
+    if skip_reason is not None:
+        logger.info(
+            "report_to_receipt_converter: skipping non-dispatch report %s (reason=%s)",
+            report_path.name, skip_reason,
+        )
+        return None, "skipped_non_dispatch"
+
     # Import through append_receipt.py (scripts/ root) so the facade is
     # registered before append_receipt_payload() is called.
     sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -923,6 +999,12 @@ class ScanStats:
     rejected_count: int = 0
     malformed_count: int = 0
     error_count: int = 0
+    # OI-1120: reports classified as known non-dispatch producer output
+    # (HEADLESS gate, panel, worktree-release) — deliberately excluded from
+    # attempted_count below. A scan cycle can legitimately see ONLY
+    # non-dispatch reports (the headless/ directory is scanned every cycle),
+    # and that must read as healthy, not as "attempted with zero success".
+    skipped_non_dispatch_count: int = 0
 
     @property
     def attempted_count(self) -> int:
@@ -973,6 +1055,7 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
             "rejected_count": stats.rejected_count,
             "malformed_count": stats.malformed_count,
             "error_count": stats.error_count,
+            "skipped_non_dispatch_count": stats.skipped_non_dispatch_count,
         },
     )
 
@@ -991,10 +1074,13 @@ def scan_and_convert(
     so a report processed by either lane is skipped by the other.
 
     Returns a ScanStats with per-outcome counts (new/duplicate/rejected/
-    malformed/error) — see ScanStats and _convert_one_detailed()'s outcome
-    tags. Only newly-appended and duplicate reports are marked processed;
-    rejected, malformed, and errored reports are NOT marked processed, so
-    they are retried on the next scan once their cause is fixed.
+    malformed/error/skipped_non_dispatch) — see ScanStats and
+    _convert_one_detailed()'s outcome tags. Newly-appended, duplicate, and
+    skipped_non_dispatch reports are marked processed (the classification
+    that produced skipped_non_dispatch is permanent — a panel-*.md report
+    never becomes a dispatch report on a later scan); rejected, malformed,
+    and errored reports are NOT marked processed, so they are retried on the
+    next scan once their cause is fixed.
 
     A single poisoned report can never abort the scan (OI-997): each
     report's conversion is wrapped in try/except here, in addition to
@@ -1024,6 +1110,7 @@ def scan_and_convert(
     rejected_count = 0
     malformed_count = 0
     error_count = 0
+    skipped_non_dispatch_count = 0
 
     for reports_dir in reports_dirs:
         if not isinstance(reports_dir, Path):
@@ -1062,10 +1149,11 @@ def scan_and_convert(
                 error_count += 1
                 continue
 
-            if outcome in ("appended", "duplicate"):
+            if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
                 # Mark as processed in BOTH watermarks — no point re-scanning
                 # a report that's already in the system (OI-1102 cross-processor
-                # dedup: the Bash processor must also skip it).
+                # dedup: the Bash processor must also skip it) or that will
+                # never become a dispatch report (OI-1120 non-dispatch skip).
                 _mark_processed(file_hash, watermark_path)
                 watermark.add(file_hash)
                 _mark_processed(file_hash, bash_watermark_path)
@@ -1077,8 +1165,10 @@ def scan_and_convert(
                         result.idempotency_key[:20],
                         report_path.name,
                     )
-                else:
+                elif outcome == "duplicate":
                     duplicate_count += 1
+                else:  # "skipped_non_dispatch"
+                    skipped_non_dispatch_count += 1
             elif outcome == "rejected":
                 rejected_count += 1
             elif outcome == "malformed":
@@ -1094,6 +1184,7 @@ def scan_and_convert(
         rejected_count=rejected_count,
         malformed_count=malformed_count,
         error_count=error_count,
+        skipped_non_dispatch_count=skipped_non_dispatch_count,
     )
     _write_scan_heartbeat(state_dir, stats)
     return stats
@@ -1152,6 +1243,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     stats = scan_and_convert(dirs, state_dir, cache_window_seconds=300)
     if stats.new_count:
         logger.info("report_to_receipt_converter: %d new receipt(s) emitted", stats.new_count)
+    if stats.skipped_non_dispatch_count:
+        logger.info(
+            "report_to_receipt_converter: %d non-dispatch report(s) skipped this scan",
+            stats.skipped_non_dispatch_count,
+        )
     if stats.rejected_count or stats.malformed_count or stats.error_count:
         logger.warning(
             "report_to_receipt_converter: %d rejected, %d malformed, %d error(s) this scan",
