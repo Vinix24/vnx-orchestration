@@ -1348,6 +1348,14 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error or result.timed_out:
             status = "timeout" if result.timed_out else "failure"
             _emit_governance(
@@ -1368,8 +1376,13 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         )
         return 0
     finally:
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_claude(args: argparse.Namespace) -> int:
@@ -1613,6 +1626,14 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "codex", model, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_codex failed: {result.error}", file=sys.stderr)
@@ -1634,10 +1655,13 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         _emit_governance(args, "codex", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
@@ -2063,6 +2087,14 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
@@ -2084,10 +2116,13 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -2158,6 +2193,14 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_kimi failed: {result.error}", file=sys.stderr)
@@ -2179,10 +2222,13 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
@@ -2275,6 +2321,14 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_deepseek_harness failed: {result.error}", file=sys.stderr)
@@ -2289,10 +2343,13 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_glm_harness(args: argparse.Namespace) -> int:
@@ -2338,6 +2395,15 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
+
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_glm_harness failed: {result.error}", file=sys.stderr)
@@ -2352,8 +2418,13 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         _emit_governance(args, "glm-harness", model_used, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -2404,6 +2475,14 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         )
         end_time = datetime.now(timezone.utc)
 
+        # OI-1090 teardown coupling: reap the worktree BEFORE _emit_governance
+        # so the provider_teardown_worktree event is archived with THIS
+        # dispatch (archive -> receipt -> clear) instead of straggling into
+        # the live ring buffer after the clear.  None marks it reaped so the
+        # finally path does not remove it twice.
+        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        isolation_worktree = None
+
         if result.error:
             _emit_governance(args, "gemini", model, result, start_time, end_time, "failure", event_store=event_store)
             print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
@@ -2425,10 +2504,13 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         _emit_governance(args, "gemini", model, result, start_time, end_time, "success", event_store=event_store)
         return 0
     finally:
-        # Safety net: archive+clear when an unexpected exception bypassed
-        # _emit_governance (idempotent after a normal emit — see helper).
-        _event_store_safety_net(event_store, args)
+        # Reap the worktree FIRST (its provider_teardown_worktree event lands
+        # in the live buffer), then the safety net archives+clears — the ring
+        # buffer ends empty even when an unexpected exception bypassed
+        # _emit_governance.  Both calls are no-ops after a normal emit (the
+        # worktree was already reaped above; the live file is truncated).
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _event_store_safety_net(event_store, args)
 
 
 _MLX_MODEL_MAP: dict[str, str] = {
