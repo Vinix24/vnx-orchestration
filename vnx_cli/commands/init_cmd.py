@@ -738,11 +738,39 @@ def _install_gate_obligation_runner(vnx_home: str) -> bool:
     Raises OSError if the template exists but is unreadable.
     """
     plist_name = "com.vnx.gate-obligation-runner"
-    template = _engine.engine_root() / "scripts" / "launchd" / f"{plist_name}.plist"
+
+    # --- OI-1117: refuse launchd agent install on an unstable root -----------
+    # When vnx init runs from an ephemeral worktree (dispatch/PR isolation),
+    # engine_root() resolves to a directory under .vnx-data/worktrees/. A
+    # launchd agent pointing at that path becomes stale the moment the worktree
+    # is reaped — and worse, writes to the HOST ~/Library/LaunchAgents from
+    # what should be an isolated workspace. Refuse silently (return False)
+    # like the missing-template case: non-main-checkout callers should not
+    # install host-wide agents. The operator can install manually via
+    # reload_plist.sh from the main checkout.
+    engine_root = _engine.engine_root().resolve()
+    engine_parts = engine_root.parts
+    for i, part in enumerate(engine_parts):
+        if part == ".vnx-data" and i + 1 < len(engine_parts) and engine_parts[i + 1] == "worktrees":
+            print(
+                f"  skipped {plist_name} launchd agent — engine root is under "
+                f".vnx-data/worktrees/ ({engine_root}); launchd agents must be "
+                "installed from the main checkout, not an ephemeral worktree. "
+                "Run: bash scripts/launchd/reload_plist.sh "
+                f"{plist_name}"
+            )
+            return False
+
+    template = engine_root / "scripts" / "launchd" / f"{plist_name}.plist"
     if not template.is_file():
         return False
 
+    # --- OI-1117: test-isolation guard — refuse write to host LaunchAgents ---
+    # vnx_paths is importable because _engine.resolve_data_root() already
+    # called ensure_engine_on_path() during _vnx_init_scaffold.
+    from vnx_paths import refuse_real_launch_agents_write_under_pytest
     dest_dir = Path.home() / "Library" / "LaunchAgents"
+    refuse_real_launch_agents_write_under_pytest(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{plist_name}.plist"
 

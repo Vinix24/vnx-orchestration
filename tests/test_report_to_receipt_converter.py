@@ -1512,3 +1512,272 @@ class TestIsKnownDispatch:
 
         result = _is_known_dispatch("good-one", state_dir)
         assert result is True, "malformed line must not prevent matching a valid record"
+
+
+# ---------------------------------------------------------------------------
+# Part 13: provider normalisation + lane-identity resolution (OI-1111)
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseProvider:
+    """_normalise_provider maps every known variant to one canonical lane value."""
+
+    def test_canonical_passthrough(self):
+        from report_to_receipt_converter import _normalise_provider
+        for canonical in ("claude", "codex", "gemini", "kimi", "deepseek-harness",
+                          "deepseek", "glm-harness"):
+            assert _normalise_provider(canonical) == canonical
+
+    def test_deepseek_variants_normalised(self):
+        from report_to_receipt_converter import _normalise_provider
+        assert _normalise_provider("litellm:deepseek") == "deepseek-harness"
+        assert _normalise_provider("deepseek (harness, key-auth)") == "deepseek-harness"
+
+    def test_kimi_variants_normalised(self):
+        from report_to_receipt_converter import _normalise_provider
+        assert _normalise_provider("kimi-k3") == "kimi"
+        assert _normalise_provider("kimi-code/k3") == "kimi"
+
+    def test_glm_variants_normalised(self):
+        from report_to_receipt_converter import _normalise_provider
+        assert _normalise_provider("glm-harness") == "glm-harness"
+        assert _normalise_provider("litellm:zai") == "glm-harness"
+
+    def test_empty_or_none_returns_unknown(self):
+        from report_to_receipt_converter import _normalise_provider
+        assert _normalise_provider("") == "unknown"
+        assert _normalise_provider("  ") == "unknown"
+
+
+class TestLaneIdentityResolution:
+    """Provider and model come from the lane (route_decision), not the body.
+
+    On harness lanes (GLM, DeepSeek) the worker introspects as sonnet/claude
+    and stamps a false identity in the body.  The lane's route decision holds
+    the authoritative identity; the body is only a fallback when no route
+    decision exists.
+    """
+
+    def _write_route_decision_for(self, state_dir: Path, dispatch_id: str,
+                                  selected_model: str) -> None:
+        import json as _json
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        (rd_dir / f"{dispatch_id}.json").write_text(_json.dumps({
+            "strategy": "smart_router",
+            "task_class": "03_bug_fix",
+            "selected_model": selected_model,
+            "timestamp": "2026-08-09T12:00:00Z",
+        }), encoding="utf-8")
+
+    def test_glm_harness_lane_wins_over_body_sonnet_claude(self, tmp_path):
+        """Core OI-1111 case: route_decision says glm-5.2, body says sonnet/claude.
+        The receipt must carry glm-harness/glm-5.2, not sonnet/claude."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260809d-w2-worker-permissieprofielen"
+        self._write_route_decision_for(state_dir, dispatch_id, "glm-5.2")
+
+        # Simulate the exact body the worker wrote: sonnet/claude.
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260809d-w2-worker-permissieprofielen\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\n"
+            "terminal: T2\n---\n\n"
+            "## Summary\n\nImplemented the feature per dispatch specification. "
+            "All tests pass and coverage is at target.\n\n"
+            "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+            "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Lane identity wins — not the body's sonnet/claude
+        assert receipt["provider"] == "glm-harness", (
+            f"Expected glm-harness from lane, got {receipt.get('provider')}"
+        )
+        assert receipt["model"] == "glm-5.2", (
+            f"Expected glm-5.2 from lane, got {receipt.get('model')}"
+        )
+
+    def test_deepseek_harness_lane_wins(self, tmp_path):
+        """Route decision for deepseek-v4-pro — receipt carries deepseek-harness."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260809-deepseek-test"
+        self._write_route_decision_for(state_dir, dispatch_id, "deepseek-v4-pro")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260809-deepseek-test\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nDeepSeek harness worker that reports as claude/sonnet. "
+            "The receipt must carry the lane identity, not the body.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "deepseek-harness", (
+            f"Expected deepseek-harness, got {receipt.get('provider')}"
+        )
+        assert receipt["model"] == "deepseek-v4-pro", (
+            f"Expected deepseek-v4-pro, got {receipt.get('model')}"
+        )
+
+    def test_body_fallback_when_no_route_decision(self, tmp_path):
+        """When no route decision JSON exists, body fields are the fallback."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        # No route_decision JSON written.
+
+        report = tmp_path / "20260601-no-rd.md"
+        report.write_text(
+            "---\ndispatch_id: 20260601-no-rd\n"
+            "provider: kimi\nmodel: kimi-k3\nstatus: success\nterminal: T2\n---\n\n"
+            "## Summary\n\nReport without route decision — body values should be "
+            "used (with normalisation).\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Body provider "kimi" normalises to "kimi" (already canonical).
+        assert receipt["provider"] == "kimi"
+        assert receipt["model"] == "kimi-k3"
+
+    def test_body_provider_normalised_when_fallback(self, tmp_path):
+        """When body is the fallback, provider strings are still normalised."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+
+        report = tmp_path / "20260601-body-norm.md"
+        report.write_text(
+            "---\ndispatch_id: 20260601-body-norm\n"
+            "provider: litellm:deepseek\nmodel: deepseek-v4-flash\nstatus: success\n"
+            "terminal: T1\n---\n\n"
+            "## Summary\n\nBody carries litellm:deepseek — must normalise to "
+            "deepseek-harness. Summary with sufficient length for validation.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "deepseek-harness"
+
+    def test_kimi_lane_wins_and_normalises(self, tmp_path):
+        """Route decision kimi-k3 → provider kimi, model kimi-k3."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260809-kimi-test"
+        self._write_route_decision_for(state_dir, dispatch_id, "kimi-k3")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260809-kimi-test\n"
+            "provider: kimi-k3\nmodel: kimi-k3\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nKimi lane worker whose body provider kimi-k3 normalises "
+            "to kimi. The lane is authoritative even when the body is close.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "kimi"
+        assert receipt["model"] == "kimi-k3"
+
+    def test_claude_lane_model_preserved(self, tmp_path):
+        """Claude route_decision is honest — lane still wins but values match."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260809-claude-test"
+        self._write_route_decision_for(state_dir, dispatch_id, "claude-sonnet-4-6")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260809-claude-test\n"
+            "provider: claude\nmodel: sonnet\nstatus: unknown\nterminal: T1\n---\n\n"
+            "## Summary\n\nClaude lane is honest — lane values match body values "
+            "for provider/model. Summary with adequate length to pass validation.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "claude"
+        # parse_route_model_id("claude-sonnet-4-6") splits on first hyphen:
+        # variant = "claude-sonnet-4-6".split("-")[1] = "sonnet"
+        assert receipt["model"] == "sonnet"
+
+    def test_dispatch_type_b_matches_this_spec(self, tmp_path):
+        """Prove the guard binds: WITHOUT route_decision the body lies."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260809d-w2-worker-permissieprofielen"
+        # Deliberately NO route_decision written — simulate body-only path.
+        # This is the pre-fix behaviour: body says sonnet/claude, receipt
+        # believes it. The lane-resolution fix above is what corrects this.
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260809d-w2-worker-permissieprofielen\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T2\n---\n\n"
+            "## Summary\n\nPre-fix behaviour: without route decision, body lies "
+            "unchecked. The lane fix changes this for harness dispatches where "
+            "the route decision IS present.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # No route_decision → body is the fallback. "claude" is already canonical.
+        assert receipt["provider"] == "claude"
+        assert receipt["model"] == "sonnet"

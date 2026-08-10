@@ -159,3 +159,67 @@ class TestWriteModeGuard:
         data_dir.mkdir()
         vnx_mode.write_mode(vnx_mode.VNXMode.OPERATOR, str(data_dir))
         assert (data_dir / "mode.json").exists()
+
+
+class TestRefuseRealLaunchAgentsWriteUnderPytest:
+    """OI-1117: the launchd-test-isolation guard refuses writes to the real
+    ``~/Library/LaunchAgents`` while running under pytest, following the
+    same pattern as ``refuse_real_central_store_write_under_pytest``."""
+
+    def test_refuses_write_under_launch_agents(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        target = fake_home / "Library" / "LaunchAgents" / "subdir"
+        target.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
+            vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+
+    def test_refuses_write_directly_in_launch_agents(self, tmp_path, monkeypatch):
+        """The guard must also fire when the target IS the LaunchAgents dir
+        itself, not just a subdir."""
+        fake_home = tmp_path / "home"
+        target = fake_home / "Library" / "LaunchAgents"
+        target.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
+            vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+
+    def test_allows_write_under_tmp_path(self, tmp_path, monkeypatch):
+        """A target outside ~/Library/LaunchAgents must not trigger the guard."""
+        target = tmp_path / "isolated" / "LaunchAgents"
+        target.mkdir(parents=True)
+        # Must not raise.
+        vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+
+    def test_allows_write_to_other_home_subdir(self, tmp_path, monkeypatch):
+        """A target elsewhere under HOME (e.g. ~/Documents) must not trigger
+        the guard — the guard only protects LaunchAgents specifically."""
+        fake_home = tmp_path / "home"
+        target = fake_home / "Documents"
+        target.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+        # Must not raise.
+        vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+
+    def test_guard_noop_outside_pytest(self, tmp_path, monkeypatch):
+        """Outside pytest the guard is a no-op: the write surface check
+        relies on ``PYTEST_CURRENT_TEST`` or ``pytest`` in ``sys.modules``.
+        When neither signal is present, the guard returns silently and the
+        write proceeds — this is the correct production behaviour."""
+        import sys
+        fake_home = tmp_path / "home"
+        target = fake_home / "Library" / "LaunchAgents"
+        target.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        # Remove pytest from sys.modules to simulate production.
+        saved = sys.modules.pop("pytest", None)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        try:
+            # Must NOT raise — the guard thinks we are not under pytest.
+            vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+        finally:
+            if saved is not None:
+                sys.modules["pytest"] = saved

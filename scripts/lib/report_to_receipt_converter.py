@@ -368,6 +368,110 @@ def _resolve_report_role(
     return role or _IDENTITY_UNRESOLVED
 
 
+# ---------------------------------------------------------------------------
+# Provider string normalization (OI-1111)
+# ---------------------------------------------------------------------------
+
+# Canonical provider names as used by dispatch lanes. Every variant found in
+# the ledger (deepseek-harness, deepseek, litellm:deepseek, kimi-k3, kimi,
+# kimi-code/k3, glm-harness) normalises to one of these.
+_CANONICAL_PROVIDER_LANE = {
+    "deepseek-harness",
+    "deepseek",
+    "kimi",
+    "glm-harness",
+    "claude",
+    "codex",
+    "gemini",
+}
+
+
+def _normalise_provider(provider_raw: str) -> str:
+    """Normalise a provider string to its canonical lane value.
+
+    Variants observed in the ledger as of 2026-08-09:
+      deepseek-harness (294), deepseek (27), ``deepseek (harness, key-auth)``
+      (one self-report), litellm:deepseek (43), kimi-k3, kimi-code/k3.
+
+    Without normalisation every cost aggregation over provider counts these as
+    separate providers. The canonical lane values are the short forms the
+    dispatch door uses.
+    """
+    if not provider_raw or not provider_raw.strip():
+        return "unknown"
+    p = provider_raw.strip()
+    pl = p.lower()
+
+    # Already a canonical lane value — pass through.
+    if pl in _CANONICAL_PROVIDER_LANE:
+        return pl
+
+    # DeepSeek variants → deepseek-harness
+    if "deepseek" in pl:
+        return "deepseek-harness"
+
+    # Kimi variants (kimi-k3, kimi-code/k3, kimi) → kimi
+    if "kimi" in pl:
+        return "kimi"
+
+    # GLM variants → glm-harness.  parse_route_model_id maps glm-* model IDs
+    # to litellm:zai (the litellm provider flag for Zhipu AI); normalise that
+    # flag back to the canonical lane name.
+    if "glm" in pl or pl == "litellm:zai":
+        return "glm-harness"
+
+    # Unknown — return as-is rather than invent a value.
+    return p
+
+
+def _resolve_report_provider_model(
+    dispatch_id: str, merged: Dict[str, Any], state_dir: Optional[Path]
+) -> Tuple[str, str]:
+    """Resolve provider and model from the lane, falling back to the body.
+
+    OI-1111: on harness lanes (GLM, DeepSeek) the worker introspects as
+    sonnet/claude because the CLI around it thinks that is what it is.  The
+    body therefore carries a false identity the worker cannot know is wrong.
+    For model and provider the LANE wins — opposite precedence from
+    ``_resolve_report_role``, where the body wins because the author's own
+    role stamp is the authoritative source.
+
+    Resolution order:
+      1. Route decision JSON (``state_dir/route_decisions/<dispatch_id>.json``)
+         — the lane's own record of which model was selected.
+      2. Report body/frontmatter fields — fallback when no route decision
+         exists (e.g. plan-gate seats that do not go through the smart router).
+    """
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+    # Lane identity first: the route decision knows which model ran.
+    if state_dir and dispatch_id:
+        route_dec = _load_route_decision(dispatch_id, state_dir)
+        if route_dec and route_dec.get("selected_model"):
+            model_id = route_dec["selected_model"]
+            try:
+                from smart_router import parse_route_model_id  # noqa: PLC0415
+                lane_provider, lane_model = parse_route_model_id(model_id)
+                provider = _normalise_provider(lane_provider)
+                model = lane_model
+            except Exception:
+                logger.debug(
+                    "report_to_receipt_converter: provider/model lane resolution "
+                    "failed for dispatch=%s model_id=%s",
+                    dispatch_id, model_id,
+                    exc_info=True,
+                )
+
+    # Body fallback: only used when lane resolution produced nothing.
+    if not provider:
+        provider = _normalise_provider(merged.get("provider", "unknown"))
+    if not model:
+        model = (merged.get("model") or "").strip()
+
+    return provider, model
+
+
 # Terminal success statuses that trigger fail-closed validation (OI-1035 et al.).
 # Any report claiming one of these statuses must pass all three fail-closed
 # checks before a success receipt is written.  Reports with other statuses
@@ -532,6 +636,16 @@ def build_receipt_from_report(
     canonical_report_path = str(resolved.path) if resolved is not None else str(report_path)
     ambiguous_report = resolved.ambiguous if resolved is not None else False
 
+    # OI-1111: provider and model come from the LANE (route decision), not
+    # from the body. On harness lanes (GLM, DeepSeek) the worker introspects
+    # as sonnet/claude; the body is a false identity the worker cannot know
+    # is wrong. The lane's route decision holds the authoritative identity.
+    # Provider strings are normalised to canonical lane values so every cost
+    # aggregation counts one provider, not four variants of the same lane.
+    _resolved_provider, _resolved_model = _resolve_report_provider_model(
+        dispatch_id, merged, state_dir,
+    )
+
     base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         # Receipt-quality PR-3: converter receipts are dispatch-lane outcomes
@@ -542,8 +656,8 @@ def build_receipt_from_report(
         "role": _resolve_report_role(dispatch_id, merged, state_dir),
         "task_id": merged.get("task_id", "unknown"),
         "terminal": merged.get("terminal", "unknown"),
-        "provider": merged.get("provider", "unknown"),
-        "model": merged.get("model", ""),
+        "provider": _resolved_provider,
+        "model": _resolved_model,
         "timestamp": timestamp,
         "report_path": canonical_report_path,
     }

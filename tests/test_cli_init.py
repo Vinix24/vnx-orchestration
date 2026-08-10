@@ -556,6 +556,12 @@ class TestGateObligationRunnerInstall:
             init_cmd._engine, "engine_root", lambda: engine_root,
         )
 
+        # OI-1117: the LaunchAgents guard checks the real Path.home(); mock
+        # it to a fake home so the guard does not fire.
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
         # Restore permissions in teardown so tmp_path cleanup works.
         try:
             with pytest.raises((OSError, PermissionError)):
@@ -642,10 +648,23 @@ class TestGateObligationRunnerInstall:
         """vnx_init in the VNX orchestration repo must install the
         gate-obligation-runner launchd plist (OI-917 core fix).
 
-        Uses the real engine root (worktree) which has the plist template;
-        only mock Path.home() and subprocess.run to avoid touching the
-        real ~/Library/LaunchAgents/.
+        Mock engine_root() to a tmp_path-based non-worktree location that
+        symlinks the real templates/ and scripts/ trees, so the OI-1117
+        worktree guard does not fire while the scaffold still has access
+        to all its required templates.
         """
+        import os as _os
+        from vnx_cli.commands import init_cmd
+
+        real_engine = init_cmd._engine.engine_root()
+        fake_engine_root = tmp_path / "fake-vnx-engine"
+        fake_engine_root.mkdir()
+        for d in ("templates", "scripts", "schemas"):
+            _os.symlink(real_engine / d, fake_engine_root / d, target_is_directory=True)
+        monkeypatch.setattr(
+            init_cmd._engine, "engine_root", lambda: fake_engine_root,
+        )
+
         fake_home = tmp_path / "fake-home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
@@ -692,6 +711,19 @@ class TestGateObligationRunnerInstall:
     def test_init_continues_on_launchctl_failure(self, tmp_path, monkeypatch, capsys):
         """If launchctl load fails, vnx_init must print a warning and
         continue — the scaffold is still valid."""
+        import os as _os
+        from vnx_cli.commands import init_cmd
+
+        # OI-1117: mock engine_root() to a non-worktree location via symlinks.
+        real_engine = init_cmd._engine.engine_root()
+        fake_engine_root = tmp_path / "fake-vnx-engine"
+        fake_engine_root.mkdir()
+        for d in ("templates", "scripts", "schemas"):
+            _os.symlink(real_engine / d, fake_engine_root / d, target_is_directory=True)
+        monkeypatch.setattr(
+            init_cmd._engine, "engine_root", lambda: fake_engine_root,
+        )
+
         fake_home = tmp_path / "fake-home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
