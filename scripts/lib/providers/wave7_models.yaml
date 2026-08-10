@@ -222,8 +222,8 @@ providers:
     models:
       glm-5.2:
         litellm_name: "openrouter/z-ai/glm-5.2"  # GLM-5.2 (released 2026-06-16)
-        cost_input_per_mtok: 0.60
-        cost_output_per_mtok: 1.92
+        cost_input_per_mtok: 0.76   # re-measured 2026-08-10 against live OpenRouter /api/v1/models
+        cost_output_per_mtok: 2.42
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true

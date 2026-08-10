@@ -246,7 +246,7 @@ echo '{
   },
   "content": {
     "title": "Run E2E Tests",
-    "instructions": "Execute full test suite and validate results"
+    "instructions": "Run the touched test files plus their direct neighbours, validate results"
   }
 }'
 ```
