@@ -91,7 +91,7 @@ def _resolve_work_timestamp(metadata: Dict[str, str], report_path: str) -> Optio
                     from datetime import timezone
                     dt = dt.replace(tzinfo=timezone.utc)
                 return dt.isoformat()
-            except Exception:
+            except Exception:  # vnx-silent-except: fallback tier — a dateutil parse miss drops to the fromisoformat tier, then the file-mtime tier, and finally the explicit fail-closed return
                 pass
         # Fallback: try fromisoformat for strict ISO-8601.
         try:
@@ -100,7 +100,7 @@ def _resolve_work_timestamp(metadata: Dict[str, str], report_path: str) -> Optio
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=_timezone.utc)
             return dt.isoformat()
-        except Exception:
+        except Exception:  # vnx-silent-except: fallback tier — a fromisoformat parse miss drops to the file-mtime tier and, if that fails too, the explicit fail-closed return
             pass
 
     # Tier 2: file modification time.
