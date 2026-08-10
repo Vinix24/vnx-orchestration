@@ -328,6 +328,8 @@ Worktree commands:
   worktree-status    Show worktree isolation status
   worktree-release   Governed release path for locked worktrees (OI-1052)
                      Dry-run default; --apply to unlock, rescue, and remove
+  dispatch-cleanup   Governed cleanup for stale dispatch bundles (OI-1072)
+                     Dry-run default; --apply to move to completed/ or abandoned/
 
 Pool commands (elastic worker pool management):
   pool status [--project <id>] [--pool-id <p>] [--json]  Show pool state
@@ -2490,6 +2492,9 @@ main() {
       ;;
     worktree-release)
       cmd_worktree_release "$@"
+      ;;
+    dispatch-cleanup)
+      cmd_dispatch_cleanup "$@"
       ;;
     snapshot)
       cmd_snapshot "$@"

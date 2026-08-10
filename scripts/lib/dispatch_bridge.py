@@ -31,6 +31,7 @@ owns lane selection (claude→tmux unless allow_headless). No Anthropic SDK impo
 from __future__ import annotations
 
 import hashlib
+import shutil
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Optional
@@ -316,8 +317,52 @@ def bridge_dispatch(*, dry_run: bool = False, **stage_kwargs) -> int:
     except (ValueError, OSError) as exc:
         print(f"[dispatch_bridge] REJECT [staging-error]: {exc}", file=sys.stderr)
         return 1
+
     from dispatch_cli import run_dispatch  # noqa: PLC0415
-    return run_dispatch(spec_file, dry_run=dry_run)
+    rc = run_dispatch(spec_file, dry_run=dry_run)
+
+    _settle_bundle(spec_file.parent, rc)
+
+    return rc
+
+
+def _settle_bundle(bundle_dir: Path, rc: int) -> None:
+    """Move a door-processed bundle out of pending/ into completed/ or failed/.
+
+    OI-1072: the bridge must MOVE the staged bundle directory after the door
+    processes it — never delete it. Consumers read dispatch-spec.json AFTER the
+    dispatch returns (receipt processing, operator forensics, the deadline
+    passthrough assertions), so removal breaks read-after-completion while
+    leaving the bundle in pending/ re-creates the unbounded growth this cleanup
+    exists to solve (the daemon only picks up flat .md files, not directory
+    bundles). The destination mirrors the door's own lifecycle dirs and the
+    `dispatch-cleanup` transition: completed/ on rc == 0, failed/ otherwise.
+    Best-effort: a failure here must not change the dispatch's exit code.
+    """
+    try:
+        if not bundle_dir.exists():
+            return
+        # bundle_dir is <data_dir>/dispatches/pending/<id> — anchored inside the
+        # data root by stage_spec_bundle before anything was written.
+        dispatches_dir = bundle_dir.parent.parent
+        if dispatches_dir.name != "dispatches" or bundle_dir.parent.name != "pending":
+            return
+        outcome_dir = dispatches_dir / ("completed" if rc == 0 else "failed")
+        outcome_dir.mkdir(parents=True, exist_ok=True)
+        dest = outcome_dir / bundle_dir.name
+        if dest.exists():
+            # Re-dispatch of the same id: never overwrite or nest into the prior
+            # bundle — pick the first free suffixed name instead.
+            suffix = 2
+            while (outcome_dir / f"{bundle_dir.name}-{suffix}").exists():
+                suffix += 1
+            dest = outcome_dir / f"{bundle_dir.name}-{suffix}"
+        shutil.move(str(bundle_dir), str(dest))
+    except OSError as exc:
+        print(
+            f"[dispatch_bridge] WARN bundle settle failed for {bundle_dir}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def deliver_via_door(

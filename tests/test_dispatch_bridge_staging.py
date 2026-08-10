@@ -215,10 +215,25 @@ def test_bridge_headless_wrong_override_value_still_blocked(tmp_path, monkeypatc
 
 def test_bridge_headless_override_reaches_staging(tmp_path, monkeypatch):
     """allow_headless=True + VNX_OVERRIDE_CLAUDE_HEADLESS=1: the gate is lifted and
-    execution proceeds into stage_spec_bundle (a real bundle gets written)."""
+    execution proceeds into stage_spec_bundle (a real bundle gets written).
+
+    OI-1072: the bundle directory is MOVED to dispatches/completed/ after a
+    successful run_dispatch — pending/ is drained, but the spec stays readable
+    at its settled location (never deleted)."""
     monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "1")
     import dispatch_cli
-    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+    captured_spec = {}
+
+    def _mock_run_dispatch(spec_file, dry_run=False):
+        # Capture and verify the bundle was correctly formed BEFORE cleanup
+        bundle = spec_file.parent
+        payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
+        captured_spec["allow_headless"] = payload["allow_headless"]
+        captured_spec["bundle"] = bundle
+        return 0
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", _mock_run_dispatch)
 
     rc = dispatch_bridge.bridge_dispatch(
         instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
@@ -227,17 +242,35 @@ def test_bridge_headless_override_reaches_staging(tmp_path, monkeypatch):
     )
 
     assert rc == 0
-    bundle = tmp_path / "dispatches" / "pending" / _GOOD_ID
-    payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
-    assert payload["allow_headless"] is True
+    assert captured_spec.get("allow_headless") is True
+    # OI-1072: bundle moved out of pending/ into completed/, spec intact
+    assert not captured_spec["bundle"].exists()
+    settled = tmp_path / "dispatches" / "completed" / _GOOD_ID
+    assert json.loads((settled / "dispatch-spec.json").read_text(encoding="utf-8"))["allow_headless"] is True
+    assert (settled / "instruction.md").read_text(encoding="utf-8") == "x"
 
 
 def test_bridge_non_headless_dispatch_never_consults_the_gate(tmp_path, monkeypatch):
     """allow_headless absent (default False): the claude tmux subscription lane is
-    unaffected — staging proceeds without the headless gate firing at all."""
+    unaffected — staging proceeds without the headless gate firing at all.
+
+    OI-1072: the bundle directory is MOVED to dispatches/completed/ after a
+    successful run_dispatch — pending/ is drained, but the spec stays readable
+    at its settled location (never deleted)."""
     monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
     import dispatch_cli
-    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+    captured_spec = {}
+
+    def _mock_run_dispatch(spec_file, dry_run=False):
+        # Capture and verify the bundle was correctly formed BEFORE cleanup
+        bundle = spec_file.parent
+        payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
+        captured_spec["allow_headless"] = payload["allow_headless"]
+        captured_spec["bundle"] = bundle
+        return 0
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", _mock_run_dispatch)
 
     rc = dispatch_bridge.bridge_dispatch(
         instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
@@ -245,6 +278,66 @@ def test_bridge_non_headless_dispatch_never_consults_the_gate(tmp_path, monkeypa
     )
 
     assert rc == 0
-    bundle = tmp_path / "dispatches" / "pending" / _GOOD_ID
-    payload = json.loads((bundle / "dispatch-spec.json").read_text(encoding="utf-8"))
-    assert payload["allow_headless"] is False
+    assert captured_spec.get("allow_headless") is False
+    # OI-1072: bundle moved out of pending/ into completed/, spec intact
+    assert not captured_spec["bundle"].exists()
+    settled = tmp_path / "dispatches" / "completed" / _GOOD_ID
+    assert json.loads((settled / "dispatch-spec.json").read_text(encoding="utf-8"))["allow_headless"] is False
+
+
+# --- OI-1072: settle semantics — move, never delete; failed dispatches land in failed/ ---
+
+def test_bridge_failed_dispatch_moves_bundle_to_failed(tmp_path, monkeypatch):
+    """rc != 0 from the door: the bundle settles in dispatches/failed/<id>/ with
+    the spec intact — read-after-failure works the same as read-after-success."""
+    import dispatch_cli
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 1)
+
+    rc = dispatch_bridge.bridge_dispatch(
+        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
+    )
+
+    assert rc == 1
+    assert not (tmp_path / "dispatches" / "pending" / _GOOD_ID).exists()
+    settled = tmp_path / "dispatches" / "failed" / _GOOD_ID
+    payload = json.loads((settled / "dispatch-spec.json").read_text(encoding="utf-8"))
+    assert payload["dispatch_id"] == _GOOD_ID
+
+
+def test_bridge_settle_never_overwrites_an_existing_settled_bundle(tmp_path, monkeypatch):
+    """A re-dispatch of the same id must not clobber the previously settled
+    bundle: the second settle lands under a suffixed name."""
+    import dispatch_cli
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+    kwargs = dict(
+        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
+    )
+    assert dispatch_bridge.bridge_dispatch(**kwargs) == 0
+    assert dispatch_bridge.bridge_dispatch(**kwargs) == 0
+
+    completed = tmp_path / "dispatches" / "completed"
+    assert (completed / _GOOD_ID / "dispatch-spec.json").is_file()
+    assert (completed / f"{_GOOD_ID}-2" / "dispatch-spec.json").is_file()
+
+
+def test_bridge_settle_failure_does_not_change_exit_code(tmp_path, monkeypatch, capsys):
+    """Best-effort contract: when the move itself fails (completed/ blocked by a
+    regular file), the dispatch's exit code is returned unchanged and a WARN is
+    printed — the bundle simply stays in pending/."""
+    import dispatch_cli
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+    # Block completed/ creation with a regular file so mkdir/move raise OSError.
+    (tmp_path / "dispatches").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "dispatches" / "completed").write_text("blocked", encoding="utf-8")
+
+    rc = dispatch_bridge.bridge_dispatch(
+        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
+    )
+
+    assert rc == 0
+    assert "bundle settle failed" in capsys.readouterr().err
+    assert (tmp_path / "dispatches" / "pending" / _GOOD_ID / "dispatch-spec.json").is_file()
