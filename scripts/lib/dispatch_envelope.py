@@ -135,9 +135,16 @@ def _enforce_push_pr(
     *skip_pr* (OI-1115): when True, the auto-PR creation is skipped.  Set when
     *base_ref* is a dispatch branch (the PR already exists).
 
-    A non-applicable state (clean/dirty) leaves *result* unchanged. Never raises:
-    an internal error fails open (the worktree is still torn down by the caller's
-    finally block), matching the tmux lane's _enforce_pr_exists contract.
+    A non-applicable state (clean, or dirty with only untracked scratch — see
+    OI-1119) leaves *result* unchanged. A ``dirty`` worktree with substantive
+    uncommitted (tracked) changes IS applicable — enforce_pr_exists salvages it
+    (commits it under an unmistakable ``[SALVAGED, UNREVIEWED]`` marker, pushes,
+    opens a draft PR) and still reports ok=False, so it takes the same
+    status="failure" path as a failed push below; it is treated exactly like a
+    committed-but-unpushed branch, because that is what the reaper would
+    otherwise destroy. Never raises: an internal error fails open (the worktree
+    is still torn down by the caller's finally block), matching the tmux lane's
+    _enforce_pr_exists contract.
 
     ``base_ref`` is kept as a last-resort fallback only. The authoritative base
     SHA is read from the worktree claim ``create_dispatch_worktree`` wrote
@@ -194,6 +201,11 @@ def _enforce_push_pr(
             ),
             target_remote_head=target_remote_head,
             skip_pr=skip_pr,
+            # OI-1119: lets enforce_pr_exists split a "dirty" verdict into
+            # substantive (loud + salvaged) vs scratch-only (unchanged). The
+            # worktree still exists here — this call runs BEFORE
+            # remove_dispatch_worktree in the caller's finally block.
+            wt_path=wt_path,
         )
     except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
         logger.error(
