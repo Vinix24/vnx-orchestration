@@ -58,7 +58,7 @@ class TestVnxInitCli:
         assert (local_data / "events").is_dir()
         assert (local_data / "unified_reports").is_dir()
 
-    def test_init_no_local_vnx_data_when_xdg(self, tmp_path, tmp_path_factory, monkeypatch):
+    def test_init_no_local_vnx_data_when_external_root(self, tmp_path, tmp_path_factory, monkeypatch):
         # When data_root is outside the project dir, vnx init must NOT create
         # a local .vnx-data/ — that would cause the resolver to prefer the
         # local dir on the next call, contradicting the config (PR-PIP-2).
@@ -74,7 +74,7 @@ class TestVnxInitCli:
 
     def test_init_reported_path_matches_resolver(self, tmp_path, tmp_path_factory, monkeypatch):
         # Core consistency invariant: what init writes into config.yml must
-        # equal what resolve_data_root returns post-init (no XDG-vs-local drift).
+        # equal what resolve_data_root returns post-init (no drift).
         external_data = tmp_path_factory.mktemp("external_data")
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
         monkeypatch.setenv("VNX_DATA_DIR", str(external_data))
@@ -720,3 +720,75 @@ class TestGateObligationRunnerInstall:
         out = capsys.readouterr().out
         assert "warning" in out.lower()
         assert "gate-obligation-runner" in out
+
+
+# ---------------------------------------------------------------------------
+# OI-1055: init→doctor no-divergence invariant
+# ---------------------------------------------------------------------------
+
+class TestInitDoctorDataDirConsistency:
+    """vnx init and vnx doctor must agree on the data-dir resolution.
+
+    OI-1055: init wrote state to ~/.local/share/vnx/<id> (the old XDG
+    default) while resolve_central_data_dir and the data-dir guard expect
+    ~/.vnx-data/<id>. After the fix, both resolve to the single canonical
+    central dir, so a fresh init→doctor round-trip must emit zero
+    VNXDataDirMismatchWarning warnings.
+    """
+
+    def test_init_then_doctor_no_mismatch_warning(
+        self, tmp_path, tmp_path_factory, monkeypatch
+    ):
+        """vnx init followed by vnx doctor must not warn about data-dir mismatch."""
+        import warnings
+        from vnx_cli.commands.doctor import vnx_doctor
+        from data_dir_guard import VNXDataDirMismatchWarning
+
+        # Isolate HOME so the test never touches the real ~/.vnx-data/.
+        fake_home = tmp_path_factory.mktemp("home")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+        # Clean env: let the resolver's default branch drive the result.
+        for key in (
+            "VNX_DATA_DIR", "VNX_DATA_DIR_EXPLICIT",
+            "VNX_DATA_HOME", "XDG_DATA_HOME",
+            "VNX_STATE_DIR", "VNX_PROJECT_ID",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+        # vnx init with default resolution — state lands at
+        # fake_home/.vnx-data/<project_id> (the canonical central dir).
+        project_dir = tmp_path_factory.mktemp("project")
+        rc = vnx_init(_args(project_dir))
+        assert rc == 0, "vnx init must succeed"
+
+        # vnx doctor — must complete without VNXDataDirMismatchWarning.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            drc = vnx_doctor(argparse.Namespace(
+                project_dir=str(project_dir),
+                json=False,
+                strict=False,
+            ))
+        assert drc == 0, "vnx doctor must exit 0"
+
+        mismatch_warnings = [
+            w for w in caught
+            if issubclass(w.category, VNXDataDirMismatchWarning)
+        ]
+        assert len(mismatch_warnings) == 0, (
+            f"vnx doctor must not warn about data-dir mismatch after vnx init; "
+            f"got {len(mismatch_warnings)}: "
+            f"{[str(w.message) for w in mismatch_warnings]}"
+        )
+
+        # Also verify: the data dir init reported must be the central dir.
+        version_pin = project_dir / ".vnx-version"
+        assert version_pin.is_file(), "init must write .vnx-version"
+        marker = project_dir / ".vnx-project-id"
+        assert marker.is_file(), "init must write .vnx-project-id"
+        pid = marker.read_text(encoding="utf-8").splitlines()[0].strip()
+        central = fake_home / ".vnx-data" / pid
+        assert central.is_dir(), (
+            f"init must create state at canonical central dir {central}"
+        )

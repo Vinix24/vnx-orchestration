@@ -71,7 +71,7 @@ def test_state_dir_resolves_from_cwd_project_id(tmp_path: Path, monkeypatch):
 
     # Pre-create a project-local .vnx-data/state so _resolve_state_root
     # branch 4 (existing dev checkout) returns it rather than falling
-    # through to XDG.
+    # through to the fresh default.
     (project_dir / ".vnx-data" / "state").mkdir(parents=True)
 
     # Strip the conftest's module-scoped VNX_DATA_DIR_EXPLICIT / VNX_DATA_DIR

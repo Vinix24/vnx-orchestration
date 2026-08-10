@@ -13,7 +13,7 @@
 # Then, in a PRISTINE HOME (no ~/.vnx-system, no ~/.vnx-data), proves the
 # pip-native state layout (PR-PIP-2):
 #   4. `vnx init` creates NO project-local .vnx-data/ (in-project footprint < 10 KB)
-#   5. runtime state lands in the XDG user-data-dir (~/.local/share/vnx/<id>)
+#   5. runtime state lands in the central data dir (~/.vnx-data/<id>)
 #   6. `vnx doctor` reports a RECOGNIZED packaged install (not "no install
 #      detected"), with state resolved OUTSIDE the package, and exits 0
 #
@@ -233,7 +233,7 @@ mkdir -p "$CLEAN_HOME" "$CLEAN_PROJECT"
 
 # Pristine env: like clean_env, but also pins HOME to an empty scratch dir and
 # strips the user-data-dir + project-id inputs so resolution is driven only by
-# the clean HOME (→ XDG default ~/.local/share/vnx/<id>).
+# the clean HOME (→ central default ~/.vnx-data/<id>).
 pip2_env() {
     env -u PYTHONPATH -u VNX_HOME -u VNX_BIN -u VNX_EXECUTABLE \
         -u VNX_DATA_DIR -u VNX_STATE_DIR -u VNX_DATA_DIR_EXPLICIT \
@@ -266,15 +266,15 @@ PYEOF
     || fail "in-project footprint ${FOOT_BYTES} bytes >= 10 KB (expected clean footprint)"
 ok "in-project footprint ${FOOT_BYTES} bytes (< 10 KB)"
 
-# Resolve the project_id init wrote, derive the expected XDG state root.
+# Resolve the project_id init wrote, derive the expected central state root.
 PID2="$(head -1 "$CLEAN_PROJECT/.vnx-project-id" 2>/dev/null | tr -d '[:space:]')"
 [ -n "$PID2" ] || fail "vnx init did not write a .vnx-project-id marker"
-EXPECT_STATE="$CLEAN_HOME/.local/share/vnx/$PID2"
+EXPECT_STATE="$CLEAN_HOME/.vnx-data/$PID2"
 
-# Assertion 3: state landed in the XDG user-data-dir, populated with the tree.
+# Assertion 3: state landed in the central data dir, populated with the tree.
 [ -d "$EXPECT_STATE/dispatches/pending" ] \
-    || fail "runtime state not at XDG dir $EXPECT_STATE (dispatches/pending missing)"
-ok "runtime state at XDG user-data-dir: $EXPECT_STATE"
+    || fail "runtime state not at central dir $EXPECT_STATE (dispatches/pending missing)"
+ok "runtime state at central data dir: $EXPECT_STATE"
 
 # Assertion 4: doctor reports a RECOGNIZED (packaged) install + state outside
 # the package, and exits 0. Parse the structured --json output.
@@ -326,10 +326,10 @@ if data_root_chk is None:
     die("doctor emitted no dir:data-root check")
 if data_root_chk["status"] != "PASS":
     die(f"dir:data-root not PASS: {data_root_chk['detail']}")
-# The reported data root must be the XDG dir, never inside the project map.
+# The reported data root must be the central dir, never inside the project map.
 resolved = data_root_chk["detail"]
 if Path(resolved).resolve() != Path(expect_state).resolve():
-    die(f"data root {resolved!r} != expected XDG dir {expect_state!r}")
+    die(f"data root {resolved!r} != expected central dir {expect_state!r}")
 if Path(resolved).resolve().is_relative_to(Path(project_dir).resolve()):
     die(f"data root {resolved!r} resolved INSIDE the project map {project_dir!r}")
 

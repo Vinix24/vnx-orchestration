@@ -358,7 +358,7 @@ def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
     ``build_t0_state._pytest_db_isolation_guard`` /
     ``migrate_future_system._pytest_db_isolation_guard``): callers of this
     function have their own legitimate no-explicit-flag paths (fresh-install
-    / XDG / project-local fallbacks all resolve safely without it), so the
+    / project-local fallbacks all resolve safely without it), so the
     flag itself is not the invariant. Landing a WRITE in the real
     ``~/.vnx-data`` is.
 
@@ -394,14 +394,17 @@ def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
          existing central installs to their current location.
       4. ``<project_root>/.vnx-data`` *if it already exists*  — keep resolving
          existing dev checkouts / pre-migration installs in place.
-      5. XDG default  — ``${XDG_DATA_HOME:-~/.local/share}/vnx/<project_id>``
-         for a fresh, clean-footprint install.
+      5. Fresh install — ``~/.vnx-data/<project_id>``, the single canonical
+         central data directory for all installs (parity with
+         ``resolve_central_data_dir``).
 
-    The existence-gated legacy branches (3, 4) are checked *before* the XDG
+    The existence-gated legacy branches (3, 4) are checked *before* the fresh
     default so that the existing dev checkouts and central installs keep
     resolving to where their state already lives (per PR-PIP-2: "breek de
     bestaande dev-checkout/central resolutie NIET"). A fresh install has
-    neither legacy dir and lands on the XDG user-data-dir.
+    neither legacy dir and lands on the canonical central dir — same path
+    as ``resolve_central_data_dir``, so the data-dir guard never warns on a
+    freshly-initialised project (OI-1055).
 
     Collision-safety: a per-project directory is only ever formed from a
     *resolved* project_id. When project_id is None we never substitute a shared
@@ -432,10 +435,9 @@ def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
     if local.is_dir():
         return local.resolve()
 
-    # 5. Fresh install (clean footprint): XDG user-data-dir.
+    # 5. Fresh install: central per-project data directory.
     if pid:
-        xdg_base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-        return (Path(xdg_base).expanduser() / "vnx" / pid).resolve()
+        return (Path.home() / ".vnx-data" / pid).resolve()
 
     # Collision-safety: no resolvable project_id and no existing layout — never
     # guess a shared id. Stay project-local rather than collide projects.
@@ -447,7 +449,7 @@ def resolve_data_root(project_root) -> Path:
 
     Honors the same ordered resolution as :func:`resolve_paths` (explicit
     override > ``VNX_DATA_HOME`` > existing ``~/.vnx-data/<id>`` > existing
-    project-local ``.vnx-data`` > XDG default), but anchored on the *given*
+    project-local ``.vnx-data`` > fresh default), but anchored on the *given*
     project_root rather than the env/VNX_HOME-resolved one. The project_id is
     resolved leniently from that root (env, ``.vnx-project-id`` marker, or
     identity chain). Used by the pip console-script commands (``vnx_cli``)

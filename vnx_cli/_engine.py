@@ -76,7 +76,7 @@ def resolve_data_root(project_dir) -> Path:
 
     Thin wrapper that bootstraps the engine path first, so every CLI command
     shares the ordered resolver (explicit > VNX_DATA_HOME > existing
-    ~/.vnx-data/<id> > existing project-local > XDG default).
+    ~/.vnx-data/<id> > existing project-local > fresh default).
     """
     ensure_engine_on_path()
     from vnx_paths import resolve_data_root as _resolve_data_root

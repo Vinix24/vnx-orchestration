@@ -309,7 +309,7 @@ class TestStateRootResolver:
     """PR-PIP-2: _resolve_state_root ordered resolution + collision-safety.
 
     Each branch is exercised in isolation with a real (tmp) HOME so the live
-    machine's ~/.vnx-data and ~/.local/share never leak into the assertions.
+    machine's ~/.vnx-data never leaks into the assertions.
     """
 
     def test_explicit_override_wins(self, tmp_path, monkeypatch):
@@ -348,11 +348,11 @@ class TestStateRootResolver:
         project_root = tmp_path / "checkout"
         local = project_root / ".vnx-data"
         local.mkdir(parents=True)
-        # No ~/.vnx-data/<id> exists → existing project-local dir wins over XDG.
+        # No ~/.vnx-data/<id> exists → existing project-local dir wins over fresh default.
         result = vnx_paths._resolve_state_root("vnx-dev", project_root)
         assert result == local.resolve()
 
-    def test_fresh_install_uses_xdg_default(self, tmp_path, monkeypatch):
+    def test_fresh_install_uses_central_default(self, tmp_path, monkeypatch):
         _clean_env(monkeypatch)
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -360,10 +360,11 @@ class TestStateRootResolver:
         project_root = tmp_path / "fresh"
         project_root.mkdir()
         result = vnx_paths._resolve_state_root("vnx-dev", project_root)
-        assert result == (fake_home / ".local" / "share" / "vnx" / "vnx-dev").resolve()
+        assert result == (fake_home / ".vnx-data" / "vnx-dev").resolve()
         assert not str(result).startswith(str(project_root))
 
-    def test_fresh_install_honors_xdg_data_home(self, tmp_path, monkeypatch):
+    def test_fresh_install_ignores_xdg_data_home(self, tmp_path, monkeypatch):
+        """XDG_DATA_HOME does not affect the fresh-install default (OI-1055)."""
         _clean_env(monkeypatch)
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -372,7 +373,8 @@ class TestStateRootResolver:
         xdg.mkdir()
         monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
         result = vnx_paths._resolve_state_root("vnx-dev", tmp_path / "fresh")
-        assert result == (xdg / "vnx" / "vnx-dev").resolve()
+        # XDG_DATA_HOME is no longer honored; central default always wins.
+        assert result == (fake_home / ".vnx-data" / "vnx-dev").resolve()
 
     def test_collision_safety_no_project_id_stays_local(self, tmp_path, monkeypatch):
         """Unresolvable project_id must NEVER collapse to a shared default id."""

@@ -43,7 +43,7 @@ def _resolve_data_root(data_root: "Path | None") -> Path:
     """Return canonical VNX data root.
 
     Uses vnx_paths so central installs resolve to ~/.vnx-data/<project_id> (or
-    VNX_DATA_HOME / XDG) rather than resolve_project_root(__file__)/.vnx-data.
+    VNX_DATA_HOME / default) rather than resolve_project_root(__file__)/.vnx-data.
     ADR-007: project_id-scoped canonical paths.
     """
     if data_root is not None:

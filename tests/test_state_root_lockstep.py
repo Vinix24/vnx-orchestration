@@ -114,7 +114,7 @@ def _py_resolve(monkeypatch, pid, project_root, env_overrides) -> Path:
         if v is not None:
             monkeypatch.setenv(k, v)
     # _resolve_state_root reads Path.home(); pin it to the test HOME so the
-    # live machine's ~/.vnx-data / ~/.local/share never leak in.
+    # live machine's ~/.vnx-data never leaks in.
     home = env_overrides.get("HOME")
     if home:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls, h=home: Path(h)))
@@ -158,7 +158,7 @@ class TestResolverLockstep:
         py = _py_resolve(monkeypatch, "vnx-dev", proj, env)
         assert sh == py == (proj / ".vnx-data").resolve()
 
-    def test_xdg_default_branch(self, shell_lib, tmp_path, monkeypatch):
+    def test_central_default_branch(self, shell_lib, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
         proj = tmp_path / "fresh"
@@ -166,9 +166,10 @@ class TestResolverLockstep:
         env = {"HOME": str(home)}
         sh = _shell_resolve(shell_lib, "vnx-dev", proj, env)
         py = _py_resolve(monkeypatch, "vnx-dev", proj, env)
-        assert sh == py == (home / ".local" / "share" / "vnx" / "vnx-dev").resolve()
+        assert sh == py == (home / ".vnx-data" / "vnx-dev").resolve()
 
-    def test_xdg_data_home_override_branch(self, shell_lib, tmp_path, monkeypatch):
+    def test_xdg_data_home_ignored_branch(self, shell_lib, tmp_path, monkeypatch):
+        """XDG_DATA_HOME no longer affects fresh-install path resolution (OI-1055)."""
         home = tmp_path / "home"
         home.mkdir()
         xdg = tmp_path / "xdg"
@@ -178,7 +179,7 @@ class TestResolverLockstep:
         env = {"HOME": str(home), "XDG_DATA_HOME": str(xdg)}
         sh = _shell_resolve(shell_lib, "vnx-dev", proj, env)
         py = _py_resolve(monkeypatch, "vnx-dev", proj, env)
-        assert sh == py == (xdg / "vnx" / "vnx-dev").resolve()
+        assert sh == py == (home / ".vnx-data" / "vnx-dev").resolve()
 
     def test_collision_safety_no_pid_stays_local(self, shell_lib, tmp_path, monkeypatch):
         home = tmp_path / "home"
