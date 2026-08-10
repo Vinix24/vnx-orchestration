@@ -19,6 +19,18 @@
 # (4 tests), and the workflow filters it out with -k "not TestFlagGateClaude" so
 # the file's 29 green tests still run.
 #
+# test_receipt_mirror_isolation.py is NOT listed here either: only
+# TestGovernEnsureReceiptIsolation::test_ensure_receipt_does_not_touch_real_store
+# is red, and ONLY in full-suite collection order on CI — it passes in
+# isolation, including after the merge of main. Measured on head 9a01f5cc:
+# 1 failed, 15953 passed, where this test is the 1. The stub-teardown in
+# tests/test_intelligence_daemon_paths.py fixed its four order-dependent
+# sibling tests plus 13 collateral tests (test_learning_loop_tz,
+# test_w5b_small_fixes); this one is a different, still unattributed cause and
+# a collection-order bisect was deliberately NOT attempted. The workflow
+# filters it out by name in the same -k expression so the file's other seven
+# tests keep running (OI-1051 versmald, PR #1434).
+#
 # dispatch 20260802-w20b-1310-red-classify (2026-08-02) added the 42 files below
 # citing OI-946..OI-953: PR #1310 widened this same sweep from 831 files (the
 # ones NOT already listed above) to include these too, and 213 of their tests
