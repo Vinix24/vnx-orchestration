@@ -149,15 +149,9 @@ def pin_vnx_data_dir(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> None:
     not shadow it. Shared by the module-level isolation fixture below and by
     tests/test_pr_dispatch_integration.py + tests/test_pr_recommendation_integration.py,
     which need the same full pin for their own PRQueueManager() writes.
-
-    Also sets VNX_DATA_HOME so resolve_central_data_dir() — the dual-write
-    central-mirror target used by dispatch_register and append_receipt —
-    resolves under the isolated tree instead of the hardcoded
-    ~/.vnx-data default (OI-1079 register-mirror guard, #1438).
     """
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-    monkeypatch.setenv("VNX_DATA_HOME", str(data_dir))
     for env_key, subdir in _VNX_SUBSYSTEM_DIRS.items():
         monkeypatch.setenv(env_key, str(data_dir / subdir))
 

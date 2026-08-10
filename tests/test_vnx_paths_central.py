@@ -12,17 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 from vnx_paths import resolve_central_data_dir
 
 
-@pytest.fixture(autouse=True)
-def _clear_vnx_data_home(monkeypatch):
-    """Clear VNX_DATA_HOME so resolve_central_data_dir falls back to the
-    default ~/.vnx-data behaviour this file's tests assert on. The conftest
-    autouse _vnx_data_dir_isolation fixture sets VNX_DATA_HOME to redirect the
-    central store under tmp_path for write-isolation tests; these path-
-    resolution tests need the unredirected default.
-    """
-    monkeypatch.delenv("VNX_DATA_HOME", raising=False)
-
-
 class TestResolveCentralDataDir:
     def test_returns_home_vnx_data_project(self):
         result = resolve_central_data_dir("vnx-dev")

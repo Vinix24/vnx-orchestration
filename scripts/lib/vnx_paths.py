@@ -627,10 +627,7 @@ def resolve_worker_state_dir(terminal_id: str, vnx_data_dir: "Path | None" = Non
 
 
 def resolve_central_data_dir(project_id: str) -> Path:
-    """Return ``<base>/<project_id>/`` — the central per-project data directory.
-
-    Base resolution: ``VNX_DATA_HOME`` env-var when set (parity with
-    ``_resolve_state_root`` branch 2), falling back to ``~/.vnx-data``.
+    """Return ``~/.vnx-data/<project_id>/`` — the central per-project data directory.
 
     Used by Phase 6 P3 dual-write paths and the envelope re-stamper.
 
@@ -646,9 +643,6 @@ def resolve_central_data_dir(project_id: str) -> Path:
             f"project_id must match ^[a-z][a-z0-9-]{{1,31}}$ "
             f"(no dots, slashes, leading dashes, or special chars): {project_id!r}"
         )
-    data_home = os.environ.get("VNX_DATA_HOME")
-    if data_home:
-        return Path(data_home).expanduser() / project_id
     return Path.home() / ".vnx-data" / project_id
 
 

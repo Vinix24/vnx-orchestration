@@ -35,6 +35,28 @@ def isolated_state(monkeypatch, tmp_path):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def isolated_central_mirror(monkeypatch, tmp_path):
+    """Redirect the central-mirror target into tmp_path (OI-1079).
+
+    resolve_central_data_dir() hardcodes ``~/.vnx-data/<project_id>`` and
+    consults no env var, so the conftest ``_vnx_data_dir_isolation`` pin
+    (VNX_DATA_DIR + subsystem dirs) cannot reach the mirror target: any test
+    here that appends an event with a known project_id without patching the
+    ``dispatch_register._resolve_central_data_dir`` seam would mirror into
+    the real central store. Redirect that module-level seam per test, into a
+    subtree distinct from the primary dir. Tests that patch the seam
+    themselves keep their own target (their patch.object wins, then restores
+    to this fixture's redirect).
+    """
+    central_root = tmp_path / "central-store"
+    monkeypatch.setattr(
+        dispatch_register,
+        "_resolve_central_data_dir",
+        lambda project_id: central_root / project_id,
+    )
+
+
 def _reg_path(data_dir: Path) -> Path:
     return data_dir / ".vnx-data" / "state" / "dispatch_register.ndjson"
 
