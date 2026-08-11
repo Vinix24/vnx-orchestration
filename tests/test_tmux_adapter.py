@@ -587,5 +587,113 @@ class TestAdapterCliResolveCommand(unittest.TestCase):
         self.assertIn("primary_path", data)
 
 
+class TestLoadAndPasteUsesPerCallNamedBuffer(unittest.TestCase):
+    """OI-1136 regression: _tmux_load_and_paste() must never use tmux's shared
+    default buffer.
+
+    Same mechanism as OI-1126 in the tmux-spawn lane (#1451): unnamed
+    load-buffer/paste-buffer operate on the tmux server's single "most recent
+    buffer" slot, so two deliveries racing can paste each other's content
+    (measured there: 15/20 instruction crossings at 4 concurrent, 0/20 after
+    scoping). These tests fail if delivery is ever addressed by the bare/
+    shared buffer again.
+    """
+
+    def _recording_run(self, recorded, *, load_rc=0, paste_rc=0):
+        def fake_run(cmd, **kwargs):
+            recorded.append(list(cmd))
+            result = MagicMock()
+            if "load-buffer" in cmd:
+                result.returncode = load_rc
+            elif "paste-buffer" in cmd:
+                result.returncode = paste_rc
+            else:
+                result.returncode = 0
+            return result
+        return fake_run
+
+    def _buffer_name(self, cmd):
+        """Extract the -b <name> argument from a recorded tmux command."""
+        self.assertIn("-b", cmd, f"expected -b named-buffer flag in {cmd}")
+        return cmd[cmd.index("-b") + 1]
+
+    def _cmds(self, recorded, subcommand):
+        return [c for c in recorded if subcommand in c]
+
+    def test_load_and_paste_use_the_same_named_buffer(self):
+        import tmux_adapter
+        recorded = []
+        with patch.object(tmux_adapter.subprocess, "run", self._recording_run(recorded)):
+            rc = tmux_adapter._tmux_load_and_paste("%1", "hello world")
+
+        self.assertEqual(rc, 0)
+        loads = self._cmds(recorded, "load-buffer")
+        pastes = self._cmds(recorded, "paste-buffer")
+        self.assertEqual(len(loads), 1)
+        self.assertEqual(len(pastes), 1)
+        # Old behavior (regression target): ["tmux", "load-buffer", "-"] /
+        # ["tmux", "paste-buffer", "-t", pane]. New behavior: both carry an
+        # explicit -b buffer name, and it is the SAME name on both.
+        self.assertEqual(self._buffer_name(loads[0]), self._buffer_name(pastes[0]))
+        self.assertIn("-t", pastes[0])
+        self.assertEqual(pastes[0][pastes[0].index("-t") + 1], "%1")
+
+    def test_two_calls_never_share_a_buffer_name(self):
+        """The exact condition behind OI-1126/OI-1136: two deliveries around the
+        same time must be structurally unable to collide on buffer identity."""
+        import tmux_adapter
+        recorded = []
+        with patch.object(tmux_adapter.subprocess, "run", self._recording_run(recorded)):
+            tmux_adapter._tmux_load_and_paste("%1", "content for A")
+            tmux_adapter._tmux_load_and_paste("%2", "content for B")
+
+        pastes = self._cmds(recorded, "paste-buffer")
+        self.assertEqual(len(pastes), 2)
+        self.assertNotEqual(
+            self._buffer_name(pastes[0]), self._buffer_name(pastes[1]),
+            "two deliveries must never paste from the same buffer name",
+        )
+
+    def test_large_body_tmp_file_path_uses_named_buffer(self):
+        """Large bodies (>50k chars) go through the tmp-file load path — must
+        also use a per-call named buffer, not the bare default."""
+        import tmux_adapter
+        recorded = []
+        with patch.object(tmux_adapter.subprocess, "run", self._recording_run(recorded)):
+            rc = tmux_adapter._tmux_load_and_paste("%1", "x" * 60000, max_inline=50000)
+
+        self.assertEqual(rc, 0)
+        loads = self._cmds(recorded, "load-buffer")
+        pastes = self._cmds(recorded, "paste-buffer")
+        self.assertEqual(len(loads), 1)
+        self.assertNotIn("-", loads[0], "large body must load from tmp file, not stdin")
+        self.assertEqual(self._buffer_name(loads[0]), self._buffer_name(pastes[0]))
+
+    def test_buffer_is_deleted_after_paste(self):
+        """Cleanup: a long-running fleet must not accumulate one named buffer
+        per delivery forever."""
+        import tmux_adapter
+        recorded = []
+        with patch.object(tmux_adapter.subprocess, "run", self._recording_run(recorded)):
+            tmux_adapter._tmux_load_and_paste("%1", "hello")
+
+        loads = self._cmds(recorded, "load-buffer")
+        deletes = self._cmds(recorded, "delete-buffer")
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(self._buffer_name(deletes[0]), self._buffer_name(loads[0]))
+
+    def test_buffer_is_deleted_even_when_load_fails(self):
+        import tmux_adapter
+        recorded = []
+        with patch.object(
+            tmux_adapter.subprocess, "run", self._recording_run(recorded, load_rc=1)
+        ):
+            rc = tmux_adapter._tmux_load_and_paste("%1", "hello")
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(self._cmds(recorded, "paste-buffer")), 0)
+        self.assertEqual(len(self._cmds(recorded, "delete-buffer")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
