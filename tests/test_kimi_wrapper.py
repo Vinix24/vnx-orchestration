@@ -102,17 +102,20 @@ class TestKimiExec:
 
     def test_emit_called_with_subscription_flat(self, monkeypatch):
         monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        monkeypatch.delenv("VNX_KIMI_MODEL", raising=False)
         mock_proc = _make_popen_result()
 
         with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc), \
              patch("provider_costs.emit_provider_cost") as mock_emit:
 
-            kimi_wrapper.kimi_exec("prompt", model="kimi-k2.6", dispatch_id="d-k004")
+            kimi_wrapper.kimi_exec("prompt", model="kimi-k3", dispatch_id="d-k004")
 
         mock_emit.assert_called_once()
         kwargs = mock_emit.call_args.kwargs
         assert kwargs["provider"] == "kimi"
-        assert kwargs["model"] == "kimi-k2.6"
+        # Emit carries the resolved registry KEY (same label the provider lane
+        # emits), never the raw CLI arg.
+        assert kwargs["model"] == "kimi-k3"
         assert kwargs["cost_usd_estimate"] is None
         assert kwargs["dispatch_id"] == "d-k004"
 
@@ -174,6 +177,88 @@ class TestKimiExec:
 
             with pytest.raises(RuntimeError, match="kimi_exec failed"):
                 kimi_wrapper.kimi_exec("prompt", dispatch_id="d-k005")
+
+
+# ---------------------------------------------------------------------------
+# Model resolution (OI-1077)
+# ---------------------------------------------------------------------------
+
+class TestKimiModelResolution:
+    """kimi_exec routes model resolution through provider_dispatch's kimi
+    resolver — the same chain the provider lane uses — instead of the old
+    hardcoded 'kimi-k2.6' default that passed raw registry keys to the CLI
+    (rc=1 'LLM not set' on kimi-cli 1.46.0)."""
+
+    def test_resolver_is_consulted(self, monkeypatch):
+        """Both resolver stages run, and the CLI arg the resolver returns is
+        what lands in argv. kimi_exec imports the resolver lazily inside the
+        call, so patching the provider_dispatch module namespace intercepts
+        the call-time binding."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        mock_proc = _make_popen_result()
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("provider_costs.emit_provider_cost"), \
+             patch("provider_dispatch._kimi_resolve_requested_key",
+                   return_value="resolved-key") as mock_key, \
+             patch("provider_dispatch._kimi_resolve_cli_model_arg",
+                   return_value="managed/cli-arg") as mock_cli:
+
+            kimi_wrapper.kimi_exec("prompt", model="anything", dispatch_id="d-k010")
+
+        mock_key.assert_called_once_with("anything")
+        mock_cli.assert_called_once_with("resolved-key")
+        cmd = mock_popen.call_args.args[0]
+        m_idx = cmd.index("-m")
+        assert cmd[m_idx + 1] == "managed/cli-arg"
+
+    def test_default_model_resolves_registry_default(self, monkeypatch):
+        """No explicit model -> registry default key (kimi_cli.default_model)
+        resolved to its slash-form CLI arg, ALWAYS passed via -m (the old code
+        omitted -m and silently rode ~/.kimi/config.toml's default)."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        monkeypatch.delenv("VNX_KIMI_MODEL", raising=False)
+        mock_proc = _make_popen_result()
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("provider_costs.emit_provider_cost") as mock_emit:
+
+            kimi_wrapper.kimi_exec("prompt", dispatch_id="d-k011")
+
+        cmd = mock_popen.call_args.args[0]
+        assert "-m" in cmd
+        m_idx = cmd.index("-m")
+        assert cmd[m_idx + 1] == "kimi-code/k3"
+        assert mock_emit.call_args.kwargs["model"] == "kimi-k3"
+
+    def test_explicit_registry_key_maps_to_cli_arg(self, monkeypatch):
+        """A registry key ('kimi-k3') never reaches the CLI raw — it maps to
+        the cli_model_arg form the CLI actually accepts."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        mock_proc = _make_popen_result()
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("provider_costs.emit_provider_cost"):
+
+            kimi_wrapper.kimi_exec("prompt", model="kimi-k3", dispatch_id="d-k012")
+
+        cmd = mock_popen.call_args.args[0]
+        m_idx = cmd.index("-m")
+        assert cmd[m_idx + 1] == "kimi-code/k3"
+        assert "kimi-k3" not in cmd
+
+    def test_dead_model_fails_loud_before_spawn(self, monkeypatch):
+        """The retired 'kimi-k2.6' (the module's OWN old default) is refused by
+        the resolver before any subprocess is spawned — fail-loud, no silent
+        pass-through of a stale string the CLI rejects with 'LLM not set'."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        from provider_dispatch import KimiModelResolutionError
+
+        with patch("kimi_wrapper.subprocess.Popen") as mock_popen:
+            with pytest.raises(KimiModelResolutionError):
+                kimi_wrapper.kimi_exec("prompt", model="kimi-k2.6", dispatch_id="d-k013")
+
+        mock_popen.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

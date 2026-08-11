@@ -282,6 +282,77 @@ class TestHeartbeatMonitorLoopKillsSilentWorker(unittest.TestCase):
                 proc.wait(timeout=2.0)
 
 
+class TestHeartbeatKilledEventSetAtKillDecision(unittest.TestCase):
+    """OI-1082: killed_event must be set at the kill DECISION, before
+    _kill_process (worst-case ~10s SIGTERM+SIGKILL waits) and the report
+    write. spawn_kimi joins the monitor thread with a 5s cap and then reads
+    the event — setting it last meant a slow kill left the flag reading False
+    after a real kill, downgrading the receipt's failure_reason to a generic
+    'kimi exited with code -9'."""
+
+    def setUp(self):
+        self._env_patch = {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"}
+        self._saved_env = {k: os.environ.get(k) for k in self._env_patch}
+        os.environ.update(self._env_patch)
+        self._tmpdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_killed_event_visible_while_kill_still_in_flight(self):
+        import provider_spawns.kimi_spawn as kimi_spawn_mod
+
+        # Silent tee file that exists but never grows.
+        log_path = Path(self._tmpdir.name) / "silent.log"
+        log_path.write_text("")
+
+        kill_started = threading.Event()
+        release_kill = threading.Event()
+
+        def _slow_kill(proc):
+            # Models a worker that ignores SIGTERM: _kill_process blocks in its
+            # SIGTERM-wait + SIGKILL-wait windows (~10s worst case).
+            kill_started.set()
+            release_kill.wait(timeout=5.0)
+
+        stop_event = threading.Event()
+        killed_event = threading.Event()
+        proc = MagicMock()
+
+        with patch.object(kimi_spawn_mod, "_kill_process", side_effect=_slow_kill), \
+             patch.object(kimi_spawn_mod, "_write_heartbeat_report"):
+            thread = threading.Thread(
+                target=kimi_spawn_mod._heartbeat_monitor_loop,
+                args=(proc, log_path, "dispatch-oi1082-race", "T1", "kimi-k3",
+                      stop_event, killed_event),
+                kwargs={"poll_interval": 0.05},
+                daemon=True,
+            )
+            thread.start()
+            try:
+                self.assertTrue(
+                    kill_started.wait(timeout=5.0),
+                    "precondition: heartbeat must reach its kill decision",
+                )
+                # The kill is still blocked in _slow_kill. This is exactly the
+                # window in which spawn_kimi's 5s-capped join expires and reads
+                # the flag — it must already be True HERE.
+                self.assertTrue(
+                    killed_event.wait(timeout=1.0),
+                    "killed_event must be set at kill-decision time, not after "
+                    "the kill + report write complete",
+                )
+            finally:
+                release_kill.set()
+                stop_event.set()
+                thread.join(timeout=3.0)
+
+
 class TestHeartbeatMonitorLoopFalsePositiveGuard(unittest.TestCase):
     """The calibration finding that MUST NOT regress: a worker producing
     periodic read-only tool-call activity (no file writes, but a steady
