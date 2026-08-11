@@ -184,6 +184,12 @@ class _TmuxRunner:
         self.dispatch_id = dispatch_id
         self.cwd: Path | None = None
         self.pending_paste = False
+        # OI-1126: tracks the -s value from the last new-session call so
+        # display-message '#{session_name}' echoes back the REAL session that was
+        # spawned (matching real tmux), instead of a hardcoded stand-in — otherwise
+        # _verify_pane_identity() sees it disagree with dispatch()'s own `session`
+        # variable and aborts before delivery even in the success path.
+        self._last_session_name: str | None = None
 
     def available(self) -> bool:
         return True
@@ -191,8 +197,12 @@ class _TmuxRunner:
     def run(self, args, **kwargs) -> TmuxResult:
         if args[0] == "new-session":
             self.cwd = Path(args[args.index("-c") + 1])
+            if "-s" in args:
+                self._last_session_name = args[args.index("-s") + 1]
             return TmuxResult(0, "%1\n", "")
         if args[0] == "display-message":
+            if args[-1] == "#{session_name}":
+                return TmuxResult(0, f"{self._last_session_name or ''}\n", "")
             return TmuxResult(0, "@1\n", "")
         if args[0] == "capture-pane":
             return TmuxResult(0, "Welcome to Claude\n? for shortcuts", "")

@@ -152,11 +152,21 @@ def test_equal_context_matches_tmux_and_provider_assembly(monkeypatch, tmp_path)
 def test_tmux_equal_context_delivers_only_the_benchmark_prompt(monkeypatch, tmp_path):
     runner = Mock()
     runner.available.return_value = True
+    # OI-1126: tracks the -s value from the last new-session call so
+    # display-message '#{session_name}' echoes back the REAL session that was
+    # spawned (matching real tmux), instead of a hardcoded stand-in — otherwise
+    # _verify_pane_identity() sees it disagree with dispatch()'s own `session`
+    # variable and aborts before delivery even in the success path.
+    last_session_name: dict[str, str] = {}
 
     def run_tmux(args, **kwargs):
         if args[0] == "new-session":
+            if "-s" in args:
+                last_session_name["value"] = args[args.index("-s") + 1]
             return TmuxResult(0, "%1\n", "")
         if args[0] == "display-message":
+            if args[-1] == "#{session_name}":
+                return TmuxResult(0, f"{last_session_name.get('value', '')}\n", "")
             return TmuxResult(0, "@1\n", "")
         if args[0] == "capture-pane":
             return TmuxResult(0, "Welcome to Claude\n? for shortcuts", "")
@@ -175,7 +185,7 @@ def test_tmux_equal_context_delivers_only_the_benchmark_prompt(monkeypatch, tmp_
     monkeypatch.setattr(
         lane,
         "_deliver_instruction",
-        lambda pane_id, body: delivered.append(body) or False,
+        lambda pane_id, body, dispatch_id: delivered.append(body) or False,
     )
 
     lane.dispatch(
