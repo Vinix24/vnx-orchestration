@@ -4,8 +4,6 @@
 import json
 import logging
 import os
-import re
-import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -692,136 +690,59 @@ def _check_active_drain(data_root: Path) -> Check:
     )
 
 
-# Hook commands frequently embed relative or absolute script paths. These rot when
-# the install mode changes (embedded -> central) or when files move.
-_HOOK_PATH_RE = re.compile(
-    r"(?:^|(?<=[\s\"'=;]))(?:\$\w+|\$\([^)]*\))?"
-    r"[A-Za-z0-9_./-]*\.(?:sh|py)(?=[\s\"';|&<>(){}]|$)",
-    re.IGNORECASE,
-)
-
-
-def _strip_shell_prefix(raw: str) -> str:
-    """Remove a leading $(...) or $VAR from a path token so it can be resolved."""
-    raw = raw.strip()
-    if raw.startswith("$(") and ")/" in raw:
-        return raw.split(")/", 1)[1]
-    if raw.startswith("${") and "}/" in raw:
-        return raw.split("}/", 1)[1]
-    if raw.startswith("$") and "/" in raw:
-        return raw[raw.find("/") + 1:]
-    return raw
-
-
-def _extract_hook_paths(command: str) -> list[str]:
-    """Return candidate file paths referenced by a hook command string."""
-    candidates: list[str] = []
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        tokens = [command]
-    for token in tokens:
-        for match in _HOOK_PATH_RE.finditer(token):
-            candidates.append(match.group(0))
-    return candidates
-
-
-def _collect_dead_hook_paths(hooks: dict, project_root: Path) -> "tuple[list[str], list[str]]":
-    """Return (dead_relative, dead_absolute) hook paths that reference missing files."""
-    dead_relative: list[str] = []
-    dead_absolute: list[str] = []
-
-    for event, matchers in hooks.items():
-        if not isinstance(matchers, list):
-            continue
-        for matcher in matchers:
-            if not isinstance(matcher, dict):
-                continue
-            for hook in matcher.get("hooks", []):
-                if not isinstance(hook, dict):
-                    continue
-                command = hook.get("command")
-                if not isinstance(command, str):
-                    continue
-                for raw in _extract_hook_paths(command):
-                    normalized = _strip_shell_prefix(raw)
-                    if not normalized or "/" not in normalized:
-                        continue
-                    if normalized.startswith("/"):
-                        abs_path = Path(normalized)
-                        try:
-                            in_project = abs_path.resolve().is_relative_to(project_root)
-                        except OSError:
-                            in_project = False
-                        if not in_project:
-                            continue
-                        if not abs_path.is_file():
-                            dead_absolute.append(normalized)
-                    else:
-                        target = project_root / normalized
-                        if not target.is_file():
-                            dead_relative.append(normalized)
-
-    return dead_relative, dead_absolute
-
-
 def _check_hook_paths(project_dir: Path) -> Check:
-    """WARN for hook commands in .claude/settings.json that reference missing files."""
+    """WARN for hook commands in .claude/settings.json that reference missing files.
+
+    Delegates to hookpin_check.check_project_hook_pins (OI-1123) instead of a second
+    resolver. The prior in-repo version skipped existence-checking any absolute path
+    outside project_dir before touching the filesystem — scoped to the embedded-layout
+    bug it was built for (#1073), not fabric pins. A fabric hook IS an absolute path
+    outside the project by design (``~/.vnx-system/versions/<v>/...``), so that skip
+    silently exempted exactly the pins most likely to go dead on a version rotation:
+    PASS on two confirmed-dead mission-control pins instead of catching them.
+    """
+    def _result(status: str, detail: str) -> Check:
+        return Check(name="hooks:path-resolution", status=status, detail=detail)
+
     settings_path = project_dir / ".claude" / "settings.json"
     if not settings_path.is_file():
-        return Check(
-            name="hooks:path-resolution",
-            status=PASS,
-            detail="no .claude/settings.json found; skipping hook path check",
-        )
+        return _result(PASS, "no .claude/settings.json found; skipping hook path check")
 
     try:
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        json.loads(settings_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        return Check(
-            name="hooks:path-resolution",
-            status=WARN,
-            detail=f".claude/settings.json is unparseable ({exc}); hook paths cannot be audited",
-        )
+        return _result(WARN, f".claude/settings.json is unparseable ({exc}); hook paths cannot be audited")
 
-    hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
-        return Check(
-            name="hooks:path-resolution",
-            status=PASS,
-            detail="no hooks section in .claude/settings.json",
-        )
+    try:
+        _engine.ensure_engine_on_path()
+        from hookpin_check import check_project_hook_pins, STATUS_MISSING, STATUS_UNRESOLVED
+    except Exception as exc:
+        return _result(WARN, f"could not load hookpin_check module: {exc}")
 
-    project_root = project_dir.resolve()
-    dead_relative, dead_absolute = _collect_dead_hook_paths(hooks, project_root)
+    findings = check_project_hook_pins(project_dir.resolve())
+    missing = [f for f in findings if f.status == STATUS_MISSING]
+    unresolved = [f for f in findings if f.status == STATUS_UNRESOLVED]
 
-    if dead_relative or dead_absolute:
-        parts: list[str] = []
-        if dead_relative:
-            descriptions = "; ".join(
-                f"{p} (expected {project_root / p}; "
-                "use canonical .claude/vnx-system/hooks/ or vnx-install)"
-                for p in dead_relative
-            )
-            parts.append(f"referenced hook script(s) missing: {descriptions}")
-        if dead_absolute:
-            descriptions = "; ".join(
-                f"{p} (use canonical .claude/vnx-system/hooks/ or vnx-install, "
-                "not a hardcoded project-relative path)"
-                for p in dead_absolute
-            )
-            parts.append(f"hardcoded absolute project hook path(s) missing: {descriptions}")
-        return Check(
-            name="hooks:path-resolution",
-            status=WARN,
-            detail="; ".join(parts),
-        )
+    if missing:
+        descriptions = "; ".join(f"{f.raw_path} ({f.event}) -> {f.resolved_path}" for f in missing)
+        return _result(WARN, f"{len(missing)} referenced hook script(s) missing: {descriptions}")
 
-    return Check(
-        name="hooks:path-resolution",
-        status=PASS,
-        detail="all referenced hook script paths resolve",
-    )
+    if unresolved:
+        # A locally-assigned shell var (e.g. `ROOT=$(...)` earlier in the same command,
+        # this repo's own settings.json convention) is a real, live pin the resolver
+        # cannot verify — not a defect. PASS, not WARN: this check exists to catch
+        # confirmed-dead pins, and warning on an unprovable blind spot would make it
+        # cry wolf on every project using this idiom instead of surfacing real drift.
+        checked_ok = len(findings) - len(unresolved)
+        return _result(PASS, (
+            f"{checked_ok} of {len(findings)} configured hook pin(s) confirmed resolving; "
+            f"{len(unresolved)} unresolved (not checked, not confirmed dead)"
+        ))
+
+    if not findings:
+        return _result(PASS, "no hooks section in .claude/settings.json")
+
+    return _result(PASS, "all referenced hook script paths resolve")
 
 
 def _check_embedded_path_assumptions() -> Check:
