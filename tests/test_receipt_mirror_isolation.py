@@ -225,15 +225,15 @@ class TestGovernEnsureReceiptIsolation:
     """End-to-end over the exact culprit flow: dispatch_govern.ensure_receipt
     appends a lane-synthesized receipt pinned to the test's own state dir."""
 
-    # QUARANTINED ON CI (Profile A, .github/workflows/vnx-ci.yml -k filter,
-    # OI-1051 versmald, PR #1434): fails ONLY in full-suite collection order
-    # on CI; passes in isolation, including after the merge of main. Measured
-    # on head 9a01f5cc: 1 failed, 15953 passed — this test is the 1. The
-    # stub-teardown in tests/test_intelligence_daemon_paths.py fixed the four
-    # order-dependent sibling failures from OI-1051 plus 13 collateral tests
-    # (test_learning_loop_tz, test_w5b_small_fixes); this one is NOT a remnant
-    # of that cause — root cause still unattributed, and a bisect over the
-    # collection order was deliberately NOT attempted. Still runs locally.
+    # CI quarantine LIFTED (OI-1121; was OI-1051 versmald, PR #1434). The
+    # CI-only, order-dependent red ("primary write to the pinned state dir
+    # must happen") was caused by tests/test_heartbeat_subprocess_cleanup.py:
+    # its _build_monitor() left a MagicMock append_receipt in sys.modules (or
+    # clobbered append_receipt_payload on the real module) with no teardown,
+    # so ensure_receipt's `from append_receipt import append_receipt_payload`
+    # below became a silent no-op mock. Reproduced with the minimal ordered
+    # pair (heartbeat file then this file, one process) and fixed there with
+    # save/restore stubbing — see TestBuildMonitorSysModulesHygiene.
     def test_ensure_receipt_does_not_touch_real_store(self, tmp_path, monkeypatch):
         from dispatch_govern import GovernRaw, GovernSpec, ensure_receipt
 

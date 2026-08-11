@@ -19,17 +19,18 @@
 # (4 tests), and the workflow filters it out with -k "not TestFlagGateClaude" so
 # the file's 29 green tests still run.
 #
-# test_receipt_mirror_isolation.py is NOT listed here either: only
-# TestGovernEnsureReceiptIsolation::test_ensure_receipt_does_not_touch_real_store
-# is red, and ONLY in full-suite collection order on CI — it passes in
-# isolation, including after the merge of main. Measured on head 9a01f5cc:
-# 1 failed, 15953 passed, where this test is the 1. The stub-teardown in
-# tests/test_intelligence_daemon_paths.py fixed its four order-dependent
-# sibling tests plus 13 collateral tests (test_learning_loop_tz,
-# test_w5b_small_fixes); this one is a different, still unattributed cause and
-# a collection-order bisect was deliberately NOT attempted. The workflow
-# filters it out by name in the same -k expression so the file's other seven
-# tests keep running (OI-1051 versmald, PR #1434).
+# test_receipt_mirror_isolation.py is NOT listed here, and its former
+# per-name quarantine (OI-1051 versmald, PR #1434; tracked as OI-1121) is
+# LIFTED: the cause was attributed. tests/test_heartbeat_subprocess_cleanup.py
+# collected earlier and its _build_monitor() left a MagicMock append_receipt
+# module (or clobbered append_receipt_payload on the already-imported real
+# module) in sys.modules with no teardown; dispatch_govern.ensure_receipt's
+# `from append_receipt import append_receipt_payload` then appended via a
+# no-op mock and the pinned ledger was never written — the exact
+# "primary write to the pinned state dir must happen" red. Reproduced with
+# the minimal ordered pair (heartbeat file, then mirror file, one process);
+# fixed with save/restore stubbing plus a sys.modules-hygiene regression
+# test, same shape as the OI-1114 fix in tests/test_intelligence_daemon_paths.py.
 #
 # dispatch 20260802-w20b-1310-red-classify (2026-08-02) added the 42 files below
 # citing OI-946..OI-953: PR #1310 widened this same sweep from 831 files (the

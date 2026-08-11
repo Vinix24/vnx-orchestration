@@ -28,16 +28,39 @@ def _build_monitor():
     attributes exercised by _monitor_dispatch and _is_subprocess_terminal.
     """
     # Import the class — its module-level `from append_receipt import ...`
-    # runs at import time, so we stub it in sys.modules before importing.
+    # runs at import time, so we stub its dependencies in sys.modules for the
+    # duration of the import and RESTORE sys.modules afterwards (OI-1121).
+    #
+    # The previous setdefault-then-mutate version polluted the process for
+    # every later test file: with append_receipt not yet imported it left a
+    # bare MagicMock module in sys.modules; with append_receipt already
+    # imported it clobbered append_receipt_payload on the REAL module. Either
+    # way, the next `from append_receipt import append_receipt_payload`
+    # (dispatch_govern.ensure_receipt) "appended" via a MagicMock and wrote
+    # nothing — which is exactly the CI-only failure that had
+    # test_receipt_mirror_isolation.py::TestGovernEnsureReceiptIsolation::
+    # test_ensure_receipt_does_not_touch_real_store quarantined by name.
+    # Attributes go on FRESH mock modules only; the real module is never
+    # mutated. Same save/restore shape as the OI-1114 fix in
+    # tests/test_intelligence_daemon_paths.py.
     mock_ar = MagicMock()
+    mock_ar.AppendReceiptError = Exception
+    mock_ar.append_receipt_payload = MagicMock(return_value=None)
     mock_ps = MagicMock()
-    sys.modules.setdefault("append_receipt", mock_ar)
-    sys.modules.setdefault("python_singleton", mock_ps)
-    sys.modules["append_receipt"].AppendReceiptError = Exception
-    sys.modules["append_receipt"].append_receipt_payload = MagicMock(return_value=None)
-    sys.modules["python_singleton"].enforce_python_singleton = MagicMock(return_value=None)
+    mock_ps.enforce_python_singleton = MagicMock(return_value=None)
 
-    from heartbeat_ack_monitor import HeartbeatACKMonitor
+    saved = {}
+    for name, mod in (("append_receipt", mock_ar), ("python_singleton", mock_ps)):
+        saved[name] = sys.modules.get(name)
+        sys.modules[name] = mod
+    try:
+        from heartbeat_ack_monitor import HeartbeatACKMonitor
+    finally:
+        for name, original in saved.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
     monitor = HeartbeatACKMonitor.__new__(HeartbeatACKMonitor)
     monitor.active_dispatches = {}
@@ -138,6 +161,48 @@ class TestMonitorDispatchSubprocessCleanup(unittest.TestCase):
 
         self.assertNotIn(dispatch_id, monitor.active_dispatches)
         self.assertNotIn(dispatch_id, monitor.polling_threads)
+
+
+class TestBuildMonitorSysModulesHygiene(unittest.TestCase):
+    """OI-1121 regression: _build_monitor must not leak its dependency stubs.
+
+    The leak had two modes, both permanent for the rest of the pytest process:
+    a bare MagicMock left in sys.modules under the canonical name, or (when the
+    real module was already imported) append_receipt_payload clobbered on the
+    real module. Downstream, dispatch_govern.ensure_receipt's
+    `from append_receipt import append_receipt_payload` silently became a
+    no-op mock — the cause behind the per-name CI quarantine of
+    test_receipt_mirror_isolation.py::TestGovernEnsureReceiptIsolation::
+    test_ensure_receipt_does_not_touch_real_store.
+    """
+
+    def _assert_unpolluted(self, name: str, attr: str):
+        cached = sys.modules.get(name)
+        if cached is not None:
+            self.assertNotIsInstance(
+                cached, MagicMock,
+                f"_build_monitor left a MagicMock in sys.modules['{name}'] (OI-1121)",
+            )
+            self.assertNotIsInstance(
+                getattr(cached, attr, None), MagicMock,
+                f"_build_monitor clobbered the real {name}.{attr} with a MagicMock (OI-1121)",
+            )
+
+    def test_build_monitor_restores_sys_modules(self):
+        _build_monitor()
+        self._assert_unpolluted("append_receipt", "append_receipt_payload")
+        self._assert_unpolluted("python_singleton", "enforce_python_singleton")
+
+    def test_later_canonical_import_gets_real_append_receipt(self):
+        """The exact downstream pattern that broke: a fresh canonical import
+        after _build_monitor must resolve the real module and a real callable."""
+        _build_monitor()
+        import importlib
+
+        real = importlib.import_module("append_receipt")
+        self.assertNotIsInstance(real, MagicMock)
+        self.assertNotIsInstance(real.append_receipt_payload, MagicMock)
+        self.assertTrue(callable(real.append_receipt_payload))
 
 
 if __name__ == "__main__":
