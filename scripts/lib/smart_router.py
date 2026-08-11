@@ -121,13 +121,21 @@ ROLE_TO_TASK_CLASS: Dict[str, str] = {
     "test-engineer": "01_code_generation",
     "quality-engineer": "02_code_review",
     "reviewer": "02_code_review",
+    "code-reviewer": "02_code_review",  # OI-1143: real fleet role (phantom_guard REVIEW_ROLES) was unmapped
     "security-engineer": "02_code_review",
     "architect": "06_design",
+    "system-architect": "06_design",  # OI-1143: fleet role string alongside the short form
     "planner": "06_design",
     "technical-writer": "04_documentation",
     "debugger": "05_debugging",
     "performance-profiler": "05_debugging",
 }
+
+# The classifier's fallthrough class. Roles mapping HERE carry no discriminating
+# signal (builder roles do refactors/debugging/docs in the same lane, and
+# "backend-developer" is additionally the fabric's no-role-resolved sentinel —
+# dispatch_govern._FAKE_DEFAULT_ROLE), so for them the instruction text decides.
+_DEFAULT_TASK_CLASS = "01_code_generation"
 
 
 # ---------------------------------------------------------------------------
@@ -141,28 +149,40 @@ def classify_task(
 ) -> str:
     """Classify a dispatch instruction into one of the 7 task classes.
 
-    Priority:
-      1. Instruction text matched against heuristic regex patterns (first match wins,
-         ordered by task class number — code_gen checked before review, etc.)
-      2. Role-based fallback if no regex matches
-      3. Default: 01_code_generation (safest default — most dispatches are code work)
+    Priority (OI-1143 — role signal dominates verb-guessing when present):
+      1. A role mapping to a NON-default task class (code-reviewer, debugger,
+         architect, ...) is an explicit operator signal and wins outright — a
+         review dispatched to a code-reviewer stays a review even when the
+         instruction text happens to trip a code-gen verb pattern.
+      2. Instruction text matched against heuristic regex patterns (first match
+         wins, ordered by task class number).
+      3. Role-based fallback for default-class (builder) roles. Builder roles map
+         to the classifier's own default, so step 1 skipping them changes nothing
+         for a no-regex-match instruction — and keeps the instruction text
+         deciding for the no-role-resolved sentinel ("backend-developer").
+      4. Default: 01_code_generation (safest default — most dispatches are code work)
 
     dispatch_paths is reserved for future signal enrichment (e.g. docs-only paths
     → documentation class) but not used in the heuristic yet.
     """
     normalized = (instruction or "").strip()
 
+    mapped: Optional[str] = None
+    if role:
+        role_key = role.strip().lstrip("/").lower()
+        mapped = ROLE_TO_TASK_CLASS.get(role_key)
+
+    if mapped and mapped != _DEFAULT_TASK_CLASS:
+        return mapped
+
     for task_class, pattern in _TASK_CLASS_PATTERNS:
         if pattern.search(normalized):
             return task_class
 
-    if role:
-        role_key = role.strip().lstrip("/").lower()
-        mapped = ROLE_TO_TASK_CLASS.get(role_key)
-        if mapped:
-            return mapped
+    if mapped:
+        return mapped
 
-    return "01_code_generation"
+    return _DEFAULT_TASK_CLASS
 
 
 # ---------------------------------------------------------------------------
