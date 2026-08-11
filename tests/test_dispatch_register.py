@@ -479,16 +479,96 @@ class TestAppendEventIdempotent:
         ids = {json.loads(line)["dispatch_id"] for line in reg.read_text().splitlines()}
         assert ids == {"d-idem-a", "d-idem-b"}
 
-    def test_precheck_read_failure_falls_through_to_append(self, isolated_data_dir):
-        """A broken pre-check read must not block the write — better a
-        possible duplicate than a lost event."""
-        with patch("dispatch_register.read_events", side_effect=OSError("boom")):
-            result = dispatch_register.append_event_idempotent(
-                "dispatch_created", dispatch_id="d-idem-preread-fail",
-            )
-        assert result is True
+    def test_corrupt_lines_do_not_block_the_write(self, isolated_data_dir):
+        """Unparseable ledger lines must not block the write — better a
+        possible duplicate than a lost event (same direction the old
+        read_events pre-check fell)."""
         reg = _reg_path(isolated_data_dir)
-        assert len(reg.read_text().splitlines()) == 1
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        reg.write_text('{"broken json\nnot json at all\n[1, 2, 3]\n')
+        result = dispatch_register.append_event_idempotent(
+            "dispatch_created", dispatch_id="d-idem-corrupt",
+        )
+        assert result is True
+        lines = reg.read_text().splitlines()
+        assert json.loads(lines[-1])["dispatch_id"] == "d-idem-corrupt"
+
+
+class TestAppendEventIdempotentRace:
+    """OI-1129: the duplicate check and the append must share ONE critical
+    section — a read-then-write pair lets two concurrent callers both pass
+    the check and both append."""
+
+    def test_race_window_interleaving_produces_single_record(self, isolated_data_dir):
+        """Deterministic simulation of the race window: both callers'
+        pre-checks saw an empty register before either wrote. ``read_events``
+        pinned to [] IS that observation. A check that runs inside the write
+        lock reads the file's actual content and is immune to the pin; the
+        old out-of-lock ``read_events`` pre-check misses both times and
+        appends twice."""
+        with patch("dispatch_register.read_events", return_value=[]):
+            first = dispatch_register.append_event_idempotent(
+                "dispatch_created", dispatch_id="d-oi1129-race",
+            )
+            second = dispatch_register.append_event_idempotent(
+                "dispatch_created", dispatch_id="d-oi1129-race",
+            )
+        assert first is True
+        assert second is True
+        reg = _reg_path(isolated_data_dir)
+        lines = reg.read_text().splitlines()
+        assert len(lines) == 1, f"expected exactly one record, got {len(lines)}: {lines}"
+        assert json.loads(lines[0])["dispatch_id"] == "d-oi1129-race"
+
+    def test_threaded_same_dispatch_single_record(self, isolated_data_dir):
+        """Genuinely concurrent registrations of the same dispatch produce
+        one record: flock serializes distinct file descriptors even within
+        one process, so every thread's check sees the winner's append."""
+        n = 6
+        barrier = threading.Barrier(n)
+        results: list[bool] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            barrier.wait()
+            result = dispatch_register.append_event_idempotent(
+                "dispatch_created", dispatch_id="d-oi1129-threads",
+            )
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=worker) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert results == [True] * n
+        reg = _reg_path(isolated_data_dir)
+        lines = reg.read_text().splitlines()
+        assert len(lines) == 1, f"expected exactly one record, got {len(lines)}: {lines}"
+
+    def test_threaded_distinct_dispatches_all_land(self, isolated_data_dir):
+        """Dedup is per-identity: concurrent registrations of DIFFERENT
+        dispatches must all land."""
+        ids = [f"d-oi1129-distinct-{i}" for i in range(4)]
+        barrier = threading.Barrier(len(ids))
+
+        def worker(dispatch_id: str) -> None:
+            barrier.wait()
+            dispatch_register.append_event_idempotent(
+                "dispatch_created", dispatch_id=dispatch_id,
+            )
+
+        threads = [threading.Thread(target=worker, args=(d,)) for d in ids]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        reg = _reg_path(isolated_data_dir)
+        written = {json.loads(line)["dispatch_id"] for line in reg.read_text().splitlines()}
+        assert written == set(ids)
 
 
 # ---------------------------------------------------------------------------
