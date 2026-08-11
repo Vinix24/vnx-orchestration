@@ -32,7 +32,9 @@ sys.path.insert(0, str(SCRIPTS_LIB))
 
 from report_to_receipt_converter import (
     _WATERMARK_FILENAME,
+    _classify_non_dispatch_report,
     _compute_sha256,
+    _convert_one_detailed,
     _extract_body_fields,
     _is_known_dispatch,
     _load_route_decision,
@@ -1781,3 +1783,399 @@ class TestLaneIdentityResolution:
         # No route_decision → body is the fallback. "claude" is already canonical.
         assert receipt["provider"] == "claude"
         assert receipt["model"] == "sonnet"
+
+
+# ---------------------------------------------------------------------------
+# Part 14: OI-1120 — non-dispatch reports must never be judged against the
+# dispatch register and must never be dead-lettered as unknown_dispatch.
+# ---------------------------------------------------------------------------
+
+_CONTRACT_BODY = (
+    "## Summary\n\nThis summary has more than fifty non-whitespace characters "
+    "so the body contract validates cleanly.\n\n"
+    "## Changes\n\n- none\n\n## Verification\n\n- none\n\n## Open Items\n\nNone\n"
+)
+
+
+class TestClassifyNonDispatchReport:
+    """_classify_non_dispatch_report() — the pure classification function."""
+
+    @pytest.mark.parametrize("relpath,expected", [
+        ("unified_reports/headless/20260706-153235-HEADLESS-codex_gate-pr-1026-c77770.md", "headless_gate_report"),
+        ("panel-strategy-abcd1234.md", "non_dispatch_tool_output"),
+        ("worktree-release-20260810-120000.md", "non_dispatch_tool_output"),
+        ("20260810g-a-converter-scoping.md", None),  # real dispatch report -> candidate
+        ("dispatch-20260810-phantom-example.md", None),  # OI-1102 shape -> still a candidate
+    ])
+    def test_classification(self, tmp_path, relpath, expected):
+        p = tmp_path / relpath
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_CONTRACT_BODY, encoding="utf-8")
+        assert _classify_non_dispatch_report(p) == expected
+
+
+class TestHeadlessReportNeverDeadlettered:
+    """A HEADLESS gate report must be skipped, not judged against the
+    dispatch register, and must never be moved into receipt_deadletter/."""
+
+    def test_headless_report_skipped_not_deadlettered(self, tmp_path, state_dir):
+        # Empty register: if the scoping check did not fire, the filename-
+        # derived id would definitely miss the register and get dead-lettered.
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+
+        headless_dir = tmp_path / "unified_reports" / "headless"
+        headless_dir.mkdir(parents=True)
+        report = headless_dir / "20260706-153235-HEADLESS-codex_gate-pr-1026-c77770.md"
+        report.write_text(
+            "codex_gate result for PR 1026: PASS\nno dispatch id here at all\n",
+            encoding="utf-8",
+        )
+
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+
+        assert outcome == "skipped_non_dispatch"
+        assert result is None
+        assert report.exists(), "HEADLESS report must not be moved"
+        assert not (state_dir / "receipt_deadletter").exists(), (
+            "HEADLESS report must never reach the dead-letter path"
+        )
+
+    def test_panel_report_skipped_not_deadlettered(self, tmp_path, state_dir):
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = tmp_path / "panel-strategy-abcd1234.md"
+        report.write_text(
+            "# Deliberation panel — strategy\n\n## Synthesis (cited)\n\nfoo\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+        assert outcome == "skipped_non_dispatch"
+        assert result is None
+        assert report.exists()
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_worktree_release_report_skipped_not_deadlettered(self, tmp_path, state_dir):
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = tmp_path / "worktree-release-20260810-120000.md"
+        report.write_text("=== Worktree Release [DRY-RUN] ===\n", encoding="utf-8")
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+        assert outcome == "skipped_non_dispatch"
+        assert result is None
+        assert report.exists()
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_skipped_non_dispatch_marked_processed_via_scan_and_convert(self, tmp_path, state_dir):
+        """scan_and_convert() must count it, mark it processed, and leave it
+        in place — visible via ScanStats, not silent."""
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        reports_dir = tmp_path / "unified_reports"
+        headless_dir = reports_dir / "headless"
+        headless_dir.mkdir(parents=True)
+        report = headless_dir / "20260706-153235-HEADLESS-codex_gate-pr-1026-c77770.md"
+        report.write_text("codex_gate result: PASS\n", encoding="utf-8")
+
+        stats = scan_and_convert([reports_dir, headless_dir], state_dir)
+
+        assert stats.skipped_non_dispatch_count == 1
+        assert stats.new_count == 0
+        assert stats.malformed_count == 0
+        assert report.exists()
+        assert not (state_dir / "receipt_deadletter").exists()
+        # attempted_count must NOT count skipped_non_dispatch — otherwise a
+        # scan cycle with ONLY headless reports would read as unhealthy.
+        assert stats.attempted_count == 0
+
+
+class TestOI1102PhantomStillDeadlettered:
+    """Regression guard: the guard OI-1102 was actually built for — a
+    dispatch-<id>.md report whose id exists ONLY in the filename and nowhere
+    in the content — must still be dead-lettered when unregistered."""
+
+    def test_filename_only_phantom_still_deadlettered(self, tmp_path, state_dir):
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = tmp_path / "dispatch-20260810-phantom-example.md"
+        report.write_text(_CONTRACT_BODY, encoding="utf-8")
+
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+
+        assert result is None
+        deadletter_dir = state_dir / "receipt_deadletter"
+        assert deadletter_dir.exists(), "phantom report must be dead-lettered"
+        assert not report.exists(), "phantom report must be moved out of the source dir"
+        moved = list(deadletter_dir.glob("dispatch-20260810-phantom-example*.md"))
+        assert moved, f"expected a moved copy in {deadletter_dir}"
+
+
+# ---------------------------------------------------------------------------
+# Part 15: OI-1120 — markdown list-item Dispatch-ID form
+# ---------------------------------------------------------------------------
+
+class TestListItemDispatchIdForm:
+    """The report contract allows the id as a 'plain-text or bold field'; a
+    markdown list item (`- Dispatch-ID: x`) is within that instruction, so
+    the parser — not the workers — was wrong."""
+
+    @pytest.mark.parametrize("marker", ["-", "*"])
+    def test_extract_body_fields_accepts_list_item_form(self, marker):
+        text = f"{marker} Dispatch-ID: 20260810e-a-seattimeout-1444\n\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810e-a-seattimeout-1444"
+
+    def test_list_item_form_produces_receipt_with_correct_dispatch_id(self, tmp_path, state_dir):
+        # Empty register + a filename that does NOT match dispatch_id: if
+        # content extraction were still broken, the filename-derived
+        # fallback id ("some-other-report-name") would miss the empty
+        # register and get dead-lettered instead. Only a correctly
+        # extracted CONTENT dispatch_id makes this test pass — the id
+        # cannot coincidentally come from the filename.
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        dispatch_id = "20260810e-a-seattimeout-1444"
+        report = tmp_path / "some-other-report-name.md"
+        report.write_text(
+            f"- Dispatch-ID: {dispatch_id}\n\n{_CONTRACT_BODY}**Model**: sonnet\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        assert result.status == "appended"
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        assert receipts[0]["dispatch_id"] == dispatch_id
+        # content_id_valid is now True from the list-item form, so this must
+        # NOT be report_contract_invalid on the dispatch_id axis, and must
+        # never touch the dead-letter path.
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_diff_addition_line_does_not_false_positive_as_dispatch_id_key(self):
+        """A pasted unified-diff line adding a `dispatch_id: str` parameter
+        must not be mistaken for a Dispatch-ID stamp — '+' is deliberately
+        excluded from the marker class (see _DISPATCH_ID_KEY_RE comment)."""
+        text = "Some prose before.\n\n+        dispatch_id: str,\n\nMore prose after.\n"
+        fields = _extract_body_fields(text)
+        assert "dispatch_id" not in fields
+
+    def test_fenced_code_block_placeholder_is_a_known_pre_existing_gap(self):
+        """Neither regex is fence-aware — a placeholder in a ``` block already
+        matched pre-widening when unmarked (bare `Dispatch-ID: <id>`); this
+        widens WHICH shapes hit that same gap, not a new gap (fence-tracking
+        is out of scope). Regression pin, not a correctness claim — 0 real
+        collisions across 4411 reports scanned for this dispatch."""
+        text = (
+            "Example report shape:\n\n"
+            "```\n"
+            "- Dispatch-ID: <your-dispatch-id>\n"
+            "```\n\n" + _CONTRACT_BODY
+        )
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "<your-dispatch-id>"
+
+    def test_prose_sentence_mentioning_dispatch_id_does_not_match(self):
+        """A sentence that merely mentions 'Dispatch-ID' must not match —
+        the anchored ^...$ line match requires the whole line to be the
+        marker + label + value, not a substring within prose."""
+        text = (
+            "- A branch named `dispatch/<dispatch-id>`, pushed to origin.\n"
+            "- A completion report with the `Dispatch-ID` field included.\n"
+            + _CONTRACT_BODY
+        )
+        fields = _extract_body_fields(text)
+        assert "dispatch_id" not in fields
+
+
+# ---------------------------------------------------------------------------
+# Part 16: PR #1445 round 2 — regex regression + OI-1122 + OI-1125
+# ---------------------------------------------------------------------------
+
+class TestPlainRegexNoLongerMatchesDiffRemovalLines:
+    """Round-1 widening (leading \\s* + [-*]\\s+) treated the unified-diff
+    REMOVAL prefix ('-') as symmetric with a genuine list-item marker. Both
+    diff-removal shapes below must stop matching; all genuine forms, and the
+    <dispatch_id> placeholder (a SEPARATE OI-1122 concern — the regex must
+    still extract it so the shape-check downstream has something to reject),
+    must keep matching."""
+
+    @pytest.mark.parametrize("name,text,expected", [
+        ("bare", "Dispatch-ID: 20260810g-a-converter-scoping", "20260810g-a-converter-scoping"),
+        ("dash_list_item", "- Dispatch-ID: 20260810e-a-seattimeout-1444", "20260810e-a-seattimeout-1444"),
+        ("star_list_item", "* Dispatch-ID: 20260810e-a-seattimeout-1444", "20260810e-a-seattimeout-1444"),
+        ("diff_removal_dispatch_id_key", "-        dispatch_id: str,", None),
+        ("diff_removal_dispatch_id_bold_label", "-    Dispatch-ID: old-value", None),
+        ("indented_codeblock_line", "    Dispatch-ID: some-value", None),
+        ("placeholder_echo", "Dispatch-ID: <dispatch_id>", "<dispatch_id>"),
+    ])
+    def test_seven_shapes(self, name, text, expected):
+        fields = _extract_body_fields(text + "\n" + _CONTRACT_BODY)
+        assert fields.get("dispatch_id") == expected, f"shape={name!r} text={text!r}"
+
+    def test_diff_removal_old_value_never_becomes_receipt_identity(self, tmp_path):
+        """The dangerous row from the finding: a report that quotes a diff
+        REMOVING a Dispatch-ID line must not adopt the old value. No genuine
+        stamp is present anywhere else in this report, so if the diff-quote
+        line matched, THAT would become the (wrong) receipt identity via the
+        filename-fallback-bypassing content path."""
+        text = (
+            "## Summary\n\nThis summary has more than fifty non-whitespace characters "
+            "so the body contract validates cleanly.\n\n"
+            "## Changes\n\nDiff excerpt:\n```diff\n"
+            "-    Dispatch-ID: old-value\n"
+            "+    Dispatch-ID: 20260810g-a-converter-scoping\n"
+            "```\n\n## Verification\n\n- none\n\n## Open Items\n\nNone\n"
+        )
+        report = tmp_path / "20260810g-a-converter-scoping.md"
+        report.write_text(text, encoding="utf-8")
+        receipt = build_receipt_from_report(report, text)
+        assert receipt is not None
+        # Neither diff-quote line is a genuine stamp (the '+' row was already
+        # excluded pre-#1445), so the id must come from the filename, not
+        # 'old-value' — and the receipt must be a contract violation, not a
+        # clean task_complete carrying a wrong id.
+        assert receipt["dispatch_id"] == "20260810g-a-converter-scoping"
+        assert receipt["dispatch_id"] != "old-value"
+        assert receipt["event_type"] == "report_contract_invalid"
+
+
+class TestDispatchIdKeyRegexNoLongerMatchesDiffRemovalLines:
+    """Same regression, same fix, applied to _DISPATCH_ID_KEY_RE (the
+    'dispatch_id:' underscore-key sibling of _DISPATCH_PLAIN_RE) — codex
+    defense checklist: same fix to all handlers."""
+
+    def test_diff_removal_underscore_key_does_not_match(self):
+        text = "-        dispatch_id: str,\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert "dispatch_id" not in fields
+
+    def test_bare_underscore_key_still_matches(self):
+        text = "dispatch_id: 20260810g-a-converter-scoping\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
+
+
+class TestOI1122PlaceholderShapeValidation:
+    """A worker that echoes the instruction template verbatim
+    (`Dispatch-ID: <dispatch_id>`) must not have the literal placeholder
+    adopted as the receipt identity — it must be treated as no-content-id
+    and fall through to the existing filename fallback / OI-1102 register
+    cross-check, exactly like a missing id."""
+
+    def test_placeholder_falls_back_to_filename_when_registered(self, tmp_path, state_dir):
+        dispatch_id = "20260810g-x-placeholder-registered"
+        reg = state_dir / "dispatch_register.ndjson"
+        reg.write_text(
+            json.dumps({"dispatch_id": dispatch_id, "event": "dispatch_created"}) + "\n",
+            encoding="utf-8",
+        )
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            f"**Dispatch-ID**: <dispatch_id>\n\n{_CONTRACT_BODY}**Model**: sonnet\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+
+        assert outcome not in ("malformed",)
+        assert not (state_dir / "receipt_deadletter").exists()
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        assert receipts[0]["dispatch_id"] == dispatch_id
+        assert receipts[0]["dispatch_id"] != "<dispatch_id>"
+        assert receipts[0]["event_type"] == "report_contract_invalid"
+
+    def test_placeholder_still_deadlettered_when_unregistered(self, tmp_path, state_dir):
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = tmp_path / "dispatch-20260810-placeholder-phantom.md"
+        report.write_text(
+            "**Dispatch-ID**: <dispatch_id>\n\n" + _CONTRACT_BODY, encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+
+        assert result is None
+        deadletter_dir = state_dir / "receipt_deadletter"
+        assert deadletter_dir.exists(), "unregistered placeholder-only report must still dead-letter"
+
+    def test_malformed_shape_falls_back_as_second_line_of_defense(self, tmp_path):
+        """'str,' passes the deny-list ('unknown'/'none'/'null') but fails
+        _ID_RE shape — the fix must catch it even though the regex fix
+        (Finding 1) already stops it from ever being extracted this way in
+        practice. Stamped via the BOLD form, which does not itself validate
+        value shape, to exercise the shape-check independently of Finding 1."""
+        text = "**Dispatch-ID**: str,\n\n" + _CONTRACT_BODY
+        report = tmp_path / "20260810g-x-malformed-shape.md"
+        report.write_text(text, encoding="utf-8")
+        receipt = build_receipt_from_report(report, text)
+        assert receipt is not None
+        assert receipt["dispatch_id"] == "20260810g-x-malformed-shape"
+        assert receipt["dispatch_id"] != "str,"
+        assert receipt["event_type"] == "report_contract_invalid"
+
+
+class TestOI1125BoldColonInsideMarkers:
+    """Workers also write **Dispatch-ID:** value (colon INSIDE the closing
+    markers), not just **Dispatch-ID**: value (colon after). Both placements
+    must extract identically; a bold phrase with no colon at all must still
+    not be treated as a field."""
+
+    def test_extract_body_fields_accepts_colon_inside_markers(self):
+        text = "**Dispatch-ID:** 20260810g-a-converter-scoping\n\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
+
+    def test_extract_body_fields_still_accepts_colon_outside_markers(self):
+        """Parity guard: the pre-existing outer-colon form must not regress
+        when the inner-colon alternative is added."""
+        text = "**Dispatch-ID**: 20260810g-a-converter-scoping\n\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
+
+    def test_bold_phrase_with_no_colon_is_not_a_false_positive(self):
+        """'**important**' with no colon anywhere must not be captured as a
+        key/value pair by either alternative of the widened pattern."""
+        text = "**important** just some bold prose, not a field.\n\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert "important" not in fields
+        assert "dispatch_id" not in fields
+
+    def test_colon_inside_markers_produces_receipt_with_correct_dispatch_id(self, tmp_path, state_dir):
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        dispatch_id = "20260810g-a-converter-scoping"
+        report = tmp_path / "some-other-report-name.md"
+        report.write_text(
+            f"**Dispatch-ID:** {dispatch_id}\n\n{_CONTRACT_BODY}**Model**: sonnet\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        assert result.status == "appended"
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        assert receipts[0]["dispatch_id"] == dispatch_id
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_midline_prose_quoting_inner_colon_shape_is_not_a_false_positive(self):
+        """Blast-radius regression pin (found scanning the real
+        unified_reports/ corpus, 2026-08-10): a report's OWN changelog prose
+        can quote the exact `**Dispatch-ID:**` shape as an example of what a
+        parser now tolerates — e.g. a line describing a fix to bold-header
+        parsing. That mid-sentence occurrence is not a field declaration and
+        must not shadow the report's real (earlier, bare-form) Dispatch-ID
+        via fields.setdefault()'s first-wins order. The inner-colon
+        alternative is anchored to line start specifically so a `**` that
+        does not begin its own line can never match."""
+        text = (
+            "Dispatch-ID: 20260810g-a-converter-scoping\n\n" + _CONTRACT_BODY +
+            "  - `DISPATCH_HEADER_RE` now tolerates bold `**Dispatch-ID:**` "
+            "labels (closing `**` sits after the colon).\n"
+        )
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
