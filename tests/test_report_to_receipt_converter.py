@@ -1986,3 +1986,196 @@ class TestListItemDispatchIdForm:
         )
         fields = _extract_body_fields(text)
         assert "dispatch_id" not in fields
+
+
+# ---------------------------------------------------------------------------
+# Part 16: PR #1445 round 2 — regex regression + OI-1122 + OI-1125
+# ---------------------------------------------------------------------------
+
+class TestPlainRegexNoLongerMatchesDiffRemovalLines:
+    """Round-1 widening (leading \\s* + [-*]\\s+) treated the unified-diff
+    REMOVAL prefix ('-') as symmetric with a genuine list-item marker. Both
+    diff-removal shapes below must stop matching; all genuine forms, and the
+    <dispatch_id> placeholder (a SEPARATE OI-1122 concern — the regex must
+    still extract it so the shape-check downstream has something to reject),
+    must keep matching."""
+
+    @pytest.mark.parametrize("name,text,expected", [
+        ("bare", "Dispatch-ID: 20260810g-a-converter-scoping", "20260810g-a-converter-scoping"),
+        ("dash_list_item", "- Dispatch-ID: 20260810e-a-seattimeout-1444", "20260810e-a-seattimeout-1444"),
+        ("star_list_item", "* Dispatch-ID: 20260810e-a-seattimeout-1444", "20260810e-a-seattimeout-1444"),
+        ("diff_removal_dispatch_id_key", "-        dispatch_id: str,", None),
+        ("diff_removal_dispatch_id_bold_label", "-    Dispatch-ID: old-value", None),
+        ("indented_codeblock_line", "    Dispatch-ID: some-value", None),
+        ("placeholder_echo", "Dispatch-ID: <dispatch_id>", "<dispatch_id>"),
+    ])
+    def test_seven_shapes(self, name, text, expected):
+        fields = _extract_body_fields(text + "\n" + _CONTRACT_BODY)
+        assert fields.get("dispatch_id") == expected, f"shape={name!r} text={text!r}"
+
+    def test_diff_removal_old_value_never_becomes_receipt_identity(self, tmp_path):
+        """The dangerous row from the finding: a report that quotes a diff
+        REMOVING a Dispatch-ID line must not adopt the old value. No genuine
+        stamp is present anywhere else in this report, so if the diff-quote
+        line matched, THAT would become the (wrong) receipt identity via the
+        filename-fallback-bypassing content path."""
+        text = (
+            "## Summary\n\nThis summary has more than fifty non-whitespace characters "
+            "so the body contract validates cleanly.\n\n"
+            "## Changes\n\nDiff excerpt:\n```diff\n"
+            "-    Dispatch-ID: old-value\n"
+            "+    Dispatch-ID: 20260810g-a-converter-scoping\n"
+            "```\n\n## Verification\n\n- none\n\n## Open Items\n\nNone\n"
+        )
+        report = tmp_path / "20260810g-a-converter-scoping.md"
+        report.write_text(text, encoding="utf-8")
+        receipt = build_receipt_from_report(report, text)
+        assert receipt is not None
+        # Neither diff-quote line is a genuine stamp (the '+' row was already
+        # excluded pre-#1445), so the id must come from the filename, not
+        # 'old-value' — and the receipt must be a contract violation, not a
+        # clean task_complete carrying a wrong id.
+        assert receipt["dispatch_id"] == "20260810g-a-converter-scoping"
+        assert receipt["dispatch_id"] != "old-value"
+        assert receipt["event_type"] == "report_contract_invalid"
+
+
+class TestDispatchIdKeyRegexNoLongerMatchesDiffRemovalLines:
+    """Same regression, same fix, applied to _DISPATCH_ID_KEY_RE (the
+    'dispatch_id:' underscore-key sibling of _DISPATCH_PLAIN_RE) — codex
+    defense checklist: same fix to all handlers."""
+
+    def test_diff_removal_underscore_key_does_not_match(self):
+        text = "-        dispatch_id: str,\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert "dispatch_id" not in fields
+
+    def test_bare_underscore_key_still_matches(self):
+        text = "dispatch_id: 20260810g-a-converter-scoping\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
+
+
+class TestOI1122PlaceholderShapeValidation:
+    """A worker that echoes the instruction template verbatim
+    (`Dispatch-ID: <dispatch_id>`) must not have the literal placeholder
+    adopted as the receipt identity — it must be treated as no-content-id
+    and fall through to the existing filename fallback / OI-1102 register
+    cross-check, exactly like a missing id."""
+
+    def test_placeholder_falls_back_to_filename_when_registered(self, tmp_path, state_dir):
+        dispatch_id = "20260810g-x-placeholder-registered"
+        reg = state_dir / "dispatch_register.ndjson"
+        reg.write_text(
+            json.dumps({"dispatch_id": dispatch_id, "event": "dispatch_created"}) + "\n",
+            encoding="utf-8",
+        )
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            f"**Dispatch-ID**: <dispatch_id>\n\n{_CONTRACT_BODY}**Model**: sonnet\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+
+        assert outcome not in ("malformed",)
+        assert not (state_dir / "receipt_deadletter").exists()
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        assert receipts[0]["dispatch_id"] == dispatch_id
+        assert receipts[0]["dispatch_id"] != "<dispatch_id>"
+        assert receipts[0]["event_type"] == "report_contract_invalid"
+
+    def test_placeholder_still_deadlettered_when_unregistered(self, tmp_path, state_dir):
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = tmp_path / "dispatch-20260810-placeholder-phantom.md"
+        report.write_text(
+            "**Dispatch-ID**: <dispatch_id>\n\n" + _CONTRACT_BODY, encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result, outcome = _convert_one_detailed(report, receipts_file=receipts_file)
+
+        assert result is None
+        deadletter_dir = state_dir / "receipt_deadletter"
+        assert deadletter_dir.exists(), "unregistered placeholder-only report must still dead-letter"
+
+    def test_malformed_shape_falls_back_as_second_line_of_defense(self, tmp_path):
+        """'str,' passes the deny-list ('unknown'/'none'/'null') but fails
+        _ID_RE shape — the fix must catch it even though the regex fix
+        (Finding 1) already stops it from ever being extracted this way in
+        practice. Stamped via the BOLD form, which does not itself validate
+        value shape, to exercise the shape-check independently of Finding 1."""
+        text = "**Dispatch-ID**: str,\n\n" + _CONTRACT_BODY
+        report = tmp_path / "20260810g-x-malformed-shape.md"
+        report.write_text(text, encoding="utf-8")
+        receipt = build_receipt_from_report(report, text)
+        assert receipt is not None
+        assert receipt["dispatch_id"] == "20260810g-x-malformed-shape"
+        assert receipt["dispatch_id"] != "str,"
+        assert receipt["event_type"] == "report_contract_invalid"
+
+
+class TestOI1125BoldColonInsideMarkers:
+    """Workers also write **Dispatch-ID:** value (colon INSIDE the closing
+    markers), not just **Dispatch-ID**: value (colon after). Both placements
+    must extract identically; a bold phrase with no colon at all must still
+    not be treated as a field."""
+
+    def test_extract_body_fields_accepts_colon_inside_markers(self):
+        text = "**Dispatch-ID:** 20260810g-a-converter-scoping\n\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
+
+    def test_extract_body_fields_still_accepts_colon_outside_markers(self):
+        """Parity guard: the pre-existing outer-colon form must not regress
+        when the inner-colon alternative is added."""
+        text = "**Dispatch-ID**: 20260810g-a-converter-scoping\n\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
+
+    def test_bold_phrase_with_no_colon_is_not_a_false_positive(self):
+        """'**important**' with no colon anywhere must not be captured as a
+        key/value pair by either alternative of the widened pattern."""
+        text = "**important** just some bold prose, not a field.\n\n" + _CONTRACT_BODY
+        fields = _extract_body_fields(text)
+        assert "important" not in fields
+        assert "dispatch_id" not in fields
+
+    def test_colon_inside_markers_produces_receipt_with_correct_dispatch_id(self, tmp_path, state_dir):
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        dispatch_id = "20260810g-a-converter-scoping"
+        report = tmp_path / "some-other-report-name.md"
+        report.write_text(
+            f"**Dispatch-ID:** {dispatch_id}\n\n{_CONTRACT_BODY}**Model**: sonnet\n",
+            encoding="utf-8",
+        )
+        receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+        result = convert_report_to_receipt(report, receipts_file=receipts_file)
+
+        assert result is not None
+        assert result.status == "appended"
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        assert receipts[0]["dispatch_id"] == dispatch_id
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_midline_prose_quoting_inner_colon_shape_is_not_a_false_positive(self):
+        """Blast-radius regression pin (found scanning the real
+        unified_reports/ corpus, 2026-08-10): a report's OWN changelog prose
+        can quote the exact `**Dispatch-ID:**` shape as an example of what a
+        parser now tolerates — e.g. a line describing a fix to bold-header
+        parsing. That mid-sentence occurrence is not a field declaration and
+        must not shadow the report's real (earlier, bare-form) Dispatch-ID
+        via fields.setdefault()'s first-wins order. The inner-colon
+        alternative is anchored to line start specifically so a `**` that
+        does not begin its own line can never match."""
+        text = (
+            "Dispatch-ID: 20260810g-a-converter-scoping\n\n" + _CONTRACT_BODY +
+            "  - `DISPATCH_HEADER_RE` now tolerates bold `**Dispatch-ID:**` "
+            "labels (closing `**` sits after the colon).\n"
+        )
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"

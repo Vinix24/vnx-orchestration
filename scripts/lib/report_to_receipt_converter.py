@@ -57,7 +57,28 @@ _WATERMARK_FILENAME = "report_to_receipt_processed.txt"
 _BASH_WATERMARK_FILENAME = "processed_receipts.txt"
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-_BOLD_KV_RE = re.compile(r"\*\*([^*]+)\*\*:\s*(.+)", re.MULTILINE)
+# OI-1125: workers also write the colon INSIDE the closing markers
+# (`**Dispatch-ID:** value`), not just after them (`**Dispatch-ID**: value`).
+# Two alternatives, one per colon placement — Python's re has no branch-reset
+# groups, so group 1/2 hold the outer-colon form and group 3/4 the
+# inner-colon form; exactly one pair is non-None per match.
+#
+# The inner-colon alternative is anchored to line start (optional [-*]
+# marker, mirroring _DISPATCH_PLAIN_RE) — unlike the pre-existing outer-colon
+# alternative, which is a bare substring search with no anchor at all. This
+# is not cosmetic: the unanchored form was measured against the real
+# unified_reports/ corpus (4015 files) and produced a genuine false positive
+# — a report's OWN changelog prose, `` `**Dispatch-ID:**` labels (closing
+# `**` sits after the colon) ``, quoting the exact inner-colon shape as an
+# example, matched as if it were a field declaration and its trailing prose
+# became the "value", shadowing (via fields.setdefault order) the report's
+# real bare Dispatch-ID line earlier in the same file. Anchoring closes this
+# without touching the outer form's existing (unrelated, pre-#1445) lack of
+# anchoring, which is out of scope here. Neither alternative matches bold
+# text with no colon at all (e.g. `**note** text`).
+_BOLD_KV_RE = re.compile(
+    r"\*\*([^*]+)\*\*:\s*(.+)|^\s*(?:[-*]\s+)?\*\*([^*]+):\*\*\s*(.+)", re.MULTILINE
+)
 # OI-1120: the report contract tells workers to stamp the id "as a plain-text
 # or bold field" — a markdown list item (`- Dispatch-ID: x`) is plainly within
 # that instruction, so the optional leading marker must be tolerated. `+` is
@@ -67,11 +88,28 @@ _BOLD_KV_RE = re.compile(r"\*\*([^*]+)\*\*:\s*(.+)", re.MULTILINE)
 # included, which is not a real id stamp. `-`/`*` cover every genuine
 # list-item occurrence observed in the corpus (grep across 4411 real reports:
 # 5 genuine `- Dispatch-ID:` stamps, 0 false positives) with no such collision.
+#
+# OI-1120 round 2: `-` is ALSO the unified-diff REMOVAL prefix, and the first
+# cut (leading `\s*` + `[-*]\s+`) treated it as symmetric with a genuine list
+# item, so `-        dispatch_id: str,` (a pasted removed function signature)
+# and `-    Dispatch-ID: old-value` (a pasted removed id stamp) both matched —
+# the second one is dangerous: a report quoting a diff that REMOVES a
+# Dispatch-ID line would adopt the OLD value as the receipt identity. Anchored
+# at `^` with no leading `\s*`, and the marker is followed by exactly one
+# literal space (`[-*] `, not `[-*]\s+`): a genuine list item is always
+# "marker, single space, label" with nothing else preceding it on the line,
+# while a diff-removal line has arbitrary reindentation whitespace after the
+# `-` that no longer lines up with a single space. This also stops matching
+# an indented line (the shape a fenced/indented code block produces),
+# closing the "code block placeholder" gap the round-1 test recorded as a
+# known pre-existing hole. Blast-radius re-measured across all 4015 reports
+# in unified_reports/ (2026-08-10): 0 reports whose only Dispatch-ID form is
+# indented — nothing regresses from dropping the leading `\s*`.
 _DISPATCH_PLAIN_RE = re.compile(
-    r"^\s*(?:[-*]\s+)?Dispatch-ID:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
+    r"^(?:[-*] )?Dispatch-ID:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
 )
 _DISPATCH_ID_KEY_RE = re.compile(
-    r"^\s*(?:[-*]\s+)?dispatch_id:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
+    r"^(?:[-*] )?dispatch_id:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE
 )
 
 
@@ -344,12 +382,15 @@ def _extract_body_fields(text: str) -> Dict[str, Any]:
     """Extract **Key**: value fields + plain-text Dispatch-ID fallback from body."""
     fields: Dict[str, Any] = {}
     for m in _BOLD_KV_RE.finditer(text[:3000]):
-        key = m.group(1).strip().lower().replace("-", "_").replace(" ", "_")
+        raw_key, raw_val = (
+            (m.group(1), m.group(2)) if m.group(1) is not None else (m.group(3), m.group(4))
+        )
+        key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
         # A bold key whose value is whitespace-only (e.g. truncated at the
         # text[:3000] scan boundary, or genuinely empty in the source report)
         # strips down to "" — splitlines() on "" is [], so index [0] would
         # raise IndexError. Guard it: no non-empty first line means no value.
-        value_lines = m.group(2).strip().splitlines()
+        value_lines = raw_val.strip().splitlines()
         val = value_lines[0].strip() if value_lines else ""
         if key and val:
             fields.setdefault(key, val)
@@ -620,6 +661,7 @@ def build_receipt_from_report(
     """
     sys.path.insert(0, str(_LIB_DIR))
     from report_body_contract import validate_body
+    from dispatch_spec import _ID_RE  # OI-1122: single shape definition, shared with staging
     from datetime import datetime, timezone
 
     fm = parse_frontmatter(text)
@@ -631,9 +673,20 @@ def build_receipt_from_report(
     # A filename-derived dispatch_id is NOT authoritative and is treated as a
     # contract violation — it must not produce a clean task_complete receipt.
     content_dispatch_id: Optional[str] = merged.get("dispatch_id") or None
+    # OI-1122: a growing deny-list ("unknown"/"none"/"null") never covers a
+    # template placeholder echoed back verbatim (`Dispatch-ID: <dispatch_id>`)
+    # — the literal string isn't in the list, so it was adopted as the real
+    # receipt identity, starving the actual dispatch of a closing receipt.
+    # Validate the shape instead: dispatch_spec._ID_RE is the SAME rule
+    # staging already enforces for a legal id, so a value that fails it can
+    # never have been a real dispatch_id to begin with. A shape failure is
+    # treated identically to a missing id — it falls through to the filename
+    # fallback and the existing OI-1102 register cross-check below, not a
+    # new rejection path of its own.
     content_id_valid = bool(
         content_dispatch_id
         and content_dispatch_id.lower() not in ("unknown", "none", "null")
+        and _ID_RE.match(content_dispatch_id)
     )
 
     # Validate body against the report body contract.
