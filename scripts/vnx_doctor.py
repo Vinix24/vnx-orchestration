@@ -399,6 +399,47 @@ def check_hooks(paths: Dict[str, str]) -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# Hook pin check
+# ---------------------------------------------------------------------------
+
+def check_hook_pins(paths: Dict[str, str]) -> List[CheckResult]:
+    """Verify every hook command path in .claude/settings.json resolves.
+
+    OI-1123: a hook pinned to a fabric version/path that no longer exists
+    fails SILENTLY (the error goes to the pane's stderr, never to a report).
+    A dead pin means the hook simply never runs — no report, no receipt, no
+    PreToolUse guard. Absent-by-design (a hook event nobody configured, or a
+    deliberately-disabled matcher) is not a defect; only a configured path
+    that fails to resolve is.
+    """
+    project_root = Path(paths["PROJECT_ROOT"])
+    if not (project_root / ".claude" / "settings.json").is_file():
+        return []
+
+    try:
+        from hookpin_check import check_project_hook_pins, STATUS_MISSING
+    except ImportError:
+        return [CheckResult("hookpin", WARN, "hookpin_check module not importable; skipped")]
+
+    findings = check_project_hook_pins(project_root)
+    if not findings:
+        return []
+
+    missing = [f for f in findings if f.status == STATUS_MISSING]
+    if missing:
+        details = [f"{f.event} ({f.matcher or '*'}): {f.raw_path} -> {f.resolved_path}"
+                   for f in missing]
+        return [CheckResult(
+            "hookpin", FAIL,
+            f"{len(missing)} configured hook path(s) do not resolve to a real file",
+            "Re-run `vnx regen-settings --merge` (or `vnx init`) to refresh the pin, "
+            "or fix the path directly in .claude/settings.json",
+            details=details,
+        )]
+    return [CheckResult("hookpin", PASS, f"All {len(findings)} configured hook path(s) resolve")]
+
+
+# ---------------------------------------------------------------------------
 # Database check
 # ---------------------------------------------------------------------------
 
@@ -882,6 +923,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_templates(paths))
     results.extend(check_hooks(paths))
     results.extend(check_settings(paths))
+    results.extend(check_hook_pins(paths))
     results.extend(check_database(paths))
     results.append(check_write_access(paths))
     results.extend(check_worktree(paths))
