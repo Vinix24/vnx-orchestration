@@ -8,6 +8,7 @@ Feature flags: VNX_TMUX_ADAPTER_ENABLED, VNX_ADAPTER_PRIMARY.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -163,25 +164,61 @@ def _tmux_send_keys(pane_id: str, *keys: str, literal: bool = False) -> int:
     return result.returncode
 
 
+# Monotonic per-process counter for paste-buffer names. Combined with the pid it
+# yields a buffer name that is never shared between two deliveries: distinct
+# processes differ in pid, distinct calls within one process differ in counter.
+_paste_buffer_counter = itertools.count()
+
+
+def _next_paste_buffer_name() -> str:
+    """Unique-per-call tmux buffer name (pid + module counter, never shared)."""
+    return f"vnx-adapter-paste-{os.getpid()}-{next(_paste_buffer_counter)}"
+
+
 def _tmux_load_and_paste(pane_id: str, content: str, max_inline: int = 50000) -> int:
-    """Load content into tmux buffer and paste to pane."""
-    if len(content) > max_inline:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".vnx_buf", delete=False, encoding="utf-8") as f:
-            f.write(content)
-            tmp_path = f.name
-        try:
-            rc = subprocess.run(["tmux", "load-buffer", tmp_path], capture_output=True, timeout=10).returncode
-        finally:
+    """Load content into a PER-CALL NAMED tmux buffer and paste it to pane.
+
+    OI-1136 — same mechanism as OI-1126 fixed in the tmux-spawn lane (#1451,
+    see tmux_interactive_dispatch._paste): ``load-buffer``/``paste-buffer``
+    without ``-b <name>`` operate on the tmux SERVER's single shared "most
+    recent buffer" slot, not on data scoped to this call. Two deliveries
+    racing to load+paste concurrently can have delivery A's ``paste-buffer``
+    retrieve delivery B's just-loaded content — a TOCTOU race on shared
+    global state (measured in the spawn lane: 15/20 instruction crossings at
+    4 concurrent, 0/20 after scoping). The call-sites here carry no
+    dispatch_id, so the buffer name is derived per call (pid + counter);
+    what matters is that no two deliveries ever touch the same buffer.
+    """
+    buffer_name = _next_paste_buffer_name()
+    try:
+        if len(content) > max_inline:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".vnx_buf", delete=False, encoding="utf-8") as f:
+                f.write(content)
+                tmp_path = f.name
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-    else:
-        rc = subprocess.run(["tmux", "load-buffer", "-"], input=content,
-            capture_output=True, text=True, timeout=10).returncode
-    if rc != 0:
-        return rc
-    return _run_tmux("paste-buffer", "-t", pane_id).returncode
+                rc = subprocess.run(
+                    ["tmux", "load-buffer", "-b", buffer_name, tmp_path],
+                    capture_output=True, timeout=10,
+                ).returncode
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        else:
+            rc = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, "-"], input=content,
+                capture_output=True, text=True, timeout=10).returncode
+        if rc != 0:
+            return rc
+        return _run_tmux("paste-buffer", "-b", buffer_name, "-t", pane_id).returncode
+    finally:
+        # Best-effort cleanup: a long-running fleet must not accumulate one
+        # named buffer per delivery forever. Failure here never affects the
+        # paste outcome already computed above.
+        try:
+            _run_tmux("delete-buffer", "-b", buffer_name)
+        except Exception:  # vnx-silent-except: best-effort buffer cleanup must never mask the paste outcome
+            pass
 
 
 class TmuxAdapter:
