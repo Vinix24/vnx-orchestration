@@ -17,6 +17,20 @@
 # instead of letting the dispatch run to a deadline against content that isn't its
 # own. Best-effort: jq missing or prompt unparseable -> skip the check, never block.
 #
+# OI-1126 round 3: the extraction is scoped to the APPENDED completion-protocol
+# block, not the whole delivered prompt. dispatch() in tmux_interactive_dispatch.py
+# always assembles body = <context/instruction> + <completion protocol> + <trailer>,
+# so the protocol block — and its code-guaranteed dispatch_id — is always the LAST
+# occurrence, never the first. Grepping the whole prompt and taking the first match
+# picked up any earlier dispatch_id-shaped text the operator's own instruction
+# happened to quote (a JSON receipt fragment, a ledger excerpt — VNX dispatch
+# instructions do this routinely, since the fabric's own open items are ABOUT
+# receipts and identifiers), which both false-killed healthy dispatches and could
+# mask a genuine crossing behind an earlier, coincidentally-matching foreign value.
+# Anchoring on the protocol block's own fixed heading (see _build_completion_protocol's
+# "## Completion Protocol (interactive lane)" heading) survives the append order
+# changing, since that's an implementation detail of a different file.
+#
 # Scoped HARD to tmux-spawn workers: fires ONLY when BOTH VNX_TMUX_SIGNAL_DIR and
 # VNX_DISPATCH_ID are set. For any normal T0/interactive session (env unset) it
 # drains stdin and exits 0 — completely no-op, no behavior change.
@@ -41,9 +55,19 @@ if command -v jq >/dev/null 2>&1; then
   # level. Strip backslashes first so one plain-quote pattern matches both the
   # escaped (\"dispatch_id\") and unescaped ("dispatch_id") forms.
   CLEAN_PROMPT="$(printf '%s' "$PROMPT_TEXT" | tr -d '\\')"
-  DELIVERED_ID="$(printf '%s' "$CLEAN_PROMPT" \
+  # Scope to the appended protocol block: everything FROM its fixed heading
+  # onward. Empty when the heading isn't present (e.g. VNX_BENCH_EQUAL_CONTEXT=1,
+  # which delivers only the context body with no protocol appended at all) —
+  # that correctly falls through to "no embedded value -> skip the check" below.
+  PROTOCOL_BLOCK="$(printf '%s' "$CLEAN_PROMPT" \
+    | sed -n '/## Completion Protocol (interactive lane)/,$p')"
+  # Last match within the scoped block (not the whole prompt): the protocol
+  # markdown embeds the dispatch_id twice, once per ready-made done/failed
+  # command, both identical, so "last" vs "first" here is just belt-and-braces
+  # against the block itself ever growing a second, non-identical occurrence.
+  DELIVERED_ID="$(printf '%s' "$PROTOCOL_BLOCK" \
     | grep -oE '"dispatch_id"[[:space:]]*:[[:space:]]*"[^"]+"' \
-    | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+    | tail -1 | sed -E 's/.*"([^"]+)"$/\1/' || true)"
   if [ -n "$DELIVERED_ID" ] && [ "$DELIVERED_ID" != "$VNX_DISPATCH_ID" ]; then
     {
       mkdir -p "$VNX_TMUX_SIGNAL_DIR" 2>/dev/null
