@@ -57,6 +57,41 @@ def test_append_locked_writes_single_record(tmp_path: Path):
     }
 
 
+def test_append_locked_skip_if_sees_content_inside_lock_and_skips(tmp_path: Path):
+    """OI-1129: skip_if receives the file's current bytes INSIDE the critical
+    section; True skips the append and append_locked reports False."""
+    path = tmp_path / "state.ndjson"
+    SW.append_locked(path, {"dispatch_id": "d-1"})
+    seen: list[bytes] = []
+
+    def _skip(content: bytes) -> bool:
+        seen.append(content)
+        return b"d-1" in content
+
+    result = SW.append_locked(path, {"dispatch_id": "d-1"}, skip_if=_skip)
+
+    assert result is False
+    assert seen and b'"dispatch_id":"d-1"' in seen[0]
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_append_locked_skip_if_false_appends_and_returns_true(tmp_path: Path):
+    path = tmp_path / "state.ndjson"
+
+    result = SW.append_locked(path, {"dispatch_id": "d-2"}, skip_if=lambda content: False)
+
+    assert result is True
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {"dispatch_id": "d-2"}
+
+
+def test_append_locked_without_skip_if_returns_true(tmp_path: Path):
+    path = tmp_path / "state.ndjson"
+
+    assert SW.append_locked(path, {"dispatch_id": "d-3"}) is True
+
+
 def test_append_locked_concurrent_100_threads_100_writes(tmp_path: Path):
     path = tmp_path / "state.ndjson"
     start = threading.Event()
