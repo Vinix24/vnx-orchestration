@@ -1411,6 +1411,75 @@ def _execute_claude_headless(
 
 
 # ---------------------------------------------------------------------------
+# OI-1120 part 2 — dispatch register fill (the guard's reference source)
+# ---------------------------------------------------------------------------
+
+def _register_dispatch_created(
+    plan: ExecutionPlan,
+    permit: ExecutionPermit,
+    spec: DispatchSpec,
+    *,
+    state_dir: Path,
+) -> None:
+    """Emit ``dispatch_created`` to the register at the moment the door
+    commits to firing (permit issued, about to invoke the lane).
+
+    OI-1105/OI-1120: none of the four lanes (tmux-spawn, provider, envelope,
+    subprocess adapter) ever wrote this event, so
+    ``report_to_receipt_converter._is_known_dispatch`` — the guard that cross-
+    checks a report's dispatch_id against the register — had almost nothing
+    to check against. One write site here, before the lane branch, covers
+    every lane (``provider``, ``claude_tmux_subscription``, ``claude_headless``)
+    so a future lane inherits the register entry for free instead of needing
+    its own hook.
+
+    Idempotent via ``dispatch_register.append_event_idempotent`` and never
+    blocks the door: a register-write failure is an observability gap, not a
+    reason to refuse work. The one exception is ``TestIsolationGuardError``
+    (OI-1079), which must propagate so a test that lost its isolation fails
+    loudly instead of silently writing into the real central store — the
+    same contract ``dispatch_register.append_event`` already enforces
+    internally; this call site must not re-swallow it.
+
+    Deliberately omits ``project_id`` (no cross-project central-mirror
+    write): ``state_dir`` here is already the door's own ADR-026-resolved
+    per-project authority (``_resolve_data_dir`` / ``_authority_from_spec_path``),
+    the same single write target ``_persist_route_decision`` and
+    ``_persist_dispatch_row`` use. Passing ``project_id`` would additionally
+    ask the register to mirror into ``~/.vnx-data/<project_id>`` — redundant
+    in production (that IS ``state_dir`` there, so the mirror's own
+    cutover guard no-ops it) and, under pytest with an isolated tmp
+    ``state_dir``, indistinguishable from the exact leak class OI-1079
+    closed even though this write was never headed to production.
+    """
+    from vnx_paths import TestIsolationGuardError  # noqa: PLC0415
+    try:
+        import dispatch_register  # noqa: PLC0415
+        from gate_obligations import pr_number_from_pr_id  # noqa: PLC0415
+        dispatch_register.append_event_idempotent(
+            "dispatch_created",
+            dispatch_id=plan.dispatch_id,
+            pr_number=pr_number_from_pr_id(spec.pr_id),
+            terminal=spec.target_slot,
+            gate=spec.gate,
+            extra={
+                "lane": plan.lane,
+                "provider": plan.provider.value,
+                "model": plan.model,
+                "permit_fingerprint": f"{permit.plan_digest[:12]}-{permit.dispatch_id}",
+            },
+            state_dir=state_dir,
+        )
+    except TestIsolationGuardError:  # vnx-silent-except: OI-1079 — must fail the test loudly, never swallowed here
+        raise
+    except Exception as exc:  # vnx-silent-except: register bookkeeping must never block the door; dispatch_created is observability, not a gate
+        logger.warning(
+            "[dispatch_cli] WARN dispatch_created register emit failed for dispatch=%s: %s",
+            plan.dispatch_id, exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # OI-849 — route decision persistence
 # ---------------------------------------------------------------------------
 
@@ -1653,8 +1722,11 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         # OI-849: persist the full canonical routing decision alongside the
         # permit fingerprint so "which model got this task and why" is
         # answerable after the fact. Best-effort — never blocks the door.
+        # OI-1120 part 2: fill the register's dispatch_created event here too —
+        # same "door commits to firing" moment, one write site for every lane.
         if not dry_run:
             _persist_route_decision(plan, permit, state_dir=state_dir)
+            _register_dispatch_created(plan, permit, vspec.spec, state_dir=state_dir)
 
         if dry_run:
             _print_plan(plan, fp)
