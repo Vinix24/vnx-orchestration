@@ -13,7 +13,13 @@
 # whenever a human happens to notice a stray pane error.
 #
 # Fail-soft by contract: this hook NEVER fails the session (always exit 0)
-# and does not block the SessionStart budget on a healthy machine.
+# and does not block the SessionStart budget on a healthy machine. Trade-off,
+# accepted: if this checker's own logic regresses (crash, bad exit, timeout),
+# the SessionStart surface goes silent instead of warning — the same failure
+# shape OI-1123 is about, one layer up. Hooks must never fail a session, so a
+# checker-level self-check would need to live outside this hook (e.g. as a
+# separate `vnx doctor` assertion that the SessionStart wiring itself is
+# intact), not inside it.
 set -u
 
 cat >/dev/null 2>&1 || true
@@ -32,7 +38,13 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY="python3"
 
-RESULT="$("$PY" "$CHECKER" --project-root "$ROOT" --json 2>/dev/null)" || exit 0
+# NOTE: do NOT gate this capture on the checker's exit code. --json mode
+# exits 1 precisely when it found a dead pin — that is the signal this hook
+# exists to surface, not a crash. An `|| exit 0` here would silently
+# swallow the positive case on every run. An empty/unparseable RESULT (a
+# genuine crash) is already a no-op below: the case pattern will not match
+# and the python heredoc's own try/except no-ops on bad JSON.
+RESULT="$("$PY" "$CHECKER" --project-root "$ROOT" --json 2>/dev/null)"
 
 # Surface a warning into the session context only when a pin is actually dead.
 case "$RESULT" in

@@ -23,7 +23,23 @@ Path resolution handles every idiom observed across the live fleet
 A token that cannot be deterministically resolved (references an unrecognized
 env var, or ``VNX_HOME`` with no candidate base found) is reported as
 "unresolved", never "missing" — guessing wrong would produce a false FAIL,
-and a check that cries wolf on healthy projects is worse than no check.
+and a check that cries wolf on healthy projects is worse than no check. An
+unresolved token is NOT proof of coverage either: both the CLI output and
+``vnx_doctor.py::check_hook_pins()`` say explicitly how many pins were
+actually checked versus skipped, rather than letting an unresolved-only run
+read as a clean "all pins verified" PASS.
+
+Scope note (OI-1123 follow-up): the original brief also asked whether a hook
+pin should resolve through the current-version symlink
+(``~/.vnx-system/current``) rather than a literal version path. This module
+is detection-only — it reads whatever command is already configured in
+``.claude/settings.json`` and reports whether it resolves — and never
+touches pin EMISSION. Pin emission lives in ``vnx_init.py::bootstrap_hooks()``
+and ``templates/settings_vnx_keys.json.tmpl``, both of which already emit
+``{{VNX_HOME}}``-relative commands rather than a literal version path, so the
+symlink question is primarily about hand-edited or historical pins, not
+anything this module or the current template emits. Not addressed here;
+tracked separately (OI-1123) if literal-version pins are found in the wild.
 """
 
 from __future__ import annotations
@@ -222,10 +238,24 @@ def main() -> int:
         icon = {STATUS_OK: "OK  ", STATUS_MISSING: "DEAD", STATUS_UNRESOLVED: "SKIP"}[f.status]
         print(f"  [{icon}] {f.event} ({f.matcher or '*'}): {f.raw_path} -> {f.resolved_path or '?'}")
 
+    unresolved = [f for f in findings if f.status == STATUS_UNRESOLVED]
+    settings_ref = f"{project_root}/.claude/settings.json"
+
+    # An unresolved pin is neither proven live nor proven dead — a clean run
+    # must say so, not present itself as full coverage (OI-1123 finding 2).
     if missing:
-        print(f"\n{len(missing)} dead hook pin(s) in {project_root}/.claude/settings.json")
+        print(f"\n{len(missing)} dead hook pin(s) in {settings_ref}")
+        if unresolved:
+            print(f"({len(unresolved)} more pin(s) unresolved — not checked, see [SKIP] above)")
+    elif unresolved:
+        checked_ok = len(findings) - len(unresolved)
+        print(
+            f"\n{checked_ok} of {len(findings)} configured hook pin(s) confirmed resolving in "
+            f"{settings_ref}; {len(unresolved)} unresolved (not checked — see [SKIP] above), "
+            "not confirmed dead"
+        )
     else:
-        print(f"\nAll configured hook pins resolve in {project_root}/.claude/settings.json")
+        print(f"\nAll {len(findings)} configured hook pin(s) resolve in {settings_ref}")
 
     return 1 if missing else 0
 

@@ -417,7 +417,7 @@ def check_hook_pins(paths: Dict[str, str]) -> List[CheckResult]:
         return []
 
     try:
-        from hookpin_check import check_project_hook_pins, STATUS_MISSING
+        from hookpin_check import check_project_hook_pins, STATUS_MISSING, STATUS_UNRESOLVED
     except ImportError:
         return [CheckResult("hookpin", WARN, "hookpin_check module not importable; skipped")]
 
@@ -426,9 +426,16 @@ def check_hook_pins(paths: Dict[str, str]) -> List[CheckResult]:
         return []
 
     missing = [f for f in findings if f.status == STATUS_MISSING]
+    unresolved = [f for f in findings if f.status == STATUS_UNRESOLVED]
+
     if missing:
         details = [f"{f.event} ({f.matcher or '*'}): {f.raw_path} -> {f.resolved_path}"
                    for f in missing]
+        if unresolved:
+            details.append(
+                f"(+{len(unresolved)} more pin(s) unresolved, not checked — "
+                "run hookpin_check.py --json for detail)"
+            )
         return [CheckResult(
             "hookpin", FAIL,
             f"{len(missing)} configured hook path(s) do not resolve to a real file",
@@ -436,6 +443,24 @@ def check_hook_pins(paths: Dict[str, str]) -> List[CheckResult]:
             "or fix the path directly in .claude/settings.json",
             details=details,
         )]
+
+    # No confirmed-dead pin, but an unresolved token is NOT a confirmed-live
+    # pin either — it means this checker's resolver has a blind spot (e.g. a
+    # locally-assigned $ROOT). A clean PASS here would claim full coverage
+    # that was never actually checked (OI-1123 finding 2); WARN instead so
+    # the gap is visible without failing `vnx doctor` on an unproven case.
+    if unresolved:
+        details = [f"{f.event} ({f.matcher or '*'}): {f.raw_path}" for f in unresolved]
+        checked_ok = len(findings) - len(unresolved)
+        return [CheckResult(
+            "hookpin", WARN,
+            f"{checked_ok} of {len(findings)} configured hook path(s) confirmed resolving; "
+            f"{len(unresolved)} could not be checked (unresolved token)",
+            "These pins use a token this checker does not resolve (e.g. a locally-assigned "
+            "$ROOT); confirm manually or extend hookpin_check.resolve_token()",
+            details=details,
+        )]
+
     return [CheckResult("hookpin", PASS, f"All {len(findings)} configured hook path(s) resolve")]
 
 
