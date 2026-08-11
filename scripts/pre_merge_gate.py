@@ -25,6 +25,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +65,17 @@ NET_LINE_DELETION_HOLD = 500
 
 # Pytest timeout in seconds
 PYTEST_TIMEOUT = 120
+
+# CI workflow name queried via `gh run list --workflow`. Overridable per-repo
+# via the VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag —
+# see _resolve_ci_workflow_name() for why this isn't auto-detected instead.
+DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
+CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
+
+# Status for a check that could not establish an answer at all — distinct
+# from GO (verified passing) and HOLD (verified failing/missing). A gate
+# consumer must never treat this as permission to merge (OI-1140).
+SKIPPED_UNVERIFIED = "SKIPPED_UNVERIFIED"
 
 
 def _utc_now_iso() -> str:
@@ -339,8 +351,8 @@ def check_pytest(project_root: Path) -> Dict[str, Any]:
     except FileNotFoundError:
         return {
             "check": "pytest",
-            "status": "GO",
-            "detail": "pytest not available — skipping",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": "pytest not available — test results could not be verified",
             "tests_found": True,
         }
 
@@ -684,29 +696,67 @@ def check_net_deletion(project_root: Path) -> Dict[str, Any]:
     }
 
 
+def _resolve_ci_workflow_name(workflow_name: Optional[str]) -> str:
+    """Resolve the workflow name to query via ``gh run list --workflow``.
+
+    Resolution order: explicit ``workflow_name`` argument (CLI
+    ``--ci-workflow-name`` or a programmatic caller) > ``VNX_CI_WORKFLOW_NAME``
+    env var (per-repo operator override) > this fabric's own default,
+    "VNX CI".
+
+    Auto-detecting "the" CI workflow from ``.github/workflows/*.yml`` was
+    considered and rejected: this repo alone ships seven workflow files
+    (VNX CI, VNX Public CI, Burn-In Headless CI, Attestation Gate, Anchor
+    Immutability Check, ADR-003 Enforcement, Subsystems Ledger Drift Check)
+    and picking one via a naming heuristic would just trade one silent wrong
+    answer (hardcoded name) for another (guessed name) — a confident
+    misdetection is exactly as dangerous as the bug this fixes. An explicit,
+    per-repo override is unambiguous and matches the operator's own claim.
+    """
+    if workflow_name:
+        return workflow_name
+    env_name = os.environ.get(CI_WORKFLOW_NAME_ENV_VAR)
+    if env_name:
+        return env_name
+    return DEFAULT_CI_WORKFLOW_NAME
+
+
 def check_ci_workflow(
     project_root: Path,
     *,
     branch: Optional[str] = None,
     head_sha: Optional[str] = None,
+    workflow_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Check that the VNX CI workflow ran successfully on this exact commit.
+    """Check that the configured CI workflow ran successfully on this exact commit.
 
-    Three states are distinguished sharply:
-      - Never ran:   no VNX CI run for this commit → HOLD, with explicit
+    Three *verified* states are distinguished sharply:
+      - Never ran:   no CI run for this commit → HOLD, with explicit
                      "workflow not run" message independent of failure.
       - Ran + failed: run exists but conclusion is not "success" → HOLD.
       - Ran + passed: run exists with conclusion "success" → GO.
 
-    Uses ``gh run list`` to query workflow runs.  Degrades gracefully to GO
-    (skip) when the gh CLI is unavailable, unauthenticated, or the branch/HEAD
-    SHA cannot be resolved from git — the check cannot determine state in those
-    cases and must not block.
+    A fourth state — unverifiable — covers every case where this check
+    cannot establish which of the three above applies: the gh CLI is
+    unavailable, ``gh run list`` fails (including "no such workflow" when
+    the configured name doesn't match any workflow in the repo), its output
+    is unparseable, or the branch/HEAD SHA cannot be resolved from git. That
+    state is SKIPPED_UNVERIFIED, never GO (OI-1140) — a merge gate that
+    cannot see CI must not grant permission to merge just because it failed
+    to look. run_gate_checks treats SKIPPED_UNVERIFIED as blocking, same as
+    HOLD, while keeping the status name distinct so a caller can always tell
+    "verified green" apart from "could not verify".
 
-    OI-931: ``gh pr checks`` can show all-green while the mandatory VNX CI
+    The workflow name is resolved via _resolve_ci_workflow_name() — never
+    hardcoded past that point, so a consumer repo whose CI workflow has a
+    different name gets a real answer instead of a silent pass.
+
+    OI-931: ``gh pr checks`` can show all-green while the mandatory CI
     workflow never ran.  This check reads the workflow conclusion directly —
-    never the check-names — so the three states are distinguishable.
+    never the check-names — so the three verified states are distinguishable.
     """
+    resolved_workflow_name = _resolve_ci_workflow_name(workflow_name)
+
     # ── Resolve head SHA ──────────────────────────────────────────────────
     if head_sha is None:
         try:
@@ -718,8 +768,8 @@ def check_ci_workflow(
             if result.returncode != 0:
                 return {
                     "check": "ci_workflow",
-                    "status": "GO",
-                    "detail": "could not resolve HEAD SHA — skipping CI workflow check",
+                    "status": SKIPPED_UNVERIFIED,
+                    "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
                     "ci_conclusion": None,
                     "ci_ran_on_sha": False,
                 }
@@ -727,8 +777,8 @@ def check_ci_workflow(
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return {
                 "check": "ci_workflow",
-                "status": "GO",
-                "detail": "could not resolve HEAD SHA — skipping CI workflow check",
+                "status": SKIPPED_UNVERIFIED,
+                "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
                 "ci_conclusion": None,
                 "ci_ran_on_sha": False,
             }
@@ -743,8 +793,8 @@ def check_ci_workflow(
             if result.returncode != 0:
                 return {
                     "check": "ci_workflow",
-                    "status": "GO",
-                    "detail": "could not resolve branch name — skipping CI workflow check",
+                    "status": SKIPPED_UNVERIFIED,
+                    "detail": "could not resolve branch name — CI workflow could not be verified",
                     "ci_conclusion": None,
                     "ci_ran_on_sha": False,
                 }
@@ -752,8 +802,8 @@ def check_ci_workflow(
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return {
                 "check": "ci_workflow",
-                "status": "GO",
-                "detail": "could not resolve branch name — skipping CI workflow check",
+                "status": SKIPPED_UNVERIFIED,
+                "detail": "could not resolve branch name — CI workflow could not be verified",
                 "ci_conclusion": None,
                 "ci_ran_on_sha": False,
             }
@@ -764,7 +814,7 @@ def check_ci_workflow(
             [
                 "gh", "run", "list",
                 "--branch", branch,
-                "--workflow", "VNX CI",
+                "--workflow", resolved_workflow_name,
                 "--limit", "10",
                 "--json", "conclusion,headSha,status,databaseId",
             ],
@@ -774,8 +824,8 @@ def check_ci_workflow(
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return {
             "check": "ci_workflow",
-            "status": "GO",
-            "detail": "gh CLI not available — skipping CI workflow check",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": "gh CLI not available — CI workflow could not be verified",
             "ci_conclusion": None,
             "ci_ran_on_sha": False,
         }
@@ -784,8 +834,11 @@ def check_ci_workflow(
         stderr = (result.stderr or "").strip()
         return {
             "check": "ci_workflow",
-            "status": "GO",
-            "detail": f"gh run list failed — skipping CI workflow check: {stderr[:120]}",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": (
+                f"gh run list failed for workflow '{resolved_workflow_name}' — "
+                f"CI workflow could not be verified: {stderr[:120]}"
+            ),
             "ci_conclusion": None,
             "ci_ran_on_sha": False,
         }
@@ -795,8 +848,8 @@ def check_ci_workflow(
     except json.JSONDecodeError:
         return {
             "check": "ci_workflow",
-            "status": "GO",
-            "detail": "gh output unparseable — skipping CI workflow check",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": "gh output unparseable — CI workflow could not be verified",
             "ci_conclusion": None,
             "ci_ran_on_sha": False,
         }
@@ -810,7 +863,7 @@ def check_ci_workflow(
                     "check": "ci_workflow",
                     "status": "GO",
                     "detail": (
-                        f"VNX CI succeeded on {head_sha[:12]} "
+                        f"{resolved_workflow_name} succeeded on {head_sha[:12]} "
                         f"(run {run.get('databaseId')})"
                     ),
                     "ci_conclusion": conclusion,
@@ -822,7 +875,7 @@ def check_ci_workflow(
                 "check": "ci_workflow",
                 "status": "HOLD",
                 "detail": (
-                    f"VNX CI conclusion is '{conclusion}' on {head_sha[:12]} "
+                    f"{resolved_workflow_name} conclusion is '{conclusion}' on {head_sha[:12]} "
                     f"(run {run.get('databaseId')}) — must be 'success'"
                 ),
                 "ci_conclusion": conclusion,
@@ -841,7 +894,7 @@ def check_ci_workflow(
             "check": "ci_workflow",
             "status": "HOLD",
             "detail": (
-                f"VNX CI workflow has NOT run on HEAD ({head_sha[:12]}). "
+                f"{resolved_workflow_name} has NOT run on HEAD ({head_sha[:12]}). "
                 f"Latest run on branch '{branch}' was on {latest_sha} "
                 f"(conclusion: {latest_conclusion}). "
                 "The PR may show green checks from a prior run — re-run CI."
@@ -855,7 +908,7 @@ def check_ci_workflow(
         "check": "ci_workflow",
         "status": "HOLD",
         "detail": (
-            f"VNX CI workflow has NEVER run on branch '{branch}'. "
+            f"{resolved_workflow_name} has NEVER run on branch '{branch}'. "
             f"No runs found for HEAD {head_sha[:12]}. "
             "PR checks may show green from other workflows — "
             "this is the 'green-lie' that OI-931 guards against."
@@ -1047,10 +1100,18 @@ def run_gate_checks(
     state_dir: Path,
     dispatch_dir: Path,
     skip_pytest: bool = False,
+    ci_workflow_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run all gate checks and produce a merged verdict.
 
     Returns a structured result with per-check status and overall verdict.
+
+    A check that returns SKIPPED_UNVERIFIED (couldn't establish an answer —
+    see check_ci_workflow, check_pytest) blocks the verdict exactly like
+    HOLD does: this gate is the last one before a merge, and "couldn't
+    check" must never read as "checked and it's fine" (OI-1140). The two are
+    kept distinguishable in the result via ``skipped_unverified_count`` and
+    per-check ``status``, even though both drive the same HOLD verdict.
     """
     checks: List[Dict[str, Any]] = []
 
@@ -1063,15 +1124,17 @@ def run_gate_checks(
     checks.append(check_artifacts(pr_id, dispatch_dir, project_root))
     checks.append(check_shell_syntax(project_root))
     checks.append(check_net_deletion(project_root))
-    checks.append(check_ci_workflow(project_root))
+    checks.append(check_ci_workflow(project_root, workflow_name=ci_workflow_name))
 
     if not skip_pytest:
         checks.append(check_pytest(project_root))
 
     hold_checks = [c for c in checks if c.get("status") == "HOLD"]
-    verdict = "HOLD" if hold_checks else "GO"
+    unverified_checks = [c for c in checks if c.get("status") == SKIPPED_UNVERIFIED]
+    blocking_checks = hold_checks + unverified_checks
+    verdict = "HOLD" if blocking_checks else "GO"
 
-    _sync_fabric_finding(pr_id, dispatch_dir, state_dir, verdict, hold_checks)
+    _sync_fabric_finding(pr_id, dispatch_dir, state_dir, verdict, blocking_checks)
 
     return {
         "pr_id": pr_id,
@@ -1079,11 +1142,12 @@ def run_gate_checks(
         "checked_at": _utc_now_iso(),
         "total_checks": len(checks),
         "go_count": len([c for c in checks if c.get("status") == "GO"]),
-        "hold_count": len(hold_checks),
+        "hold_count": len(blocking_checks),
+        "skipped_unverified_count": len(unverified_checks),
         "checks": checks,
         "hold_reasons": [
             {"check": c["check"], "detail": c.get("detail", "")}
-            for c in hold_checks
+            for c in blocking_checks
         ],
     }
 
@@ -1114,14 +1178,18 @@ def format_human_readable(result: Dict[str, Any]) -> str:
     verdict_icon = "✅" if verdict == "GO" else "🚫"
     lines.append(f"\n{verdict_icon}  Gate verdict for {pr_id}: {verdict}")
     lines.append(f"   Checked at: {result.get('checked_at', '?')}")
-    lines.append(f"   Checks: {result.get('go_count', 0)} GO, {result.get('hold_count', 0)} HOLD\n")
+    lines.append(
+        f"   Checks: {result.get('go_count', 0)} GO, {result.get('hold_count', 0)} HOLD"
+        f" ({result.get('skipped_unverified_count', 0)} unverified)\n"
+    )
 
     for check in result.get("checks", []):
-        icon = "✓" if check.get("status") == "GO" else "✗"
-        lines.append(f"  [{icon}] {check.get('check', '?'):.<30s} {check.get('status', '?'):>4s}  {check.get('detail', '')}")
+        status = check.get("status")
+        icon = "✓" if status == "GO" else ("?" if status == SKIPPED_UNVERIFIED else "✗")
+        lines.append(f"  [{icon}] {check.get('check', '?'):.<30s} {status or '?':>4s}  {check.get('detail', '')}")
 
     if result.get("hold_reasons"):
-        lines.append("\n  HOLD reasons:")
+        lines.append("\n  HOLD reasons (includes unverified — see status column):")
         for hr in result["hold_reasons"]:
             lines.append(f"    - {hr['check']}: {hr['detail']}")
 
@@ -1172,6 +1240,16 @@ def main() -> int:
         default=True,
         help="Store results in state directory (default: true)",
     )
+    parser.add_argument(
+        "--ci-workflow-name",
+        default=None,
+        help=(
+            "Name of the CI workflow to query via `gh run list --workflow`. "
+            f"Default: {CI_WORKFLOW_NAME_ENV_VAR} env var, else "
+            f"'{DEFAULT_CI_WORKFLOW_NAME}'. Set this for consumer repos whose "
+            "CI workflow has a different name."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1186,6 +1264,7 @@ def main() -> int:
         state_dir=state_dir,
         dispatch_dir=dispatch_dir,
         skip_pytest=args.skip_pytest,
+        ci_workflow_name=args.ci_workflow_name,
     )
 
     if args.store:

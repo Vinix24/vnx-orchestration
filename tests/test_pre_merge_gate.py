@@ -37,11 +37,15 @@ from pre_merge_gate import (
     _find_dispatch_for_pr,
     _resolve_dispatch_id_for_pr,
     _is_artifact_path,
+    _resolve_ci_workflow_name,
     CQS_THRESHOLD,
     DELETION_FILE_WARN,
     DELETION_FILE_HOLD,
     PR_SIZE_WARN,
     PR_SIZE_HOLD,
+    SKIPPED_UNVERIFIED,
+    DEFAULT_CI_WORKFLOW_NAME,
+    CI_WORKFLOW_NAME_ENV_VAR,
 )
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
@@ -92,6 +96,25 @@ def _stub_pr_size_go(monkeypatch):
         lambda project_root, **kw: {
             "check": "pr_size", "status": "GO", "detail": "stubbed for this test",
             "lines_added": 0, "lines_removed": 0, "lines_changed": 0,
+        },
+    )
+
+
+def _stub_ci_workflow_go(monkeypatch):
+    """Stub check_ci_workflow to a fixed GO result.
+
+    Like _stub_pr_size_go above: check_ci_workflow now correctly returns
+    SKIPPED_UNVERIFIED (OI-1140) against a bare non-git tmp_path, since HEAD
+    can't be resolved there. Tests in this module that exercise run_gate_checks
+    orchestration/wiring (not ci_workflow logic itself) stub it to GO so that
+    unrelated behavior isn't blocked by noise from this check. See
+    TestCheckCIWorkflow for the real coverage of ci_workflow's own logic.
+    """
+    monkeypatch.setattr(
+        pre_merge_gate, "check_ci_workflow",
+        lambda project_root, **kw: {
+            "check": "ci_workflow", "status": "GO", "detail": "stubbed for this test",
+            "ci_conclusion": "success", "ci_ran_on_sha": True,
         },
     )
 
@@ -565,6 +588,7 @@ class TestFabricFindingWiring:
         self, state_dir, dispatch_dir, tmp_path, monkeypatch
     ):
         _stub_pr_size_go(monkeypatch)
+        _stub_ci_workflow_go(monkeypatch)
         (dispatch_dir / "active" / "d.md").write_text(
             "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-go\n"
         )
@@ -606,6 +630,7 @@ class TestFabricFindingWiring:
         """Defense in depth: even if the (already best-effort) bridge itself regressed and
         raised, run_gate_checks must still return its verdict rather than crash."""
         _stub_pr_size_go(monkeypatch)
+        _stub_ci_workflow_go(monkeypatch)
         (dispatch_dir / "active" / "d.md").write_text(
             "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-boom\n"
         )
@@ -630,6 +655,7 @@ class TestRunGateChecks:
     def test_all_go_verdict(self, state_dir, dispatch_dir, tmp_path, monkeypatch):
         """When all checks pass, verdict is GO."""
         _stub_pr_size_go(monkeypatch)
+        _stub_ci_workflow_go(monkeypatch)
         result = run_gate_checks(
             pr_id="PR-6",
             project_root=tmp_path,
@@ -660,6 +686,24 @@ class TestRunGateChecks:
         assert result["verdict"] == "HOLD"
         assert result["hold_count"] >= 1
         assert any(r["check"] == "open_items" for r in result["hold_reasons"])
+
+    def test_hold_on_unverifiable_ci(self, state_dir, dispatch_dir, tmp_path, monkeypatch):
+        """OI-1140: SKIPPED_UNVERIFIED from ci_workflow blocks the verdict —
+        it must never read as permission to merge, same as a real HOLD.
+        """
+        _stub_pr_size_go(monkeypatch)
+        result = run_gate_checks(
+            pr_id="PR-6",
+            project_root=tmp_path,
+            state_dir=state_dir,
+            dispatch_dir=dispatch_dir,
+            skip_pytest=True,
+        )
+        assert result["verdict"] == "HOLD"
+        assert result["skipped_unverified_count"] >= 1
+        ci_check = next(c for c in result["checks"] if c["check"] == "ci_workflow")
+        assert ci_check["status"] == SKIPPED_UNVERIFIED
+        assert any(r["check"] == "ci_workflow" for r in result["hold_reasons"])
 
     def test_checks_list_populated(self, state_dir, dispatch_dir, tmp_path):
         result = run_gate_checks(
@@ -940,20 +984,21 @@ class TestCheckCIWorkflow:
         assert result["status"] == "HOLD"
         assert result["ci_conclusion"] == "cancelled"
 
-    def test_gh_not_available_skips(self, tmp_path):
-        """gh CLI missing → GO (skip, do not block)."""
+    def test_gh_not_available_is_unverified(self, tmp_path):
+        """OI-1140: gh CLI missing -> SKIPPED_UNVERIFIED, never GO."""
         sha = "g" * 40
         git_head = self._git_head_mock(sha)
         git_branch = self._git_branch_mock()
         mocks = [git_head, git_branch, FileNotFoundError("gh not found")]
         with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
             result = check_ci_workflow(tmp_path)
-        assert result["status"] == "GO"
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
         assert "not available" in result["detail"]
         assert result["ci_conclusion"] is None
 
-    def test_gh_run_list_fails_skips(self, tmp_path):
-        """gh run list non-zero exit → GO (skip)."""
+    def test_gh_run_list_fails_is_unverified(self, tmp_path):
+        """OI-1140: gh run list non-zero exit -> SKIPPED_UNVERIFIED, never GO."""
         sha = "h" * 40
         gh_fail = MagicMock(returncode=1, stdout="", stderr="HTTP 403")
         mocks = [
@@ -963,13 +1008,154 @@ class TestCheckCIWorkflow:
         ]
         with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
             result = check_ci_workflow(tmp_path)
-        assert result["status"] == "GO"
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
         assert "gh run list failed" in result["detail"]
 
-    def test_git_head_fails_skips(self, tmp_path):
-        """git rev-parse HEAD fails → GO (skip, cannot determine SHA)."""
+    def test_gh_no_such_workflow_is_unverified(self, tmp_path):
+        """OI-1140: consumer repo's workflow doesn't match the configured name
+        (measured by the seocrawler-v2 operator: `gh` reports "could not find
+        any workflows named VNX CI") -> SKIPPED_UNVERIFIED, never GO.
+        """
+        sha = "s" * 40
+        gh_fail = MagicMock(
+            returncode=1, stdout="",
+            stderr="could not find any workflows named VNX CI",
+        )
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            gh_fail,
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+        assert "could not find any workflows" in result["detail"]
+
+    def test_gh_output_unparseable_is_unverified(self, tmp_path):
+        """OI-1140: gh emits non-JSON output -> SKIPPED_UNVERIFIED, never GO.
+
+        A 5th silent-GO path found while auditing the ones the dispatch
+        listed explicitly — same shape, same fix.
+        """
+        sha = "t" * 40
+        gh_bad_json = MagicMock(returncode=0, stdout="not json", stderr="")
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            gh_bad_json,
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+        assert "unparseable" in result["detail"]
+
+    def test_git_head_fails_is_unverified(self, tmp_path):
+        """OI-1140: git rev-parse HEAD fails -> SKIPPED_UNVERIFIED, never GO."""
         git_fail = MagicMock(returncode=128, stdout="", stderr="fatal: not a git repository")
         with patch("pre_merge_gate.subprocess.run", side_effect=[git_fail]):
             result = check_ci_workflow(tmp_path)
-        assert result["status"] == "GO"
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
         assert "could not resolve HEAD SHA" in result["detail"]
+
+    def test_git_branch_fails_is_unverified(self, tmp_path):
+        """OI-1140: git rev-parse --abbrev-ref HEAD fails -> SKIPPED_UNVERIFIED, never GO."""
+        sha = "u" * 40
+        branch_fail = MagicMock(returncode=128, stdout="", stderr="fatal: ambiguous")
+        mocks = [self._git_head_mock(sha), branch_fail]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks):
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+        assert "could not resolve branch name" in result["detail"]
+
+    def test_ci_succeeded_uses_configured_workflow_name(self, tmp_path):
+        """The real-green path still returns GO unchanged, and the gh call
+        uses the resolved workflow name (default: DEFAULT_CI_WORKFLOW_NAME).
+        """
+        sha = "v" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_run_output("success", sha),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks) as mock_run:
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "GO"
+        gh_call_args = mock_run.call_args_list[2].args[0]
+        workflow_idx = gh_call_args.index("--workflow")
+        assert gh_call_args[workflow_idx + 1] == DEFAULT_CI_WORKFLOW_NAME
+
+    def test_workflow_name_explicit_argument_wins(self, tmp_path):
+        """An explicit workflow_name argument is used verbatim, not the default."""
+        sha = "w" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_run_output("success", sha),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks) as mock_run:
+            result = check_ci_workflow(tmp_path, workflow_name="CI/CD Pipeline")
+        assert result["status"] == "GO"
+        assert "CI/CD Pipeline" in result["detail"]
+        gh_call_args = mock_run.call_args_list[2].args[0]
+        workflow_idx = gh_call_args.index("--workflow")
+        assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
+
+    def test_workflow_name_env_var_override(self, tmp_path, monkeypatch):
+        """VNX_CI_WORKFLOW_NAME env var is used when no explicit argument is given."""
+        monkeypatch.setenv(CI_WORKFLOW_NAME_ENV_VAR, "CI/CD Pipeline")
+        sha = "x" * 40
+        mocks = [
+            self._git_head_mock(sha),
+            self._git_branch_mock(),
+            self._gh_run_output("success", sha),
+        ]
+        with patch("pre_merge_gate.subprocess.run", side_effect=mocks) as mock_run:
+            result = check_ci_workflow(tmp_path)
+        assert result["status"] == "GO"
+        gh_call_args = mock_run.call_args_list[2].args[0]
+        workflow_idx = gh_call_args.index("--workflow")
+        assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
+
+
+class TestResolveCIWorkflowName:
+    """_resolve_ci_workflow_name(): explicit arg > env var > default."""
+
+    def test_explicit_argument_wins_over_env(self, monkeypatch):
+        monkeypatch.setenv(CI_WORKFLOW_NAME_ENV_VAR, "From Env")
+        assert _resolve_ci_workflow_name("From Argument") == "From Argument"
+
+    def test_env_var_used_when_no_argument(self, monkeypatch):
+        monkeypatch.setenv(CI_WORKFLOW_NAME_ENV_VAR, "From Env")
+        assert _resolve_ci_workflow_name(None) == "From Env"
+
+    def test_default_when_nothing_set(self, monkeypatch):
+        monkeypatch.delenv(CI_WORKFLOW_NAME_ENV_VAR, raising=False)
+        assert _resolve_ci_workflow_name(None) == DEFAULT_CI_WORKFLOW_NAME
+
+
+# ---------------------------------------------------------------------------
+# check_pytest — sibling of the OI-1140 ci_workflow bug: the pytest binary
+# being unavailable is a tooling failure, not "no tests to run" (tests_found
+# stays True), so it must not silently report GO either.
+# ---------------------------------------------------------------------------
+
+class TestCheckPytest:
+
+    def test_pytest_not_available_is_unverified(self, project_root):
+        (project_root / "tests" / "test_something.py").write_text("def test_x(): assert True\n")
+        with patch("pre_merge_gate.subprocess.run", side_effect=FileNotFoundError("pytest not found")):
+            result = check_pytest(project_root)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+        assert result["tests_found"] is True
+
+    def test_no_tests_dir_is_still_go(self, tmp_path):
+        """Contrast case: genuinely nothing to run stays GO, unchanged."""
+        result = check_pytest(tmp_path)
+        assert result["status"] == "GO"
+        assert result["tests_found"] is False
