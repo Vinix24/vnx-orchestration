@@ -51,6 +51,10 @@
 # repaired by #1449; reproduced at pre-fix SHA 30d6916b as control).
 # Solo-green is not sweep-green: the de-quarantining PR's own Profile A run
 # is the full-sweep group check per OI-1133. Files still red stay listed.
+# GROUP-CHECK OUTCOME (PR #1458 Profile A, run 31506897662): 6 of the 29
+# flipped red in the full sweep on the CI image (35 fails, all inside those
+# 6 files) and returned to this list with the failure named per entry.
+# 23 files (491 tests) stay de-quarantined; that sweep had no other reds.
 #
 tests/integration/test_gemini_streaming_gated.py
 tests/migrations/test_auto_apply.py
@@ -110,6 +114,7 @@ tests/test_headless_inspect.py
 # nobody reads. No heavy-dep stack (sqlite3 + in-repo modules only).
 tests/test_horizon_schema_migration_fix.py
 tests/test_horizon_skill_alias.py  # OI-951: doc/content drift the test already asserts against, red on main too
+tests/test_init_migrate_bootstrap.py  # OI-1133 group-check: solo-green locally, 18/32 failed in PR#1458 Profile A sweep (vnx init/migrate exit non-zero on the CI image; OI-946 class)
 tests/test_installer_no_template_leak.py
 tests/test_intelligence_ab_framework.py
 tests/test_intelligence_pipeline_e2e.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
@@ -138,10 +143,13 @@ tests/test_project_status_hook.py
 tests/test_provider_dispatch_contract_integration.py
 tests/test_provider_dispatch_deepseek_harness.py
 tests/test_provider_dispatch_entry.py
+tests/test_quality_advisory_pipeline.py  # OI-1133 group-check: solo-green locally, 2/43 failed in PR#1458 Profile A sweep (NoneType .status; OI-948 class)
 tests/test_queue_reconciliation_certification.py
 tests/test_quickstart_validation.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_classifier.py
 tests/test_receipt_instruction_hash.py
+tests/test_receipt_processor_autopr_rejected_mirror.py  # OI-1133 group-check: solo-green locally, 6/6 failed in PR#1458 Profile A sweep (outcome_status resolves None)
+tests/test_receipt_processor_bootstrap.py  # OI-1133 group-check: solo-green locally, 6/10 failed in PR#1458 Profile A sweep (bootstrap returns rc=1)
 tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
 tests/test_receipt_v2_pr5_schema_cutover.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
@@ -164,6 +172,8 @@ tests/test_subprocess_cheap_lane.py
 tests/test_subprocess_dispatch_identity.py
 tests/test_subprocess_health.py
 tests/test_subprocess_w3e_robustness.py
+tests/test_t0_decision_log.py  # OI-1133 group-check: solo-green locally, 2/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection)
+tests/test_t0_escalations_log.py  # OI-1133 group-check: solo-green locally, 1/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection)
 tests/test_t0_skill_consistency.py
 tests/test_t0_skill_slim.py  # OI-951: doc/content drift the test already asserts against, red on main too
 tests/test_tenant_stamp_fail_closed.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
