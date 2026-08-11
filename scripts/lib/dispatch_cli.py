@@ -1620,10 +1620,21 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             spec = dataclasses.replace(spec, provider=new_provider, model=new_model)
             door_route_reason = route_reason
         else:
-            # Router declined or could not resolve — fall back to CLAUDE.
-            # T0 is never routed (t0-opus-only floor), tier-mid/high route
-            # to claude which the door handles via its own lane resolution.
-            spec = dataclasses.replace(spec, provider=Provider.CLAUDE)
+            # Router declined or could not resolve (T0, VNX_SMART_ROUTER_DISABLE,
+            # a classifier/resolver exception, or a tier whose TierRoute.provider
+            # has no _TIER_PROVIDER_TO_ENUM entry) — fall back to CLAUDE. OI-1050:
+            # this must set provider AND model TOGETHER, in the same replace() call
+            # that resolves the router's own success path above (line 1550-1552).
+            # Setting provider alone previously left spec.model=None, and the
+            # workers-kimi-pinned "default" pin semantics then filled effective_model
+            # from ITS OWN pin (kimi-k3) whenever spec.model was empty — producing a
+            # spec with provider=claude and model=kimi-k3, which kimi-via-cli-only
+            # correctly rejects. Defaulting model here, in the same statement as the
+            # provider, makes that half-filled combination unreachable rather than
+            # merely unlikely — spec.model is only used when the caller already set
+            # one; otherwise it lands on the same "sonnet" default every other
+            # claude-lane fallback in this function already uses.
+            spec = dataclasses.replace(spec, provider=Provider.CLAUDE, model=spec.model or "sonnet")
             door_route_reason = "smart-router:no-route,fallback=claude"
 
     vspec = validate(spec, project_id=project_id, repo_root=repo_root)
