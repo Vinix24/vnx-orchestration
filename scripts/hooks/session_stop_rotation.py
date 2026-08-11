@@ -2,13 +2,12 @@
 """Stop hook safety-net for T0 context rotation (DEFAULT OFF).
 
 NO-OP unless VNX_T0_ROTATION=1. When enabled, it ONLY ensures handoff.md
-exists at the project_id+terminal-scoped rotation dir — a safety net for the
-case where T0 goes idle (Stop fires) without ever calling
-scripts/lib/context_rotation.checkpoint() itself (e.g. no governance boundary
-was reached, or rotation was disabled mid-session). It makes NO claim to
-spawn a successor T0 — the respawn is strictly T0-INITIATED
-(context_rotation.checkpoint() -> respawn()), never hook-initiated (rev-3
-plan §"Rev-3 decision", point 3).
+exists at the project_id+terminal-scoped rotation dir (via
+scripts/lib/context_rotation.write_t0_handoff()) — a safety net so a T0
+that goes idle (Stop fires) always leaves a resume contract behind. It
+makes NO claim to spawn a successor T0 — a shell Stop hook cannot launch
+an interactive session; rotation execution lives in the worker rotation
+system (hooks/vnx_rotate.sh) and the operator /rotate flow.
 
 The Stop hook's settings.json matcher is empty ("") — it fires for EVERY
 session, T0 or worker. Since the handoff it writes is always the T0 one,
