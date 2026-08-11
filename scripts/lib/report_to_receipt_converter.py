@@ -63,21 +63,34 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 # groups, so group 1/2 hold the outer-colon form and group 3/4 the
 # inner-colon form; exactly one pair is non-None per match.
 #
-# The inner-colon alternative is anchored to line start (optional [-*]
-# marker, mirroring _DISPATCH_PLAIN_RE) — unlike the pre-existing outer-colon
-# alternative, which is a bare substring search with no anchor at all. This
-# is not cosmetic: the unanchored form was measured against the real
-# unified_reports/ corpus (4015 files) and produced a genuine false positive
-# — a report's OWN changelog prose, `` `**Dispatch-ID:**` labels (closing
-# `**` sits after the colon) ``, quoting the exact inner-colon shape as an
-# example, matched as if it were a field declaration and its trailing prose
-# became the "value", shadowing (via fields.setdefault order) the report's
-# real bare Dispatch-ID line earlier in the same file. Anchoring closes this
-# without touching the outer form's existing (unrelated, pre-#1445) lack of
-# anchoring, which is out of scope here. Neither alternative matches bold
-# text with no colon at all (e.g. `**note** text`).
+# OI-1132: BOTH alternatives carry the exact anchor _DISPATCH_PLAIN_RE got
+# in #1445 — `^` with no leading `\s*`, then an optional list marker followed
+# by exactly one literal space (`[-*] `). #1445 anchored the plain-text path
+# precisely so quoted unified-diff removal lines (`-    Dispatch-ID:
+# old-value`, arbitrary reindentation after the `-`) and indented code-block
+# lines can never be adopted as identity, but left the bold branches loose:
+# the inner-colon alternative accepted `^\s*` + `[-*]\s+` (so a diff-removal
+# `-    **Dispatch-ID:** old-stale-value` and an indented
+# `    **Dispatch-ID:** quoted-example` both matched — reproduced on the
+# #1445 branch), and the outer-colon alternative had no anchor at all: a
+# bare substring search that matched mid-line, mid-prose, and inside quoted
+# diffs (it already produced a real corpus false positive — a report's OWN
+# changelog prose quoting `` `**Dispatch-ID:**` labels `` matched as a field
+# declaration, shadowing the report's genuine bare Dispatch-ID line via
+# fields.setdefault order). The value's id-shape check (dispatch_spec._ID_RE)
+# cannot save this: a stale foreign id is a perfectly legal id shape — only
+# the line anchor separates a field declaration from quoted content.
+#
+# Blast radius measured across all 4230 reports in unified_reports/
+# (2026-08-11, method as in #1445): 0 reports change dispatch_id under the
+# anchored form; 1 report changes any consumed key at all
+# (20260610-gate-kimi-pr836.md, whose old `status`="Active" was itself
+# scraped from a quoted diff context line ` **Status**: Active` — dropping
+# it is this very bug being fixed, not a regression). Neither alternative
+# matches bold text with no colon at all (e.g. `**note** text`).
 _BOLD_KV_RE = re.compile(
-    r"\*\*([^*]+)\*\*:\s*(.+)|^\s*(?:[-*]\s+)?\*\*([^*]+):\*\*\s*(.+)", re.MULTILINE
+    r"^(?:[-*] )?\*\*([^*]+)\*\*:\s*(.+)|^(?:[-*] )?\*\*([^*]+):\*\*\s*(.+)",
+    re.MULTILINE,
 )
 # OI-1120: the report contract tells workers to stamp the id "as a plain-text
 # or bold field" — a markdown list item (`- Dispatch-ID: x`) is plainly within
