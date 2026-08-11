@@ -840,6 +840,14 @@ def _heartbeat_monitor_loop(
             "threshold=%.0fs) — killing worker",
             dispatch_id, verdict.silence_seconds, verdict.threshold_seconds,
         )
+        # OI-1082: flag the kill DECISION before executing it. _kill_process
+        # blocks worst-case ~10s (SIGTERM wait + SIGKILL wait) and the report
+        # write adds more, while spawn_kimi joins this thread with a 5s cap —
+        # setting the event last meant the reader could see False after a real
+        # kill and downgrade the receipt's failure_reason to a generic
+        # "kimi exited with code -9". The event marks the decision, not the
+        # completion; the kill below is unconditional once we reach here.
+        killed_event.set()
         _kill_process(proc)
         try:
             report = build_heartbeat_failure_report(
@@ -858,7 +866,6 @@ def _heartbeat_monitor_loop(
                 "kimi_spawn: heartbeat failure report write failed for %s: %s",
                 dispatch_id, exc,
             )
-        killed_event.set()
         return
 
 
