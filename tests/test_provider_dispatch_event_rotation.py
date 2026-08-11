@@ -80,6 +80,12 @@ def _make_spawn_result(*, error=None, timed_out=False, returncode=0, event_write
     return r
 
 
+# OI-1090: isolation is default-on, so every _dispatch_* call below now creates
+# a real git worktree unless _create_provider_worktree/_remove_provider_worktree
+# are mocked — these tests exercise ring-buffer rotation, not worktree lifecycle
+# (that's test_provider_dispatch_worktree_isolation.py's job), so fake the seam.
+_FAKE_PROVIDER_WT_PATH = Path("/tmp/fake-event-rotation-worktree")
+
 # Patch targets for governance sinks so tests don't need real DB / receipts.
 # We mock at the governance_emit module level (where the functions are defined),
 # not at the provider_dispatch import level, so _emit_governance can run for real.
@@ -121,7 +127,9 @@ class TestCodexEventRotation:
              patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_dispatch._record_provider_metadata"):
+             patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"):
             rc = provider_dispatch._dispatch_codex(args)
 
         assert rc == 0
@@ -146,7 +154,9 @@ class TestCodexEventRotation:
              patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_dispatch._record_provider_metadata"):
+             patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"):
             rc = provider_dispatch._dispatch_codex(args)
 
         assert rc == 1
@@ -176,7 +186,9 @@ class TestGeminiEventRotation:
              patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_dispatch._record_provider_metadata"):
+             patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"):
             rc = provider_dispatch._dispatch_gemini(args)
 
         assert rc == 0
@@ -201,7 +213,9 @@ class TestGeminiEventRotation:
              patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_dispatch._record_provider_metadata"):
+             patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"):
             rc = provider_dispatch._dispatch_gemini(args)
 
         assert rc == 1
@@ -231,7 +245,9 @@ class TestKimiEventRotation:
              patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_dispatch._record_provider_metadata"):
+             patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"):
             rc = provider_dispatch._dispatch_kimi(args)
 
         assert rc == 0
@@ -256,7 +272,9 @@ class TestKimiEventRotation:
              patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/fake.ndjson")), \
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
-             patch("provider_dispatch._record_provider_metadata"):
+             patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"):
             rc = provider_dispatch._dispatch_kimi(args)
 
         assert rc == 1
@@ -297,6 +315,8 @@ class TestLitellmEventRotation:
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
              patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"), \
              patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}):
             rc = provider_dispatch._dispatch_litellm(args)
 
@@ -319,6 +339,8 @@ class TestLitellmEventRotation:
              patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake.md")), \
              patch("provider_costs.emit_provider_cost"), \
              patch("provider_dispatch._record_provider_metadata"), \
+             patch("provider_dispatch._create_provider_worktree", return_value=_FAKE_PROVIDER_WT_PATH), \
+             patch("provider_dispatch._remove_provider_worktree"), \
              patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}):
             rc = provider_dispatch._dispatch_litellm(args)
 

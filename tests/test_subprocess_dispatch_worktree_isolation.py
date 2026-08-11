@@ -1,17 +1,18 @@
-"""test_subprocess_dispatch_worktree_isolation.py — VNX_ISOLATED_WORKTREE tests.
+"""test_subprocess_dispatch_worktree_isolation.py — worktree isolation tests (default-on since OI-1090).
 
 Verifies:
-1. When VNX_ISOLATED_WORKTREE unset: _repo_root() uses file-based path (no .vnx-data).
-2. _set_active_worktree / _get_active_worktree / _repo_root() override mechanism.
-3. create_dispatch_worktree runs git fetch + worktree add, returns correct path.
-4. remove_dispatch_worktree calls git worktree remove --force + prune; idempotent.
-5. Failure path: worktree is removed even when dispatch raises.
-6. Two concurrent dispatch IDs → distinct worktree paths (no shared HEAD/index).
-7. delivery._resolve_agent_cwd_and_log_profile returns worktree path when active.
+1. _set_active_worktree / _get_active_worktree / _repo_root() override mechanism.
+2. create_dispatch_worktree runs git fetch + worktree add, returns correct path.
+3. remove_dispatch_worktree classifies before removal; idempotent.
+4. Failure path: worktree is removed even when dispatch raises.
+5. Two concurrent dispatch IDs → distinct worktree paths (no shared HEAD/index).
+6. delivery._resolve_agent_cwd_and_log_profile returns worktree path when active.
+7. OI-975: HEAD-jump detection stores main_head_sha in claim and warns on mismatch.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -37,7 +38,12 @@ class TestGitHelpersWorktreeOverride:
         from subprocess_dispatch_internals.git_helpers import _repo_root
         result = _repo_root()
         assert result.is_absolute()
-        assert ".vnx-data" not in str(result)
+        # _repo_root() resolves to a git-managed directory (may include
+        # .vnx-data when running from a worktree — the dispatch worktree is
+        # also a git checkout, so the assertion below holds regardless).
+        assert (result / ".git").exists(), (
+            f"_repo_root() must resolve to a git root; got {result}"
+        )
 
     def test_set_worktree_changes_repo_root(self, tmp_path):
         from subprocess_dispatch_internals.git_helpers import (
@@ -112,6 +118,8 @@ class TestCreateDispatchWorktree:
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
+            r.stdout = ""
+            r.stdout = ""
             return r
 
         with patch("dispatch_worktree_isolation.subprocess.run", side_effect=fake_run):
@@ -139,6 +147,7 @@ class TestCreateDispatchWorktree:
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
+            r.stdout = ""
             return r
 
         with pytest.raises(RuntimeError, match="create_dispatch_worktree failed"):
@@ -161,6 +170,7 @@ class TestCreateDispatchWorktree:
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
+            r.stdout = ""
             return r
 
         with patch("dispatch_worktree_isolation.subprocess.run", side_effect=fake_run):
@@ -210,7 +220,10 @@ class TestCentralInstallGuard:
 
 
 class TestRemoveDispatchWorktree:
-    def test_calls_remove_force_and_prune(self, tmp_path):
+    def test_remove_delegates_to_tmux_worktree_reap(self, tmp_path):
+        """remove_dispatch_worktree delegates to tmux_worktree.classify()+reap()
+        (L3 provider-lane reap, 2026-08-08).  The reap call invokes
+        git worktree remove --force for clean/pushed/committed classifications."""
         from dispatch_worktree_isolation import remove_dispatch_worktree, _dispatch_worktree_dir
 
         dispatch_id = "20260529-test-remove"
@@ -224,26 +237,38 @@ class TestRemoveDispatchWorktree:
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
+            r.stdout = ""
             return r
 
         with patch("dispatch_worktree_isolation.subprocess.run", side_effect=fake_run):
             remove_dispatch_worktree(dispatch_id, project_root=tmp_path)
 
         cmd_strs = [" ".join(c) for c in called_cmds]
-        assert any("remove" in s and "--force" in s for s in cmd_strs), (
-            f"git worktree remove --force not called; got: {cmd_strs}"
-        )
-        assert any("prune" in s for s in cmd_strs), (
-            f"git worktree prune not called; got: {cmd_strs}"
+        assert any("worktree remove" in s and "--force" in s for s in cmd_strs), (
+            f"git worktree remove --force not called (via reap); got: {cmd_strs}"
         )
 
     def test_idempotent_when_worktree_absent(self, tmp_path):
+        """remove_dispatch_worktree exits early without git calls when worktree
+        is absent.  Verifies the function completes without raising."""
         from dispatch_worktree_isolation import remove_dispatch_worktree
 
-        with patch("dispatch_worktree_isolation.subprocess.run") as mock_run:
-            remove_dispatch_worktree("nonexistent-dispatch", project_root=tmp_path)
+        # The absent-worktree early-exit path goes through _clear_claim →
+        # vnx_paths.resolve_data_root, which internally calls subprocess.
+        # Patch subprocess.run in dispatch_worktree_isolation to return a
+        # well-formed CompletedProcess so the vnx_paths resolver (which uses
+        # subprocess.check_output → subprocess.run) doesn't choke on a
+        # MagicMock.
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 128  # not a git repo → non-zero
+            r.stderr = "fatal: not a git repository"
+            r.stdout = ""
+            return r
 
-        mock_run.assert_not_called()
+        with patch("dispatch_worktree_isolation.subprocess.run", side_effect=fake_run):
+            # Must not raise — idempotent when worktree is absent
+            remove_dispatch_worktree("nonexistent-dispatch", project_root=tmp_path)
 
 
 # ─── delivery._resolve_agent_cwd_and_log_profile ─────────────────────────────
@@ -327,6 +352,7 @@ class TestIsolationLifecycle:
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
+            r.stdout = ""
             return r
 
         with patch("dispatch_worktree_isolation.subprocess.run", side_effect=fake_run):
@@ -364,6 +390,7 @@ class TestIsolationLifecycle:
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
+            r.stdout = ""
             return r
 
         with patch("dispatch_worktree_isolation.subprocess.run", side_effect=fake_run):
@@ -389,3 +416,176 @@ class TestIsolationLifecycle:
         assert path_a.resolve() != path_b.resolve()
         # Each worktree has its own HEAD/index — no shared state possible.
         assert str(path_a) != str(path_b)
+
+
+# ─── OI-975 HEAD-jump detection ──────────────────────────────────────────────
+
+
+class TestHeadJumpDetection:
+    """OI-975: detect when the main checkout HEAD changes during a dispatch.
+
+    The claim stores main_head_sha at creation time; teardown compares the
+    current main checkout HEAD against it and logs a loud WARNING when they
+    differ, naming the dispatch-id so the event is traceable.
+    """
+
+    def test_main_head_sha_stored_in_claim(self, tmp_path):
+        """create_dispatch_worktree stores main_head_sha in the claim."""
+        import json
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            _sanitize_dispatch_id,
+            _claim_path,
+        )
+
+        local = self._init_repo(tmp_path)
+        dispatch_id = "head-jump-store-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        safe_id = _sanitize_dispatch_id(dispatch_id)
+        claim_path = _claim_path(safe_id, local)
+        claim = json.loads(claim_path.read_text())
+
+        assert "main_head_sha" in claim, (
+            "OI-975: claim must include main_head_sha"
+        )
+        main_head_sha = claim["main_head_sha"]
+        assert len(main_head_sha) == 40, (
+            f"main_head_sha must be a full SHA, got {main_head_sha!r}"
+        )
+        # Must match the actual HEAD of the main checkout.
+        actual_head = subprocess.check_output(
+            ["git", "-C", str(local), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert main_head_sha == actual_head
+
+    def test_remove_detects_head_jump(self, tmp_path, caplog):
+        """remove_dispatch_worktree logs WARNING when main checkout HEAD changed."""
+        import logging
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+            _sanitize_dispatch_id,
+            _claim_path,
+        )
+        import json
+
+        local = self._init_repo(tmp_path)
+        dispatch_id = "head-jump-detect-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        # Simulate a HEAD jump: change the claim's main_head_sha to a different
+        # (but valid) SHA that doesn't match the current HEAD.
+        safe_id = _sanitize_dispatch_id(dispatch_id)
+        claim_path = _claim_path(safe_id, local)
+        claim = json.loads(claim_path.read_text())
+        # Use a fake SHA that is 40 hex chars — definitely not the current HEAD.
+        claim["main_head_sha"] = "0" * 40
+        claim_path.write_text(json.dumps(claim) + "\n")
+
+        with caplog.at_level(logging.WARNING, logger="dispatch_worktree_isolation"):
+            remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        head_jump_logs = [
+            r for r in caplog.records
+            if "HEAD-JUMP DETECTED" in (r.message or "")
+        ]
+        assert len(head_jump_logs) == 1, (
+            f"OI-975: expected exactly 1 HEAD-JUMP warning, got {len(head_jump_logs)}"
+        )
+        assert dispatch_id in head_jump_logs[0].message, (
+            "HEAD-JUMP warning must include the dispatch_id"
+        )
+
+    def test_no_warning_when_head_unchanged(self, tmp_path, caplog):
+        """No false alarm: when HEAD hasn't changed, no HEAD-JUMP warning is logged."""
+        import logging
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = self._init_repo(tmp_path)
+        dispatch_id = "head-jump-clean-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        with caplog.at_level(logging.WARNING, logger="dispatch_worktree_isolation"):
+            remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        head_jump_logs = [
+            r for r in caplog.records
+            if "HEAD-JUMP DETECTED" in (r.message or "")
+        ]
+        assert len(head_jump_logs) == 0, (
+            "no HEAD-JUMP warning when HEAD is unchanged"
+        )
+
+    def test_missing_main_head_sha_skips_check(self, tmp_path, caplog):
+        """Pre-existing claims without main_head_sha do not trigger a warning."""
+        import logging
+        import json
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+            _sanitize_dispatch_id,
+            _claim_path,
+        )
+
+        local = self._init_repo(tmp_path)
+        dispatch_id = "head-jump-old-claim-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        # Remove main_head_sha to simulate a pre-OI-975 claim.
+        safe_id = _sanitize_dispatch_id(dispatch_id)
+        claim_path = _claim_path(safe_id, local)
+        claim = json.loads(claim_path.read_text())
+        del claim["main_head_sha"]
+        claim_path.write_text(json.dumps(claim) + "\n")
+
+        with caplog.at_level(logging.WARNING, logger="dispatch_worktree_isolation"):
+            remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
+
+        head_jump_logs = [
+            r for r in caplog.records
+            if "HEAD-JUMP DETECTED" in (r.message or "")
+        ]
+        assert len(head_jump_logs) == 0, (
+            "no HEAD-JUMP warning when claim has no main_head_sha field"
+        )
+
+    @staticmethod
+    def _init_repo(tmp_path: Path) -> Path:
+        """Create a bare origin + local clone with an initial commit."""
+        bare = tmp_path / "origin.git"
+        bare.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(bare)],
+            check=True, capture_output=True,
+        )
+        local = tmp_path / "local"
+        subprocess.run(
+            ["git", "clone", str(bare), str(local)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "config", "user.email", "test@test.local"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "config", "user.name", "Test"],
+            check=True, capture_output=True,
+        )
+        (local / "README.md").write_text("init\n")
+        subprocess.run(
+            ["git", "-C", str(local), "add", "README.md"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "commit", "-m", "initial"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "push", "-u", "origin", "main"],
+            check=True, capture_output=True,
+        )
+        return local
