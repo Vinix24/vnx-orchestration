@@ -1400,10 +1400,24 @@ class TmuxInteractiveDispatch:
         )
         return False
 
-    def _deliver_instruction(self, pane_id: str, body: str) -> bool:
+    def _verify_pane_identity(self, pane_id: str, session: str) -> bool:
+        """OI-1126 defense-in-depth: assert *pane_id* still belongs to *session*.
+
+        Pane addressing was measured stable (a captured pane_id never drifts to a
+        different session within a live tmux server — 0 mismatches across repeated
+        concurrent-spawn trials), but this check is the difference between "delivery
+        to the wrong pane is unlikely" and "delivery to the wrong pane is impossible":
+        called immediately before every send-keys/paste that carries dispatch content,
+        so a future addressing regression fails loud here instead of silently
+        delivering into a sibling dispatch's pane.
+        """
+        check = self._runner.run(["display-message", "-p", "-t", pane_id, "#{session_name}"])
+        return check.returncode == 0 and check.stdout.strip() == session
+
+    def _deliver_instruction(self, pane_id: str, body: str, dispatch_id: str) -> bool:
         """Clear input, paste the instruction body, settle, then submit with Enter."""
         self._runner.run(["send-keys", "-t", pane_id, "C-u"])
-        if not self._paste(pane_id, body):
+        if not self._paste(pane_id, body, dispatch_id):
             return False
         # Settle after bracketed paste so the pane has fully received the content.
         # Scale with body size: +1s per 50k chars, capped at +2s. Large bodies need
@@ -1669,29 +1683,54 @@ class TmuxInteractiveDispatch:
             return WORK_START_AWAITING_PERMISSION
         return WORK_START_NO_PROGRESS
 
-    def _paste(self, pane_id: str, content: str, max_inline: int = 50000) -> bool:
-        """Load *content* into a tmux buffer and paste it into the pane."""
-        if len(content) > max_inline:
-            tmp_path = ""
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".vnx_int_buf", delete=False, encoding="utf-8"
-                ) as fh:
-                    fh.write(content)
-                    tmp_path = fh.name
-                rc = self._runner.run(["load-buffer", tmp_path]).returncode
-            finally:
-                if tmp_path:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-        else:
-            rc = self._runner.run(["load-buffer", "-"], input_text=content).returncode
-        if rc != 0:
-            logger.warning("interactive: load-buffer failed for %s", pane_id)
-            return False
-        return self._runner.run(["paste-buffer", "-t", pane_id]).returncode == 0
+    def _paste(self, pane_id: str, content: str, dispatch_id: str, max_inline: int = 50000) -> bool:
+        """Load *content* into a PER-DISPATCH NAMED tmux buffer and paste it into the pane.
+
+        OI-1126: ``load-buffer``/``paste-buffer`` without ``-b <name>`` operate on the
+        tmux SERVER's single shared "most recent buffer" slot, not on data scoped to
+        this call. Two dispatches racing to load+paste concurrently (fired close
+        together, e.g. via the door) can have dispatch A's ``paste-buffer`` retrieve
+        dispatch B's just-loaded content instead of its own — a TOCTOU race on shared
+        global state. Measured: 0/25 crossings with a 2-dispatch, 2s-staggered load, but
+        15/15 (100%) with 4 dispatches racing with no stagger at all — see the dispatch
+        report for the full reproduction. This was NOT a pane-addressing bug: pane_id
+        always stayed correctly bound to its own session (also measured, 0 mismatches
+        across 3x4-way spawn-only trials); the race was purely in the shared buffer.
+        A dispatch-id-scoped buffer name makes load+paste immune to any concurrently
+        running sibling dispatch, because no two dispatches ever touch the same buffer.
+        """
+        buffer_name = f"vnx-paste-{_sanitize_session_name(dispatch_id)}"
+        try:
+            if len(content) > max_inline:
+                tmp_path = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".vnx_int_buf", delete=False, encoding="utf-8"
+                    ) as fh:
+                        fh.write(content)
+                        tmp_path = fh.name
+                    rc = self._runner.run(["load-buffer", "-b", buffer_name, tmp_path]).returncode
+                finally:
+                    if tmp_path:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+            else:
+                rc = self._runner.run(
+                    ["load-buffer", "-b", buffer_name, "-"], input_text=content
+                ).returncode
+            if rc != 0:
+                logger.warning("interactive: load-buffer failed for %s", pane_id)
+                return False
+            return self._runner.run(
+                ["paste-buffer", "-b", buffer_name, "-t", pane_id]
+            ).returncode == 0
+        finally:
+            # Best-effort cleanup: a long-running fleet must not accumulate one
+            # named buffer per dispatch forever. Failure here never affects the
+            # paste outcome already computed above.
+            self._runner.run(["delete-buffer", "-b", buffer_name])
 
     # -- worker-permission relay (governance, flag-gated) ------------------
     def _maybe_start_permission_relay(self, session: str, dispatch_id: str):
@@ -2558,6 +2597,31 @@ class TmuxInteractiveDispatch:
                     f"VNX_DISPATCH_ID={shlex.quote(dispatch_id)}; {launch_cmd}"
                 )
 
+            # OI-1126: verify the captured pane_id still belongs to THIS dispatch's
+            # session immediately before the first content is delivered to it. Cheap
+            # (~one tmux round-trip) defense-in-depth on top of the per-dispatch named
+            # buffer fix below — makes delivery to a sibling dispatch's pane impossible
+            # to do silently, not merely unlikely.
+            if not self._verify_pane_identity(pane_id, session):
+                self._emit_event(
+                    "interactive_pane_identity_mismatch",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="pane_id no longer bound to this dispatch's session before launch",
+                    metadata={"session": session, "pane_id": pane_id},
+                )
+                _teardown("pane_identity_mismatch")
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    session=session,
+                    label=label,
+                    window_id=window_id,
+                    pane_id=pane_id,
+                    failure_reason="pane_identity_mismatch_before_launch",
+                    duration_seconds=time.monotonic() - start_time,
+                )
+
             if not self._launch_claude(pane_id, launch_cmd):
                 self._emit_event(
                     "interactive_launch_failed",
@@ -2746,7 +2810,30 @@ class TmuxInteractiveDispatch:
                 reason="send-keys dispatch instruction",
                 metadata={"session": session, "pane_id": pane_id},
             )
-            if not self._deliver_instruction(pane_id, body):
+            # OI-1126: re-verify identity right before the instruction payload itself
+            # goes out — this is the delivery the reproduction showed was actually at
+            # risk (via the shared tmux paste buffer, now fixed below in _paste()).
+            if not self._verify_pane_identity(pane_id, session):
+                self._emit_event(
+                    "interactive_pane_identity_mismatch",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="pane_id no longer bound to this dispatch's session before instruction delivery",
+                    metadata={"session": session, "pane_id": pane_id},
+                )
+                _teardown("pane_identity_mismatch")
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    session=session,
+                    label=label,
+                    window_id=window_id,
+                    pane_id=pane_id,
+                    failure_reason="pane_identity_mismatch_before_deliver",
+                    duration_seconds=time.monotonic() - start_time,
+                )
+
+            if not self._deliver_instruction(pane_id, body, dispatch_id):
                 self._emit_event(
                     "interactive_deliver_failed",
                     dispatch_id=dispatch_id,
@@ -2801,6 +2888,56 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                     worktree_state=_wt_state[0],
                 )
+
+            # 7b-alt. OI-1126 worker-side detectability: the UserPromptSubmit hook
+            # (tmux_signal_prompt_received.sh) independently compares the dispatch_id
+            # embedded in the delivered prompt's completion-protocol JSON against
+            # VNX_DISPATCH_ID (set race-free at spawn/launch time, never via the shared
+            # paste buffer) and drops a "dispatch_id_mismatch" sentinel when they
+            # disagree. The worker's own pane is the last line of defence against a
+            # delivery bug anywhere upstream of it — fail loud immediately rather than
+            # let the dispatch run out its deadline against content that isn't its own.
+            if signal_dir is not None:
+                _mismatch_sentinel = signal_dir / "dispatch_id_mismatch"
+                if _mismatch_sentinel.exists():
+                    _mismatch_detail = ""
+                    try:
+                        _mismatch_detail = _mismatch_sentinel.read_text(encoding="utf-8").strip()
+                    except OSError:
+                        pass
+                    self._emit_event(
+                        "interactive_dispatch_id_mismatch",
+                        dispatch_id=dispatch_id,
+                        label=label,
+                        reason=_mismatch_detail or "worker-side dispatch id mismatch detected",
+                        metadata={"session": session, "pane_id": pane_id},
+                    )
+                    self._govern_report(
+                        dispatch_id=dispatch_id,
+                        terminal_id=label,
+                        instruction=instruction,
+                        receipt=None,
+                        duration_seconds=time.monotonic() - start_time,
+                        base_sha=worktree_handle.base_sha if worktree_handle else None,
+                        worktree_path=worktree_handle.path if worktree_handle else None,
+                        model=model,
+                        failure_reason="dispatch_id_mismatch_detected",
+                        role=role,
+                        session_id=session_uuid,
+                        permission_posture=permission_posture,
+                    )
+                    _teardown("dispatch_id_mismatch_detected")
+                    return InteractiveDispatchResult(
+                        success=False,
+                        dispatch_id=dispatch_id,
+                        session=session,
+                        label=label,
+                        window_id=window_id,
+                        pane_id=pane_id,
+                        failure_reason="dispatch_id_mismatch_detected",
+                        duration_seconds=time.monotonic() - start_time,
+                        worktree_state=_wt_state[0],
+                    )
 
             # 7b-bis. Confirm the worker actually STARTED working. A verified submit can
             # still clear the input box without the worker progressing under subscription

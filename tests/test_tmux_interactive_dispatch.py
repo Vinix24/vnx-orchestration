@@ -67,16 +67,29 @@ class FakeTmux:
         ready_content: str = "Welcome to Claude\n? for shortcuts",
         post_paste_capture_seq: "list[str] | None" = None,
         post_paste_content: "str | None" = None,
+        session_name_override: "str | None" = None,
+        simulate_dispatch_id_mismatch: bool = False,
     ) -> None:
         self.receipts_file = receipts_file
         self.dispatch_id = dispatch_id
         self._available = available
         self._spawn_ok = spawn_ok
+        # OI-1126 test hook: simulates the UserPromptSubmit hook
+        # (tmux_signal_prompt_received.sh) having detected a dispatch_id mismatch and
+        # dropped its sentinel — exercised by parsing VNX_TMUX_SIGNAL_DIR out of the
+        # launch command (the same way the real pane env carries it) so the sentinel
+        # lands in the SAME directory dispatch() itself polls.
+        self._simulate_dispatch_id_mismatch = simulate_dispatch_id_mismatch
         self._launch_ok = launch_ok
         self._deliver_ok = deliver_ok
         self._emit_receipt = emit_receipt
         self._receipt_status = receipt_status
         self._ready_content = ready_content
+        # OI-1126 test hook: when set, display-message '#{session_name}' always
+        # returns THIS value regardless of which session was actually spawned —
+        # simulates a pane whose identity no longer matches this dispatch by the
+        # time delivery is about to happen.
+        self._session_name_override = session_name_override
         self._post_paste_seq: list[str] = list(post_paste_capture_seq or [])
         # OI-863: persistent content for capture-pane calls AFTER the submit
         # (once post_paste_capture_seq is exhausted), e.g. a pane that stays on
@@ -89,6 +102,15 @@ class FakeTmux:
         self._paste_fired = False  # True after first Enter following paste-buffer
         self._literal_send_attempted = False
         self.receipts_written = 0
+        # OI-1126: tracks the -s value from the last new-session call so
+        # display-message '#{session_name}' echoes back the REAL session that was
+        # spawned (matching real tmux), instead of a hardcoded stand-in — otherwise
+        # _verify_pane_identity() would see it disagree with dispatch()'s own
+        # `session` variable and every success-path test would spuriously abort.
+        self._last_session_name: "str | None" = None
+        self.loaded_buffer_names: list[str] = []
+        self.pasted_buffer_names: list[str] = []
+        self.deleted_buffer_names: list[str] = []
 
     def available(self) -> bool:
         return self._available
@@ -100,9 +122,15 @@ class FakeTmux:
         if cmd == "new-session":
             if not self._spawn_ok:
                 return TmuxResult(1, "", "session create failed")
+            if "-s" in args:
+                self._last_session_name = args[args.index("-s") + 1]
             return TmuxResult(0, "%1\n")
 
         if cmd == "display-message":
+            if args and args[-1] == "#{session_name}":
+                if self._session_name_override is not None:
+                    return TmuxResult(0, f"{self._session_name_override}\n")
+                return TmuxResult(0, f"{self._last_session_name or ''}\n")
             return TmuxResult(0, "@1\n")
 
         if cmd == "capture-pane":
@@ -117,6 +145,8 @@ class FakeTmux:
             return TmuxResult(0, self._ready_content)
 
         if cmd == "load-buffer":
+            if "-b" in args:
+                self.loaded_buffer_names.append(args[args.index("-b") + 1])
             if not self._deliver_ok:
                 return TmuxResult(1, "", "load-buffer failed")
             if input_text is not None:
@@ -129,7 +159,14 @@ class FakeTmux:
             return TmuxResult(0)
 
         if cmd == "paste-buffer":
+            if "-b" in args:
+                self.pasted_buffer_names.append(args[args.index("-b") + 1])
             self._pending_paste = True
+            return TmuxResult(0)
+
+        if cmd == "delete-buffer":
+            if "-b" in args:
+                self.deleted_buffer_names.append(args[args.index("-b") + 1])
             return TmuxResult(0)
 
         if cmd == "send-keys":
@@ -138,6 +175,19 @@ class FakeTmux:
                 self._literal_send_attempted = True
                 if not self._launch_ok:
                     return TmuxResult(1, "", "send-keys literal failed")
+                if self._simulate_dispatch_id_mismatch:
+                    # The launch command exports VNX_TMUX_SIGNAL_DIR=<path> — parse it
+                    # out the same way the real pane env carries it, and drop the
+                    # sentinel there, simulating tmux_signal_prompt_received.sh having
+                    # detected a mismatch on the (would-be) delivered prompt.
+                    m = re.search(r"VNX_TMUX_SIGNAL_DIR=(\S+)", args[-1])
+                    if m:
+                        sig_dir = Path(m.group(1).strip("'\""))
+                        sig_dir.mkdir(parents=True, exist_ok=True)
+                        (sig_dir / "dispatch_id_mismatch").write_text(
+                            "expected=this-dispatch delivered=some-other-dispatch\n",
+                            encoding="utf-8",
+                        )
             # First Enter after paste-buffer → simulate worker completing.
             if args[-1] == "Enter" and self._pending_paste:
                 self._pending_paste = False
@@ -546,6 +596,163 @@ class TestDeliverFailureTeardown(_LaneTestCase):
         self.assertTrue(fake.killed_sessions, "kill-session must be called on deliver failure")
         handle_path = self.state_dir / "tmux_interactive" / f"{self.DISPATCH_ID}.json"
         self.assertFalse(handle_path.exists())
+
+
+class TestPasteUsesPerDispatchNamedBuffer(_LaneTestCase):
+    """OI-1126 regression: _paste() must never use tmux's shared/default buffer.
+
+    Reproduction (see the dispatch report): with the OLD unnamed load-buffer/
+    paste-buffer pair, 4 dispatches racing with no stagger crossed content
+    100% of the time (15/15 trials) even though pane_id addressing itself was
+    always correct — the race was in tmux's server-global "most recent buffer"
+    slot, not in which pane was targeted. This is the test that fails if
+    delivery is ever addressed by an unstable/shared handle again.
+    """
+
+    def test_paste_uses_named_buffer_for_this_dispatch(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        ok = lane._paste("%1", "hello world", self.DISPATCH_ID)
+
+        self.assertTrue(ok)
+        # Old behavior (regression target): ["load-buffer", "-"] / ["paste-buffer", "-t", pane].
+        # New behavior: every load/paste/delete call carries an explicit -b buffer name
+        # that is derived from THIS dispatch's id — never the bare/default buffer.
+        self.assertEqual(len(fake.loaded_buffer_names), 1)
+        self.assertEqual(len(fake.pasted_buffer_names), 1)
+        self.assertEqual(fake.loaded_buffer_names[0], fake.pasted_buffer_names[0])
+        self.assertIn(self.DISPATCH_ID, fake.loaded_buffer_names[0])
+        # Buffer is cleaned up after use so a long-running fleet never accumulates one
+        # named buffer per dispatch forever.
+        self.assertEqual(fake.deleted_buffer_names, [fake.loaded_buffer_names[0]])
+
+    def test_two_dispatches_never_share_a_buffer_name(self):
+        """The exact condition that caused OI-1126: two dispatches delivering around
+        the same time must be structurally unable to collide on buffer identity."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        lane._paste("%1", "content for A", "dispatch-a")
+        lane._paste("%2", "content for B", "dispatch-b")
+
+        self.assertEqual(len(fake.pasted_buffer_names), 2)
+        self.assertNotEqual(
+            fake.pasted_buffer_names[0], fake.pasted_buffer_names[1],
+            "two different dispatches must never paste from the same buffer name",
+        )
+
+    def test_paste_uses_named_buffer_for_large_body_tmp_file_path(self):
+        """Large bodies (>50k chars) go through the tmp-file load path — must also
+        use a per-dispatch named buffer, not the bare default."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        ok = lane._paste("%1", "x" * 60000, self.DISPATCH_ID, max_inline=50000)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(fake.loaded_buffer_names), 1)
+        self.assertIn(self.DISPATCH_ID, fake.loaded_buffer_names[0])
+
+
+class TestVerifyPaneIdentity(_LaneTestCase):
+    """OI-1126: _verify_pane_identity() is the pre-delivery identity check."""
+
+    def test_returns_true_when_pane_belongs_to_expected_session(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        fake._last_session_name = "vnx-my-dispatch"
+        lane = self._make_lane(fake)
+
+        self.assertTrue(lane._verify_pane_identity("%1", "vnx-my-dispatch"))
+
+    def test_returns_false_when_pane_belongs_to_a_different_session(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        fake._last_session_name = "vnx-someone-elses-dispatch"
+        lane = self._make_lane(fake)
+
+        self.assertFalse(lane._verify_pane_identity("%1", "vnx-my-dispatch"))
+
+    def test_returns_false_when_display_message_fails(self):
+        class _FailingRunner:
+            def available(self):
+                return True
+
+            def run(self, args, *, timeout=10, input_text=None):
+                return TmuxResult(1, "", "no such pane")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            runner=_FailingRunner(),
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        self.assertFalse(lane._verify_pane_identity("%1", "vnx-my-dispatch"))
+
+
+class TestMismatchedPaneIdentityFailsLoud(_LaneTestCase):
+    """OI-1126: a mismatched pane/session identity must fail loud instead of
+    delivering — this is the test that catches a future addressing regression
+    even though the OI-1126 root cause (shared paste buffer) is fixed separately."""
+
+    def test_dispatch_fails_loud_when_pane_identity_mismatched_before_launch(self):
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            # Simulate a pane_id that (for whatever reason) no longer resolves to
+            # THIS dispatch's own session by the time delivery is about to happen.
+            session_name_override="vnx-some-other-dispatch",
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "pane_identity_mismatch_before_launch")
+        # Nothing was ever delivered to the (potentially wrong) pane.
+        self.assertEqual(fake.pasted, [], "instruction must never be pasted when identity is unverified")
+        self.assertFalse(
+            any("-l" in cmd for cmd in fake.commands if cmd and cmd[0] == "send-keys"),
+            "the claude launch line must never be sent when identity is unverified",
+        )
+        self.assertTrue(fake.killed_sessions, "kill-session must be called on identity mismatch")
+
+
+class TestWorkerSideDispatchIdMismatchDetection(_LaneTestCase):
+    """OI-1126 Part 3: the worker's own pane is the last line of defence. When the
+    UserPromptSubmit hook (tmux_signal_prompt_received.sh) drops a
+    dispatch_id_mismatch sentinel, dispatch() must fail loud immediately rather than
+    run out its deadline waiting on a receipt for content that isn't its own."""
+
+    def test_dispatch_fails_loud_on_worker_side_mismatch_sentinel(self):
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            simulate_dispatch_id_mismatch=True,
+            emit_receipt=False,  # the worker never gets to run its own instruction
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, deadline_seconds=1.0, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "dispatch_id_mismatch_detected")
+        self.assertTrue(fake.killed_sessions, "kill-session must be called on mismatch detection")
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_dispatch_id_mismatch",
+            {e["event_type"] for e in events},
+        )
+
+    def test_dispatch_succeeds_when_no_mismatch_sentinel_present(self):
+        """Control: identical setup minus the mismatch sentinel completes normally."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            simulate_dispatch_id_mismatch=False,
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
 
 
 class TestNoDashP(_LaneTestCase):
@@ -3859,7 +4066,7 @@ class TestAdaptivePasteSettle(_LaneTestCase):
 
         with patch("time.sleep", side_effect=fake_sleep):
             with patch.dict(os.environ, {"VNX_TMUX_PASTE_SETTLE_SECONDS": "0.75"}):
-                lane._deliver_instruction("pane-0", large_body)
+                lane._deliver_instruction("pane-0", large_body, self.DISPATCH_ID)
 
         # Pastes (load-buffer, paste-buffer) + settle sleep + Enter send-keys.
         # Find the settle sleep: it's the largest sleep since there may be poll sleeps too.
@@ -3889,7 +4096,7 @@ class TestAdaptivePasteSettle(_LaneTestCase):
 
         with patch("time.sleep", side_effect=fake_sleep):
             with patch.dict(os.environ, {"VNX_TMUX_PASTE_SETTLE_SECONDS": "0.75"}):
-                lane._deliver_instruction("pane-0", huge_body)
+                lane._deliver_instruction("pane-0", huge_body, self.DISPATCH_ID)
 
         self.assertTrue(sleep_calls, "time.sleep must have been called")
         settle_duration = max(sleep_calls)
@@ -3916,7 +4123,7 @@ class TestAdaptivePasteSettle(_LaneTestCase):
 
         with patch("time.sleep", side_effect=fake_sleep):
             with patch.dict(os.environ, {"VNX_TMUX_PASTE_SETTLE_SECONDS": "0.75"}):
-                lane._deliver_instruction("pane-0", small_body)
+                lane._deliver_instruction("pane-0", small_body, self.DISPATCH_ID)
 
         self.assertTrue(sleep_calls, "time.sleep must have been called")
         settle_duration = max(sleep_calls)

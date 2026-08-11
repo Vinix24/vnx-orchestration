@@ -251,6 +251,148 @@ class TestHookGuards(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
 
     @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_writes_mismatch_sentinel_when_dispatch_id_disagrees(self) -> None:
+        """OI-1126 worker-side detectability: the delivered prompt's own embedded
+        dispatch_id (from the completion-protocol JSON) disagreeing with
+        VNX_DISPATCH_ID (set race-free at spawn/launch time) is the worker's own
+        last-line-of-defence signal that it received a sibling dispatch's content."""
+        sig = self.root / "sig-mismatch"
+        prompt = (
+            "## Completion Protocol (interactive lane)\n\n```bash\n"
+            'python3 append_receipt.py --receipt "{\\"dispatch_id\\": \\"disp-OTHER\\"}"\n'
+            "```\n"
+        )
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": prompt}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        mismatch_path = sig / "dispatch_id_mismatch"
+        self.assertTrue(mismatch_path.is_file(), "mismatch sentinel must be written")
+        content = mismatch_path.read_text(encoding="utf-8")
+        self.assertIn("disp-prompt", content)
+        self.assertIn("disp-OTHER", content)
+        # The base submission signal still fires — the prompt WAS submitted, just
+        # not this dispatch's own content.
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_no_mismatch_sentinel_when_dispatch_id_agrees(self) -> None:
+        sig = self.root / "sig-agree"
+        prompt = (
+            "## Completion Protocol (interactive lane)\n\n```bash\n"
+            'python3 append_receipt.py --receipt "{\\"dispatch_id\\": \\"disp-prompt\\"}"\n'
+            "```\n"
+        )
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": prompt}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertFalse((sig / "dispatch_id_mismatch").exists())
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_no_mismatch_sentinel_when_prompt_has_no_dispatch_id(self) -> None:
+        """A prompt with no extractable dispatch_id must never false-positive."""
+        sig = self.root / "sig-none"
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": "Do the thing, no protocol block here."}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertFalse((sig / "dispatch_id_mismatch").exists())
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    # -- OI-1126 round 3: scope the extraction to the appended protocol block --
+    #
+    # Fixtures below are built the way the lane actually assembles a body:
+    # context text FIRST, completion-protocol block APPENDED LAST (matching
+    # `body = _context_body + ... + self._build_completion_protocol(...)` in
+    # tmux_interactive_dispatch.py's dispatch()). The protocol text itself
+    # comes from the real `_build_completion_protocol()` method, not a
+    # hand-typed guess, so the fixture can't drift from production shape.
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_ignores_foreign_id_quoted_earlier_in_body(self) -> None:
+        """False-kill case: a dispatch instruction that legitimately quotes a
+        different dispatch's identifier (a ledger excerpt, a JSON receipt
+        fragment — VNX dispatch instructions do this routinely, since the
+        fabric's own open items are ABOUT receipts and identifiers) must not
+        trip the mismatch guard just because that foreign value appears
+        BEFORE the code-guaranteed, always-appended-last protocol block."""
+        sig = self.root / "sig-false-kill"
+        lane = _make_lane(_CaptureRunner(), self.root)
+        context_body = (
+            "Fix the receipt converter so it stops choking on this stale ledger "
+            'excerpt: {"dispatch_id": "disp-FOREIGN-OLD", "status": "done"}\n\n'
+            "Now implement the fix and commit.\n"
+        )
+        protocol_block = lane._build_completion_protocol("disp-prompt", "disp-prompt")
+        prompt = context_body + protocol_block
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": prompt}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertFalse(
+            (sig / "dispatch_id_mismatch").exists(),
+            "a foreign id quoted earlier in the instruction body must not "
+            "trigger a false mismatch when the appended protocol id agrees",
+        )
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_detects_real_mismatch_despite_foreign_id_in_body(self) -> None:
+        """Masking case: a foreign id earlier in the body must not hide a REAL
+        crossing carried by the appended protocol block — the recorded
+        delivered value must be the protocol's, not the body's earlier one."""
+        sig = self.root / "sig-masking"
+        lane = _make_lane(_CaptureRunner(), self.root)
+        context_body = (
+            "Ledger excerpt for reference: "
+            '{"dispatch_id": "disp-FOREIGN-OLD", "status": "done"}\n\n'
+            "Now implement the fix and commit.\n"
+        )
+        protocol_block = lane._build_completion_protocol("disp-CROSSED", "disp-CROSSED")
+        prompt = context_body + protocol_block
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": prompt}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        mismatch_path = sig / "dispatch_id_mismatch"
+        self.assertTrue(mismatch_path.is_file(), "a genuine crossing must still be caught")
+        content = mismatch_path.read_text(encoding="utf-8")
+        self.assertIn("expected=disp-prompt", content)
+        self.assertIn("delivered=disp-CROSSED", content)
+        self.assertNotIn("disp-FOREIGN-OLD", content)
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_no_mismatch_when_protocol_id_agrees_with_env(self) -> None:
+        """Baseline still holds: a realistic context body plus the appended
+        protocol block (built via the real dispatcher method) carrying the
+        correct id writes no sentinel."""
+        sig = self.root / "sig-baseline-agree"
+        lane = _make_lane(_CaptureRunner(), self.root)
+        context_body = "Implement the fix described above, then commit and push.\n"
+        protocol_block = lane._build_completion_protocol("disp-prompt", "disp-prompt")
+        prompt = context_body + protocol_block
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": prompt}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertFalse((sig / "dispatch_id_mismatch").exists())
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
     def test_session_ready_captures_session_id_from_stdin(self) -> None:
         sig = self.root / "sig-sid"
         session_id = "123e4567-e89b-12d3-a456-426614174000"
