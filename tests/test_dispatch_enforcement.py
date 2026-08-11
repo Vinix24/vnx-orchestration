@@ -50,12 +50,15 @@ class TestD11ConstraintLoads:
         )
         assert headless is not None, "claude-headless constraint missing from YAML"
 
-    def test_is_forbid_route_blocking_override_allowed(self, real_enforcer: ConstraintEnforcer) -> None:
+    def test_is_forbid_route_warn_override_allowed(self, real_enforcer: ConstraintEnforcer) -> None:
+        """dispatch-20260811c-b: downgraded blocking -> warn (opened 2026-08-11); the route
+        is no longer refused, but override_allowed stays true so an explicit opt-in still
+        shows up in the audit trail if the block is ever re-tightened."""
         headless = next(
             c for c in real_enforcer._constraints if c.get("id") == "claude-headless"
         )
         assert headless["rule"] == "forbid_route"
-        assert headless["audit_severity"] == "blocking"
+        assert headless["audit_severity"] == "warn"
         assert headless["override_allowed"] is True
 
     def test_forbidden_route_spec(self, real_enforcer: ConstraintEnforcer) -> None:
@@ -76,14 +79,17 @@ class TestD12ViaAndConstraint:
     def test_via_for_claude_is_cli(self) -> None:
         assert _via_for_provider("claude", None) == "cli"
 
-    def test_headless_via_fires_blocking_without_flag(self, real_enforcer: ConstraintEnforcer) -> None:
+    def test_headless_via_fires_warn_without_flag(self, real_enforcer: ConstraintEnforcer) -> None:
+        """dispatch-20260811c-b: the route is no longer refused (the lane is open by
+        default) — it still surfaces as a warn-severity violation for audit visibility,
+        it just never raises."""
         violations = real_enforcer.check_constraints(
             provider="claude", via="headless", env={}
         )
         codes = [v.code for v in violations]
         assert "claude-headless" in codes, f"claude-headless not in violations: {codes}"
         v = next(v for v in violations if v.code == "claude-headless")
-        assert v.severity == "blocking"
+        assert v.severity == "warn"
         assert not v.override_applied
 
     def test_headless_via_downgraded_to_warn_with_flag(self, real_enforcer: ConstraintEnforcer) -> None:
@@ -254,14 +260,20 @@ class TestSafetyRegression:
 
 class TestD13Backstops:
 
-    def test_execute_claude_headless_raises_without_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_execute_claude_headless_proceeds_without_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """dispatch-20260811c-b: the lane is open by default (lane_safety.headless_block.enabled:
+        false) — no PermissionError, no flag required. Was test_execute_claude_headless_raises_
+        without_flag before the block opened; proves the last-gate-before-spawn check reads the
+        yaml's new default correctly instead of a hardcoded block."""
         monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
         from dispatch_cli import _execute_claude_headless  # noqa: PLC0415
 
-        with pytest.raises(PermissionError, match="VNX_OVERRIDE_CLAUDE_HEADLESS"):
-            _execute_claude_headless(
+        mock_result = type("R", (), {"returncode": 0})()
+        with patch("dispatch_cli.run_envelope_headless_plan", return_value=mock_result):
+            rc = _execute_claude_headless(
                 None, None, state_dir=Path("/tmp"), data_dir=Path("/tmp")
             )
+        assert rc == 0
 
     def test_execute_claude_headless_proceeds_with_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "1")
@@ -274,17 +286,29 @@ class TestD13Backstops:
             )
         assert rc == 0
 
-    def test_bridge_dispatch_blocks_allow_headless_without_flag(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_bridge_dispatch_reaches_staging_for_allow_headless_without_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """dispatch-20260811c-b: the lane is open by default — allow_headless=True without
+        the override env reaches stage_spec_bundle instead of being rejected pre-staging.
+        Was test_bridge_dispatch_blocks_allow_headless_without_flag (asserted rc == 1,
+        never-staged) before the block opened. Mirrors test_bridge_headless_override_
+        reaches_staging in test_dispatch_bridge_staging.py, minus the override env."""
         monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
-        from dispatch_bridge import bridge_dispatch  # noqa: PLC0415
+        import dispatch_bridge  # noqa: PLC0415
+        import dispatch_cli  # noqa: PLC0415
 
-        rc = bridge_dispatch(
+        monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
+        rc = dispatch_bridge.bridge_dispatch(
             instruction_text="test instruction",
-            dispatch_id="test-bridge-block-d13",
+            dispatch_id="test-bridge-open-d13",
             role="T1",
             target_slot="T1",
+            project_id="p1",
+            data_dir=tmp_path,
             allow_headless=True,
+            headless_reason="test",
+            dry_run=True,
         )
-        assert rc == 1
+        assert rc == 0
