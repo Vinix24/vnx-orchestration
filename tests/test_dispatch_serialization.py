@@ -28,8 +28,13 @@ from dispatch_serialization import _iso_now, force_release, serialize_lane
 # ---------------------------------------------------------------------------
 
 def test_parallel_claude_serializes(tmp_path, monkeypatch):
-    """Two threads entering serialize_lane("claude-tmux") never hold body concurrently."""
+    """Two threads entering serialize_lane("claude-tmux") never hold body concurrently.
+
+    Pins VNX_TMUX_MAX_CONCURRENT=1 explicitly (dispatch-20260811c-b raised the unset
+    default to 5) — this test is about single-slot mutual exclusion, not the default
+    concurrency level; test_three_slots_concurrent_fourth_blocks below covers N>1."""
     monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "1")
 
     concurrent_count = 0
     overlap_detected = False
@@ -124,23 +129,28 @@ def test_three_slots_concurrent_fourth_blocks(tmp_path, monkeypatch):
 # test_max_concurrent clamping + defaults
 # ---------------------------------------------------------------------------
 
-def test_max_concurrent_defaults_to_one(monkeypatch):
-    """No VNX_TMUX_MAX_CONCURRENT set -> default concurrency is 1 (subscription-safe)."""
+def test_max_concurrent_defaults_to_five(monkeypatch):
+    """dispatch-20260811c-b: no VNX_TMUX_MAX_CONCURRENT set -> default concurrency is 5
+    (raised from 1 now that #1451 gives every tmux dispatch its own named paste buffer —
+    see the module docstring)."""
     monkeypatch.delenv("VNX_TMUX_MAX_CONCURRENT", raising=False)
-    assert _ds_mod._max_concurrent() == 1
+    assert _ds_mod._max_concurrent() == 5
 
 
 def test_max_concurrent_accepts_valid_positive_value(monkeypatch):
-    """A valid positive integer is used verbatim."""
+    """A valid positive integer is used verbatim, overriding the default."""
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "3")
     assert _ds_mod._max_concurrent() == 3
 
 
 @pytest.mark.parametrize("raw_value", ["0", "-1", "-100", "x", ""])
 def test_max_concurrent_clamps_bad_values(raw_value, monkeypatch):
-    """0, negative, or unparseable VNX_TMUX_MAX_CONCURRENT falls back to 1."""
+    """0, negative, or unparseable VNX_TMUX_MAX_CONCURRENT falls back to 5 (>= 1 satisfied,
+    same fallback as the missing-env-var default — see test_max_concurrent_defaults_to_five)."""
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", raw_value)
-    assert _ds_mod._max_concurrent() == 1
+    result = _ds_mod._max_concurrent()
+    assert result >= 1
+    assert result == 5
 
 
 # ---------------------------------------------------------------------------
