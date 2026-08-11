@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vnx_cli.commands.doctor import PASS, WARN, _check_agents, _check_hook_paths, _collect_dead_hook_paths
+from vnx_cli.commands.doctor import PASS, WARN, _check_agents, _check_hook_paths
 
 
 def _make_agent(base: Path, name: str, rel: str = "agents") -> Path:
@@ -72,7 +72,40 @@ class TestHookPathResolution:
         assert result.status == "WARN"
         assert "dead_hook.sh" in result.detail
         assert "live_hook.sh" not in result.detail
-        assert "canonical .claude/vnx-system/hooks/" in result.detail
+
+    def test_absolute_path_outside_project_dead_is_flagged(self, tmp_path):
+        """OI-1123 follow-up regression guard.
+
+        A fabric-deployed hook pin is ALWAYS an absolute path outside project_dir
+        by design (``~/.vnx-system/versions/<v>/...``). A prior implementation
+        skipped existence-checking any absolute path that resolved outside
+        project_dir before touching the filesystem, which reported PASS on two
+        confirmed-dead pins in mission-control (a stop-report hook and a
+        raw-claude-spawn security guard) instead of catching them. This must
+        fail again if that ``in_project`` skip is ever reintroduced.
+        """
+        project = tmp_path / "project"
+        project.mkdir()
+        # Deliberately never created — simulates a fabric version dir that
+        # vanished after a version rotation (e.g. edge -> a pinned release).
+        dead_pin = tmp_path / "outside-fabric" / "versions" / "edge" / "hooks" / "stop_report.sh"
+
+        settings = {
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [{"type": "command", "command": f"bash {dead_pin}"}],
+                    }
+                ]
+            }
+        }
+        _write_settings(project, settings)
+
+        result = _check_hook_paths(project)
+
+        assert result.status == "WARN"
+        assert "stop_report.sh" in result.detail
 
     def test_missing_settings_is_clean(self, tmp_path):
         project = tmp_path / "project"
@@ -120,7 +153,6 @@ class TestHookPathResolution:
 
         assert result.status == "WARN"
         assert "gone.sh" in result.detail
-        assert "hardcoded absolute" in result.detail.lower()
 
     def test_all_paths_live_passes(self, tmp_path):
         project = tmp_path / "project"
@@ -137,7 +169,10 @@ class TestHookPathResolution:
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": 'bash -c \'exec bash "$ROOT/scripts/hooks/present.sh"\'',
+                                "command": (
+                                    'bash -c \'exec bash '
+                                    '"$CLAUDE_PROJECT_DIR/scripts/hooks/present.sh"\''
+                                ),
                             }
                         ],
                     }
@@ -154,9 +189,11 @@ class TestHookPathResolution:
 class TestHookPathFunctionSize:
     """OI-547: _check_hook_paths must stay within the 70-line codex advisory.
 
-    The function was split into _collect_dead_hook_paths + the probe so the
-    report-shaping stays readable. AST line-count guards the advisory the same
-    way test_doctor_refactor_oi1573.py guards cmd_doctor (≤190 lines).
+    It now delegates path resolution entirely to hookpin_check.check_project_hook_pins
+    (OI-1123 consolidation) rather than maintaining a second in-repo resolver, so there
+    is no longer a separate _collect_dead_hook_paths helper to size-guard. AST
+    line-count guards the advisory the same way test_doctor_refactor_oi1573.py guards
+    cmd_doctor (≤190 lines).
     """
 
     def test_check_hook_paths_under_70_lines(self) -> None:
@@ -168,35 +205,6 @@ class TestHookPathFunctionSize:
             and n.name == "_check_hook_paths"
         )
         assert fn.end_lineno - fn.lineno + 1 <= 70
-
-    def test_collect_dead_hook_paths_under_70_lines(self) -> None:
-        source = Path(__file__).parent.parent.parent.parent.parent / "vnx_cli" / "commands" / "doctor.py"
-        tree = ast.parse(source.read_text(encoding="utf-8"))
-        fn = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "_collect_dead_hook_paths"
-        )
-        assert fn.end_lineno - fn.lineno + 1 <= 70
-
-    def test_collect_dead_hook_paths_parts(self, tmp_path):
-        """Extracted helper keeps the relative/absolute dead-path split."""
-        project = tmp_path / "project"
-        project.mkdir()
-        hooks = {
-            "PreToolUse": [
-                {
-                    "matcher": "Bash",
-                    "hooks": [
-                        {"type": "command", "command": f"bash {project / 'scripts' / 'hooks' / 'gone.sh'}"},
-                        {"type": "command", "command": "bash scripts/hooks/relative_missing.sh"},
-                    ],
-                }
-            ]
-        }
-        dead_relative, dead_absolute = _collect_dead_hook_paths(hooks, project.resolve())
-        assert "gone.sh" in " ".join(dead_absolute)
-        assert "relative_missing.sh" in " ".join(dead_relative)
 
 
 class TestCheckAgents:
