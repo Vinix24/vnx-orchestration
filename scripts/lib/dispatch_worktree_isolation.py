@@ -1,6 +1,6 @@
 """dispatch_worktree_isolation.py — per-dispatch ephemeral git worktree.
 
-Feature-flag gated: only active when VNX_ISOLATED_WORKTREE=1.
+Always active (default-on since OI-1090, 2026-08-10).
 Each dispatch gets a fresh worktree rooted at origin/main under
 .vnx-data/worktrees/dispatch-{safe_id}/.  The worktree is removed
 (success OR failure) so no state leaks between dispatches.
@@ -184,6 +184,7 @@ def _write_claim_atomic(
     base_sha: str = "",
     base_ref: str = "",
     branch: str = "",
+    main_head_sha: str = "",
 ) -> dict:
     """Claim *worktree_path* for *dispatch_id* with an O_EXCL write.
 
@@ -196,6 +197,10 @@ def _write_claim_atomic(
     (L3 provider-lane reap): the claim carries enough metadata to construct a
     ``WorktreeHandle`` for ``tmux_worktree.classify()`` without re-deriving
     values that may have shifted since the worktree was created.
+
+    *main_head_sha* is the main checkout's HEAD captured before worktree
+    creation (OI-975): compared against the current HEAD at teardown to detect
+    unexpected checkout jumps during a dispatch.
     """
     safe_id = _sanitize_dispatch_id(dispatch_id)
     path = _claim_path(safe_id, project_root)
@@ -208,6 +213,7 @@ def _write_claim_atomic(
         "base_sha": base_sha,
         "base_ref": base_ref,
         "branch": branch,
+        "main_head_sha": main_head_sha,
     }
     try:
         with open(path, "x", encoding="utf-8") as fh:
@@ -517,6 +523,24 @@ def create_dispatch_worktree(
             f"{(exc.stderr or '').strip()}"
         ) from exc
 
+    # OI-975: capture the main checkout HEAD BEFORE worktree creation so
+    # teardown can detect unexpected checkout jumps during the dispatch.
+    # Best-effort — a failed capture logs a warning and the field defaults
+    # to "" in the claim, which skips the comparison at teardown.
+    _main_head_sha = ""
+    try:
+        _main_head_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        _main_head_sha = _main_head_result.stdout.strip()
+    except subprocess.CalledProcessError:
+        log.warning(
+            "create_dispatch_worktree: cannot resolve HEAD for %s; "
+            "HEAD-jump detection skipped (OI-975)",
+            dispatch_id,
+        )
+
     with _worktree_lock(root):
         # OI-861 identity check BEFORE creating: if this worktree already exists
         # and is claimed by a DIFFERENT dispatch id, refuse immediately.  A
@@ -561,6 +585,7 @@ def create_dispatch_worktree(
         # may reuse it.  The claim carries base_sha + base_ref + branch so
         # teardown (L3 provider-lane reap) can construct a WorktreeHandle for
         # classification without re-deriving values that may have shifted.
+        # main_head_sha is the OI-975 pre-dispatch HEAD snapshot.
         try:
             _write_claim_atomic(
                 dispatch_id,
@@ -569,6 +594,7 @@ def create_dispatch_worktree(
                 base_sha=base_sha,
                 base_ref=base_ref,
                 branch=branch_name,
+                main_head_sha=_main_head_sha,
             )
         except WorktreeClaimError:
             raced = _read_claim(dispatch_id, root)
@@ -616,6 +642,38 @@ def remove_dispatch_worktree(
     claim = _read_claim(dispatch_id, root)
     if claim is not None:
         _claim_belongs_to_or_raise(dispatch_id, claim, wt_path)
+
+    # ── OI-975: detect HEAD jumps in the main checkout ─────────────────────
+    # Compare the main checkout HEAD captured at worktree creation against the
+    # current HEAD.  A difference means something (or someone) ran `git checkout`
+    # in the main checkout during this dispatch — a governance break because the
+    # main checkout's checked-out branch no longer matches what the dispatch was
+    # launched against.  This check is DEFAULT-PATH (no flag), best-effort
+    # (never raises), and namedrops the dispatch_id so the warning is traceable.
+    _claim_main_head = (claim or {}).get("main_head_sha", "")
+    if _claim_main_head:
+        try:
+            _current_head_result = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            )
+            _current_head = _current_head_result.stdout.strip()
+            if _current_head and _current_head != _claim_main_head:
+                log.warning(
+                    "OI-975 HEAD-JUMP DETECTED: main checkout HEAD changed "
+                    "during dispatch %s: was %s, now %s — something ran "
+                    "'git checkout' in the main checkout while this dispatch "
+                    "was active",
+                    dispatch_id,
+                    _claim_main_head[:12],
+                    _current_head[:12],
+                )
+        except subprocess.CalledProcessError:
+            log.debug(
+                "remove_dispatch_worktree: cannot resolve current HEAD for %s; "
+                "HEAD-jump check skipped",
+                dispatch_id,
+            )
 
     # ── L3: classify before removing ──────────────────────────────────────
     # Build a WorktreeHandle from the claim so we can call the single

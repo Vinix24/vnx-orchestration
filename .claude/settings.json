@@ -108,6 +108,16 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/hookpin_check.sh\"'",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
