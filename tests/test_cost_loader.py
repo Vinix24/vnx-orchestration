@@ -122,7 +122,9 @@ class TestOI1143CandidateModelsResolve:
         assert cost is not None and cost > 0
 
     def test_kimi_k2_7_registry_key_same_cost(self):
-        assert compute_cost_per_call("kimi-k2-7") == compute_cost_per_call("kimi-k2-7-code")
+        cost = compute_cost_per_call("kimi-k2-7")
+        assert cost is not None  # not vacuously equal via None == None
+        assert cost == compute_cost_per_call("kimi-k2-7-code")
 
     def test_codex_gpt_5_4_has_cost(self):
         # codex CLI lane running openai gpt-5.4 — API-metered ($1.25/$10 per
