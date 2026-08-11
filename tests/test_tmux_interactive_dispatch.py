@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1981,6 +1982,56 @@ class TestAutoPrEnforcement(_WorktreeTestCase):
         self.assertEqual(result.receipt.get("status"), "failed")
         self.assertTrue(result.receipt.get("autopr_rejected"))
         self.assertEqual(result.receipt.get("autopr_reason"), "gh auth expired")
+
+    def test_enforcement_receives_wt_path_when_worktree_exists(self):
+        """OI-1127: the tmux lane hands its worktree path to enforce_pr_exists,
+        so a dirty tree can be split substantive-vs-scratch and salvaged — the
+        envelope lane already did; without wt_path this lane kept the old
+        lose-everything behaviour (dirty → silently not-applicable)."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        mock_enforce = MagicMock(
+            return_value=PrEnforcementResult(applicable=False, ok=True, reason="scratch only")
+        )
+
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle):
+            with patch("tmux_interactive_dispatch.classify", return_value="dirty"):
+                with patch(
+                    "tmux_interactive_dispatch.reap",
+                    return_value=ReapResult(removed=False, preserved_path=handle.path),
+                ):
+                    with patch("pr_enforcement.enforce_pr_exists", mock_enforce):
+                        self._fast_dispatch(lane, isolated_worktree=True)
+
+        mock_enforce.assert_called_once()
+        self.assertEqual(mock_enforce.call_args.kwargs["wt_path"], handle.path)
+
+    def test_enforcement_wt_path_none_when_worktree_dir_gone(self):
+        """OI-1127 existence check: a worktree directory that vanished between
+        spawn and completion degrades to wt_path=None (the pre-OI-1119
+        back-compat path) instead of feeding a dead path into git. Tested on
+        the adapter directly — through dispatch() the spawn plumbing recreates
+        the cwd, so the vanished-dir state cannot be staged end-to-end."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        mock_enforce = MagicMock(
+            return_value=PrEnforcementResult(applicable=False, ok=True, reason="no wt_path")
+        )
+        shutil.rmtree(handle.path)  # externally cleaned up mid-dispatch
+
+        with patch("pr_enforcement.enforce_pr_exists", mock_enforce):
+            result = lane._enforce_pr_exists(
+                dispatch_id=self.DISPATCH_ID,
+                label="T1",
+                worktree_handle=handle,
+                worktree_state="dirty",
+            )
+
+        mock_enforce.assert_called_once()
+        self.assertIsNone(mock_enforce.call_args.kwargs["wt_path"])
+        self.assertFalse(result.applicable)
 
     def test_pr_enforcement_skipped_when_worker_already_failed(self):
         """A worker that self-reported failure is never PR-enforced (nothing to enforce)."""

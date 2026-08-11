@@ -29,7 +29,9 @@ Per-state decision (one binding site, never duplicated across lanes):
   ok=True, applicable=False. The latter is a delivery failure exactly like an
   unpushed ``committed`` branch (the reaper destroys it the same way): loud,
   receipt-visible (ok=False, corrective receipt), AND — when ``wt_path`` is
-  supplied — salvaged: the tracked changes are committed onto *branch* under an
+  supplied — salvaged: the tracked changes, plus any untracked non-gitignored
+  files sitting next to them (OI-1128: a worker's genuinely new file that
+  never saw ``git add``), are committed onto *branch* under an
   unmistakable ``[SALVAGED, UNREVIEWED]`` marker, pushed, and (unless
   ``skip_pr``) opened as a **draft** PR so it can never be mistaken for a
   worker-vouched, ready-for-review delivery. See ``_classify_dirty_worktree``
@@ -146,10 +148,20 @@ def _check_containment(*, branch: str, old_head: str, repo_root: Path) -> "tuple
 @dataclass(frozen=True)
 class _DirtyClassification:
     """Verdict of _classify_dirty_worktree(): whether a ``dirty`` tree carries
-    real (tracked) uncommitted work, or only untracked scratch."""
+    real (tracked) uncommitted work, or only untracked scratch.
+
+    ``untracked_paths`` (OI-1128): the ``??`` paths ``git status --porcelain``
+    listed. git status respects .gitignore natively, so ignored junk
+    (.DS_Store, build artefacts covered by .gitignore) never appears here.
+    When the tree is substantive, these ride along in the salvage — on
+    2026-08-10 two of the three hand-rescued files were ``??`` (a worker
+    that creates a NEW file and never runs ``git add`` leaves it exactly
+    here), so excluding them re-creates the OI-1119 loss in the
+    new-file variant."""
     substantive: bool
     evidence: str
     tracked_paths: "tuple[str, ...]" = ()
+    untracked_paths: "tuple[str, ...]" = ()
 
 
 def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
@@ -157,14 +169,22 @@ def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
 
     Rule, evidence-based: a change is substantive when git already knows the
     path — modified, staged, deleted, renamed, copied, or conflicted (any
-    ``git status --porcelain`` code other than ``??``). Untracked paths are
-    scratch files, editor droppings, and generated artefacts by definition:
-    they were never part of the branch's tracked history and a targeted
-    ``git add`` never staged them, so their mere presence is not evidence a
-    worker left real work behind. This re-derives file-level detail from the
-    same git flags tmux_worktree.classify_path uses for its yes/no verdict,
-    without duplicating that verdict itself — classify_path still owns
-    clean/committed/pushed/dirty; this only refines what "dirty" means.
+    ``git status --porcelain`` code other than ``??``). A tree with ONLY
+    untracked paths stays non-substantive: their mere presence is not evidence
+    a worker left real work behind, and going loud on every stray scratch file
+    would turn ordinary dispatches into false failures. This re-derives
+    file-level detail from the same git flags tmux_worktree.classify_path uses
+    for its yes/no verdict, without duplicating that verdict itself —
+    classify_path still owns clean/committed/pushed/dirty; this only refines
+    what "dirty" means.
+
+    OI-1128 refinement: once a tree IS substantive, the untracked (``??``)
+    paths are collected too and salvaged alongside the tracked ones. The
+    distinguishing signal between "new source file the worker forgot to add"
+    and "editor droppings" is .gitignore — ``git status`` already applies it,
+    so anything the repo declares junk never shows up. ``-uall`` lists files
+    inside new directories individually (a new ``tests/foo/`` otherwise
+    collapses to one directory entry), so the receipt names the actual files.
 
     Never raises: a git failure degrades to substantive=False (the existing
     safe not-applicable behaviour) — a broken git invocation must never turn
@@ -175,7 +195,7 @@ def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
             [
                 "git", "-c", "core.fileMode=false", "-c", "core.autocrlf=input",
                 "-c", "core.quotePath=false",
-                "-C", str(wt_path), "status", "--porcelain",
+                "-C", str(wt_path), "status", "--porcelain", "-uall",
             ],
             capture_output=True, text=True, timeout=15,
         )
@@ -193,13 +213,15 @@ def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
         )
 
     tracked_paths: "list[str]" = []
-    untracked = 0
+    untracked_paths: "list[str]" = []
     for line in proc.stdout.splitlines():
         if len(line) < 4:
             continue
         code, path_part = line[:2], line[3:]
         if code == "??":
-            untracked += 1
+            path = path_part.strip()
+            if path:
+                untracked_paths.append(path)
             continue
         path = path_part.split(" -> ")[-1].strip()
         if path:
@@ -209,21 +231,32 @@ def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
         return _DirtyClassification(
             substantive=False,
             evidence=(
-                f"dirty worktree has only untracked paths ({untracked} file(s)) — "
+                f"dirty worktree has only untracked paths ({len(untracked_paths)} file(s)) — "
                 "no tracked source/test changes; treated as scratch/non-substantive"
             ),
+            untracked_paths=tuple(untracked_paths),
         )
 
     shown = tracked_paths[:10]
     more = len(tracked_paths) - len(shown)
     listing = ", ".join(shown) + (f", +{more} more" if more else "")
+    evidence = (
+        f"dirty worktree has {len(tracked_paths)} tracked file(s) with uncommitted "
+        f"changes the worker never committed: {listing}"
+    )
+    if untracked_paths:
+        u_shown = untracked_paths[:10]
+        u_more = len(untracked_paths) - len(u_shown)
+        u_listing = ", ".join(u_shown) + (f", +{u_more} more" if u_more else "")
+        evidence += (
+            f"; plus {len(untracked_paths)} untracked non-gitignored file(s) "
+            f"salvaged alongside (OI-1128): {u_listing}"
+        )
     return _DirtyClassification(
         substantive=True,
-        evidence=(
-            f"dirty worktree has {len(tracked_paths)} tracked file(s) with uncommitted "
-            f"changes the worker never committed: {listing}"
-        ),
+        evidence=evidence,
         tracked_paths=tuple(tracked_paths),
+        untracked_paths=tuple(untracked_paths),
     )
 
 
@@ -302,7 +335,9 @@ def enforce_pr_exists(
         return _handle_dirty_substantive(
             dispatch_id=dispatch_id, branch=branch, wt_path=Path(wt_path),
             repo_root=repo_root, receipts_file=receipts_file,
-            tracked_paths=classification.tracked_paths, evidence=classification.evidence,
+            tracked_paths=classification.tracked_paths,
+            untracked_paths=classification.untracked_paths,
+            evidence=classification.evidence,
             pr_title=pr_title, pr_body=pr_body, skip_pr=skip_pr,
         )
 
@@ -394,6 +429,7 @@ def _handle_dirty_substantive(
     pr_title: str,
     pr_body: str,
     skip_pr: bool,
+    untracked_paths: "tuple[str, ...]" = (),
 ) -> PrEnforcementResult:
     """OI-1119: a ``dirty`` tree with substantive uncommitted work — loud AND salvaged.
 
@@ -404,14 +440,17 @@ def _handle_dirty_substantive(
     review boundary (the dispatch still resolves ok=False, exactly like a
     failed push) while preventing the data loss T0 was hand-salvaging.
 
-    Salvage commits ONLY the tracked paths this call already classified as
-    substantive (never ``git add -A`` — that would sweep in the same
-    untracked scratch the classifier just excluded), under a commit message
-    unmistakably marked ``[SALVAGED, UNREVIEWED]`` (mirrors the existing
-    fleet convention, e.g. PR #1444), pushes it, and — unless ``skip_pr``
-    (an existing PR already covers this branch) — opens a **draft** PR with a
-    title/body banner saying the same thing, so it can never be mistaken for
-    a normal, ready-for-review delivery.
+    Salvage commits ONLY the explicit paths this call already classified
+    (never ``git add -A``): the tracked paths that made the tree substantive,
+    plus — OI-1128 — the untracked non-gitignored paths ``git status`` listed
+    next to them. A worker's genuinely NEW file (created, never ``git add``ed)
+    is ``??`` by definition and was previously left to the reaper; .gitignore
+    is the junk filter, applied by git itself before the paths ever reach this
+    function. The commit is unmistakably marked ``[SALVAGED, UNREVIEWED]``
+    (mirrors the existing fleet convention, e.g. PR #1444), pushed, and —
+    unless ``skip_pr`` (an existing PR already covers this branch) — opened as
+    a **draft** PR with a title/body banner saying the same thing, so it can
+    never be mistaken for a normal, ready-for-review delivery.
 
     Never raises: every git/gh step is wrapped; a failure at any stage still
     reaches the corrective receipt below (kind="dirty_substantive_unsalvaged")
@@ -424,7 +463,7 @@ def _handle_dirty_substantive(
 
     try:
         add_proc = subprocess.run(
-            ["git", "-C", str(wt_path), "add", "--", *tracked_paths],
+            ["git", "-C", str(wt_path), "add", "--", *tracked_paths, *untracked_paths],
             capture_output=True, text=True, timeout=30,
         )
     except Exception as exc:  # noqa: BLE001 — degrade to unsalvaged, still loud
@@ -498,6 +537,9 @@ def _handle_dirty_substantive(
             "dirty_substantive": True,
             "dirty_files": list(tracked_paths[:25]),
             "dirty_file_count": len(tracked_paths),
+            # OI-1128: the ?? (untracked, non-gitignored) paths salvaged alongside.
+            "salvaged_untracked_files": list(untracked_paths[:25]),
+            "salvaged_untracked_count": len(untracked_paths),
             "salvaged": pushed,
             "salvage_pr_number": pr_number,
         },
