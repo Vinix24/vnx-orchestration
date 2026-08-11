@@ -251,6 +251,63 @@ class TestHookGuards(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
 
     @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_writes_mismatch_sentinel_when_dispatch_id_disagrees(self) -> None:
+        """OI-1126 worker-side detectability: the delivered prompt's own embedded
+        dispatch_id (from the completion-protocol JSON) disagreeing with
+        VNX_DISPATCH_ID (set race-free at spawn/launch time) is the worker's own
+        last-line-of-defence signal that it received a sibling dispatch's content."""
+        sig = self.root / "sig-mismatch"
+        prompt = (
+            "## Completion Protocol\n\n```bash\n"
+            'python3 append_receipt.py --receipt "{\\"dispatch_id\\": \\"disp-OTHER\\"}"\n'
+            "```\n"
+        )
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": prompt}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        mismatch_path = sig / "dispatch_id_mismatch"
+        self.assertTrue(mismatch_path.is_file(), "mismatch sentinel must be written")
+        content = mismatch_path.read_text(encoding="utf-8")
+        self.assertIn("disp-prompt", content)
+        self.assertIn("disp-OTHER", content)
+        # The base submission signal still fires — the prompt WAS submitted, just
+        # not this dispatch's own content.
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_no_mismatch_sentinel_when_dispatch_id_agrees(self) -> None:
+        sig = self.root / "sig-agree"
+        prompt = (
+            "```bash\n"
+            'python3 append_receipt.py --receipt "{\\"dispatch_id\\": \\"disp-prompt\\"}"\n'
+            "```\n"
+        )
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": prompt}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertFalse((sig / "dispatch_id_mismatch").exists())
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
+    def test_prompt_received_no_mismatch_sentinel_when_prompt_has_no_dispatch_id(self) -> None:
+        """A prompt with no extractable dispatch_id must never false-positive."""
+        sig = self.root / "sig-none"
+        proc = self._run_hook(
+            PROMPT_RECEIVED_HOOK,
+            env={"VNX_TMUX_SIGNAL_DIR": str(sig), "VNX_DISPATCH_ID": "disp-prompt"},
+            input_text=json.dumps({"prompt": "Do the thing, no protocol block here."}),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertFalse((sig / "dispatch_id_mismatch").exists())
+        self.assertTrue((sig / "prompt_received").is_file())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq not available")
     def test_session_ready_captures_session_id_from_stdin(self) -> None:
         sig = self.root / "sig-sid"
         session_id = "123e4567-e89b-12d3-a456-426614174000"
