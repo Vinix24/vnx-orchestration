@@ -32,6 +32,20 @@ import shutil
 import sys
 from datetime import datetime, timezone
 
+# Deferred (merge-time) template placeholder token for the VNX_HOME slot in
+# settings_vnx_keys.json.tmpl. Built by concatenation on purpose, NOT written
+# out as a literal "{{VNX_HOME}}" string: install.sh's own INSTALL-TIME
+# placeholder substitution (_substitute_install_templates) scans every
+# shipped .py file for that exact 12-character spelling and sed-replaces it
+# with the current install's path (see install.sh's INSTALL_TIME_PLACEHOLDERS
+# vocabulary). A literal occurrence here collides with that vocabulary and
+# gets permanently clobbered the moment this file ships via `install.sh`,
+# silently turning this search pattern into a no-op against the (correctly
+# un-substituted, .tmpl-protected) placeholder in the real template — see
+# OI-1139. PROJECT_ROOT does not collide (install.sh's token is
+# VNX_PROJECT_ROOT, a different spelling) so it is left as a normal literal.
+_VNX_HOME_TOKEN = "{{" + "VNX_HOME" + "}}"
+
 
 def find_vnx_home(project_root: str) -> str:
     """Resolve VNX_HOME: prefer .vnx/ layout, fall back to legacy layout."""
@@ -50,8 +64,82 @@ def find_vnx_home(project_root: str) -> str:
     return vnx_primary  # default expectation
 
 
+def _relative_suffixes(raw: str, token: str) -> list[str]:
+    """Return the literal text following each ``token`` occurrence in ``raw``,
+    up to the next ``"`` (the JSON string terminator). Used to know what a
+    correctly-rendered value must be followed by, so the render can be
+    verified structurally instead of just hoped for.
+    """
+    suffixes = []
+    start = 0
+    while True:
+        idx = raw.find(token, start)
+        if idx == -1:
+            break
+        after = idx + len(token)
+        end = raw.find('"', after)
+        suffixes.append(raw[after:end] if end != -1 else raw[after:after + 80])
+        start = after
+    return suffixes
+
+
+def _assert_rendered_cleanly(raw: str, rendered: str, vnx_home: str, project_root: str,
+                              template_path: str) -> None:
+    """Guard against OI-1139: a render that silently drops the install root.
+
+    A rendered hook command must never contain an unresolved ``{{...}}``
+    placeholder, and every VNX_HOME/PROJECT_ROOT-relative path the raw
+    template declares must actually appear prefixed by the real (non-empty)
+    value in the output — not as a bare path rooted at ``/``. Checking the
+    real value is present (rather than just "no placeholder left") also
+    catches a corrupted search pattern that turns the substitution into a
+    silent no-op, which is exactly how this regression manifested: the
+    template's own placeholder was untouched, but the *code* rendering it had
+    been mangled to search for the wrong string.
+    """
+    if "{{" in rendered:
+        print(
+            f"ERROR: {template_path} rendered with an unresolved template "
+            "placeholder still present in the output — refusing to write dead "
+            "hook pins",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for label, token, value in (
+        ("VNX_HOME", _VNX_HOME_TOKEN, vnx_home),
+        ("PROJECT_ROOT", "{{PROJECT_ROOT}}", project_root),
+    ):
+        for suffix in _relative_suffixes(raw, token):
+            if suffix and (value + suffix) not in rendered:
+                print(
+                    f"ERROR: {template_path} — {label} substitution did not "
+                    f"produce the expected path (value + {suffix!r}) in the "
+                    "rendered output; a hook would resolve to a path rooted "
+                    "at '/' instead of the install root — refusing to write "
+                    "dead hook pins",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+
 def load_template(vnx_home: str, project_root: str) -> dict:
     """Load and render the VNX settings template."""
+    if not vnx_home:
+        print(
+            "ERROR: vnx_home is empty — refusing to render hook commands "
+            "rooted at '/' instead of the install root",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not project_root:
+        print(
+            "ERROR: project_root is empty — refusing to render hook commands "
+            "rooted at '/' instead of the project root",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     template_path = os.path.join(vnx_home, "templates", "settings_vnx_keys.json.tmpl")
     if not os.path.isfile(template_path):
         print(f"ERROR: VNX settings template not found: {template_path}", file=sys.stderr)
@@ -64,10 +152,12 @@ def load_template(vnx_home: str, project_root: str) -> dict:
     # tree actually lives (embedded: a hidden dir under the project's .claude/,
     # central: the shared per-machine install, dev checkout: the repo itself)
     # — distinct from PROJECT_ROOT, which only equals VNX_HOME in the
-    # dev-checkout case. A hook command that hardcodes {{PROJECT_ROOT}}/scripts/... breaks in
+    # dev-checkout case. A hardcoded VNX_HOME-relative hook command breaks in
     # embedded and central installs. See #1023.
-    rendered = raw.replace("{{VNX_HOME}}", vnx_home)
+    rendered = raw.replace(_VNX_HOME_TOKEN, vnx_home)
     rendered = rendered.replace("{{PROJECT_ROOT}}", project_root)
+
+    _assert_rendered_cleanly(raw, rendered, vnx_home, project_root, template_path)
 
     try:
         return json.loads(rendered)

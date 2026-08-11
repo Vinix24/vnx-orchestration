@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -192,6 +193,76 @@ def test_regen_guard_skipped_for_validate():
     result = _run_regen_unit("--validate", guard_returns=1)
     # --validate is read-only and must not consult the write guard at all.
     assert "GUARD_CALLED" not in result.stderr
+
+
+# ── OI-1139: a fresh install must not ship dead hook pins ─────────────────────
+# install.sh's own install-time placeholder substitution (_substitute_install_
+# templates) scans every shipped .py file for the literal string "{{VNX_HOME}}"
+# and rewrites it in place. vnx_settings_merge.py used that exact spelling as
+# its OWN (deferred, merge-time) search pattern for rendering
+# settings_vnx_keys.json.tmpl — so a real `install.sh` run clobbered the
+# search-pattern string literal inside the *installed copy* of
+# vnx_settings_merge.py, turning its .replace() call into a silent no-op. The
+# real placeholder in the template (protected only by its .tmpl extension)
+# then survived un-substituted into settings.json, and hookpin_check's path-
+# token regex (which recognizes /, ~, $VAR but not {{...}}) picked up the
+# "/scripts/hooks/....sh" tail as a bare, filesystem-root-relative path,
+# reporting it as a dead pin.
+#
+# This drives the REAL install.sh against a REAL fresh target directory, then
+# the REAL (installed) vnx_settings_merge.py --full — no reimplementation of
+# either — and asserts every rendered hook command resolves to a real file,
+# exactly mirroring the "vnx doctor smoke" CI job.
+def test_fresh_install_render_produces_no_dead_hook_pins(tmp_path):
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+    import hookpin_check  # noqa: E402  (local import — path only needed here)
+
+    target = tmp_path / "fresh-project"
+    target.mkdir()
+    install_result = subprocess.run(
+        ["bash", str(_REPO_ROOT / "install.sh"), str(target)],
+        capture_output=True, text=True, env=_clean_env(),
+    )
+    assert install_result.returncode == 0, (
+        "install.sh failed:\n" + install_result.stdout + install_result.stderr
+    )
+
+    vnx_home = target / ".vnx"
+    merge_script = vnx_home / "scripts" / "vnx_settings_merge.py"
+    assert merge_script.is_file(), f"install.sh did not ship {merge_script}"
+
+    # Mirror scripts/vnx_init.py::bootstrap_hooks(), which deploys
+    # sessionstart.sh into the project BEFORE triggering the settings render —
+    # its {{PROJECT_ROOT}}-relative pin only resolves once this file exists.
+    hooks_dir = target / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(vnx_home / "hooks" / "sessionstart.sh"), str(hooks_dir / "sessionstart.sh"))
+
+    render_result = subprocess.run(
+        [sys.executable, str(merge_script),
+         "--full", "--project-root", str(target), "--vnx-home", str(vnx_home),
+         "--no-backup"],
+        capture_output=True, text=True, env=_clean_env(),
+    )
+    assert render_result.returncode == 0, (
+        "vnx_settings_merge.py --full failed against a fresh install layout:\n"
+        + render_result.stdout + render_result.stderr
+    )
+
+    settings_path = target / ".claude" / "settings.json"
+    assert settings_path.is_file(), "settings.json was not created"
+    raw_settings = settings_path.read_text(encoding="utf-8")
+    assert "{{" not in raw_settings, (
+        "settings.json contains an unrendered template placeholder — the "
+        "install-root substitution silently failed:\n" + raw_settings
+    )
+
+    findings = hookpin_check.check_project_hook_pins(target)
+    assert findings, "expected at least one configured hook pin to check"
+    dead = [f for f in findings if f.status == hookpin_check.STATUS_MISSING]
+    assert not dead, "dead hook pin(s) after a fresh install render:\n" + "\n".join(
+        f"  {f.event} ({f.matcher}): {f.raw_path} -> {f.resolved_path}" for f in dead
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
