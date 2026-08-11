@@ -118,7 +118,12 @@ class TestCreateDispatchWorktree:
             r = MagicMock()
             r.returncode = 0
             r.stderr = ""
-            r.stdout = ""
+            # stdout must be a real string: patching subprocess.run patches the
+            # actual stdlib function, and subprocess.check_output is implemented
+            # in terms of run() — so the claim-path's check_output call (via
+            # resolve_data_root -> _project_id_from_git_remote) collects THIS
+            # mock's .stdout too. Left as an auto-MagicMock it breaks .strip()
+            # downstream with a TypeError unrelated to what this test exercises.
             r.stdout = ""
             return r
 
