@@ -1195,49 +1195,10 @@ def _register_attest_subparser(subparsers: argparse.Action) -> None:
 def _register_gate_check_subparser(subparsers: argparse.Action) -> None:
     """`vnx gate-check` — same machinery as the fabric repo's `bin/vnx
     gate-check` (scripts/pre_merge_gate.py), exposed on the pip CLI so the
-    documented invocation works in consumer repos too (OI-1135). Flag
-    surface mirrors pre_merge_gate.py's own parser."""
-    gc_parser = subparsers.add_parser(
-        "gate-check",
-        help="run deterministic pre-merge gate checks for a PR (GO/HOLD verdict)",
-    )
-    gc_parser.add_argument(
-        "--pr",
-        required=True,
-        metavar="PR_ID",
-        help="PR identifier (e.g. 1449 or PR-6)",
-    )
-    gc_parser.add_argument(
-        "--project-root",
-        dest="project_root",
-        default=None,
-        metavar="DIR",
-        help="project root (default: auto-detect)",
-    )
-    gc_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="output JSON only",
-    )
-    gc_parser.add_argument(
-        "--output-file",
-        dest="output_file",
-        default=None,
-        metavar="FILE",
-        help="write results to file",
-    )
-    gc_parser.add_argument(
-        "--skip-pytest",
-        dest="skip_pytest",
-        action="store_true",
-        help="skip pytest execution (useful for CI or fast checks)",
-    )
-    gc_parser.add_argument(
-        "--store",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="store results in the state directory (default: true)",
-    )
+    documented invocation works in consumer repos too (OI-1135). Parser
+    definition lives in the command module to keep this file thin."""
+    from vnx_cli.commands.gate_check import register_gate_check_subparser
+    register_gate_check_subparser(subparsers)
 
 
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:

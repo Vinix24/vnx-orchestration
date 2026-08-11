@@ -32,6 +32,59 @@ from vnx_cli import _engine
 _EXIT_IO_ERROR = 20
 
 
+def register_gate_check_subparser(subparsers) -> None:
+    """Register the `vnx gate-check` subparser.
+
+    Lives here rather than in vnx_cli/main.py so the oversized main module
+    only carries a thin delegate (main.py already exceeds the
+    quality-advisory file-size ceiling on main). Flag surface mirrors
+    pre_merge_gate.py's own parser one-to-one.
+    """
+    import argparse
+
+    gc_parser = subparsers.add_parser(
+        "gate-check",
+        help="run deterministic pre-merge gate checks for a PR (GO/HOLD verdict)",
+    )
+    gc_parser.add_argument(
+        "--pr",
+        required=True,
+        metavar="PR_ID",
+        help="PR identifier (e.g. 1449 or PR-6)",
+    )
+    gc_parser.add_argument(
+        "--project-root",
+        dest="project_root",
+        default=None,
+        metavar="DIR",
+        help="project root (default: auto-detect)",
+    )
+    gc_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="output JSON only",
+    )
+    gc_parser.add_argument(
+        "--output-file",
+        dest="output_file",
+        default=None,
+        metavar="FILE",
+        help="write results to file",
+    )
+    gc_parser.add_argument(
+        "--skip-pytest",
+        dest="skip_pytest",
+        action="store_true",
+        help="skip pytest execution (useful for CI or fast checks)",
+    )
+    gc_parser.add_argument(
+        "--store",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="store results in the state directory (default: true)",
+    )
+
+
 def build_gate_check_argv(args) -> List[str]:
     """Translate the parsed vnx_cli namespace into pre_merge_gate.py argv.
 

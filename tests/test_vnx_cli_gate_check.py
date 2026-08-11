@@ -128,7 +128,7 @@ def test_vnx_gate_check_invokes_packaged_engine_script(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, **_kwargs):
         captured["cmd"] = cmd
         return SimpleNamespace(returncode=1)  # HOLD
 
