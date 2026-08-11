@@ -86,6 +86,16 @@
             "command": "bash -c 'exec bash \"{{VNX_HOME}}/scripts/hooks/build_t0_state_hook.sh\"'"
           }
         ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash {{VNX_HOME}}/scripts/hooks/hookpin_check.sh",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
