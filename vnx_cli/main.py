@@ -1192,6 +1192,15 @@ def _register_attest_subparser(subparsers: argparse.Action) -> None:
                      help="repository root (default: current directory)")
 
 
+def _register_gate_check_subparser(subparsers: argparse.Action) -> None:
+    """`vnx gate-check` — same machinery as the fabric repo's `bin/vnx
+    gate-check` (scripts/pre_merge_gate.py), exposed on the pip CLI so the
+    documented invocation works in consumer repos too (OI-1135). Parser
+    definition lives in the command module to keep this file thin."""
+    from vnx_cli.commands.gate_check import register_gate_check_subparser
+    register_gate_check_subparser(subparsers)
+
+
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":
         from vnx_cli.commands.init_cmd import vnx_init
@@ -1273,6 +1282,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.horizon import vnx_deliverable
         sys.exit(vnx_deliverable(args))
 
+    elif args.command == "gate-check":
+        from vnx_cli.commands.gate_check import vnx_gate_check
+        sys.exit(vnx_gate_check(args))
+
     else:
         parser.print_help()
         sys.exit(0)
@@ -1316,6 +1329,7 @@ def main() -> None:
     _register_horizon_subparser(subparsers)
     _register_objective_subparser(subparsers)
     _register_deliverable_subparser(subparsers)
+    _register_gate_check_subparser(subparsers)
 
     args = parser.parse_args()
     _dispatch_command(args, parser)
