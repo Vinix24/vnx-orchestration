@@ -67,6 +67,18 @@ def _pin(project_dir: Path, value: str) -> Path:
     return project_dir
 
 
+@pytest.fixture()
+def fake_home(tmp_path, monkeypatch):
+    """A home directory confined entirely to tmp_path, so pin-walk-up
+    boundary tests never escape into the real filesystem (the walk climbs
+    toward $HOME — see _reexec._find_pin_dir — and the real $HOME on the
+    machine running these tests is not a hermetic sandbox)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    return home
+
+
 # ---------------------------------------------------------------------------
 # No-op cases
 # ---------------------------------------------------------------------------
@@ -361,6 +373,124 @@ def test_fail_open_symlink_escape_refused(central_store, execv_spy, tmp_path, ca
     _reexec.maybe_reexec_pinned(["--project-dir", str(tmp_path)])
     assert execv_spy == []
     assert "WARNING" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Pin walk-up (OI-1170): the pin used to be looked up ONLY in the literal
+# project_dir/cwd. A T0 terminal running from a nested submap (e.g.
+# .claude/terminals/T0) would find nothing there and silently run whatever
+# version happened to be `current`, disagreeing with `vnx --version` run
+# from the project root. These five cases are each written to fail on the
+# pre-fix code (see docstrings) and pass after the walk-up fix.
+# ---------------------------------------------------------------------------
+
+def test_pin_found_by_walking_up_from_submap(central_store, execv_spy, fake_home):
+    """Case 1: pin lives at the project root; the command runs from a nested
+    submap (mirrors a T0 terminal under .claude/terminals/T0). RED on the
+    pre-fix code: `_read_pin` only checked the literal project_dir, found
+    nothing in the submap, and returned early with zero re-exec."""
+    pinned = _add_version(central_store, "v1.2.0", "1.2.0")
+    project = fake_home / "project"
+    _pin(project, "v1.2.0")
+    submap = project / ".claude" / "terminals" / "T0"
+    submap.mkdir(parents=True)
+
+    _reexec.maybe_reexec_pinned(["--project-dir", str(submap)])
+
+    assert len(execv_spy) == 1
+    assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(pinned)
+
+
+def test_project_dir_pin_wins_over_ancestor_pin(central_store, execv_spy, fake_home):
+    """Case 2 (regression pin): an explicit --project-dir naming a directory
+    that HAS its own pin must be honored as-is — an ancestor's different pin
+    must never override the closer, explicitly-named one. Behavior must be
+    unchanged by the walk-up fix whenever --project-dir already points
+    straight at the pin."""
+    _add_version(central_store, "v1.1.0", "1.1.0")
+    inner = _add_version(central_store, "v1.2.0", "1.2.0")
+    project = fake_home / "project"
+    _pin(project, "v1.1.0")
+    sub = project / "sub"
+    _pin(sub, "v1.2.0")
+
+    _reexec.maybe_reexec_pinned(["--project-dir", str(sub)])
+
+    assert len(execv_spy) == 1
+    assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(inner)
+
+
+def test_no_pin_anywhere_within_boundary_no_reexec(central_store, execv_spy, fake_home):
+    """Case 3 (regression pin): no .vnx-version anywhere from the submap up
+    to the $HOME boundary -> no re-exec, same as the pre-walk-up behavior for
+    a directory with no pin. Also proves the walk does not manufacture a
+    match out of nothing once it is allowed to climb."""
+    project = fake_home / "project"
+    submap = project / ".claude" / "terminals" / "T0"
+    submap.mkdir(parents=True)
+
+    _reexec.maybe_reexec_pinned(["--project-dir", str(submap)])
+
+    assert execv_spy == []
+
+
+def test_dev_checkout_warns_on_pin_divergence(central_store, execv_spy, fake_home, capsys):
+    """Case 4: a pin IS found (via walk-up) but the running install is a dev
+    checkout (no .vnx-install-mode=central marker), so no re-exec can honor
+    it and the running version differs from the pin. RED on the pre-fix
+    code for two independent reasons: the walk-up did not exist (so the pin
+    was never found from the submap at all), AND the dev-checkout branch
+    printed nothing even when it did have a pin in hand — this was the one
+    branch where 'pin found, running version diverges' produced zero
+    output."""
+    (central_store / "v1.3.0" / ".vnx-install-mode").unlink()
+    project = fake_home / "project"
+    _pin(project, "v1.2.0")
+    submap = project / "sub"
+    submap.mkdir()
+
+    _reexec.maybe_reexec_pinned(["--project-dir", str(submap)])
+
+    assert execv_spy == []
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "v1.2.0" in err
+    assert str(project / ".vnx-version") in err
+
+
+def test_malformed_pin_found_via_walkup_fails_open_with_warning(
+    central_store, execv_spy, fake_home, capsys
+):
+    """Case 5: an unreadable/malformed pin keeps the existing fail-open
+    behavior (no re-exec, no crash) plus its warning — now also reachable
+    when the malformed pin is discovered via walk-up rather than sitting
+    directly in the literal project_dir. RED on the pre-fix code: the
+    submap-relative lookup found no file at all, so neither the fail-open
+    path nor its warning ever ran."""
+    project = fake_home / "project"
+    _pin(project, "bad;rm")
+    submap = project / ".claude" / "terminals" / "T0"
+    submap.mkdir(parents=True)
+
+    _reexec.maybe_reexec_pinned(["--project-dir", str(submap)])
+
+    assert execv_spy == []
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_walkup_stops_before_home_directory(central_store, execv_spy, fake_home):
+    """The walk must never consider $HOME itself (or above it) as a pin
+    source — a pin sitting there would silently apply to every project on
+    the machine. A pin placed AT fake_home is invisible to a project nested
+    under it."""
+    _add_version(central_store, "v1.2.0", "1.2.0")
+    _pin(fake_home, "v1.2.0")
+    submap = fake_home / "project" / "sub"
+    submap.mkdir(parents=True)
+
+    _reexec.maybe_reexec_pinned(["--project-dir", str(submap)])
+
+    assert execv_spy == []
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 REEXEC_ENV_FLAG = "VNX_PIN_REEXECED"
 
@@ -88,27 +88,85 @@ def _resolve_project_dir(argv: List[str]) -> Path:
         return Path.cwd()
 
 
-def _read_pin(project_dir: Path) -> Optional[str]:
-    """Return the validated pin from ``project_dir/.vnx-version``.
+def _find_pin_dir(start: Path) -> Optional[Path]:
+    """Walk UP from ``start`` looking for the nearest ancestor holding a
+    ``.vnx-version`` file. Returns that ancestor, or None when none of the
+    directories walked has one.
 
-    None when there is no usable pin (absent, empty, unreadable, malformed) —
-    every one of those is a no-re-exec outcome.
+    Same walk SHAPE as ``scripts/lib/vnx_paths.py::_project_id_from_marker``
+    (check ``start``, then each parent in turn, first hit wins) — not
+    imported from there, on purpose: that module pulls in ``vnx_ids`` and
+    ``data_dir_guard`` (~8ms just to import, measured), and this check runs
+    on the startup path of EVERY ``vnx`` invocation, including the common
+    case of no pin at all, before this module has decided whether an engine
+    bootstrap is even warranted (see the module docstring). Re-implementing
+    six lines of ``pathlib`` here keeps that path cheap; other command
+    modules already import lightweight symbols FROM ``_reexec`` rather than
+    the reverse (see ``vnx_cli/commands/update.py`` and ``doctor.py``), so
+    this direction of no-shared-import is the established boundary, not a
+    new one.
+
+    Bounded at the resolved home directory (exclusive) — deliberately
+    NARROWER than the marker walk, which climbs unbounded to the filesystem
+    root. The two markers carry different blast radii: a stray
+    ``.vnx-project-id`` picked up from a shared ancestor mis-routes state
+    storage for one project; a stray ``.vnx-version`` picked up the same way
+    would silently pin the ENGINE CODE VERSION for every project a user runs
+    ``vnx`` from underneath that ancestor — a home-directory-wide footgun,
+    since nobody deliberately places a version pin above their own project
+    root. git-toplevel was considered instead and rejected: resolving it
+    means spawning a ``git`` subprocess on every invocation before we even
+    know a pin exists, which the fail-fast design of this module (no engine
+    bootstrap until a pin is confirmed) is built to avoid. When the home
+    directory itself cannot be resolved (rare — a misconfigured environment)
+    this falls open to the marker's unbounded behavior rather than refusing
+    to search at all, matching the fail-open contract of this whole module.
     """
-    pin_file = project_dir / PIN_FILE_NAME
-    if not pin_file.is_file():
-        return None
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+    for ancestor in [start, *start.parents]:
+        if home is not None and ancestor == home:
+            break
+        if (ancestor / PIN_FILE_NAME).is_file():
+            return ancestor
+    return None
+
+
+def _read_pin(project_dir: Path) -> Tuple[Optional[str], Optional[Path]]:
+    """Return ``(pin, pin_dir)``: the validated pin and the directory that
+    held the ``.vnx-version`` file it came from.
+
+    ``(None, None)`` when no usable pin exists anywhere in the walk
+    (absent everywhere within the boundary, empty, unreadable, malformed) —
+    every one of those is a no-re-exec outcome. Once an ancestor WITH the
+    file is found, only that file is considered: an empty, unreadable, or
+    malformed pin there is terminal (warn + no re-exec), never a reason to
+    keep climbing past it in search of a valid one further up. ``pin_dir``
+    is still returned as ``None`` in that failure case — there is no
+    honored pin to attribute a directory to.
+    """
+    try:
+        start = project_dir.expanduser().resolve()
+    except OSError:
+        return None, None
+    pin_dir = _find_pin_dir(start)
+    if pin_dir is None:
+        return None, None
+    pin_file = pin_dir / PIN_FILE_NAME
     try:
         lines = pin_file.read_text(encoding="utf-8").splitlines()
         first = lines[0].strip() if lines else ""
     except OSError as exc:
         _warn(f"cannot read {pin_file} ({exc}); running current version")
-        return None
+        return None, None
     if not first:
-        return None
+        return None, None
     if first in (".", "..") or not _PIN_RE.match(first):
         _warn(f"malformed pin {first!r} in {pin_file}; running current version")
-        return None
-    return first
+        return None, None
+    return first, pin_dir
 
 
 def _is_central_install(engine_root: Path) -> bool:
@@ -249,8 +307,26 @@ def maybe_reexec_pinned(argv: Optional[List[str]] = None) -> None:
         _warn(f"pin re-exec check failed ({exc}); running current version")
 
 
+def _warn_diverged_dev_checkout(pin: str, pin_dir: Path, engine_root: Path) -> None:
+    """Warn when a dev checkout is running a version the found pin disagrees
+    with. This is the one branch where a pin was actually LOCATED but no
+    re-exec is possible (dev checkouts run whatever code tree they are), so
+    without this the divergence between "pin says X" and "actually running
+    Y" was completely silent — the exact symptom this dispatch exists to
+    close (OI-1170)."""
+    running = _running_version(engine_root)
+    if running is not None and _normalize_version(running) == _normalize_version(pin):
+        return
+    _warn(
+        f"pin {pin!r} (from {pin_dir / PIN_FILE_NAME}) names a different "
+        f"version than the one running ({running or 'unknown'}), but this is "
+        "a dev checkout (no .vnx-install-mode=central marker) so the pin "
+        "cannot be honored by re-exec here; running current version"
+    )
+
+
 def _maybe_reexec_pinned(argv: List[str]) -> None:
-    pin = _read_pin(_resolve_project_dir(argv))
+    pin, pin_dir = _read_pin(_resolve_project_dir(argv))
     if pin is None:
         return
 
@@ -263,6 +339,7 @@ def _maybe_reexec_pinned(argv: List[str]) -> None:
 
     engine_root = _engine.engine_root()
     if not _is_central_install(engine_root):
+        _warn_diverged_dev_checkout(pin, pin_dir, engine_root)
         return  # dev checkout / non-central install: never re-exec
 
     versions_dir = _versions_dir(engine_root)
@@ -272,8 +349,8 @@ def _maybe_reexec_pinned(argv: List[str]) -> None:
         # to, not a VERSION label that can disagree with the installed dir.
         resolved = _resolved_current_version(engine_root)
         _warn(
-            f"pinned version {pin!r} is not installed under {versions_dir}; "
-            f"running current version ({resolved or 'unknown'})"
+            f"pin {pin!r} (from {pin_dir / PIN_FILE_NAME}) is not installed "
+            f"under {versions_dir}; running current version ({resolved or 'unknown'})"
         )
         return
 
