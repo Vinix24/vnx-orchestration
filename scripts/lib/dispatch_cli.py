@@ -242,6 +242,56 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
         print(f"  [WARN] {w}")
 
 
+_HEADLESS_ISOLATION_WARNING = (
+    "OI-1158: claude_headless lane isolation is NOT structurally verified by "
+    "the door. Every ExecutionPlan claims isolation=worktree (dispatch_plan.py's "
+    "D6 rule — Isolation.WORKTREE is the only legal member), but the door has no "
+    "check that the CHOSEN LANE actually delivers it. The claude_tmux_subscription "
+    "lane's isolation is enforced one call away via tmux_worktree.allocate(); the "
+    "claude_headless lane's isolation lives in a parallel code path "
+    "(dispatch_envelope.py -> dispatch_worktree_isolation.py) this module never "
+    "inspects or cross-checks. Treat this dispatch as isolation-UNVERIFIED by the "
+    "door until a structural check replaces this warning — do not assume the "
+    "worktree guarantee held just because the plan says isolation=worktree."
+)
+
+
+def _headless_isolation_guard(plan: "ExecutionPlan") -> "Optional[str]":
+    """Return a loud isolation-guarantee warning for a claude_headless plan.
+
+    OI-1158 (peer-measured 2026-08-12, pacompany-engine): two headless
+    dispatches, both staged with ``isolation: worktree`` in the spec, both
+    ended up sharing the SAME tree — the project's own main checkout — on the
+    branch of whichever dispatch fired first. The door printed nothing: the
+    ExecutionPlan's ``isolation`` field always reads ``Isolation.WORKTREE``
+    (it is the only legal enum member — see dispatch_spec.Isolation), so a
+    caller reading the plan sees an isolation guarantee that the door itself
+    never verifies the LANE actually implements. A silent no-op on an
+    isolation guarantee is the most dangerous form: the caller believes they
+    are protected.
+
+    Deliberately WARNS rather than REFUSES: the headless lane is a live,
+    relied-upon lane (opened 2026-08-11 by explicit operator directive,
+    ``docs/core/DISPATCH_RULES.md`` §8), and a hard door-level refusal would
+    block dispatches that run successfully today. A refusal belongs on the
+    lane's OWN fail-closed gate (``_execute_claude_headless`` already has one
+    via ``lane_safety.headless_block``) — not duplicated here as a second,
+    coarser gate that can't distinguish "isolation is broken" from "isolation
+    is merely unverified by this door". The warning plus the receipt-visible
+    field (``_persist_route_decision``'s ``isolation_note``) is the minimum
+    bar this dispatch closes: never silent again, escalate to a hard door
+    gate only once the real enforcement gap it flags is closed.
+
+    Returns None for every lane other than ``claude_headless`` — the tmux
+    lane's isolation is verified structurally (``tmux_worktree.allocate()``
+    is one call away from ``_execute_claude`` and asserts the worktree's own
+    branch, OI-1124), so it earns no warning here.
+    """
+    if plan.lane != "claude_headless":
+        return None
+    return _HEADLESS_ISOLATION_WARNING
+
+
 def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
     """Verify the selected lane's endpoint is reachable (OI-867).
 
@@ -1488,6 +1538,7 @@ def _persist_route_decision(
     permit: ExecutionPermit,
     *,
     state_dir: Path,
+    isolation_note: "Optional[str]" = None,
 ) -> None:
     """Persist the canonical routing decision alongside the permit fingerprint.
 
@@ -1498,6 +1549,14 @@ def _persist_route_decision(
     The stored canonical dict is the same one digest() hashes, so the fingerprint
     can be verified against it later — a stored decision that can't be linked to
     its permit would repeat the same problem one layer higher (OI-849).
+
+    ``isolation_note`` (OI-1158): an optional loud isolation-guarantee warning
+    (see ``_headless_isolation_guard``) stored as a SIBLING of ``decision``, not
+    inside it — ``canonical_dict()``/``digest()`` deliberately excludes advisory
+    fields, so this never perturbs the permit fingerprint. This is the
+    "receipt-visible field" half of OI-1158's fix: the audit trail this door
+    writes for every dispatch, closest in spirit to a receipt for callers who
+    only have write access to this module.
 
     Never blocks the door: any failure logs a WARN and the dispatch continues.
     """
@@ -1516,6 +1575,8 @@ def _persist_route_decision(
             "plan_digest": permit.plan_digest,
             "decision": canonical,
         }
+        if isolation_note:
+            record["isolation_warning"] = isolation_note
 
         # 1. Append to shared NDJSON under the sentinel + data-file locks.
         ndjson_path = state_dir / "route_decisions.ndjson"
@@ -1659,6 +1720,19 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                 route_reason=f"{door_route_reason};{plan.route_reason}",
             )
 
+        # OI-1158: loud isolation-guarantee warning for lanes the door cannot
+        # structurally verify (currently: claude_headless). Merged onto
+        # plan.warnings — the same mechanism door_route_reason and the D4
+        # model-tier warnings already use — so it surfaces in dry-run output
+        # via _print_plan AND is available below for the real-execution print
+        # and the route-decision receipt field. None for every other lane.
+        headless_isolation_warning = _headless_isolation_guard(plan)
+        if headless_isolation_warning:
+            plan = dataclasses.replace(
+                plan,
+                warnings=plan.warnings + (headless_isolation_warning,),
+            )
+
         # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth
         # model ranks the deterministic anchors into a sidecar BEFORE the permit
         # is issued. It reads vspec.instruction_text in-memory and writes a
@@ -1736,7 +1810,10 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         # OI-1120 part 2: fill the register's dispatch_created event here too —
         # same "door commits to firing" moment, one write site for every lane.
         if not dry_run:
-            _persist_route_decision(plan, permit, state_dir=state_dir)
+            _persist_route_decision(
+                plan, permit, state_dir=state_dir,
+                isolation_note=headless_isolation_warning,
+            )
             _register_dispatch_created(plan, permit, vspec.spec, state_dir=state_dir)
 
         if dry_run:
@@ -1772,6 +1849,16 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                     role=vspec.spec.role,
                 )
             elif plan.lane == "claude_headless":
+                # OI-1158: the door never printed anything about isolation on a
+                # real (non-dry-run) fire — _print_plan's warnings loop only
+                # runs under --dry-run. Surface the same warning here, loud, so
+                # a live headless dispatch is never silent about the gap.
+                if headless_isolation_warning:
+                    logger.warning("[dispatch_cli] %s", headless_isolation_warning)
+                    print(
+                        f"[dispatch_cli] [WARN] {headless_isolation_warning}",
+                        file=sys.stderr,
+                    )
                 return _execute_claude_headless(
                     plan,
                     permit,
