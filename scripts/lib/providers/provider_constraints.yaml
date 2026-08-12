@@ -180,9 +180,22 @@ constraints:
       provider: claude
       via: headless
     reason: >-
-      Account-protection and billing: the claude_headless lane runs `claude -p`
-      via subprocess_adapter on api-metered billing. Blocked by default; opened
-      explicitly with VNX_OVERRIDE_CLAUDE_HEADLESS=1.
-    enforcement: code_raise
-    audit_severity: blocking
+      OPENED 2026-08-11 (operator directive, dispatch-20260811c-b): the prior
+      "api-metered billing" reason does not hold — claude -p runs on the Max
+      subscription (measured 2026-08-11: no ANTHROPIC_API_KEY, no
+      ANTHROPIC_BASE_URL, keychain subscriptionType=max, scope
+      user:inference), and the 2026-06-15 API-metered cutover this constraint
+      cited was never carried out by Anthropic. Operator ratified 2026-08-04.
+      Downgraded from blocking to warn to match routing_policy.yaml's
+      lane_safety.headless_block (both gates cover the same lane; they move
+      together). USABLE, NOT YET GOVERNED: two measured gaps from 2026-08-05
+      remain open regardless of billing — the lane ignores isolation=worktree
+      (worktree created then reaped while the worker branches in the MAIN
+      checkout, leaving real work uncommitted there) and the fail-closed
+      report gate did not bite on a report missing all four mandatory
+      headings. VNX_OVERRIDE_CLAUDE_HEADLESS=1 still marks an explicit
+      per-dispatch opt-in for audit visibility even though the route no
+      longer blocks.
+    enforcement: code_warn
+    audit_severity: warn
     override_allowed: true

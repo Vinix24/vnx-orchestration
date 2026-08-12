@@ -75,17 +75,31 @@ fallback_chain:
 # remains DECLARATIVE — exposed by load_lane_safety() for tooling/tests, but
 # not read by any runtime gating decision. Do not rely on them as live guards.
 lane_safety:
-  # claude-headless-lane-block (OI-223 fold-in). LIVE as of this PR — see
-  # is_claude_headless_blocked() above. Refuses the claude_headless lane
-  # (`claude -p`, API-metered) by default; the tmux subscription lane stays
-  # the default for claude. Protects the production OAuth subscription
-  # post-2026-06-15 billing cutover (headless now bills API credits, not
-  # subscription quota). Set enabled: false here to lift the block yaml-side,
-  # or export the override_env var =1 to opt in per-dispatch.
+  # claude-headless-lane-block (OI-223 fold-in). OPENED 2026-08-11 (operator
+  # directive, dispatch-20260811c-b): the prior block reason — "claude -p is
+  # API-metered post-2026-06-15 cutover" — does not hold. Anthropic never
+  # carried out that cutover, and a 2026-08-11 measurement of the auth state
+  # (no ANTHROPIC_API_KEY, no ANTHROPIC_BASE_URL, keychain subscriptionType:
+  # max, scope user:inference) confirms claude -p still runs on the Max
+  # subscription, same as the tmux lane. Operator ratified 2026-08-04.
+  #
+  # USABLE, NOT GOVERNED. Opening the billing block does not close two
+  # measured governance gaps (2026-08-05), both still live:
+  #   1. The lane ignores isolation=worktree — the door creates a worktree,
+  #      but the worker operates in the MAIN checkout and branches there, and
+  #      the worktree is reaped while the real work sits uncommitted in the
+  #      main repo.
+  #   2. The fail-closed report gate did not bite on a report missing all
+  #      four mandatory headings.
+  # Treat headless as usable-but-not-yet-governed until those gaps close.
+  #
+  # enabled: false opens the lane by default; set enabled: true to re-block.
+  # override_env is kept wired (VNX_OVERRIDE_CLAUDE_HEADLESS) so that reversal
+  # stays a one-line flip — the escape hatch doesn't need to be re-added.
   headless_block:
-    enabled: true
+    enabled: false
     override_env: "VNX_OVERRIDE_CLAUDE_HEADLESS"
-    reason: "claude -p (headless) is API-metered post-2026-06-15 cutover; the tmux subscription lane is the safe default for claude"
+    reason: "Opened 2026-08-11 (operator directive, dispatch-20260811c-b): claude -p runs on the Max subscription, not API credits — measured 2026-08-11 via auth state (no key/base-url, keychain subscriptionType=max). The 2026-06-15 API-metered cutover this block cited was never carried out by Anthropic. Still usable-but-not-governed: ignores isolation=worktree, and the report-gate miss from 2026-08-05 — see the comment above."
 
   # Anthropic Claude Code interactive-session hang (Issues #63390 + #64153).
   # Measured 2026-06-04/05: opus-4-8/4-7 + sonnet-5 hang for hours or exit

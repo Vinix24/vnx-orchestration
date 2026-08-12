@@ -8,6 +8,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Optional
 
 _SENTINEL_REGISTRY = {
     "dispatch_register.ndjson": ".state.lock",
@@ -24,8 +25,25 @@ def _sentinel_path(data_path: Path) -> Path:
     return data_path.parent / lock_name
 
 
-def append_locked(path: Path, record: dict) -> None:
-    """Append one JSON record under the shared sentinel and data-file locks."""
+def append_locked(
+    path: Path,
+    record: dict,
+    *,
+    skip_if: Optional[Callable[[bytes], bool]] = None,
+) -> bool:
+    """Append one JSON record under the shared sentinel and data-file locks.
+
+    ``skip_if``, when given, receives the file's current content INSIDE the
+    critical section; returning True skips the append. This makes
+    check-and-append one atomic operation — the same check-inside-the-lock
+    discipline the receipt writer uses
+    (``append_receipt_internals.idempotency._write_receipt_under_lock``) —
+    instead of a read-then-write pair that two concurrent callers can both
+    pass (OI-1129).
+
+    Returns True when the record was appended, False when ``skip_if``
+    skipped it. Callers without ``skip_if`` always get True.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     sentinel = _sentinel_path(path)
     payload = (json.dumps(record, separators=(",", ":"), sort_keys=False) + "\n").encode("utf-8")
@@ -33,10 +51,15 @@ def append_locked(path: Path, record: dict) -> None:
         fcntl.flock(sentinel_fh.fileno(), fcntl.LOCK_EX)
         with path.open("a+b") as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            if skip_if is not None:
+                fh.seek(0)
+                if skip_if(fh.read()):
+                    return False
             fh.seek(0, os.SEEK_END)
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
+    return True
 
 
 def rewrite_locked(path: Path, new_content: bytes | Callable[[bytes], bytes]) -> None:

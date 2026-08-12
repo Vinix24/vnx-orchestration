@@ -28,8 +28,10 @@ parallel path:
   `dispatch_cli.py --spec-file`). The door runs `compile_plan` + an ExecutionPermit
   for every lane. Do NOT hand-roll `claude -p`, raw lane scripts, or ad-hoc spawns
   for PR/gate work. Routing/lanes/constraints: `docs/core/DISPATCH_RULES.md`.
-  Lane rule the door enforces: **`claude`/Opus → tmux-spawn lane** (subscription, June-15
-  escape; never `provider_dispatch`, never headless `claude -p`); `kimi`/`glm`/`deepseek`
+  Lane rule the door enforces: **`claude`/Opus → tmux-spawn lane** (subscription, default;
+  never `provider_dispatch`); headless `claude -p` is opened as of 2026-08-11 (operator
+  directive) — it runs on the subscription too, not API credits, but is usable-not-yet-governed
+  (ignores `isolation=worktree`, report-gate gap) — see DISPATCH_RULES §6. `kimi`/`glm`/`deepseek`
   → `provider_dispatch`. Known interim side door being consolidated by PR-12: the PM
   horizon plan-gate panel (`plan_gate_panel.py`) calls lanes directly until the door is wired.
 - **Feature/build planning** goes through Horizon, the future-state layer:
@@ -98,11 +100,13 @@ Review-gate status + the full mapping: DISPATCH_RULES §2.
 ## 5. Concurrency + billing (the two that bite)
 
 - **claude-tmux is subscription-session-capped, shared with every Claude agent on the
-  account → serialize it (one at a time).** Providers stay parallel. The door enforces
-  this (PR-6 lock); direct callers self-serialize (`--claude-serial`). A ~0.1s `rc=1`
-  exit = capacity, not a bug. See DISPATCH_RULES §6.
-- **Claude routes via the tmux subscription lane, never headless `claude -p`** (= API
-  billing). `cost=$0.0000` confirms subscription. See DISPATCH_RULES §6–8.
+  account → serialize it (N-slot, default 5).** Providers stay parallel. The door enforces
+  this (PR-6 lock + #1017 concurrency config); direct callers self-serialize
+  (`--claude-serial`). A ~0.1s `rc=1` exit = capacity, not a bug. See DISPATCH_RULES §6.
+- **Claude routes via the tmux subscription lane by default; headless `claude -p` is
+  opened (2026-08-11 operator directive) but usable-not-yet-governed** (ignores
+  `isolation=worktree`, report-gate gap — see DISPATCH_RULES §6). Both lanes run on the
+  subscription, not API billing — `cost=$0.0000` confirms it either way. See DISPATCH_RULES §6–8.
 
 ## 6. Doubt and escalation
 

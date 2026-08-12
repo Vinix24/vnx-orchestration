@@ -174,43 +174,48 @@ def test_bridge_dispatch_rejects_unsafe_id_as_exit_1(tmp_path):
     assert rc == 1  # clean reject — never falls back to a side-door delivery
 
 
-# --- claude_headless lane_safety gate (OI-223): fail-closed by default, yaml-driven ---
+# --- claude_headless lane_safety gate (OI-223): OPENED 2026-08-11 (dispatch-20260811c-b) ---
+#
+# claude -p runs on the Max subscription, not API credits (measured 2026-08-11); the
+# "API-metered post-2026-06-15-cutover" reason the block used to cite never held (Anthropic
+# never carried out that cutover). lane_safety.headless_block.enabled is now false by
+# default — see routing_policy.yaml for the full rationale and the two measured governance
+# gaps (isolation=worktree, report-gate) that still make the lane usable-not-yet-governed.
 
-def test_bridge_headless_blocked_by_default_before_staging(tmp_path, monkeypatch, capsys):
-    """allow_headless=True without the override env var: REJECT before stage_spec_bundle
-    ever runs — no bundle is written, no side-door path is reachable."""
+def test_bridge_headless_open_by_default_reaches_staging(tmp_path, monkeypatch):
+    """allow_headless=True without the override env var: staging proceeds — no block fires
+    pre-staging. Was test_bridge_headless_blocked_by_default_before_staging (asserted rc == 1,
+    never-staged, 'headless-blocked' in stderr) before the block opened."""
     monkeypatch.delenv("VNX_OVERRIDE_CLAUDE_HEADLESS", raising=False)
-    reached_staging = []
-    monkeypatch.setattr(
-        dispatch_bridge, "stage_spec_bundle",
-        lambda **kw: reached_staging.append(kw),
-    )
+    import dispatch_cli
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
     rc = dispatch_bridge.bridge_dispatch(
         instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
         target_slot="T1", project_id="p1", data_dir=tmp_path,
         allow_headless=True, headless_reason="benchmark", dry_run=True,
     )
-    assert rc == 1
-    assert reached_staging == []
-    err = capsys.readouterr().err
-    assert "headless-blocked" in err
-    assert "VNX_OVERRIDE_CLAUDE_HEADLESS" in err
+    assert rc == 0
+    settled = tmp_path / "dispatches" / "completed" / _GOOD_ID
+    assert json.loads((settled / "dispatch-spec.json").read_text(encoding="utf-8"))["allow_headless"] is True
 
 
-def test_bridge_headless_wrong_override_value_still_blocked(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "true")  # only "1" opts in
-    reached_staging = []
-    monkeypatch.setattr(
-        dispatch_bridge, "stage_spec_bundle",
-        lambda **kw: reached_staging.append(kw),
-    )
+def test_bridge_headless_wrong_override_value_still_reaches_staging(tmp_path, monkeypatch):
+    """A garbage override value ("true" instead of "1") doesn't matter while the block is
+    off — staging still proceeds. Was test_bridge_headless_wrong_override_value_still_blocked
+    (asserted rc == 1, never-staged) before the block opened."""
+    monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "true")  # only "1" would opt in a block
+    import dispatch_cli
+
+    monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
+
     rc = dispatch_bridge.bridge_dispatch(
         instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
         target_slot="T1", project_id="p1", data_dir=tmp_path,
         allow_headless=True, headless_reason="benchmark", dry_run=True,
     )
-    assert rc == 1
-    assert reached_staging == []
+    assert rc == 0
 
 
 def test_bridge_headless_override_reaches_staging(tmp_path, monkeypatch):

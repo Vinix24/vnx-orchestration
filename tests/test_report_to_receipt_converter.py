@@ -236,6 +236,40 @@ class TestBuildReceiptFromReport:
         assert receipt is not None
         assert receipt["dispatch_id"] == "20260601-bold-field"
 
+    def test_declared_failure_status_produces_task_failed(self, tmp_path):
+        # OI-1130: a report that declares Status: failed must land as a
+        # task_failed receipt even though it passes the body contract —
+        # never as a task_complete that reads as a normal completion.
+        p = tmp_path / "20260811-declared-fail.md"
+        p.write_text(
+            "**Dispatch-ID**: 20260811-declared-fail\n"
+            "**Status**: failed\n"
+            "**Failure-Reason**: heartbeat_killed\n\n"
+            "## Summary\n\nWorker killed by heartbeat monitor after threshold breach.\n\n"
+            "## Changes\n\nNone recorded.\n\n## Verification\n\n-\n\n## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+        receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
+        assert receipt is not None
+        assert receipt["event_type"] == "task_failed"
+        assert receipt["status"] == "failed"
+        assert receipt["failure_reason"] == "heartbeat_killed"
+
+    def test_declared_failure_outranks_contract_invalid(self, tmp_path):
+        # A failed-status report with missing headings must still surface as
+        # task_failed, not vanish into the contract_invalid bucket.
+        p = tmp_path / "20260811-fail-no-body.md"
+        p.write_text(
+            "**Dispatch-ID**: 20260811-fail-no-body\n"
+            "**Status**: failure\n\n"
+            "Worker died without writing a full report.\n",
+            encoding="utf-8",
+        )
+        receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
+        assert receipt is not None
+        assert receipt["event_type"] == "task_failed"
+        assert receipt["status"] == "failed"
+
 
 # ---------------------------------------------------------------------------
 # Part 3: convert_report_to_receipt() — single-file conversion
@@ -2179,3 +2213,118 @@ class TestOI1125BoldColonInsideMarkers:
         )
         fields = _extract_body_fields(text)
         assert fields.get("dispatch_id") == "20260810g-a-converter-scoping"
+
+
+# ---------------------------------------------------------------------------
+# Part 17: OI-1132 — the bold branches get the same line anchor as the
+# plain-text path (#1445 residual gap, filed deliberately at merge)
+# ---------------------------------------------------------------------------
+
+class TestBoldBranchesLineAnchored:
+    """#1445 anchored _DISPATCH_PLAIN_RE at `^` (no leading \\s*, optional
+    `[-*] ` marker with exactly one space) so quoted diff-removal lines and
+    indented code-block lines can never become identity — but left both bold
+    alternatives loose: the inner-colon branch accepted `^\\s*` + `[-*]\\s+`,
+    and the outer-colon branch had no anchor at all. dispatch_spec._ID_RE
+    cannot catch this ('old-stale-value' is a perfectly legal id shape);
+    only the anchor separates a field declaration from quoted content."""
+
+    # The four reproduced-in-OI-1132 shapes that must NOT match, plus the
+    # genuine forms (both colon placements, bare + dash-list + star-list)
+    # that must keep matching.
+    @pytest.mark.parametrize("name,line,expected", [
+        # -- reproduced gap shapes (all matched before the anchor fix) --
+        ("diff_removal_inner_colon", "-    **Dispatch-ID:** old-stale-value", None),
+        ("indented_codeblock_inner_colon", "    **Dispatch-ID:** quoted-example", None),
+        ("diff_removal_outer_colon", "-    **Dispatch-ID**: old-stale-value", None),
+        ("indented_codeblock_outer_colon", "    **Dispatch-ID**: quoted-example", None),
+        # -- pre-existing-on-main outer-colon gap: bare substring, mid-line --
+        ("midline_prose_outer_colon",
+         "The report carries **Dispatch-ID**: old-stale-value in its header.",
+         None),
+        # -- genuine forms that must keep working --
+        ("bare_outer_colon", "**Dispatch-ID**: 20260810g-a-converter-scoping",
+         "20260810g-a-converter-scoping"),
+        ("bare_inner_colon", "**Dispatch-ID:** 20260810g-a-converter-scoping",
+         "20260810g-a-converter-scoping"),
+        ("dash_list_outer_colon", "- **Dispatch-ID**: 20260810e-a-seattimeout-1444",
+         "20260810e-a-seattimeout-1444"),
+        ("star_list_outer_colon", "* **Dispatch-ID**: 20260810e-a-seattimeout-1444",
+         "20260810e-a-seattimeout-1444"),
+        ("dash_list_inner_colon", "- **Dispatch-ID:** 20260810e-a-seattimeout-1444",
+         "20260810e-a-seattimeout-1444"),
+        ("star_list_inner_colon", "* **Dispatch-ID:** 20260810e-a-seattimeout-1444",
+         "20260810e-a-seattimeout-1444"),
+    ])
+    def test_bold_shapes(self, name, line, expected):
+        fields = _extract_body_fields(line + "\n\n" + _CONTRACT_BODY)
+        assert fields.get("dispatch_id") == expected, f"shape={name!r} line={line!r}"
+
+    def test_genuine_field_wins_over_quoted_foreign_bold_diff_line(self):
+        """A report that QUOTES a diff line carrying another dispatch's bold
+        Dispatch-ID while stamping its own genuine field must keep its own
+        identity — and not via setdefault ordering luck: the quoted line
+        comes FIRST here, so under the unanchored regex the foreign id would
+        win. Only the anchor rejects it."""
+        text = (
+            "Review finding quoted below:\n\n"
+            "```diff\n"
+            "-    **Dispatch-ID:** old-stale-value\n"
+            "+    **Dispatch-ID:** something-else\n"
+            "```\n\n"
+            "**Dispatch-ID**: 20260811h-b-boldanchor-1132\n\n" + _CONTRACT_BODY
+        )
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260811h-b-boldanchor-1132"
+
+    def test_only_quoted_foreign_bold_form_is_never_adopted_as_identity(self, tmp_path):
+        """A report whose ONLY bold Dispatch-ID occurrence is inside a quoted
+        diff must not adopt that foreign id: identity falls back to the
+        filename and the receipt is a contract violation, not a clean
+        task_complete carrying someone else's id."""
+        text = (
+            "## Summary\n\nThis summary has more than fifty non-whitespace "
+            "characters so the body contract validates cleanly.\n\n"
+            "## Changes\n\nDiff excerpt from the reviewed PR:\n```diff\n"
+            "-    **Dispatch-ID:** old-stale-value\n"
+            "+    **Dispatch-ID:** 20260811h-b-boldanchor-1132\n"
+            "```\n\n## Verification\n\n- none\n\n## Open Items\n\nNone\n"
+        )
+        report = tmp_path / "20260811h-b-boldanchor-1132.md"
+        report.write_text(text, encoding="utf-8")
+        receipt = build_receipt_from_report(report, text)
+        assert receipt is not None
+        assert receipt["dispatch_id"] == "20260811h-b-boldanchor-1132"
+        assert receipt["dispatch_id"] != "old-stale-value"
+        assert receipt["event_type"] == "report_contract_invalid"
+
+    def test_list_item_bold_model_field_still_extracted(self):
+        """The anchor applies to ALL bold fields, not just Dispatch-ID —
+        genuine list-item identity blocks (`- **Model**: sonnet`) must keep
+        parsing, or the fail-closed model check would start refusing valid
+        reports."""
+        text = (
+            "- **Dispatch-ID**: 20260811h-b-boldanchor-1132\n"
+            "- **Model**: sonnet\n"
+            "- **Provider**: claude\n\n" + _CONTRACT_BODY
+        )
+        fields = _extract_body_fields(text)
+        assert fields.get("dispatch_id") == "20260811h-b-boldanchor-1132"
+        assert fields.get("model") == "sonnet"
+        assert fields.get("provider") == "claude"
+
+    def test_quoted_diff_context_status_line_not_scraped(self):
+        """The one consumed-key change in the 4230-report blast-radius
+        measurement (20260610-gate-kimi-pr836.md): a quoted diff CONTEXT
+        line ` **Status**: Active` (diff's leading-space indent) was scraped
+        as the report's status field. The anchor must reject it."""
+        text = (
+            "Doc diff under review:\n\n"
+            "```diff\n"
+            " **Status**: Active\n"
+            "-**Last Updated**: 2026-04-08\n"
+            "+**Last Updated**: 2026-06-10\n"
+            "```\n\n" + _CONTRACT_BODY
+        )
+        fields = _extract_body_fields(text)
+        assert "status" not in fields
