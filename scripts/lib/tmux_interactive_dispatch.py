@@ -226,6 +226,42 @@ class TmuxCommandRunner:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic worker liveness (OI-1130 follow-up)
+# ---------------------------------------------------------------------------
+def _process_alive(pid: int) -> bool:
+    """``os.kill(pid, 0)`` liveness probe. True unless *pid* is provably gone.
+
+    ``ProcessLookupError`` means the pid no longer exists in the OS process
+    table -> dead. ``PermissionError`` means the pid exists but is owned by a
+    different user -> still alive, just not signalable by us. Any other
+    ``OSError`` is unexpected and propagates so the caller's fail-open guard
+    classifies the result as unknown rather than guessing dead.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@dataclass(frozen=True)
+class WorkerLiveness:
+    """Verdict of the tmux-lane deterministic liveness probe.
+
+    ``alive`` is TRI-STATE: ``True``/``False`` are deterministic verdicts;
+    ``None`` means the probe could not establish liveness (a tmux error, an
+    unparseable pane_pid, an unexpected exception) and the caller MUST fail
+    open — "cannot measure" is never read as "dead" (mirrors the fail-closed
+    check's own fail-open guard in ``pre_merge_gate.py``, #1468).
+    """
+
+    alive: "bool | None"
+    reason: str
+
+
+# ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
 @dataclass
@@ -472,6 +508,9 @@ class TmuxInteractiveDispatch:
         # OI-863: dispatch ids for which the awaiting-permission detection event
         # has already been emitted (one event per dispatch, not one per poll).
         self._awaiting_permission_emitted: set[str] = set()
+        # OI-1130: dispatch ids for which the "silent but confirmed alive"
+        # thinking-worker event has already been emitted (one per dispatch).
+        self._thinking_silent_emitted: set[str] = set()
 
     # -- OI-863 pane classification ----------------------------------------
     def _classify_pane(self, pane_id: str):
@@ -483,6 +522,77 @@ class TmuxInteractiveDispatch:
         cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
         content = cap.stdout if cap.returncode == 0 else ""
         return classify_worker_pane(content)
+
+    # -- OI-1130 deterministic liveness -------------------------------------
+    def _check_worker_liveness(self, pane_id: str, session: str) -> WorkerLiveness:
+        """Deterministic liveness probe for the worker behind *pane_id*/*session*.
+
+        Distinguishes a worker that is silently THINKING (the pane log has
+        stalled but the process is still there) from one that is genuinely
+        DEAD (its tmux session/pane — and the OS pid behind it — are gone).
+        The pane-log heartbeat alone cannot make this distinction: it only
+        ever sees SILENCE, never the process itself, so a slow-thinking
+        worker and a dead one look identical to it (OI-1130: 4 of 5 deep-
+        thinking dispatches were killed on exactly this confusion).
+
+        Scope (deliberate — see the dispatch report for the full rationale):
+        this checks whether the worker's tmux home (session, pane, and the
+        shell pid tmux spawned it with) still exists. That is the dominant
+        real death mode for an ephemeral single-shot tmux dispatch — a tmux
+        server crash, an externally killed session, an OOM/SIGKILL that took
+        the whole process group with it. It deliberately does NOT walk the
+        process tree looking for a child ``claude`` process that exited while
+        the wrapping shell survives: that would need either a full-system
+        ``ps`` scan on every poll interval (explicitly too expensive — this
+        probe must stay cheap enough to run every poll) or a second pane-TEXT
+        heuristic, which is exactly the kind of guess this check exists to
+        replace. That residual gap stays bounded by the unchanged
+        ``deadline_seconds``.
+
+        Fail-open: ANY ambiguity (a tmux error, an unparseable pane_pid, a
+        surprising probe exception) returns ``alive=None`` — never ``False``.
+        "Cannot measure" must never be read as "dead" (mirrors the fail-open
+        guard #1468 put in ``pre_merge_gate.py`` for the same principle).
+        """
+        try:
+            has = self._runner.run(["has-session", "-t", session])
+        except Exception as exc:  # noqa: BLE001 — probe must never raise into the poll loop
+            return WorkerLiveness(
+                alive=None, reason=f"has_session_probe_error:{exc.__class__.__name__}"
+            )
+        if has.returncode != 0:
+            return WorkerLiveness(alive=False, reason="tmux_session_gone")
+
+        try:
+            res = self._runner.run(
+                ["display-message", "-p", "-t", pane_id, "#{pane_dead}\t#{pane_pid}"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            return WorkerLiveness(
+                alive=None, reason=f"pane_probe_error:{exc.__class__.__name__}"
+            )
+        if res.returncode != 0 or not (res.stdout or "").strip():
+            return WorkerLiveness(alive=False, reason="tmux_pane_gone")
+
+        parts = res.stdout.strip().split("\t")
+        if len(parts) != 2:
+            return WorkerLiveness(alive=None, reason="tmux_pane_info_unparseable")
+        dead_flag, pid_str = parts[0].strip(), parts[1].strip()
+        if dead_flag == "1":
+            return WorkerLiveness(alive=False, reason="tmux_pane_dead_flag")
+        if not pid_str.isdigit() or int(pid_str) <= 0:
+            return WorkerLiveness(alive=None, reason="tmux_pane_pid_unparseable")
+
+        pid = int(pid_str)
+        try:
+            alive = _process_alive(pid)
+        except Exception as exc:  # noqa: BLE001 — fail open, never guess dead on a probe crash
+            return WorkerLiveness(
+                alive=None, reason=f"pid_probe_error:{exc.__class__.__name__}"
+            )
+        if alive:
+            return WorkerLiveness(alive=True, reason="pane_pid_alive")
+        return WorkerLiveness(alive=False, reason="pane_pid_gone")
 
     def _emit_awaiting_permission(
         self,
@@ -2028,7 +2138,20 @@ class TmuxInteractiveDispatch:
           fallback (permission-prompt detection) is the only guard.
 
         *session*: tmux session name, required when raw_log_path is provided so
-          the heartbeat can kill the session on silence timeout.
+          the heartbeat can kill the session on silence timeout. Also required
+          (together with *pane_id*) for the OI-1130 deterministic liveness probe
+          below; when either is missing the probe reports "unknown" every poll
+          and every decision falls open to the pre-OI-1130 heartbeat-only
+          behavior.
+
+        OI-1130 deterministic liveness (see ``_check_worker_liveness``): each
+        poll, independent of heartbeat silence, the worker's tmux session/pane
+        is probed for a confirmed-dead verdict. A confirmed-dead worker is
+        killed immediately (reason ``worker_process_gone``) without waiting out
+        the silence threshold. A confirmed-ALIVE worker is never killed on
+        silence alone — silence plus alive means "thinking", not "stuck" — only
+        ``deadline_seconds`` still bounds that wait. An "unknown" verdict (fail
+        open) reproduces the exact pre-OI-1130 heartbeat-silence-kill behavior.
 
         Priority: signal 1 (canonical) > signal 2 (pending) > signal 3 (backstop).
         Returns the best matching receipt, or None on deadline.
@@ -2113,17 +2236,120 @@ class TmuxInteractiveDispatch:
                             dispatch_id, label, pane_id,
                             "permission prompt during receipt wait",
                         )
-                # OI-944 / OI-1007: heartbeat silence check.  If the pipe-pane
-                # log has stopped growing for longer than the silence threshold,
-                # the worker is stuck — kill it and write a terminal failure.
+                # Heartbeat verdict, computed at most once per poll (skipped while
+                # awaiting a permission prompt — see the OI-863 note at the kill
+                # site below). Reused by both the OI-1130 liveness cross-check and
+                # the legacy silence-kill branch so FileProgressHeartbeat.check()
+                # (which mutates its own growth timer) is never called twice in
+                # the same iteration.
+                _hb_verdict = None
+                if _heartbeat is not None and not _awaiting_permission:
+                    _hb_verdict = _heartbeat.check()
+
+                # OI-1130 follow-up: deterministic liveness probe.  Runs every
+                # poll, independent of heartbeat silence, so a genuinely DEAD
+                # worker is caught within one poll interval instead of waiting
+                # out the full silence threshold.  See _check_worker_liveness
+                # for the fail-open contract and the deliberate scope boundary.
+                _liveness = (
+                    self._check_worker_liveness(pane_id, session)
+                    if pane_id is not None and session
+                    else WorkerLiveness(alive=None, reason="no_pane_or_session")
+                )
+
+                if _liveness.alive is False:
+                    if _hb_verdict is not None and not _hb_verdict.is_silent:
+                        # "groeit + dood" is structurally impossible (a growing
+                        # pane log implies a live writer) — the process death
+                        # verdict still wins, but the contradiction is logged as
+                        # an anomaly worth investigating.
+                        logger.warning(
+                            "interactive: liveness check found worker gone for %s "
+                            "(reason=%s) while the pane log was STILL GROWING — "
+                            "anomaly, but process death wins; killing anyway",
+                            dispatch_id, _liveness.reason,
+                        )
+                    else:
+                        logger.warning(
+                            "interactive: deterministic liveness check found worker "
+                            "gone for %s (reason=%s) — killing without waiting out "
+                            "the silence threshold",
+                            dispatch_id, _liveness.reason,
+                        )
+                    # Write a failure report so the audit trail records a
+                    # confirmed-dead kill under its OWN reason — distinct from a
+                    # heartbeat-silence guess (see worker_heartbeat module docs).
+                    try:
+                        from worker_heartbeat import build_process_gone_failure_report  # noqa: PLC0415
+                        _pg_report = build_process_gone_failure_report(
+                            dispatch_id,
+                            liveness_reason=_liveness.reason,
+                            terminal_id=label or "",
+                        )
+                        _reports_dir = self._state_dir.parent / "unified_reports"
+                        _reports_dir.mkdir(parents=True, exist_ok=True)
+                        _report_path = _reports_dir / f"{dispatch_id}.md"
+                        _report_path.write_text(_pg_report, encoding="utf-8")
+                        logger.info(
+                            "interactive: worker_process_gone failure report "
+                            "written to %s",
+                            _report_path,
+                        )
+                    except Exception as _pg_write_exc:
+                        logger.warning(
+                            "interactive: worker_process_gone failure report "
+                            "write failed for %s: %s",
+                            dispatch_id,
+                            _pg_write_exc,
+                        )
+                    return None
+
+                # OI-944 / OI-1007 / OI-1130: heartbeat silence check.  If the
+                # pipe-pane log has stopped growing for longer than the silence
+                # threshold AND the liveness probe could not confirm the worker
+                # is alive (fail-open: unknown, not "alive"), the worker is
+                # treated as stuck — kill it and write a terminal failure exactly
+                # as before.  When the liveness probe DID confirm the process is
+                # alive, a silent log means the worker is THINKING, not stuck
+                # (OI-1130 regression pin: 4 of 5 deep-thinking dispatches were
+                # killed on exactly this false signal) — surface it once instead
+                # of killing, and let deadline_seconds remain the only bound.
                 # EXCEPTION (OI-863): a recoverable awaiting_permission worker is
                 # NOT a silent/stalled worker — its log has legitimately stopped
                 # growing while it waits on ONE keystroke. Killing it would discard
                 # a rescueable dispatch, so the heartbeat is skipped while the pane
                 # shows a permission prompt (which escalates instead).
-                if _heartbeat is not None and not _awaiting_permission:
-                    _hb_verdict = _heartbeat.check()
-                    if _hb_verdict.is_silent:
+                if _hb_verdict is not None and _hb_verdict.is_silent:
+                    if _liveness.alive is True:
+                        if dispatch_id not in self._thinking_silent_emitted:
+                            self._thinking_silent_emitted.add(dispatch_id)
+                            logger.info(
+                                "interactive: worker %s silent for %.0fs (threshold="
+                                "%.0fs) but the liveness check confirms it is alive "
+                                "— NOT killing; deadline_seconds remains the only "
+                                "bound (OI-1130)",
+                                dispatch_id,
+                                _hb_verdict.silence_seconds,
+                                _hb_verdict.threshold_seconds,
+                            )
+                            self._emit_event(
+                                "interactive_worker_thinking_silent",
+                                dispatch_id=dispatch_id,
+                                label=label or "",
+                                reason="pane log silent but process confirmed alive",
+                                metadata={
+                                    "silence_seconds": _hb_verdict.silence_seconds,
+                                    "silence_threshold_seconds": _hb_verdict.threshold_seconds,
+                                },
+                            )
+                    else:
+                        if _liveness.alive is None:
+                            logger.debug(
+                                "interactive: liveness undeterminable for %s "
+                                "(reason=%s) — falling back to the pre-OI-1130 "
+                                "heartbeat-silence-kill behavior",
+                                dispatch_id, _liveness.reason,
+                            )
                         logger.warning(
                             "interactive: heartbeat silence detected for %s "
                             "(%.0fs silent, threshold=%.0fs) — killing worker",

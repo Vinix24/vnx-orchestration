@@ -331,6 +331,66 @@ def _detect_permission_prompt(event: Dict[str, Any]) -> tuple[bool, str]:
     return False, ""
 
 
+def build_process_gone_failure_report(
+    dispatch_id: str,
+    *,
+    liveness_reason: str,
+    model: str = "unknown",
+    provider: str = "unknown",
+    terminal_id: str = "",
+) -> str:
+    """Build a terminal failure report for a worker killed on a DETERMINISTIC
+    dead-process verdict (OI-1130 follow-up), distinct from a heartbeat-silence
+    guess.
+
+    ``liveness_reason`` is the tmux-lane liveness probe's own reason code (e.g.
+    ``tmux_session_gone``, ``pane_pid_gone``) — recorded verbatim so the audit
+    trail shows exactly which signal fired, not just that *some* check failed.
+
+    Returns the report text as a string.  The caller is responsible for
+    writing it to the unified_reports directory.
+
+    Carries a STRUCTURAL failure identity — bold-fields ``Status: failed`` and
+    ``Failure-Reason: worker_process_gone`` — so the receipt converter emits a
+    ``task_failed`` receipt (mirrors ``build_heartbeat_failure_report``). Kept
+    as its OWN reason (not ``heartbeat_killed``) so the ledger can tell a
+    process that was confirmed gone apart from one killed on a silence guess —
+    the distinction the tmux-lane liveness check exists to make.
+    """
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return f"""**Dispatch-ID**: {dispatch_id}
+**Model**: {model}
+**Provider**: {provider}
+**Status**: failed
+**Failure-Reason**: worker_process_gone
+
+## Summary
+
+Worker killed by the tmux-lane deterministic liveness check: the worker's
+process was confirmed gone ({liveness_reason}), not merely silent. This is a
+terminal failure — the dispatch did not complete.
+
+## Changes
+
+None recorded by the worker. The worker's process was gone before it could
+write a receipt or a report; any work it produced may still sit uncommitted
+in its worktree — salvage before reap.
+
+## Verification
+
+- Liveness verdict: dead ({liveness_reason})
+- Detection: deterministic tmux/process probe, not a silence-duration guess
+- Terminal: {terminal_id}
+- Kill timestamp: {now_iso}
+
+## Open Items
+
+- Investigate why worker {terminal_id} process disappeared for dispatch {dispatch_id}
+- Check for an OOM kill, a crashed tmux server, or an externally killed session
+"""
+
+
 def build_heartbeat_failure_report(
     dispatch_id: str,
     verdict: SilenceVerdict,
