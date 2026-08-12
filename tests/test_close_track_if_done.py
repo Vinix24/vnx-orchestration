@@ -37,8 +37,9 @@ PROJECT_ID = "test-close-proj"
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def _build_db(tmp_path: Path) -> Path:
-    """State dir with migrations 0022 + 0024 + 0027 + 0028 + 0030 applied."""
+def _build_db(tmp_path: Path, *, with_delivery_table: bool = True) -> Path:
+    """State dir with migrations 0022 + 0024 + 0027 + 0028 + 0030 (+0032 unless
+    with_delivery_table=False, for OI-1167 pre-0032-store coverage) applied."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
     (state_dir.parent / "events").mkdir(parents=True, exist_ok=True)
@@ -82,12 +83,14 @@ def _build_db(tmp_path: Path) -> Path:
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
 
-    for ver, fname in (
+    migrations = [
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
         (30, "0030_track_oi_resolved_at.sql"),
-        (32, "0032_track_pr_delivery.sql"),
-    ):
+    ]
+    if with_delivery_table:
+        migrations.append((32, "0032_track_pr_delivery.sql"))
+    for ver, fname in migrations:
         schema_migration.apply_script_if_below(
             conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
         )
@@ -723,6 +726,43 @@ def test_oi829_evidence_none_path_closes_unchanged_without_any_marking(tmp_path)
     assert result["action"] == "closed"
     assert result["applied"] is True
     assert _phase(sd, "T-manual-close") == "done"
+
+
+def test_oi1167_evidence_none_path_blocked_when_table_absent(tmp_path):
+    """OI-1167: the evidence=None (human `vnx objective close`) path has no
+    delivery-completeness check of its own -- it gates purely on
+    derived_status=='done'. On a pre-0032 store (table absent entirely, not
+    just an unmarked row) that derivation used to fall through unguarded,
+    exactly reproducing the OI-829 bug shape (PR merged, delivery marking
+    can't exist, track closes anyway). Same shape as the byte-for-byte-
+    unchanged test above, EXCEPT migration 0032 was never applied -- so this
+    one must now stay open, not close."""
+    sd = _build_db(tmp_path, with_delivery_table=False)
+    tracks_lib.create_track(
+        sd, "T-pre32-manual-close", PROJECT_ID, title="manual close pre-0032",
+        goal_state="y", phase="active", pr_ref="#1221,#1239",
+    )
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track) VALUES (?,?,?,?)",
+        ("D-T-pre32-manual-close", PROJECT_ID, "completed", "T-pre32-manual-close"),
+    )
+    conn.execute(
+        "INSERT INTO coordination_events "
+        "(event_id, event_type, entity_type, entity_id, occurred_at, project_id) "
+        "VALUES ('ev-pre32-manual-close','pr_merged','dispatch',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?)",
+        ("D-T-pre32-manual-close", PROJECT_ID),
+    )
+    conn.commit()
+    conn.close()
+
+    result = track_reconciler.close_track_if_done(
+        sd, "T-pre32-manual-close", PROJECT_ID, actor="operator", approval_id="MANUAL-2",
+    )
+    assert result["action"] == "noop_not_terminal"
+    assert result["applied"] is False
+    assert _phase(sd, "T-pre32-manual-close") == "active"  # no write
+    assert _derived_status(sd, "T-pre32-manual-close") == "in_progress"
 
 
 # ---------------------------------------------------------------------------
