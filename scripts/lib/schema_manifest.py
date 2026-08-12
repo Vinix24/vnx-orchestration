@@ -478,6 +478,24 @@ def _runtime_tables_v31() -> Tuple[TableInvariant, ...]:
     )
 
 
+def _track_pr_delivery() -> TableInvariant:
+    """track_pr_delivery (v32, OI-829): fail-closed auto-close evidence per linked PR.
+
+    schemas/migrations/0032_track_pr_delivery.sql — composite PK over
+    (project_id, track_id, pr_number) per ADR-007; FK to tracks(track_id, project_id)."""
+    return TableInvariant(
+        name="track_pr_delivery",
+        columns=_cols(
+            ("project_id", "TEXT", True), ("track_id", "TEXT", True),
+            ("pr_number", "INTEGER", True), ("delivery_kind", "TEXT", True),
+            ("set_by", "TEXT", True), ("set_at", "TEXT", True),
+        ),
+        pk=("project_id", "track_id", "pr_number"),
+        foreign_keys=(ForeignKeyInvariant(("track_id", "project_id"), "tracks",
+                                          ("track_id", "project_id")),),
+    )
+
+
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
     return {
@@ -512,6 +530,12 @@ def _build_manifest() -> Dict[int, VersionManifest]:
             _tracks_composite(_TRACKS_COLS_V29, _TRACKS_IDX_V29),
             *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
             *_runtime_tables_v31()),
+            (_DELIVERABLES_VIEW,)),
+        32: VersionManifest(32, (
+            _dispatches(_DISPATCH_COLS_V27),
+            _tracks_composite(_TRACKS_COLS_V29, _TRACKS_IDX_V29),
+            *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
+            *_runtime_tables_v31(), _track_pr_delivery()),
             (_DELIVERABLES_VIEW,)),
     }
 
@@ -693,22 +717,22 @@ def validate_db_at_version(conn: sqlite3.Connection, version: int) -> List[str]:
     STRICT on PK ordinals (so a composite-PK v24+ DB never validates as v22) and on
     the declared nullability/affinity of every required column.
 
-    For v31: the runtime-pool family (terminal_leases, dispatch_attempts, headless_runs,
+    For v31+: the runtime-pool family (terminal_leases, dispatch_attempts, headless_runs,
     worker_states, worker_pool_membership, pool_config) is optional — a store that was
-    never initialized with the runtime-pool schema is still valid at v31. This covers
-    two cases:
+    never initialized with the runtime-pool schema is still valid at v31 or any later
+    version that carries the family forward unchanged (e.g. v32). This covers two cases:
       - ALL absent: skip_runtime=True → skip the entire conditional family.
       - SOME absent (partial-runtime, e.g. MC's headless_runs-only shape): each absent
         conditional table is skipped individually; present tables are still validated.
     """
     manifest = SCHEMA_MANIFEST[version]
     skip_runtime = (
-        version == 31
+        version >= 31
         and not any(_table_exists(conn, table) for table in _V31_RUNTIME_FAMILY_TABLES)
     )
     # For partial-runtime stores: track which conditional tables to skip individually.
     partial_skip_tables: frozenset[str] = frozenset()
-    if (version == 31 and not skip_runtime):
+    if (version >= 31 and not skip_runtime):
         partial_skip_tables = frozenset(
             t for t in _CONDITIONAL_V31_RUNTIME_TABLES
             if not _table_exists(conn, t)

@@ -24,8 +24,10 @@ for _p in (_LIB, _SCRIPTS):
         sys.path.insert(0, str(_p))
 
 import migrate_future_system as mfs  # noqa: E402
+import schema_manifest  # noqa: E402
 import schema_migration  # noqa: E402
 from effectiveness_probe import EFFECTIVENESS_PROBES  # noqa: E402
+from migrations.auto_apply import auto_apply  # noqa: E402
 from migration_effectiveness_probe import (  # noqa: E402
     COORDINATION_DB_FILENAME,
     MigrationEffectivenessProbe,
@@ -110,12 +112,24 @@ def test_unknown_when_claimed_version_predates_manifest_floor(tmp_path):
 
 
 def test_genuine_terminal_version_db_is_ok(tmp_path):
+    """A DB genuinely walked to TERMINAL_VERSION reports ok with zero violations.
+
+    _APPLY_CHAIN's fixed per-version apply functions top out at 31 (0032+ is applied
+    generically by the OI-1169 auto_apply sweep, not a new per-version chain entry —
+    see migrate_future_system.py's module docstring), so the genuine-v31 DB is swept
+    the rest of the way via the same auto_apply() step F uses before asserting
+    against TERMINAL_VERSION rather than a version pinned literally (this test's DB
+    must be genuinely AT the terminal, whatever that resolves to, not stuck at 31).
+    Uses auto_apply() directly rather than the full mfs.run() pipeline — the ADR-007
+    repair + W1 tenant-stamping steps need a resolvable project_id this test's
+    minimal fixture does not provide, and are orthogonal to what's under test here."""
     proj = _build_db_at(tmp_path, 31)
+    auto_apply(_state_dir(proj) / COORDINATION_DB_FILENAME)
 
     result = MigrationEffectivenessProbe(state_dir=_state_dir(proj)).run()
 
     assert result.status == "ok"
-    assert result.detail["claimed_version"] == 31
+    assert result.detail["claimed_version"] == schema_manifest.TERMINAL_VERSION
     assert result.detail["violation_count"] == 0
 
 
