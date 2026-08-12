@@ -5,16 +5,27 @@ Classifies every running process into one of three actionable classes plus a
 default no-op, so a stray/violating process never races a build again (the 5 stray
 `claude -p` incident, 2026-07-06) while legitimate work is left alone:
 
-  - VIOLATION  — a process on the account-protection-blocked headless lane
-                 (`claude -p` / `claude --print`; constraint ``claude-headless``).
-                 Flagged as an auto-kill candidate regardless of idle time. Killing
-                 is still opt-in (``--apply``); dry-run reports only.
+  - VIOLATION  — a `claude -p` / `claude --print` process while the headless lane
+                 is blocked (``routing_policy.yaml``'s ``lane_safety.headless_block``
+                 — the same gate the single-entry door checks before it will ever
+                 spawn one; constraint ``claude-headless``). Flagged as an auto-kill
+                 candidate regardless of idle time. Killing is still opt-in
+                 (``--apply``); dry-run reports only.
   - IDLE       — a *work* process idle past the threshold (>4h, ~0 cpu). SURFACED
                  to the operator (proposal: close y/n) and NEVER auto-killed — the
                  human decides, exactly like the self-learning proposals.
   - PROTECTED  — an INTERACTIVE ``claude`` process (no ``-p``): the fleet sessions
                  (mc/sales/seo + /remote-control). Never flagged, never touched.
+                 Also covers a `claude -p` process while the headless lane is OPEN
+                 (``headless_block.enabled: false``, dispatch-20260811c-b): the
+                 door legitimately spawned it, so this daemon must not kill its
+                 own fleet's governed work just because it carries `-p`.
   - OK         — everything else.
+
+Consults the lane's open/blocked state via ``routing_policy.is_claude_headless_blocked``
+(the door's own source of truth) rather than re-deriving the policy from the raw
+YAML — see ``_headless_lane_blocked`` below. Fails closed (blocked) if the policy
+can't be read, matching ``is_claude_headless_blocked``'s own fail-closed default.
 
 The producer is pure/testable: ``scan_processes`` takes an optional ``ps_output``
 so tests inject fixture lines instead of scanning the host. ``--apply`` sends
@@ -119,6 +130,24 @@ def _looks_like_work(command: str) -> bool:
     return any(p.search(command) for p in _WORK_PATTERNS)
 
 
+def _headless_lane_blocked() -> bool:
+    """Consult routing_policy.yaml's ``lane_safety.headless_block`` — the same source
+    of truth the single-entry door gates on before it will ever spawn a `claude -p`
+    worker (``dispatch_bridge.py``, ``dispatch_cli.py``) — instead of re-deriving the
+    policy from the raw YAML a second time here.
+
+    Fails closed (True == blocked) if the policy file is missing or malformed, same
+    as ``is_claude_headless_blocked`` itself falls closed on a missing/malformed
+    `headless_block` entry — a policy-load failure must never silently open the lane
+    for this daemon's purposes.
+    """
+    try:
+        from routing_policy import is_claude_headless_blocked, load_lane_safety  # noqa: PLC0415
+        return is_claude_headless_blocked(load_lane_safety())
+    except (FileNotFoundError, ValueError, OSError):
+        return True
+
+
 def _classify(
     f: ProcessFinding,
     *,
@@ -126,6 +155,7 @@ def _classify(
     cpu_idle_max: float,
     protected_pids: Optional[set] = None,
     self_pid: Optional[int] = None,
+    headless_blocked: bool = True,
 ) -> ProcessFinding:
     protected_pids = protected_pids or set()
     # Never classify the scanner itself (or its shell parent) as anything actionable.
@@ -133,8 +163,15 @@ def _classify(
         f.klass, f.reason = OK, "scanner"
         return f
     if _is_forbidden_headless_claude(f.command):
-        f.klass = VIOLATION
-        f.reason = "forbidden headless lane (claude -p / --print) — constraint claude-headless"
+        if headless_blocked:
+            f.klass = VIOLATION
+            f.reason = "forbidden headless lane (claude -p / --print) — constraint claude-headless"
+        else:
+            f.klass = PROTECTED
+            f.reason = (
+                "headless claude -p — lane open (routing_policy.yaml lane_safety."
+                "headless_block.enabled: false); door-spawned, not auto-killed"
+            )
         return f
     if f.pid in protected_pids or _argv0_is_claude(f.command):
         # Interactive claude (no -p): the fleet sessions + /remote-control. Protected.
@@ -187,10 +224,19 @@ def scan_processes(
     idle_threshold: int = IDLE_THRESHOLD_SECONDS,
     cpu_idle_max: float = CPU_IDLE_MAX,
     protected_pids: Optional[set] = None,
+    headless_blocked: Optional[bool] = None,
 ) -> List[ProcessFinding]:
-    """Scan + classify. Pure over ``ps_output`` when supplied (tests inject fixtures)."""
+    """Scan + classify. Pure over ``ps_output`` when supplied (tests inject fixtures).
+
+    ``headless_blocked`` mirrors that purity for the lane's open/blocked state: pass
+    it explicitly (tests do) to avoid touching the real routing_policy.yaml; leave it
+    ``None`` (the live default, used by ``main()``) to read the door's actual policy
+    via ``_headless_lane_blocked``.
+    """
     raw = ps_output if ps_output is not None else _read_ps()
     self_pid = os.getpid()
+    if headless_blocked is None:
+        headless_blocked = _headless_lane_blocked()
     return [
         _classify(
             f,
@@ -198,6 +244,7 @@ def scan_processes(
             cpu_idle_max=cpu_idle_max,
             protected_pids=protected_pids,
             self_pid=self_pid,
+            headless_blocked=headless_blocked,
         )
         for f in _parse_ps(raw)
     ]

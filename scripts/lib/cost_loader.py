@@ -50,6 +50,13 @@ _AVG_OUTPUT_TOKENS = 2_000
 # 2026-08-04 OI-977: canonical dot-form GLM keys added alongside legacy dash-form keys
 # so that ledger-stored names (glm-5.2) resolve. normalize_model_name() is called before
 # the lookup; deprecated variants (glm-4.5, glm-5.1) resolve via _deprecated_map.
+#
+# 2026-08-11 OI-1143: routing_recommendations carries kimi-k2-7-code (the kimi-cli
+# "kimi-for-coding" model = registry key kimi_cli/kimi-k2-7) and codex-gpt-5-4 /
+# codex-gpt-5-5 (the codex CLI lane running openai gpt-5.4 / gpt-5.5 — API-metered at
+# $1.25/$10 per Mtok, measured 2026-06-06, see routing_policy.yaml cost reference).
+# None of these had a map entry, so enrich_candidates() warned "unknown candidate model"
+# and the router weighed them cost-blind (cost_usd_per_call stayed None).
 _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-sonnet-4-6": ("anthropic", "sonnet"),
     "claude-sonnet-5": ("anthropic", "sonnet-5"),
@@ -69,6 +76,13 @@ _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     # Kimi
     "kimi-k2-0905": ("kimi_cli", "kimi-default"),
     "kimi-k2-6": ("kimi_cli", "kimi-k2-6"),
+    # kimi-cli "kimi-for-coding" (registry key kimi-k2-7); kimi-k2-7-code is the
+    # routing_recommendations model_id for the same model (OI-1143)
+    "kimi-k2-7": ("kimi_cli", "kimi-k2-7"),
+    "kimi-k2-7-code": ("kimi_cli", "kimi-k2-7"),
+    # Codex CLI lane — runs openai gpt-5.4 / gpt-5.5, API-metered (OI-1143)
+    "codex-gpt-5-4": ("openai", "gpt-5.4"),
+    "codex-gpt-5-5": ("openai", "gpt-5.5"),
 }
 
 # Cache: deprecated model name → current canonical model key.

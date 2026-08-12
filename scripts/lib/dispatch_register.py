@@ -342,6 +342,48 @@ def append_event(
     primary write (see ``_register_path``) — the same override ``read_events``
     already accepts.
     """
+    return _append_event_core(
+        event,
+        dispatch_id=dispatch_id,
+        pr_number=pr_number,
+        feature_id=feature_id,
+        terminal=terminal,
+        gate=gate,
+        extra=extra,
+        operator_id=operator_id,
+        project_id=project_id,
+        orchestrator_id=orchestrator_id,
+        agent_id=agent_id,
+        state_dir=state_dir,
+        dedup=False,
+    )
+
+
+def _append_event_core(
+    event: str,
+    *,
+    dispatch_id: str,
+    pr_number: Optional[int],
+    feature_id: str,
+    terminal: str,
+    gate: str,
+    extra: Optional[dict],
+    operator_id: Optional[str],
+    project_id: Optional[str],
+    orchestrator_id: Optional[str],
+    agent_id: Optional[str],
+    state_dir: Optional[Path],
+    dedup: bool,
+) -> bool:
+    """Shared body of ``append_event`` / ``append_event_idempotent``.
+
+    ``dedup=True`` performs the duplicate check INSIDE the write's critical
+    section (``state_writer.append_locked`` with ``skip_if``): check and
+    append share one sentinel + data-file ``LOCK_EX`` hold, so two
+    concurrent callers can never both pass the check (OI-1129). On a
+    duplicate hit the mirrors (decision log, central) are skipped — the
+    equivalent event already went through them when it was first written.
+    """
     if event not in VALID_EVENTS:
         return False
     # Require at least one identifying field — register is canonical source, must be queryable
@@ -365,7 +407,20 @@ def append_event(
     )
     try:
         primary_path = _resolve_register_path(state_dir=state_dir)
-        _write_event_locked(primary_path, record)
+        if dedup:
+            event_identity = _event_identity(record)
+            appended = state_writer.append_locked(
+                primary_path,
+                record,
+                skip_if=lambda content: _content_has_identity(content, event_identity),
+            )
+            if not appended:
+                # Equivalent event already in the register: present-after-call
+                # is the contract, and the first write already fanned out to
+                # the mirrors.
+                return True
+        else:
+            _write_event_locked(primary_path, record)
         _mirror_to_decision_log(event, record, extra=extra)
         # Phase 6 P3 dual-write: mirror to central when project_id is known
         if project_id:
@@ -380,7 +435,7 @@ def append_event(
         return False
 
 
-def _event_identity(event: dict) -> tuple[str, str, str]:
+def _event_identity(event: dict) -> tuple[str, str, str, str]:
     """The non-timestamp portion of ``_merge_dedup_key``.
 
     Two records sharing this identity describe the same real-world
@@ -388,6 +443,29 @@ def _event_identity(event: dict) -> tuple[str, str, str]:
     only field ``_merge_dedup_key`` includes that a retry naturally varies.
     """
     return _merge_dedup_key(event)[1:]
+
+
+def _content_has_identity(content: bytes, identity: tuple[str, str, str, str]) -> bool:
+    """True when raw register NDJSON ``content`` holds an event with ``identity``.
+
+    Total by construction — undecodable bytes, unparseable lines, and
+    non-dict JSON are skipped, never raised on — because this runs as the
+    ``skip_if`` predicate inside ``state_writer.append_locked``'s critical
+    section: a scan failure must degrade to "no duplicate found" (append
+    proceeds; better a possible duplicate than a lost event), the same
+    direction the old pre-check fell.
+    """
+    for line in content.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            existing = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(existing, dict) and _event_identity(existing) == identity:
+            return True
+    return False
 
 
 def append_event_idempotent(
@@ -415,24 +493,17 @@ def append_event_idempotent(
     (event, dispatch_id, pr_number, feature_id), evaluated at write time
     instead of read time, rather than inventing a second dedup scheme.
 
-    The pre-check is best-effort: a failed read falls through to the normal
-    ``append_event`` attempt (better a possible duplicate than a lost event).
+    OI-1129: the duplicate check runs INSIDE the write's critical section
+    (``state_writer.append_locked`` with ``skip_if`` — the same
+    check-inside-the-lock discipline the receipt writer uses in
+    ``append_receipt_internals.idempotency._write_receipt_under_lock``), not
+    as a separate ``read_events`` pre-check. The original read-then-write
+    pair let two concurrent callers both miss the pre-check and both append.
+
     Returns True when the event is present after the call — whether it was
     already there or newly written — False only on a genuine write failure.
     """
-    identity = _event_identity({
-        "event": event,
-        "dispatch_id": dispatch_id,
-        "pr_number": pr_number,
-        "feature_id": feature_id,
-    })
-    try:
-        for existing in read_events(state_dir=state_dir):
-            if _event_identity(existing) == identity:
-                return True
-    except Exception:  # vnx-silent-except: pre-check is best-effort; fall through to the real append attempt
-        pass
-    return append_event(
+    return _append_event_core(
         event,
         dispatch_id=dispatch_id,
         pr_number=pr_number,
@@ -445,6 +516,7 @@ def append_event_idempotent(
         orchestrator_id=orchestrator_id,
         agent_id=agent_id,
         state_dir=state_dir,
+        dedup=True,
     )
 
 

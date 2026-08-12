@@ -214,6 +214,50 @@ class TestClassifyRoleFallback:
 
 
 # ---------------------------------------------------------------------------
+# classify_task — specialist-role dominance (OI-1143)
+# ---------------------------------------------------------------------------
+
+class TestClassifySpecialistRoleDominance:
+    """A role mapping to a non-default task class is an explicit signal and wins
+    over instruction verb-guessing (OI-1143). Builder roles (mapping to the
+    default class, incl. the no-role-resolved sentinel backend-developer) keep
+    instruction-first behavior."""
+
+    def test_code_reviewer_role_classifies_review_instruction(self):
+        # The exact OI-1143 measurement: this returned 01_code_generation because
+        # "code-reviewer" was unmapped and the instruction trips no review regex
+        # ("Review the diff" — "diff" is not in the pattern's object alternation).
+        assert classify_task(
+            "Review the diff on PR 1455 for correctness", role="code-reviewer",
+        ) == "02_code_review"
+
+    def test_code_reviewer_role_dominates_code_gen_verb(self):
+        # "implement" trips the 01_code_generation regex, but a dispatch to a
+        # code-reviewer is review work — the role signal dominates.
+        assert classify_task(
+            "Check whether they implement the retry contract correctly",
+            role="code-reviewer",
+        ) == "02_code_review"
+
+    def test_debugger_role_dominates_code_gen_verb(self):
+        assert classify_task(
+            "Implement a fix once you find it", role="debugger",
+        ) == "05_debugging"
+
+    def test_system_architect_role_maps_to_design(self):
+        assert classify_task(
+            "Think through the module boundaries", role="system-architect",
+        ) == "06_design"
+
+    def test_builder_role_still_instruction_first(self):
+        # backend-developer maps to the default class → carries no discriminating
+        # signal; the instruction text keeps deciding (guards the sentinel case).
+        assert classify_task(
+            "debug the flaky lease test", role="backend-developer",
+        ) == "05_debugging"
+
+
+# ---------------------------------------------------------------------------
 # classify_task — edge cases
 # ---------------------------------------------------------------------------
 

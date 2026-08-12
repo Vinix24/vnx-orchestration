@@ -593,6 +593,13 @@ def _resolve_report_provider_model(
 # (e.g. "unknown", absent) keep the pre-existing contract-invalid semantics.
 _TERMINAL_SUCCESS_STATUSES = frozenset({"success", "done", "complete", "completed"})
 
+# Terminal failure statuses (OI-1130).  A report that DECLARES itself failed
+# (e.g. the heartbeat-kill report from worker_heartbeat.
+# build_heartbeat_failure_report, which stamps ``Status: failed`` +
+# ``Failure-Reason: heartbeat_killed``) must produce a task_failed receipt —
+# never a task_complete that downstream tooling reads as a normal completion.
+_TERMINAL_FAILURE_STATUSES = frozenset({"failed", "failure", "heartbeat_killed"})
+
 
 def _check_branch_on_origin(dispatch_id: str) -> bool:
     """Return True when ``dispatch/<dispatch_id>`` exists on origin.
@@ -821,6 +828,30 @@ def build_receipt_from_report(
                     for c in resolved.candidates_found
                 ] if resolved is not None else []
             return receipt_out
+
+    # OI-1130: a report that declares an explicit terminal FAILURE status is
+    # failure-shaped by construction.  Before this mapping, the heartbeat-kill
+    # report (which passes the body contract on purpose so the audit trail is
+    # complete) landed as task_complete with status="" — a kill dressed as
+    # success, detectable only by reading the Summary prose.  Declared failure
+    # outranks contract violations: an explicit failure signal must never
+    # degrade into the low-visibility contract_invalid bucket.
+    if status_raw in _TERMINAL_FAILURE_STATUSES:
+        receipt_out: Dict[str, Any] = {
+            **base,
+            "event_type": "task_failed",
+            "status": "failed",
+        }
+        failure_reason = str(merged.get("failure_reason") or "").strip()
+        if failure_reason:
+            receipt_out["failure_reason"] = failure_reason
+        if ambiguous_report:
+            receipt_out["ambiguous_report_path"] = True
+            receipt_out["report_path_candidates"] = [
+                {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
+                for c in resolved.candidates_found
+            ] if resolved is not None else []
+        return receipt_out
 
     if contract_violations:
         logger.warning(

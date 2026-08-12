@@ -236,6 +236,40 @@ class TestBuildReceiptFromReport:
         assert receipt is not None
         assert receipt["dispatch_id"] == "20260601-bold-field"
 
+    def test_declared_failure_status_produces_task_failed(self, tmp_path):
+        # OI-1130: a report that declares Status: failed must land as a
+        # task_failed receipt even though it passes the body contract —
+        # never as a task_complete that reads as a normal completion.
+        p = tmp_path / "20260811-declared-fail.md"
+        p.write_text(
+            "**Dispatch-ID**: 20260811-declared-fail\n"
+            "**Status**: failed\n"
+            "**Failure-Reason**: heartbeat_killed\n\n"
+            "## Summary\n\nWorker killed by heartbeat monitor after threshold breach.\n\n"
+            "## Changes\n\nNone recorded.\n\n## Verification\n\n-\n\n## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+        receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
+        assert receipt is not None
+        assert receipt["event_type"] == "task_failed"
+        assert receipt["status"] == "failed"
+        assert receipt["failure_reason"] == "heartbeat_killed"
+
+    def test_declared_failure_outranks_contract_invalid(self, tmp_path):
+        # A failed-status report with missing headings must still surface as
+        # task_failed, not vanish into the contract_invalid bucket.
+        p = tmp_path / "20260811-fail-no-body.md"
+        p.write_text(
+            "**Dispatch-ID**: 20260811-fail-no-body\n"
+            "**Status**: failure\n\n"
+            "Worker died without writing a full report.\n",
+            encoding="utf-8",
+        )
+        receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
+        assert receipt is not None
+        assert receipt["event_type"] == "task_failed"
+        assert receipt["status"] == "failed"
+
 
 # ---------------------------------------------------------------------------
 # Part 3: convert_report_to_receipt() — single-file conversion

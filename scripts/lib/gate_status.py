@@ -18,8 +18,14 @@ from typing import Any, Dict, Tuple
 PASS_STATES = frozenset({"approve", "completed", "pass", "passed"})
 FAIL_STATES = frozenset({"failed", "errored", "fail", "blocked"})
 INCOMPLETE_STATES = frozenset({"pending", "running", "queued", "requested"})
+# OI-1142: the provider/tool could not produce a verdict at all (quota-403, 429,
+# auth failure, timeout, empty output). Absence of evidence: never a pass, never
+# a fail, and not terminal — a retry against a healthy provider can still decide.
+UNAVAILABLE_STATES = frozenset({"unavailable"})
 
-ALL_KNOWN_STATES = PASS_STATES | FAIL_STATES | INCOMPLETE_STATES | frozenset({"not_executable"})
+ALL_KNOWN_STATES = (
+    PASS_STATES | FAIL_STATES | INCOMPLETE_STATES | UNAVAILABLE_STATES | frozenset({"not_executable"})
+)
 
 
 def _coerce_status(result: Dict[str, Any]) -> Tuple[str, bool]:
@@ -75,6 +81,8 @@ def is_pass(result: Dict[str, Any]) -> Tuple[bool, str]:
         return False, f"blocking_count: {blocking_count}"
     if status in INCOMPLETE_STATES:
         return False, f"incomplete: {status}"
+    if status in UNAVAILABLE_STATES:
+        return False, "unavailable: provider outage — no verdict evidence (not a review fail)"
     if status == "not_executable":
         return False, "status: not_executable"
     if not status:
@@ -88,7 +96,10 @@ def is_terminal(result: Dict[str, Any]) -> bool:
     Used by closure verifier to decide whether to enforce report_path on
     a result (pass/fail must carry evidence; in-flight states must not).
     ``not_executable`` is treated as terminal because the gate has been
-    finally classified even though no execution happened.
+    finally classified even though no execution happened. ``unavailable``
+    (OI-1142) is deliberately NOT terminal: the provider was down, no verdict
+    exists, and a rerun can still decide — closure must stay blocked on
+    "incomplete evidence", not read the outage as a decided outcome.
     """
     status, _ = _coerce_status(result)
     return status in PASS_STATES or status in FAIL_STATES or status == "not_executable"

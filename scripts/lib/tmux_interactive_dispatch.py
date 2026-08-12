@@ -1052,12 +1052,22 @@ class TmuxInteractiveDispatch:
         try:
             from pr_enforcement import enforce_pr_exists  # noqa: PLC0415
 
+            # OI-1127: hand the worktree path through so a "dirty" verdict is
+            # split into substantive vs scratch and substantive work is
+            # salvaged (OI-1119) — without wt_path this lane kept the old
+            # lose-everything behaviour while the envelope lane was already
+            # fixed. Verified to still exist at this moment rather than
+            # assumed: this runs before _teardown's reap(), but a vanished
+            # directory (external cleanup, crash-restart) must degrade to the
+            # back-compat path, not feed a dead path into git.
+            _wt_path = worktree_handle.path if worktree_handle.path.is_dir() else None
             result = enforce_pr_exists(
                 dispatch_id=dispatch_id,
                 branch=worktree_handle.branch,
                 worktree_state=worktree_state,
                 repo_root=self._project_root,
                 receipts_file=self._receipts_file,
+                wt_path=_wt_path,
                 pr_title=f"dispatch({dispatch_id}): auto-created by VNX tmux-spawn lane",
                 pr_body=(
                     f"Auto-created by VNX tmux-spawn build-dispatch completion "
@@ -3107,7 +3117,8 @@ class TmuxInteractiveDispatch:
             # `gh pr create`, leaves T0 to salvage the work by hand every time. The
             # per-state decision lives in pr_enforcement.enforce_pr_exists (the ONE
             # binding site — never duplicated): `committed` → push then PR, `pushed`
-            # → PR, `clean`/`dirty` → not applicable. Runs BEFORE govern() so a push
+            # → PR, `clean` → not applicable, `dirty` → split into substantive
+            # (salvaged + loud, OI-1119/OI-1127) vs scratch. Runs BEFORE govern() so a push
             # or creation failure is reflected in the governed report and
             # InteractiveDispatchResult.success — never a silent "done" with work
             # stranded locally or on origin.
