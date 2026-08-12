@@ -354,12 +354,22 @@ class SubprocessAdapter:
             popen_kwargs["cwd"] = str(cwd)
         # Always export the dispatch id so worker commits carry a provenance trace token
         # (prepare-commit-msg hook -> trace_token_validator), closing the dispatch->commit link.
-        if extra_env or scrub_env_keys or dispatch_id:
+        # VNX_WORKER_ROLE / VNX_TERMINAL mirror the tmux-lane export (D1): the role/terminal
+        # were previously known only to the spawner (used to build --allowedTools above),
+        # never exported into the process's own environment. Unconditional — inert unless
+        # something in-process reads them, and nothing does unless
+        # VNX_ENFORCE_WORKER_PERMISSIONS is also on (see docstring in worker_scope_enforce.py
+        # re: subprocess-lane enforcement being an explicit follow-up, not shipped here).
+        if extra_env or scrub_env_keys or dispatch_id or effective_role or terminal_id:
             merged_env = os.environ.copy()
             if extra_env:
                 merged_env.update({k: v for k, v in extra_env.items() if v is not None})
             if dispatch_id:
                 merged_env["VNX_CURRENT_DISPATCH_ID"] = dispatch_id
+            if effective_role:
+                merged_env["VNX_WORKER_ROLE"] = effective_role
+            if terminal_id:
+                merged_env["VNX_TERMINAL"] = terminal_id
             for _scrub_key in (scrub_env_keys or ()):
                 merged_env.pop(_scrub_key, None)
             popen_kwargs["env"] = merged_env

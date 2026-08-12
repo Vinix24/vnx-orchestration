@@ -301,6 +301,79 @@ def _sanitize_session_name(raw: str) -> str:
     return "".join("-" if c in ".:" else c for c in raw)
 
 
+_WORKER_SCOPE_HOOK_MATCHER = "Bash|Write|Edit|MultiEdit"
+_WORKER_SCOPE_HOOK_COMMAND = (
+    "bash -c 'exec python3 "
+    "\"$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+    "/scripts/hooks/worker_scope_enforce.py\"'"
+)
+
+
+def _materialize_worker_scope_hook(worktree_path: Path) -> None:
+    """Write a worktree-local ``.claude/settings.local.json`` registering the
+    worker-scope-enforce PreToolUse hook (D3, flag-gated, best-effort).
+
+    No-op when ``VNX_ENFORCE_WORKER_PERMISSIONS`` is not truthy — the default
+    posture stays byte-for-byte unchanged: no file is written, so a flag-off
+    dispatch never gets the hook wired up even though VNX_WORKER_ROLE is now
+    exported into every pane (see _spawn_session). This is deliberately the
+    ONLY consumer of the worktree-local settings file for this feature — the
+    shared T0 ``.claude/settings.json`` is never touched (OI-188).
+
+    Best-effort: any failure (permissions, disk, malformed pre-existing file)
+    is logged and swallowed. A hook that fails to register must never block
+    the dispatch — the worker simply runs unscoped, same as today.
+    """
+    if not worker_permission_enforcement_enabled():
+        return
+    try:
+        claude_dir = worktree_path / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = claude_dir / "settings.local.json"
+
+        existing: dict = {}
+        if settings_path.exists():
+            try:
+                loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+
+        hooks_block = existing.setdefault("hooks", {})
+        pre_tool_use = hooks_block.setdefault("PreToolUse", [])
+        already_registered = any(
+            isinstance(entry, dict)
+            and entry.get("matcher") == _WORKER_SCOPE_HOOK_MATCHER
+            and any(
+                isinstance(h, dict) and "worker_scope_enforce.py" in (h.get("command") or "")
+                for h in entry.get("hooks", [])
+            )
+            for entry in pre_tool_use
+        )
+        if not already_registered:
+            pre_tool_use.append(
+                {
+                    "matcher": _WORKER_SCOPE_HOOK_MATCHER,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": _WORKER_SCOPE_HOOK_COMMAND,
+                            "timeout": 5000,
+                        }
+                    ],
+                }
+            )
+
+        settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "interactive: failed to materialize worker-scope settings.local.json in %s: %s",
+            worktree_path,
+            exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Core lane
 # ---------------------------------------------------------------------------
@@ -1007,6 +1080,8 @@ class TmuxInteractiveDispatch:
         cwd: Path,
         dispatch_id: str = "",
         session_uuid: "str | None" = None,
+        role: "str | None" = None,
+        terminal: "str | None" = None,
     ) -> "tuple[str, str] | None":
         """Create a detached session; return (pane_id, window_id) or None.
 
@@ -1017,12 +1092,26 @@ class TmuxInteractiveDispatch:
 
         When ``session_uuid`` is provided it is exported as ``VNX_CLAUDE_SESSION_ID``
         so the SessionStart hook can verify the pre-assigned id took (F1.1).
+
+        When ``role`` / ``terminal`` are provided they are exported as
+        ``VNX_WORKER_ROLE`` / ``VNX_TERMINAL`` so an in-pane PreToolUse hook can
+        resolve the worker's permission profile (worker_scope_enforce.py) — the
+        role was previously known only to the spawner, never to the pane itself.
+        Exporting these is unconditional (no enforcement-flag gate): the values
+        are inert unless something in the pane actually reads them, and nothing
+        does unless VNX_ENFORCE_WORKER_PERMISSIONS is also on and the hook is
+        registered (see _materialize_worker_scope_hook), so this never changes
+        default-OFF behavior.
         """
         args = ["new-session", "-d", "-s", session, "-c", str(cwd)]
         if dispatch_id:
             args += ["-e", f"VNX_CURRENT_DISPATCH_ID={dispatch_id}"]
         if session_uuid:
             args += ["-e", f"VNX_CLAUDE_SESSION_ID={session_uuid}"]
+        if role:
+            args += ["-e", f"VNX_WORKER_ROLE={role}"]
+        if terminal:
+            args += ["-e", f"VNX_TERMINAL={terminal}"]
         args += ["-P", "-F", "#{pane_id}"]
         res = self._runner.run(args)
         if res.returncode != 0:
@@ -1896,6 +1985,7 @@ class TmuxInteractiveDispatch:
                     from benchmark_worker_isolation import materialize_benchmark_seed  # noqa: PLC0415
 
                     cwd = materialize_benchmark_seed(cwd, dispatch_paths)
+                _materialize_worker_scope_hook(cwd)
             except WorktreeAllocateError as exc:
                 self._emit_event(
                     "interactive_worktree_add_failed",
@@ -2031,7 +2121,9 @@ class TmuxInteractiveDispatch:
         window_id: "str | None" = None
         try:
             # 1. Spawn detached session
-            spawned = self._spawn_session(session, cwd, dispatch_id, session_uuid=session_uuid)
+            spawned = self._spawn_session(
+                session, cwd, dispatch_id, session_uuid=session_uuid, role=role, terminal=label,
+            )
             if spawned is None:
                 self._emit_event(
                     "interactive_spawn_failed",

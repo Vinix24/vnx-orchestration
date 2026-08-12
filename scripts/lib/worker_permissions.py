@@ -143,6 +143,23 @@ def load_permissions(role: str, yaml_path: Path | None = None) -> PermissionProf
     )
 
 
+def role_known(role: str, yaml_path: Path | None = None) -> bool:
+    """Return True iff *role* has an explicit profile entry in worker_permissions.yaml.
+
+    Unlike :func:`load_permissions` / :func:`resolve_worker_profile`, this makes
+    NO allow-all fallback for a missing/unknown role — those two return a
+    permissive empty or default profile so a headless worker never gets stuck,
+    which makes them unsafe as a membership check. A caller that needs to
+    fail CLOSED on an unrecognized role (e.g. an enforcement hook) must use
+    this function first, not infer unknown-ness from an empty profile.
+    """
+    if yaml_path is None:
+        yaml_path = _resolve_permissions_yaml()
+    data = _load_yaml(yaml_path)
+    profiles = data.get("profiles", {})
+    return isinstance(profiles, dict) and role in profiles
+
+
 def generate_claude_settings(profile: PermissionProfile) -> dict:
     """Generate Claude Code compatible settings.json content.
 
