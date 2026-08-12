@@ -1,0 +1,16 @@
+# Agent Instructions
+
+## Role
+Define the role for this agent terminal.
+
+## Capabilities
+List the tools and capabilities available.
+
+## Workflow
+1. Read the dispatch instruction
+2. Implement changes
+3. Write a completion report to the runtime reports directory
+
+## Rules
+- No TODO comments — complete all implementations
+- Follow established project patterns
