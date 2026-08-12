@@ -515,6 +515,12 @@ def run_envelope_plan(
         resolve_consumer_project_root,
     )
 
+    # Resolved BEFORE worktree creation so create_dispatch_worktree honors the
+    # plan's actual base_ref instead of silently defaulting to origin/main
+    # (OI-1170-class: a fix-forward dispatch with base_ref=origin/dispatch/<branch>
+    # was previously always built on origin/main with no signal).
+    _base_ref = plan.base_ref or "origin/main"
+
     wt_path: Optional[Path] = None
     try:
         # Resolve the CONSUMER project root explicitly (VNX_PROJECT_ROOT / CWD-git,
@@ -526,7 +532,9 @@ def run_envelope_plan(
         # Any resolution failure is handled by the same fail-loud path below as
         # a worktree-creation failure — never falls back to a shared checkout.
         _consumer_project_root = resolve_consumer_project_root()
-        wt_path = create_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
+        wt_path = create_dispatch_worktree(
+            plan.dispatch_id, project_root=_consumer_project_root, base_ref=_base_ref,
+        )
     except Exception as _wt_exc:
         _isolation_error = (
             f"isolation required (require_worktree) but worktree creation failed "
@@ -566,7 +574,6 @@ def run_envelope_plan(
         _target_remote_head = None
 
     # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
-    _base_ref = plan.base_ref or "origin/main"
     _skip_pr = _is_dispatch_branch_ref(_base_ref)
 
     _phantom_diff: Optional[str] = None
@@ -735,10 +742,17 @@ def run_envelope_headless_plan(
         resolve_consumer_project_root,
     )
 
+    # Resolved BEFORE worktree creation so create_dispatch_worktree honors the
+    # plan's actual base_ref instead of silently defaulting to origin/main —
+    # the headless-lane blocker this dispatch fixes.
+    _base_ref = plan.base_ref or "origin/main"
+
     wt_path: Optional[Path] = None
     try:
         _consumer_project_root = resolve_consumer_project_root()
-        wt_path = create_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root)
+        wt_path = create_dispatch_worktree(
+            plan.dispatch_id, project_root=_consumer_project_root, base_ref=_base_ref,
+        )
     except Exception as _wt_exc:
         _isolation_error = (
             f"isolation required but worktree creation failed "
@@ -777,7 +791,6 @@ def run_envelope_headless_plan(
         _target_remote_head = None
 
     # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
-    _base_ref = plan.base_ref or "origin/main"
     _skip_pr = _is_dispatch_branch_ref(_base_ref)
 
     _phantom_diff: Optional[str] = None

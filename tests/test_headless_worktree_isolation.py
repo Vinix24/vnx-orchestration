@@ -58,6 +58,7 @@ def _make_headless_spec(
     pr_id: Optional[str] = None,
     target_slot: str = "T1",
     model: str = "sonnet",
+    base_ref: str = "origin/main",
 ) -> DispatchSpec:
     return DispatchSpec(
         schema_version=1,
@@ -72,6 +73,7 @@ def _make_headless_spec(
         provider=Provider.CLAUDE,
         model=model,
         pr_id=pr_id,
+        base_ref=base_ref,
         allow_headless=True,
         headless_reason="test",
     )
@@ -272,4 +274,66 @@ class TestHeadlessWorktreeIsolation:
         assert remove_calls, (
             "remove_dispatch_worktree was never called — teardown is missing; "
             "the worktree would leak on every headless dispatch"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — the headless-lane base_ref blocker (20260812h-a-headless-baseref)
+# ---------------------------------------------------------------------------
+
+
+class TestHeadlessWorktreeHonorsBaseRef:
+    """create_dispatch_worktree() always built on origin/main regardless of
+    plan.base_ref, because run_envelope_headless_plan never passed it through.
+    A headless dispatch fired with a non-default base_ref (e.g. a fix-forward
+    dispatch on an existing PR branch, base_ref=origin/dispatch/<branch>) got a
+    correctly ISOLATED worktree on the WRONG basis, with no signal — the
+    worker's diff then looks empty or conflicting for reasons unrelated to the
+    actual work. This test must fail on the pre-fix code (create_dispatch_worktree
+    called without a base_ref kwarg at all) and pass on the fix.
+    """
+
+    def test_plan_base_ref_is_passed_to_create_dispatch_worktree(self, tmp_path: Path) -> None:
+        spec = _make_headless_spec(
+            tmp_path=tmp_path, base_ref="origin/dispatch/some-existing-branch",
+        )
+        vspec = _make_vspec_from_spec(spec)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert plan.lane == "claude_headless"
+        assert plan.base_ref == "origin/dispatch/some-existing-branch"
+        permit = issue_permit(plan)
+
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+        fake_receipt = state_dir / "t0_receipts.ndjson"
+        fake_receipt.touch()
+
+        fake_consumer_root = tmp_path / "consumer-root"
+        fake_consumer_root.mkdir()
+        fake_wt_path = fake_consumer_root / ".vnx-data" / "worktrees" / f"dispatch-{plan.dispatch_id}"
+        fake_wt_path.mkdir(parents=True)
+
+        def capture_govern(spec_arg, *args, **kwargs):
+            return (fake_receipt, fake_receipt)
+
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+                   return_value=fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree",
+                   return_value=fake_wt_path) as mock_create, \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
+             patch.object(dispatch_envelope.ClaudeSubprocessAdapter, "run",
+                          return_value=_fake_adapter_success()), \
+             patch("dispatch_envelope._govern", side_effect=capture_govern):
+            result = run_envelope_headless_plan(
+                plan, permit, state_dir=state_dir, data_dir=data_dir,
+                role=plan.role,
+            )
+
+        assert result.status == "success"
+        mock_create.assert_called_once_with(
+            plan.dispatch_id,
+            project_root=fake_consumer_root,
+            base_ref="origin/dispatch/some-existing-branch",
         )

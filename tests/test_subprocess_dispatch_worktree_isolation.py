@@ -184,6 +184,157 @@ class TestCreateDispatchWorktree:
         assert result == expected_wt.resolve()
 
 
+# ─── explicit base_ref (dispatch 20260812h-a-headless-baseref) ───────────────
+
+
+class TestCreateDispatchWorktreeExplicitBaseRef:
+    """create_dispatch_worktree() previously always built on origin/main,
+    ignoring any base_ref the caller wanted — the headless-lane blocker this
+    dispatch fixes. Real git repos (two branches, distinct HEADs) so the
+    assertion is on the worktree's actual committed content, not a mocked
+    subprocess call. These tests fail on the pre-fix signature (no base_ref
+    kwarg accepted at all).
+    """
+
+    @staticmethod
+    def _init_repo_two_branches(tmp_path: Path) -> "tuple[Path, str, str]":
+        """Bare origin + local clone with `main` and `feature` at DIFFERENT commits.
+
+        Returns (local_checkout, main_sha, feature_sha).
+        """
+        bare = tmp_path / "origin.git"
+        bare.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(bare)],
+            check=True, capture_output=True,
+        )
+        local = tmp_path / "local"
+        subprocess.run(["git", "clone", str(bare), str(local)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(local), "config", "user.email", "test@test.local"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "config", "user.name", "Test"],
+            check=True, capture_output=True,
+        )
+        (local / "README.md").write_text("init\n")
+        subprocess.run(["git", "-C", str(local), "add", "README.md"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(local), "commit", "-m", "initial"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(local), "push", "-u", "origin", "main"], check=True, capture_output=True)
+        main_sha = subprocess.check_output(
+            ["git", "-C", str(local), "rev-parse", "main"], text=True
+        ).strip()
+
+        subprocess.run(["git", "-C", str(local), "checkout", "-b", "feature"], check=True, capture_output=True)
+        (local / "feature.txt").write_text("feature work\n")
+        subprocess.run(["git", "-C", str(local), "add", "feature.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(local), "commit", "-m", "feature commit"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(local), "push", "-u", "origin", "feature"], check=True, capture_output=True)
+        feature_sha = subprocess.check_output(
+            ["git", "-C", str(local), "rev-parse", "feature"], text=True
+        ).strip()
+
+        subprocess.run(["git", "-C", str(local), "checkout", "main"], check=True, capture_output=True)
+        assert main_sha != feature_sha, "fixture bug: main and feature must diverge"
+        return local, main_sha, feature_sha
+
+    def test_explicit_base_ref_sets_worktree_on_that_ref(self, tmp_path, monkeypatch):
+        """An explicit base_ref=origin/feature builds the worktree on feature's
+        HEAD, not origin/main — the core fix this dispatch delivers."""
+        monkeypatch.delenv("VNX_BENCH_WORKTREE_BASE_REF", raising=False)
+        from dispatch_worktree_isolation import create_dispatch_worktree
+
+        local, main_sha, feature_sha = self._init_repo_two_branches(tmp_path)
+
+        wt_path = create_dispatch_worktree(
+            "explicit-base-ref-test", project_root=local, base_ref="origin/feature",
+        )
+
+        wt_head = subprocess.check_output(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert wt_head == feature_sha, (
+            f"worktree HEAD ({wt_head}) must equal the explicit base_ref's commit "
+            f"({feature_sha}, feature), not origin/main's ({main_sha}) — a dispatch "
+            f"with base_ref=origin/dispatch/<branch> must build on THAT branch"
+        )
+        assert (wt_path / "feature.txt").exists(), (
+            "worktree must contain the feature branch's file — proof it was built "
+            "on feature, not silently on main"
+        )
+
+    def test_no_explicit_base_ref_defaults_to_origin_main(self, tmp_path, monkeypatch):
+        """Omitting base_ref preserves the pre-existing default: origin/main."""
+        monkeypatch.delenv("VNX_BENCH_WORKTREE_BASE_REF", raising=False)
+        from dispatch_worktree_isolation import create_dispatch_worktree
+
+        local, main_sha, _feature_sha = self._init_repo_two_branches(tmp_path)
+
+        wt_path = create_dispatch_worktree("default-base-ref-test", project_root=local)
+
+        wt_head = subprocess.check_output(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert wt_head == main_sha
+        assert not (wt_path / "feature.txt").exists()
+
+    def test_bench_override_still_works_without_explicit_base_ref(self, tmp_path, monkeypatch):
+        """VNX_BENCH_WORKTREE_BASE_REF remains a working fallback for callers
+        that pass no explicit base_ref (the provider-lane benchmark harness)."""
+        from dispatch_worktree_isolation import create_dispatch_worktree
+
+        local, _main_sha, feature_sha = self._init_repo_two_branches(tmp_path)
+        monkeypatch.setenv("VNX_BENCH_WORKTREE_BASE_REF", "feature")
+
+        wt_path = create_dispatch_worktree("bench-override-test", project_root=local)
+
+        wt_head = subprocess.check_output(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert wt_head == feature_sha, (
+            "VNX_BENCH_WORKTREE_BASE_REF must still redirect the worktree when the "
+            "caller passes no explicit base_ref"
+        )
+
+    def test_explicit_base_ref_wins_over_bench_override(self, tmp_path, monkeypatch):
+        """An explicit base_ref takes priority over VNX_BENCH_WORKTREE_BASE_REF.
+
+        The bench env var is a fallback for callers with no explicit base_ref
+        (see the precedence note in create_dispatch_worktree's docstring), not an
+        override of a caller's own explicit request — silently letting the env
+        win would reproduce the exact silent-wrong-base defect this fix closes,
+        just from a different source.
+        """
+        from dispatch_worktree_isolation import create_dispatch_worktree
+
+        local, main_sha, _feature_sha = self._init_repo_two_branches(tmp_path)
+        monkeypatch.setenv("VNX_BENCH_WORKTREE_BASE_REF", "feature")
+
+        wt_path = create_dispatch_worktree(
+            "explicit-wins-test", project_root=local, base_ref="origin/main",
+        )
+
+        wt_head = subprocess.check_output(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assert wt_head == main_sha
+
+    def test_nonexistent_base_ref_fails_loud_with_ref_named(self, tmp_path, monkeypatch):
+        """A base_ref that doesn't exist raises RuntimeError naming the ref —
+        no silent fallback to origin/main (OI-class: a stale/silent fallback is
+        worse than a loud error here)."""
+        monkeypatch.delenv("VNX_BENCH_WORKTREE_BASE_REF", raising=False)
+        from dispatch_worktree_isolation import create_dispatch_worktree
+
+        local, _main_sha, _feature_sha = self._init_repo_two_branches(tmp_path)
+
+        with pytest.raises(RuntimeError, match="origin/does-not-exist"):
+            create_dispatch_worktree(
+                "bad-base-ref-test", project_root=local, base_ref="origin/does-not-exist",
+            )
+
+
 class TestCentralInstallGuard:
     """P0 provider-worktree-root-fix: a dispatch worktree must NEVER be created
     (or removed) inside the shared VNX central install tree
