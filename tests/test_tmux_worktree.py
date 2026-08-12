@@ -474,3 +474,72 @@ def test_flock_serializes_concurrent_allocate(tmp_path):
     assert concurrent_max[0] <= 1, (
         f"flock violation: {concurrent_max[0]} concurrent holders observed"
     )
+
+
+# ---------------------------------------------------------------------------
+# OI-1124: branch/worktree identity (creation assert + drift classification)
+# ---------------------------------------------------------------------------
+
+def test_allocate_raises_on_branch_identity_mismatch(tmp_path):
+    """allocate() must fail loud when the fresh worktree is not on its own
+    dispatch branch (OI-1124 creation-time assert)."""
+    local = _init_git_repo_with_origin(tmp_path)
+    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True), \
+            patch.object(tmux_worktree, "_current_branch",
+                         return_value="dispatch-some-other-id"):
+        with pytest.raises(WorktreeAllocateError, match="identity mismatch"):
+            allocate("ident-1", repo_root=local)
+
+
+def test_classify_flags_cross_dispatch_branch_as_dirty(tmp_path):
+    """The OI-1124 incident shape: a worktree checked out on ANOTHER
+    dispatch's branch (dash form ``dispatch-<other-id>``) must classify
+    ``dirty`` (preserve + lock), never ``clean`` (reap + branch delete under
+    the wrong identity)."""
+    local = _init_git_repo_with_origin(tmp_path)
+    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
+        handle = allocate("victim-d", repo_root=local)
+    # A worker following a crossed instruction moves the worktree onto a
+    # branch carrying a DIFFERENT dispatch's id, in the dash name-form.
+    subprocess.run(
+        ["git", "-C", str(handle.path), "checkout", "-b", "dispatch-donor-b"],
+        check=True, capture_output=True,
+    )
+    assert classify(handle) == "dirty"
+
+
+def test_classify_flags_cross_dispatch_slash_branch_as_dirty(tmp_path):
+    """Same identity compromise in the canonical slash form."""
+    local = _init_git_repo_with_origin(tmp_path)
+    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
+        handle = allocate("victim-d2", repo_root=local)
+    subprocess.run(
+        ["git", "-C", str(handle.path), "checkout", "-b", "dispatch/donor-b2"],
+        check=True, capture_output=True,
+    )
+    assert classify(handle) == "dirty"
+
+
+def test_classify_tolerates_worker_feature_branch(tmp_path):
+    """A worker-chosen non-dispatch branch (fix/...) keeps the normal verdict:
+    identity patterns only, no new policing of legitimate PR branches."""
+    local = _init_git_repo_with_origin(tmp_path)
+    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
+        handle = allocate("featbr-1", repo_root=local)
+    subprocess.run(
+        ["git", "-C", str(handle.path), "checkout", "-b", "fix/some-topic"],
+        check=True, capture_output=True,
+    )
+    assert classify(handle) == "clean"
+
+
+def test_classify_tolerates_dash_form_of_own_id(tmp_path):
+    """Wrong FORM with the OWN id keeps identity intact — not flagged."""
+    local = _init_git_repo_with_origin(tmp_path)
+    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
+        handle = allocate("ownform-1", repo_root=local)
+    subprocess.run(
+        ["git", "-C", str(handle.path), "checkout", "-b", "dispatch-ownform-1"],
+        check=True, capture_output=True,
+    )
+    assert classify(handle) == "clean"

@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 # Analogous to pool_worktree_manager._TERMINAL_ID_RE; dispatch IDs are longer.
 _DISPATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
+# OI-1124: both name-forms a dispatch identity travels in — the canonical
+# branch form ``dispatch/<id>`` (this module and the provider-lane allocator)
+# and the worktree-DIRECTORY form ``dispatch-<id>`` (which git itself would
+# mint as a branch from the path basename, and which a confused worker can
+# copy as a branch name). A checked-out branch matching this pattern with a
+# DIFFERENT embedded id is a cross-dispatch identity compromise.
+_DISPATCH_BRANCH_RE = re.compile(r"^dispatch[-/](?P<id>[A-Za-z0-9][A-Za-z0-9_-]{0,63})$")
+
 # Fetch cache: keyed by base_ref, value = monotonic timestamp of last successful cache-update.
 _FETCH_CACHE: dict[str, float] = {}
 _FETCH_CACHE_TTL = 30.0
@@ -62,6 +70,12 @@ def _resolve_repo_root(repo_root: Path | None) -> Path:
 def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Thin subprocess wrapper — no shell=True."""
     return subprocess.run(args, capture_output=True, text=True, **kwargs)
+
+
+def _current_branch(wt: "Path | str") -> str:
+    """The branch checked out at *wt* ('' on git failure, 'HEAD' when detached)."""
+    result = _run(["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"])
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def _git_common_dir(repo_root: Path) -> Path:
@@ -176,6 +190,23 @@ def allocate(
                     f"git worktree add failed for {dispatch_id!r}: {stderr}"
                 )
 
+        # OI-1124: the worktree MUST come up on its own dispatch branch. git
+        # mints a branch from the PATH BASENAME (dash form ``dispatch-<id>``)
+        # when ``worktree add`` runs without ``-b``/committish, so any code
+        # path that regresses into that form silently builds a wrong
+        # worktree→branch mapping — the failure that surfaces later as one
+        # dispatch's diff merging under another's name. Assert at creation,
+        # fail loud. Fail-open on '' (git itself unreachable): the add above
+        # already succeeded, so an unreadable HEAD is a probe failure, not
+        # evidence of a wrong branch.
+        actual_branch = _current_branch(worktree_path)
+        if actual_branch and actual_branch != branch:
+            raise WorktreeAllocateError(
+                f"worktree for {dispatch_id!r} came up on branch "
+                f"{actual_branch!r}, expected {branch!r} — branch/worktree "
+                f"identity mismatch at creation (OI-1124)"
+            )
+
     resolved_path = worktree_path.resolve()
     logger.info(
         "worktree allocated: %s branch=%s base=%s",
@@ -240,6 +271,38 @@ def classify_path(
     - ``committed`` : new local commits, not yet on origin (or origin unknown).
     - ``pushed``    : new commits and the remote dispatch branch matches HEAD.
     """
+    # ── OI-1124: cross-dispatch branch-identity drift ──────────────────────
+    # Measured 2026-08-10: a worker that received a crossed instruction (the
+    # pre-#1451 shared tmux paste buffer) ran ``git checkout -b
+    # dispatch-<OTHER-id>`` inside its own worktree — dispatch D's worktree
+    # ended up on a branch carrying dispatch B's id, and B's PR shipped from
+    # D's tree. Allocation was correct; the drift happened mid-run. Everything
+    # downstream (reap's branch delete, PR enforcement, T0's review) identifies
+    # work by branch name, so silently continuing risks merging one dispatch's
+    # diff under another's name with green CI. A worktree whose checked-out
+    # branch names a DIFFERENT dispatch id is therefore classified ``dirty`` —
+    # reap preserves and locks it for identity review instead of reaping or
+    # branch-deleting under the wrong identity. Worker-chosen non-dispatch
+    # branches (``fix/...``) and a re-formed branch carrying the OWN id keep
+    # their normal verdicts: identity is intact there, only the form differs.
+    current = _current_branch(wt)
+    if current and current != branch:
+        drift = _DISPATCH_BRANCH_RE.match(current)
+        expected_ids = {dispatch_id}
+        expected = _DISPATCH_BRANCH_RE.match(branch)
+        if expected:
+            expected_ids.add(expected.group("id"))
+        if drift and drift.group("id") not in expected_ids:
+            logger.warning(
+                "OI-1124 BRANCH-IDENTITY DRIFT: worktree %s (dispatch %s) is "
+                "checked out on %r, which names a DIFFERENT dispatch (%r); "
+                "expected %r. Classifying 'dirty' so the worktree is preserved "
+                "for identity review instead of reaped or merged under the "
+                "wrong name.",
+                wt, dispatch_id, current, drift.group("id"), branch,
+            )
+            return "dirty"
+
     status_result = _run(
         [
             "git", "-c", "core.fileMode=false", "-c", "core.autocrlf=input",
