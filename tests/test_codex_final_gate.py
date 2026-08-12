@@ -2,6 +2,7 @@
 """Tests for Codex final gate prompt renderer, enforcement, and receipts."""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from review_contract import (
 from codex_final_gate import (
     CodexFinalGateReceipt,
     CodexGateEnforcementResult,
+    NET_LINE_DELETION_HOLD,
     check_gate_clearance,
     enforce_codex_gate,
     evaluate_and_record,
@@ -326,19 +328,19 @@ class TestCodexFinalGateReceipt:
 # ---------------------------------------------------------------------------
 
 class TestCheckGateClearance:
-    def test_not_required_clears(self):
+    def test_not_required_clears(self, tmp_path):
         contract = _make_low_risk_contract()
-        result = check_gate_clearance(contract, None)
+        result = check_gate_clearance(contract, None, project_root=tmp_path)
         assert result["cleared"] is True
         assert result["reason"] == "codex_gate_not_required"
 
-    def test_required_no_receipt_blocks(self):
+    def test_required_no_receipt_blocks(self, tmp_path):
         contract = _make_contract()
-        result = check_gate_clearance(contract, None)
+        result = check_gate_clearance(contract, None, project_root=tmp_path)
         assert result["cleared"] is False
         assert "missing_codex_gate_receipt" in result["blockers"]
 
-    def test_required_pass_verdict_clears(self):
+    def test_required_pass_verdict_clears(self, tmp_path):
         contract = _make_contract()
         receipt = CodexFinalGateReceipt(
             pr_id="PR-3",
@@ -346,11 +348,11 @@ class TestCheckGateClearance:
             required=True,
             content_hash="abc123def456",
         )
-        result = check_gate_clearance(contract, receipt)
+        result = check_gate_clearance(contract, receipt, project_root=tmp_path)
         assert result["cleared"] is True
         assert result["reason"] == "codex_gate_passed"
 
-    def test_required_fail_verdict_blocks(self):
+    def test_required_fail_verdict_blocks(self, tmp_path):
         contract = _make_contract()
         receipt = CodexFinalGateReceipt(
             pr_id="PR-3",
@@ -358,11 +360,11 @@ class TestCheckGateClearance:
             required=True,
             content_hash="abc123def456",
         )
-        result = check_gate_clearance(contract, receipt)
+        result = check_gate_clearance(contract, receipt, project_root=tmp_path)
         assert result["cleared"] is False
         assert "codex_gate_failed" in result["blockers"]
 
-    def test_required_blocked_verdict_blocks(self):
+    def test_required_blocked_verdict_blocks(self, tmp_path):
         contract = _make_contract()
         receipt = CodexFinalGateReceipt(
             pr_id="PR-3",
@@ -370,11 +372,11 @@ class TestCheckGateClearance:
             required=True,
             content_hash="abc123def456",
         )
-        result = check_gate_clearance(contract, receipt)
+        result = check_gate_clearance(contract, receipt, project_root=tmp_path)
         assert result["cleared"] is False
         assert "codex_gate_blocked" in result["blockers"]
 
-    def test_required_pending_verdict_blocks(self):
+    def test_required_pending_verdict_blocks(self, tmp_path):
         contract = _make_contract()
         receipt = CodexFinalGateReceipt(
             pr_id="PR-3",
@@ -382,11 +384,11 @@ class TestCheckGateClearance:
             required=True,
             content_hash="abc123def456",
         )
-        result = check_gate_clearance(contract, receipt)
+        result = check_gate_clearance(contract, receipt, project_root=tmp_path)
         assert result["cleared"] is False
         assert "codex_gate_pending" in result["blockers"]
 
-    def test_rerun_required_blocks(self):
+    def test_rerun_required_blocks(self, tmp_path):
         contract = _make_contract()
         receipt = CodexFinalGateReceipt(
             pr_id="PR-3",
@@ -396,11 +398,11 @@ class TestCheckGateClearance:
             rerun_reason="contract_changed",
             content_hash="abc123def456",
         )
-        result = check_gate_clearance(contract, receipt)
+        result = check_gate_clearance(contract, receipt, project_root=tmp_path)
         assert result["cleared"] is False
         assert "codex_gate_rerun_required" in result["blockers"]
 
-    def test_stale_content_hash_blocks(self):
+    def test_stale_content_hash_blocks(self, tmp_path):
         contract = _make_contract(content_hash="current_hash")
         receipt = CodexFinalGateReceipt(
             pr_id="PR-3",
@@ -408,11 +410,11 @@ class TestCheckGateClearance:
             required=True,
             content_hash="old_hash",
         )
-        result = check_gate_clearance(contract, receipt)
+        result = check_gate_clearance(contract, receipt, project_root=tmp_path)
         assert result["cleared"] is False
         assert "codex_gate_stale_receipt" in result["blockers"]
 
-    def test_unresolved_errors_block(self):
+    def test_unresolved_errors_block(self, tmp_path):
         contract = _make_contract()
         receipt = CodexFinalGateReceipt(
             pr_id="PR-3",
@@ -421,9 +423,54 @@ class TestCheckGateClearance:
             findings=[{"severity": "error", "message": "critical bug"}],
             content_hash="abc123def456",
         )
-        result = check_gate_clearance(contract, receipt)
+        result = check_gate_clearance(contract, receipt, project_root=tmp_path)
         assert result["cleared"] is False
         assert any("unresolved_errors" in b for b in result["blockers"])
+
+    def test_net_line_deletion_tripwire_blocks_in_explicit_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "config", "user.email", "codex@example.invalid"],
+            cwd=repo,
+            check=True,
+        )
+        subprocess.run(["git", "config", "user.name", "Codex Test"], cwd=repo, check=True)
+
+        deleted_path = repo / "tracked.txt"
+        deleted_path.write_text(
+            "".join(f"line {line}\n" for line in range(NET_LINE_DELETION_HOLD + 1)),
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add tracked file"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        deleted_path.unlink()
+        subprocess.run(["git", "add", "-u"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "delete tracked file"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        contract = _make_low_risk_contract()
+        result = check_gate_clearance(contract, None, project_root=repo)
+        enforcement = enforce_codex_gate(contract, project_root=repo)
+
+        assert result["cleared"] is False
+        assert "missing_codex_gate_receipt" in result["blockers"]
+        assert enforcement.required is True
+        assert "net_line_deletion" in enforcement.reasons
+        assert enforcement.net_line_deletion >= NET_LINE_DELETION_HOLD
 
 
 # ---------------------------------------------------------------------------
