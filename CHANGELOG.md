@@ -4,6 +4,72 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.4.7] — 2026-08-12
+
+Patch release (10 commits since v1.4.6). Four of the ten fixes are for behavior
+consumers were demonstrably blocked by before this release shipped: the
+`.vnx-version` pin was read from the wrong directory, headless dispatches
+could share one worktree with zero warning, `vnx migrate` left every central
+store but one stuck below the current schema, and a missing migration table
+silently released a reconciler hold that should have blocked the close.
+
+### Added
+
+- **Ledger-health check: every fired dispatch must have a receipt (#1471)** —
+  `vnx doctor` now includes a per-dispatch reconciliation between the
+  dispatch register and the receipts ledger, plus pull-cursor age and chain
+  status. A dispatch that fires with no receipt is now a finding, not
+  silence.
+
+### Fixed
+
+- **Dispatch-lane isolation is honored, not silently skipped (#1481, #1478,
+  #1476)** — `base_ref` is now honored when a headless or provider-lane
+  dispatch creates its worktree, instead of always building on
+  `origin/main`, with a loud failure on an unresolvable ref. The door now
+  warns and stamps a field when a lane's isolation guarantee cannot be
+  verified structurally, instead of staying silent (OI-1158). Worktree
+  creation now asserts the result lands on its own branch, catching a
+  cross-dispatch identity mismatch at creation time instead of surfacing it
+  later as one dispatch's diff under another's name (OI-1124).
+- **Worker liveness distinguishes silence from death (#1473)** — a
+  deterministic check (tmux session, pane, process) now runs on every poll,
+  independent of heartbeat silence. A deep-thinking worker with no output is
+  never killed on silence alone, and a confirmed-dead process fails within
+  one poll interval under its own reason instead of waiting out the silence
+  threshold (OI-1130).
+- **`vnx migrate` applies the full chain, staleness goes loud (#1477)** — the
+  hardcoded 0022-0031 walk and the generic migration discovery were two
+  separate mechanisms. `vnx migrate` now ends with a generic sweep on the
+  same store, so a store can no longer get stuck below the current schema
+  version, and a store that falls behind is now a `vnx doctor` finding
+  instead of silence (OI-1169).
+- **A missing `track_pr_delivery` table now holds the close, never releases
+  it (#1479)** — the reconciler's delivery hold treated "the table doesn't
+  exist yet" the same as "checked and found nothing to object to", which let
+  a track close on unguarded PR evidence on any pre-migration store. A
+  missing table now returns a hold, and `link-pr --delivery` surfaces the
+  failure as an error instead of a silently swallowed warning (OI-1167).
+- **CLI surface: `worktree-release` is loadable, the version pin resolves
+  from the project root (#1470, #1482)** — the command loader looked for
+  `worktree-release.sh`/`worktree_release.sh` while the implementation lived
+  under a different file name, so the command was never invocable since it
+  shipped (OI-1052). A new test derives every advertised `bin/vnx` command
+  from the script itself and asserts it has a working implementation.
+  Separately, the `.vnx-version` pin lookup now walks up to the project root
+  instead of only checking the working directory, so a T0 orchestrator
+  running from `.claude/terminals/T0` reads the same version the project
+  root does (OI-1170).
+
+### Changed
+
+- **README corrected on version, billing/headless claims, ADR count; real
+  "Your first dispatch" walkthrough added (#1475)** — the Status section
+  pointed at 1.2.0, the billing and headless sections still described a lane
+  boundary that stopped being the billing boundary once headless opened by
+  default, and the ADR count was stale. The new walkthrough is real,
+  trimmed output from an actual install-to-receipt run.
+
 ## [1.4.6] — 2026-08-12
 
 Patch release (64 commits since v1.4.5). Headline: the dispatch lanes, worker
