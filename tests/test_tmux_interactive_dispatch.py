@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1227,6 +1228,262 @@ class TestAwaitingPermission(_LaneTestCase):
         self.assertTrue(
             report_path.exists(),
             "a genuinely stalled worker must be heartbeat-killed (failure report)",
+        )
+
+
+# ---------------------------------------------------------------------------
+# OI-1130 follow-up: deterministic worker liveness (thinking vs dead)
+# ---------------------------------------------------------------------------
+class _LivenessFakeTmux(FakeTmux):
+    """FakeTmux extended with a controllable OI-1130 liveness-probe response.
+
+    ``has_session_ok``: return code for ``tmux has-session -t <session>`` — the
+    lane's first, cheapest liveness signal (whole session gone).
+
+    ``pane_dead_flag`` / ``pane_pid``: the two values interpolated into the
+    combined ``#{pane_dead}\\t#{pane_pid}`` display-message query the probe
+    issues once the session is confirmed to exist. ``pane_pid`` is the pid the
+    (separately monkeypatched) ``_process_alive`` probe is asked to judge —
+    this fixture never touches a real OS process, matching the dispatch's
+    "fabricated tmux-runner + controllable pid-liveness" test contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        has_session_ok: bool = True,
+        pane_dead_flag: str = "0",
+        pane_pid: str = "4242",
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.has_session_ok = has_session_ok
+        self.pane_dead_flag = pane_dead_flag
+        self.pane_pid = pane_pid
+        self.has_session_calls = 0
+        self.liveness_display_message_calls = 0
+
+    def run(self, args, *, timeout: int = 10, input_text=None) -> TmuxResult:
+        if args and args[0] == "has-session":
+            self.commands.append(list(args))
+            self.has_session_calls += 1
+            if self.has_session_ok:
+                return TmuxResult(0, "")
+            return TmuxResult(1, "", "can't find session")
+        if (
+            args
+            and args[0] == "display-message"
+            and args[-1] == "#{pane_dead}\t#{pane_pid}"
+        ):
+            self.commands.append(list(args))
+            self.liveness_display_message_calls += 1
+            return TmuxResult(0, f"{self.pane_dead_flag}\t{self.pane_pid}\n")
+        return super().run(args, timeout=timeout, input_text=input_text)
+
+
+class TestOI1130DeterministicLiveness(_LaneTestCase):
+    """The four quadrants of the pane-log x process-liveness decision table.
+
+    Each test calls ``_wait_for_receipt`` directly (matching the existing
+    heartbeat tests above) with a short ``deadline_seconds`` so the loop
+    resolves fast; the FakeTmux never emits a receipt, so the only way the
+    call returns before the deadline is a liveness-driven kill.
+    """
+
+    def _report_path(self) -> Path:
+        return self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+
+    def _clear_report(self) -> None:
+        report_path = self._report_path()
+        if report_path.exists():
+            report_path.unlink()
+
+    def test_silent_and_alive_is_not_killed_oi1130_pin(self):
+        """Quadrant: pane log SILENT, process ALIVE -> NOT killed, even well
+        past the silence threshold. This is the OI-1130 regression pin: before
+        this dispatch, silence alone killed a thinking worker."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")  # never grows
+        fake = _LivenessFakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            has_session_ok=True,
+            pane_dead_flag="0",
+            pane_pid="4242",
+        )
+        lane = self._make_lane(fake)
+        self._clear_report()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.02"}
+        ), patch("tmux_interactive_dispatch._process_alive", return_value=True):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        self.assertIsNone(result, "no receipt ever arrives; only the deadline ends the wait")
+        self.assertFalse(
+            self._report_path().exists(),
+            "a silent-but-alive worker must NOT be killed — no failure report",
+        )
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        self.assertIn(
+            "interactive_worker_thinking_silent",
+            {e["event_type"] for e in events},
+            "the thinking-but-alive state must be surfaced via an event",
+        )
+        # The probe ran on more than one poll — proves this was a sustained
+        # wait past the silence threshold, not a lucky single check.
+        self.assertGreater(fake.has_session_calls, 1)
+
+    def test_silent_and_dead_fails_within_one_poll_worker_process_gone(self):
+        """Quadrant: pane log SILENT, process DEAD -> immediate failure with
+        reason worker_process_gone, well before deadline_seconds AND without
+        waiting out a (deliberately long) silence threshold."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = _LivenessFakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            has_session_ok=False,  # session gone -> deterministically dead
+        )
+        lane = self._make_lane(fake)
+        self._clear_report()
+        start = time.monotonic()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "1800"}
+        ):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=5.0,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        elapsed = time.monotonic() - start
+        self.assertIsNone(result)
+        self.assertLess(
+            elapsed, 1.0,
+            "a dead worker must fail within ~one poll interval, not wait out "
+            "the (long) silence threshold or the (long) deadline",
+        )
+        report_path = self._report_path()
+        self.assertTrue(report_path.exists(), "a dead worker must write a failure report")
+        from report_to_receipt_converter import _extract_body_fields
+        fields = _extract_body_fields(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(fields.get("status"), "failed")
+        self.assertEqual(
+            fields.get("failure_reason"), "worker_process_gone",
+            "a confirmed-dead kill must carry its OWN reason, not heartbeat_killed",
+        )
+
+    def test_liveness_undeterminable_falls_back_to_heartbeat_behavior(self):
+        """Quadrant: liveness cannot be established (plain FakeTmux — no
+        has-session/pane_pid support, mirroring a tmux error) -> the lane
+        falls back EXACTLY to the pre-OI-1130 heartbeat-silence-kill
+        behavior, plus a log line noting the fallback."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("some stale log line\nthat is not a prompt", encoding="utf-8")
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content="some stale log line\nthat is not a prompt",
+        )
+        lane = self._make_lane(fake)
+        self._clear_report()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.05"}
+        ), self.assertLogs("tmux_interactive_dispatch", level="DEBUG") as logs:
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        self.assertIsNone(result)
+        report_path = self._report_path()
+        self.assertTrue(
+            report_path.exists(),
+            "unknown liveness must fall back to the legacy heartbeat kill",
+        )
+        from report_to_receipt_converter import _extract_body_fields
+        fields = _extract_body_fields(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            fields.get("failure_reason"), "heartbeat_killed",
+            "the legacy reason must be unchanged when liveness is undeterminable",
+        )
+        self.assertTrue(
+            any("liveness undeterminable" in msg for msg in logs.output),
+            "the fail-open fallback must be logged, not silent",
+        )
+
+    def test_growing_log_is_unaffected(self):
+        """Quadrant: pane log GROWING (never silent), process alive -> the
+        liveness probe runs every poll but changes nothing — no kill,
+        identical to the pre-OI-1130 behavior for a healthy worker."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = _LivenessFakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            has_session_ok=True,
+            pane_dead_flag="0",
+            pane_pid="4242",
+        )
+        lane = self._make_lane(fake)
+        self._clear_report()
+        # Threshold far longer than deadline_seconds => the log is, from the
+        # heartbeat's perspective, never silent — the "growing" quadrant.
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "100"}
+        ), patch("tmux_interactive_dispatch._process_alive", return_value=True):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.2,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+            )
+        self.assertIsNone(result, "no receipt ever arrives; only the deadline ends the wait")
+        self.assertFalse(
+            self._report_path().exists(),
+            "a growing/healthy worker must never be killed",
+        )
+        self.assertGreater(
+            fake.has_session_calls, 0,
+            "the liveness probe must still run on a healthy worker (no regression in coverage)",
         )
 
 
