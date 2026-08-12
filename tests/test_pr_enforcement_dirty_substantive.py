@@ -57,8 +57,13 @@ def _init_git_repo_with_origin(tmp_path: Path) -> Path:
     )
     for name in ("alpha.py", "beta.py", "gamma.py", "delta.py", "epsilon.py"):
         (local / name).write_text(f"# {name}\nprint('{name}')\n")
+    # Mirrors the real repo: .DS_Store is gitignored, so git status never even
+    # lists it — .gitignore is the junk filter the OI-1128 untracked salvage
+    # relies on.
+    (local / ".gitignore").write_text(".DS_Store\n")
     subprocess.run(
-        ["git", "-C", str(local), "add", "alpha.py", "beta.py", "gamma.py", "delta.py", "epsilon.py"],
+        ["git", "-C", str(local), "add", ".gitignore",
+         "alpha.py", "beta.py", "gamma.py", "delta.py", "epsilon.py"],
         check=True, capture_output=True,
     )
     subprocess.run(["git", "-C", str(local), "commit", "-m", "initial"], check=True, capture_output=True)
@@ -127,18 +132,40 @@ def test_classify_non_substantive_untracked_only(tmp_path):
     assert "untracked" in result.evidence
 
 
-def test_classify_mixed_ignores_untracked_counts_only_tracked(tmp_path):
-    """A tracked edit plus scratch junk: substantive, but only the tracked file
-    is reported — scratch never pollutes the evidence or the salvage set."""
+def test_classify_mixed_gitignored_junk_stays_out(tmp_path):
+    """A tracked edit plus GITIGNORED junk: substantive, and the junk never
+    reaches the salvage set — .gitignore is the scratch filter (OI-1128),
+    applied by git itself before classification sees the paths."""
     local = _init_git_repo_with_origin(tmp_path)
     handle = _allocate(local, "cls-mixed-1")
     (handle.path / "alpha.py").write_text("# edited\n")
-    (handle.path / ".DS_Store").write_text("junk\n")
+    (handle.path / ".DS_Store").write_text("junk\n")  # gitignored in the fixture
 
     result = pe._classify_dirty_worktree(wt_path=handle.path)
 
     assert result.substantive is True
     assert result.tracked_paths == ("alpha.py",)
+    assert result.untracked_paths == ()
+
+
+def test_classify_untracked_new_file_joins_salvage_set(tmp_path):
+    """OI-1128: a tracked edit plus a genuinely NEW file the worker never
+    `git add`ed — the new file is ?? and must be in the salvage set, including
+    a file inside a brand-new directory (porcelain -uall lists it by file)."""
+    local = _init_git_repo_with_origin(tmp_path)
+    handle = _allocate(local, "cls-newfile-1")
+    (handle.path / "alpha.py").write_text("# edited\n")
+    (handle.path / "test_new_feature.py").write_text("def test_x():\n    assert True\n")
+    (handle.path / "newdir").mkdir()
+    (handle.path / "newdir" / "module.py").write_text("VALUE = 1\n")
+
+    result = pe._classify_dirty_worktree(wt_path=handle.path)
+
+    assert result.substantive is True
+    assert result.tracked_paths == ("alpha.py",)
+    assert set(result.untracked_paths) == {"test_new_feature.py", "newdir/module.py"}
+    assert "untracked" in result.evidence
+    assert "test_new_feature.py" in result.evidence
 
 
 def test_classify_degrades_safe_on_git_failure(tmp_path):
@@ -206,6 +233,55 @@ def test_case2_five_tracked_files_zero_commits_is_loud_and_receipt_visible(tmp_p
     assert kwargs_used["draft"] is True
     assert kwargs_used["title"].startswith("[SALVAGED-UNVOUCHED]")
     assert "No worker committed" in kwargs_used["body"]
+
+
+# ---------------------------------------------------------------------------
+# OI-1128 end-to-end: a modified tracked file AND a new never-added file are
+# BOTH salvaged; gitignored junk stays out of the commit.
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_tracked_and_untracked_both_salvaged_end_to_end(tmp_path):
+    """The 2026-08-10 loss shape: of the hand-rescued files, most were ``??``.
+    A tracked edit plus a new untracked file must BOTH land in the salvage
+    commit on origin; the gitignored .DS_Store must not."""
+    local = _init_git_repo_with_origin(tmp_path)
+    handle = _allocate(local, "oi1128-mixed")
+    (handle.path / "alpha.py").write_text("# edited\nprint('edited')\n")
+    (handle.path / "test_new_feature.py").write_text("def test_x():\n    assert True\n")
+    (handle.path / ".DS_Store").write_text("junk\n")  # gitignored in the fixture
+
+    assert tmux_worktree.classify(handle) == "dirty"
+
+    captured_receipt = {}
+    with patch("gh_pr_ensure.ensure_pr",
+               return_value={"pr_number": 910, "created": True, "reason": None}), \
+         patch("append_receipt.append_receipt_payload",
+               side_effect=lambda payload, **kw: captured_receipt.update(payload)):
+        result = pe.enforce_pr_exists(**_kwargs(handle, local))
+
+    # Still loud — untracked inclusion changes what is saved, not the verdict.
+    assert result.applicable is True
+    assert result.ok is False
+    assert result.pushed is True
+
+    # Both files are in the salvage commit on origin; the gitignored junk is not.
+    committed_files = subprocess.run(
+        ["git", "-C", str(local), "show", f"origin/{handle.branch}",
+         "--name-only", "--format="],
+        capture_output=True, text=True,
+    ).stdout.split()
+    assert "alpha.py" in committed_files
+    assert "test_new_feature.py" in committed_files
+    assert ".DS_Store" not in committed_files
+
+    # Receipt-visible: the untracked salvage is named, not implied.
+    assert captured_receipt["autopr_kind"] == "dirty_substantive_salvaged"
+    assert captured_receipt["dirty_file_count"] == 1
+    assert captured_receipt["dirty_files"] == ["alpha.py"]
+    assert captured_receipt["salvaged_untracked_count"] == 1
+    assert captured_receipt["salvaged_untracked_files"] == ["test_new_feature.py"]
+    assert captured_receipt["salvaged"] is True
 
 
 # ---------------------------------------------------------------------------

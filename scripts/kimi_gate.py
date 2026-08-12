@@ -17,7 +17,14 @@ Usage:
     python3 scripts/kimi_gate.py --pr 378 --data-dir ~/.vnx-data/<project>
     python3 scripts/kimi_gate.py --diff-file /tmp/x.diff --pr 0   # offline diff source
 
-Exit codes: 0 = pass, 2 = fail/blocked, 1 = infra error (no diff / dispatch failed).
+Exit codes: 0 = pass, 2 = fail/blocked (a REAL parsed review verdict), 1 = infra
+error / provider unavailable (no diff, dispatch failed, or no readable verdict).
+
+Provider outages are NOT review verdicts (OI-1142): when the kimi CLI dies on a
+quota-403/429/auth error, times out, or returns output without a verdict block,
+the result status is ``unavailable`` — never ``fail``. Eleven quota-403 outages
+were once booked as eleven rejected PRs because the no-verdict path defaulted to
+"fail"; absence of evidence must surface as absence, not as a rejection.
 """
 from __future__ import annotations
 
@@ -105,7 +112,14 @@ def _get_diff(pr: str, diff_file: "str | None") -> "str | None":
 
 
 def _verdict_to_status(verdict: dict) -> "tuple[str, list, str]":
-    """Map the extracted verdict to (status, blocking_findings, residual_risk)."""
+    """Map the extracted verdict to (status, blocking_findings, residual_risk).
+
+    OI-1142: an empty ``verdict`` means the provider produced no readable verdict
+    at all — the kimi CLI hit a quota-403/429/auth error, was cut off, or emitted
+    output without the contract's JSON block. That is a tool outage, not a review
+    outcome, and it maps to ``unavailable``. Only a REAL parsed verdict may ever
+    produce ``fail``.
+    """
     v = (verdict.get("verdict") or "").strip().lower() if verdict else ""
     findings = verdict.get("findings") or [] if verdict else []
     blocking = [
@@ -117,7 +131,19 @@ def _verdict_to_status(verdict: dict) -> "tuple[str, list, str]":
         return "pass", [], residual
     if v in {"fail", "blocked"} or blocking:
         return "fail", blocking, residual or "kimi gate reported blocking findings"
-    return "fail", [], residual or "kimi gate produced no readable verdict"
+    return (
+        "unavailable",
+        [],
+        residual
+        or "kimi produced no readable verdict (provider outage/quota/truncation) — not a review outcome",
+    )
+
+
+def _status_summary(status: str, blocking: list) -> str:
+    """Summary line for the result record — outage vs verdict must be unmistakable."""
+    if status == "unavailable":
+        return "kimi gate: UNAVAILABLE (provider outage/no verdict — NOT a review fail)"
+    return f"kimi gate: {status} ({len(blocking)} blocking finding(s))"
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -142,16 +168,27 @@ def main(argv: "list[str] | None" = None) -> int:
     dispatcher = _make_default_dispatcher(data_dir, args.timeout)
 
     start = time.monotonic()
+    report_text = ""
+    dispatch_error = ""
     try:
         # Governed lane: provider_dispatch runs kimi, writes a unified report, returns its text.
         report_text = dispatcher("kimi", args.model, _build_prompt(diff, args.pr), dispatch_id)
     except Exception as exc:  # noqa: BLE001 — dispatch/report-read failure
+        # OI-1142: do NOT bail without a record — a required gate that cannot fire
+        # must surface as ``unavailable`` in the results dir, not vanish.
+        dispatch_error = str(exc)
         print(f"kimi_gate: governed kimi dispatch failed: {exc}", file=sys.stderr)
-        return 1
     duration = time.monotonic() - start
 
-    verdict = _extract_verdict(report_text or "")
-    status, blocking, residual = _verdict_to_status(verdict)
+    if dispatch_error:
+        verdict: dict = {}
+        status, blocking = "unavailable", []
+        residual = f"governed kimi dispatch failed: {dispatch_error[:400]}"
+        reason = "dispatch_error"
+    else:
+        verdict = _extract_verdict(report_text or "")
+        status, blocking, residual = _verdict_to_status(verdict)
+        reason = "verdict" if verdict else "no_verdict"
 
     record = {
         "gate": "kimi_gate",
@@ -162,9 +199,9 @@ def main(argv: "list[str] | None" = None) -> int:
         # closure verifier refuses records with test_run: true.
         "test_run": bool(args.diff_file),
         "status": status,
-        "reason": "verdict" if verdict else "no_verdict",
+        "reason": reason,
         "duration_seconds": round(duration, 3),
-        "summary": f"kimi gate: {status} ({len(blocking)} blocking finding(s))",
+        "summary": _status_summary(status, blocking),
         "provider": "kimi",
         "model": args.model,
         "dispatch_id": dispatch_id,
@@ -187,12 +224,17 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if args.json:
         print(json.dumps(record, indent=2))
+    elif status == "unavailable":
+        print("VERDICT: UNAVAILABLE  (provider outage/no verdict — NOT a review fail)")
     else:
         print(f"VERDICT: {status.upper()}  ({len(blocking)} blocking)")
         for f in blocking:
             print(f"  · [{f.get('severity')}] {f.get('message')}")
 
-    return 0 if status == "pass" else 2
+    # 0 = pass, 2 = a REAL parsed fail/blocked verdict, 1 = unavailable/infra.
+    if status == "pass":
+        return 0
+    return 2 if status == "fail" else 1
 
 
 if __name__ == "__main__":

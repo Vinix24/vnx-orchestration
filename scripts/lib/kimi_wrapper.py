@@ -28,7 +28,13 @@ if _LIB_DIR not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_KIMI_MODEL = "kimi-k2.6"
+# Mirror of the registry default (kimi_cli.default_model in wave7_models.yaml).
+# Retained ONLY for the 90-day backward-compat import surface
+# (providers/provider_lanes/kimi.py re-exports it); the exec path never reads
+# it — model resolution goes through provider_dispatch's kimi resolver, so a
+# registry change cannot silently drift past this constant (OI-1077: the old
+# hardcoded "kimi-k2.6" default outlived the model itself).
+DEFAULT_KIMI_MODEL = "kimi-k3"
 DEFAULT_TIMEOUT = 300.0
 
 
@@ -70,26 +76,49 @@ def _parse_kimi_token_usage(stdout: str) -> Optional[dict]:
 
 def kimi_exec(
     prompt: str,
-    model: str = DEFAULT_KIMI_MODEL,
+    model: Optional[str] = None,
     dispatch_id: Optional[str] = None,
     project_id: Optional[str] = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> str:
-    """Spawn `kimi --print --output-format stream-json --yolo -p <prompt>`.
+    """Spawn `kimi --print --output-format stream-json --yolo -m <model> -p <prompt>`.
+
+    Model resolution (OI-1077) goes through the SAME resolver chain the provider
+    lane uses (provider_dispatch): ``_kimi_resolve_requested_key`` applies the
+    explicit-model -> VNX_KIMI_MODEL env -> registry-default precedence, and
+    ``_kimi_resolve_cli_model_arg`` maps the registry key to the CLI arg form
+    (kimi-cli 1.46.0 wants slash-form managed ids like ``kimi-code/k3``; raw
+    registry keys fail with rc=1 "LLM not set"). The resolved arg is ALWAYS
+    passed via ``-m`` so what runs is pinned by the VNX registry, not by
+    whatever ``~/.kimi/config.toml`` happens to default to.
 
     stdin=DEVNULL per cli-headless-subprocess-pattern (prevents interactive hang).
     Kimi is subscription-flat: cost_usd_estimate=None, billing_mode=subscription.
 
-    Emits a provider cost event via emit_provider_cost() and returns captured stdout.
+    Emits a provider cost event via emit_provider_cost() (labeled with the
+    resolved registry key, same label the provider lane emits) and returns
+    captured stdout.
 
+    Raises KimiModelResolutionError (a ValueError) when the requested model is
+    unknown or disabled in the registry — fail-loud, no silent substitution.
     Raises subprocess.TimeoutExpired on timeout.
     Raises RuntimeError on non-zero exit.
     """
     from provider_costs import emit_provider_cost  # noqa: PLC0415
+    # Lazy import: keeps this wrapper light at import time and cycle-safe
+    # (provider_lanes.kimi imports this module at module level).
+    from provider_dispatch import (  # noqa: PLC0415
+        _kimi_resolve_cli_model_arg,
+        _kimi_resolve_requested_key,
+    )
 
-    cmd = ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", prompt]
-    if model and model != DEFAULT_KIMI_MODEL:
-        cmd.extend(["-m", model])
+    model_key = _kimi_resolve_requested_key(model)
+    cli_model_arg = _kimi_resolve_cli_model_arg(model_key)
+
+    cmd = [
+        "kimi", "--print", "--output-format", "stream-json", "--yolo",
+        "-m", cli_model_arg, "-p", prompt,
+    ]
 
     with open(os.devnull, "r") as devnull:
         proc = subprocess.Popen(
@@ -113,7 +142,7 @@ def kimi_exec(
             proc.wait()
             logger.error(
                 "kimi_exec timed out after %.0fs (model=%s dispatch=%s)",
-                timeout, model, dispatch_id,
+                timeout, model_key, dispatch_id,
             )
             raise
 
@@ -125,7 +154,7 @@ def kimi_exec(
     # Kimi is subscription-flat: no per-token billing
     emit_provider_cost(
         provider="kimi",
-        model=model,
+        model=model_key,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd_estimate=None,

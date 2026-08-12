@@ -21,18 +21,57 @@ def _by_pid(findings):
 
 
 def test_forbidden_headless_claude_is_violation():
-    f = _by_pid(_scan(["1000 1 500 0.0 /Users/x/.local/bin/claude -p do the thing"]))
+    # Pinned to headless_blocked=True: this test is about the blocked-lane branch,
+    # not about whatever routing_policy.yaml currently says — it must not silently
+    # change meaning (or start failing) when the lane's live config flips.
+    f = _by_pid(_scan(
+        ["1000 1 500 0.0 /Users/x/.local/bin/claude -p do the thing"],
+        headless_blocked=True,
+    ))
     assert f[1000].klass == pc.VIOLATION
     assert "claude-headless" in f[1000].reason
 
 
 def test_print_flag_is_also_violation():
-    f = _by_pid(_scan(["1000 1 500 0.0 claude --print summarize"]))
+    f = _by_pid(_scan(["1000 1 500 0.0 claude --print summarize"], headless_blocked=True))
     assert f[1000].klass == pc.VIOLATION
+
+
+def test_headless_claude_not_killed_when_lane_open():
+    """dispatch-20260811c-c: opening the headless lane in config (headless_block.enabled:
+    false) must not leave the cleanup daemon still killing the lane's own processes —
+    the classifier has to consult the same policy the door does, not a hardcoded verdict."""
+    f = _by_pid(_scan(
+        ["1000 1 500 0.0 /Users/x/.local/bin/claude -p do the thing"],
+        headless_blocked=False,
+    ))
+    assert f[1000].klass != pc.VIOLATION
+    assert f[1000].klass == pc.PROTECTED
+    assert "lane open" in f[1000].reason
+
+
+def test_live_default_matches_routing_policy_yaml():
+    """No headless_blocked override -> scan_processes reads the real routing_policy.yaml
+    via _headless_lane_blocked(), the same source of truth the door itself gates on.
+    Production state as of dispatch-20260811c-b: headless_block.enabled is false, so a
+    `claude -p` process is not a VIOLATION by default."""
+    f = _by_pid(_scan(["1000 1 500 0.0 /Users/x/.local/bin/claude -p do the thing"]))
+    assert f[1000].klass == pc.PROTECTED
 
 
 def test_interactive_claude_is_protected():
     f = _by_pid(_scan(["1001 1 30000 0.1 /usr/local/bin/claude"]))
+    assert f[1001].klass == pc.PROTECTED
+
+
+@pytest.mark.parametrize("headless_blocked", [True, False])
+def test_interactive_claude_protected_in_both_lane_states(headless_blocked):
+    """An interactive claude (no -p) is a fleet session either way — the lane's
+    open/blocked state governs `-p` invocations only, never this branch."""
+    f = _by_pid(_scan(
+        ["1001 1 30000 0.1 /usr/local/bin/claude"],
+        headless_blocked=headless_blocked,
+    ))
     assert f[1001].klass == pc.PROTECTED
 
 
@@ -77,7 +116,7 @@ def test_emit_proposals_marks_gating(tmp_path):
         "2000 1 20000 0.0 python3 scripts/lib/provider_dispatch.py",    # idle
         "1001 1 30000 0.1 claude",                                      # protected
         "3000 1 100 0.0 /usr/sbin/cron",                                # ok
-    ])
+    ], headless_blocked=True)
     import json
     path = pc.emit_proposals(findings, tmp_path)
     rows = [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
@@ -94,9 +133,22 @@ def test_kill_violations_targets_only_violations(monkeypatch):
         "1000 1 500 0.0 claude -p x",                                   # violation
         "2000 1 20000 0.0 python3 scripts/lib/provider_dispatch.py",    # idle
         "1001 1 30000 0.1 claude",                                      # protected
-    ])
+    ], headless_blocked=True)
     killed = []
     monkeypatch.setattr(pc.os, "kill", lambda pid, sig: killed.append(pid))
     result = pc._kill_violations(findings)
     assert killed == [1000]  # idle + protected are never killed
     assert result == [1000]
+
+
+def test_headless_lane_blocked_fails_closed_on_missing_policy(monkeypatch):
+    """A policy-load failure (missing/malformed routing_policy.yaml) must fall back to
+    blocked=True, mirroring is_claude_headless_blocked's own fail-closed default — a
+    daemon that can't read the policy must never silently open the lane."""
+    import routing_policy
+
+    def _raise(*_args, **_kwargs):
+        raise FileNotFoundError("routing_policy.yaml missing")
+
+    monkeypatch.setattr(routing_policy, "load_lane_safety", _raise)
+    assert pc._headless_lane_blocked() is True

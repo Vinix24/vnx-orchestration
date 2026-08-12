@@ -108,6 +108,55 @@ class TestExistingMapFormNames:
 
 
 # ---------------------------------------------------------------------------
+# OI-1143: routing_recommendations candidates missing from the cost register
+# ---------------------------------------------------------------------------
+
+class TestOI1143CandidateModelsResolve:
+    """kimi-k2-7-code and codex-gpt-5-4/-5-5 are routing_recommendations
+    candidates; smart_router.decide() logged 'unknown candidate model' for them
+    and weighed them cost-blind (cost_usd_per_call stayed None)."""
+
+    def test_kimi_k2_7_code_has_cost(self):
+        # kimi-cli "kimi-for-coding" — registry key kimi_cli/kimi-k2-7
+        cost = compute_cost_per_call("kimi-k2-7-code")
+        assert cost is not None and cost > 0
+
+    def test_kimi_k2_7_registry_key_same_cost(self):
+        cost = compute_cost_per_call("kimi-k2-7")
+        assert cost is not None  # not vacuously equal via None == None
+        assert cost == compute_cost_per_call("kimi-k2-7-code")
+
+    def test_codex_gpt_5_4_has_cost(self):
+        # codex CLI lane running openai gpt-5.4 — API-metered ($1.25/$10 per
+        # Mtok, routing_policy.yaml cost reference, measured 2026-06-06)
+        cost = compute_cost_per_call("codex-gpt-5-4")
+        assert cost is not None and cost > 0
+
+    def test_codex_gpt_5_5_has_cost(self):
+        cost = compute_cost_per_call("codex-gpt-5-5")
+        assert cost is not None and cost > 0
+
+    def test_enrich_candidates_no_unknown_warning(self, caplog):
+        """enrich_candidates must fill the cost without the unknown-candidate
+        warning for every routing_recommendations model_id of these lanes."""
+        import logging
+        from types import SimpleNamespace
+
+        from cost_loader import enrich_candidates
+
+        candidates = [
+            SimpleNamespace(model_id=m, cost_usd_per_call=None)
+            for m in ("kimi-k2-7-code", "codex-gpt-5-4", "codex-gpt-5-5")
+        ]
+        with caplog.at_level(logging.WARNING, logger="cost_loader"):
+            enrich_candidates(candidates)
+        assert "unknown candidate model" not in caplog.text
+        for candidate in candidates:
+            assert candidate.cost_usd_per_call is not None, candidate.model_id
+            assert candidate.cost_usd_per_call > 0, candidate.model_id
+
+
+# ---------------------------------------------------------------------------
 # Negative-path: unknown models
 # ---------------------------------------------------------------------------
 

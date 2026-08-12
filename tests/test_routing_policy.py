@@ -331,23 +331,54 @@ def test_load_lane_safety_non_mapping_raises(tmp_path: Path) -> None:
         load_lane_safety(policy_file)
 
 
-def test_production_headless_block_is_blocked_without_override() -> None:
+def test_production_headless_block_is_open_by_default() -> None:
+    """dispatch-20260811c-b: the block is OFF by default (lane_safety.headless_block.enabled:
+    false) — claude -p runs on the subscription, not API credits, so it no longer needs the
+    billing-protection block. No override needed to proceed."""
     lane_safety = load_lane_safety(_POLICY_PATH)
-    assert is_claude_headless_blocked(lane_safety, env={}) is True
+    assert lane_safety["headless_block"]["enabled"] is False
+    assert is_claude_headless_blocked(lane_safety, env={}) is False
+
+
+def test_production_headless_block_override_env_still_wired() -> None:
+    """The override_env key is retained even though the block is off, so a future revert
+    (enabled: true) doesn't also need the escape hatch re-added — the switch stays reversible."""
+    lane_safety = load_lane_safety(_POLICY_PATH)
+    assert lane_safety["headless_block"]["override_env"] == "VNX_OVERRIDE_CLAUDE_HEADLESS"
 
 
 def test_production_headless_block_lifted_with_override() -> None:
+    """Still not blocked with the override set — no regression from the open-by-default state."""
     lane_safety = load_lane_safety(_POLICY_PATH)
     assert is_claude_headless_blocked(
         lane_safety, env={"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}
     ) is False
 
 
-def test_headless_block_wrong_override_value_still_blocked() -> None:
+def test_headless_block_reenabled_still_honours_override() -> None:
+    """Reversibility proof: if enabled is ever flipped back to true (the yaml-side revert),
+    the retained override_env config still works exactly as it did before the open — without
+    the flag it blocks, with the flag it doesn't. Uses the real block's override_env value
+    with enabled forced True, so this exercises the actual configured escape hatch, not just
+    the default env-var name."""
+    lane_safety = load_lane_safety(_POLICY_PATH)
+    reenabled = {
+        "headless_block": {
+            **lane_safety["headless_block"],
+            "enabled": True,
+        }
+    }
+    override_env = reenabled["headless_block"]["override_env"]
+    assert is_claude_headless_blocked(reenabled, env={}) is True
+    assert is_claude_headless_blocked(reenabled, env={override_env: "1"}) is False
+
+
+def test_headless_block_wrong_override_value_still_open() -> None:
+    """A garbage override value doesn't matter while the block is off — still not blocked."""
     lane_safety = load_lane_safety(_POLICY_PATH)
     assert is_claude_headless_blocked(
         lane_safety, env={"VNX_OVERRIDE_CLAUDE_HEADLESS": "yes"}
-    ) is True
+    ) is False
 
 
 def test_headless_blocked_missing_block_fails_closed() -> None:

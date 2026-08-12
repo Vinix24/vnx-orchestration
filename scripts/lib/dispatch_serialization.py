@@ -7,14 +7,21 @@ pass None -> no-op.
 The serial lock protects the Claude SUBSCRIPTION, not a resource. Running
 multiple subscription-authenticated `claude` processes concurrently risks
 rate-limits and (per prior-incident precedent) account action. Default
-concurrency is 1 (fully serial, the historically-safe behavior). An operator
-who accepts that trade-off may opt in to more headroom via
-VNX_TMUX_MAX_CONCURRENT — e.g. =3 to run three tmux-spawn workers at once.
-This is an explicit, informed opt-in: raising it is the operator's call, not
-a default the code should creep towards.
+concurrency is 5 (operator directive 2026-08-11, dispatch-20260811c-b).
+Concurrent tmux dispatches used to cross each other's instructions through
+tmux's single shared paste buffer — measured 15 of 20 crossings with 4
+simultaneous dispatches. #1451 gave every dispatch its own named paste
+buffer; the same measurement came back 0 of 20 crossings after. Raising the
+default past 1 is only sound on a fabric that carries that fix. An operator
+may still dial concurrency up or down via VNX_TMUX_MAX_CONCURRENT — e.g. =8
+for more headroom, or =1 to go back to fully serial; this is an explicit,
+informed choice, not a default the code should creep towards on its own.
 
-Lock is account-level: $VNX_LOCK_DIR or ~/.vnx-data/locks — shared across all
-projects and worktrees that use the same Claude subscription.
+Lock is account-level: $VNX_LOCK_DIR or ~/.vnx-data/locks — shared across ALL
+projects and worktrees that use the same Claude subscription, by design: the
+subscription session cap is an account property, not a per-project one.
+Setting VNX_LOCK_DIR per project to get 5 slots per project (instead of 5
+across the whole account) multiplies past the real limit — don't.
 
 Posix-only: requires fcntl (unavailable on Windows).
 """
@@ -70,15 +77,17 @@ def _max_concurrent() -> int:
     """N-slot concurrency limit for the claude-tmux lane.
 
     VNX_TMUX_MAX_CONCURRENT, clamped to >= 1. Missing, unparseable, zero, or
-    negative values fall back to 1 -- the subscription-safe default. Only a
-    valid positive integer opts into more than one concurrent slot.
+    negative values fall back to 5 -- the subscription-safe default since the
+    per-dispatch tmux paste-buffer fix (#1451; see module docstring). Only a
+    valid positive integer overrides the default with a different
+    concurrency level.
     """
-    raw = os.environ.get("VNX_TMUX_MAX_CONCURRENT", "1")
+    raw = os.environ.get("VNX_TMUX_MAX_CONCURRENT", "5")
     try:
         n = int(raw)
     except (ValueError, TypeError):
-        return 1
-    return n if n >= 1 else 1
+        return 5
+    return n if n >= 1 else 5
 
 
 def _iso_now() -> str:
@@ -209,7 +218,7 @@ def serialize_lane(
     None -> no-op: yield immediately, touch nothing (providers + headless).
     "claude-tmux" -> acquire the first free slot among N exclusive flocks on
     <lock_dir>/claude-tmux-slot-{0..N-1}.lock (N = VNX_TMUX_MAX_CONCURRENT,
-    default 1) and hold it through the entire with-body (execution +
+    default 5) and hold it through the entire with-body (execution +
     receipt/GOVERN). The acquired slot is released unconditionally in
     finally, including on exception. flock auto-releases on process death;
     no manual stale-lock cleanup needed.

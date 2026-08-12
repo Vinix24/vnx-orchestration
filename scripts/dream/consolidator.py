@@ -221,7 +221,12 @@ Patterns to consolidate:
 def _dispatch_kimi_consolidation(
     patterns_input: dict, project_id: str, timeout: float = _DEFAULT_KIMI_TIMEOUT
 ) -> dict:
-    """Dispatch kimi K2.6 cheap-lane for pattern consolidation and parse the result.
+    """Dispatch the kimi cheap-lane for pattern consolidation and parse the result.
+
+    No explicit model: kimi_exec resolves the registry default
+    (``kimi_cli.default_model`` in wave7_models.yaml, currently kimi-k3) and
+    pins it via ``-m`` — what runs is recorded in VNX, not left to whatever
+    ``~/.kimi/config.toml`` defaults to (OI-1077).
 
     Raises subprocess.TimeoutExpired if kimi does not respond within ``timeout`` seconds.
     """
