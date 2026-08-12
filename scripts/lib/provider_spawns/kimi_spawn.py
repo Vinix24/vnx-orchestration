@@ -807,12 +807,13 @@ def _heartbeat_monitor_loop(
     """Poll the per-dispatch tee file for silence; kill + report if stuck.
 
     Same module (``worker_heartbeat.FileProgressHeartbeat``), same threshold
-    (``VNX_WORKER_HEARTBEAT_SILENCE_SECONDS``, default 600s), same failure-report
+    (``VNX_WORKER_HEARTBEAT_SILENCE_SECONDS``, default 1800s since OI-1130),
+    same failure-report
     shape (``build_heartbeat_failure_report``) as the tmux-spawn and subprocess
     lanes, so the audit trail is uniform regardless of which lane ran the
     dispatch (OI-944, OI-1007, OI-1044).
 
-    The 600s default tolerates kimi's measured cadence: a healthy worker can go
+    The default tolerates kimi's measured cadence: a healthy worker can go
     22 minutes between *file writes* while doing nothing but Read/Grep, but its
     stdout stream (which this tee mirrors) carries a tool_call/tool_result pair
     for every one of those reads — measured gaps between kimi's own LLM steps

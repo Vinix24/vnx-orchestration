@@ -238,29 +238,81 @@ class TestBuildFailureReport(unittest.TestCase):
         summary_text = "".join(summary_body.split())
         self.assertGreaterEqual(len(summary_text), 50)
 
+    def test_report_carries_structural_failure_status(self):
+        # OI-1130: the failure must be a parseable STATUS FIELD, not Summary
+        # prose.  Assert on the extracted fields, never on prose text.
+        from worker_heartbeat import SilenceVerdict, build_heartbeat_failure_report
+        from report_to_receipt_converter import _extract_body_fields
+        verdict = SilenceVerdict(
+            is_silent=True, silence_seconds=1900.0, threshold_seconds=1800,
+        )
+        report = build_heartbeat_failure_report(
+            "20260811-hb-kill", verdict, terminal_id="T1",
+        )
+        fields = _extract_body_fields(report)
+        self.assertEqual(fields.get("status"), "failed")
+        self.assertEqual(fields.get("failure_reason"), "heartbeat_killed")
+
+    def test_kill_report_converts_to_task_failed_receipt(self):
+        # OI-1130 end-to-end shape: the heartbeat-kill report must land as a
+        # task_failed receipt, never task_complete.  Before the fix the report
+        # passed the body contract with no status field at all -> the
+        # converter emitted event_type="task_complete", status="" — a kill
+        # indistinguishable from success without reading the Summary.
+        from worker_heartbeat import SilenceVerdict, build_heartbeat_failure_report
+        from report_to_receipt_converter import build_receipt_from_report
+        verdict = SilenceVerdict(
+            is_silent=True, silence_seconds=1900.0, threshold_seconds=1800,
+        )
+        report = build_heartbeat_failure_report(
+            "20260811-hb-kill-receipt", verdict, terminal_id="T1",
+        )
+        tmpdir = Path(tempfile.mkdtemp())
+        path = tmpdir / "20260811-hb-kill-receipt.md"
+        path.write_text(report, encoding="utf-8")
+        try:
+            receipt = build_receipt_from_report(path, report)
+        finally:
+            import shutil
+            shutil.rmtree(str(tmpdir), ignore_errors=True)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["event_type"], "task_failed")
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt.get("failure_reason"), "heartbeat_killed")
+
 
 class TestThresholdResolution(unittest.TestCase):
     """VNX_WORKER_HEARTBEAT_SILENCE_SECONDS env var resolution."""
 
     def test_default_unset(self):
+        # OI-1130: default raised 600 -> 1800.  The 600s tail was measured on
+        # the chatty subprocess event stream; deep-thinking tmux workers are
+        # legitimately silent past 600s (4 of 5 killed on 2026-08-10 with
+        # real work in their worktrees).
         with patch.dict(os.environ, {}, clear=True):
             from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 600)
+            self.assertEqual(_resolve_silence_threshold(), 1800)
 
     def test_valid_env_value(self):
         with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "300"}):
             from worker_heartbeat import _resolve_silence_threshold
             self.assertEqual(_resolve_silence_threshold(), 300)
 
+    def test_env_override_above_default_wins(self):
+        # The override must win in BOTH directions — 3600 > default 1800.
+        with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "3600"}):
+            from worker_heartbeat import _resolve_silence_threshold
+            self.assertEqual(_resolve_silence_threshold(), 3600)
+
     def test_negative_clamps(self):
         with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "-100"}):
             from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 600)
+            self.assertEqual(_resolve_silence_threshold(), 1800)
 
     def test_unparseable_clamps(self):
         with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "abc"}):
             from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 600)
+            self.assertEqual(_resolve_silence_threshold(), 1800)
 
     def test_zero_disables(self):
         with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0"}):

@@ -7,16 +7,20 @@ it is considered stuck and a terminal failure is written.
 
 Deterministic: no model calls, pure timer + read on NDJSON or file growth.
 
-**Data-driven default (N=600s):** measured across 4.2M within-dispatch event
-gaps from 445 real dispatches (T1/T2/T3 subprocess lanes, archived + live
-streams from vnx-dev).  Distribution:
+**Data-driven default (1800s):** the original 600s default was measured
+across 4.2M within-dispatch event gaps from 445 real dispatches (T1/T2/T3
+subprocess lanes, archived + live streams from vnx-dev):
   p50=0.0s  p90=0.0s  p95=0.0s  p99=0.1s  p99.9=2.5s  max=566.3s (T2)
 
-The longest legitimate gap in a production build-worker dispatch was 389.7s
-(a plan-revise dispatch on T2).  The 600s default is ~1.5x above that tail
-and ~240x the p99.9 value, giving ample headroom for slow tool executions
-while catching truly hung workers within typical dispatch deadlines
-(3600-7200s).
+That tail does not transfer to the tmux lane.  OI-1130 (measured 2026-08-10/11):
+4 of 5 evening dispatches with deep-thinking sonnet workers were killed at
+exactly 600s of pane-log silence, each holding real uncommitted work — the
+only survivor was the most mechanical task of the five.  Thinking is quiet
+on the pane; the chatty subprocess event stream the 600s figure came from is
+not the signal the FileProgressHeartbeat watches.  The default is therefore
+1800s: slower detection of a truly hung worker (still well inside typical
+3600-7200s dispatch deadlines) in exchange for not killing exactly the deep
+work that was requested.
 
 The default is overridable via VNX_WORKER_HEARTBEAT_SILENCE_SECONDS.
 
@@ -36,9 +40,9 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Default silence threshold: 600 seconds (10 minutes).
-# See module docstring for the data-driven rationale.
-_DEFAULT_SILENCE_THRESHOLD_SECONDS = 600
+# Default silence threshold: 1800 seconds (30 minutes).
+# Raised from 600s by OI-1130 — see module docstring for the rationale.
+_DEFAULT_SILENCE_THRESHOLD_SECONDS = 1800
 
 # Env var to override the default.
 _ENV_SILENCE_SECONDS = "VNX_WORKER_HEARTBEAT_SILENCE_SECONDS"
@@ -339,6 +343,13 @@ def build_heartbeat_failure_report(
 
     Returns the report text as a string.  The caller is responsible for
     writing it to the unified_reports directory.
+
+    OI-1130: the report carries a STRUCTURAL failure identity — bold-fields
+    ``Status: failed`` and ``Failure-Reason: heartbeat_killed`` — so the
+    receipt converter emits a ``task_failed`` receipt.  The report passes the
+    body contract on purpose (the audit trail needs the four headings), which
+    previously made a heartbeat kill land as a normal ``task_complete``
+    receipt, indistinguishable from success without reading the Summary prose.
     """
     from datetime import datetime as _dt
 
@@ -374,6 +385,8 @@ def build_heartbeat_failure_report(
     return f"""**Dispatch-ID**: {dispatch_id}
 **Model**: {model}
 **Provider**: {provider}
+**Status**: failed
+**Failure-Reason**: heartbeat_killed
 
 ## Summary
 
@@ -385,7 +398,9 @@ failure — the dispatch did not complete.
 
 ## Changes
 
-None.  The worker was killed before producing any committed changes.
+None recorded by the worker.  The worker was killed mid-run; any work it
+produced may still sit uncommitted in its worktree — salvage before reap
+(OI-1130).
 
 ## Verification
 
