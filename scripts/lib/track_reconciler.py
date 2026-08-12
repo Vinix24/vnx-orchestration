@@ -74,12 +74,16 @@ def _delivery_hold(
     project_id: str,
     pr_ref: Optional[str],
 ) -> Optional[Dict[str, Any]]:
-    """OI-1098: delivery-marking hold for the done-derivation and nomination.
+    """OI-1098 / OI-1167: delivery-marking hold for the done-derivation and nomination.
 
     Returns None when the track is NOT held; otherwise a dict::
 
         {"held": True, "partial": N, "complete": C, "unmarked": U,
          "total": M, "reason": "<operator-readable>"}
+
+    (When the hold fires because the table itself is missing — OI-1167 below
+    — there is nothing to count: partial/complete are None and an extra
+    ``"unverifiable": True`` key is set instead.)
 
     Rule (fail-closed, decision taken in OI-1098): a track is held when ANY
     PR in its CURRENT pr_ref has an explicit track_pr_delivery row whose
@@ -88,20 +92,36 @@ def _delivery_hold(
 
     Legacy handling (measured on the vnx-dev tracks DB, 2026-08-09): the only
     delivery_kind values in practice are 'partial' (29 rows) and 'complete'
-    (4 rows), enforced by the 0032 CHECK constraint. A PR with NO row is NOT
-    the same as an explicit 'partial': planning_cli's link path writes a row
-    for EVERY PR in the call (``--delivery`` defaults to 'partial'), so a
-    missing row can only mean the PR was linked before migration 0032 existed.
-    Treating such unmarked legacy PRs as 'partial' would silently freeze
-    every pre-0032 track — the same invisible-drop failure this fix exists to
-    prevent, at fleet scale. So: unmarked PRs do NOT hold; only explicit
+    (4 rows), enforced by the 0032 CHECK constraint. A PR with NO ROW *in an
+    existing table* is NOT the same as an explicit 'partial': planning_cli's
+    link path writes a row for EVERY PR in the call (``--delivery`` defaults
+    to 'partial'), so a missing row on a migrated DB can only mean that PR
+    was linked before migration 0032 was applied. Treating such unmarked
+    legacy rows as 'partial' would silently freeze every such track — the
+    same invisible-drop failure this fix exists to prevent, at fleet scale.
+    So: an unmarked row on an EXISTING table does NOT hold; only explicit
     non-'complete' markings do.
+
+    OI-1167: that grandfather clause covers a missing ROW, not a missing
+    TABLE, and the two are not the same failure mode. A store that has never
+    applied migration 0032 did not check and find nothing to object to — it
+    never had the ability to object at all. Reading that as "no explicit
+    markings exist, so nothing is held" repeats the exact OI-829 bug
+    (worker-provider-free-choice closing after PR 1 of 5 merged) on every
+    track in every pre-0032 store, permanently, since the table can never
+    silently appear on its own. Measured 2026-08-12: 4 of the fleet's 5
+    consumer stores (mission-control, seocrawler-v2, sales-copilot,
+    pacompany-engine) pre-date migration 0032 and were, before this fix,
+    completely exempt from the OI-829 protection. So: a missing TABLE now
+    HOLDS (unverifiable=True) rather than returning None.
 
     Fail-closed edges (mirror close_track_if_done's OI-829 gate):
       - An unrecognized delivery_kind on an existing row is logged at ERROR
         and treated as a hold (never silently read as 'complete').
-      - When the track_pr_delivery table is absent (pre-0032 DB), there is
-        nothing explicit to hold on: returns None (legacy behaviour).
+      - When the track_pr_delivery table itself is absent (pre-0032 DB), the
+        store cannot distinguish 'complete' from 'partial' for ANY linked
+        PR — holds, with unverifiable=True (OI-1167; previously returned
+        None and let PR-evidence derive 'done' unguarded).
 
     Only rows whose pr_number is in the CURRENT pr_ref count — a stale row
     left behind by an unlinked PR must not hold the track.
@@ -115,7 +135,25 @@ def _delivery_hold(
         ).fetchone()
     )
     if not has_table:
-        return None  # migration 0032 not applied to this DB — no explicit markings exist
+        # OI-1167: migration 0032 not applied to this DB — there is no way to
+        # tell 'complete' from 'partial' for any linked PR. That is a reason
+        # to hold, not a free pass: see the docstring's OI-1167 section.
+        total = len(nums)
+        return {
+            "held": True,
+            "unverifiable": True,
+            "partial": None,
+            "complete": None,
+            "unmarked": total,
+            "total": total,
+            "reason": (
+                f"delivery unverifiable: track_pr_delivery table is absent "
+                f"(migration 0032 not applied to this DB) — cannot confirm "
+                f"any of the {total} linked PR(s) marked the plan 'complete'; "
+                f"failing closed instead of treating the missing table as "
+                f"evidence of completion"
+            ),
+        }
     rows = conn.execute(
         "SELECT pr_number, delivery_kind FROM track_pr_delivery "
         "WHERE track_id = ? AND project_id = ?",

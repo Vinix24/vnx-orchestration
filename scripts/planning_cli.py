@@ -754,6 +754,29 @@ def _merge_pr_refs(existing: Optional[str], incoming: list[str]) -> tuple[Option
     return new_ref, added, already
 
 
+# OI-1167: link-pr's pr_ref write and its delivery-marking write are two
+# separate facts. Linking the PR reference genuinely succeeds even when
+# track_pr_delivery is absent (pre-0032 store) -- that is legitimate
+# bookkeeping many legacy tracks rely on, and the reconciler's own OI-1167
+# hold (track_reconciler._delivery_hold) independently protects auto-close
+# on such a track regardless of what link-pr records here. So the exit code
+# stays 0 for a successful pr_ref write. What must change is the LIE: the
+# old shape (print a soft "WARNING" bullet buried among success output,
+# still exit 0) let the caller believe --delivery had recorded a fail-closed
+# marking when nothing was written at all. This is fixed by making the
+# failure starkly visible instead -- an ERROR-level line on stderr (not
+# stdout) plus an explicit "error" key in --json output -- so a caller who
+# checks either surface cannot miss it, even though the overall command still
+# reports success for the part that did succeed.
+_DELIVERY_TABLE_MISSING_MSG = (
+    "delivery NOT recorded: track_pr_delivery table is absent (migration 0032 "
+    "not applied to this DB). pr_ref is still linked, but the OI-829 "
+    "fail-closed auto-close gate has nothing to check for this track's PR(s) "
+    "until 0032 is applied -- apply the migration, then re-run this command "
+    "with --delivery to record the marking."
+)
+
+
 def _write_pr_delivery(
     conn: sqlite3.Connection,
     project_id: str,
@@ -838,28 +861,28 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
             conn.commit()
         finally:
             conn.close()
+        payload = {
+            "track_id": track_id,
+            "project_id": project_id,
+            "pr_ref": new_ref,
+            "added": added,
+            "already_present": already,
+            "delivery": delivery_kind,
+            "delivery_written": delivery_written,
+            "action": "noop_no_change",
+            "applied": False,
+        }
+        if not delivery_written:
+            payload["error"] = _DELIVERY_TABLE_MISSING_MSG
         if args.json:
-            print(json.dumps({
-                "track_id": track_id,
-                "project_id": project_id,
-                "pr_ref": new_ref,
-                "added": added,
-                "already_present": already,
-                "delivery": delivery_kind,
-                "delivery_written": delivery_written,
-                "action": "noop_no_change",
-                "applied": False,
-            }, indent=2, default=str))
+            print(json.dumps(payload, indent=2, default=str))
         else:
             print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
             print(f"  pr_ref: {new_ref}")
             if delivery_written:
                 print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
             else:
-                print(
-                    "  WARNING: delivery not recorded — migration 0032 "
-                    "(track_pr_delivery) not applied to this DB yet."
-                )
+                print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
             print(f"  all provided PR refs already present; no pr_ref change made.\n")
         return 0
 
@@ -887,18 +910,21 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
         {"added": added, "already_present": already, "pr_ref": new_ref, "delivery": delivery_kind},
     )
 
+    payload = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "pr_ref": new_ref,
+        "added": added,
+        "already_present": already,
+        "delivery": delivery_kind,
+        "delivery_written": delivery_written,
+        "action": "linked",
+        "applied": True,
+    }
+    if not delivery_written:
+        payload["error"] = _DELIVERY_TABLE_MISSING_MSG
     if args.json:
-        print(json.dumps({
-            "track_id": track_id,
-            "project_id": project_id,
-            "pr_ref": new_ref,
-            "added": added,
-            "already_present": already,
-            "delivery": delivery_kind,
-            "delivery_written": delivery_written,
-            "action": "linked",
-            "applied": True,
-        }, indent=2, default=str))
+        print(json.dumps(payload, indent=2, default=str))
     else:
         print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
         print(f"  pr_ref: {new_ref}")
@@ -909,10 +935,7 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
         if delivery_written:
             print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
         else:
-            print(
-                "  WARNING: delivery not recorded — migration 0032 "
-                "(track_pr_delivery) not applied to this DB yet."
-            )
+            print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
         print()
     return 0
 
@@ -2609,8 +2632,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_link_pr.add_argument(
         "--delivery", choices=("partial", "complete"), default="partial",
         help="delivery_kind for the linked PR(s): 'partial' ships a slice of the "
-             "plan, 'complete' ships the whole thing (default: partial — fail-closed; "
-             "OI-829 auto-close requires >=1 linked PR marked 'complete')",
+             "plan, 'complete' ships the whole thing (default: partial). OI-829 "
+             "auto-close requires >=1 linked PR marked 'complete' -- fail-closed "
+             "ONLY once migration 0032 (track_pr_delivery) is applied to this DB; "
+             "if it is missing, pr_ref is still linked but the delivery marking "
+             "is NOT recorded (a loud stderr error and --json 'error' field say "
+             "so; apply 0032 and re-run to record it)",
     )
     p_link_pr.set_defaults(func=cmd_objective_link_pr)
 

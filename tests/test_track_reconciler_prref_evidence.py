@@ -48,10 +48,19 @@ PROJECT_ID = "test-ev-proj"
 # ---------------------------------------------------------------------------
 
 def _build_db(tmp_path: Path, *, deep: bool = False) -> Path:
-    """Return a state_dir with migrations 0022 + 0024 + 0027 + 0028 applied.
+    """Return a state_dir with migrations 0022 + 0024 + 0027 + 0028 + 0032 applied.
 
     deep=True uses tmp_path/.vnx-data/state so that state_dir.parent.parent == tmp_path,
     matching the real project structure and allowing ROADMAP.yaml at tmp_path/ROADMAP.yaml.
+
+    0032 (track_pr_delivery) is included so this file's pr_ref+merged-evidence
+    path is exercised on a store that CAN record delivery markings, same as
+    every other reconciler test file. None of the tracks below ever get an
+    explicit marking, so the OI-1098 "unmarked row in an existing table does
+    not hold" grandfather still applies and these assertions are unchanged.
+    A store that has NEVER applied 0032 at all is a different, narrower case
+    (OI-1167: the table is absent, not merely empty) — covered separately in
+    tests/test_reconciler_delivery_hold.py and tests/test_close_track_if_done.py.
     """
     if deep:
         state_dir = tmp_path / ".vnx-data" / "state"
@@ -116,6 +125,12 @@ def _build_db(tmp_path: Path, *, deep: bool = False) -> Path:
     schema_migration.apply_script_if_below(
         conn, 28,
         (_MIGRATIONS / "0028_tracks_derived_status.sql").read_text(encoding="utf-8"),
+    )
+    conn.commit()
+
+    schema_migration.apply_script_if_below(
+        conn, 32,
+        (_MIGRATIONS / "0032_track_pr_delivery.sql").read_text(encoding="utf-8"),
     )
     conn.commit()
     conn.close()

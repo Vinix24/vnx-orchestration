@@ -294,14 +294,44 @@ def test_unmarked_legacy_pr_derives_done(tmp_path):
     assert "delivery_hold" not in result
 
 
-def test_pre0032_db_without_table_derives_done(tmp_path):
-    """A DB without migration 0032 has no explicit markings at all → no hold."""
+def test_pre0032_db_without_table_holds_instead_of_done(tmp_path):
+    """OI-1167: a DB without migration 0032 cannot tell 'complete' from
+    'partial' for ANY linked PR -- that is a reason to hold, not a free pass.
+    Pre-fix this derived 'done' from bare PR-evidence with zero ability to
+    veto an incomplete delivery (the exact OI-829 blind spot, permanently, on
+    every pre-0032 store); post-fix it holds and says why."""
     sd = _build_db(tmp_path, with_delivery_table=False)
     _seed_track(sd, "T-pre32", phase="active", pr_ref="#100")
     _seed_dispatch(sd, "D-pre32", "T-pre32", state="completed")
     _seed_pr_merged_event(sd, "D-pre32")
 
     result = track_reconciler.reconcile_track(sd, "T-pre32", PROJECT_ID)
+
+    assert result["derived_status"] == "in_progress"  # terminal dispatches, done vetoed
+    hold = result.get("delivery_hold")
+    assert hold is not None
+    assert hold["unverifiable"] is True
+    assert hold["partial"] is None
+    assert hold["complete"] is None
+    assert hold["total"] == 1
+    assert "table is absent" in hold["reason"]
+
+    # peek (read-only dry-run path) carries the same visibility contract.
+    peeked = track_reconciler.peek_derived_status(sd, "T-pre32", PROJECT_ID)
+    assert peeked["derived_status"] == "in_progress"
+    assert peeked.get("delivery_hold", {}).get("unverifiable") is True
+
+
+def test_pre0032_db_without_table_declared_done_stays_done(tmp_path):
+    """Declared-phase stability is unaffected by OI-1167 (mirrors the
+    post-0032 partial-marking case): a human-declared 'done' track on a
+    pre-0032 store still derives 'done' -- the hold vetoes PR-EVIDENCE-based
+    derivation only, never a declared 'done'."""
+    sd = _build_db(tmp_path, with_delivery_table=False)
+    _seed_track(sd, "T-pre32-declared", phase="done", pr_ref="#100")
+    _seed_dispatch(sd, "D-pre32-declared", "T-pre32-declared", state="completed")
+
+    result = track_reconciler.reconcile_track(sd, "T-pre32-declared", PROJECT_ID)
 
     assert result["derived_status"] == "done"
     assert "delivery_hold" not in result

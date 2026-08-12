@@ -334,18 +334,60 @@ def test_link_pr_upgrades_already_present_pr_to_complete(tmp_path):
     assert _pr_delivery(sd, "T", 502) == "complete"
 
 
-def test_link_pr_delivery_missing_migration_warns_not_crashes(tmp_path, capsys):
-    """DB without migration 0032 applied: link-pr must not crash. It records
-    pr_ref as usual and surfaces a plain warning instead of silently dropping
-    the delivery marking."""
+def test_link_pr_delivery_missing_migration_fails_closed_loudly(tmp_path, capsys):
+    """OI-1167: DB without migration 0032 applied: link-pr must not crash, and
+    must not quietly bury the failure either. pr_ref linking is a genuinely
+    separate, successful fact (the reconciler's own OI-1167 hold protects
+    auto-close independently of what gets recorded here), so the command
+    still exits 0 -- but the delivery marking was NOT recorded, and that must
+    be starkly visible: an ERROR-level line on stderr (not a soft "WARNING"
+    bullet buried in the success output on stdout). The old shape printed
+    only the soft warning and nothing on stderr, so a caller who only checks
+    stderr for problems -- a common convention -- would see nothing at all."""
     sd = _build_db(tmp_path)  # deliberately NOT applying 0032
     tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
 
     rc = planning_cli.cmd_objective_link_pr(_link_pr_args(sd, "T", "#503", delivery="complete"))
     assert rc == 0
     assert _pr_ref(sd, "T") == "#503"
-    out = capsys.readouterr().out
-    assert "WARNING" in out and "track_pr_delivery" in out
+    captured = capsys.readouterr()
+    assert "ERROR" in captured.err and "track_pr_delivery" in captured.err
+    assert "WARNING" not in captured.out
+    assert "WARNING" not in captured.err
+
+
+def test_link_pr_delivery_missing_migration_json_reports_error(tmp_path, capsys):
+    """Same missing-migration scenario via --json: delivery_written is False
+    and an explicit "error" key names the cause -- a machine caller reading
+    the JSON payload must not have to scrape human-facing text to detect it."""
+    sd = _build_db(tmp_path)  # deliberately NOT applying 0032
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+
+    rc = planning_cli.cmd_objective_link_pr(
+        _link_pr_args(sd, "T", "#504", delivery="complete", json=True)
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["delivery_written"] is False
+    assert payload["action"] == "linked"
+    assert "track_pr_delivery" in payload["error"]
+
+
+def test_link_pr_delivery_missing_migration_noop_no_change_branch_fails_closed(tmp_path, capsys):
+    """Same fail-closed-and-loud contract on the OTHER write branch: re-linking
+    an already-present PR (pr_ref unchanged -> action='noop_no_change') on a
+    DB without migration 0032 must also surface the loud stderr error, not
+    just the 'new pr_ref' branch above."""
+    sd = _build_db(tmp_path)  # deliberately NOT applying 0032
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#505"
+    )
+
+    rc = planning_cli.cmd_objective_link_pr(_link_pr_args(sd, "T", "#505", delivery="complete"))
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#505"
+    captured = capsys.readouterr()
+    assert "ERROR" in captured.err and "track_pr_delivery" in captured.err
 
 
 # ---------------------------------------------------------------------------
