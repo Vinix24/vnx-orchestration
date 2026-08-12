@@ -13,7 +13,7 @@
 
 [![Stars](https://img.shields.io/github/stars/Vinix24/vnx-orchestration?logo=github)](https://github.com/Vinix24/vnx-orchestration/stargazers)
 &nbsp;![Forks](https://img.shields.io/github/forks/Vinix24/vnx-orchestration?logo=github)
-&nbsp;![Audit trail](https://img.shields.io/badge/audit%20trail-15k%2B%20receipts-2ea043)
+&nbsp;![Audit trail](https://img.shields.io/badge/audit%20trail-27k%2B%20receipts-2ea043)
 &nbsp;![Vendor SDK](https://img.shields.io/badge/vendor%20SDK-none-24292f)
 
 **[Docs](docs/) · [Architecture](docs/core/00_VNX_ARCHITECTURE.md) · [State Fabric](docs/core/STATE_FABRIC.md) · [ADRs](docs/governance/decisions/) · [Writing](https://vincentvandeth.nl) · [Changelog](CHANGELOG.md)**
@@ -28,25 +28,24 @@ It is a local control plane for the AI coding CLIs that already sit on your mach
 
 Most agent projects build SDK-native agents. I orchestrate the binaries instead. The difference shows up in the audit trail: I can reconstruct what was dispatched, what was reviewed, what merged, and what each gate cost.
 
-I built this for my own work, across 3,000+ hours of Claude Code and 15,000+ tests. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+I built this for my own work, across 3,000+ hours of Claude Code and 18,816 test functions across 1,008 test files. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
 This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
-## What's new in 1.2
+## What's new in 1.4
 
-- **Plan-first-gate enforcement.** A track is born plan-gated, but until now that gate bound only closure bookkeeping — work could be built and merged without the plan gate ever passing. It is now enforced at the dispatch door (advisory-first, `VNX_PLAN_GATE_ENFORCE`), with the merge gate as the second chokepoint: plan before work, structurally. [ADR-030](docs/governance/decisions/ADR-030-plan-first-gate-enforcement.md). The full track lifecycle — plan-gate → dispatch → merge → reconcile → close → auto-close — is documented in [HORIZON_LIFECYCLE.md](docs/core/HORIZON_LIFECYCLE.md).
-- **Auto-close on by default.** The git-grounded reconcile closes merged tracks without a manual sweep; the trust-streak is now observability-only, with close-time revalidation the durable safeguard.
-- **ADR-028 orchestration-target Phases 1–4** (agent-folder fusion + a decision-judge that shadows, fast-paths, then binds — all default-off), **ADR-029 hash-chain epoch-rotation**, the **central-store `project_id` authority** fix, the **`/panel` multi-provider deliberation skill**, and the **evidence-bound merge gate**. Full detail in the [CHANGELOG](CHANGELOG.md).
+Six patch releases (1.4.0 through 1.4.5, July 31 to August 7, 2026), all documented in the [CHANGELOG](CHANGELOG.md). The headlines:
 
-## What's new in 1.1
+- **Worker-provider free choice shipped end-to-end** (1.4.0): a `ModelPin` floor-vs-default contract replaces the old hard pin, so a dispatch can choose its provider instead of inheriting a fleet default.
+- **Fleet-wide plan-gate outage fixed** (1.4.1, #1280): a central install resolved the plan-gate's data directory from the module's own (read-only, pinned) install path instead of the project's central store, so every plan-gate on the machine died with `PermissionError` across all five provider lanes. Now resolved from the central store for the active `project_id`.
+- **Reconcile chain and open-item cleanup** (1.4.2): open items went from 773 to 53 across eight triage rounds, and the auto-close reconciler's 31-hour silent outage on a bare `gh` lookup is fixed.
+- **CI measured 2% of the suite** (1.4.3): Profile A ran 18 of 933 test files; it now runs the full suite, and two tests that could write into the live production store are fail-closed.
+- **ReceiptV2 schema + measured token capture** (1.4.4): real `token_usage` harvested from claude-harness transcripts and the kimi session log, replacing modeled estimates.
+- **Release-publish guard + `vnx horizon link-pr`/`set-lane-hint` on the pip CLI** (1.4.5).
 
-- **Horizon planning module.** `vnx horizon` is the named command surface for the future-state layer: `list / show / add / sync / drift / reconcile / close / reopen / plan-gate`. Tracks project from `ROADMAP.yaml`, and a git-grounded reconcile closes them against merged PRs. See [Horizon planning](docs/core/HORIZON_PLANNING.md) and its [lifecycle](docs/core/HORIZON_LIFECYCLE.md).
-- **Signed attestation enforcement.** SSH-key-signed, content-keyed, diff-bound attest records with a server-side verify gate and a signed, budgeted, audited override (a recorded deviation, never silent). [ADR-027](docs/governance/decisions/ADR-027-signed-attestation-enforcement.md).
-- **Track-linkage + git-grounded backward closure.** `track_id` is validated at the dispatch door and auto-propagated to `track.pr_ref` on merge; a reconcile loop verifies PR merge state via `gh` and closes done tracks under a system actor. No manual bookkeeping.
-- **`vnx fabric-audit`.** A Phase-0 store-hygiene check over split-brain stores, per-project ledgers, and receipt hash-chain integrity. [ADR-028](docs/governance/decisions/ADR-028-orchestration-target-architecture.md).
-- **Operator-gated self-learning proposal tier.** The receipt stream is mined for recurring failures into prevention-rule proposals for a human to accept. Nothing auto-activates.
+Since 1.4.5, three defaults have flipped by direct operator decision, all in this repository's history: the headless `claude -p` lane opened by default (#1455), per-dispatch git-worktree isolation became unconditional for the provider/subprocess lanes (#1449), and `vnx gate-check` landed on the pip CLI (#1462) — see "What works today vs what is opt-in" and "Your first dispatch" below for what that means in practice.
 
-Full detail, including the folded-in 1.0.1 future-state batch, is in the [CHANGELOG](CHANGELOG.md). The 1.0 launch surface — pip packaging, provider-agnostic skill injection ([ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md)), the benchmark field-tests harness, the SSRF-safe URL policy, headless review gates, and receipt hash-chain verification — shipped in [1.0.0](CHANGELOG.md).
+Full history for every minor and patch back to 0.1.0 is in the [CHANGELOG](CHANGELOG.md).
 
 ## Writing
 
@@ -78,9 +77,9 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 ## What works today vs what is opt-in
 
-The audit trail is the whole point, so I am honest about maturity. Verified against code and receipts as of 1.1 (July 2026).
+The audit trail is the whole point, so I am honest about maturity. Verified against code and receipts on 2026-08-12 (version 1.4.5, unreleased fixes on top).
 
-**Tier 1 — in production.** Append-only NDJSON receipts with hash-chain verification (`audit_chain`); per-append enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. Multi-CLI provider hub, no vendor SDK. Review gates (codex + gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (`VNX_ISOLATED_WORKTREE` defaults off). Default interactive tmux worker lane on the subscription (headless `claude -p` is opt-in, blocked by default). Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
+**Tier 1 — in production.** Append-only NDJSON receipts with hash-chain verification (`audit_chain`); per-append enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. Multi-CLI provider hub, no vendor SDK. Review gates (codex + gemini) with deterministic CI as the third gate. Per-worker git worktree isolation, default-on since #1449 — unconditional for the provider and subprocess lanes, on by default for the tmux lane (`--no-isolated-worktree` opts out), with teardown classification for clean, committed, or dirty state. Default interactive tmux worker lane on the subscription; headless `claude -p` opened by default since #1455 (both lanes bill the subscription, not API credits — see "Billing" below). Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
 
 **Tier 2 — shipped, opt-in, burning in.** Smart routing (`VNX_AUTO_ROUTE`), elastic worker pool (`bin/vnx pool`), track layer + roadmap autopilot (`VNX_ROADMAP_AUTOPILOT=1`), auto-dream consolidation, and an operator-gated self-learning proposal tier that mines the receipt stream for recurring failures into `pending_rules.json` for a human to accept (G-L1; nothing auto-activates). These default off and are not yet proven at the Tier 1 bar. The single-entry dispatch door (`dispatch_cli.py`) is the exception: default-ON since 2026-06-24 (ADR-024), normalizing GLM to the harness lane and running a phantom-guard that rejects evidence-free GATE-GREEN receipts — recent enough that I still hold it here. Roll back per terminal with `VNX_DISPATCH_LEGACY=1`.
 
@@ -105,7 +104,7 @@ usage. `vnx dispatch-agent` fails at spawn if no worker CLI is present — `vnx 
 a `tool:worker-cli` warning. (Zero-key exploration of the governance flow is not currently shipped;
 the old replay demo was retired.)
 
-There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check` and `new-worktree` — for those, clone the repository and run `pip install -e .` from the checkout.
+There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`), and as of `#1462` also `gate-check` — the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. Checkout-only operator commands still live behind `./bin/vnx` — `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging) — for those, clone the repository and run `pip install -e .` from the checkout.
 
 ## Architecture
 
