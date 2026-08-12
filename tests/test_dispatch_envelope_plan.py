@@ -754,7 +754,9 @@ class TestEnvelopeWorktreeIsolation:
             result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
 
         assert result.status == "success"
-        mock_create.assert_called_once_with("wt-cwd-test", project_root=_fake_consumer_root)
+        mock_create.assert_called_once_with(
+            "wt-cwd-test", project_root=_fake_consumer_root, base_ref=plan.base_ref
+        )
         assert adapter_calls, "ProviderAdapter.run was not called"
         assert adapter_calls[0]["cwd"] == _FAKE_WT_PATH, (
             f"expected cwd={_FAKE_WT_PATH}, got cwd={adapter_calls[0]['cwd']}"

@@ -1,9 +1,9 @@
 """dispatch_worktree_isolation.py — per-dispatch ephemeral git worktree.
 
 Always active (default-on since OI-1090, 2026-08-10).
-Each dispatch gets a fresh worktree rooted at origin/main under
-.vnx-data/worktrees/dispatch-{safe_id}/.  The worktree is removed
-(success OR failure) so no state leaks between dispatches.
+Each dispatch gets a fresh worktree, rooted at the caller's explicit base_ref
+(``origin/main`` when none is given), under .vnx-data/worktrees/dispatch-{safe_id}/.
+The worktree is removed (success OR failure) so no state leaks between dispatches.
 
 Dispatch-identity binding (OI-861):
 A worktree's path is derived from the dispatch id, but the path alone does
@@ -470,34 +470,55 @@ def create_dispatch_worktree(
     dispatch_id: str,
     *,
     project_root: Optional[Path] = None,
+    base_ref: Optional[str] = None,
 ) -> Path:
-    """Create an ephemeral git worktree based on origin/main for one dispatch.
+    """Create an ephemeral git worktree for one dispatch, based on *base_ref*.
 
     Steps:
-      1. git fetch origin main  (best-effort — warns on failure)
-      2. git worktree add <path> -b dispatch/<safe_id> origin/main
+      1. git fetch origin <ref>  (best-effort — warns on failure; remote refs only)
+      2. git worktree add <path> -b dispatch/<safe_id> <resolved base ref>
+
+    The base ref actually used is resolved by precedence (highest wins):
+      1. the explicit *base_ref* argument — the caller's real intent (e.g. the
+         dispatch spec's ``plan.base_ref``, mirroring ``tmux_worktree.allocate()``).
+      2. ``VNX_BENCH_WORKTREE_BASE_REF`` — a FALLBACK for callers that never pass
+         an explicit ref at all (the provider-lane benchmark harness), so a bench
+         run can redirect every worktree at the bench checkout's HEAD without
+         threading a base_ref through that call site. It never overrides an
+         explicit *base_ref*: silently redirecting a caller's own explicit
+         request would reproduce the exact silent-wrong-base defect this
+         parameter exists to fix, just from a different source.
+      3. ``"origin/main"`` — the default when neither is given.
+
+    An unresolvable base ref (bad ref, deleted dispatch branch, etc.) fails
+    LOUD — both the ``rev-parse`` and the ``git worktree add`` step below raise
+    with the requested ref named in the message. There is no fallback to
+    origin/main on failure: a silent fallback is the one thing worse than a
+    loud error here — it would put a worker's changes on the wrong tree with
+    no signal until a human reviews an empty or conflicting diff.
 
     Returns the resolved worktree Path.
-    Raises RuntimeError when worktree creation fails.
+    Raises RuntimeError when the base ref is unresolvable or worktree creation fails.
     """
     root = _resolve_project_root(project_root)
     wt_path = _dispatch_worktree_dir(root, dispatch_id)
     safe_id = _sanitize_dispatch_id(dispatch_id)
     branch_name = f"dispatch/{safe_id}"
 
-    # VNX_BENCH_WORKTREE_BASE_REF: base the worktree on a given ref instead of origin/main.
+    # VNX_BENCH_WORKTREE_BASE_REF: see precedence note in the docstring above.
     # The benchmark sets this to the bench checkout's HEAD so worktrees carry the bench
     # branch's committed task seeds (e.g. the t4_02 SWE-bench seed) without merging WIP
     # benchmark tasks to main. Default (unset) keeps origin/main — production unchanged.
-    base_ref = os.environ.get("VNX_BENCH_WORKTREE_BASE_REF", "").strip() or "origin/main"
-    is_remote = base_ref.startswith("origin/")
+    bench_override = os.environ.get("VNX_BENCH_WORKTREE_BASE_REF", "").strip()
+    resolved_base_ref = (base_ref or "").strip() or bench_override or "origin/main"
+    is_remote = resolved_base_ref.startswith("origin/")
 
     wt_path.parent.mkdir(parents=True, exist_ok=True)
 
     if is_remote:
         try:
             subprocess.run(
-                ["git", "fetch", "origin", base_ref[len("origin/"):]],
+                ["git", "fetch", "origin", resolved_base_ref[len("origin/"):]],
                 cwd=str(root),
                 check=True,
                 capture_output=True,
@@ -506,21 +527,21 @@ def create_dispatch_worktree(
         except subprocess.CalledProcessError as exc:
             log.warning(
                 "create_dispatch_worktree: git fetch %s failed (continuing): %s",
-                base_ref, (exc.stderr or "").strip(),
+                resolved_base_ref, (exc.stderr or "").strip(),
             )
 
     # Resolve base_sha BEFORE adding the worktree — needed for teardown
     # classification (L3 provider-lane reap).  Mirrors tmux_worktree.allocate().
     try:
         sha_result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", base_ref],
+            ["git", "-C", str(root), "rev-parse", resolved_base_ref],
             check=True, capture_output=True, text=True,
         )
         base_sha = sha_result.stdout.strip()
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            f"create_dispatch_worktree: cannot resolve {base_ref!r}: "
-            f"{(exc.stderr or '').strip()}"
+            f"create_dispatch_worktree: cannot resolve base_ref {resolved_base_ref!r} "
+            f"for dispatch {dispatch_id!r}: {(exc.stderr or '').strip()}"
         ) from exc
 
     # OI-975: capture the main checkout HEAD BEFORE worktree creation so
@@ -561,7 +582,7 @@ def create_dispatch_worktree(
                     "git", "worktree", "add",
                     str(wt_path),
                     "-b", branch_name,
-                    base_ref,
+                    resolved_base_ref,
                 ],
                 cwd=str(root),
                 check=True,
@@ -576,8 +597,8 @@ def create_dispatch_worktree(
             if raced is not None:
                 _claim_belongs_to_or_raise(dispatch_id, raced, wt_path)
             raise RuntimeError(
-                f"create_dispatch_worktree failed for {dispatch_id!r}: "
-                f"{(exc.stderr or '').strip()}"
+                f"create_dispatch_worktree failed for {dispatch_id!r} "
+                f"(base_ref={resolved_base_ref!r}): {(exc.stderr or '').strip()}"
             ) from exc
 
         # Claim the freshly-created worktree atomically (O_EXCL).  From here on
@@ -592,7 +613,7 @@ def create_dispatch_worktree(
                 worktree_path=wt_path,
                 project_root=root,
                 base_sha=base_sha,
-                base_ref=base_ref,
+                base_ref=resolved_base_ref,
                 branch=branch_name,
                 main_head_sha=_main_head_sha,
             )

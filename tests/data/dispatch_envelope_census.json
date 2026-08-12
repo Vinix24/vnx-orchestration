@@ -499,21 +499,21 @@
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 784,
+      "line": 786,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 816,
+      "line": 818,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 817,
+      "line": 819,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
@@ -681,84 +681,105 @@
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 146,
+      "line": 148,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
-    },
-    {
-      "file": "tests/test_headless_worktree_isolation.py",
-      "line": 146,
-      "mechanism": "patch.object-attr",
-      "module_target": "dispatch_envelope",
-      "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
       "line": 148,
-      "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
-      "symbol": "_govern"
-    },
-    {
-      "file": "tests/test_headless_worktree_isolation.py",
-      "line": 205,
-      "mechanism": "direct-call",
-      "module_target": "dispatch_envelope",
-      "symbol": "ClaudeSubprocessAdapter"
-    },
-    {
-      "file": "tests/test_headless_worktree_isolation.py",
-      "line": 205,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 150,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
       "line": 207,
-      "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
-      "symbol": "_govern"
-    },
-    {
-      "file": "tests/test_headless_worktree_isolation.py",
-      "line": 264,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 264,
+      "line": 207,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 209,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
       "line": 266,
-      "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
-      "symbol": "_govern"
-    },
-    {
-      "file": "tests/test_headless_worktree_isolation.py",
-      "line": 340,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 340,
+      "line": 266,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
+      "line": 268,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
       "line": 342,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 342,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 344,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 406,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 406,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 408,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
