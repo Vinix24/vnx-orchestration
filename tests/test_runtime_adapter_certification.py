@@ -288,14 +288,14 @@ class TestDirectCouplingFreeze:
         # (operator-approved): the leaseless tmux-spawn lane is now first-class,
         # so the door/spawn/governance modules below legitimately couple to tmux.
         # The set guards against NEW, unexpected coupling outside this lane.
-        # context_rotation.py — T0-initiated non-destructive rotation respawn
-        # (default-OFF); first-class tmux use, added 2026-07-12.
         # git_target_guard.py — dispatch-context git target guard (OI-975);
         # uses subprocess and references tmux in its docstring env-var
         # explainer, added 2026-08-04.
+        # context_rotation.py dropped from this baseline 2026-08-11 (OI-1042):
+        # its dead respawn() control-plane — the only tmux coupling — was
+        # removed, so it must no longer be granted direct tmux use.
         known_preexisting = {
             "cleanup_worker_exit.py",
-            "context_rotation.py",
             "dashboard_actions.py",
             "dispatch_govern.py",
             "dispatch_prepare.py",
@@ -321,14 +321,14 @@ class TestDirectCouplingFreeze:
         """Direct-tmux-coupling file set must not grow beyond the approved baseline."""
         # Refreshed 2026-06-27 (operator-approved) — see the note in
         # test_no_direct_tmux_subprocess_in_protected_modules. Kept in sync with it.
-        # context_rotation.py — T0-initiated non-destructive rotation respawn
-        # (default-OFF); first-class tmux use, added 2026-07-12.
         # git_target_guard.py — dispatch-context git target guard (OI-975);
         # uses subprocess and references tmux in its docstring env-var
         # explainer, added 2026-08-04.
+        # context_rotation.py dropped from this baseline 2026-08-11 (OI-1042):
+        # its dead respawn() control-plane — the only tmux coupling — was
+        # removed, so it must no longer be granted direct tmux use.
         known_files = {
             "cleanup_worker_exit.py",
-            "context_rotation.py",
             "dashboard_actions.py",
             "dispatch_govern.py",
             "dispatch_prepare.py",

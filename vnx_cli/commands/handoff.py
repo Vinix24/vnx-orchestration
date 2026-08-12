@@ -3,20 +3,20 @@
 
 Two verbs:
   vnx handoff show [--logdir DIR] [--terminal T0] [--mark-ready --rotation-id ID]
-      Prints the resume briefing parsed from <logdir>/handoff.md. This is
-      what a freshly-respawned T0 runs first (scripts/lib/context_rotation.
-      respawn() preloads exactly this instruction into the successor's tmux
-      pane) — NOT the personal /kickoff skill; this is the repo-level
-      contract (docs/operations/CONTEXT_ROTATION.md).
+      Prints the resume briefing parsed from <logdir>/handoff.md — what a
+      fresh T0 session runs first after a rotation. NOT the personal
+      /kickoff skill; this is the repo-level contract
+      (docs/operations/CONTEXT_ROTATION.md).
   vnx handoff mark-ready --rotation-id ID [--terminal T0]
-      Writes the rotation_id-stamped `.ready` signal the old T0's respawn()
-      call is waiting on (round-3 finding #6: the waiter validates the
-      rotation_id, so a stale `.ready` from a previous rotation can never
-      false-confirm a new one).
+      Writes the rotation_id-stamped `.ready` ack via
+      context_rotation.write_ready_signal() (the rotation_id stamp is what
+      distinguishes this ack from a stale `.ready` left by a previous
+      rotation).
 
 --logdir defaults to the SAME project_id+terminal-scoped path
-context_rotation.checkpoint() writes to, so `vnx handoff show` with no flags
-finds the handoff a real rotation produced.
+context_rotation.write_t0_handoff() (via the Stop-hook safety net,
+scripts/hooks/session_stop_rotation.py) writes to, so `vnx handoff show`
+with no flags finds the handoff a real rotation produced.
 """
 
 from __future__ import annotations
