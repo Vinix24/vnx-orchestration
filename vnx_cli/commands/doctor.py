@@ -791,7 +791,11 @@ def _check_ledger_health(data_root: Path) -> Check:
         findings.append(f"beacon is stale ({age_str} old) — rerun ledger_health.py")
 
     details = beacon.get("details") or {}
+    if not isinstance(details, dict):
+        details = {}
     checks = details.get("checks") or {}
+    if not isinstance(checks, dict):
+        checks = {}
 
     coverage = checks.get("receipt_coverage") or {}
     if coverage.get("status") == "finding":
@@ -821,6 +825,12 @@ def _check_ledger_health(data_root: Path) -> Check:
         )
     elif chain.get("status") == "SKIPPED_UNVERIFIED":
         findings.append(f"chain-status unmeasurable: {chain.get('reason', '?')}")
+
+    if health == "fail" and not findings:
+        findings.append(
+            "ledger-health beacon reports fail, but no findings could be derived from its "
+            "details — inspect the beacon directly"
+        )
 
     if findings:
         return _result(WARN, "; ".join(findings))

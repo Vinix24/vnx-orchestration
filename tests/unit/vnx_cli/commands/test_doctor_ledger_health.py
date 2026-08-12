@@ -9,7 +9,9 @@ never fabricate a FAIL when the beacon simply hasn't been run yet.
 
 from __future__ import annotations
 
+import json
 import sys
+import time
 from pathlib import Path
 
 VNX_ROOT = Path(__file__).resolve().parents[4]
@@ -18,6 +20,26 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 import ledger_health as lh  # noqa: E402
 from vnx_cli.commands.doctor import PASS, WARN, _check_ledger_health  # noqa: E402
+
+_NO_DETAILS = object()
+
+
+def _write_raw_beacon(tmp_path: Path, *, status: str, details=_NO_DETAILS, expected_interval_seconds=86400) -> None:
+    """Write a ledger_health beacon file directly, bypassing compute_health/
+    write_health_surface, so a test can force a ``details`` shape that the
+    real writer would never produce (missing, empty, or malformed)."""
+    health_dir = tmp_path / "health"
+    health_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "component": lh.COMPONENT_NAME,
+        "last_run_ts": time.time(),
+        "last_run_iso": "2026-08-12T00:00:00Z",
+        "status": status,
+        "expected_interval_seconds": expected_interval_seconds,
+    }
+    if details is not _NO_DETAILS:
+        payload["details"] = details
+    (health_dir / f"{lh.COMPONENT_NAME}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _register_entry(dispatch_id: str) -> dict:
@@ -148,3 +170,48 @@ class TestCheckLedgerHealth:
         result = _check_ledger_health(tmp_path)
         assert result.status == WARN
         assert "stale" in result.detail.lower()
+
+
+class TestFailBeaconWithUnreadableDetails:
+    """Dispatch 20260812d-d: a beacon that says ``health: "fail"`` must never
+    fall through to PASS just because ``details["checks"]`` couldn't be
+    read — unknown is never healthy."""
+
+    def test_fail_beacon_missing_details_is_warn_not_pass(self, tmp_path):
+        _write_raw_beacon(tmp_path, status="fail")
+
+        result = _check_ledger_health(tmp_path)
+        assert result.status == WARN
+        assert "fail" in result.detail.lower()
+
+    def test_fail_beacon_empty_checks_is_warn_not_pass(self, tmp_path):
+        _write_raw_beacon(tmp_path, status="fail", details={"checks": {}})
+
+        result = _check_ledger_health(tmp_path)
+        assert result.status == WARN
+        assert "fail" in result.detail.lower()
+
+    def test_fail_beacon_malformed_checks_is_warn_not_pass(self, tmp_path):
+        _write_raw_beacon(tmp_path, status="fail", details={"checks": "not-a-dict"})
+
+        result = _check_ledger_health(tmp_path)
+        assert result.status == WARN
+        assert "fail" in result.detail.lower()
+
+    def test_ok_beacon_without_findings_is_still_pass(self, tmp_path):
+        """Regression guard: a genuinely healthy beacon must not start
+        WARNing just because the fail-path got stricter."""
+        _write_raw_beacon(
+            tmp_path,
+            status="ok",
+            details={
+                "checks": {
+                    "receipt_coverage": {"status": "ok"},
+                    "pull_cursor": {"status": "ok"},
+                    "chain_status": {"status": "ok"},
+                }
+            },
+        )
+
+        result = _check_ledger_health(tmp_path)
+        assert result.status == PASS
