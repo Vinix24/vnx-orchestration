@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """migrate_future_system.py — apply track layer migrations (schema only).
 
-run() ordering (R2.2 — repair → version-reconcile → numbered walk):
+run() ordering (R2.2 — repair → version-reconcile → numbered walk → auto-apply sweep):
   A. ADR-007 dispatches repair (`_run_adr007_dispatches_repair`, PR-A1) — the ad-hoc
      in-place composite-UNIQUE rebuild, a PRE-walk step. NOT a numbered migration.
   B. Numbered version reconciliation (`_run_version_reconciliation`, PR-A2) — validate
@@ -13,6 +13,23 @@ run() ordering (R2.2 — repair → version-reconcile → numbered walk):
   D. Convergence guard (`_assert_manifest_converged`) — after the walk the terminal
      version's manifest MUST hold, else a downgrade+re-walk did not converge → abort
      loudly rather than loop (oscillation guard).
+  E. W1 tenant-stamping (optional, `run_tenant_stamp`).
+  F. Generic auto-apply sweep (OI-1169) — `migrations.auto_apply.auto_apply()` on the
+     SAME store. This is the ONLY mechanism for anything above 0031 (e.g. 0032+):
+     before this dispatch, `vnx migrate` / `migrate_all_central_stores()` only ever
+     drove the numbered walk (A-D), which is a fixed, hand-maintained list that stops
+     at 0031 by construction. `auto_apply` was previously wired ONLY into
+     `scripts/build_t0_state.py`'s SessionStart bootstrap — a store that never opens a
+     T0 session with that hook (every central store but vnx-dev, measured 2026-08-12)
+     never saw a migration past 0031 no matter how many times `vnx migrate` ran. The
+     numbered walk (A-D) stays a fixed, adaptive procedure (repair + tenant-stamping +
+     manifest-backed preflights, not just DDL) and is never extended per-migration
+     again; step F is how everything discovered under `schemas/migrations/` above it is
+     picked up generically, with zero code change here. A migration SQL file with no
+     paired `apply_NNNN.py` runner (e.g. a date-named file targeting a different
+     database such as quality_intelligence.db) is out of `auto_apply`'s scope by design
+     — see `migrations/auto_apply.py`'s own docstring — and does not advance this
+     store's `user_version`.
 
 The reconciliation (B) runs BEFORE the walk (C) so the walk re-applies whatever the
 downgrade exposed. This matches the operator ordering in PRD §6 (migrate first) and
@@ -67,6 +84,9 @@ import schema_manifest
 from atomic_io import audit_event_append
 import tenant_stamping
 from db_backup_rotation import parse_backup_keep, rotate_backups_safe
+from migrations.auto_apply import auto_apply
+from migrations.auto_apply import _discover_migrations as _auto_apply_discover_migrations
+from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -3190,19 +3210,39 @@ def _run_w1_coupled_migration(rc_db_path: Path) -> None:
         print("  [W1] No tenant-stamping changes needed (RC + QI already clean).")
 
 
+def _highest_runner_backed_auto_apply_migration() -> int | None:
+    """Highest NNNN under schemas/migrations/ that `auto_apply` can actually apply
+    to runtime_coordination.db — i.e. it has a paired `apply_NNNN.py` runner.
+
+    `schemas/migrations/` also holds date-named files (e.g.
+    ``2026_05_intelligence_hygiene.sql``) that target a different database and
+    have no runner; those are correctly out of scope for step F and must not be
+    counted here. None when no runner-backed migration exists at all.
+    """
+    highest: int | None = None
+    for number, _sql_path in _auto_apply_discover_migrations(_MIGRATIONS):
+        if (_AUTO_APPLY_RUNNERS_DIR / f"apply_{number:04d}.py").exists():
+            highest = number if highest is None else max(highest, number)
+    return highest
+
+
 def _pipeline_would_mutate(db_path: Path) -> bool:
     """Return True when the migration pipeline would change this DB.
 
-    Cheap pre-check that opens a read-only connection and inspects three signals:
+    Cheap pre-check that opens a read-only connection and inspects four signals:
 
     1. user_version < TERMINAL_VERSION → the numbered walk will apply at least one
        migration.
     2. ADR-007 repair is needed → the dispatches table will be rebuilt.
     3. The DB's effective manifest does not hold → version reconciliation will
        downgrade user_version, which causes the walk to re-apply.
+    4. user_version < the highest runner-backed migration under schemas/migrations/
+       (OI-1169) → step F's generic auto-apply sweep will apply at least one
+       migration above the numbered walk (e.g. 0032+), even when signals 1-3 are
+       all clean because the numbered walk itself has nothing left to do.
 
-    When all three signals are clean the schema pipeline (repair + reconcile +
-    walk + converge) is a confident no-op.  W1 tenant-stamping could still
+    When all four signals are clean the schema pipeline (repair + reconcile +
+    walk + converge + sweep) is a confident no-op.  W1 tenant-stamping could still
     mutate but has its own self-checkpoint + restore — the schema walk's commits
     are independent of W1, and skipping a backup for W1-only mutations is
     acceptable because W1 never corrupts the terminal schema.
@@ -3231,6 +3271,12 @@ def _pipeline_would_mutate(db_path: Path) -> bool:
                 violations = schema_manifest.validate_db_at_version(conn, effective)
                 if violations:
                     return True
+
+            # Signal 4 (OI-1169): the generic auto-apply sweep (step F) has a
+            # runner-backed migration above the current user_version to apply.
+            highest_available = _highest_runner_backed_auto_apply_migration()
+            if highest_available is not None and user_version < highest_available:
+                return True
 
             return False
         finally:
@@ -3277,7 +3323,10 @@ def run(
     run_tenant_stamp: bool = True,
     backup: bool = False,
 ) -> None:
-    """Apply future-system migrations through 0031 (+ optional W1 tenant-stamping).
+    """Apply future-system migrations through 0031, then everything above it via a
+    generic auto-apply sweep (+ optional W1 tenant-stamping). See the module
+    docstring's step F (OI-1169): after this call the store is at the highest
+    migration number that has a paired `apply_NNNN.py` runner — never stuck at 0031.
 
     DB path resolution (mirrors dispatch_cli.py:69-74):
     - Explicit ``data_dir`` argument wins (D4 threading trap): the CLI has already
@@ -3350,9 +3399,9 @@ def _run_pipeline(
     db_path: Path, project_root: Path, *,
     tenant_stamp_fatal: bool, run_tenant_stamp: bool = True,
 ) -> None:
-    """Steps A–E of run(): ADR-007 repair → version reconcile → 0022→0031 walk →
-    convergence guard → W1 tenant-stamping. Extracted from run() so each stays within
-    the 70-line function-size gate; behaviour is identical."""
+    """Steps A–F of run(): ADR-007 repair → version reconcile → 0022→0031 walk →
+    convergence guard → W1 tenant-stamping → generic auto-apply sweep. Extracted from
+    run() so each stays within the 70-line function-size gate; behaviour is identical."""
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -3381,6 +3430,14 @@ def _run_pipeline(
             _run_w1_step(db_path, tenant_stamp_fatal=tenant_stamp_fatal)
         else:
             print("  [W1][skip] tenant-stamping disabled by caller (schema-only migrate).")
+        # (F) OI-1169: generic auto-apply sweep for anything above the numbered walk
+        # (e.g. 0032+). Opens its own connection (the walk's `conn` is already closed
+        # above), so this runs unconditionally regardless of run_tenant_stamp. This is
+        # the ONLY place that keeps `vnx migrate` at the true highest migration without
+        # this file growing a new hardcoded step per future migration.
+        swept = auto_apply(db_path)
+        if swept:
+            print(f"  [auto_apply] applied migration(s) above the numbered walk: {swept}")
         print("\n  Migration complete. Schema at user_version (RC verified by manifest converge).\n")
     except Exception:
         if conn is not None:

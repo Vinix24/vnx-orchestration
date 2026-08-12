@@ -284,6 +284,53 @@ cp "$VNX_DATA_DIR/backups/runtime_coordination.pre-1.0.1.db" \
 # verify the restored DB opens + integrity_check 'ok', then re-run from Preconditions
 ```
 
+### One canonical migration chain (OI-1169)
+
+Before this fix, two independent mechanisms discovered migrations, and only one
+of them was wired into `vnx migrate`:
+
+| Mechanism | Discovery | Wired into |
+|---|---|---|
+| `scripts/lib/migrations/auto_apply.py` | **Generic** — walks `schemas/migrations/`, pairs each `NNNN_*.sql` with `apply_NNNN.py`, applies anything above the DB's `PRAGMA user_version` | Only `scripts/build_t0_state.py`'s SessionStart bootstrap |
+| `scripts/migrate_future_system.py` | **Hardcoded** — a fixed walk, `0022 → 0031` | `vnx migrate` / `migrate_all_central_stores()` |
+
+A store that never opens a T0 session with the SessionStart hook (every central
+store except vnx-dev, measured 2026-08-12) never got a migration past 0031 no
+matter how many times `vnx migrate` ran — `0032_track_pr_delivery.sql` shipped
+with a paired runner (`apply_0032.py`) and `auto_apply` already knew how to
+apply it, but nothing outside SessionStart ever called it.
+
+**Generic discovery is now canonical.** `migrate_future_system.run()` — and
+therefore both `vnx migrate` and `migrate_all_central_stores()` — ends with a
+generic `auto_apply()` sweep against the same store, after the numbered
+0022→0031 walk (which stays exactly as it was: an adaptive procedure doing
+ADR-007 repair, tenant reconciliation, and manifest-backed preflights, not
+just DDL) and after W1 tenant-stamping. **After any `vnx migrate` run, a store
+is at the highest migration number with a paired `apply_NNNN.py` runner —
+never stuck below it.** The numbered walk is never extended per-migration
+again; a new migration only needs its `NNNN_*.sql` file plus, if it targets
+`runtime_coordination.db`, its `apply_NNNN.py` runner.
+
+**A migration SQL file with no paired Python runner is out of scope by
+design, not a bug.** `schemas/migrations/` also holds date-named files (e.g.
+`2026_05_intelligence_hygiene.sql`) that target a different database
+(`quality_intelligence.db`, handled by `project_id_migration.py` /
+`quality_db_init.py`) and carry no `apply_NNNN.py`. Both `auto_apply` and the
+staleness check below skip these — they do not, and must not, advance
+`runtime_coordination.db`'s `user_version`.
+
+**A store that falls behind is now loud.** `scripts/ledger_health.py`'s
+`migration_staleness` sub-check compares a store's `PRAGMA user_version`
+against the highest runner-backed migration under `schemas/migrations/` and
+reports a finding when it's behind. It rides the same beacon
+(`<data_dir>/health/ledger_health.json`) `vnx doctor` already reads via
+`_check_ledger_health` — no doctor change needed. Run it directly, or let
+`vnx doctor` surface it:
+
+```bash
+python3 scripts/ledger_health.py --data-dir "$VNX_DATA_DIR" --state-dir "$VNX_STATE_DIR"
+```
+
 ---
 
 ## Appendix A: Two binaries

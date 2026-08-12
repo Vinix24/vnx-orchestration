@@ -376,6 +376,139 @@ class TestChainStatus:
 
 
 # ---------------------------------------------------------------------------
+# migration_staleness (OI-1169)
+# ---------------------------------------------------------------------------
+
+
+def _migrations_fixture(tmp_path: Path, *, with_runner, without_runner=()) -> tuple:
+    """Build isolated (migrations_dir, runners_dir) so this test never depends
+    on the repo's real, ever-growing schemas/migrations/ contents.
+
+    ``with_runner`` gets both a ``NNNN_x.sql`` file and a paired
+    ``apply_NNNN.py`` runner (auto_apply can reach it). ``without_runner`` gets
+    only the ``.sql`` file — the date-named-migration shape (e.g. a migration
+    targeting quality_intelligence.db) that must NOT count toward "highest
+    available" for runtime_coordination.db.
+    """
+    migrations_dir = tmp_path / "migrations"
+    runners_dir = tmp_path / "runners"
+    migrations_dir.mkdir()
+    runners_dir.mkdir()
+    for number in with_runner:
+        (migrations_dir / f"{number:04d}_x.sql").write_text("-- noop\n", encoding="utf-8")
+        (runners_dir / f"apply_{number:04d}.py").write_text(
+            "def apply_migration(db_path, migration_sql_path):\n    return False\n",
+            encoding="utf-8",
+        )
+    for number in without_runner:
+        (migrations_dir / f"{number:04d}_x.sql").write_text("-- noop\n", encoding="utf-8")
+    return migrations_dir, runners_dir
+
+
+def _db_at_version(state_dir: Path, version: int) -> Path:
+    db_path = state_dir / lh.RUNTIME_DB_NAME
+    conn = __import__("sqlite3").connect(str(db_path))
+    conn.execute(f"PRAGMA user_version = {int(version)}")
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestMigrationStaleness:
+    def test_no_db_yet_is_ok_not_unmeasurable(self, state_dir):
+        """A store with no runtime_coordination.db has nothing to be stale
+        against — a legitimate nothing-to-check case, not a read failure."""
+        result = lh.check_migration_staleness(state_dir)
+        assert result["status"] == lh.STATUS_OK
+        assert result["db_exists"] is False
+
+    def test_store_at_31_with_0032_available_is_a_finding(self, tmp_path, state_dir):
+        """The exact scenario OI-1169 exists for: a store at the numbered-walk
+        terminal (31) with a runner-backed 0032 sitting unapplied."""
+        migrations_dir, runners_dir = _migrations_fixture(tmp_path, with_runner=[22, 24, 31, 32])
+        _db_at_version(state_dir, 31)
+
+        result = lh.check_migration_staleness(
+            state_dir, migrations_dir=migrations_dir, runners_dir=runners_dir
+        )
+
+        assert result["status"] == lh.STATUS_FINDING
+        assert result["current_user_version"] == 31
+        assert result["highest_available_migration"] == 32
+        assert result["versions_behind"] == 1
+
+    def test_store_at_highest_available_is_ok(self, tmp_path, state_dir):
+        migrations_dir, runners_dir = _migrations_fixture(tmp_path, with_runner=[22, 24, 31, 32])
+        _db_at_version(state_dir, 32)
+
+        result = lh.check_migration_staleness(
+            state_dir, migrations_dir=migrations_dir, runners_dir=runners_dir
+        )
+
+        assert result["status"] == lh.STATUS_OK
+        assert result["versions_behind"] == 0
+
+    def test_runnerless_migration_is_not_counted_as_available(self, tmp_path, state_dir):
+        """A date-named migration (e.g. targeting quality_intelligence.db) with
+        no apply_NNNN.py runner must never count as 'available' for
+        runtime_coordination.db — otherwise every store would read as
+        permanently behind a version it can never reach."""
+        migrations_dir, runners_dir = _migrations_fixture(
+            tmp_path, with_runner=[22, 24, 31, 32], without_runner=[2026]
+        )
+        _db_at_version(state_dir, 32)
+
+        result = lh.check_migration_staleness(
+            state_dir, migrations_dir=migrations_dir, runners_dir=runners_dir
+        )
+
+        assert result["status"] == lh.STATUS_OK
+        assert result["highest_available_migration"] == 32
+
+    def test_no_runner_backed_migration_at_all_is_unmeasurable(self, tmp_path, state_dir):
+        migrations_dir, runners_dir = _migrations_fixture(tmp_path, with_runner=[], without_runner=[2026])
+        _db_at_version(state_dir, 31)
+
+        result = lh.check_migration_staleness(
+            state_dir, migrations_dir=migrations_dir, runners_dir=runners_dir
+        )
+
+        assert result["status"] == lh.SKIPPED_UNVERIFIED
+
+    def test_unreadable_db_is_unmeasurable(self, tmp_path, state_dir):
+        migrations_dir, runners_dir = _migrations_fixture(tmp_path, with_runner=[22, 32])
+        db_path = state_dir / lh.RUNTIME_DB_NAME
+        db_path.write_text("not a sqlite file", encoding="utf-8")
+
+        result = lh.check_migration_staleness(
+            state_dir, migrations_dir=migrations_dir, runners_dir=runners_dir
+        )
+
+        assert result["status"] == lh.SKIPPED_UNVERIFIED
+
+    def test_wired_into_compute_health(self, tmp_path, state_dir, monkeypatch):
+        """compute_health includes migration_staleness in its checks dict and
+        a finding there rolls up to overall STATUS_FINDING (vnx doctor reads
+        this via the existing beacon-fail fallback — see _check_ledger_health)."""
+        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"))
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
+        ledger_size = (state_dir / lh.LEDGER_NAME).stat().st_size
+        (state_dir / lh.CURSOR_NAME).write_text(json.dumps({"offset": ledger_size}), encoding="utf-8")
+        _db_at_version(state_dir, 31)
+
+        migrations_dir, runners_dir = _migrations_fixture(tmp_path, with_runner=[22, 31, 32])
+        monkeypatch.setattr(lh, "_AUTO_APPLY_MIGRATIONS_DIR", migrations_dir)
+        monkeypatch.setattr(lh, "_AUTO_APPLY_RUNNERS_DIR", runners_dir)
+
+        result = lh.compute_health(tmp_path, state_dir)
+
+        assert result["checks"]["migration_staleness"]["status"] == lh.STATUS_FINDING
+        assert result["overall_status"] == lh.STATUS_FINDING
+        assert result["exit_code"] == lh.EXIT_FINDINGS
+
+
+# ---------------------------------------------------------------------------
 # compute_health — overall rollup precedence
 # ---------------------------------------------------------------------------
 
