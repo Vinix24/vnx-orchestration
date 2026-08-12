@@ -101,10 +101,13 @@ def check_open_items(pr_id: str, state_dir: Path) -> Dict[str, Any]:
     try:
         data = json.loads(oi_file.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
+        # The file exists but couldn't be read/parsed — we don't know whether
+        # it holds a blocker. Unlike the no-file-at-all case above, this is
+        # a failed verification attempt, not "nothing to check" (OI-1140).
         return {
             "check": "open_items",
-            "status": "GO",
-            "detail": f"could not read open items: {exc}",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": f"open_items.json exists but could not be read: {exc}",
             "blockers": 0,
             "warnings": 0,
         }
@@ -149,6 +152,7 @@ def check_cqs(pr_id: str, state_dir: Path) -> Dict[str, Any]:
         }
 
     latest_receipt = None
+    read_error = None
     try:
         for line in receipts_file.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -161,8 +165,19 @@ def check_cqs(pr_id: str, state_dir: Path) -> Dict[str, Any]:
             receipt_pr = receipt.get("pr_id") or receipt.get("pr") or ""
             if receipt_pr == pr_id:
                 latest_receipt = receipt
-    except OSError:
-        pass
+    except OSError as exc:
+        read_error = exc
+
+    if read_error is not None:
+        # The file exists but reading it failed outright — distinct from
+        # "read fine, no receipt for this PR yet" below. We genuinely don't
+        # know this PR's CQS, so this must not read as GO (OI-1140).
+        return {
+            "check": "cqs_threshold",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": f"t0_receipts.ndjson exists but could not be read: {read_error}",
+            "cqs": None,
+        }
 
     if latest_receipt is None:
         return {
@@ -532,11 +547,15 @@ def check_artifacts(
 
     try:
         contract = parse_contract_from_file(dispatch_file)
-    except OSError:
+    except OSError as exc:
+        # The dispatch file was found by _find_dispatch_for_pr but couldn't
+        # be read here — we don't know whether it declared artifact claims.
+        # Same failure mode check_contract_verification treats as blocking;
+        # this handler must not diverge into a silent GO (OI-1140).
         return {
             "check": "artifact_verification",
-            "status": "GO",
-            "detail": "could not read dispatch",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": f"dispatch file found but could not be read: {exc}",
             "artifacts_checked": 0,
         }
 
@@ -603,6 +622,7 @@ def check_shell_syntax(project_root: Path) -> Dict[str, Any]:
         }
 
     failures = []
+    unverified = []
     for sf in shell_files:
         try:
             result = subprocess.run(
@@ -616,16 +636,33 @@ def check_shell_syntax(project_root: Path) -> Dict[str, Any]:
                     "file": str(sf),
                     "error": result.stderr.strip(),
                 })
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+        except subprocess.TimeoutExpired:
+            # bash -n never completed for this file — its syntax was never
+            # actually checked. Folding this into "checked, 0 failures" would
+            # silently pass a file we never looked at (OI-1140).
+            unverified.append({"file": str(sf), "reason": "bash -n timed out"})
+        except FileNotFoundError:
+            unverified.append({"file": str(sf), "reason": "bash binary not available"})
 
-    status = "HOLD" if failures else "GO"
+    if failures:
+        status = "HOLD"
+    elif unverified:
+        status = SKIPPED_UNVERIFIED
+    else:
+        status = "GO"
+
+    detail = f"{len(shell_files)} file(s) checked, {len(failures)} failure(s)"
+    if unverified:
+        detail += f", {len(unverified)} could not be verified"
+
     return {
         "check": "shell_syntax",
         "status": status,
-        "detail": f"{len(shell_files)} file(s) checked, {len(failures)} failure(s)",
+        "detail": detail,
         "files_checked": len(shell_files),
+        "files_unverified": len(unverified),
         "failures": failures,
+        "unverified": unverified,
     }
 
 
@@ -637,36 +674,36 @@ def check_net_deletion(project_root: Path) -> Dict[str, Any]:
     - Net line deletion (total_removed - total_added across all changed files)
 
     Either sub-check reaching its HOLD threshold produces a HOLD verdict.
-    WARN-level findings are advisory and do not block merge.
+    WARN-level findings are advisory and do not block merge. If a sub-check's
+    underlying git query fails outright, that sub-check cannot be evaluated
+    and is SKIPPED_UNVERIFIED — a merge gate that can't see the diff must
+    not assume it's small (OI-1140). The two sub-checks are independent, so
+    one failing does not skip evaluation of the other.
     """
     deleted = _get_deleted_files(project_root)
-    if deleted is None:
-        return {
-            "check": "net_deletion",
-            "status": "GO",
-            "detail": "could not compute deleted files",
-            "deleted_count": None,
-            "net_line_deletion": None,
-        }
-
-    deleted_count = len(deleted)
     net_line = _get_net_line_deletion(project_root)
 
     # Determine file-deletion verdict
-    if deleted_count >= DELETION_FILE_HOLD:
-        file_status = "HOLD"
-        file_detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_HOLD} — mass deletion requires review)"
-    elif deleted_count >= DELETION_FILE_WARN:
-        file_status = "WARN"
-        file_detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_WARN} — review deletions before merge)"
+    if deleted is None:
+        file_status = SKIPPED_UNVERIFIED
+        file_detail = "could not compute deleted files"
+        deleted_count = None
     else:
-        file_status = "GO"
-        file_detail = f"{deleted_count} file(s) deleted"
+        deleted_count = len(deleted)
+        if deleted_count >= DELETION_FILE_HOLD:
+            file_status = "HOLD"
+            file_detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_HOLD} — mass deletion requires review)"
+        elif deleted_count >= DELETION_FILE_WARN:
+            file_status = "WARN"
+            file_detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_WARN} — review deletions before merge)"
+        else:
+            file_status = "GO"
+            file_detail = f"{deleted_count} file(s) deleted"
 
     # Determine net-line-deletion verdict
     if net_line is None:
-        line_status = "GO"
-        line_detail = "net line deletion: unavailable"
+        line_status = SKIPPED_UNVERIFIED
+        line_detail = "net line deletion: could not be computed"
     elif net_line >= NET_LINE_DELETION_HOLD:
         line_status = "HOLD"
         line_detail = f"net line deletion: {net_line} lines removed (>={NET_LINE_DELETION_HOLD} — requires review)"
@@ -675,11 +712,14 @@ def check_net_deletion(project_root: Path) -> Dict[str, Any]:
         line_detail = f"net line deletion: {net_line} lines removed (>={NET_LINE_DELETION_WARN} — review scope reduction)"
     else:
         line_status = "GO"
-        line_detail = f"net line deletion: {net_line if net_line is not None else 'n/a'} lines removed"
+        line_detail = f"net line deletion: {net_line} lines removed"
 
-    # Merge: HOLD wins over WARN wins over GO
-    if file_status == "HOLD" or line_status == "HOLD":
+    # Merge: HOLD wins over SKIPPED_UNVERIFIED wins over WARN wins over GO
+    sub_statuses = {file_status, line_status}
+    if "HOLD" in sub_statuses:
         status = "HOLD"
+    elif SKIPPED_UNVERIFIED in sub_statuses:
+        status = SKIPPED_UNVERIFIED
     else:
         status = "GO"
 
@@ -689,7 +729,7 @@ def check_net_deletion(project_root: Path) -> Dict[str, Any]:
         "status": status,
         "detail": "; ".join(details),
         "deleted_count": deleted_count,
-        "deleted_files": deleted,
+        "deleted_files": deleted if deleted is not None else [],
         "net_line_deletion": net_line,
         "net_line_deletion_warn": line_status == "WARN",
         "file_deletion_warn": file_status == "WARN",

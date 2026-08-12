@@ -119,6 +119,26 @@ def _stub_ci_workflow_go(monkeypatch):
     )
 
 
+def _stub_net_deletion_go(monkeypatch):
+    """Stub check_net_deletion to a fixed GO result.
+
+    Like _stub_pr_size_go/_stub_ci_workflow_go above: check_net_deletion now
+    correctly returns SKIPPED_UNVERIFIED (OI-1140) against a bare non-git
+    tmp_path, since git can't resolve anything there. Tests in this module
+    that exercise run_gate_checks orchestration/wiring (not net_deletion
+    logic itself) stub it to GO. See TestCheckNetDeletion (in
+    test_pre_merge_gate_net_deletion.py) for the real coverage.
+    """
+    monkeypatch.setattr(
+        pre_merge_gate, "check_net_deletion",
+        lambda project_root, **kw: {
+            "check": "net_deletion", "status": "GO", "detail": "stubbed for this test",
+            "deleted_count": 0, "deleted_files": [], "net_line_deletion": 0,
+            "net_line_deletion_warn": False, "file_deletion_warn": False,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # check_open_items
 # ---------------------------------------------------------------------------
@@ -190,6 +210,23 @@ class TestCheckOpenItems:
         result = check_open_items("PR-6", state_dir)
         assert result["status"] == "HOLD"
 
+    def test_unreadable_file_is_unverified(self, state_dir):
+        """OI-1140 sibling: open_items.json exists but can't be read (here: it's
+        a directory, triggering IsADirectoryError, a real OSError subclass) ->
+        SKIPPED_UNVERIFIED, never a silent GO claiming zero blockers."""
+        (state_dir / "open_items.json").mkdir()
+        result = check_open_items("PR-6", state_dir)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+
+    def test_malformed_json_is_unverified(self, state_dir):
+        """OI-1140 sibling: open_items.json exists but is not valid JSON ->
+        SKIPPED_UNVERIFIED, never a silent GO."""
+        (state_dir / "open_items.json").write_text("{not valid json")
+        result = check_open_items("PR-6", state_dir)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+
 
 # ---------------------------------------------------------------------------
 # check_cqs
@@ -224,6 +261,16 @@ class TestCheckCQS:
         result = check_cqs("PR-6", state_dir)
         assert result["status"] == "GO"
         assert result["cqs"] is None
+
+    def test_unreadable_receipts_file_is_unverified(self, state_dir):
+        """OI-1140 sibling: t0_receipts.ndjson exists but can't be read (here:
+        it's a directory) -> SKIPPED_UNVERIFIED. Previously the OSError was
+        swallowed and fell through to the same GO as "no receipt for this
+        PR yet", masking a real read failure as a clean CQS pass."""
+        (state_dir / "t0_receipts.ndjson").mkdir()
+        result = check_cqs("PR-6", state_dir)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +389,23 @@ class TestCheckArtifacts:
         assert result["status"] == "HOLD"
         assert result["artifacts_failed"] == 1
 
+    def test_dispatch_read_failure_is_unverified(self, dispatch_dir, tmp_path, monkeypatch):
+        """OI-1140 sibling: a dispatch file IS found by _find_dispatch_for_pr
+        but reading its contract fails (OSError) -> SKIPPED_UNVERIFIED, not
+        the previous silent GO ("could not read dispatch"). Mirrors how
+        check_contract_verification already treats the identical failure as
+        blocking rather than passing."""
+        (dispatch_dir / "active" / "art-4.md").write_text(
+            "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: art-4\n"
+        )
+        monkeypatch.setattr(
+            pre_merge_gate, "parse_contract_from_file",
+            MagicMock(side_effect=OSError("permission denied")),
+        )
+        result = check_artifacts("PR-6", dispatch_dir, tmp_path)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+
 
 # ---------------------------------------------------------------------------
 # check_shell_syntax
@@ -373,6 +437,34 @@ class TestCheckShellSyntax:
         result = check_shell_syntax(tmp_path)
         assert result["status"] == "HOLD"
         assert len(result["failures"]) == 1
+
+    @patch("pre_merge_gate.subprocess.run")
+    @patch("pre_merge_gate.get_changed_files")
+    def test_bash_unavailable_is_unverified(self, mock_gcf, mock_run, tmp_path):
+        """OI-1140 sibling: bash -n itself can't run (binary missing / timed
+        out) -> that file's syntax was never checked. Previously silently
+        folded into "checked, 0 failures" -> GO; must be SKIPPED_UNVERIFIED."""
+        sh = tmp_path / "unverifiable.sh"
+        sh.write_text("#!/bin/bash\necho hi\n")
+        mock_gcf.return_value = [sh]
+        mock_run.side_effect = FileNotFoundError("bash not found")
+        result = check_shell_syntax(tmp_path)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+        assert result["files_unverified"] == 1
+        assert result["failures"] == []
+
+    @patch("pre_merge_gate.subprocess.run")
+    @patch("pre_merge_gate.get_changed_files")
+    def test_bash_timeout_is_unverified(self, mock_gcf, mock_run, tmp_path):
+        sh = tmp_path / "slow.sh"
+        sh.write_text("#!/bin/bash\necho hi\n")
+        mock_gcf.return_value = [sh]
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["bash", "-n"], timeout=10)
+        result = check_shell_syntax(tmp_path)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+        assert result["files_unverified"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -501,15 +593,40 @@ class TestCheckNetDeletion:
         assert result["deleted_count"] == count
 
     @patch("subprocess.run")
-    def test_git_failure_is_go(self, mock_run, tmp_path):
-        """If git command fails, check degrades gracefully to GO."""
+    def test_git_failure_is_unverified(self, mock_run, tmp_path):
+        """OI-1140: if git fails entirely, the check cannot determine deletion
+        scope. Previously this degraded to a silent GO; a merge gate that
+        can't see the diff must not assume it's small -> SKIPPED_UNVERIFIED."""
         mock_result = MagicMock()
         mock_result.returncode = 128
         mock_result.stdout = ""
         mock_run.return_value = mock_result
         result = check_net_deletion(tmp_path)
-        assert result["status"] == "GO"
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
         assert result["deleted_count"] is None
+        assert result["net_line_deletion"] is None
+
+    def test_net_line_failure_alone_is_unverified(self, tmp_path, monkeypatch):
+        """The two sub-checks are independent (per the check's own docstring):
+        file-deletion resolving fine must not mask a net-line-deletion
+        sub-check that failed to compute -> SKIPPED_UNVERIFIED, not GO."""
+        monkeypatch.setattr(pre_merge_gate, "_get_deleted_files", lambda project_root: [])
+        monkeypatch.setattr(pre_merge_gate, "_get_net_line_deletion", lambda project_root: None)
+        result = check_net_deletion(tmp_path)
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
+        assert result["deleted_count"] == 0
+        assert result["net_line_deletion"] is None
+
+    def test_hold_wins_over_unverified_net_line(self, tmp_path, monkeypatch):
+        """HOLD from one sub-check must still win even if the other sub-check
+        is unverifiable -- unverified must not water down a real HOLD."""
+        many_deleted = [f"file_{i}.py" for i in range(DELETION_FILE_HOLD)]
+        monkeypatch.setattr(pre_merge_gate, "_get_deleted_files", lambda project_root: many_deleted)
+        monkeypatch.setattr(pre_merge_gate, "_get_net_line_deletion", lambda project_root: None)
+        result = check_net_deletion(tmp_path)
+        assert result["status"] == "HOLD"
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +706,7 @@ class TestFabricFindingWiring:
     ):
         _stub_pr_size_go(monkeypatch)
         _stub_ci_workflow_go(monkeypatch)
+        _stub_net_deletion_go(monkeypatch)
         (dispatch_dir / "active" / "d.md").write_text(
             "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-go\n"
         )
@@ -631,6 +749,7 @@ class TestFabricFindingWiring:
         raised, run_gate_checks must still return its verdict rather than crash."""
         _stub_pr_size_go(monkeypatch)
         _stub_ci_workflow_go(monkeypatch)
+        _stub_net_deletion_go(monkeypatch)
         (dispatch_dir / "active" / "d.md").write_text(
             "# Dispatch\n\n**PR**: PR-6\nDispatch-ID: d-boom\n"
         )
@@ -656,6 +775,7 @@ class TestRunGateChecks:
         """When all checks pass, verdict is GO."""
         _stub_pr_size_go(monkeypatch)
         _stub_ci_workflow_go(monkeypatch)
+        _stub_net_deletion_go(monkeypatch)
         result = run_gate_checks(
             pr_id="PR-6",
             project_root=tmp_path,
