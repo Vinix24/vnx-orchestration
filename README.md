@@ -92,8 +92,9 @@ pip install vnx-orchestration
 vnx init                                  # scaffold a VNX project in the current dir
 vnx migrate                               # apply runtime DB migrations
 vnx doctor                                # environment and dependency checks
-vnx dispatch-agent --agent hello-world    # needs a worker CLI (see Prerequisites)
 ```
+
+For an actual dispatch, worker, report, and receipt, see "Your first dispatch" below — there are two prerequisites this four-line snippet does not show.
 
 ### Prerequisites
 
@@ -105,6 +106,71 @@ a `tool:worker-cli` warning. (Zero-key exploration of the governance flow is not
 the old replay demo was retired.)
 
 There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`), and as of `#1462` also `gate-check` — the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. Checkout-only operator commands still live behind `./bin/vnx` — `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging) — for those, clone the repository and run `pip install -e .` from the checkout.
+
+## Your first dispatch
+
+I ran this end to end in a scratch directory on 2026-08-12 to write this section. Two things broke on a completely fresh project, and the Install snippet above does not warn about either.
+
+**A fresh `vnx init` project is not a git repository.** `vnx init` scaffolds config, databases, and `agents/`, but it does not run `git init`. Dispatching before you do fails at the worktree-creation step, and the error is unhelpful: a permission error against the read-only central install path, not a message pointing at "run git init."
+
+**The default lane needs a GitHub-hosted `origin` remote, with `gh` authenticated.** Worktree isolation is unconditional on this lane (see "What works today vs what is opt-in" above), and that path calls `gh pr create` before it will record the dispatch as done. A local-only remote is not enough; without one the worker still does real work, but the receipt reads `failed`.
+
+The commands, run for real:
+
+```bash
+mkdir readme-walkthrough-demo && cd readme-walkthrough-demo
+vnx init
+git init -q && git add -A && git commit -q -m "initial scaffold"
+git remote add origin git@github.com:<you>/<repo>.git && git push -u origin main
+vnx migrate
+vnx doctor
+```
+
+`vnx doctor` reported `agents   11 agent(s) resolvable (10 engine, 1 examples)`. The "1 examples" entry is `examples/hello-world/`, the same agent the old Install snippet dispatched. It does not actually work: the single-entry door validates the role against its own `agents/` registry (this repository's ten built-in fleet roles: `backend-developer`, `blog-writer`, `code-reviewer`, `frontend-developer`, `linkedin-writer`, `orchestrator`, `quality-engineer`, `research-analyst`, `security-engineer`, `system-architect`), not `examples/`. `doctor` discovers `hello-world`; the dispatch door rejects it with `role 'hello-world' is not a known agent role`. Use one of the ten role names instead:
+
+```bash
+vnx dispatch-agent --agent research-analyst \
+  --instruction "Quick depth research: what does 'orchestration' mean in software systems? 3 bullet points."
+```
+
+```
+Dispatching to agent 'research-analyst' (dispatch_id=D-4d7b2a30, project_id=readme-walkthrough-demo) ...
+```
+
+The worker appears in its own tmux session (`vnx-D-4d7b2a30`), running the worker CLI in an isolated git worktree on branch `dispatch/D-4d7b2a30`. In my run it wrote `findings.md`, committed it as `712280f`, and left a report at `$VNX_DATA_DIR/unified_reports/D-4d7b2a30.md`. Real output, trimmed:
+
+```yaml
+---
+dispatch_id: D-4d7b2a30
+provider: claude
+model: sonnet
+role: research-analyst
+duration_seconds: 42.94
+exit_code: 0
+token_usage: {input: 0, output: 369, cache_read: 0}
+cost_usd: 0.0
+lane: tmux_interactive
+---
+## Summary
+Quick-depth research task: define what "orchestration" means in software systems...
+## Changes
+- Added `findings.md` (new file) ...
+- Committed as `712280f` on branch `dispatch/D-4d7b2a30`.
+## Verification
+...
+## Open Items
+None
+```
+
+The receipt lands in `$VNX_DATA_DIR/state/t0_receipts.ndjson`, one JSON line per dispatch. Query it rather than grep the file directly:
+
+```bash
+$ python3 scripts/receipt_query.py by-dispatch D-4d7b2a30 --state-dir $VNX_DATA_DIR/state
+1 receipt(s) for dispatch D-4d7b2a30:
+  ? D-4d7b2a30 [failed] schema_version=2 pr=-
+```
+
+That receipt reads `[failed]`, and it is correct: I pointed `origin` at a local bare repository instead of a real GitHub remote, `gh pr create` had nothing to talk to, and the receipt records exactly that (`autopr_reason: "gh pr create failed for branch ... (no open PR found on retry)"`). The worker's report, commit, and `findings.md` are real and complete; the receipt still refuses to call the dispatch done without a PR in front of it. That refusal is the governance model working, not a bug I hit while writing this. Point `origin` at a real GitHub remote and this same sequence ends with `status: done`.
 
 ## Architecture
 
