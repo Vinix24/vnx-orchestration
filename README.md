@@ -13,7 +13,7 @@
 
 [![Stars](https://img.shields.io/github/stars/Vinix24/vnx-orchestration?logo=github)](https://github.com/Vinix24/vnx-orchestration/stargazers)
 &nbsp;![Forks](https://img.shields.io/github/forks/Vinix24/vnx-orchestration?logo=github)
-&nbsp;![Audit trail](https://img.shields.io/badge/audit%20trail-15k%2B%20receipts-2ea043)
+&nbsp;![Audit trail](https://img.shields.io/badge/audit%20trail-27k%2B%20receipts-2ea043)
 &nbsp;![Vendor SDK](https://img.shields.io/badge/vendor%20SDK-none-24292f)
 
 **[Docs](docs/) · [Architecture](docs/core/00_VNX_ARCHITECTURE.md) · [State Fabric](docs/core/STATE_FABRIC.md) · [ADRs](docs/governance/decisions/) · [Writing](https://vincentvandeth.nl) · [Changelog](CHANGELOG.md)**
@@ -28,25 +28,24 @@ It is a local control plane for the AI coding CLIs that already sit on your mach
 
 Most agent projects build SDK-native agents. I orchestrate the binaries instead. The difference shows up in the audit trail: I can reconstruct what was dispatched, what was reviewed, what merged, and what each gate cost.
 
-I built this for my own work, across 3,000+ hours of Claude Code and 15,000+ tests. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+I built this for my own work, across 3,000+ hours of Claude Code and 18,816 test functions across 1,008 test files. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
 This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
-## What's new in 1.2
+## What's new in 1.4
 
-- **Plan-first-gate enforcement.** A track is born plan-gated, but until now that gate bound only closure bookkeeping — work could be built and merged without the plan gate ever passing. It is now enforced at the dispatch door (advisory-first, `VNX_PLAN_GATE_ENFORCE`), with the merge gate as the second chokepoint: plan before work, structurally. [ADR-030](docs/governance/decisions/ADR-030-plan-first-gate-enforcement.md). The full track lifecycle — plan-gate → dispatch → merge → reconcile → close → auto-close — is documented in [HORIZON_LIFECYCLE.md](docs/core/HORIZON_LIFECYCLE.md).
-- **Auto-close on by default.** The git-grounded reconcile closes merged tracks without a manual sweep; the trust-streak is now observability-only, with close-time revalidation the durable safeguard.
-- **ADR-028 orchestration-target Phases 1–4** (agent-folder fusion + a decision-judge that shadows, fast-paths, then binds — all default-off), **ADR-029 hash-chain epoch-rotation**, the **central-store `project_id` authority** fix, the **`/panel` multi-provider deliberation skill**, and the **evidence-bound merge gate**. Full detail in the [CHANGELOG](CHANGELOG.md).
+Six patch releases (1.4.0 through 1.4.5, July 31 to August 7, 2026), all documented in the [CHANGELOG](CHANGELOG.md). The headlines:
 
-## What's new in 1.1
+- **Worker-provider free choice shipped end-to-end** (1.4.0): a `ModelPin` floor-vs-default contract replaces the old hard pin, so a dispatch can choose its provider instead of inheriting a fleet default.
+- **Fleet-wide plan-gate outage fixed** (1.4.1, #1280): a central install resolved the plan-gate's data directory from the module's own (read-only, pinned) install path instead of the project's central store, so every plan-gate on the machine died with `PermissionError` across all five provider lanes. Now resolved from the central store for the active `project_id`.
+- **Reconcile chain and open-item cleanup** (1.4.2): open items went from 773 to 53 across eight triage rounds, and the auto-close reconciler's 31-hour silent outage on a bare `gh` lookup is fixed.
+- **CI measured 2% of the suite** (1.4.3): Profile A ran 18 of 933 test files; it now runs the full suite, and two tests that could write into the live production store are fail-closed.
+- **ReceiptV2 schema + measured token capture** (1.4.4): real `token_usage` harvested from claude-harness transcripts and the kimi session log, replacing modeled estimates.
+- **Release-publish guard + `vnx horizon link-pr`/`set-lane-hint` on the pip CLI** (1.4.5).
 
-- **Horizon planning module.** `vnx horizon` is the named command surface for the future-state layer: `list / show / add / sync / drift / reconcile / close / reopen / plan-gate`. Tracks project from `ROADMAP.yaml`, and a git-grounded reconcile closes them against merged PRs. See [Horizon planning](docs/core/HORIZON_PLANNING.md) and its [lifecycle](docs/core/HORIZON_LIFECYCLE.md).
-- **Signed attestation enforcement.** SSH-key-signed, content-keyed, diff-bound attest records with a server-side verify gate and a signed, budgeted, audited override (a recorded deviation, never silent). [ADR-027](docs/governance/decisions/ADR-027-signed-attestation-enforcement.md).
-- **Track-linkage + git-grounded backward closure.** `track_id` is validated at the dispatch door and auto-propagated to `track.pr_ref` on merge; a reconcile loop verifies PR merge state via `gh` and closes done tracks under a system actor. No manual bookkeeping.
-- **`vnx fabric-audit`.** A Phase-0 store-hygiene check over split-brain stores, per-project ledgers, and receipt hash-chain integrity. [ADR-028](docs/governance/decisions/ADR-028-orchestration-target-architecture.md).
-- **Operator-gated self-learning proposal tier.** The receipt stream is mined for recurring failures into prevention-rule proposals for a human to accept. Nothing auto-activates.
+Since 1.4.5, three defaults have flipped by direct operator decision, all in this repository's history: the headless `claude -p` lane opened by default (#1455), per-dispatch git-worktree isolation became unconditional for the provider/subprocess lanes (#1449), and `vnx gate-check` landed on the pip CLI (#1462) — see "What works today vs what is opt-in" and "Your first dispatch" below for what that means in practice.
 
-Full detail, including the folded-in 1.0.1 future-state batch, is in the [CHANGELOG](CHANGELOG.md). The 1.0 launch surface — pip packaging, provider-agnostic skill injection ([ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md)), the benchmark field-tests harness, the SSRF-safe URL policy, headless review gates, and receipt hash-chain verification — shipped in [1.0.0](CHANGELOG.md).
+Full history for every minor and patch back to 0.1.0 is in the [CHANGELOG](CHANGELOG.md).
 
 ## Writing
 
@@ -78,9 +77,9 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 ## What works today vs what is opt-in
 
-The audit trail is the whole point, so I am honest about maturity. Verified against code and receipts as of 1.1 (July 2026).
+The audit trail is the whole point, so I am honest about maturity. Verified against code and receipts on 2026-08-12 (version 1.4.5, unreleased fixes on top).
 
-**Tier 1 — in production.** Append-only NDJSON receipts with hash-chain verification (`audit_chain`); per-append enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. Multi-CLI provider hub, no vendor SDK. Review gates (codex + gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification (`VNX_ISOLATED_WORKTREE` defaults off). Default interactive tmux worker lane on the subscription (headless `claude -p` is opt-in, blocked by default). Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
+**Tier 1 — in production.** Append-only NDJSON receipts with hash-chain verification (`audit_chain`); per-append enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. Multi-CLI provider hub, no vendor SDK. Review gates (codex + gemini) with deterministic CI as the third gate. Per-worker git worktree isolation, default-on since #1449 — unconditional for the provider and subprocess lanes, on by default for the tmux lane (`--no-isolated-worktree` opts out), with teardown classification for clean, committed, or dirty state. Default interactive tmux worker lane on the subscription; headless `claude -p` opened by default since #1455 (both lanes bill the subscription, not API credits — see "Billing" below). Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
 
 **Tier 2 — shipped, opt-in, burning in.** Smart routing (`VNX_AUTO_ROUTE`), elastic worker pool (`bin/vnx pool`), track layer + roadmap autopilot (`VNX_ROADMAP_AUTOPILOT=1`), auto-dream consolidation, and an operator-gated self-learning proposal tier that mines the receipt stream for recurring failures into `pending_rules.json` for a human to accept (G-L1; nothing auto-activates). These default off and are not yet proven at the Tier 1 bar. The single-entry dispatch door (`dispatch_cli.py`) is the exception: default-ON since 2026-06-24 (ADR-024), normalizing GLM to the harness lane and running a phantom-guard that rejects evidence-free GATE-GREEN receipts — recent enough that I still hold it here. Roll back per terminal with `VNX_DISPATCH_LEGACY=1`.
 
@@ -93,8 +92,9 @@ pip install vnx-orchestration
 vnx init                                  # scaffold a VNX project in the current dir
 vnx migrate                               # apply runtime DB migrations
 vnx doctor                                # environment and dependency checks
-vnx dispatch-agent --agent hello-world    # needs a worker CLI (see Prerequisites)
 ```
+
+For an actual dispatch, worker, report, and receipt, see "Your first dispatch" below — there are two prerequisites this four-line snippet does not show.
 
 ### Prerequisites
 
@@ -105,7 +105,72 @@ usage. `vnx dispatch-agent` fails at spawn if no worker CLI is present — `vnx 
 a `tool:worker-cli` warning. (Zero-key exploration of the governance flow is not currently shipped;
 the old replay demo was retired.)
 
-There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands live behind `./bin/vnx`, including `gate-check` and `new-worktree` — for those, clone the repository and run `pip install -e .` from the checkout.
+There are two binaries on purpose. The pip `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`), and as of `#1462` also `gate-check` — the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. Checkout-only operator commands still live behind `./bin/vnx` — `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging) — for those, clone the repository and run `pip install -e .` from the checkout.
+
+## Your first dispatch
+
+I ran this end to end in a scratch directory on 2026-08-12 to write this section. Two things broke on a completely fresh project, and the Install snippet above does not warn about either.
+
+**A fresh `vnx init` project is not a git repository.** `vnx init` scaffolds config, databases, and `agents/`, but it does not run `git init`. Dispatching before you do fails at the worktree-creation step, and the error is unhelpful: a permission error against the read-only central install path, not a message pointing at "run git init."
+
+**The default lane needs a GitHub-hosted `origin` remote, with `gh` authenticated.** Worktree isolation is unconditional on this lane (see "What works today vs what is opt-in" above), and that path calls `gh pr create` before it will record the dispatch as done. A local-only remote is not enough; without one the worker still does real work, but the receipt reads `failed`.
+
+The commands, run for real:
+
+```bash
+mkdir readme-walkthrough-demo && cd readme-walkthrough-demo
+vnx init
+git init -q && git add -A && git commit -q -m "initial scaffold"
+git remote add origin git@github.com:<you>/<repo>.git && git push -u origin main
+vnx migrate
+vnx doctor
+```
+
+`vnx doctor` reported `agents   11 agent(s) resolvable (10 engine, 1 examples)`. The "1 examples" entry is `examples/hello-world/`, the same agent the old Install snippet dispatched. It does not actually work: the single-entry door validates the role against its own `agents/` registry (this repository's ten built-in fleet roles: `backend-developer`, `blog-writer`, `code-reviewer`, `frontend-developer`, `linkedin-writer`, `orchestrator`, `quality-engineer`, `research-analyst`, `security-engineer`, `system-architect`), not `examples/`. `doctor` discovers `hello-world`; the dispatch door rejects it with `role 'hello-world' is not a known agent role`. Use one of the ten role names instead:
+
+```bash
+vnx dispatch-agent --agent research-analyst \
+  --instruction "Quick depth research: what does 'orchestration' mean in software systems? 3 bullet points."
+```
+
+```
+Dispatching to agent 'research-analyst' (dispatch_id=D-4d7b2a30, project_id=readme-walkthrough-demo) ...
+```
+
+The worker appears in its own tmux session (`vnx-D-4d7b2a30`), running the worker CLI in an isolated git worktree on branch `dispatch/D-4d7b2a30`. In my run it wrote `findings.md`, committed it as `712280f`, and left a report at `$VNX_DATA_DIR/unified_reports/D-4d7b2a30.md`. Real output, trimmed:
+
+```yaml
+---
+dispatch_id: D-4d7b2a30
+provider: claude
+model: sonnet
+role: research-analyst
+duration_seconds: 42.94
+exit_code: 0
+token_usage: {input: 0, output: 369, cache_read: 0}
+cost_usd: 0.0
+lane: tmux_interactive
+---
+## Summary
+Quick-depth research task: define what "orchestration" means in software systems...
+## Changes
+- Added `findings.md` (new file) ...
+- Committed as `712280f` on branch `dispatch/D-4d7b2a30`.
+## Verification
+...
+## Open Items
+None
+```
+
+The receipt lands in `$VNX_DATA_DIR/state/t0_receipts.ndjson`, one JSON line per dispatch. Query it rather than grep the file directly:
+
+```bash
+$ python3 scripts/receipt_query.py by-dispatch D-4d7b2a30 --state-dir $VNX_DATA_DIR/state
+1 receipt(s) for dispatch D-4d7b2a30:
+  ? D-4d7b2a30 [failed] schema_version=2 pr=-
+```
+
+That receipt reads `[failed]`, and it is correct: I pointed `origin` at a local bare repository instead of a real GitHub remote, `gh pr create` had nothing to talk to, and the receipt records exactly that (`autopr_reason: "gh pr create failed for branch ... (no open PR found on retry)"`). The worker's report, commit, and `findings.md` are real and complete; the receipt still refuses to call the dispatch done without a PR in front of it. That refusal is the governance model working, not a bug I hit while writing this. Point `origin` at a real GitHub remote and this same sequence ends with `status: done`.
 
 ## Architecture
 
@@ -133,9 +198,9 @@ The end-to-end deep dive — intent → single-entry door → bundle assembly �
    append-only NDJSON receipts  (one per dispatch; hash-chain verify via audit_chain)
 ```
 
-Claude has two explicit lanes. The default worker lane is the interactive tmux lane: it runs Claude on the subscription and is what `dispatch.sh` selects unless a dispatch opts out. The headless `claude -p` subprocess lane is the burst alternative; after the June 15, 2026 billing change it runs on API credits, so it is opt-in and blocked by default (`VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it). The tmux lane is subscription-preserving and still maturing toward full parity with the headless lane on every surface.
+Claude has two lanes. The default worker lane is the interactive tmux lane, which runs on the subscription and is what `dispatch.sh` selects unless a dispatch opts out. The headless `claude -p` subprocess lane is the burst alternative. It was opt-in and blocked by default until an operator directive opened it on 2026-08-11 (#1455, `lane_safety.headless_block.enabled: false` in [`routing_policy.yaml`](scripts/lib/providers/routing_policy.yaml)). Both lanes bill the same Claude subscription, not API credits. A `cost=$0.0000` receipt confirms either lane; billing only changes if the environment carries its own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL`, which routes outside both lanes entirely. Headless is usable but not yet governed: it ignores `isolation=worktree`, and the report gate has been seen to miss a report with all four mandatory headings absent (see [DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md)). `VNX_OVERRIDE_CLAUDE_HEADLESS=1` re-lifts the block if it is ever re-enabled.
 
-The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees. Worktree isolation is available via `VNX_ISOLATED_WORKTREE=1` and is off by default; isolation guarantees vary by lane.
+The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees. Isolation is default-on since #1449 (`--no-isolated-worktree` opts out on the tmux lane; unconditional on the provider and subprocess lanes); isolation guarantees still vary by lane, and the headless lane ignores it (see above).
 
 ### Governed memory: past, current, future
 
@@ -153,7 +218,7 @@ The point is not that the AI remembers. The point is that what it remembers is g
 
 ## Architecture decisions
 
-The decisions behind VNX are written down, not implied. There are 30 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
+The decisions behind VNX are written down, not implied. There are 34 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
 
 - [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
 - [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
@@ -172,7 +237,7 @@ VNX is not a thin "supports many models" wrapper. The provider layer is governed
 
 | Provider | How VNX drives it | Billing / constraint |
 |---|---|---|
-| **claude** | interactive tmux CLI (default) · headless `claude -p` (opt-in) | subscription (tmux) / API credits (headless, blocked by default) |
+| **claude** | interactive tmux CLI (default) · headless `claude -p` (open by default since #1455) | subscription, both lanes (own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` routes outside both) |
 | **codex** | CLI subprocess | provider sub/credits · review gate + worker |
 | **gemini** | CLI subprocess | provider sub/credits · review gate + worker |
 | **kimi** | Kimi CLI over OAuth | `kimi-via-cli-only`, no Moonshot SDK |
@@ -185,9 +250,11 @@ No vendor SDK: VNX calls each CLI as a subprocess and never imports a provider l
 
 **The non-obvious lane: DeepSeek v4 through the Claude harness.** With my own DeepSeek key plus hardening (`ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater off, MCP off), DeepSeek v4 runs inside the Claude harness. Operator measurement on Claude Code 2.1.150 (2026-05-26) showed this beats a bare DeepSeek API call on coding and tool tasks (internal measurement, not a published benchmark) — the harness adds tool-use loops, context injection, and structured diff output the raw API lacks.
 
-### Billing as a consequence, not a goal
+### Billing follows auth, not the lane
 
-VNX treats AI coding tools as interactive CLI workers, not SDK calls. A consequence falls out of that choice. Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. Because interactive Claude sessions stay on the subscription rather than API credits, the interactive tmux lane is subscription-preserving, and it is the default Claude worker lane. The headless lane stays opt-in and blocked by default for exactly this reason. This describes current public policy; vendors can change their terms.
+VNX treats AI coding tools as interactive CLI workers, not SDK calls, and that choice raised a real billing question: does the headless lane cost more than the interactive one. I measured it instead of assuming. Both the interactive tmux lane and the headless `claude -p` lane run the same CLI under the same OAuth session, and both post `cost=$0.0000` receipts, confirmed 2026-08-11 via auth state (no `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` in the environment, keychain `subscriptionType: max`). The billing boundary is the auth method, not which lane dispatched the work. Set your own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` and that changes, since both lanes then bill through that key instead of the subscription.
+
+An earlier version of this README assumed a June 15, 2026 Anthropic billing change that would push headless usage to API credits by default. That change was never carried out. The headless lane was opened by direct operator decision (#1455) once subscription billing was confirmed by measurement, not by reading vendor announcements. This describes what this repository measures today; Anthropic's billing terms are the vendor's to change, and I have verified nothing beyond what a `cost=$0.0000` receipt tells me.
 
 ## Compared to dmux
 
@@ -195,7 +262,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-1.2 (July 2026): `VERSION` is `1.2.0`. 1.2 adds plan-first-gate enforcement at the dispatch door (ADR-030, advisory-first), ADR-028 orchestration-target Phases 1–4, ADR-029 hash-chain epoch-rotation, the central-store `project_id` authority fix, the `/panel` deliberation skill, and the evidence-bound merge gate — see [CHANGELOG.md](CHANGELOG.md). The `v1.2.0` tag is cut; the PyPI publish follows. It builds on 1.1 (the Horizon planning module `vnx horizon`, signed attestation enforcement (ADR-027), track-linkage + git-grounded backward closure, `vnx fabric-audit`), the first minor since the 1.0.0 PyPI launch (2026-07-02, `pip install vnx-orchestration`, tagged `v1.0.0`). The single-entry dispatch door is default-ON (ADR-024, 2026-06-24), the Mission Control central-store cutover completed (2026-06-23), and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+1.4.6 (August 12, 2026): `VERSION` is `1.4.6`, tagged today (`v1.4.6`) and rolled out to the central version store. This patch release hardens the dispatch lanes and worker receipt semantics: the claude headless lane is open by default (#1455), tmux concurrency is raised to 5, worktree isolation is default-on and salvages untracked non-gitignored files on teardown, the heartbeat silence threshold moved from 600s to 1800s with failure-shaped kills, `gate-check` is exposed on the pip CLI (#1462), and the pre-merge gate can no longer report GO on unverified checks. Full entry, and every release back to 0.1.0, in [CHANGELOG.md](CHANGELOG.md). Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 
