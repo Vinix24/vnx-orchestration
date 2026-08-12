@@ -4,6 +4,88 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.4.6] — 2026-08-12
+
+Patch release (64 commits since v1.4.5). Headline: the dispatch lanes, worker
+receipt semantics, merge gates, and release/install guardrails were hardened so
+consumer fleets stop hitting defects already fixed on main.
+
+### Added
+
+- **Documented gate-check CLI surface (#1462)** — `gate-check` is now exposed on
+  the pip CLI, so consumers can run the documented pre-merge gate without relying
+  on an internal entry point.
+- **Worktree release path and learning dispositions (#1425, #1430)** — locked
+  worktrees gained a governed release path, and pending archival records now have
+  explicit approve/dismiss verbs.
+- **T0 state builder install artefact (#1404)** — the t0_state builder ships as
+  an install artefact instead of remaining repo-local tooling.
+
+### Changed
+
+- **Dispatch-lane capacity and isolation (#1455, #1451, #1456, #1449, #1446,
+  #1463, #1448, #1442, #1416, #1417, #1419, #1411, #1413)** — the claude
+  headless lane is open, tmux concurrency is raised to 5, paste buffers are
+  scoped per dispatch/call, worktree isolation is default-on, dirty worktrees
+  salvage substantive changes including untracked non-gitignored files, AUTO
+  fallback pairs provider+model, worktree launchd installs fail loud, provider
+  lanes preserve unpushed work before reap, push+PR obligations bind the envelope
+  lanes, permission-menu panes are treated as awaiting workers, and fabric hook
+  artefacts anchor at the fabric install root.
+- **Heartbeat, workers and routing (#1464, #1460, #1465, #1427, #1429)** — the
+  default silence threshold moved from 600s to 1800s; heartbeat kills now land as
+  failure-shaped receipts; `kimi_exec` routes through the model resolver; kimi-k2
+  and codex candidates have explicit smart-router pricing; worker permission
+  profiles align with canonical dispatched roles; and three noisy monitor alarms
+  were damped.
+- **CI and release verification coverage (#1458, #1467, #1438, #1434, #1432)** —
+  Profile A regained 23 measured-green files / 491 tests, codex gate-clearance
+  tests are hermetic, register isolation tests and leak measurement were added,
+  receipt mirror isolation was de-quarantined, and critical-rules footer /
+  receipt-resolution tests were pinned.
+- **Governance and delivery contracts (#1435, #1424, #1420, #1418, #1403,
+  #1436)** — push containment and single-destination PR logic were tightened,
+  envelope classification now uses the worktree's recorded base, report
+  contracts are binding on envelope lanes, delivery markings create a fail-closed
+  hold with visible reason, merged-PR evidence threads into the close verb, and
+  four stale config truths were corrected.
+- **Documentation and measurement state (#1423, #1414, #1335)** — the lane
+  conformity matrix was corrected after the lane-conformity series, the L1 matrix
+  measurement report landed, and the daemon-driven T0 context-rotation plan was
+  recorded for follow-up verification.
+
+### Fixed
+
+- **Gates fail closed on unavailable or unverified checks (#1461, #1468, #1444,
+  #1440, #1433, #1422, #1415, #1412, #1410, #1408, #1406)** — kimi provider
+  outages book as `unavailable` instead of review `fail`; `pre_merge_gate` no
+  longer reports GO on checks that could not run and now has
+  `SKIPPED_UNVERIFIED`; plan-gate seat timeout/unreadable-config handling was
+  split; pip CLI and engine flags were realigned; gate dispatch is table-driven
+  from the Gate enum; unknown gates require producer identity; envelope
+  body-contract violations are observed; run-resolver passes are emitted; and
+  no-verdict is separate from abstain.
+- **Receipts, register and identity extraction (#1457, #1445, #1447, #1459,
+  #1443, #1439, #1426, #1421, #1409)** — Dispatch-ID parsing is line-anchored
+  for both bold forms; phantom guards are scoped to dispatch reports; the
+  dispatch register is filled at fire time; idempotency is checked inside the
+  write lock; phantom ID exclusions were cleaned up; lane identity wins over
+  body-provided model/provider; appended receipts always emit register rows;
+  echoed instructions and phantom filenames are ignored during identity
+  extraction; and report-derived receipts lift model/provider deterministically.
+- **Installer, doctor and runtime roots (#1454, #1450, #1453, #1437, #1428,
+  #1405)** — `install.sh` no longer corrupts the literal `VNX_HOME` token in
+  `vnx_settings_merge.py`; hook-pin checks run from SessionStart and include
+  fabric-deployed pins; runtime state resolves to the canonical central dir
+  instead of XDG; `vnx horizon` works through both entrances; and doctor symlink
+  conflict checks resolve paths before comparison.
+
+### Removed
+
+- **Dead context-rotation control-plane (#1466)** — the unused
+  `context_rotation` checkpoint control-plane was removed while the live handoff
+  surface was kept.
+
 ## [1.4.3] — 2026-08-03
 
 Patch release (6 commits since 1.4.2). Headline: **CI was measuring 2% of the suite**, and
