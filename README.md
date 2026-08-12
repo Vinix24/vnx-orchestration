@@ -132,9 +132,9 @@ The end-to-end deep dive — intent → single-entry door → bundle assembly �
    append-only NDJSON receipts  (one per dispatch; hash-chain verify via audit_chain)
 ```
 
-Claude has two explicit lanes. The default worker lane is the interactive tmux lane: it runs Claude on the subscription and is what `dispatch.sh` selects unless a dispatch opts out. The headless `claude -p` subprocess lane is the burst alternative; after the June 15, 2026 billing change it runs on API credits, so it is opt-in and blocked by default (`VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it). The tmux lane is subscription-preserving and still maturing toward full parity with the headless lane on every surface.
+Claude has two lanes. The default worker lane is the interactive tmux lane, which runs on the subscription and is what `dispatch.sh` selects unless a dispatch opts out. The headless `claude -p` subprocess lane is the burst alternative. It was opt-in and blocked by default until an operator directive opened it on 2026-08-11 (#1455, `lane_safety.headless_block.enabled: false` in [`routing_policy.yaml`](scripts/lib/providers/routing_policy.yaml)). Both lanes bill the same Claude subscription, not API credits. A `cost=$0.0000` receipt confirms either lane; billing only changes if the environment carries its own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL`, which routes outside both lanes entirely. Headless is usable but not yet governed: it ignores `isolation=worktree`, and the report gate has been seen to miss a report with all four mandatory headings absent (see [DISPATCH_RULES.md](docs/core/DISPATCH_RULES.md)). `VNX_OVERRIDE_CLAUDE_HEADLESS=1` re-lifts the block if it is ever re-enabled.
 
-The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees. Worktree isolation is available via `VNX_ISOLATED_WORKTREE=1` and is off by default; isolation guarantees vary by lane.
+The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees. Isolation is default-on since #1449 (`--no-isolated-worktree` opts out on the tmux lane; unconditional on the provider and subprocess lanes); isolation guarantees still vary by lane, and the headless lane ignores it (see above).
 
 ### Governed memory: past, current, future
 
@@ -152,7 +152,7 @@ The point is not that the AI remembers. The point is that what it remembers is g
 
 ## Architecture decisions
 
-The decisions behind VNX are written down, not implied. There are 30 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
+The decisions behind VNX are written down, not implied. There are 34 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
 
 - [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
 - [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
@@ -171,7 +171,7 @@ VNX is not a thin "supports many models" wrapper. The provider layer is governed
 
 | Provider | How VNX drives it | Billing / constraint |
 |---|---|---|
-| **claude** | interactive tmux CLI (default) · headless `claude -p` (opt-in) | subscription (tmux) / API credits (headless, blocked by default) |
+| **claude** | interactive tmux CLI (default) · headless `claude -p` (open by default since #1455) | subscription, both lanes (own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` routes outside both) |
 | **codex** | CLI subprocess | provider sub/credits · review gate + worker |
 | **gemini** | CLI subprocess | provider sub/credits · review gate + worker |
 | **kimi** | Kimi CLI over OAuth | `kimi-via-cli-only`, no Moonshot SDK |
@@ -184,9 +184,11 @@ No vendor SDK: VNX calls each CLI as a subprocess and never imports a provider l
 
 **The non-obvious lane: DeepSeek v4 through the Claude harness.** With my own DeepSeek key plus hardening (`ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater off, MCP off), DeepSeek v4 runs inside the Claude harness. Operator measurement on Claude Code 2.1.150 (2026-05-26) showed this beats a bare DeepSeek API call on coding and tool tasks (internal measurement, not a published benchmark) — the harness adds tool-use loops, context injection, and structured diff output the raw API lacks.
 
-### Billing as a consequence, not a goal
+### Billing follows auth, not the lane
 
-VNX treats AI coding tools as interactive CLI workers, not SDK calls. A consequence falls out of that choice. Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. Because interactive Claude sessions stay on the subscription rather than API credits, the interactive tmux lane is subscription-preserving, and it is the default Claude worker lane. The headless lane stays opt-in and blocked by default for exactly this reason. This describes current public policy; vendors can change their terms.
+VNX treats AI coding tools as interactive CLI workers, not SDK calls, and that choice raised a real billing question: does the headless lane cost more than the interactive one. I measured it instead of assuming. Both the interactive tmux lane and the headless `claude -p` lane run the same CLI under the same OAuth session, and both post `cost=$0.0000` receipts, confirmed 2026-08-11 via auth state (no `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` in the environment, keychain `subscriptionType: max`). The billing boundary is the auth method, not which lane dispatched the work. Set your own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` and that changes, since both lanes then bill through that key instead of the subscription.
+
+An earlier version of this README assumed a June 15, 2026 Anthropic billing change that would push headless usage to API credits by default. That change was never carried out. The headless lane was opened by direct operator decision (#1455) once subscription billing was confirmed by measurement, not by reading vendor announcements. This describes what this repository measures today; Anthropic's billing terms are the vendor's to change, and I have verified nothing beyond what a `cost=$0.0000` receipt tells me.
 
 ## Compared to dmux
 
@@ -194,7 +196,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-1.2 (July 2026): `VERSION` is `1.2.0`. 1.2 adds plan-first-gate enforcement at the dispatch door (ADR-030, advisory-first), ADR-028 orchestration-target Phases 1–4, ADR-029 hash-chain epoch-rotation, the central-store `project_id` authority fix, the `/panel` deliberation skill, and the evidence-bound merge gate — see [CHANGELOG.md](CHANGELOG.md). The `v1.2.0` tag is cut; the PyPI publish follows. It builds on 1.1 (the Horizon planning module `vnx horizon`, signed attestation enforcement (ADR-027), track-linkage + git-grounded backward closure, `vnx fabric-audit`), the first minor since the 1.0.0 PyPI launch (2026-07-02, `pip install vnx-orchestration`, tagged `v1.0.0`). The single-entry dispatch door is default-ON (ADR-024, 2026-06-24), the Mission Control central-store cutover completed (2026-06-23), and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+1.4.6 (August 12, 2026): `VERSION` is `1.4.6`, tagged today (`v1.4.6`) and rolled out to the central version store. This patch release hardens the dispatch lanes and worker receipt semantics: the claude headless lane is open by default (#1455), tmux concurrency is raised to 5, worktree isolation is default-on and salvages untracked non-gitignored files on teardown, the heartbeat silence threshold moved from 600s to 1800s with failure-shaped kills, `gate-check` is exposed on the pip CLI (#1462), and the pre-merge gate can no longer report GO on unverified checks. Full entry, and every release back to 0.1.0, in [CHANGELOG.md](CHANGELOG.md). Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 
