@@ -22,11 +22,17 @@ or ``receipt_pull_cursor.json`` — that answers three questions:
 
   pull_cursor — the age of ``receipt_pull_cursor.json`` (ADR-035 §5.3: the
       PULL that replaced the retired T0-pane push, DISPATCH_RULES §13's step
-      0 of every T0 cycle) and the unread backlog behind it. Read via the
-      same byte-cursor primitive ``receipt_query.py``'s ``pull --peek`` uses
-      (``load_cursor`` + ``pull_new_receipts``) — this module never calls
+      0 of every T0 cycle) and the unread backlog behind it. The backlog is
+      read via the same byte-cursor primitive ``receipt_query.py``'s
+      ``pull --peek`` uses (``pull_new_receipts``) — this module never calls
       ``save_cursor``, so the cursor position on disk is provably unchanged
-      by a health run.
+      by a health run. The offset itself is read by a local wrapper, not
+      ``receipt_query.load_cursor`` directly: that helper collapses a
+      missing cursor AND a corrupt/unparseable one to the same offset 0,
+      which is correct for its own caller (the pull cadence just starts
+      over) but would let a corrupt cursor file read as "legitimately at
+      byte 0" here. A ledger smaller than the cursor offset (truncation/
+      rotation) is its own finding, not just a reported field.
 
   chain_status — the existing ``ndjson_hash_chain.verify_chain`` outcome,
       with ``unchained`` reported as its own explicit class rather than
@@ -63,7 +69,7 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from ndjson_hash_chain import verify_chain  # noqa: E402
-from receipt_query import CURSOR_NAME, load_cursor, pull_new_receipts  # noqa: E402
+from receipt_query import CURSOR_NAME, pull_new_receipts  # noqa: E402
 
 REGISTER_NAME = "dispatch_register.ndjson"
 LEDGER_NAME = "t0_receipts.ndjson"
@@ -161,8 +167,9 @@ def check_receipt_coverage(state_dir: Path) -> Dict[str, Any]:
         return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read ledger/register: {exc}"}
 
     missing = sorted(register_ids - receipt_ids)
+    parse_errors = register_errors + receipt_errors
 
-    return {
+    result: Dict[str, Any] = {
         "status": STATUS_FINDING if missing else STATUS_OK,
         "register_dispatch_count": len(register_ids),
         "receipted_dispatch_count": len(receipt_ids),
@@ -174,6 +181,52 @@ def check_receipt_coverage(state_dir: Path) -> Dict[str, Any]:
         "receipt_parse_errors": receipt_errors,
     }
 
+    if parse_errors:
+        # A parse error on EITHER file makes `missing` untrustworthy in both
+        # directions: a malformed register line can hide a dispatch_id that
+        # in fact has no receipt (coverage looks better than it is), and a
+        # malformed receipt line can hide the very receipt that would clear
+        # an entry off `missing` (a false "missing"). Either way this check
+        # cannot certify coverage, so it is SKIPPED_UNVERIFIED — chosen over
+        # STATUS_FINDING-with-a-flag because a corrupt line's blast radius is
+        # unbounded (we don't know what dispatch_id it would have carried),
+        # unlike a clean-parse `missing` list, which is exact. This mirrors
+        # the OSError branch above: a read that didn't fully succeed is
+        # "cannot measure", never "measured and fine" — status is
+        # overridden even when `missing` is empty.
+        result["status"] = SKIPPED_UNVERIFIED
+        result["reason"] = (
+            f"{register_errors} register + {receipt_errors} receipt parse error(s) — "
+            "coverage cannot be certified from a partially-unreadable ledger/register"
+        )
+
+    return result
+
+
+def _read_cursor_offset(cursor_path: Path) -> Tuple[Optional[int], bool]:
+    """Read the byte offset from ``cursor_path`` directly, distinguishing a
+    corrupt/unparseable cursor file from a legitimate offset (including 0).
+
+    ``receipt_query.load_cursor`` intentionally collapses a missing cursor
+    AND a corrupt one to the same offset 0 — correct for its own caller (the
+    pull cadence just starts over from 0), but a health check consuming that
+    same 0 could not tell "cursor genuinely at byte 0" from "cursor file is
+    garbage, this 0 means nothing". Duplicated here as a two-line parse
+    (same shape as ``load_cursor``) rather than changing that helper's
+    contract for its other caller.
+
+    Returns ``(offset, is_corrupt)``. ``offset`` is ``None`` when corrupt.
+    Only called after the caller has already confirmed ``cursor_path``
+    exists.
+    """
+    try:
+        raw = cursor_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        offset = int(data.get("offset", 0))
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        return None, True
+    return offset, False
+
 
 def check_pull_cursor(
     state_dir: Path,
@@ -182,9 +235,10 @@ def check_pull_cursor(
 ) -> Dict[str, Any]:
     """Age of receipt_pull_cursor.json plus the unread backlog behind it.
 
-    Never advances the cursor: reads the offset with ``receipt_query.
-    load_cursor`` and the backlog with ``receipt_query.pull_new_receipts``,
-    but never calls ``save_cursor`` — the same non-mutating contract
+    Never advances the cursor: reads the offset with the local
+    ``_read_cursor_offset`` (a corruption-aware wrapper, see its docstring)
+    and the backlog with ``receipt_query.pull_new_receipts``, but never
+    calls ``save_cursor`` — the same non-mutating contract
     ``receipt_query.py pull --peek`` gives its callers.
     """
     ledger_path = state_dir / LEDGER_NAME
@@ -227,10 +281,30 @@ def check_pull_cursor(
         }
 
     try:
-        cursor_offset = load_cursor(cursor_path)
         cursor_mtime = cursor_path.stat().st_mtime
     except OSError as exc:
         return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read cursor: {exc}"}
+
+    cursor_offset, cursor_corrupt = _read_cursor_offset(cursor_path)
+
+    if cursor_corrupt:
+        # load_cursor() would silently coerce this same file to offset 0 —
+        # indistinguishable from a legitimate cursor that really is at byte
+        # 0. Never trust an offset we can't parse: status is
+        # SKIPPED_UNVERIFIED, not STATUS_OK on a guessed 0.
+        return {
+            "status": SKIPPED_UNVERIFIED,
+            "cursor_path": str(cursor_path),
+            "cursor_exists": True,
+            "cursor_corrupt": True,
+            "cursor_offset": None,
+            "cursor_age_seconds": round(max(0.0, time.time() - cursor_mtime), 1),
+            "ledger_size_bytes": ledger_size,
+            "stale_threshold_hours": stale_hours,
+            "reason": f"{cursor_path} exists but its offset could not be parsed as valid "
+                      "JSON — not the same as a legitimate offset of 0, so the cursor "
+                      "position cannot be trusted",
+        }
 
     age_seconds = max(0.0, time.time() - cursor_mtime)
     truncated = ledger_size < cursor_offset
@@ -245,10 +319,22 @@ def check_pull_cursor(
 
     stale = age_seconds > (stale_hours * 3600.0)
 
+    reasons = []
+    if truncated:
+        reasons.append(
+            f"ledger ({ledger_size} bytes) is smaller than the cursor offset "
+            f"({cursor_offset} bytes) — truncated or rotated since the last pull"
+        )
+    if stale:
+        reasons.append(
+            f"cursor is {round(age_seconds / 3600.0, 1)}h old, past the {stale_hours}h threshold"
+        )
+
     return {
-        "status": STATUS_FINDING if stale else STATUS_OK,
+        "status": STATUS_FINDING if (stale or truncated) else STATUS_OK,
         "cursor_path": str(cursor_path),
         "cursor_exists": True,
+        "cursor_corrupt": False,
         "cursor_offset": cursor_offset,
         "cursor_age_seconds": round(age_seconds, 1),
         "ledger_size_bytes": ledger_size,
@@ -256,10 +342,7 @@ def check_pull_cursor(
         "backlog_receipt_count": len(backlog_receipts),
         "ledger_truncated_since_cursor": truncated,
         "stale_threshold_hours": stale_hours,
-        "reason": (
-            f"cursor is {round(age_seconds / 3600.0, 1)}h old, past the {stale_hours}h threshold"
-            if stale else None
-        ),
+        "reason": "; ".join(reasons) if reasons else None,
     }
 
 

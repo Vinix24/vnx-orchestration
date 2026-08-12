@@ -133,7 +133,11 @@ class TestReceiptCoverage:
         result = lh.check_receipt_coverage(state_dir)
         assert result["status"] == lh.STATUS_OK
 
-    def test_malformed_lines_are_skipped_not_fatal(self, state_dir):
+    def test_malformed_lines_do_not_crash_the_check(self, state_dir):
+        """A malformed line must never raise — but (regression, dispatch
+        20260812d-c) it must also never let the check report STATUS_OK: a
+        corrupt register line could be hiding a dispatch_id that has no
+        receipt at all, which this check would then never see."""
         register_path = state_dir / lh.REGISTER_NAME
         register_path.write_text(
             json.dumps(_register_entry("d-001")) + "\n" + "{not json\n", encoding="utf-8"
@@ -141,8 +145,46 @@ class TestReceiptCoverage:
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
 
         result = lh.check_receipt_coverage(state_dir)
-        assert result["status"] == lh.STATUS_OK
         assert result["register_parse_errors"] == 1
+        assert result["status"] != lh.STATUS_OK
+
+    def test_corrupt_register_line_with_no_missing_receipts_is_not_ok(self, state_dir):
+        """Regression (dispatch 20260812d-c): on the pre-fix branch this case
+        reported STATUS_OK because ``missing`` came back empty — the parse
+        error itself never touched the status. A corrupt register line means
+        the register was NOT fully read, so coverage cannot be certified as
+        OK even when every dispatch_id that DID parse has a receipt.
+        """
+        register_path = state_dir / lh.REGISTER_NAME
+        register_path.write_text(
+            json.dumps(_register_entry("d-001")) + "\n" + "{not json\n", encoding="utf-8"
+        )
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
+
+        result = lh.check_receipt_coverage(state_dir)
+
+        assert result["missing_receipt_count"] == 0
+        assert result["register_parse_errors"] == 1
+        assert result["status"] != lh.STATUS_OK
+        assert result["status"] == lh.SKIPPED_UNVERIFIED
+
+    def test_corrupt_receipt_line_is_not_ok(self, state_dir):
+        """Regression (dispatch 20260812d-c): the same blind spot on the
+        receipts side. A malformed line in ``t0_receipts.ndjson`` could be
+        hiding the exact receipt that would clear a dispatch off `missing` —
+        or hiding nothing. Either way, coverage cannot be certified.
+        """
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"))
+        ledger_path = state_dir / lh.LEDGER_NAME
+        ledger_path.write_text(
+            json.dumps(_receipt("d-001")) + "\n" + "{not json\n", encoding="utf-8"
+        )
+
+        result = lh.check_receipt_coverage(state_dir)
+
+        assert result["receipt_parse_errors"] == 1
+        assert result["status"] != lh.STATUS_OK
+        assert result["status"] == lh.SKIPPED_UNVERIFIED
 
     def test_missing_register_is_unmeasurable(self, state_dir):
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
@@ -223,6 +265,54 @@ class TestPullCursor:
         result = lh.check_pull_cursor(state_dir)
 
         assert result["ledger_truncated_since_cursor"] is True
+        assert result["status"] == lh.STATUS_FINDING
+
+    def test_truncated_ledger_is_not_ok_even_when_cursor_is_fresh(self, state_dir):
+        """Regression (dispatch 20260812d-c): on the pre-fix branch a fresh
+        (non-stale) cursor masked truncation entirely — ``truncated`` was
+        computed and reported but never touched ``status``, so a rotated/
+        truncated ledger read as STATUS_OK as long as the cursor file itself
+        was young. Truncation is a finding on its own, independent of age.
+        """
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
+        cursor_path = state_dir / lh.CURSOR_NAME
+        cursor_path.write_text(json.dumps({"offset": 10_000_000}), encoding="utf-8")
+        # cursor_path.write_text() just now => age_seconds ~0, nowhere near stale.
+
+        result = lh.check_pull_cursor(state_dir, stale_hours=24.0)
+
+        assert result["cursor_age_seconds"] < 5.0
+        assert result["status"] != lh.STATUS_OK
+        assert result["status"] == lh.STATUS_FINDING
+
+    def test_corrupt_cursor_file_is_not_ok_and_distinct_from_offset_zero(self, state_dir):
+        """Regression (dispatch 20260812d-c): ``receipt_query.load_cursor``
+        silently coerces a corrupt/unparseable cursor file to offset 0 — the
+        SAME value a legitimate "cursor genuinely at byte 0" produces. Before
+        the fix, ``ledger_health`` inherited that collapse and could report
+        STATUS_OK on a cursor it could not actually read. A corrupt cursor
+        must be its own outcome, not silently treated as a measured zero.
+        """
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
+        cursor_path = state_dir / lh.CURSOR_NAME
+        cursor_path.write_text("{not valid json at all", encoding="utf-8")
+
+        corrupt_result = lh.check_pull_cursor(state_dir, stale_hours=24.0)
+
+        assert corrupt_result["status"] != lh.STATUS_OK
+        assert corrupt_result["status"] == lh.SKIPPED_UNVERIFIED
+        assert corrupt_result["cursor_corrupt"] is True
+
+        # A legitimate offset of 0 against an empty (nothing-to-pull) ledger
+        # is a materially different, healthy outcome — proves the two are
+        # distinguished rather than both collapsing to "offset 0, fine".
+        cursor_path.write_text(json.dumps({"offset": 0}), encoding="utf-8")
+        (state_dir / lh.LEDGER_NAME).write_text("", encoding="utf-8")
+        legit_result = lh.check_pull_cursor(state_dir, stale_hours=24.0)
+
+        assert legit_result["cursor_corrupt"] is False
+        assert legit_result["cursor_offset"] == 0
+        assert legit_result["status"] == lh.STATUS_OK
 
     def test_missing_ledger_is_unmeasurable(self, state_dir):
         result = lh.check_pull_cursor(state_dir)
@@ -320,6 +410,32 @@ class TestComputeHealth:
         # which must win over any finding-shaped result.
         result = lh.compute_health(tmp_path, state_dir)
 
+        assert result["overall_status"] == lh.SKIPPED_UNVERIFIED
+        assert result["exit_code"] == lh.EXIT_UNMEASURABLE
+
+    def test_single_subcheck_parse_error_rolls_up_to_unverifiable_exit_2(
+        self, tmp_path, state_dir, monkeypatch
+    ):
+        """Regression (dispatch 20260812d-c): a parse error in ONE sub-check
+        (receipt_coverage) must not get diluted by two otherwise-healthy
+        sub-checks. compute_health's own SKIPPED_UNVERIFIED-outranks-FINDING
+        rollup already existed pre-fix; what's new is that a corrupt line
+        alone (no missing receipts, no stale cursor, no chain finding) now
+        actually produces that SKIPPED_UNVERIFIED in the first place.
+        """
+        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        register_path = state_dir / lh.REGISTER_NAME
+        register_path.write_text(
+            json.dumps(_register_entry("d-001")) + "\n" + "{not json\n", encoding="utf-8"
+        )
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
+        ledger_size = (state_dir / lh.LEDGER_NAME).stat().st_size
+        (state_dir / lh.CURSOR_NAME).write_text(json.dumps({"offset": ledger_size}), encoding="utf-8")
+
+        result = lh.compute_health(tmp_path, state_dir)
+
+        assert result["checks"]["receipt_coverage"]["status"] == lh.SKIPPED_UNVERIFIED
+        assert result["checks"]["pull_cursor"]["status"] == lh.STATUS_OK
         assert result["overall_status"] == lh.SKIPPED_UNVERIFIED
         assert result["exit_code"] == lh.EXIT_UNMEASURABLE
 

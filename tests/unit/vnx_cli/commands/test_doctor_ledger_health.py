@@ -98,6 +98,32 @@ class TestCheckLedgerHealth:
         assert result.status == WARN
         assert "corrupt" in result.detail.lower()
 
+    def test_corrupt_register_line_is_warn_not_pass(self, tmp_path):
+        """Regression (dispatch 20260812d-c): a corrupt line in
+        dispatch_register.ndjson with zero missing receipts used to make
+        ``check_receipt_coverage`` report STATUS_OK, so doctor would PASS on
+        a register it never fully read. It must now surface as WARN via the
+        SKIPPED_UNVERIFIED branch, the same as any other unmeasurable state.
+        """
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / lh.REGISTER_NAME).write_text(
+            __import__("json").dumps(_register_entry("d-001")) + "\n" + "{not json\n",
+            encoding="utf-8",
+        )
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
+        ledger_size = (state_dir / lh.LEDGER_NAME).stat().st_size
+        (state_dir / lh.CURSOR_NAME).write_text(
+            __import__("json").dumps({"offset": ledger_size}), encoding="utf-8"
+        )
+
+        computed = lh.compute_health(tmp_path, state_dir)
+        lh.write_health_surface(tmp_path, computed)
+
+        result = _check_ledger_health(tmp_path)
+        assert result.status == WARN
+        assert "unmeasurable" in result.detail
+
     def test_stale_beacon_is_warn(self, tmp_path, monkeypatch):
         """A beacon older than its expected_interval_seconds is stale
         regardless of the status it recorded at write time (health_beacon
