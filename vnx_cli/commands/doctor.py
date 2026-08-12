@@ -745,6 +745,88 @@ def _check_hook_paths(project_dir: Path) -> Check:
     return _result(PASS, "all referenced hook script paths resolve")
 
 
+def _check_ledger_health(data_root: Path) -> Check:
+    """WARN from the ledger_health beacon: dispatches without a receipt, a
+    stale receipt-pull cursor, or a ledger that is unchained while
+    VNX_CHAIN_RECEIPTS is configured on.
+
+    Delegates entirely to two existing modules instead of a third resolver
+    or threshold set: ``health_beacon.all_beacons`` (the same staleness/
+    corrupt classification every other subsystem beacon uses —
+    ``vnx_cli/commands/subsystems.py``) reads the beacon file itself, and
+    ``ledger_health.COMPONENT_NAME`` names it — the actual coverage/cursor/
+    chain thresholds live only in ``scripts/ledger_health.py``. Mirrors
+    ``_check_hook_paths``'s delegation to ``hookpin_check``.
+
+    The beacon is written by a separate, manual/periodic run of
+    ``python3 scripts/ledger_health.py`` (wiring an automatic cadence is out
+    of scope — see the dispatch this check shipped with) — so a project that
+    has never run it gets PASS-with-a-pointer, not a false FAIL.
+    """
+    def _result(status: str, detail: str) -> Check:
+        return Check(name="ledger:health", status=status, detail=detail)
+
+    try:
+        _engine.ensure_engine_on_path()
+        from health_beacon import all_beacons
+        from ledger_health import COMPONENT_NAME
+    except Exception as exc:
+        return _result(WARN, f"could not load ledger_health/health_beacon module: {exc}")
+
+    beacon = all_beacons(data_root).get(COMPONENT_NAME)
+    if beacon is None:
+        return _result(
+            PASS,
+            "no ledger-health beacon yet — run `python3 scripts/ledger_health.py` to populate",
+        )
+
+    health = beacon.get("health", "unknown")
+    if health == "corrupt":
+        return _result(WARN, f"ledger-health beacon is corrupt/unreadable: {beacon.get('error', '?')}")
+
+    findings: list[str] = []
+    if health == "stale":
+        age = beacon.get("age_seconds")
+        age_str = f"{round(age / 3600, 1)}h" if isinstance(age, (int, float)) else "?"
+        findings.append(f"beacon is stale ({age_str} old) — rerun ledger_health.py")
+
+    details = beacon.get("details") or {}
+    checks = details.get("checks") or {}
+
+    coverage = checks.get("receipt_coverage") or {}
+    if coverage.get("status") == "finding":
+        findings.append(
+            f"{coverage.get('missing_receipt_count', '?')} dispatch(es) in the register "
+            "have no matching receipt"
+        )
+    elif coverage.get("status") == "SKIPPED_UNVERIFIED":
+        findings.append(f"receipt coverage unmeasurable: {coverage.get('reason', '?')}")
+
+    cursor = checks.get("pull_cursor") or {}
+    if cursor.get("status") == "finding":
+        age_seconds = cursor.get("cursor_age_seconds")
+        age_h = round(age_seconds / 3600, 1) if isinstance(age_seconds, (int, float)) else "?"
+        findings.append(
+            f"receipt pull cursor is {age_h}h old "
+            f"(backlog {cursor.get('backlog_receipt_count', '?')} receipt(s))"
+        )
+    elif cursor.get("status") == "SKIPPED_UNVERIFIED":
+        findings.append(f"pull-cursor health unmeasurable: {cursor.get('reason', '?')}")
+
+    chain = checks.get("chain_status") or {}
+    if chain.get("status") == "finding":
+        findings.append(
+            f"receipts ledger is {chain.get('chain_state', '?')} while VNX_CHAIN_RECEIPTS "
+            "is configured on"
+        )
+    elif chain.get("status") == "SKIPPED_UNVERIFIED":
+        findings.append(f"chain-status unmeasurable: {chain.get('reason', '?')}")
+
+    if findings:
+        return _result(WARN, "; ".join(findings))
+    return _result(PASS, "receipt coverage, pull-cursor age, and chain status all healthy")
+
+
 def _check_embedded_path_assumptions() -> Check:
     """WARN when scripts/lib contains __file__-anchored .vnx-data/ROADMAP.yaml derivations.
 
@@ -825,6 +907,7 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_worktree_orphans(project_dir))
     checks.append(_check_active_drain(data_root))
     checks.append(_check_hook_paths(project_dir))
+    checks.append(_check_ledger_health(data_root))
     checks.append(_check_embedded_path_assumptions())
 
     passed = sum(1 for c in checks if c.status == PASS)
