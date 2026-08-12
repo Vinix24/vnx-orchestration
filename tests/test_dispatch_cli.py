@@ -1764,6 +1764,154 @@ def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# OI-1158 — headless isolation guard: never silent on isolation=worktree
+# ---------------------------------------------------------------------------
+
+class TestHeadlessIsolationGuard:
+    """The door must never no-op on isolation=worktree for a lane it cannot
+    structurally verify (currently: claude_headless).
+
+    Peer-measured 2026-08-12 (pacompany-engine, OI-1158): two headless
+    dispatches, both staged with isolation:'worktree' in the spec, ended up
+    sharing one tree with zero warning anywhere in the door. These tests must
+    fail on pre-fix code (no _headless_isolation_guard, no warning surfaced
+    anywhere, no receipt field) and pass on the fix.
+    """
+
+    def test_guard_flags_headless_lane(self, tmp_path):
+        """_headless_isolation_guard returns a non-empty warning for claude_headless."""
+        from dispatch_cli import _headless_isolation_guard
+
+        spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+            "allow_headless": True,
+            "headless_reason": "unit test",
+        })
+        spec = load_spec(spec_file)
+        vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
+        assert not isinstance(vspec, Reject), f"spec must validate cleanly, got {vspec}"
+        plan = compile_plan(vspec, _clean_snapshot())
+        assert not isinstance(plan, Reject), f"plan must compile cleanly, got {plan}"
+        assert plan.lane == "claude_headless"
+
+        warning = _headless_isolation_guard(plan)
+        assert warning, "headless lane must get a non-empty isolation warning"
+        assert "OI-1158" in warning
+        assert "isolation" in warning.lower()
+
+    def test_guard_returns_none_for_tmux_lane(self, tmp_path):
+        """The tmux lane's isolation is structurally verified elsewhere — no warning."""
+        from dispatch_cli import _headless_isolation_guard
+
+        spec_file = _make_spec_file(tmp_path, provider="claude")
+        spec = load_spec(spec_file)
+        vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
+        plan = compile_plan(vspec, _clean_snapshot())
+        assert plan.lane == "claude_tmux_subscription"
+
+        assert _headless_isolation_guard(plan) is None
+
+    def test_guard_returns_none_for_provider_lane(self, tmp_path):
+        """A provider (non-claude) lane also gets no headless-specific warning."""
+        from dispatch_cli import _headless_isolation_guard
+
+        spec_file = _make_spec_file(tmp_path, provider="codex")
+        spec = load_spec(spec_file)
+        vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
+        plan = compile_plan(vspec, _clean_snapshot())
+        assert plan.lane == "provider"
+
+        assert _headless_isolation_guard(plan) is None
+
+    @patch("dispatch_cli.build_runtime_snapshot")
+    def test_dry_run_surfaces_isolation_warning_for_headless(self, mock_snapshot, tmp_path, capsys):
+        """--dry-run on a headless spec must print the isolation warning — never silent."""
+        mock_snapshot.return_value = _clean_snapshot()
+        spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+            "allow_headless": True,
+            "headless_reason": "unit test",
+        })
+
+        rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "OI-1158" in out, (
+            f"dry-run on a headless spec must surface the isolation warning; got:\n{out}"
+        )
+
+    @patch("dispatch_cli.build_runtime_snapshot")
+    def test_dry_run_default_claude_has_no_isolation_warning(self, mock_snapshot, tmp_path, capsys):
+        """Regression pin: a normal (tmux-lane) dry-run must NOT print the OI-1158 warning."""
+        mock_snapshot.return_value = _clean_snapshot()
+        spec_file = _make_spec_file(tmp_path, provider="claude")
+
+        rc = run_dispatch(spec_file, dry_run=True)
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "OI-1158" not in out, (
+            f"tmux-lane dispatch must not carry the headless isolation warning; got:\n{out}"
+        )
+
+    @patch("dispatch_cli.build_runtime_snapshot")
+    def test_real_headless_dispatch_prints_warning_and_stamps_receipt_field(
+        self, mock_snapshot, tmp_path, capsys
+    ):
+        """A live (non-dry-run) headless fire must print the warning to stderr AND
+        pass a non-empty isolation_note through to _persist_route_decision — the
+        receipt-visible half of OI-1158's fix."""
+        mock_snapshot.return_value = _clean_snapshot()
+        spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+            "allow_headless": True,
+            "headless_reason": "unit test",
+        })
+
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless, \
+             patch("dispatch_cli._persist_route_decision") as mock_persist, \
+             patch.dict(os.environ, {"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}):
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_headless.assert_called_once()
+
+        err = capsys.readouterr().err
+        assert "OI-1158" in err, (
+            f"live headless fire must print the isolation warning to stderr; got:\n{err}"
+        )
+
+        mock_persist.assert_called_once()
+        _, persist_kwargs = mock_persist.call_args
+        assert persist_kwargs.get("isolation_note"), (
+            "the route-decision receipt must carry a non-empty isolation_note "
+            "for a headless dispatch"
+        )
+        assert "OI-1158" in persist_kwargs["isolation_note"]
+
+    def test_real_tmux_dispatch_has_no_isolation_note(self, tmp_path, monkeypatch):
+        """Regression pin: a tmux-lane dispatch's route-decision must carry
+        isolation_note=None — the warning is headless-specific."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# OI-1158 tmux regression\n\nDo something safe.\n",
+            staging_id="20260812-staging-oi1158-tmux",
+            dispatch_id="20260812-oi1158-tmux",
+            target_slot="T0",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec, \
+             patch("dispatch_cli._persist_route_decision") as mock_persist:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_exec.assert_called_once()
+        mock_persist.assert_called_once()
+        _, persist_kwargs = mock_persist.call_args
+        assert persist_kwargs.get("isolation_note") is None
+
+
+# ---------------------------------------------------------------------------
 # HIGH-1 — load_spec strict bool coercion for allow_headless / requires_mcp
 # ---------------------------------------------------------------------------
 

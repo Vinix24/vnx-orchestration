@@ -2,14 +2,14 @@
   "couplings": [
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 759,
+      "line": 760,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 762,
+      "line": 763,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
@@ -310,42 +310,42 @@
     },
     {
       "file": "tests/test_dispatch_envelope_field_propagation.py",
-      "line": 204,
+      "line": 214,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_dispatch_envelope_field_propagation.py",
-      "line": 204,
+      "line": 214,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_field_propagation.py",
-      "line": 206,
+      "line": 221,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_field_propagation.py",
-      "line": 257,
+      "line": 279,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_dispatch_envelope_field_propagation.py",
-      "line": 257,
+      "line": 279,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_field_propagation.py",
-      "line": 259,
+      "line": 286,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
@@ -401,119 +401,119 @@
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 166,
+      "line": 178,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 167,
+      "line": 179,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 412,
+      "line": 436,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 449,
+      "line": 473,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 514,
+      "line": 538,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 560,
+      "line": 584,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 603,
+      "line": 627,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 643,
+      "line": 667,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 678,
+      "line": 702,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "CodexAdapter"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 684,
+      "line": 708,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "CodexAdapter"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 684,
+      "line": 708,
       "mechanism": "monkeypatch",
       "module_target": "dispatch_envelope",
       "symbol": "CodexAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 689,
+      "line": 713,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 728,
+      "line": 752,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 729,
+      "line": 753,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 760,
+      "line": 784,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 792,
+      "line": 816,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 793,
+      "line": 817,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
@@ -660,84 +660,105 @@
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 29,
+      "line": 30,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 30,
+      "line": 31,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 31,
+      "line": 32,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_headless_plan"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 145,
+      "line": 146,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 145,
+      "line": 146,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 147,
+      "line": 148,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 204,
+      "line": 205,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 204,
+      "line": 205,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 206,
+      "line": 207,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 263,
+      "line": 264,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 263,
+      "line": 264,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
-      "line": 265,
+      "line": 266,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 340,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 340,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_headless_worktree_isolation.py",
+      "line": 342,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
@@ -968,35 +989,35 @@
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1032,
+      "line": 1036,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1032,
+      "line": 1036,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1123,
+      "line": 1127,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1123,
+      "line": 1127,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1139,
+      "line": 1143,
       "mechanism": "logger-name",
       "module_target": "dispatch_envelope",
       "symbol": ""
@@ -1137,6 +1158,7 @@
     "dispatch_envelope.LaneRouter::get",
     "dispatch_envelope::_dispatch_branch_name",
     "dispatch_envelope::_enforce_push_pr",
+    "dispatch_envelope::_is_dispatch_branch_ref",
     "dispatch_envelope::_receipts_file_for",
     "dispatch_envelope::_resolve_base_sha",
     "dispatch_envelope::run_envelope",
