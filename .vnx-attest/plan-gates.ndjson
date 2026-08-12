@@ -1,0 +1,2 @@
+{"type": "plan_gate_pass", "track_id": "T", "project_id": "test-proj", "resolver": "attest", "resolved_at": "2026-07-17T09:10:24.563210Z", "approval_id": "APR-1", "reason": "already shipped+merged pre-gate", "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000"}
+{"type": "plan_gate_pass", "track_id": "T", "project_id": "test-proj", "resolver": "attest", "resolved_at": "2026-07-17T09:10:24.654978Z", "approval_id": "APR-1", "reason": "shipped", "prev_hash": "217f654dab622647098220bd1dbcd5fbc21accc45407e89325f0274b61b36189"}
