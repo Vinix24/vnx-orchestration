@@ -17,6 +17,7 @@ from pre_merge_gate import (
     DELETION_FILE_WARN,
     NET_LINE_DELETION_HOLD,
     NET_LINE_DELETION_WARN,
+    SKIPPED_UNVERIFIED,
     _parse_numstat_net,
     check_net_deletion,
 )
@@ -111,7 +112,11 @@ class TestCheckNetDeletion:
         assert result["status"] == "GO"
         assert result["net_line_deletion_warn"] is False
 
-    def test_git_failure_on_numstat_falls_back_to_none(self, tmp_path):
+    def test_git_failure_on_numstat_is_unverified(self, tmp_path):
+        """OI-1140: numstat failing on every attempt means net-line-deletion
+        could not be computed at all -- previously fell back to a silent GO;
+        must be SKIPPED_UNVERIFIED since the gate never actually saw the
+        diff (file-deletion sub-check resolving cleanly must not mask this)."""
         fail = MagicMock()
         fail.returncode = 1
         fail.stdout = ""
@@ -121,7 +126,8 @@ class TestCheckNetDeletion:
         ]):
             result = check_net_deletion(tmp_path)
         assert result["net_line_deletion"] is None
-        assert result["status"] == "GO"
+        assert result["status"] == SKIPPED_UNVERIFIED
+        assert result["status"] != "GO"
 
     def test_file_hold_plus_net_line_hold(self, tmp_path):
         """Both triggers: status must still be HOLD."""
