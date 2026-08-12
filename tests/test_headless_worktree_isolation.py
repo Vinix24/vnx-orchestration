@@ -13,6 +13,7 @@ fix branch. Pure unit assertions — no worker spawn.
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -70,10 +71,10 @@ def _make_headless_spec(
         target_slot=target_slot,
         gate="human-promoted",
         dispatch_paths=(),
+        base_ref=base_ref,
         provider=Provider.CLAUDE,
         model=model,
         pr_id=pr_id,
-        base_ref=base_ref,
         allow_headless=True,
         headless_reason="test",
     )
@@ -274,6 +275,85 @@ class TestHeadlessWorktreeIsolation:
         assert remove_calls, (
             "remove_dispatch_worktree was never called — teardown is missing; "
             "the worktree would leak on every headless dispatch"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 2 — OI-1158: the isolation boundary through the ACTUAL door entry point
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteClaudeHeadlessIsolationBoundary:
+    """OI-1158 (peer-measured 2026-08-12, pacompany-engine): prove the
+    isolation boundary through ``dispatch_cli._execute_claude_headless`` — the
+    actual door entry point for the headless lane — not just
+    ``run_envelope_headless_plan`` directly (Test 1 above already covers
+    that). Fabricated runner only, no real claude spawn: ``create_dispatch_worktree``,
+    ``ClaudeSubprocessAdapter.run`` and ``_govern`` are all mocked.
+    """
+
+    def test_execute_claude_headless_worker_runs_inside_dispatch_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """_execute_claude_headless must hand the worker cwd=<dispatch worktree>,
+        never the main checkout — the exact symptom peer-measured on 2026-08-12
+        (two headless dispatches sharing one tree = the project root)."""
+        import dispatch_envelope
+        from dispatch_cli import _execute_claude_headless
+
+        spec = _make_headless_spec(tmp_path=tmp_path, target_slot="T1")
+        vspec = _make_vspec_from_spec(spec)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert plan.lane == "claude_headless", f"Expected claude_headless, got {plan.lane}"
+        permit = issue_permit(plan)
+
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+        fake_receipt = state_dir / "t0_receipts.ndjson"
+        fake_receipt.touch()
+
+        fake_consumer_root = tmp_path / "consumer-root"
+        fake_consumer_root.mkdir()
+        fake_wt_path = fake_consumer_root / ".vnx-data" / "worktrees" / f"dispatch-{plan.dispatch_id}"
+        fake_wt_path.mkdir(parents=True)
+
+        captured_cwd: list = []
+        captured_dispatch_ids: list = []
+
+        def capture_create(dispatch_id, **kwargs):
+            captured_dispatch_ids.append(dispatch_id)
+            return fake_wt_path
+
+        def capture_adapter_run(spec_arg, cwd=None, **kwargs):
+            captured_cwd.append(cwd)
+            return _fake_adapter_success()
+
+        def capture_govern(spec_arg, *args, **kwargs):
+            return (fake_receipt, fake_receipt)
+
+        with patch.dict(os.environ, {"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}), \
+             patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+                   return_value=fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree",
+                   side_effect=capture_create), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
+             patch.object(dispatch_envelope.ClaudeSubprocessAdapter, "run",
+                          side_effect=capture_adapter_run), \
+             patch("dispatch_envelope._govern", side_effect=capture_govern):
+            rc = _execute_claude_headless(
+                plan, permit, state_dir=state_dir, data_dir=data_dir, role=plan.role,
+            )
+
+        assert rc == 0, f"expected success returncode, got {rc}"
+        assert captured_dispatch_ids == [plan.dispatch_id], (
+            "the worktree must be allocated for THIS dispatch's own id, never "
+            "reused/shared from another dispatch"
+        )
+        assert captured_cwd and captured_cwd[0] == fake_wt_path, (
+            "the worker must run with cwd=<the dispatch worktree>, not the main "
+            f"checkout — the exact OI-1158 failure mode. Got cwd={captured_cwd}"
         )
 
 

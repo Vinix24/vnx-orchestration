@@ -43,6 +43,21 @@ or ``receipt_pull_cursor.json`` — that answers three questions:
       sees a green checkmark for a ledger integrity CANNOT be verified on.
       Absence of evidence is not evidence of absence.
 
+  migration_staleness — (OI-1169) compares ``runtime_coordination.db``'s
+      ``PRAGMA user_version`` against the highest migration number under
+      ``schemas/migrations/`` that ``migrations.auto_apply`` can actually
+      apply (i.e. it has a paired ``apply_NNNN.py`` runner — a date-named
+      migration targeting a different database, such as
+      ``quality_intelligence.db``, has no runner and is correctly excluded;
+      see ``migrations/auto_apply.py``). Before this dispatch a store that
+      never opened a T0 SessionStart (the only wiring `auto_apply` had) could
+      fall behind the numbered walk `vnx migrate` actually drives and stay
+      behind silently forever. A store with no ``runtime_coordination.db`` yet
+      has no schema state to be stale against — that is a legitimate nothing-
+      to-check case (mirrors ``pull_cursor``'s no-cursor+empty-ledger "OK"),
+      not a read failure, so it reports ``STATUS_OK`` rather than
+      ``SKIPPED_UNVERIFIED``.
+
 Exit codes: 0 all healthy, 1 findings, 2 cannot measure (a required file is
 missing or unreadable) — mirrors ``pre_merge_gate.py``'s ``SKIPPED_UNVERIFIED``
 (#1468): an unmeasurable state is never conflated with a pass, and outranks a
@@ -58,6 +73,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -70,9 +86,13 @@ if str(LIB_DIR) not in sys.path:
 
 from ndjson_hash_chain import verify_chain  # noqa: E402
 from receipt_query import CURSOR_NAME, pull_new_receipts  # noqa: E402
+from migrations.auto_apply import _discover_migrations as _auto_apply_discover_migrations  # noqa: E402
+from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR  # noqa: E402
+from migrations.auto_apply import _DEFAULT_MIGRATIONS_DIR as _AUTO_APPLY_MIGRATIONS_DIR  # noqa: E402
 
 REGISTER_NAME = "dispatch_register.ndjson"
 LEDGER_NAME = "t0_receipts.ndjson"
+RUNTIME_DB_NAME = "runtime_coordination.db"
 COMPONENT_NAME = "ledger_health"
 
 # ADR-035 §5.3 made PULL step 0 of every T0 cycle; an active project runs
@@ -399,17 +419,103 @@ def check_chain_status(state_dir: Path) -> Dict[str, Any]:
     }
 
 
+def _highest_runner_backed_migration(migrations_dir: Path, runners_dir: Path) -> Optional[int]:
+    """Highest NNNN under *migrations_dir* that has a paired ``apply_NNNN.py``
+    runner in *runners_dir* — i.e. the highest migration ``migrations.auto_apply``
+    can actually apply to ``runtime_coordination.db`` (OI-1169).
+
+    Deliberately NOT the naive highest-numbered-filename in the directory:
+    ``schemas/migrations/`` also holds date-named files (e.g.
+    ``2026_05_intelligence_hygiene.sql``) that match the same ``NNNN_*.sql``
+    discovery pattern with NNNN=2026 but target a different database and carry
+    no runner — counting those would make every real store permanently
+    "behind" a version no store can ever reach. None when no runner-backed
+    migration exists at all (unmeasurable, not zero).
+    """
+    highest: Optional[int] = None
+    for number, _sql_path in _auto_apply_discover_migrations(migrations_dir):
+        if (runners_dir / f"apply_{number:04d}.py").exists():
+            highest = number if highest is None else max(highest, number)
+    return highest
+
+
+def check_migration_staleness(
+    state_dir: Path,
+    *,
+    migrations_dir: Optional[Path] = None,
+    runners_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Compare runtime_coordination.db's PRAGMA user_version against the highest
+    runner-backed migration under schemas/migrations/ (OI-1169).
+
+    A store with no runtime_coordination.db yet has no schema state to be stale
+    against — reported STATUS_OK (nothing to check), not SKIPPED_UNVERIFIED
+    (mirrors check_pull_cursor's no-cursor+empty-ledger OK case). A DB that
+    exists but cannot be opened/read, or a migrations directory that yields no
+    runner-backed migration at all, IS unmeasurable.
+    """
+    db_path = state_dir / RUNTIME_DB_NAME
+    mig_dir = migrations_dir or _AUTO_APPLY_MIGRATIONS_DIR
+    run_dir = runners_dir or _AUTO_APPLY_RUNNERS_DIR
+
+    if not db_path.exists():
+        return {
+            "status": STATUS_OK,
+            "db_path": str(db_path),
+            "db_exists": False,
+            "reason": "no runtime_coordination.db yet — nothing to be stale against",
+        }
+
+    try:
+        highest_available = _highest_runner_backed_migration(mig_dir, run_dir)
+    except OSError as exc:
+        return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read migrations dir {mig_dir}: {exc}"}
+
+    if highest_available is None:
+        return {
+            "status": SKIPPED_UNVERIFIED,
+            "reason": f"no runner-backed migration found under {mig_dir} — cannot determine staleness",
+        }
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read {db_path}: {exc}"}
+
+    behind = highest_available - current_version
+    result: Dict[str, Any] = {
+        "status": STATUS_FINDING if behind > 0 else STATUS_OK,
+        "db_path": str(db_path),
+        "db_exists": True,
+        "current_user_version": current_version,
+        "highest_available_migration": highest_available,
+        "versions_behind": max(behind, 0),
+    }
+    if behind > 0:
+        result["reason"] = (
+            f"store is at user_version={current_version}, highest available "
+            f"runner-backed migration is {highest_available:04d} — {behind} "
+            "migration(s) behind. Run `vnx migrate` to catch it up."
+        )
+    return result
+
+
 def compute_health(
     data_dir: Path,
     state_dir: Path,
     *,
     cursor_stale_hours: float = DEFAULT_CURSOR_STALE_HOURS,
 ) -> Dict[str, Any]:
-    """Run all three checks read-only. Pure function: no writes, no mutation."""
+    """Run all four checks read-only. Pure function: no writes, no mutation."""
     checks = {
         "receipt_coverage": check_receipt_coverage(state_dir),
         "pull_cursor": check_pull_cursor(state_dir, stale_hours=cursor_stale_hours),
         "chain_status": check_chain_status(state_dir),
+        "migration_staleness": check_migration_staleness(state_dir),
     }
 
     statuses = {c["status"] for c in checks.values()}
@@ -497,7 +603,8 @@ def _format_human(result: Dict[str, Any]) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Reconcile dispatch_register.ndjson against t0_receipts.ndjson "
-                     "(coverage, pull-cursor freshness, chain status). Read-only on state.",
+                     "(coverage, pull-cursor freshness, chain status, migration staleness). "
+                     "Read-only on state.",
     )
     parser.add_argument("--data-dir", default=None, help="override VNX_DATA_DIR (default: ambient resolution)")
     parser.add_argument("--state-dir", default=None, help="override VNX_STATE_DIR (default: ambient resolution)")

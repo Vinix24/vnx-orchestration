@@ -140,7 +140,13 @@ class TestPragmaPreflightAssertion:
             mod.run(project_dir)
 
     def test_preflight_passes_on_v21_schema(self, tmp_path):
-        """v21 DB with project_id passes the preflight and migration proceeds."""
+        """v21 DB with project_id passes the preflight and migration proceeds.
+
+        version == 32, not 31 (OI-1169): run() now ends with a generic
+        auto_apply sweep, so a single call carries a fresh store straight
+        through the numbered walk (0022->0031) AND everything runner-backed
+        above it (0032) in one pass.
+        """
         project_dir = _init_project(tmp_path)
         mod = _get_migrate_module()
         mod.run(project_dir)
@@ -150,7 +156,7 @@ class TestPragmaPreflightAssertion:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
         assert "project_id" in cols
-        assert version == 31
+        assert version == 32
 
 
 class TestBidirectionalPreflight:
@@ -292,3 +298,54 @@ class TestPreflightThroughApplyScriptIfBelow:
         with pytest.raises(RuntimeError, match="project_id|schema drift"):
             schema_migration.apply_script_if_below(conn, 22, sql)
         conn.close()
+
+
+class TestAutoApplySweep:
+    """OI-1169: run() must end with a generic auto_apply sweep so anything above
+    the numbered 0022->0031 walk (e.g. 0032) is picked up without a new
+    hardcoded step here. Before the fix a store already at user_version 31
+    stayed at 31 forever, no matter how many times `vnx migrate` ran, because
+    run() never called migrations.auto_apply.auto_apply() at all — the ONLY
+    wiring for that function was scripts/build_t0_state.py's SessionStart
+    bootstrap, which most central stores never go through (T0-measurement
+    2026-08-12: every central store but vnx-dev sat at 31)."""
+
+    def test_store_at_31_reaches_highest_available_after_run(self, tmp_path):
+        """A store already at user_version 31 (the numbered-walk terminal
+        version, simulating a store migrated before 0032 existed) must land
+        on the highest runner-backed migration (32) after a fresh run().
+
+        Fails on the pre-fix code: run() stops at 31 and never advances
+        further, so the final assertion (version == 32) fails.
+        """
+        project_dir = _init_project(tmp_path)
+        db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+
+        # Land the store at 31 first, with the sweep disabled on THIS module
+        # instance — deterministically reproduces "a store at 31" regardless
+        # of how the numbered walk itself evolves.
+        setup_mod = _get_migrate_module()
+        setup_mod.auto_apply = lambda *_a, **_kw: []
+        setup_mod.run(project_dir)
+
+        conn = sqlite3.connect(str(db_path))
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        assert version == 31, "fixture setup must land the store at 31 before testing the sweep"
+
+        # A fresh `vnx migrate` run (real auto_apply, not the disabled stand-in
+        # above) against that already-31 store is the exact scenario OI-1169
+        # is about: the numbered walk (A-D) has nothing left to do, only the
+        # generic sweep (F) can advance the store further.
+        real_mod = _get_migrate_module()
+        real_mod.run(project_dir)
+
+        conn = sqlite3.connect(str(db_path))
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_track_pr_delivery = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='track_pr_delivery'"
+        ).fetchone()
+        conn.close()
+
+        assert version == 32, "store must land on the highest available runner-backed migration"
+        assert has_track_pr_delivery is not None, "0032's track_pr_delivery table must exist"

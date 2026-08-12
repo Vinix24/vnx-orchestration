@@ -24,6 +24,7 @@ and operates ONLY on temp DBs; the live ~/.vnx-data is never opened or mutated.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -131,15 +132,20 @@ def _open(db: Path) -> sqlite3.Connection:
 # --------------------------------------------------------------------------- #
 
 def test_fresh_db_walk_satisfies_v31_manifest_exactly(tmp_path: Path) -> None:
-    """Applying the full walk to a fresh DB yields a schema that satisfies the v31
-    invariant manifest EXACTLY (zero violations). If this fails, the manifest has
-    drifted from the migration SQL and the reconciler would oscillate."""
+    """Applying the full walk to a fresh DB yields a schema that satisfies the
+    TERMINAL_VERSION invariant manifest EXACTLY (zero violations). If this fails, the
+    manifest has drifted from the migration SQL and the reconciler would oscillate.
+
+    run() now lands on TERMINAL_VERSION (32, OI-1169 auto_apply sweep), not the fixed
+    numbered walk's 0022->0031 terminal — this is the "end state after a full
+    migration" case, so the assertion moves WITH TERMINAL_VERSION rather than pinning
+    31 literally (see the sibling v31-lie tests below for the cases that stay pinned)."""
     proj = _make_project(tmp_path)
     mfs.run(proj)
     conn = _open(_db_path(proj))
     try:
         assert schema_migration.get_user_version(conn) == sm.TERMINAL_VERSION
-        assert sm.validate_db_at_version(conn, 31) == []
+        assert sm.validate_db_at_version(conn, sm.TERMINAL_VERSION) == []
     finally:
         conn.close()
 
@@ -166,7 +172,11 @@ def test_lying_v31_downgrades_to_true_version_and_rewalks(
     tmp_path: Path, true_version: int
 ) -> None:
     """A genuine vK DB stamped as v31 is reconciled DOWN to vK; the numbered walk then
-    re-applies 00(K+1)..0031 and converges at a clean v31 (no data dropped)."""
+    re-applies 00(K+1)..0031 and converges at a clean v31 — then run()'s OI-1169
+    auto_apply sweep (step F) picks up anything runner-backed above the numbered walk
+    (0032+), so the FINAL state after run() is TERMINAL_VERSION, not a pinned 31. The
+    v31-lie setup above stays literal: it is specifically exercising the "claims v31"
+    scenario, independent of how high TERMINAL_VERSION happens to be."""
     proj = _build_db_at(tmp_path, true_version)
     db = _db_path(proj)
     _stamp_user_version(db, 31)
@@ -180,8 +190,8 @@ def test_lying_v31_downgrades_to_true_version_and_rewalks(
 
     conn = _open(db)
     try:
-        assert schema_migration.get_user_version(conn) == 31
-        assert sm.validate_db_at_version(conn, 31) == []
+        assert schema_migration.get_user_version(conn) == sm.TERMINAL_VERSION
+        assert sm.validate_db_at_version(conn, sm.TERMINAL_VERSION) == []
         # the seeded dispatch row survived the whole walk (no data loss)
         assert conn.execute("SELECT COUNT(*) FROM dispatches").fetchone()[0] == 1
     finally:
@@ -210,7 +220,9 @@ def test_canonical_derived_status_absent_at_v31(tmp_path: Path) -> None:
     mfs.run(proj)
     conn = _open(db)
     try:
-        assert schema_migration.get_user_version(conn) == 31
+        # end state after a full run() moves WITH TERMINAL_VERSION (OI-1169 sweep) —
+        # the claim-31 setup above stays a literal 31, this is the post-run() outcome.
+        assert schema_migration.get_user_version(conn) == sm.TERMINAL_VERSION
         new_cols = {r[1] for r in conn.execute("PRAGMA table_info('tracks')")}
         assert {"derived_status", "track_type"} <= new_cols      # 0028+0029 re-ran
         oi_cols = {r[1] for r in conn.execute("PRAGMA table_info('track_open_items')")}
@@ -233,13 +245,24 @@ def test_no_spurious_downgrade_on_complete_v31(tmp_path: Path) -> None:
 
 
 def test_complete_v31_run_is_idempotent_noop(tmp_path: Path) -> None:
-    """run() on an already-complete, truthful v31 DB leaves user_version at 31."""
+    """run() on an already-complete, truthful v31 DB is idempotent: it lands on
+    TERMINAL_VERSION (the numbered walk 0022->0031 is a no-op since the DB is already
+    genuinely v31; the OI-1169 auto_apply sweep then picks up anything runner-backed
+    above it, e.g. 0032) and a second run() converges at the same TERMINAL_VERSION."""
     proj = _build_db_at(tmp_path, 31)
     mfs.run(proj)
     conn = _open(_db_path(proj))
     try:
-        assert schema_migration.get_user_version(conn) == 31
-        assert sm.validate_db_at_version(conn, 31) == []
+        assert schema_migration.get_user_version(conn) == sm.TERMINAL_VERSION
+        assert sm.validate_db_at_version(conn, sm.TERMINAL_VERSION) == []
+    finally:
+        conn.close()
+
+    mfs.run(proj)
+    conn = _open(_db_path(proj))
+    try:
+        assert schema_migration.get_user_version(conn) == sm.TERMINAL_VERSION
+        assert sm.validate_db_at_version(conn, sm.TERMINAL_VERSION) == []
     finally:
         conn.close()
 
@@ -474,3 +497,59 @@ def test_columns_introduced_at_matches_migration_deltas() -> None:
     assert sm.columns_introduced_at(24, "tracks") == ()          # 0024 is a PK rebuild, no new cols
     assert sm.table_pk_at(22, "tracks") == ("track_id",)
     assert sm.table_pk_at(24, "tracks") == ("track_id", "project_id")
+
+
+# --------------------------------------------------------------------------- #
+# Manifest coverage: every PRAGMA-user_version-stamping runner has an entry
+# --------------------------------------------------------------------------- #
+
+_APPLY_SCRIPT_IF_BELOW_RE = re.compile(
+    r"apply_script_if_below\(\s*conn\s*,\s*(\d+)\s*,"
+)
+
+
+def test_every_pragma_stamping_migration_runner_has_manifest_entry() -> None:
+    """Same disease the manifest itself was built to fix, one layer down (OI-1169
+    fix-forward): SCHEMA_MANIFEST is a HAND-WRITTEN dict keyed by version, and
+    TERMINAL_VERSION = max(SCHEMA_MANIFEST). A migration under schemas/migrations/
+    with a Python runner (scripts/lib/migrations/apply_NNNN.py) that stamps PRAGMA
+    user_version via the shared schema_migration.apply_script_if_below() helper
+    participates in this manifest's version scheme — if nobody adds a manifest entry
+    for it, TERMINAL_VERSION silently lags the real terminal version and every test
+    (or caller) that pins/derives against TERMINAL_VERSION goes stale, exactly like
+    0032 shipped without one before this fix.
+
+    Both sides of the comparison are DERIVED from the files on disk, never from a
+    hand-typed version list:
+      - the "needs an entry" set: every apply_NNNN.py under scripts/lib/migrations/
+        whose source calls apply_script_if_below(conn, NNNN, ...) — the actual
+        mechanism that advances PRAGMA user_version, not a naming convention;
+      - runners that use a different tracking mechanism (the legacy
+        runtime_schema_version table — apply_0017/0019/0020/0026.py) do NOT call
+        apply_script_if_below and are correctly excluded: they predate this
+        manifest's PRAGMA-user_version scheme (MIN_VERSION=22) and are out of its
+        scope by construction, not by an ad-hoc skip list here.
+
+    Fails on the pre-fix branch: apply_0032.py calls apply_script_if_below(conn, 32,
+    ...) but SCHEMA_MANIFEST has no key 32 (TERMINAL_VERSION was still 31)."""
+    runners_dir = _SCRIPTS / "lib" / "migrations"
+    missing: list[int] = []
+    checked: list[int] = []
+    for runner_path in sorted(runners_dir.glob("apply_*.py")):
+        text = runner_path.read_text(encoding="utf-8")
+        match = _APPLY_SCRIPT_IF_BELOW_RE.search(text)
+        if match is None:
+            continue  # different tracking mechanism (legacy runtime_schema_version) — out of scope
+        version = int(match.group(1))
+        checked.append(version)
+        if version not in sm.SCHEMA_MANIFEST:
+            missing.append(version)
+
+    # Sanity: the derivation itself must find something, or this test is a no-op.
+    assert checked, "no apply_NNNN.py runner calls apply_script_if_below — derivation broken?"
+    assert not missing, (
+        f"migration(s) {sorted(missing)} stamp PRAGMA user_version via a Python runner "
+        "(apply_script_if_below) but have no schema_manifest.SCHEMA_MANIFEST entry — "
+        "add one (see version 31 for the pattern) or TERMINAL_VERSION silently lags "
+        "the real terminal migration."
+    )
