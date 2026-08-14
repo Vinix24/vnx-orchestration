@@ -9,7 +9,7 @@ v30 but is physically v27) SKIPS every migration and never trips them — leavin
 migrations silently un-applied (synthesis E-F, repro-confirmed).
 
 This module replaces that fragile, scattered mechanism with ONE declarative
-INVARIANT MANIFEST per schema version (v22-v31) plus a single reconciler engine:
+INVARIANT MANIFEST per schema version (v22-v33) plus a single reconciler engine:
 
   * The manifest declares, per version, the FULL expected shape: required tables;
     columns (name + affinity + nullability); PK column ordinals; composite UNIQUE
@@ -170,6 +170,9 @@ _TRACKS_COLS_V27 = {**_TRACKS_COLS_V24, **_cols(("horizon", "TEXT", False))}
 _TRACKS_COLS_V28 = {**_TRACKS_COLS_V27, **_cols(("derived_status", "TEXT", False))}
 _TRACKS_COLS_V29 = {**_TRACKS_COLS_V28,
                     **_cols(("track_type", "TEXT", True), ("next_action_owner", "TEXT", False))}
+# v33 adds decision_ref (OI-1190): nullable TEXT JSON pointer to the plan-gate
+# report(s) + rejected alternatives. Additive column — no index (read via PK).
+_TRACKS_COLS_V33 = {**_TRACKS_COLS_V29, **_cols(("decision_ref", "TEXT", False))}
 
 # track_phase_history
 _TPH_COLS_V22 = _cols(
@@ -534,6 +537,12 @@ def _build_manifest() -> Dict[int, VersionManifest]:
         32: VersionManifest(32, (
             _dispatches(_DISPATCH_COLS_V27),
             _tracks_composite(_TRACKS_COLS_V29, _TRACKS_IDX_V29),
+            *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
+            *_runtime_tables_v31(), _track_pr_delivery()),
+            (_DELIVERABLES_VIEW,)),
+        33: VersionManifest(33, (
+            _dispatches(_DISPATCH_COLS_V27),
+            _tracks_composite(_TRACKS_COLS_V33, _TRACKS_IDX_V29),
             *base_children_v24, _toi_composite(_TOI_COLS_V30, _OI_BLOCKER_IDX),
             *_runtime_tables_v31(), _track_pr_delivery()),
             (_DELIVERABLES_VIEW,)),
