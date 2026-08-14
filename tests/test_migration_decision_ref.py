@@ -273,3 +273,32 @@ def test_apply_0033_runner_idempotent(tmp_path):
     assert apply_migration(db_path, _MIGRATIONS / "0033_track_decision_ref.sql") is True
     # Already at user_version >= 33 → skipped, not an error.
     assert apply_migration(db_path, _MIGRATIONS / "0033_track_decision_ref.sql") is False
+
+
+def test_apply_0033_skips_alter_when_column_present_below_version(tmp_path):
+    """Regression (OI-1197): a store that ALREADY carries tracks.decision_ref but
+    whose user_version was set below 33 (the reconcile_user_version downgrade case,
+    e.g. a v33 store downgraded to 24 then re-walked) must NOT re-run the
+    non-idempotent ALTER TABLE ADD COLUMN — that raises
+    "duplicate column name: decision_ref". The runner advances the version stamp
+    without re-adding the column."""
+    db_path = tmp_path / "runtime_coordination.db"
+    conn = _base_v29_db(tmp_path)
+    _apply_0033(conn)  # add decision_ref + stamp user_version 33
+    conn.close()
+
+    # Simulate the reconcile downgrade: column present, version pushed below 33.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA user_version = 29")
+    conn.commit()
+    conn.close()
+
+    # Must skip the ALTER (not raise) and converge the version stamp back to 33.
+    assert apply_migration(db_path, _MIGRATIONS / "0033_track_decision_ref.sql") is False
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert "decision_ref" in _cols(conn, "tracks")
+        assert schema_migration.get_user_version(conn) == 33
+    finally:
+        conn.close()
