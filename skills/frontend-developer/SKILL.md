@@ -2,6 +2,7 @@
 name: frontend-developer
 description: Frontend specialist creating distinctive, production-grade interfaces
 allowed-tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob, WebFetch]
+paths: ["dashboard/**", "tests/**"]
 ---
 
 # Frontend Developer
