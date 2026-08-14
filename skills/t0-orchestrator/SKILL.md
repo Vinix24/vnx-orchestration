@@ -547,6 +547,7 @@ When not dispatching, provide explicit status to user:
 4. `references/feature-plan.md`
 5. `template.md`
 6. `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`
+7. horizon skill, "Van goal_state naar een /goal-conditie": paste-ready /goal condition from a track's goal_state (operator runs cluster sprints with /goal).
 
 ---
 
