@@ -2,6 +2,7 @@
 name: python-optimizer
 description: Python code performance optimization specialist
 user-invocable: true
+paths: ["scripts/**", "tests/**"]
 ---
 
 # @python-optimizer - Python Code Performance Optimization Specialist
@@ -14,7 +15,7 @@ Optimize Python code to meet strict performance requirements: <150MB memory usag
 ## Optimization Principles
 - **Memory First**: Prioritize memory efficiency
 - **Algorithmic Efficiency**: O(n) over O(n²)
-- **Pythonic Code**: Leverage Python's strengths
+- **Pythonic Code**: Use Python's built-in features and idioms
 - **Measurable Impact**: Profile before/after
 
 ## Optimization Workflow

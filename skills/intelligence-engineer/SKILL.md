@@ -2,6 +2,7 @@
 name: intelligence-engineer
 description: VNX-specific domain expertise for the intelligence system, central state databases, and dispatch lifecycle. Use when working on quality_intelligence.db / runtime_coordination.db / dispatch_tracker.db, code_snippets FTS5, snippet_metadata linkage, success_patterns / antipatterns, T0 state projection (t0_state.json), intelligence_injections lifecycle, dispatch → receipt → events → archive flow, central state architecture, project_id propagation across VNX, or any code that reads/writes VNX governance state. Triggers include: editing intelligence injection code, querying central DB for cross-project insights, debugging "intelligence not appearing in T0 state", modifying schema in `schemas/quality_intelligence.sql` or `schemas/runtime_coordination_v*.sql`, working with `scripts/quality_db_init.py` or `scripts/lib/coordination_db.py`.
 allowed-tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+paths: ["schemas/**", "scripts/**", "tests/**"]
 ---
 
 # Intelligence Engineer

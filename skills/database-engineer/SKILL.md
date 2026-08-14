@@ -2,6 +2,7 @@
 name: database-engineer
 description: SQLite database expertise for migrations, multi-tenant patterns, transactional safety, FTS5 virtual tables, and schema evolution. Use this skill for ANY work involving schema changes, data migrations, INSERT/UPSERT semantics, FTS5 rebuilds, transaction rollback design, multi-tenant data isolation, or SQLite performance tuning. Triggers include: writing migration SQL, modifying `_import_table`-style importers, designing UNIQUE/PK constraints, adding indexes for JOINs, debugging "rows missing" / "wrong count" / "stuck for hours" symptoms in SQLite-backed systems.
 allowed-tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+paths: ["schemas/**", "scripts/**", "tests/**"]
 ---
 
 # Database Engineer

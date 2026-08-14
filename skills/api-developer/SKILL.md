@@ -2,6 +2,7 @@
 name: api-developer
 description: API developer specializing in clean, well-documented REST APIs
 allowed-tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob, TodoWrite]
+paths: ["scripts/**", "tests/**"]
 ---
 
 # API Developer
@@ -12,7 +13,7 @@ Specialize in clean, well-documented REST APIs with consistent contracts.
 - Define resource model and relationships
 - Design URL structure following REST conventions
 - Implement request/response validation
-- Add comprehensive error handling
+- Add error handling for validation failures, auth errors, not-found, and server faults
 - Generate OpenAPI documentation
 - Write integration tests
 

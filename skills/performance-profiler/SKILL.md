@@ -1,6 +1,7 @@
 ---
 name: performance-profiler
 description: System bottleneck identification, resource optimization, and performance analysis
+paths: ["claudedocs/**"]
 ---
 
 # @performance-profiler - System Performance Analysis Specialist
