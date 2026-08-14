@@ -1,45 +1,38 @@
 """tier_routing.py — Map cost tiers to provider/lane routing specs.
 
-Tier→provider mappings (honoring provider_constraints.yaml):
-  tier-zero → DeepSeek (deepseek-v4-flash) via Claude-harness key-auth
-               (DEEPSEEK_API_KEY required); fallback Codex via provider lane.
-  tier-low  → DeepSeek (deepseek-v4-flash) via Claude-harness key-auth
-               (DEEPSEEK_API_KEY required); runtime fallback Kimi CLI
-               (kimi-k3, kimi-via-cli-only) then Codex.
-  tier-mid  → sonnet-5  (canonical registry key — see wave7_models.yaml)
-  tier-high → opus-5    (canonical registry key — see wave7_models.yaml)
+Model identity and provider strings are read from wave7_models.yaml (ADR-036):
+there are zero model names and zero provider strings as Python literals on this
+routing path. ``provider_registry.load_tier_map()`` resolves the registry's
+``routing.tier_map`` block — a provider key to its dispatch enum, a model key to
+a validated registry model — and raises RegistryLookupError on anything the
+registry does not know. A malformed registry therefore fails at import, before
+any dispatch reaches the lookup (loud and early).
 
-Model names here are canonical registry keys from wave7_models.yaml, never
-free-form strings: the registry is the single source of truth for model
-identity (dispatch-20260802-model-ssot-en-ketenlink). The previous 4-series
-ids (claude-sonnet-4-6 / claude-opus-4-8) were not registry keys and would
-reject with model-not-in-current-registry the moment tier-mid/tier-high
-actually routed; the fleet now runs the 5-series.
-
-Availability is a runtime signal, not a code comment. Each non-Claude lane is
-gated by ``availability.lane_available`` (env vars, CLI presence, cooldown) at
-decision time. A lane that fails on quota/auth is recorded by
-``availability.record_lane_failure`` and auto-recovers after its cooldown
-period — no code edit or release required to bring it back. Kimi is a regular
-route in the tier map again (through the availability check), and local-gemma
-stays disabled via the availability layer's explicit reason, not as a
-commented-out block.
+Availability is a runtime signal, not a code comment. Each lane is gated at
+decision time by ``availability.lane_available`` (env vars, CLI presence,
+cooldown). A lane that is unavailable — missing key, CLI absent, or in cooldown
+after a quota/auth failure — is skipped and the next step in the ``fallback``
+chain takes over (OI-1185). Missing key and cooldown follow the SAME chain: the
+availability layer is the single gate, so there is no separate "missing key"
+branch. The chain terminates in an ungated lane (claude/codex), so a route is
+always returned.
 
 Constraint references (provider_constraints.yaml):
-  kimi-via-cli-only: Kimi must use lane='kimi_cli', never via=api/moonshot
-  deepseek-harness-subscription-blocked: DEEPSEEK_API_KEY required; subscription-
-    redirect blocked. Allowed only with via=claude_harness_keyed + own key.
-  zai-via-openrouter-only: GLM only via OpenRouter (no direct Zhipu API)
-  deprecated-glm-models: GLM-4.5/4.6/5/5.1 blocked; use glm-5.2 via OpenRouter
+  kimi-via-cli-only: kimi_cli lane, never via=api/moonshot
+  deepseek-harness-subscription-blocked: DEEPSEEK_API_KEY required; own key only
+  zai-via-openrouter-only / deprecated-glm-models: not routed by this static map
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .cost_tier import TIER_ZERO, TIER_LOW, TIER_MID, TIER_HIGH
+from providers.provider_registry import RegistryLookupError, TierRouteSpec, load_tier_map
+
+from .cost_tier import TIER_HIGH
 
 
 @dataclass(frozen=True)
@@ -55,71 +48,82 @@ class TierRoute:
     reason: Optional[str] = None  # why this route was chosen over its primary
 
 
-def _codex_route(tier: str, reason: Optional[str] = None) -> TierRoute:
-    """Codex vangnet — the last-resort provider lane (OI-940)."""
+# Resolved once at import (ADR-036): a malformed registry raises
+# RegistryLookupError here, before any dispatch reaches the lookup — loud and
+# early rather than discovered mid-dispatch.
+_TIER_MAP = load_tier_map()
+
+
+def _route_from_spec(
+    spec: TierRouteSpec,
+    fallback: Optional[TierRoute],
+    reason: Optional[str] = None,
+) -> TierRoute:
+    from .availability import lane_env_vars  # noqa: PLC0415
+
     return TierRoute(
-        tier=tier,
-        provider="codex",
-        model="gpt-5.5",
-        lane="provider",
+        tier=spec.tier,
+        provider=spec.provider,
+        model=spec.model,
+        lane=spec.lane,
+        env_requirements=lane_env_vars(spec.provider),
+        fallback=fallback,
         reason=reason,
     )
 
 
-def _deepseek_route(tier: str) -> TierRoute:
-    """DeepSeek flash via claude-harness key-auth (deepseek-chat discontinued
-    2026-07-24)."""
-    return TierRoute(
-        tier=tier,
-        provider="deepseek",
-        model="deepseek-v4-flash",
-        lane="claude_harness_keyed",
-        env_requirements=("DEEPSEEK_API_KEY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-        fallback=_codex_route(tier),
-    )
+def _chain_from_spec(spec: TierRouteSpec) -> TierRoute:
+    """Build the primary + fallback linked chain for a tier spec."""
+    fallback: Optional[TierRoute] = None
+    for step in reversed(spec.fallback):
+        step_spec = TierRouteSpec(
+            tier=spec.tier,
+            provider=step.provider,
+            model=step.model,
+            lane=step.lane,
+            fallback=(),
+        )
+        fallback = _route_from_spec(step_spec, fallback)
+    return _route_from_spec(spec, fallback)
 
 
-def _kimi_route(tier: str, reason: Optional[str] = None) -> TierRoute:
-    """Kimi CLI route (kimi-via-cli-only: never via=api/moonshot).
+def _fallback_reason(route: TierRoute, skipped: list[str]) -> str:
+    return f"{'; '.join(skipped)}; using {route.provider}"
 
-    kimi-k3 is the canonical registry key (kimi_cli.default_model in
-    wave7_models.yaml). Codex remains the vangnet behind it.
+
+def _walk_chain(
+    route: TierRoute,
+    env: dict,
+    state_dir: Optional[Path],
+    now: Optional[float],
+) -> TierRoute:
+    """Walk the fallback chain, skipping unavailable lanes (OI-1185).
+
+    Missing key, CLI absent, and cooldown all funnel through the same
+    ``lane_available`` gate, so they walk the same chain. The terminal lane is
+    ungated (claude/codex), so this always returns a route.
     """
-    return TierRoute(
-        tier=tier,
-        provider="kimi",
-        model="kimi-k3",
-        lane="kimi_cli",
-        fallback=_codex_route(tier),
-        reason=reason,
-    )
+    from .availability import lane_available  # noqa: PLC0415
 
-
-_ROUTE_MID = TierRoute(
-    tier=TIER_MID,
-    provider="claude",
-    model="sonnet-5",  # canonical registry key (wave7_models.yaml)
-    lane="tmux_interactive",
-)
-
-_ROUTE_HIGH = TierRoute(
-    tier=TIER_HIGH,
-    provider="claude",
-    model="opus-5",  # canonical registry key (wave7_models.yaml)
-    lane="tmux_interactive",
-)
-
-
-def _deepseek_has_key(env: dict) -> bool:
-    """True when DEEPSEEK_API_KEY is present (static check, no cooldown).
-
-    Kept separate from the full availability check so the missing-key case
-    preserves the pre-existing behaviour (codex fallback, kimi NOT consulted)
-    while the key-present-but-in-cooldown case can fall through to kimi.
-    Implements deepseek-harness-subscription-blocked: own key + hardening
-    required; routing through the production OAuth subscription is blocked.
-    """
-    return bool(env.get("DEEPSEEK_API_KEY"))
+    current: Optional[TierRoute] = route
+    last = route
+    skipped: list[str] = []
+    while current is not None:
+        last = current
+        ok, reason = lane_available(
+            current.provider, env=env, state_dir=state_dir, now=now,
+        )
+        if ok:
+            if skipped:
+                return dataclasses.replace(
+                    current, reason=_fallback_reason(current, skipped),
+                )
+            return current
+        skipped.append(f"{current.provider} unavailable ({reason})")
+        current = current.fallback
+    # Unreachable in practice: every chain terminates in an ungated lane
+    # (claude/codex). Defensive only — the door must never receive None.
+    return last
 
 
 def resolve_tier_route(
@@ -128,57 +132,20 @@ def resolve_tier_route(
     state_dir: Optional[Path] = None,
     now: Optional[float] = None,
 ) -> TierRoute:
-    """Resolve a cost tier to a TierRoute.
+    """Resolve a cost tier to a TierRoute, walking the fallback chain.
 
-    Entry tiers (zero/low) prefer DeepSeek claude-harness when DEEPSEEK_API_KEY
-    is present; a missing key falls back to Codex (existing behaviour). When
-    DeepSeek has a key but is in cooldown after a quota/auth failure, the router
-    falls back to Kimi CLI (kimi-via-cli-only) and then Codex — availability is
-    read at decision time so a restored lane rejoins without a release. Unknown
-    tier strings default to tier-high.
+    Entry tiers (zero/low) prefer DeepSeek claude-harness; an unavailable lane
+    (missing DEEPSEEK_API_KEY, CLI absent, or cooldown) is skipped and the next
+    chain step takes over (Kimi CLI, then Codex). Availability is read at
+    decision time so a restored lane rejoins without a release. Unknown tier
+    strings default to tier-high (safe over silent skip).
     """
     _env = env if env is not None else dict(os.environ)
 
-    if tier in (TIER_ZERO, TIER_LOW):
-        return _resolve_entry_tier_route(tier, _env, state_dir, now)
-
-    if tier == TIER_MID:
-        return _ROUTE_MID
-
-    return _ROUTE_HIGH
-
-
-def _resolve_entry_tier_route(
-    tier: str,
-    env: dict,
-    state_dir: Optional[Path],
-    now: Optional[float],
-) -> TierRoute:
-    from .availability import lane_available  # noqa: PLC0415
-
-    deepseek_ok, deepseek_reason = lane_available(
-        "deepseek", env=env, state_dir=state_dir, now=now,
-    )
-    if deepseek_ok:
-        return _deepseek_route(tier)
-
-    if _deepseek_has_key(env):
-        # Key present but DeepSeek is in cooldown → try Kimi before the vangnet.
-        kimi_ok, kimi_reason = lane_available(
-            "kimi", env=env, state_dir=state_dir, now=now,
+    spec = _TIER_MAP.get(tier) or _TIER_MAP.get(TIER_HIGH)
+    if spec is None:
+        raise RegistryLookupError(
+            f"tier {tier!r} (and the tier-high default) is missing from "
+            "routing.tier_map in the registry"
         )
-        if kimi_ok:
-            return _kimi_route(
-                tier,
-                reason=f"deepseek unavailable ({deepseek_reason}); using kimi",
-            )
-        return _codex_route(
-            tier,
-            reason=(
-                f"deepseek unavailable ({deepseek_reason}); "
-                f"kimi unavailable ({kimi_reason}); using codex"
-            ),
-        )
-
-    # Missing key → existing behaviour: Codex vangnet (kimi not consulted).
-    return _codex_route(tier)
+    return _walk_chain(_chain_from_spec(spec), _env, state_dir, now)

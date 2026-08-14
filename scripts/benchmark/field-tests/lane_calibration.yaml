@@ -60,11 +60,14 @@ cases:
     expected_lane: provider
     matches_human_tier: true
     note: >
-      tier-zero without DEEPSEEK_API_KEY falls back to Codex. Local Gemma route
-      preserved but unused until gemma-4-12b-integration ships (operator decision
-      2026-08-02). When DEEPSEEK_API_KEY is present, the route is deepseek-v4-flash
-      via claude_harness_keyed. See test_lane_calibration_field_test.py for explicit
-      coverage of both env branches.
+      tier-zero without DEEPSEEK_API_KEY walks the fallback chain (OI-1185): kimi
+      when the kimi CLI is on PATH, else the codex terminal vangnet. The runner
+      pins kimi absent for determinism, so this case calibrates the static tier map
+      (codex vangnet); the kimi branch is unit-tested in tests/smart_router/. Local
+      Gemma route preserved but unused until gemma-4-12b-integration ships (operator
+      decision 2026-08-02). When DEEPSEEK_API_KEY is present, the route is
+      deepseek-v4-flash via claude_harness_keyed. See test_lane_calibration_field_test.py
+      for explicit coverage of both env branches.
 
   - task_id: "04_scorer_task"
     tier: t2_medium

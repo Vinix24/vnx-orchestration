@@ -34,6 +34,7 @@ from incident_taxonomy import (
     REPEATED_FAILURE_THRESHOLD,
     RetryBudget,
     Severity,
+    classify_provider_failure,
     get_contract,
     get_cooldown_seconds,
     should_dead_letter,
@@ -65,8 +66,10 @@ class TestCompleteness:
         enum_values = {ic.value for ic in IncidentClass}
         assert INCIDENT_CLASSES == enum_values
 
-    def test_eight_incident_classes(self):
-        assert len(IncidentClass) == 8
+    def test_ten_incident_classes(self):
+        # 8 original classes + the OI-1185 split of PROVIDER_OUTAGE into
+        # rate-limit / quota-exhausted / auth-failure (net +2).
+        assert len(IncidentClass) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +360,68 @@ class TestContractProperties:
                 assert has_dl, (
                     f"{ic.value}: dead-letter eligible but DEAD_LETTER_DISPATCH not permitted"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Provider failure classification (OI-1185)
+# ---------------------------------------------------------------------------
+
+class TestProviderFailureClassification:
+    """A lane-failure reason maps to exactly one provider incident class."""
+
+    def test_auth_markers(self):
+        for reason in (
+            "401 unauthorized", "403 forbidden", "invalid api key",
+            "not authenticated", "access denied", "bad credentials",
+            "authentication failed",
+        ):
+            assert classify_provider_failure(reason) == IncidentClass.PROVIDER_AUTH_FAILURE, reason
+
+    def test_rate_limit_markers(self):
+        for reason in (
+            "429 too many requests", "rate limit exceeded",
+            "rate_limit hit", "ratelimited",
+        ):
+            assert classify_provider_failure(reason) == IncidentClass.PROVIDER_RATE_LIMIT, reason
+
+    def test_quota_default(self):
+        for reason in (
+            "quota exhausted", "402 payment required",
+            "insufficient balance", "some unknown failure",
+        ):
+            assert classify_provider_failure(reason) == IncidentClass.PROVIDER_QUOTA_EXHAUSTED, reason
+
+    def test_auth_outranks_rate_limit(self):
+        # "403 rate limited" is an auth failure (expired/revoked key), not a
+        # transient rate limit — most-specific marker wins.
+        assert classify_provider_failure("403 rate limited") == IncidentClass.PROVIDER_AUTH_FAILURE
+
+    def test_none_reason_defaults_to_quota(self):
+        assert classify_provider_failure(None) == IncidentClass.PROVIDER_QUOTA_EXHAUSTED
+
+
+class TestProviderContracts:
+    """OI-1185: the three provider classes carry distinct recovery physics."""
+
+    def test_auth_contract_halts_auto_recovery(self):
+        c = RECOVERY_CONTRACTS[IncidentClass.PROVIDER_AUTH_FAILURE]
+        assert c.escalation.halt_auto_recovery is True
+        assert c.escalation.escalate_to == "operator"
+        assert c.retry_budget.max_retries == 0
+        assert c.retry_budget.cooldown_seconds == 0
+        assert c.default_severity == Severity.ERROR
+
+    def test_rate_limit_contract_is_transient(self):
+        c = RECOVERY_CONTRACTS[IncidentClass.PROVIDER_RATE_LIMIT]
+        assert c.escalation.halt_auto_recovery is False
+        assert c.retry_budget.cooldown_seconds == 60
+        assert c.retry_budget.max_cooldown_seconds == 600
+
+    def test_quota_contract_is_hours(self):
+        c = RECOVERY_CONTRACTS[IncidentClass.PROVIDER_QUOTA_EXHAUSTED]
+        assert c.escalation.halt_auto_recovery is False
+        assert c.retry_budget.cooldown_seconds == 3600
+        assert c.retry_budget.max_cooldown_seconds == 14400
 
 
 # ---------------------------------------------------------------------------

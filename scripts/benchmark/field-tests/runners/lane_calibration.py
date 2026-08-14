@@ -67,6 +67,21 @@ def load_calibration_cases(field_tests_dir: Path = FIELD_TESTS) -> list[dict]:
     return cfg["cases"]
 
 
+def _resolve_for_calibration(tier: str):
+    """Resolve a tier route deterministically for calibration.
+
+    OI-1185 walks the fallback chain at decision time, so a no-key tier-zero/low
+    resolves to kimi when the kimi CLI is on PATH and to codex otherwise. The
+    calibration table pins the STATIC tier map (terminal vangnet), so pin kimi
+    absent here: the kimi-present branch is unit-tested in tests/smart_router/.
+    """
+    import shutil
+    from unittest import mock
+
+    with mock.patch.object(shutil, "which", return_value=None):
+        return resolve_tier_route(tier, env={})
+
+
 def run_case(case: dict, tasks_by_id: dict, field_tests_dir: Path = FIELD_TESTS) -> CalibrationResult:
     task = tasks_by_id[case["task_id"]]
     instruction = (field_tests_dir / task["folder"] / "instruction.md").read_text(
@@ -76,7 +91,7 @@ def run_case(case: dict, tasks_by_id: dict, field_tests_dir: Path = FIELD_TESTS)
     loc_estimate = task["target_loc"]
 
     actual_tier = classify_dispatch({"instruction": instruction}, file_paths, loc_estimate)
-    route = resolve_tier_route(actual_tier, env={})
+    route = _resolve_for_calibration(actual_tier)
 
     passed = (
         actual_tier == case["expected_tier"]
