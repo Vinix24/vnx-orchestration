@@ -33,6 +33,7 @@ _TIER_PROVIDER_TO_ENUM: dict[str, Provider] = {
     "deepseek": Provider.DEEPSEEK_HARNESS,
     "codex": Provider.CODEX,
     "kimi": Provider.KIMI,
+    "claude": Provider.CLAUDE,
     "local-gemma": Provider.LOCAL_GEMMA,
 }
 
@@ -91,11 +92,21 @@ def resolve_door_route(
 
         provider_enum = _TIER_PROVIDER_TO_ENUM.get(route.provider)
         if provider_enum is None:
-            # Unmapped provider — e.g. a future tier-mid or tier-high returning
-            # claude, which the door handles via its own lane resolution.
+            # A decline is still possible (an unmapped provider string), but it
+            # must be visible, not silent: the door falls through to its own
+            # lane resolution, and the reason is logged so a drift in the tier
+            # map is diagnosable.
+            logger.warning(
+                "smart-router door routing: provider %r for tier=%s is not in "
+                "_TIER_PROVIDER_TO_ENUM; declining route (fail-open to default lane)",
+                route.provider,
+                tier,
+            )
             return None
 
         route_reason = f"smart-router:tier={tier},provider={route.provider},model={route.model},lane={route.lane}"
+        if route.reason:
+            route_reason += f";{route.reason}"
         return provider_enum, route.model, route_reason
     except Exception:
         # Fail-open: a broken classifier or resolver must never block a dispatch.

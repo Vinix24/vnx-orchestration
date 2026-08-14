@@ -121,6 +121,74 @@ def test_unknown_tier_defaults_to_opus():
     assert route.model == "opus-5"
 
 
+# ---------------------------------------------------------------------------
+# Availability wiring — cooldown drives runtime fallback (Problem 2)
+# ---------------------------------------------------------------------------
+
+
+def test_tier_low_deepseek_cooldown_falls_back_to_kimi(tmp_path, monkeypatch):
+    """DeepSeek in cooldown with a key → Kimi CLI (kimi-via-cli-only) before
+    the Codex vangnet."""
+    import shutil as _shutil
+
+    from providers.smart_router.availability import record_lane_failure
+
+    state_dir = tmp_path / "state"
+    now = 1_000_000.0
+    record_lane_failure(
+        "deepseek", "429 quota-exhausted", state_dir=state_dir,
+        duration_seconds=3600, now=now,
+    )
+    monkeypatch.setattr(
+        _shutil, "which", lambda name: "/usr/local/bin/kimi" if name == "kimi" else None,
+    )
+    route = resolve_tier_route(
+        TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
+    )
+    assert route.provider == "kimi"
+    assert route.model == "kimi-k3"
+    assert route.lane == "kimi_cli"
+    assert "deepseek unavailable" in route.reason
+
+
+def test_tier_low_deepseek_cooldown_kimi_unavailable_falls_back_to_codex(tmp_path, monkeypatch):
+    """DeepSeek in cooldown and kimi CLI absent → Codex vangnet, reason visible."""
+    import shutil as _shutil
+
+    from providers.smart_router.availability import record_lane_failure
+
+    state_dir = tmp_path / "state"
+    now = 2_000_000.0
+    record_lane_failure(
+        "deepseek", "403 auth", state_dir=state_dir, duration_seconds=3600, now=now,
+    )
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    route = resolve_tier_route(
+        TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
+    )
+    assert route.provider == "codex"
+    assert route.model == "gpt-5.5"
+    assert "deepseek unavailable" in route.reason
+    assert "kimi unavailable" in route.reason
+
+
+def test_tier_low_deepseek_reengages_after_cooldown(tmp_path):
+    """After the cooldown period the lane re-engages — no release required."""
+    from providers.smart_router.availability import record_lane_failure
+
+    state_dir = tmp_path / "state"
+    now = 3_000_000.0
+    record_lane_failure(
+        "deepseek", "429", state_dir=state_dir, duration_seconds=3600, now=now,
+    )
+    route = resolve_tier_route(
+        TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"},
+        state_dir=state_dir, now=now + 3601,
+    )
+    assert route.provider == "deepseek"
+    assert route.model == "deepseek-v4-flash"
+
+
 def test_route_dispatch_disabled_via_flag():
     """route_dispatch() returns None when VNX_SMART_ROUTER_DISABLE=1."""
     from providers.smart_router import route_dispatch
@@ -283,3 +351,63 @@ def test_door_route_fail_open_on_broken_input():
     # Empty instruction with 0 LOC classifies to tier-low; we get a route or
     # fail-open.
     assert result is not None or result is None  # never raises
+
+
+def test_door_route_tier_mid_resolves_claude():
+    """tier-mid now maps to a concrete Provider.CLAUDE choice (enum-gap fix)."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import resolve_door_route
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="implement a medium feature",
+        file_paths=["src/foo.py"],
+        loc_estimate=200,
+        env={},
+    )
+    assert result is not None
+    provider, model, reason = result
+    assert provider == Provider.CLAUDE
+    assert model == "sonnet-5"
+    assert "tier=tier-mid" in reason
+
+
+def test_door_route_tier_high_resolves_claude():
+    """tier-high maps to Provider.CLAUDE (opus-5), not a silent decline."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import resolve_door_route
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="implement a large feature",
+        file_paths=["src/foo.py"],
+        loc_estimate=350,
+        env={},
+    )
+    assert result is not None
+    provider, model, reason = result
+    assert provider == Provider.CLAUDE
+    assert model == "opus-5"
+    assert "tier=tier-high" in reason
+
+
+def test_door_route_t0_stays_unrouted_when_mid_tier():
+    """T0 is never routed even when the classifier would land on tier-mid —
+    t0-opus-only is a floor, not an advisory."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import resolve_door_route
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T0",
+        instruction_text="implement a medium feature",
+        file_paths=["src/foo.py"],
+        loc_estimate=200,
+        env={},
+    )
+    assert result is None, "T0 must never be routed"
