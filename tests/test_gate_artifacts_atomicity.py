@@ -1,7 +1,9 @@
 """GATE-11 atomicity: orphan report cleanup on validation failure.
 
 Verifies that materialize_artifacts deletes the report file before recording
-a failed result when _validate_report_file or _validate_content fails.
+an unavailable result when _validate_report_file or _validate_content fails.
+A validation failure means the gate never produced a reviewable verdict, so
+it books ``unavailable`` (OI-1178) — absence of evidence, not a rejected PR.
 """
 from __future__ import annotations
 
@@ -68,18 +70,28 @@ def _run(env, stdout="Review line one.\nReview line two.\nReview line three.\n",
 class TestGate11Atomicity:
 
     def test_sparse_stdout_no_orphan_report(self, env):
-        """empty_review_content failure must delete report before recording failure."""
+        """empty_review_content books unavailable and deletes the orphan report.
+
+        Sparse output means the gate never produced a review verdict, so the
+        result is a non-execution (``unavailable``), not a rejected PR — yet the
+        orphan report must still be cleaned up (GATE-11 atomicity).
+        """
         sparse_stdout = "Only one line."
         result, report_file = _run(env, stdout=sparse_stdout)
 
-        assert result["status"] == "failed", f"Expected failed, got: {result}"
+        assert result["status"] == "unavailable", f"Expected unavailable, got: {result}"
         assert result["reason"] == "empty_review_content"
         assert not report_file.exists(), (
             "GATE-11 violation: orphan report file left on disk after validation failure"
         )
 
     def test_validate_report_file_failure_no_orphan(self, env):
-        """_validate_report_file returning an error must delete report before recording failure."""
+        """_validate_report_file error books unavailable and deletes the orphan report.
+
+        An empty/missing report file after write means the gate produced no
+        reviewable artifact, so this is a non-execution (``unavailable``), not a
+        rejected PR — yet the orphan report must still be cleaned up.
+        """
         result, report_file = _run(env)
 
         # Force _validate_report_file to fail by patching it to always error
@@ -113,7 +125,7 @@ class TestGate11Atomicity:
                 reports_dir=env["reports_dir"],
             )
 
-        assert result2["status"] == "failed"
+        assert result2["status"] == "unavailable"
         assert not report_file2.exists(), (
             "GATE-11 violation: orphan report left after _validate_report_file failure"
         )
