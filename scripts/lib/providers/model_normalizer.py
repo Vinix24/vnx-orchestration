@@ -13,6 +13,7 @@ Canonical name = the registry key (e.g. ``opus-5``, ``sonnet-5``,
   deepseek/deepseek-v4-pro      -> deepseek-v4-pro
   moonshot/kimi-k2-0905-preview -> kimi-k2-0905-default
   kimi-code/k3                  -> kimi-k3
+  kimi-for-coding               -> kimi-k2-7
   claude-opus-4-8               -> opus-4-8
   claude-opus-5                 -> opus-5
   claude-sonnet-5               -> sonnet-5
@@ -106,9 +107,11 @@ def _build_alias_map() -> Dict[str, str]:
     For every provider/model entry, these aliases resolve to the model key:
       - the registry key itself,
       - the full ``litellm_name`` and ``cli_model_arg`` values,
-      - the part of ``litellm_name`` after the last ``/`` (so
-        ``deepseek/deepseek-v4-pro`` and ``anthropic/claude-opus-4-8`` resolve
-        without knowing the provider prefix).
+      - the part of ``litellm_name`` or ``cli_model_arg`` after the last ``/``
+        (so ``deepseek/deepseek-v4-pro`` and
+        ``anthropic/claude-opus-4-8`` resolve without knowing the provider
+        prefix, and the kimi CLI's ``kimi-code/kimi-for-coding`` resolves to
+        ``kimi-k2-7`` from its bare ``kimi-for-coding`` spelling).
     """
     alias_sets: Dict[str, list] = {}
     for cfg in _load_registry().values():
@@ -125,6 +128,8 @@ def _build_alias_map() -> Dict[str, str]:
             cli_arg = _norm(getattr(entry, "cli_model_arg", "") or "")
             if cli_arg:
                 aliases.add(cli_arg)
+                if "/" in cli_arg:
+                    aliases.add(cli_arg.rsplit("/", 1)[-1])
             for alias in aliases:
                 alias_sets.setdefault(alias, []).append(key_norm)
 

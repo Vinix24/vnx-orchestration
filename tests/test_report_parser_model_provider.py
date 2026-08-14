@@ -554,6 +554,182 @@ def test_valid_model_passes_shape_guard(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# OI-1194: prose model values are rejected (empty field, fail-closed)
+# ---------------------------------------------------------------------------
+
+# The exact prose strings observed in the ledger's `model` field (5 receipts,
+# 3 distinct strings). Each is documentation/instruction text that explains
+# how to write the Model field, captured verbatim by an unguarded extraction
+# path instead of a real model id.
+_PROSE_MODEL_VALUES = [
+    "` / `**Provider**:`.",
+    "sonnet`). Unknown-achtige frontmatter-waarden worden overgeslagen.",
+    "` / `**Provider**:` regel. Zonder die identiteitsregels landt je receipt niet.",
+]
+
+
+def _frontmatter_model_body(model_value: str) -> str:
+    return f"""---
+schema_version: 1
+dispatch_id: 20260814-oi1194-frontmatter-prose
+provider: claude
+model: {model_value}
+---
+
+# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260814-oi1194-frontmatter-prose
+
+## Summary
+A report whose dispatch-envelope frontmatter carries documentation text as
+the model value; the parser must reject it and omit the model key.
+
+## Changes
+- none
+
+## Verification
+- none
+
+## Open Items
+None
+"""
+
+
+@pytest.mark.parametrize("prose", _PROSE_MODEL_VALUES)
+def test_frontmatter_prose_model_is_rejected(tmp_path, prose):
+    """The three observed prose strings (5 receipts) lead to an empty model
+    field, never an accepted value. The frontmatter `model:` path is the one
+    that historically accepted prose verbatim (no shape guard)."""
+    r = _parse(tmp_path, _frontmatter_model_body(prose))
+    assert "model" not in r, f"prose model value must be stripped: {prose!r}"
+
+
+_PLAIN_BACKTICK_MODEL_BODY = """# Dispatch 20260814-oi1194-plain-backtick
+
+Dispatch-ID: 20260814-oi1194-plain-backtick
+Provider: claude
+Model: `sonnet`
+Terminal: T1
+
+## Summary
+
+A plain-text header block whose model value is a backtick-wrapped token. The
+parser must reject it, not accept the backtick-bearing string as a model id.
+
+## Changes
+- none
+
+## Verification
+- none
+
+## Open Items
+None
+"""
+
+
+def test_plain_header_backtick_model_is_rejected(tmp_path):
+    """The plain-text `Model:` fallback captures \\S+ and previously accepted a
+    backtick-wrapped value without any shape check."""
+    r = _parse(tmp_path, _PLAIN_BACKTICK_MODEL_BODY)
+    assert "model" not in r
+
+
+def test_yaml_block_prose_model_is_rejected(tmp_path):
+    """A ```yaml block that echoes a prose model value must be rejected — the
+    YAML metadata path previously accepted prose without any shape check."""
+    body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260814-oi1194-yaml-prose
+
+```yaml
+model: the real model that ran this dispatch
+provider: claude
+```
+
+## Summary
+A report whose yaml metadata block carries a prose model value; the parser must
+reject it and omit the model key, leaving the fail-closed check to refuse it.
+
+## Changes
+- none
+
+## Verification
+- none
+
+## Open Items
+None
+"""
+    r = _parse(tmp_path, body)
+    assert "model" not in r
+
+
+def test_yaml_block_prose_does_not_clobber_valid_header(tmp_path):
+    """A prose model value in a ```yaml block must never clobber a valid header
+    value already parsed — the silent-fallback class PR #1491 removed."""
+    body = """# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260814-oi1194-yaml-clobber
+**Model**: sonnet
+**Provider**: claude
+
+```yaml
+model: the real model that ran this dispatch
+provider: claude
+```
+
+## Summary
+A report whose header carries a real model while a trailing yaml block echoes
+a prose placeholder; the header value must survive.
+
+## Changes
+- none
+
+## Verification
+- none
+
+## Open Items
+None
+"""
+    r = _parse(tmp_path, body)
+    assert r["model"] == "sonnet"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "deepseek/deepseek-v4-pro",
+        "kimi-code/k3",
+        "claude-sonnet-5",
+        "moonshot/kimi-k2-0905-preview",
+    ],
+)
+def test_resolvable_variant_model_accepted_unharmed(tmp_path, variant):
+    """A provider-prefixed / alias spelling that resolves through the registry
+    must be accepted intact (not rejected as prose by the plausibility guard)."""
+    body = f"""# Completion Report
+**Status**: success
+**Dispatch-ID**: 20260814-oi1194-variant
+**Model**: {variant}
+**Provider**: claude
+
+## Summary
+A report carrying a provider-prefixed model spelling that normalizes to a
+canonical registry key; the plausibility guard must accept it, not reject it.
+
+## Changes
+- none
+
+## Verification
+- none
+
+## Open Items
+None
+"""
+    r = _parse(tmp_path, body)
+    assert r["model"] == variant
+
+
+# ---------------------------------------------------------------------------
 # OI-1102: dispatch register cross-check + cross-processor dedup
 # ---------------------------------------------------------------------------
 

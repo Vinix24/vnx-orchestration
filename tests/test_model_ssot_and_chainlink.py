@@ -57,6 +57,10 @@ class TestNormalizeModelName:
             ("moonshot/kimi-k2-0905-preview", "kimi-k2-0905-default"),
             ("kimi-code/k3", "kimi-k3"),
             ("kimi-k3", "kimi-k3"),
+            # OI-1194: the kimi CLI's own cli_model_arg spelling and its
+            # provider-prefix-stripped form both resolve to the kimi-k2-7 key.
+            ("kimi-code/kimi-for-coding", "kimi-k2-7"),
+            ("kimi-for-coding", "kimi-k2-7"),
             # 5-series + Fable (added to the registry by this dispatch).
             ("claude-sonnet-5", "sonnet-5"),
             ("claude-opus-5", "opus-5"),
@@ -89,6 +93,13 @@ class TestNormalizeModelName:
 
     def test_unmapped_string_passes_through(self):
         assert normalize_model_name("gpt-4-turbo") == "gpt-4-turbo"
+
+    def test_retired_kimi_spellings_stay_unresolved(self):
+        """OI-1194: the retired dot-form generation and the CLI-output label
+        must NOT be resurrected into the canon via an alias. They pass through
+        unchanged so the caller (routing/validation) can reject them loudly."""
+        assert normalize_model_name("kimi-k2.5") == "kimi-k2.5"
+        assert normalize_model_name("kimi-k2 (Kimi Code CLI)") == "kimi-k2 (Kimi Code CLI)"
 
     def test_unknown_sentinel_passes_through(self):
         assert normalize_model_name("unknown") == "unknown"

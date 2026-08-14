@@ -19,12 +19,38 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 
-# OI-1101: model-name shape validation. Real model names (sonnet, opus,
+# OI-1101 + OI-1194: model-name plausibility. Real model names (sonnet, opus,
 # kimi-k3, deepseek-v4-pro, claude-haiku-4-5-20251001) share three properties:
 # no spaces, no backticks, bounded length. The longest known model name across
 # the wave7 registry is claude-haiku-4-5-20251001 (26 chars); 64 gives generous
 # headroom while rejecting prose-sized strings (70+ chars observed in the wild).
+#
+# OI-1194 tightens "plausible" from shape-only to registry-derived: a value that
+# ``providers.model_normalizer.normalize_model_name`` cannot bring to a canonical
+# registry key AND that carries spaces, backticks, or sentence punctuation is
+# documentation text explaining how to write the Model field, not a model name.
 _MODEL_NAME_MAX_LENGTH = 64
+
+# OI-1194: sentence punctuation that never appears in a registry model id. The
+# dot is deliberately excluded: dot-form version numbers (gpt-5.5, glm-5.2,
+# kimi-k2.6) are registry-resolvable and never reach this branch, while a
+# retired dot-form token (kimi-k2.5) is a model-shaped token, not prose.
+_SENTENCE_PUNCT_RE = re.compile(r"[,;:!?()\[\]{}\"']")
+
+
+def _normalize_model_to_canonical(value: str) -> "Optional[str]":
+    """Return the canonical registry key for *value*.
+
+    Returns the canonical key when ``normalize_model_name`` resolves *value*,
+    ``""`` when the normalizer ran but could not resolve it, or ``None`` when
+    the normalizer itself is unavailable (caller falls back to shape-only).
+    """
+    try:
+        from providers.model_normalizer import canonical_model_names, normalize_model_name
+    except Exception:  # vnx-silent-except: normalizer unavailable -> shape-only fallback
+        return None
+    canonical = normalize_model_name(value)
+    return canonical if canonical in canonical_model_names() else ""
 
 
 def _is_inside_inline_code(text: str, pos: int) -> bool:
@@ -41,11 +67,18 @@ def _is_inside_inline_code(text: str, pos: int) -> bool:
     return without_blocks.count('`') % 2 == 1
 
 
-def _is_valid_model_name(value: str) -> bool:
-    """Return True when *value* looks like a real model identifier.
+def _is_plausible_model_name(value: str) -> bool:
+    """Return True when *value* is a plausible model identifier.
 
-    A valid model name contains no spaces, no backticks, is non-empty, and
-    does not exceed ``_MODEL_NAME_MAX_LENGTH`` characters.
+    A model value is plausible when it can be brought to a canonical registry
+    key by ``normalize_model_name``. A value that cannot, and that additionally
+    carries spaces, backticks, or sentence punctuation, is prose (documentation
+    that explains how to write the Model field), not a model name.
+
+    A value the normalizer cannot resolve but that carries none of those
+    markers (e.g. a retired dot-form token like ``kimi-k2.5``) is left alone:
+    it is model-shaped, and the fail-closed check downstream is the caller's
+    problem, not silently rewritten here.
     """
     v = value.strip()
     if not v:
@@ -55,6 +88,11 @@ def _is_valid_model_name(value: str) -> bool:
     if '`' in v:
         return False
     if len(v) > _MODEL_NAME_MAX_LENGTH:
+        return False
+    canonical = _normalize_model_to_canonical(v)
+    if canonical:
+        return True
+    if canonical == "" and _SENTENCE_PUNCT_RE.search(v):
         return False
     return True
 
@@ -282,6 +320,11 @@ class ReportParser:
                     continue
                 if value.lower() in _UNKNOWN_LIKE:
                     continue
+                # OI-1194: frontmatter `model:` must be plausible too — the
+                # bold-field guards below do not run for a frontmatter-only
+                # value, and prose here was accepted verbatim (measured).
+                if key == 'model' and not _is_plausible_model_name(value):
+                    continue
                 metadata[key] = value
 
         # Extract all metadata fields. OI-1101: skip matches inside inline
@@ -293,7 +336,7 @@ class ReportParser:
                 continue
             key = _normalize_meta_key(match.group(1))
             value = match.group(2).strip()
-            if key == 'model' and not _is_valid_model_name(value):
+            if key == 'model' and not _is_plausible_model_name(value):
                 continue
             metadata[key] = value
 
@@ -323,7 +366,7 @@ class ReportParser:
                     _value = m.group(1).strip()
                     if _is_inside_inline_code(content, m.start()):
                         continue
-                    if _key == 'model' and not _is_valid_model_name(_value):
+                    if _key == 'model' and not _is_plausible_model_name(_value):
                         continue
                     metadata[_key] = _value
                     break
@@ -341,7 +384,13 @@ class ReportParser:
             if not str(metadata.get(_key) or '').strip():
                 m = re.search(_pat, content[:3000], re.MULTILINE)
                 if m and m.group(1).strip().lower() not in _UNKNOWN_LIKE:
-                    metadata[_key] = m.group(1).strip()
+                    _plain_value = m.group(1).strip()
+                    # OI-1194: the plain-text `Model:` fallback captures \S+,
+                    # which can still be a backtick/punctuation-wrapped token
+                    # (e.g. `Model: \`sonnet\``); reject prose-shaped values.
+                    if _key == 'model' and not _is_plausible_model_name(_plain_value):
+                        continue
+                    metadata[_key] = _plain_value
 
         # PR #8 Fix: Extract YAML metadata block including dispatch_id
         yaml_match = re.search(r'```yaml\n(.*?)\n```', content[:2000], re.DOTALL)
@@ -353,6 +402,15 @@ class ReportParser:
                     key, value = line.split(':', 1)
                     key = _normalize_meta_key(key)
                     value = value.strip()
+                    if key == 'model':
+                        # OI-1194: a ```yaml block can echo the dispatch
+                        # envelope; its model value must be plausible and must
+                        # never clobber a valid header value already parsed
+                        # (the silent-fallback class PR #1491 removed).
+                        if str(metadata.get(key) or '').strip():
+                            continue
+                        if not _is_plausible_model_name(value):
+                            continue
                     metadata[key] = value
 
         # Dispatch assignment table fallback:
