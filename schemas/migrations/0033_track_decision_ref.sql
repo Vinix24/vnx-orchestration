@@ -1,0 +1,44 @@
+-- 0033_track_decision_ref.sql
+-- OI-1190: make the plan-gate decision findable from the track.
+--
+-- Purpose: add tracks.decision_ref — a nullable TEXT column holding a JSON
+--          payload that points at the plan-gate report(s) plus the rejected
+--          alternatives with their reasons. The plan-gate panel writes 820
+--          reports to unified_reports/ over 50 unique tracks, previously only
+--          findable via the name pattern plan-gate-<track_id>-<label>-<hash>.md.
+--          The durable half of a plan decision (why this approach, what was
+--          rejected and why) was therefore not reachable from the track. This
+--          column carries that pointer; the perishable half (the steps) stays
+--          generated just-in-time and is deliberately NOT stored here.
+--
+-- Payload shape (written by plan_gate_panel.build_decision_ref):
+--     {
+--       "reports": ["unified_reports/plan-gate-<track>-<label>-<hash>.md", ...],
+--       "decision": "PASS" | "REVISE" | "BLOCK" | "INFRA_FAIL",
+--       "rejected_alternatives": [
+--         {"panelist": "<label>", "verdict": "block|revise",
+--          "findings": [...], "rationale": "..."}, ...
+--       ],
+--       "set_at": "<ISO-8601>",
+--       "source": "plan-gate" | "backfill"
+--     }
+--
+-- ADR-007 binding: additive column on an existing table whose composite PRIMARY
+--          KEY (track_id, project_id) already satisfies ADR-007 (migration 0024).
+--          No index is added — decision_ref is read via the existing PK lookup
+--          (get_track), never queried by its own value, so a single-column index
+--          (which would omit project_id and violate ADR-007) is never needed.
+--
+-- Target DB: runtime_coordination.db
+-- Applied by: scripts/lib/migrations/apply_0033.py (via auto_apply.py)
+-- Tested by:  tests/test_migration_decision_ref.py
+--
+-- Idempotency: ALTER TABLE ADD COLUMN is not idempotent in SQLite, but
+--              apply_script_if_below skips the whole script when user_version >= 33.
+--
+-- Pre-migration state  (v32): tracks has no decision_ref column.
+-- Post-migration state (v33): tracks.decision_ref exists, NULL on every row.
+
+ALTER TABLE tracks ADD COLUMN decision_ref TEXT;
+
+PRAGMA user_version = 33;

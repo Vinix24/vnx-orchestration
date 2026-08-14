@@ -676,6 +676,7 @@ def _bootstrap(tmp_path: Path) -> Path:
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
         (30, "0030_track_oi_resolved_at.sql"),
+        (33, "0033_track_decision_ref.sql"),
     ]:
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
         schema_migration.apply_script_if_below(conn, version, sql)
@@ -2141,3 +2142,160 @@ def test_cmd_plan_gate_run_pass_with_failed_evidence_is_loud_not_silent(tmp_path
     assert "plan_gate_pass evidence NOT written" in captured.err
     # Nothing durable landed in the repo ledger.
     assert not (tmp_path / ".vnx-attest" / "plan-gates.ndjson").exists()
+
+
+# --------------------------------------------------------------------------
+# OI-1190: build_decision_ref — the durable half of a plan decision rendered as
+# the tracks.decision_ref JSON payload (report pointers + rejected alternatives).
+# --------------------------------------------------------------------------
+
+def test_build_decision_ref_renders_full_payload():
+    import json
+    panelists = [
+        {"label": "opus", "verdict": "pass", "blocking_findings": [], "rationale": "ok",
+         "report_path": "plan-gate-x-opus-abc12345", "dispatched": True,
+         "parse_error": False, "no_verdict": False},
+        {"label": "kimi", "verdict": "block", "blocking_findings": ["no rollback"], "rationale": "unsafe",
+         "report_path": "plan-gate-x-kimi-6789abcd", "dispatched": True,
+         "parse_error": False, "no_verdict": False},
+        {"label": "glm-5.2-harness", "verdict": "revise", "blocking_findings": [], "rationale": "",
+         "report_path": "", "dispatched": False, "parse_error": True, "no_verdict": False},
+    ]
+    payload = json.loads(pgp.build_decision_ref("REVISE", panelists))
+    assert payload["decision"] == "REVISE"
+    assert payload["source"] == "plan-gate"
+    assert payload["set_at"]  # ISO-8601 timestamp present
+    # Only dispatched seats contribute a report pointer; the undispatched glm seat does not.
+    assert set(payload["reports"]) == {
+        "unified_reports/plan-gate-x-opus-abc12345.md",
+        "unified_reports/plan-gate-x-kimi-6789abcd.md",
+    }
+    # Only the SCORING block seat is a rejected alternative (with reasons).
+    rejected = payload["rejected_alternatives"]
+    assert [r["panelist"] for r in rejected] == ["kimi"]
+    assert rejected[0]["verdict"] == "block"
+    assert rejected[0]["findings"] == ["no rollback"]
+    assert rejected[0]["rationale"] == "unsafe"
+
+
+def test_build_decision_ref_parse_error_seat_is_not_a_rejected_alternative():
+    import json
+    # A parse_error seat carries a fail-safe "revise" verdict that was never authored
+    # by the model — it must NOT read as a rejected alternative with reasons.
+    panelists = [
+        {"label": "opus", "verdict": "pass", "blocking_findings": [], "rationale": "ok",
+         "report_path": "plan-gate-x-opus-abc12345", "dispatched": True,
+         "parse_error": False, "no_verdict": False},
+        {"label": "glm-5.2-harness", "verdict": "revise", "blocking_findings": [], "rationale": "",
+         "report_path": "plan-gate-x-glm-fedcba98", "dispatched": True,
+         "parse_error": True, "no_verdict": False},
+    ]
+    payload = json.loads(pgp.build_decision_ref("PASS", panelists))
+    assert payload["rejected_alternatives"] == []
+
+
+def test_build_decision_ref_honors_source_and_set_at_overrides():
+    import json
+    payload = json.loads(pgp.build_decision_ref(
+        "INFRA_FAIL", [], source="backfill", set_at="2026-08-14T00:00:00Z",
+    ))
+    assert payload["source"] == "backfill"
+    assert payload["set_at"] == "2026-08-14T00:00:00Z"
+    assert payload["decision"] == "INFRA_FAIL"
+    assert payload["reports"] == []
+    assert payload["rejected_alternatives"] == []
+
+
+# --------------------------------------------------------------------------
+# OI-1190: the plan-gate write hook — after a plan-gate round the TRACK carries
+# decision_ref pointing at the existing report file(s). This is the test that
+# FAILS without the fix (previously the decision lived only in name-pattern-
+# matchable unified_reports/ files, unreachable from the track).
+# --------------------------------------------------------------------------
+
+def _dref_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+    return {
+        "track_id": track_id, "project_id": project_id, "decision": "REVISE",
+        "summary": {"decision": "REVISE", "pass_count": 1, "revise_count": 0,
+                    "block_count": 1, "rationale": "one block"},
+        "panelists": [
+            {"label": "opus", "verdict": "pass", "blocking_findings": [], "rationale": "ok",
+             "report_path": "plan-gate-feat-dref-opus-abc12345", "dispatched": True,
+             "parse_error": False, "no_verdict": False},
+            {"label": "kimi", "verdict": "block", "blocking_findings": ["no rollback"],
+             "rationale": "unsafe", "report_path": "plan-gate-feat-dref-kimi-6789abcd",
+             "dispatched": True, "parse_error": False, "no_verdict": False},
+        ],
+        "doc_truncation": {"truncated": False},
+    }
+
+
+def test_cmd_plan_gate_run_writes_decision_ref_to_track(tmp_path, monkeypatch):
+    import argparse
+    import json
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-dref", "p1", "t", "shipped", phase="queued")
+
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "plan-gate-feat-dref-opus-abc12345.md").write_text(
+        _make_report_with_fence("pass"), encoding="utf-8"
+    )
+    (reports_dir / "plan-gate-feat-dref-kimi-6789abcd.md").write_text(
+        _report('{"verdict": "block", "blocking_findings": ["no rollback"], "rationale": "unsafe"}'),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(pgp, "run_panel", _dref_run_panel)
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
+    args = argparse.Namespace(
+        track_id="feat-dref", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None,
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 2  # REVISE
+
+    decision_ref = tracks.get_track(state_dir, "feat-dref", "p1")["decision_ref"]
+    assert decision_ref, "the track must carry decision_ref after a plan-gate round"
+    payload = json.loads(decision_ref)
+    assert payload["source"] == "plan-gate"
+    assert payload["decision"] == "REVISE"
+    assert set(payload["reports"]) == {
+        "unified_reports/plan-gate-feat-dref-opus-abc12345.md",
+        "unified_reports/plan-gate-feat-dref-kimi-6789abcd.md",
+    }
+    # The pointers resolve to files that actually exist on disk.
+    for rel in payload["reports"]:
+        assert (tmp_path / rel).exists(), f"decision_ref points at missing report: {rel}"
+    assert [r["panelist"] for r in payload["rejected_alternatives"]] == ["kimi"]
+
+
+def test_cmd_plan_gate_run_decision_ref_write_failure_does_not_break_gate(tmp_path, monkeypatch, capsys):
+    """A decision_ref write failure (e.g. column missing) must never break the gate
+    verdict — it degrades to a loud WARNING, not a crash (OI-1190 best-effort)."""
+    import argparse
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-nodref", "p1", "t", "shipped", phase="queued")
+
+    def _raise(*a, **k):
+        raise tracks.DecisionRefColumnMissingError("store predates migration 0033")
+
+    monkeypatch.setattr(tracks, "set_decision_ref", _raise)
+    monkeypatch.setattr(pgp, "run_panel", _dref_run_panel)
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
+    args = argparse.Namespace(
+        track_id="feat-nodref", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None,
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 2  # the gate verdict is unaffected
+    captured = capsys.readouterr()
+    assert "could not persist decision_ref" in captured.err
