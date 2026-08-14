@@ -17,6 +17,11 @@ from typing import Dict, List, Optional, Sequence
 
 import yaml
 
+# GOVERNANCE_MIN_TIERS is the single source of truth for the governance-variant
+# vocabulary. The gate-weight derivation below must emit only keys from this
+# closed set, never a new variant name.
+from observability_tier import GOVERNANCE_MIN_TIERS
+
 _RECOMMENDATIONS_PATH = Path(__file__).parent / "providers" / "routing_recommendations.yaml"
 
 
@@ -44,6 +49,29 @@ class RouteDecision:
     reason: str
     constraints_applied: List[str] = field(default_factory=list)
     cost_estimate: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class GovernanceVariantResult:
+    """Derived governance variant plus the reasoning for the trace."""
+    variant: str       # one of GOVERNANCE_MIN_TIERS keys
+    reason: str        # why this variant was chosen (deterministic rule fired)
+    gate: str          # the review-gate weight this variant resolves to
+    direction: str     # "up" | "unchanged" | "down" vs the codex_gate baseline
+
+
+@dataclass(frozen=True)
+class GateWeightResolution:
+    """Final review-gate weight for a dispatch.
+
+    ``source`` is "explicit" when the spec declared a gate (router never
+    overrides) or "derived" when the router filled a silent spec.
+    ``governance_variant`` is "" on the explicit path (no derivation ran).
+    """
+    gate: str
+    source: str
+    governance_variant: str
+    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +474,260 @@ def parse_route_model_id(model_id: str) -> tuple[str, str]:
     if model_id.startswith("kimi-"):
         return "kimi", model_id
     return "litellm", model_id
+
+
+# ---------------------------------------------------------------------------
+# Governance variant derivation (gate-weight selection)
+# ---------------------------------------------------------------------------
+#
+# The router derives a ``governance_variant`` from what it already knows about
+# the dispatch (dispatch_paths, task_class) and that variant selects the review-
+# gate weight. This is a DETERMINISTIC rule, not a model decision: the risk
+# class of a change is a function of which paths it touches, which is checkable
+# and reproducible. The five variants in GOVERNANCE_MIN_TIERS already encode the
+# risk ladder (min observability tier 1..3); mapping "which files change" onto
+# "which rung of that ladder" is a fixed rule with no open natural language to
+# judge, so a model adds nothing here. It would only make the gate weight
+# non-reproducible and its receipt unfalsifiable.
+
+# The gate a plain code dispatch gets by convention today (the author writes
+# ``gate=codex_gate``). Used as the up/down reference so a derivation that lands
+# on a LIGHTER gate than this is never silent: "only upward, never silently
+# downward"; a lighter gate must carry an explicit reason in the trace.
+_GATE_BASELINE = "codex_gate"
+
+# Heaviness ladder over the closed Gate enum (scripts/lib/dispatch_spec.py).
+# Only the relative order matters, for the up/down direction in the trace.
+_GATE_WEIGHT: dict[str, int] = {
+    "codex_gate": 3,
+    "gemini_review": 2,
+    "claude_github_optional": 1,
+    "ci_gate": 0,
+    "wiring_gate": 0,
+}
+
+# Governance variant -> review-gate weight. Strictest governance (min tier 1)
+# gets the heaviest single gate; lightest governance (min tier 3) gets the
+# lightest. Keys are exactly the GOVERNANCE_MIN_TIERS vocabulary, no new names.
+GOVERNANCE_VARIANT_GATE: dict[str, str] = {
+    "coding-strict": "codex_gate",               # strictest: full codex diff review
+    "default": "codex_gate",                     # code baseline: codex diff review
+    "business-light": "claude_github_optional",  # non-code deliverable: optional review
+    "light": "claude_github_optional",           # light: optional review
+    "minimal": "ci_gate",                        # docs/content: CI checks only
+}
+
+# Fail-loud drift guard: the gate-weight table must only ever name variants from
+# the observability-tier vocabulary. If a variant is renamed upstream, this
+# import fails loudly instead of silently carrying a stale name into the router.
+_UNKNOWN_VARIANTS = set(GOVERNANCE_VARIANT_GATE) - set(GOVERNANCE_MIN_TIERS)
+if _UNKNOWN_VARIANTS:
+    raise ValueError(
+        f"GOVERNANCE_VARIANT_GATE declares variants not in GOVERNANCE_MIN_TIERS: "
+        f"{sorted(_UNKNOWN_VARIANTS)}; the gate weight must use the closed "
+        f"observability-tier vocabulary (no new variant names)."
+    )
+
+# A change here can alter the dispatch door, the router, the receipt trail, or
+# the gates themselves: the highest risk class (coding-strict). Matched by path
+# prefix or exact name.
+_GOVERNANCE_CORE_PREFIXES: tuple[str, ...] = (
+    "scripts/lib/providers/",
+    "scripts/lib/append_receipt_internals/",
+    "scripts/lib/dispatch",          # dispatch_cli/spec/plan/govern/bridge/*.py
+    "scripts/lib/tmux_interactive_dispatch.py",
+    "scripts/lib/subprocess_dispatch.py",
+    "scripts/lib/subprocess_adapter.py",
+    "scripts/lib/provider_dispatch.py",
+    "scripts/lib/gate",              # gate_executor/recorder/status/obligations/stack_resolver/...
+    "scripts/lib/observability_tier.py",
+    "scripts/lib/smart_router.py",
+    "scripts/lib/report_to_receipt_converter.py",
+    "scripts/lib/governance_receipts.py",
+    "scripts/lib/incident_taxonomy.py",
+    "scripts/review_gate_manager.py",
+    "scripts/gate_obligation_runner.py",
+)
+
+_DOC_PREFIXES: tuple[str, ...] = ("docs/", "claudedocs/")
+_DOC_EXTENSIONS: frozenset[str] = frozenset({".md", ".rst", ".txt", ".adoc"})
+_DOC_FILENAME_MARKERS: frozenset[str] = frozenset({
+    "readme", "changelog", "roadmap", "feature_plan", "contributing",
+    "security", "license", "codeowners",
+})
+
+# Non-code deliverables: config/content/templates, not logic (business-light).
+_BUSINESS_PREFIXES: tuple[str, ...] = (
+    "samples/", "templates/", "examples/", "configs/", "agents/", "skills/",
+)
+
+_CODE_PREFIXES: tuple[str, ...] = (
+    "scripts/", "lib/", "bin/", "vnx_cli/", "tests/", "hooks/", "database/",
+    "schemas/", "ledger/", "dashboard/", "roadmap/",
+)
+_CODE_EXTENSIONS: frozenset[str] = frozenset({
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".rb", ".go",
+    ".rs", ".java", ".c", ".cc", ".cpp", ".h", ".sql", ".yaml", ".yml", ".toml",
+    ".json", ".svelte", ".css", ".html",
+})
+
+_CATEGORY_TO_VARIANT: dict[str, str] = {
+    "core": "coding-strict",
+    "code": "default",
+    "business": "business-light",
+    "docs": "minimal",
+}
+
+# Strictness rank: the STRICTEST category across all touched paths wins, so a
+# dispatch that edits the door AND a doc file is still coding-strict, never a
+# silent downgrade.
+_CATEGORY_RANK: dict[str, int] = {"docs": 0, "business": 1, "code": 2, "core": 3}
+
+
+def _matches_prefix(path: str, prefix: str) -> bool:
+    """True when ``path`` equals the prefix's bare dir or lives under it."""
+    return path == prefix.rstrip("/") or path.startswith(prefix)
+
+
+def _path_category(path: str) -> str:
+    """Classify one dispatch path into 'core' | 'docs' | 'code' | 'business'.
+
+    Deterministic, first-match wins. An unrecognized path falls through to
+    'code' (the ``default`` variant), the safe middle, never silently lighter.
+    """
+    p = str(path).strip().lstrip("./")
+    if not p:
+        return "code"
+
+    for prefix in _GOVERNANCE_CORE_PREFIXES:
+        if _matches_prefix(p, prefix):
+            return "core"
+
+    for prefix in _DOC_PREFIXES:
+        if _matches_prefix(p, prefix):
+            return "docs"
+
+    name = p.rsplit("/", 1)[-1].lower()
+    for marker in _DOC_FILENAME_MARKERS:
+        if name.startswith(marker):
+            return "docs"
+
+    leaf = p.rsplit("/", 1)[-1]
+    ext = ("." + leaf.rsplit(".", 1)[-1].lower()) if "." in leaf else ""
+    if ext in _DOC_EXTENSIONS:
+        return "docs"
+
+    for prefix in _BUSINESS_PREFIXES:
+        if _matches_prefix(p, prefix):
+            return "business"
+
+    if ext in _CODE_EXTENSIONS:
+        return "code"
+    for prefix in _CODE_PREFIXES:
+        if _matches_prefix(p, prefix):
+            return "code"
+    return "code"
+
+
+def _category_from_task_class(task_class: Optional[str]) -> str:
+    """Fallback category when a dispatch declares no paths.
+
+    Documentation/translation work is content (minimal); review/design/debug of
+    unknown code defaults to the code baseline, never strict, never light.
+    """
+    if task_class in ("04_documentation", "07_translation"):
+        return "docs"
+    return "code"
+
+
+def _direction_for(gate: str) -> str:
+    """Direction of the gate weight vs the codex_gate baseline.
+
+    'down' marks a lighter-than-baseline gate so the trace can never hide it.
+    """
+    baseline = _GATE_WEIGHT.get(_GATE_BASELINE, 0)
+    weight = _GATE_WEIGHT.get(gate)
+    if weight is None:
+        return "unchanged"  # unknown gate: neutral, no false up/down claim
+    if weight > baseline:
+        return "up"
+    if weight < baseline:
+        return "down"
+    return "unchanged"
+
+
+def derive_governance_variant(
+    dispatch_paths: Optional[Sequence[str]] = None,
+    *,
+    task_class: Optional[str] = None,
+) -> GovernanceVariantResult:
+    """Derive a governance variant from the signals the router already has.
+
+    Deterministic rule, first-match wins. Paths are the primary signal (they say
+    WHAT changes); the strictest category across all touched paths wins. When a
+    dispatch declares no paths, task_class is the fallback. Instruction text and
+    role are deliberately NOT signals here: path + task_class already pin the
+    risk class deterministically, and text/role guessing is exactly the
+    ambiguity a model would be for; this rule has none.
+    """
+    paths = [p for p in (dispatch_paths or []) if p and str(p).strip()]
+    if paths:
+        category = max(
+            (_path_category(str(p)) for p in paths),
+            key=lambda c: _CATEGORY_RANK[c],
+        )
+        reason = (
+            f"strictest path category={category!r} across {len(paths)} dispatch path(s)"
+        )
+    else:
+        category = _category_from_task_class(task_class)
+        reason = f"no dispatch paths; task_class={task_class or 'none'} -> {category!r}"
+
+    variant = _CATEGORY_TO_VARIANT[category]
+    gate = GOVERNANCE_VARIANT_GATE[variant]
+    return GovernanceVariantResult(
+        variant=variant,
+        reason=reason,
+        gate=gate,
+        direction=_direction_for(gate),
+    )
+
+
+def resolve_gate(
+    explicit_gate: str = "",
+    *,
+    dispatch_paths: Optional[Sequence[str]] = None,
+    task_class: Optional[str] = None,
+) -> GateWeightResolution:
+    """Resolve the review-gate weight for a dispatch.
+
+    An explicit gate on the spec always wins: the router fills in, it never
+    overrides (worker-provider-free-choice, pin_semantics=default). When the spec
+    is silent, the router derives a governance_variant and maps it to a gate
+    weight; the variant, direction and reason are carried in ``reason`` so the
+    trace is never silent about a lighter-than-baseline gate.
+    """
+    gate = (explicit_gate or "").strip()
+    if gate:
+        return GateWeightResolution(
+            gate=gate,
+            source="explicit",
+            governance_variant="",
+            reason=f"gate={gate} declared on spec; router did not override",
+        )
+    derived = derive_governance_variant(
+        dispatch_paths=dispatch_paths,
+        task_class=task_class,
+    )
+    return GateWeightResolution(
+        gate=derived.gate,
+        source="derived",
+        governance_variant=derived.variant,
+        reason=(
+            f"governance_variant={derived.variant} gate={derived.gate} "
+            f"direction={derived.direction}; {derived.reason}"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

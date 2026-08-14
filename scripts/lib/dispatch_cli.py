@@ -1112,6 +1112,47 @@ def _tier_aware_fallback_model(tier: Optional[str], spec_model: Optional[str]) -
     return "sonnet"
 
 
+def _resolve_gate_via_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Optional[str]]":
+    """Fill the spec's review-gate from the router when the spec is silent.
+
+    Punt 7 (gate-weight-by-variant): the router derives a ``governance_variant``
+    from the change (dispatch_paths + task_class) and maps it to a gate weight,
+    so a docs dispatch and a dispatch-door rewrite no longer land on the same
+    gate because one author chose it. An explicit gate on the spec always wins
+    (worker-provider-free-choice, pin_semantics=default: the router fills in,
+    it never overrides).
+
+    Returns (vspec, gate_reason): a rebuilt ValidatedSpec carrying the filled
+    gate (or the original when the spec already declared one), and a trace
+    string for the dry-run output / receipt; never a bare None when the router
+    ran. Fail-open: a broken derivation returns the original vspec unchanged
+    with the gate left empty (today's baseline), logged at WARNING.
+    """
+    spec = vspec.spec
+    if (spec.gate or "").strip():
+        return vspec, None
+
+    try:
+        from smart_router import resolve_gate  # noqa: PLC0415
+
+        resolution = resolve_gate(
+            explicit_gate=spec.gate,
+            dispatch_paths=[str(dp.path) for dp in spec.dispatch_paths],
+            task_class=spec.task_class,
+        )
+    except Exception as exc:
+        logger.warning(
+            "smart-router gate resolution failed, gate left empty (fail-open): %s",
+            exc,
+            exc_info=True,
+        )
+        return vspec, None
+
+    new_spec = dataclasses.replace(spec, gate=resolution.gate)
+    new_vspec = dataclasses.replace(vspec, spec=new_spec)
+    return new_vspec, f"smart-router:{resolution.reason}"
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -1742,6 +1783,16 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
     if isinstance(vspec, Reject):
         _emit_reject(vspec)
         return 1
+
+    # Punt 7 (gate-weight-by-variant): fill the review-gate from the router when
+    # the spec is silent. The gate reason is merged into door_route_reason so the
+    # chosen variant + reason are visible in the dry-run output and carried on
+    # the plan (route_reason), never a silent lighter gate.
+    vspec, gate_reason = _resolve_gate_via_router(vspec)
+    if gate_reason:
+        door_route_reason = (
+            f"{door_route_reason};{gate_reason}" if door_route_reason else gate_reason
+        )
 
     # P1-#1: wrap everything after validate in try/except — door never panics
     try:
