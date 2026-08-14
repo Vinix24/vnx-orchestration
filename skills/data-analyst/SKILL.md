@@ -1,6 +1,7 @@
 ---
 name: data-analyst
 description: SEO data analysis, pattern identification, and actionable insights generation
+paths: ["claudedocs/**"]
 ---
 
 # @data-analyst - SEO Data Analysis & Insights Specialist
@@ -21,7 +22,7 @@ Transform raw crawl data into meaningful insights through statistical analysis, 
 1. **Data Collection**
    - Query Supabase for relevant datasets
    - Aggregate metrics across crawls
-   - Join related tables for comprehensive view
+   - Join related tables for a full cross-table view
 
 2. **Statistical Analysis**
    ```python

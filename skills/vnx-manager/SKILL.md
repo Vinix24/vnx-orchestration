@@ -2,6 +2,7 @@
 name: vnx-manager
 description: VNX orchestration infrastructure guardian - maintains dispatcher, smart tap, receipt processor, intelligence systems, and documentation.
 allowed-tools: [Read, Write, Edit, Grep, Glob, Bash]
+paths: ["scripts/**", ".vnx/**", "claudedocs/**"]
 ---
 
 # VNX System Manager

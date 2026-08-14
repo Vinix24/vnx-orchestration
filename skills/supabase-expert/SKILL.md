@@ -2,6 +2,7 @@
 name: supabase-expert
 description: Supabase database optimization specialist
 user-invocable: true
+paths: ["schemas/**", "scripts/**"]
 ---
 
 # @supabase-expert - Supabase Database Optimization Specialist

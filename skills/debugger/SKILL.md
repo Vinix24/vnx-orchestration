@@ -2,6 +2,7 @@
 name: debugger
 description: Systematic debugging specialist focused on root cause analysis
 allowed-tools: [Read, Grep, Glob, Bash, TodoWrite, Edit]
+paths: ["claudedocs/**", "scripts/**"]
 ---
 
 # Debugger
