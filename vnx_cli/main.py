@@ -1291,13 +1291,96 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         sys.exit(0)
 
 
+def _check_migration_staleness_startup(argv: "list[str] | None" = None) -> None:
+    """Cheap schema-staleness check at CLI startup (Part 2, OI-1169 follow-on).
+
+    Compares the resolved project's ``runtime_coordination.db`` PRAGMA
+    ``user_version`` against the highest runner-backed migration the RUNNING
+    code knows about, reusing ``scripts/ledger_health.check_migration_staleness``
+    — the read-only comparison that already exists (#1477) — rather than
+    building a second mechanism (dispatch instruction).
+
+    Two directions, asymmetric because they carry different risk:
+
+    * store BEHIND the code (the common case right after a ``vnx update``):
+      warned to stderr with the exact fix (``vnx migrate``), never
+      auto-applied here. Auto-migrating on every CLI invocation would mutate
+      state on whatever project the command happens to resolve to, without
+      being asked, and without the backup a state write deserves (dispatch
+      instruction: "een schrijfactie op state altijd een backup verdient").
+      ``vnx migrate`` and the T0 SessionStart ``auto_apply`` hook remain the
+      only two write paths — this check only ever reads.
+    * store AHEAD of the code (an old binary against a newer schema — e.g. a
+      ``.vnx-version-freeze`` taken AFTER a migration already ran): the
+      dangerous direction, since old code can silently misread or corrupt a
+      schema it does not know about. This fails loud (``SystemExit``), the
+      same treatment Part 1 gives an unmet pin floor.
+
+    Fail-open on anything unmeasurable (no state dir yet, corrupt DB,
+    ``SKIPPED_UNVERIFIED``): a check that cannot read what it needs must
+    never block the CLI on that basis alone — only a POSITIVELY measured
+    "ahead" does.
+    """
+    try:
+        from vnx_cli import _engine
+        from vnx_cli._reexec import _resolve_project_dir
+
+        project_dir = _resolve_project_dir(sys.argv[1:] if argv is None else argv)
+        data_root = _engine.resolve_data_root(project_dir)
+        _engine.ensure_engine_on_path()
+        import ledger_health  # scripts/ is on sys.path only after ensure_engine_on_path()
+    except Exception:
+        return  # cannot even resolve the state dir / import the checker — fail open
+
+    state_dir = data_root / "state"
+    try:
+        result = ledger_health.check_migration_staleness(state_dir)
+    except Exception:
+        return
+
+    if not result.get("db_exists") or result.get("status") == ledger_health.SKIPPED_UNVERIFIED:
+        return
+
+    current = result.get("current_user_version")
+    highest = result.get("highest_available_migration")
+    if current is None or highest is None:
+        return
+
+    db_path = state_dir / ledger_health.RUNTIME_DB_NAME
+
+    if current > highest:
+        raise SystemExit(
+            f"[vnx-migrate] ERROR: {db_path} is at schema user_version={current}, "
+            f"but the running code only knows migrations up to {highest:04d}. This "
+            "install is OLDER than the schema it would be operating on — refusing "
+            "to run rather than risk misreading or corrupting it.\n"
+            "  Fix: run a `vnx` build that knows this schema (`vnx update`), or "
+            "restore an older backup of this store."
+        )
+
+    if highest > current:
+        print(
+            f"[vnx-migrate] WARNING: {db_path} is {highest - current} migration(s) "
+            f"behind (user_version={current}, highest available {highest:04d}). "
+            "Run `vnx migrate` to catch it up.",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
-    # FIRST: honor a project's .vnx-version pin by re-exec'ing the pinned
-    # central install (vnx_cli + engine stay version-consistent). No-op for
-    # dev checkouts, matching pins, and any ambiguity (fail-open).
+    # FIRST: honor a project's .vnx-version pin (a floor, not a freeze) by
+    # re-exec'ing a different central install when the running one does not
+    # satisfy it (vnx_cli + engine stay version-consistent). No-op for dev
+    # checkouts, an already-satisfied floor, and any ambiguity (fail-open,
+    # except a genuinely unmet floor with nothing installed to meet it).
     from vnx_cli._reexec import maybe_reexec_pinned
 
     maybe_reexec_pinned()
+
+    # SECOND: a cheap, read-only check that this project's runtime schema
+    # isn't stale relative to the code that just resolved above. Never
+    # blocks on "behind" (warns only); does block on "ahead" (see docstring).
+    _check_migration_staleness_startup()
 
     parser = _SuggestionArgumentParser(
         prog="vnx",
