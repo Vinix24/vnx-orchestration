@@ -5,10 +5,13 @@ provider (provider=AUTO). Resolves the dispatch to a concrete provider + model
 via the cost-tier classifier and tier-routing engine, then hands back a
 Provider enum + model string that compile_plan can consume.
 
-Fail-open by design: a broken router returns a declined result with a reason
-and the door falls through to the existing behaviour. T0 is never routed
-(t0-opus-only is a floor, not an advisory). The router is default-on since
-2026-08-02.
+Fail-open for the classifier, fail-loud for the registry (ADR-036 §2). A broken
+classifier returns a declined result with a reason and the door falls through to
+the existing behaviour — a routing *bug* must never block a dispatch. But an
+unknown provider/model (a provider string the registry does not know) is drift
+between the router and the registry, and raises RegistryLookupError naming what
+was missing and where it was looked for. T0 is never routed (t0-opus-only is a
+floor, not an advisory). The router is default-on since 2026-08-02.
 
 Every decline path carries an explicit reason (OI-1187) so a no-route is
 distinguishable in the dry-run output and receipt. Before this, a T0 skip, an
@@ -18,7 +21,8 @@ returned a bare None and were indistinguishable in the audit trail.
 Constraints:
 - No imports from dispatch_cli or dispatch_plan (avoid circular deps).
 - No I/O beyond what the smart_router submodules already do.
-- Pure decision function — never mutates, never raises.
+- Pure decision function — never mutates; never raises except for the
+  registry-drift error of ADR-036 §2.
 """
 from __future__ import annotations
 
@@ -38,20 +42,28 @@ logger = logging.getLogger(__name__)
 DECLINE_T0_NEVER_ROUTES = "t0-never-routes"
 DECLINE_EXPLICIT_PROVIDER = "explicit-provider"
 DECLINE_ROUTER_DISABLED = "router-disabled"
-DECLINE_PROVIDER_NOT_MAPPED = "provider-not-mapped"
 DECLINE_CLASSIFIER_ERROR = "classifier-error"
 
 
-# TierRoute.provider string -> Provider enum.
-# The tier-routing engine uses short provider strings; the door's compile_plan
-# needs a Provider enum. This mapping is the canonical translation layer.
-_TIER_PROVIDER_TO_ENUM: dict[str, Provider] = {
-    "deepseek": Provider.DEEPSEEK_HARNESS,
-    "codex": Provider.CODEX,
-    "kimi": Provider.KIMI,
-    "claude": Provider.CLAUDE,
-    "local-gemma": Provider.LOCAL_GEMMA,
-}
+def _provider_enum(provider_str: str) -> Provider:
+    """Map a route provider string to a Provider enum — fail-loud (ADR-036 §2).
+
+    The route's provider string is the registry's ``dispatch_enum`` (read by the
+    tier router from wave7_models.yaml). A string that is not a real dispatch
+    Provider is drift between the tier map and the registry, and must surface
+    with what+where — never a silent None.
+    """
+    try:
+        return Provider(provider_str)
+    except ValueError:
+        from providers.provider_registry import RegistryLookupError  # noqa: PLC0415
+
+        raise RegistryLookupError(
+            f"provider {provider_str!r} is not a known dispatch Provider; the "
+            f"tier map produced a provider string that the Provider enum "
+            f"(dispatch_spec) and registry (wave7_models.yaml dispatch_enum) do "
+            f"not recognize"
+        ) from None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -83,9 +95,13 @@ def resolve_door_route(
 
     Returns a DoorRouteResult: either ``route=(provider, model, route_reason)``
     when the router has a recommendation, or a ``decline_reason`` naming why
-    routing was skipped (T0, explicit provider, router disabled, an unmapped
-    provider string, or a classifier error). ``tier`` is populated whenever the
-    classifier ran so the door can fall back tier-aware instead of blindly.
+    routing was skipped (T0, explicit provider, router disabled, or a
+    classifier error). ``tier`` is populated whenever the classifier ran so the
+    door can fall back tier-aware instead of blindly.
+
+    Raises RegistryLookupError when the classifier succeeded but produced a
+    provider/model the registry does not know (ADR-036 §2 fail-loud) — the
+    door must surface that drift, not fall back.
 
     Args:
         spec_provider: The spec's provider enum value (check Provider.AUTO before calling).
@@ -116,52 +132,37 @@ def resolve_door_route(
     if auto_route in ("0", "false", "no", "off"):
         return DoorRouteResult(decline_reason=DECLINE_ROUTER_DISABLED)
 
+    # Classifier — fail-open (ADR-036 §2). A routing bug (a stale loc_estimate,
+    # an import error, a classifier crash) must never block a dispatch.
     try:
         from .cost_tier import classify_dispatch  # noqa: PLC0415
-        from .tier_routing import resolve_tier_route  # noqa: PLC0415
 
         task_spec = {"instruction": instruction_text}
         tier = classify_dispatch(task_spec, file_paths or [], loc_estimate)
-        route = resolve_tier_route(tier, _env)
-
-        provider_enum = _TIER_PROVIDER_TO_ENUM.get(route.provider)
-        if provider_enum is None:
-            # A decline is still possible (an unmapped provider string), but it
-            # must be visible, not silent: the door falls through to its own
-            # lane resolution, and the reason is logged so a drift in the tier
-            # map is diagnosable. The classified tier is carried so the door can
-            # fall back at the same quality class instead of one lower.
-            logger.warning(
-                "smart-router door routing: provider %r for tier=%s is not in "
-                "_TIER_PROVIDER_TO_ENUM; declining route (fail-open to default lane)",
-                route.provider,
-                tier,
-            )
-            return DoorRouteResult(
-                decline_reason=DECLINE_PROVIDER_NOT_MAPPED,
-                tier=tier,
-            )
-
-        route_reason = f"smart-router:tier={tier},provider={route.provider},model={route.model},lane={route.lane}"
-        if route.reason:
-            route_reason += f";{route.reason}"
-        return DoorRouteResult(
-            route=(provider_enum, route.model, route_reason),
-            tier=tier,
-        )
     except Exception as exc:
-        # Fail-open: a broken classifier or resolver must never block a dispatch.
-        # The door falls through to its existing behaviour.
-        # A failing router that is silent is indistinguishable from a correctly
-        # operating router that declined to route — always log at WARNING so
-        # drift (e.g. a TypeError on stale loc_estimate=None) is visible.
         logger.warning(
-            "smart-router door routing: classifier/resolver failed, dispatch "
-            "falls through to default lane (fail-open). Error: %s",
+            "smart-router door routing: classifier failed, dispatch falls "
+            "through to default lane (fail-open). Error: %s",
             exc,
             exc_info=True,
         )
         return DoorRouteResult(decline_reason=DECLINE_CLASSIFIER_ERROR)
+
+    # Tier routing + provider enum — fail-loud (ADR-036 §2). The classifier
+    # worked; an unknown provider/model is registry drift and must surface, not
+    # vanish as a silent None. RegistryLookupError propagates to the door.
+    from .tier_routing import resolve_tier_route  # noqa: PLC0415
+
+    route = resolve_tier_route(tier, _env)
+    provider_enum = _provider_enum(route.provider)
+
+    route_reason = f"smart-router:tier={tier},provider={route.provider},model={route.model},lane={route.lane}"
+    if route.reason:
+        route_reason += f";{route.reason}"
+    return DoorRouteResult(
+        route=(provider_enum, route.model, route_reason),
+        tier=tier,
+    )
 
 
 def apply_door_route(
@@ -177,8 +178,9 @@ def apply_door_route(
     recommendation when routed, or the decline reason (prefixed "smart-router:")
     when the router skipped — never a bare None for a decline (OI-1187).
 
-    Fail-open: never raises. A broken router returns the original vspec unchanged
-    with a decline reason.
+    Fail-open for a broken classifier (returns the original vspec unchanged
+    with a decline reason); fail-loud for registry drift (RegistryLookupError
+    propagates to the caller, ADR-036 §2).
     """
     spec = vspec.spec
     if spec.provider != Provider.AUTO:
