@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 log = logging.getLogger(__name__)
 
-from .common import _emit, _utc_now_iso, facade
+from .common import SCRIPTS_DIR, _emit, _utc_now_iso, facade
 
 _PROVIDER_ENV_VAR: Dict[str, str] = {
     "claude_code": "CLAUDE_SESSION_ID",
@@ -118,11 +119,13 @@ def _resolve_model_provider(terminal: str, state_dir: Path) -> Dict[str, str]:
     1. panes.json mapping (if exists)
     2. Terminal naming convention heuristic (fallback)
 
-    Default models for Claude terminals:
-    - T0: claude-opus-4.6
-    - T1/T2/T3/T-MANAGER: claude-sonnet-4.5
+    The model is left empty when it cannot be resolved — the caller (enrichment
+    + the fail-closed ``_validate_model_present``) decides how to treat an
+    unresolvable model. It is never silently defaulted to the literal
+    ``"unknown"`` (OI-1184): an undeterminable model must surface loudly, not
+    land in the ledger as a fake value.
     """
-    model = "unknown"
+    model = ""
     provider = "unknown"
 
     panes_json = state_dir / "panes.json"
@@ -133,22 +136,24 @@ def _resolve_model_provider(terminal: str, state_dir: Path) -> Dict[str, str]:
                 term_lower = terminal.lower()
                 entry = payload.get(terminal) or payload.get(term_lower)
                 if isinstance(entry, dict):
-                    model = str(entry.get("model") or "unknown").strip() or "unknown"
+                    model = str(entry.get("model") or "").strip()
                     provider = str(entry.get("provider") or "unknown").strip().lower() or "unknown"
         except (OSError, json.JSONDecodeError) as e:
             log.debug("Failed to parse panes.json at %s: %s", panes_json, e)
 
     if provider == "unknown":
+        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        from providers.model_normalizer import is_unknown_model  # noqa: PLC0415
         upper = terminal.upper()
         if upper in ("T0", "T1", "T2", "T3", "T-MANAGER"):
             provider = "claude_code"
         elif "GEMINI" in upper or upper.startswith("GEM-"):
             provider = "gemini_cli"
-            if model == "unknown":
+            if is_unknown_model(model):
                 model = "gemini-pro"
         elif "CODEX" in upper or upper.startswith("CODE-"):
             provider = "codex_cli"
-            if model == "unknown":
+            if is_unknown_model(model):
                 model = "gpt-5.2-codex"
         elif "KIMI" in upper:
             provider = "kimi_cli"

@@ -185,6 +185,7 @@ def _start_heartbeat(
     heartbeat_interval: float,
     *,
     process_cell: "list | None" = None,
+    model: str = "",
 ) -> tuple["threading.Event | None", "threading.Thread | None", "threading.Thread | None"]:
     """Start background lease-renewal + silence-detection threads.
 
@@ -219,6 +220,7 @@ def _start_heartbeat(
         kwargs={
             "interval": 30.0,
             "process_cell": process_cell,
+            "model": model,
         },
         daemon=True,
         name=f"silence-hb-{terminal_id}",
@@ -336,6 +338,7 @@ def deliver_via_subprocess(
     heartbeat_stop, heartbeat_thread, silence_thread = _start_heartbeat(
         terminal_id, dispatch_id, lease_generation, heartbeat_interval,
         process_cell=process_cell,
+        model=model,
     )
 
     # Governance state accumulated by the per-event callback below.
