@@ -61,7 +61,14 @@ def _make_state_dir(tmp_path: Path) -> Path:
     return state_dir
 
 
-def _make_bundle(tmp_path: Path, *, staging_id: str, dispatch_id: str, gate: str):
+def _make_bundle(
+    tmp_path: Path,
+    *,
+    staging_id: str,
+    dispatch_id: str,
+    gate: str,
+    dispatch_paths: list[str] | None = None,
+):
     """A promoted-style staged bundle (spec + instruction inside the bundle dir)."""
     data_dir = tmp_path / "vnx-data"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -77,7 +84,7 @@ def _make_bundle(tmp_path: Path, *, staging_id: str, dispatch_id: str, gate: str
         "role": "backend-developer",
         "target_slot": "T0",
         "gate": gate,
-        "dispatch_paths": [],
+        "dispatch_paths": [{"path": p} for p in (dispatch_paths or [])],
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
@@ -165,7 +172,16 @@ def test_door_registers_obligation_for_declared_gate(tmp_path, monkeypatch):
     assert record["dispatch_id"] == "20260731-oi876-declared-gate"
 
 
-def test_door_without_gate_registers_no_obligation(tmp_path, monkeypatch):
+def test_door_without_declared_gate_derives_obligation(tmp_path, monkeypatch):
+    """Punt 7 (gate-weight-by-variant): a silent spec now derives a gate.
+
+    Before the router derived the gate, a dispatch with no ``gate`` field left
+    no obligation (that was the OLD assertion this test used to make). Now the
+    router fills the silent spec from its governance variant. Empty paths and
+    no task_class land on the safe 'code' middle -> codex_gate, so the door
+    registers the derived gate's obligation. "Silent" no longer means
+    "unreviewed"; it means "derived from the change's risk class".
+    """
     data_dir, spec_file = _make_bundle(
         tmp_path,
         staging_id="20260731-staging-oi876-nogate",
@@ -179,7 +195,46 @@ def test_door_without_gate_registers_no_obligation(tmp_path, monkeypatch):
     with patch("dispatch_cli._execute_claude", return_value=0):
         rc = run_dispatch(spec_file)
     assert rc == 0
-    assert not obligation_path(data_dir / "state", "20260731-oi876-no-gate").exists()
+    path = obligation_path(data_dir / "state", "20260731-oi876-no-gate")
+    assert path.exists(), (
+        "a silent spec now derives a gate from its governance variant and must "
+        "leave a registered obligation, not run unreviewed"
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["gate"] == "codex_gate"
+    assert record["status"] == STATUS_PENDING
+    assert record["dispatch_id"] == "20260731-oi876-no-gate"
+
+
+def test_explicit_gate_wins_over_derived_obligation(tmp_path, monkeypatch):
+    """An explicit gate on the spec wins over the router's derived gate.
+
+    A core path (scripts/lib/dispatch_cli.py) would derive codex_gate, but a
+    spec that declares wiring_gate keeps wiring_gate. The router fills in, it
+    never overrides (worker-provider-free-choice, pin_semantics=default).
+    """
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260731-staging-oi876-explicit",
+        dispatch_id="20260731-oi876-explicit-wins",
+        gate="wiring_gate",
+        dispatch_paths=["scripts/lib/dispatch_cli.py"],
+    )
+    _make_state_dir(tmp_path)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        rc = run_dispatch(spec_file)
+    assert rc == 0
+    path = obligation_path(data_dir / "state", "20260731-oi876-explicit-wins")
+    assert path.exists()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["gate"] == "wiring_gate", (
+        "an explicit gate on the spec must win over the router's derived "
+        "codex_gate for a core path"
+    )
+    assert record["status"] == STATUS_PENDING
 
 
 def test_register_obligation_never_resets_fulfilled(tmp_path):
