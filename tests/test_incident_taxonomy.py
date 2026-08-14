@@ -65,8 +65,8 @@ class TestCompleteness:
         enum_values = {ic.value for ic in IncidentClass}
         assert INCIDENT_CLASSES == enum_values
 
-    def test_seven_incident_classes(self):
-        assert len(IncidentClass) == 7
+    def test_eight_incident_classes(self):
+        assert len(IncidentClass) == 8
 
 
 # ---------------------------------------------------------------------------

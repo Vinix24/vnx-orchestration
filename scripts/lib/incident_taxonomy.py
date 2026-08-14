@@ -93,6 +93,14 @@ class IncidentClass(str, Enum):
     Detected by: generation mismatch error, InvalidTransitionError on lease ops.
     Scope: single terminal lease."""
 
+    # -- External dependency-level incidents --
+    PROVIDER_OUTAGE = "provider_outage"
+    """A provider lane (Claude, Kimi, GLM, DeepSeek, Codex) failed on quota,
+    auth (403/429), or is otherwise unavailable at decision or execution time.
+    Detected by: a lane failure recorded by the smart-router availability layer
+    (record_lane_failure) or a provider-dispatch error.
+    Scope: a provider lane across dispatches until its cooldown budget clears."""
+
     # -- Workflow-level incidents --
     RESUME_FAILED = "resume_failed"
     """A dispatch that was recovered and re-queued failed again on its next
@@ -361,6 +369,32 @@ RECOVERY_CONTRACTS: Dict[IncidentClass, RecoveryContract] = {
             "One reconciliation attempt permitted to resolve stale lease. "
             "Automatic recovery halted until operator confirms resolution. "
             "Dispatch is NOT dead-lettered — ownership is resolved first."
+        ),
+    ),
+
+    IncidentClass.PROVIDER_OUTAGE: RecoveryContract(
+        incident_class=IncidentClass.PROVIDER_OUTAGE,
+        default_severity=Severity.WARNING,
+        retry_budget=RetryBudget(
+            max_retries=3,
+            cooldown_seconds=3600,
+            backoff_factor=2.0,
+            max_cooldown_seconds=14400,
+        ),
+        escalation=EscalationRule(
+            escalate_after_retries=2,
+            escalate_to="T0",
+            halt_auto_recovery=False,
+            dead_letter_eligible=False,
+        ),
+        permitted_actions=(
+            RecoveryAction.ESCALATE_TO_OPERATOR,
+        ),
+        description=(
+            "A provider lane failed on quota, auth (403/429), or availability. "
+            "Cooldown the lane for one hour, doubling on repeat up to four hours. "
+            "Escalate to T0 after the second consecutive failure. "
+            "The lane re-engages automatically once its cooldown budget clears."
         ),
     ),
 

@@ -137,7 +137,7 @@ def test_tier_low_deepseek_cooldown_falls_back_to_kimi(tmp_path, monkeypatch):
     now = 1_000_000.0
     record_lane_failure(
         "deepseek", "429 quota-exhausted", state_dir=state_dir,
-        duration_seconds=3600, now=now,
+        now=now,
     )
     monkeypatch.setattr(
         _shutil, "which", lambda name: "/usr/local/bin/kimi" if name == "kimi" else None,
@@ -160,7 +160,7 @@ def test_tier_low_deepseek_cooldown_kimi_unavailable_falls_back_to_codex(tmp_pat
     state_dir = tmp_path / "state"
     now = 2_000_000.0
     record_lane_failure(
-        "deepseek", "403 auth", state_dir=state_dir, duration_seconds=3600, now=now,
+        "deepseek", "403 auth", state_dir=state_dir, now=now,
     )
     monkeypatch.setattr(_shutil, "which", lambda name: None)
     route = resolve_tier_route(
@@ -179,7 +179,7 @@ def test_tier_low_deepseek_reengages_after_cooldown(tmp_path):
     state_dir = tmp_path / "state"
     now = 3_000_000.0
     record_lane_failure(
-        "deepseek", "429", state_dir=state_dir, duration_seconds=3600, now=now,
+        "deepseek", "429", state_dir=state_dir, now=now,
     )
     route = resolve_tier_route(
         TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"},
@@ -248,7 +248,10 @@ def test_door_route_explicit_provider_overrules_router():
     """An explicit provider+model in the spec must win over the router
     (worker-provider-free-choice, pin_semantics=default)."""
     from dispatch_spec import Provider
-    from providers.smart_router.door_routing import resolve_door_route
+    from providers.smart_router.door_routing import (
+        DECLINE_EXPLICIT_PROVIDER,
+        resolve_door_route,
+    )
 
     result = resolve_door_route(
         spec_provider=Provider.CODEX,
@@ -257,13 +260,17 @@ def test_door_route_explicit_provider_overrules_router():
         instruction_text="add a function",
         env={"DEEPSEEK_API_KEY": "sk-test"},
     )
-    assert result is None, "explicit provider must skip router entirely"
+    assert result.route is None, "explicit provider must skip router entirely"
+    assert result.decline_reason == DECLINE_EXPLICIT_PROVIDER
 
 
 def test_door_route_t0_never_routed():
     """T0 is never routed — t0-opus-only is a floor, not an advisory."""
     from dispatch_spec import Provider
-    from providers.smart_router.door_routing import resolve_door_route
+    from providers.smart_router.door_routing import (
+        DECLINE_T0_NEVER_ROUTES,
+        resolve_door_route,
+    )
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -272,7 +279,8 @@ def test_door_route_t0_never_routed():
         instruction_text="plan a dispatch",
         env={"DEEPSEEK_API_KEY": "sk-test"},
     )
-    assert result is None, "T0 must never be routed"
+    assert result.route is None, "T0 must never be routed"
+    assert result.decline_reason == DECLINE_T0_NEVER_ROUTES
 
 
 def test_door_route_auto_fills_provider():
@@ -290,8 +298,8 @@ def test_door_route_auto_fills_provider():
         loc_estimate=50,
         env={"DEEPSEEK_API_KEY": "sk-test"},
     )
-    assert result is not None
-    provider, model, reason = result
+    assert result.route is not None
+    provider, model, reason = result.route
     assert provider == Provider.DEEPSEEK_HARNESS
     assert model == "deepseek-v4-flash"
     assert "tier=tier-low" in reason
@@ -312,8 +320,8 @@ def test_door_route_auto_fallback_codex():
         loc_estimate=50,
         env={},  # no DEEPSEEK_API_KEY
     )
-    assert result is not None
-    provider, model, reason = result
+    assert result.route is not None
+    provider, model, reason = result.route
     assert provider == Provider.CODEX, "tier-low without DEEPSEEK_API_KEY must fall back to codex"
     assert model == "gpt-5.5"
     assert "codex" in reason.lower()
@@ -322,7 +330,10 @@ def test_door_route_auto_fallback_codex():
 def test_door_route_disabled_via_flag():
     """VNX_SMART_ROUTER_DISABLE=1 suppresses the router entirely."""
     from dispatch_spec import Provider
-    from providers.smart_router.door_routing import resolve_door_route
+    from providers.smart_router.door_routing import (
+        DECLINE_ROUTER_DISABLED,
+        resolve_door_route,
+    )
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -331,7 +342,90 @@ def test_door_route_disabled_via_flag():
         instruction_text="add a function",
         env={"VNX_SMART_ROUTER_DISABLE": "1", "DEEPSEEK_API_KEY": "sk-test"},
     )
-    assert result is None, "router must be suppressible"
+    assert result.route is None, "router must be suppressible"
+    assert result.decline_reason == DECLINE_ROUTER_DISABLED
+
+
+def test_door_route_disabled_via_legacy_flag():
+    """VNX_AUTO_ROUTE=0 (legacy opt-in default-off) also disables, with the
+    same router-disabled reason as the primary kill-switch."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import (
+        DECLINE_ROUTER_DISABLED,
+        resolve_door_route,
+    )
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a function",
+        env={"VNX_AUTO_ROUTE": "0", "DEEPSEEK_API_KEY": "sk-test"},
+    )
+    assert result.route is None
+    assert result.decline_reason == DECLINE_ROUTER_DISABLED
+
+
+def test_door_route_provider_not_mapped_declines_with_reason(monkeypatch):
+    """A tier route whose provider string has no _TIER_PROVIDER_TO_ENUM entry
+    declines with provider-not-mapped and carries the classified tier (OI-1187)."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import (
+        DECLINE_PROVIDER_NOT_MAPPED,
+        resolve_door_route,
+    )
+    from providers.smart_router.tier_routing import TierRoute
+    import providers.smart_router.tier_routing as tier_routing_module
+
+    monkeypatch.setattr(
+        tier_routing_module,
+        "resolve_tier_route",
+        lambda tier, env, state_dir=None, now=None: TierRoute(
+            tier=tier, provider="future-provider", model="future-model", lane="provider",
+        ),
+    )
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a helper function",
+        file_paths=["src/foo.py"],
+        loc_estimate=50,
+        env={},
+    )
+    assert result.route is None
+    assert result.decline_reason == DECLINE_PROVIDER_NOT_MAPPED
+    assert result.tier is not None
+
+
+def test_door_route_classifier_error_declines_with_reason(monkeypatch):
+    """A classifier crash declines with classifier-error (fail-open) — never
+    raises, never a bare None (OI-1187)."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import (
+        DECLINE_CLASSIFIER_ERROR,
+        resolve_door_route,
+    )
+    import providers.smart_router.cost_tier as cost_tier_module
+
+    def boom(task_spec, file_paths, loc_estimate):
+        raise RuntimeError("classifier exploded")
+
+    monkeypatch.setattr(cost_tier_module, "classify_dispatch", boom)
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a helper function",
+        file_paths=["src/foo.py"],
+        loc_estimate=50,
+        env={},
+    )
+    assert result.route is None
+    assert result.decline_reason == DECLINE_CLASSIFIER_ERROR
+    assert result.tier is None
 
 
 def test_door_route_fail_open_on_broken_input():
@@ -339,8 +433,8 @@ def test_door_route_fail_open_on_broken_input():
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import resolve_door_route
 
-    # Empty instruction text and zero LOC still classifies (tier-zero or tier-low),
-    # but the router must not raise.
+    # Empty instruction text and zero LOC still classifies (tier-zero or tier-low);
+    # the router returns a DoorRouteResult either way, never raises.
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
         spec_model=None,
@@ -348,9 +442,7 @@ def test_door_route_fail_open_on_broken_input():
         instruction_text="",
         env={},
     )
-    # Empty instruction with 0 LOC classifies to tier-low; we get a route or
-    # fail-open.
-    assert result is not None or result is None  # never raises
+    assert result is not None
 
 
 def test_door_route_tier_mid_resolves_claude():
@@ -367,8 +459,8 @@ def test_door_route_tier_mid_resolves_claude():
         loc_estimate=200,
         env={},
     )
-    assert result is not None
-    provider, model, reason = result
+    assert result.route is not None
+    provider, model, reason = result.route
     assert provider == Provider.CLAUDE
     assert model == "sonnet-5"
     assert "tier=tier-mid" in reason
@@ -388,8 +480,8 @@ def test_door_route_tier_high_resolves_claude():
         loc_estimate=350,
         env={},
     )
-    assert result is not None
-    provider, model, reason = result
+    assert result.route is not None
+    provider, model, reason = result.route
     assert provider == Provider.CLAUDE
     assert model == "opus-5"
     assert "tier=tier-high" in reason
@@ -399,7 +491,10 @@ def test_door_route_t0_stays_unrouted_when_mid_tier():
     """T0 is never routed even when the classifier would land on tier-mid —
     t0-opus-only is a floor, not an advisory."""
     from dispatch_spec import Provider
-    from providers.smart_router.door_routing import resolve_door_route
+    from providers.smart_router.door_routing import (
+        DECLINE_T0_NEVER_ROUTES,
+        resolve_door_route,
+    )
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -410,4 +505,5 @@ def test_door_route_t0_stays_unrouted_when_mid_tier():
         loc_estimate=200,
         env={},
     )
-    assert result is None, "T0 must never be routed"
+    assert result.route is None, "T0 must never be routed"
+    assert result.decline_reason == DECLINE_T0_NEVER_ROUTES

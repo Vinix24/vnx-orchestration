@@ -5,9 +5,15 @@ provider (provider=AUTO). Resolves the dispatch to a concrete provider + model
 via the cost-tier classifier and tier-routing engine, then hands back a
 Provider enum + model string that compile_plan can consume.
 
-Fail-open by design: a broken router returns None and the door falls through
-to the existing behaviour. T0 is never routed (t0-opus-only is a floor, not
-an advisory). The router is default-on since 2026-08-02.
+Fail-open by design: a broken router returns a declined result with a reason
+and the door falls through to the existing behaviour. T0 is never routed
+(t0-opus-only is a floor, not an advisory). The router is default-on since
+2026-08-02.
+
+Every decline path carries an explicit reason (OI-1187) so a no-route is
+distinguishable in the dry-run output and receipt. Before this, a T0 skip, an
+explicit provider, the kill-switch, the enum gap and a classifier crash all
+returned a bare None and were indistinguishable in the audit trail.
 
 Constraints:
 - No imports from dispatch_cli or dispatch_plan (avoid circular deps).
@@ -19,11 +25,21 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 
 from dispatch_spec import Provider, ValidatedSpec  # noqa: PLC0415 — sibling package, no cycle
 
 logger = logging.getLogger(__name__)
+
+
+# Decline reasons — one per distinct no-route cause (OI-1187). Each is a stable
+# string surfaced in the dry-run output and receipt, so a decline is diagnosable
+# instead of an anonymous None.
+DECLINE_T0_NEVER_ROUTES = "t0-never-routes"
+DECLINE_EXPLICIT_PROVIDER = "explicit-provider"
+DECLINE_ROUTER_DISABLED = "router-disabled"
+DECLINE_PROVIDER_NOT_MAPPED = "provider-not-mapped"
+DECLINE_CLASSIFIER_ERROR = "classifier-error"
 
 
 # TierRoute.provider string -> Provider enum.
@@ -38,6 +54,22 @@ _TIER_PROVIDER_TO_ENUM: dict[str, Provider] = {
 }
 
 
+@dataclasses.dataclass(frozen=True)
+class DoorRouteResult:
+    """Outcome of resolve_door_route.
+
+    Exactly one of ``route`` / ``decline_reason`` is populated. ``tier`` carries
+    the classifier's tier whenever classification ran, so the door can make a
+    tier-aware fallback when a route cannot be applied after a successful
+    classification (OI-1187): a tier-high decline must never silently land on
+    the sonnet default.
+    """
+
+    route: Optional[Tuple[Provider, str, str]] = None
+    decline_reason: Optional[str] = None
+    tier: Optional[str] = None
+
+
 def resolve_door_route(
     spec_provider: Provider,
     spec_model: Optional[str],
@@ -46,12 +78,14 @@ def resolve_door_route(
     file_paths: Optional[list[str]] = None,
     loc_estimate: int = 0,
     env: Optional[dict] = None,
-) -> Optional[Tuple[Provider, str, str]]:
+) -> DoorRouteResult:
     """Resolve a concrete provider + model for a dispatch without an explicit one.
 
-    Returns (provider, model, route_reason) when the router has a recommendation,
-    or None when routing should be skipped (T0, explicit provider, router
-    disabled, or router error).
+    Returns a DoorRouteResult: either ``route=(provider, model, route_reason)``
+    when the router has a recommendation, or a ``decline_reason`` naming why
+    routing was skipped (T0, explicit provider, router disabled, an unmapped
+    provider string, or a classifier error). ``tier`` is populated whenever the
+    classifier ran so the door can fall back tier-aware instead of blindly.
 
     Args:
         spec_provider: The spec's provider enum value (check Provider.AUTO before calling).
@@ -64,23 +98,23 @@ def resolve_door_route(
     """
     # Gate 1: T0 never routes. t0-opus-only is a floor, not an advisory.
     if target_slot == "T0":
-        return None
+        return DoorRouteResult(decline_reason=DECLINE_T0_NEVER_ROUTES)
 
     # Gate 2: Only fill in when the spec is silent. An explicit provider wins
     # undiminished (worker-provider-free-choice, pin_semantics=default).
     if spec_provider != Provider.AUTO:
-        return None
+        return DoorRouteResult(decline_reason=DECLINE_EXPLICIT_PROVIDER)
 
     _env = env if env is not None else dict(os.environ)
 
     # Gate 3: VNX_SMART_ROUTER_DISABLE=1 disables the router entirely.
     if _env.get("VNX_SMART_ROUTER_DISABLE", "").strip().lower() in ("1", "true", "yes", "on"):
-        return None
+        return DoorRouteResult(decline_reason=DECLINE_ROUTER_DISABLED)
 
     # Backward compat: VNX_AUTO_ROUTE=0/false/off also disables.
     auto_route = _env.get("VNX_AUTO_ROUTE", "").strip().lower()
     if auto_route in ("0", "false", "no", "off"):
-        return None
+        return DoorRouteResult(decline_reason=DECLINE_ROUTER_DISABLED)
 
     try:
         from .cost_tier import classify_dispatch  # noqa: PLC0415
@@ -95,20 +129,27 @@ def resolve_door_route(
             # A decline is still possible (an unmapped provider string), but it
             # must be visible, not silent: the door falls through to its own
             # lane resolution, and the reason is logged so a drift in the tier
-            # map is diagnosable.
+            # map is diagnosable. The classified tier is carried so the door can
+            # fall back at the same quality class instead of one lower.
             logger.warning(
                 "smart-router door routing: provider %r for tier=%s is not in "
                 "_TIER_PROVIDER_TO_ENUM; declining route (fail-open to default lane)",
                 route.provider,
                 tier,
             )
-            return None
+            return DoorRouteResult(
+                decline_reason=DECLINE_PROVIDER_NOT_MAPPED,
+                tier=tier,
+            )
 
         route_reason = f"smart-router:tier={tier},provider={route.provider},model={route.model},lane={route.lane}"
         if route.reason:
             route_reason += f";{route.reason}"
-        return provider_enum, route.model, route_reason
-    except Exception:
+        return DoorRouteResult(
+            route=(provider_enum, route.model, route_reason),
+            tier=tier,
+        )
+    except Exception as exc:
         # Fail-open: a broken classifier or resolver must never block a dispatch.
         # The door falls through to its existing behaviour.
         # A failing router that is silent is indistinguishable from a correctly
@@ -117,9 +158,10 @@ def resolve_door_route(
         logger.warning(
             "smart-router door routing: classifier/resolver failed, dispatch "
             "falls through to default lane (fail-open). Error: %s",
+            exc,
             exc_info=True,
         )
-        return None
+        return DoorRouteResult(decline_reason=DECLINE_CLASSIFIER_ERROR)
 
 
 def apply_door_route(
@@ -131,11 +173,12 @@ def apply_door_route(
     Single call site for dispatch_cli.run_dispatch(). Returns (vspec, route_reason)
     where vspec is either the original (router skipped/disabled/failed) or a new
     ValidatedSpec with the resolved provider + model. route_reason is a
-    human-readable string for the dry-run output and receipt, or None when the
-    router did not apply.
+    human-readable string for the dry-run output and receipt: the router's
+    recommendation when routed, or the decline reason (prefixed "smart-router:")
+    when the router skipped — never a bare None for a decline (OI-1187).
 
     Fail-open: never raises. A broken router returns the original vspec unchanged
-    with route_reason=None.
+    with a decline reason.
     """
     spec = vspec.spec
     if spec.provider != Provider.AUTO:
@@ -154,11 +197,12 @@ def apply_door_route(
         file_paths=file_paths,
         env=_env,
     )
-    if result is None:
-        return vspec, None
+    if result.route is None:
+        if result.decline_reason is None:
+            return vspec, None
+        return vspec, f"smart-router:no-route,reason={result.decline_reason}"
 
-    new_provider, new_model, route_reason = result
+    new_provider, new_model, route_reason = result.route
     new_spec = dataclasses.replace(spec, provider=new_provider, model=new_model)
     new_vspec = dataclasses.replace(vspec, spec=new_spec)
     return new_vspec, route_reason
-

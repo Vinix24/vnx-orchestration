@@ -3,7 +3,8 @@
 Covers:
 - decision-time gates: env vars, CLI presence, disabled lanes, unknown lanes
 - cooldown lifecycle: record → active → re-engage after the period
-- env-configurable cooldown duration with invalid-value fallback
+- cooldown duration sourced from the incident taxonomy (PROVIDER_OUTAGE),
+  no own duration/backoff/override math (OI-1188)
 - fail-open: corrupt cooldown state reads as not-in-cooldown; best-effort
   record_lane_failure never raises
 """
@@ -87,7 +88,7 @@ class TestCooldownLifecycle:
         now = 1_000.0
         record_lane_failure(
             "deepseek", "429 quota-exhausted", state_dir=state_dir,
-            duration_seconds=3600, now=now,
+            now=now,
         )
         assert lane_cooldown_remaining("deepseek", state_dir=state_dir, now=now) == pytest.approx(3600.0)
         assert lane_cooldown_remaining("deepseek", state_dir=state_dir, now=now + 3600) == 0.0
@@ -95,7 +96,7 @@ class TestCooldownLifecycle:
     def test_lane_available_respects_cooldown(self, state_dir):
         now = 2_000.0
         record_lane_failure(
-            "deepseek", "403 auth", state_dir=state_dir, duration_seconds=3600, now=now,
+            "deepseek", "403 auth", state_dir=state_dir, now=now,
         )
         ok, reason = lane_available(
             "deepseek", env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
@@ -114,13 +115,13 @@ class TestCooldownLifecycle:
 
         now = 3_000.0
         record_lane_failure(
-            "kimi", "quota", state_dir=state_dir, duration_seconds=600, now=now,
+            "kimi", "quota", state_dir=state_dir, now=now,
         )
         cooldown_file = state_dir / "router_lane_cooldown" / "kimi.json"
         assert cooldown_file.is_file()
         data = json.loads(cooldown_file.read_text(encoding="utf-8"))
         assert data["lane"] == "kimi"
-        assert data["until"] == pytest.approx(now + 600)
+        assert data["until"] == pytest.approx(now + 3600)
 
     def test_no_cooldown_file_means_active(self, state_dir):
         assert lane_cooldown_remaining("deepseek", state_dir=state_dir, now=0.0) == 0.0
@@ -132,17 +133,38 @@ class TestCooldownLifecycle:
 
 class TestCooldownSeconds:
 
+    def test_delegates_to_incident_taxonomy(self):
+        """cooldown_seconds() must lean on the canonical incident taxonomy
+        (PROVIDER_OUTAGE contract), not carry its own duration (OI-1188)."""
+        from incident_taxonomy import IncidentClass, get_cooldown_seconds
+
+        assert cooldown_seconds() == get_cooldown_seconds(IncidentClass.PROVIDER_OUTAGE, 0)
+
     def test_default_is_one_hour(self):
-        assert cooldown_seconds({}) == 3600
+        """The PROVIDER_OUTAGE base cooldown is one hour (3600s)."""
+        assert cooldown_seconds() == 3600
 
-    def test_env_override(self):
-        assert cooldown_seconds({"VNX_ROUTER_COOLDOWN_SECONDS": "120"}) == 120
+    def test_no_own_time_arithmetic(self, monkeypatch):
+        """cooldown_seconds() returns get_cooldown_seconds verbatim — it does no
+        duration, env-override, or backoff math of its own (OI-1188)."""
+        import incident_taxonomy
 
-    def test_invalid_value_falls_back(self):
-        assert cooldown_seconds({"VNX_ROUTER_COOLDOWN_SECONDS": "garbage"}) == 3600
+        captured = {}
 
-    def test_negative_value_falls_back(self):
-        assert cooldown_seconds({"VNX_ROUTER_COOLDOWN_SECONDS": "-5"}) == 3600
+        def fake_get_cooldown_seconds(incident_class, retry_count):
+            captured["incident_class"] = incident_class
+            captured["retry_count"] = retry_count
+            return 4242
+
+        monkeypatch.setattr(
+            incident_taxonomy, "get_cooldown_seconds", fake_get_cooldown_seconds,
+        )
+        assert cooldown_seconds() == 4242
+
+        from incident_taxonomy import IncidentClass
+
+        assert captured["incident_class"] == IncidentClass.PROVIDER_OUTAGE
+        assert captured["retry_count"] == 0
 
 
 # ---------------------------------------------------------------------------

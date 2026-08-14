@@ -9,11 +9,18 @@ with an explicit availability layer that runs at decision time and is cheap:
   - required env vars present   (deepseek: DEEPSEEK_API_KEY — existing behaviour)
   - required CLI on PATH        (kimi: kimi CLI — kimi-via-cli-only)
   - not in cooldown             (a prior quota/auth failure marks the lane
-                                 inactive for an env-configurable period)
+                                 inactive for the provider-outage cooldown,
+                                 sourced from the incident taxonomy)
 
 Cooldown state lives in the central state dir, resolved via the existing
 ``vnx_paths.resolve_state_dir`` helper (never a hardcoded ``.vnx-data/`` path)
 and is written atomically via ``atomic_io.atomic_write_json``.
+
+The cooldown duration is NOT owned here (OI-1188): ``cooldown_seconds()``
+delegates to ``incident_taxonomy.get_cooldown_seconds`` for the
+``PROVIDER_OUTAGE`` incident class, so the router lane cooldown and the
+supervisor retry budget share one clock and one retry contract. There is no
+second duration constant, env override, or backoff arithmetic in this module.
 
 Fail-open by design: a broken availability layer never blocks a dispatch. Any
 unexpected error is logged loudly and the lane is treated as available, so the
@@ -37,9 +44,6 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_COOLDOWN_SECONDS = 3600  # 60 minutes
-COOLDOWN_ENV = "VNX_ROUTER_COOLDOWN_SECONDS"
 
 # Lane names this module understands. Values are provider strings the
 # tier-routing engine emits; the regex keeps the per-lane state filename safe.
@@ -103,31 +107,17 @@ def _now() -> float:
     return time.time()
 
 
-def cooldown_seconds(env: Optional[dict] = None) -> int:
-    """Return the configured lane-cooldown duration in seconds.
+def cooldown_seconds() -> int:
+    """Return the provider-outage lane-cooldown duration in seconds.
 
-    Default 60 minutes (3600s), overridable via VNX_ROUTER_COOLDOWN_SECONDS.
-    Invalid or negative values fall back to the default with a loud log.
+    Single cooldown clock (OI-1188): delegates to the canonical incident
+    taxonomy's ``get_cooldown_seconds`` for ``IncidentClass.PROVIDER_OUTAGE`` at
+    retry 0. This module performs no duration, env-override, or backoff
+    arithmetic of its own — the recovery contract is the one source of truth.
     """
-    _env = env if env is not None else dict(os.environ)
-    raw = str(_env.get(COOLDOWN_ENV, "")).strip()
-    if not raw:
-        return DEFAULT_COOLDOWN_SECONDS
-    try:
-        value = int(float(raw))
-    except (TypeError, ValueError):
-        logger.warning(
-            "smart-router: invalid %s=%r; using default %ds",
-            COOLDOWN_ENV, raw, DEFAULT_COOLDOWN_SECONDS,
-        )
-        return DEFAULT_COOLDOWN_SECONDS
-    if value < 0:
-        logger.warning(
-            "smart-router: %s=%d is negative; using default %ds",
-            COOLDOWN_ENV, value, DEFAULT_COOLDOWN_SECONDS,
-        )
-        return DEFAULT_COOLDOWN_SECONDS
-    return value
+    from incident_taxonomy import IncidentClass, get_cooldown_seconds  # noqa: PLC0415
+
+    return get_cooldown_seconds(IncidentClass.PROVIDER_OUTAGE, 0)
 
 
 def record_lane_failure(
@@ -135,10 +125,12 @@ def record_lane_failure(
     reason: str,
     *,
     state_dir: Optional[Path] = None,
-    duration_seconds: Optional[int] = None,
     now: Optional[float] = None,
 ) -> None:
     """Mark a lane as in cooldown after a quota/auth failure.
+
+    The cooldown duration comes from the single cooldown clock
+    (``cooldown_seconds`` → incident taxonomy PROVIDER_OUTAGE contract).
 
     Best-effort and fail-open: a failure to persist cooldown state is logged and
     swallowed — cooldown bookkeeping must never break a dispatch.
@@ -151,7 +143,7 @@ def record_lane_failure(
         from vnx_paths import refuse_real_central_store_write_under_pytest  # noqa: PLC0415
 
         refuse_real_central_store_write_under_pytest(sd)
-        duration = duration_seconds if duration_seconds is not None else cooldown_seconds()
+        duration = cooldown_seconds()
         until = (now if now is not None else _now()) + duration
         from atomic_io import atomic_write_json  # noqa: PLC0415
 
@@ -242,8 +234,6 @@ def lane_available(
 
 
 __all__ = [
-    "DEFAULT_COOLDOWN_SECONDS",
-    "COOLDOWN_ENV",
     "LOCAL_GEMMA_DISABLED_REASON",
     "LaneCheck",
     "cooldown_seconds",
