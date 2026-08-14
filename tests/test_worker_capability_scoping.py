@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """Tests for worker capability scoping.
 
-Per operator decision (2026-07-05): tmux-spawn workers run in an isolated
-per-dispatch worktree, so the scoped allow-list only stalls autonomous builds
-on prompts for un-allow-listed ops. The default is now the blanket
-``--dangerously-skip-permissions``; the scoped posture (WITHOUT
-``--dangerously-skip-permissions`` and WITHOUT ambient MCP, while remaining a
-fully functional code worker: Read/Write/Edit/Bash/Glob/Grep + git) is opt-in
-via ``VNX_WORKER_SCOPED=1``.
+Per operator decision (2026-08-14, mcp-scoped-default): scoped worker-mode is
+the fabric default, revising the 03-08 blanket-skip ratification. The old
+default — blanket ``--dangerously-skip-permissions`` — rested on the worktree
+argument, which weighed one axis and missed the MCP axis: worktree isolation
+bounds the filesystem, not the network, and an MCP server talks to a service
+outside the checkout. A detached worker now spawns scoped by default
+(``--permission-mode acceptEdits`` + empty ambient MCP + role allow-list, while
+remaining a fully functional code worker: Read/Write/Edit/Bash/Glob/Grep +
+git). Blanket skip is the explicit opt-out (``VNX_WORKER_BLANKET_SKIP=1``, or
+falsy ``VNX_WORKER_SCOPED``).
 
 Covers:
   1. generate_claude_settings(default_profile) yields the code-worker allow-list
   2. build_claude_scope_args() — empty MCP, acceptEdits, allow/deny lists, no skip flag
-  3. SubprocessAdapter.deliver() spawn argv: blanket skip-permissions by default,
-     scoped (empty MCP, no skip-permissions) opt-in via VNX_WORKER_SCOPED=1
+  3. SubprocessAdapter.deliver() spawn argv: scoped by default, blanket
+     skip-permissions opt-in via VNX_WORKER_BLANKET_SKIP=1
   4. resolve_worker_profile() fallback for unknown / empty roles
-  5. VNX_WORKER_SCOPED=1 feature flag opts into the scoped posture
-  6. tmux _default_launch_command() detached spawn is blanket by default (skip
-     flag present); VNX_WORKER_SCOPED=1 opts into the scoped posture
+  5. VNX_WORKER_BLANKET_SKIP=1 / falsy VNX_WORKER_SCOPED opts into the blanket posture
+  6. tmux _default_launch_command() detached spawn is scoped by default (no skip
+     flag, empty MCP); VNX_WORKER_BLANKET_SKIP=1 opts into the blanket posture
   7. negative-path: empty profile yields a still-valid scope argv
 """
 
@@ -176,7 +179,7 @@ class TestResolveWorkerProfile:
 # ---------------------------------------------------------------------------
 
 class TestDeliverSpawnArgv:
-    def test_argv_has_skip_permissions_by_default(self):
+    def test_argv_has_scoped_posture_by_default(self):
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
@@ -185,8 +188,8 @@ class TestDeliverSpawnArgv:
 
         assert cmd[0] == "claude"
         assert "-p" in cmd
-        assert SKIP_FLAG in cmd, "blanket skip-permissions is the default worker posture"
-        assert "--strict-mcp-config" not in cmd
+        assert SKIP_FLAG not in cmd, "scoped is the default worker posture since 14-08"
+        assert "--strict-mcp-config" in cmd
 
     def test_argv_keeps_functional_code_worker_tools_when_scoped(self, monkeypatch):
         monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
@@ -237,12 +240,12 @@ class TestDeliverSpawnArgv:
 # ---------------------------------------------------------------------------
 
 class TestTmuxDetachedSpawn:
-    def test_detached_default_is_blanket(self):
+    def test_detached_default_is_scoped(self):
         cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG in cmd
-        assert "--strict-mcp-config" not in cmd
-        assert "--permission-mode acceptEdits" not in cmd
-        assert '{"mcpServers":{}}' not in cmd
+        assert SKIP_FLAG not in cmd
+        assert "--strict-mcp-config" in cmd
+        assert "--permission-mode acceptEdits" in cmd
+        assert '{"mcpServers":{}}' in cmd
 
     def test_attached_run_unchanged(self):
         cmd = _default_launch_command("sonnet", skip_permissions=False)
@@ -262,19 +265,34 @@ class TestTmuxDetachedSpawn:
 # ---------------------------------------------------------------------------
 
 class TestWorkerScopedEnabled:
-    def test_default_off(self, monkeypatch):
+    def test_default_on(self, monkeypatch):
         monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
-        assert worker_scoped_enabled() is False
+        monkeypatch.delenv("VNX_WORKER_BLANKET_SKIP", raising=False)
+        assert worker_scoped_enabled() is True
 
     @pytest.mark.parametrize("val", ["0", "false", "no", "off", "OFF", "False"])
     def test_falsey_values_disable(self, monkeypatch, val):
+        monkeypatch.delenv("VNX_WORKER_BLANKET_SKIP", raising=False)
         monkeypatch.setenv("VNX_WORKER_SCOPED", val)
         assert worker_scoped_enabled() is False
 
     @pytest.mark.parametrize("val", ["1", "true", "yes", "on"])
     def test_truthy_values_enable(self, monkeypatch, val):
+        monkeypatch.delenv("VNX_WORKER_BLANKET_SKIP", raising=False)
         monkeypatch.setenv("VNX_WORKER_SCOPED", val)
         assert worker_scoped_enabled() is True
+
+    @pytest.mark.parametrize("val", ["1", "true", "yes", "on"])
+    def test_blanket_skip_opt_out_disables(self, monkeypatch, val):
+        monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+        monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", val)
+        assert worker_scoped_enabled() is False
+
+    def test_blanket_skip_wins_over_scoped_default(self, monkeypatch):
+        # The explicit opt-out beats the now-default scoped posture.
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
+        monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
+        assert worker_scoped_enabled() is False
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +300,16 @@ class TestWorkerScopedEnabled:
 # ---------------------------------------------------------------------------
 
 class TestTmuxDetachedNoStall:
-    """Detached worker gets the blanket skip flag by default so it can proceed
-    without TTY prompts; VNX_WORKER_SCOPED=1 opts into --allowedTools instead."""
+    """Detached worker gets the scoped allow-list by default (no TTY to answer
+    prompts); VNX_WORKER_BLANKET_SKIP=1 opts into --dangerously-skip-permissions."""
 
-    def test_detached_spawn_has_skip_permissions_by_default(self):
+    def test_detached_spawn_is_scoped_by_default(self):
+        cmd = _default_launch_command("sonnet", skip_permissions=True)
+        assert SKIP_FLAG not in cmd
+        assert "--allowedTools" in cmd
+
+    def test_detached_spawn_blanket_skip_has_no_allowed_tools(self, monkeypatch):
+        monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
         cmd = _default_launch_command("sonnet", skip_permissions=True)
         assert SKIP_FLAG in cmd
         assert "--allowedTools" not in cmd

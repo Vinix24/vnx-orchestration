@@ -246,17 +246,31 @@ def resolve_role_mcp_config(
 
 
 def worker_scoped_enabled() -> bool:
-    """Whether headless workers spawn with scoped capabilities (default OFF).
+    """Whether headless workers spawn with scoped capabilities (default ON since 14-08).
 
-    Tmux-spawn workers run in an isolated per-dispatch worktree, so the scoped
-    allow-list only stalls autonomous builds on prompts for un-allow-listed ops
-    (skills/ writes, mkdir, rm) without adding real blast-radius protection.
-    Returns False (blanket ``--dangerously-skip-permissions``) unless
-    ``VNX_WORKER_SCOPED`` is explicitly set to a truthy value (``1`` / ``true`` /
-    ``yes`` / ``on``), which opts back into the scoped posture (role allow-list +
-    empty ambient MCP).
+    The default flipped 2026-08-14 (operator directive, mcp-scoped-default): the
+    old blanket ``--dangerously-skip-permissions`` default rested on the worktree
+    argument, which weighed one axis and missed the MCP axis — worktree isolation
+    bounds the FILESYSTEM, not the NETWORK, and an MCP server talks to a service
+    outside the checkout. Measured 2026-08-14 from a real dispatch worktree
+    without opt-in: six ambient MCP servers were still connected (incl. Gmail and
+    Google Drive).
+
+    Opt-outs (scoped is the default):
+      - ``VNX_WORKER_BLANKET_SKIP=1`` — explicit per-dispatch opt back into the
+        blanket ``--dangerously-skip-permissions`` posture.
+      - ``VNX_WORKER_SCOPED`` set to a falsy value (``0`` / ``false`` / ``no`` /
+        ``off``) — the legacy switch, kept for backward compat, also disables
+        scoping.
     """
-    return os.environ.get("VNX_WORKER_SCOPED", "0").strip().lower() in (
+    if os.environ.get("VNX_WORKER_BLANKET_SKIP", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+    return os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -265,13 +279,15 @@ def worker_scoped_enabled() -> bool:
 
 
 def worker_permission_enforcement_enabled() -> bool:
-    """Whether role-scoped worker permission enforcement is active (default OFF).
+    """Whether ADR-012 worker-permission ENFORCEMENT is active (default OFF).
 
-    This is the ADR-012 enforcement flag: when ON, detached workers launch with
-    role-derived ``--allowedTools`` / ``--disallowedTools`` /
-    ``--permission-mode`` instead of the blanket
-    ``--dangerously-skip-permissions``. Default OFF preserves the historical
-    skip-permissions behavior exactly.
+    Distinct from the scoped-spawn default owned by :func:`worker_scoped_enabled`
+    (default ON since 14-08): that flag decides the spawn-time posture (scoped
+    allow-list vs blanket skip), while this flag gates the ADR-012 hook-layer
+    enforcement — role-derived ``--allowedTools`` / ``--disallowedTools`` /
+    ``--permission-mode`` through the PreToolUse hook, plus the ``enforced``
+    receipt marker. It stays default OFF independent of the scoped-spawn flip,
+    so the two can be toggled separately.
 
     Truthy values: ``1``, ``true``, ``yes``, ``on``.
     """
@@ -366,7 +382,7 @@ def build_claude_scope_args(
 
       - ``--permission-mode <mode>`` — ``acceptEdits`` auto-approves edits so a
         no-TTY worker proceeds without prompts, while Bash/MCP stay gated.
-      - ``--strict-mcp-config --mcp-config <config>`` — ignore ambient MCP
+      - ``--mcp-config <config> --strict-mcp-config`` — ignore ambient MCP
         sources beyond the role's ``mcp_servers`` allowlist:
           * ``profile.mcp_servers`` empty (default) — ``{"mcpServers":{}}``,
             the worker reaches ZERO MCP servers.
@@ -380,7 +396,7 @@ def build_claude_scope_args(
       - ``--allowedTools`` / ``--disallowedTools`` — the profile's tool allow/deny
         lists (the previously-dead :func:`generate_claude_settings`, now live).
 
-    ``requires_mcp``: when True, the ``--strict-mcp-config --mcp-config`` pair
+    ``requires_mcp``: when True, the ``--mcp-config ... --strict-mcp-config`` pair
     is omitted so the worker's normal ambient MCP config is used instead.
     """
     settings = generate_claude_settings(profile)
@@ -394,7 +410,12 @@ def build_claude_scope_args(
             )
         else:
             mcp_config = EMPTY_MCP_CONFIG
-        args += ["--strict-mcp-config", "--mcp-config", mcp_config]
+        # --mcp-config is VARIADIC (<configs...>) in the claude CLI: it greedily
+        # consumes following non-flag tokens until the next option flag, so the
+        # JSON value must come FIRST and the boolean --strict-mcp-config LAST to
+        # deterministically terminate the variadic (same order as
+        # provider_spawns/deepseek_harness_spawn.build_harness_cli_args).
+        args += ["--mcp-config", mcp_config, "--strict-mcp-config"]
     if allowed:
         args += ["--allowedTools", ",".join(allowed)]
     disallowed = list(profile.denied_tools)

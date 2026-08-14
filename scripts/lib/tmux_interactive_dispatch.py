@@ -51,20 +51,20 @@ WORK_START_AWAITING_PERMISSION = "awaiting_permission"
 WORK_START_NO_PROGRESS = "no_progress"
 
 # Capability scoping (interim, per WORKER-CAPABILITY-SCOPING-DESIGN.md §4.4/§5):
-# detached ephemeral spawns run under the blanket --dangerously-skip-permissions
-# by default (tmux-spawn workers run in an isolated per-dispatch worktree, so
-# the scoped allow-list only stalls autonomous builds on prompts for
-# un-allow-listed ops). Scoped (empty ambient MCP + acceptEdits + role
-# allow-list) is opt-in via VNX_ENFORCE_WORKER_PERMISSIONS=1 (ADR-012) or the
-# legacy VNX_WORKER_SCOPED=1.
+# detached ephemeral spawns run SCOPED by default (empty ambient MCP +
+# acceptEdits + role allow-list) since the 14-08 flip (mcp-scoped-default). The
+# old blanket --dangerously-skip-permissions default rested on the worktree
+# argument — worktree isolation bounds the FILESYSTEM, not the NETWORK, and an
+# MCP server talks to a service outside the checkout. Blanket skip is now the
+# explicit opt-out (VNX_WORKER_BLANKET_SKIP=1, or VNX_WORKER_SCOPED=0/false/no/off).
 #
 # OI-1099: the decision predicates worker_scoped_enabled /
 # worker_permission_enforcement_enabled resolve in ONE place — the canonical
 # worker_permissions module. They are NOT re-defined here as a second default
-# that could silently diverge from the real predicate on an import fault. If the
-# sibling import is unavailable the names bind to None and the call site raises
-# (hard-fail) rather than silently picking a posture. Default direction is
-# unchanged: blanket-skip (both predicates default False) unless opted in.
+# that could silently diverge from the real predicate on an import fault. On an
+# import fault the inline fallback below still fails CLOSED into the scoped
+# posture (never blanket-skip), so a missing sibling import can never silently
+# re-open the wider blast radius.
 try:
     from worker_permissions import (  # noqa: E402
         EMPTY_MCP_CONFIG,
@@ -78,13 +78,16 @@ try:
 except Exception:  # pragma: no cover - sibling import is available in-tree
     EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
     _WP_AVAILABLE = False
-    # Predicates are NOT re-defined here (OI-1099): a second inline copy would let
-    # the permission posture silently diverge from worker_permissions on an import
-    # fault. Binding to None makes any call site raise instead of silently choosing
-    # blanket-skip or scoped. The default direction still comes from the real
-    # predicates when the import succeeds (both default False -> blanket-skip).
-    worker_scoped_enabled = None  # type: ignore[assignment]
-    worker_permission_enforcement_enabled = None  # type: ignore[assignment]
+    # Import-fault fallback (OI-1099 + 14-08 flip): fail CLOSED into the scoped
+    # posture — never silently re-open the wider blanket-skip blast radius. These
+    # inline predicates return the new defaults (scoped ON, ADR-012 enforcement
+    # OFF) so the normal code path below still assembles a scoped spawn; only the
+    # canonical worker_permissions module owns the real, env-driven decision.
+    def worker_scoped_enabled():  # type: ignore[misc]
+        return True
+
+    def worker_permission_enforcement_enabled():  # type: ignore[misc]
+        return False
 
     def classify_permission_posture(argv, role=None):  # type: ignore[misc]
         # OI-864 fallback: classify from the actual argv tokens, never by
@@ -107,7 +110,9 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
     def _wp_build_claude_scope_args(profile, *, permission_mode="acceptEdits", requires_mcp=False, working_tree_only=False):  # type: ignore[misc]
         args = ["--permission-mode", permission_mode]
         if not requires_mcp:
-            args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
+            # --mcp-config is variadic; the boolean --strict-mcp-config must
+            # terminate it (same order as build_claude_scope_args).
+            args += ["--mcp-config", EMPTY_MCP_CONFIG, "--strict-mcp-config"]
         # Kept in parity with worker_permissions.DEFAULT_CODE_WORKER_TOOLS (OI-104):
         # explicit Bash(<cmd>:*) build-toolchain coverage alongside bare "Bash".
         args += [
@@ -305,8 +310,8 @@ def _default_launch_command(
     is included as ``--allowedTools`` so detached headless workers proceed without
     stalling on tool-use prompts (``acceptEdits`` alone only auto-approves file edits).
 
-    ``requires_mcp``: when True, ``--strict-mcp-config --mcp-config {}`` is omitted
-    so the worker keeps its normal ambient MCP config.
+    ``requires_mcp``: when True, the ``--mcp-config {} --strict-mcp-config`` pair
+    is omitted so the worker keeps its normal ambient MCP config.
 
     ``session_uuid``: when provided, ``--session-id <uuid>`` is injected after
     ``--model`` so the worker's transcript is deterministically joinable. The uuid
@@ -340,12 +345,11 @@ def _default_launch_command(
         extra_flags = " ".join(safe_tokens)
     flags = ""
     if skip_permissions:
-        # Detached/autonomous run (no TTY to answer prompts). Default: the
-        # blanket skip-permissions flag — the spawn runs in an isolated
-        # per-dispatch worktree, so scoping only stalls autonomous builds on
-        # prompts for un-allow-listed ops. VNX_ENFORCE_WORKER_PERMISSIONS=1
-        # (or legacy VNX_WORKER_SCOPED=1) opts into the scoped posture
-        # (role allow-list + optional empty-MCP) instead.
+        # Detached/autonomous run (no TTY to answer prompts). Default: the scoped
+        # posture (role allow-list + empty ambient MCP) since the 14-08 flip —
+        # worktree isolation bounds the filesystem, not the network, and an MCP
+        # server talks to a service outside the checkout. The else branch is the
+        # explicit opt-out (VNX_WORKER_BLANKET_SKIP=1 or VNX_WORKER_SCOPED=0).
         if worker_scoped_enabled() or worker_permission_enforcement_enabled():
             profile = _wp_resolve_worker_profile(role)
             scope_args = _wp_build_claude_scope_args(
@@ -2483,11 +2487,11 @@ class TmuxInteractiveDispatch:
 
         # D2.2 scoping precondition (fail-closed): a working-tree-only dispatch's
         # commit/push deny only binds in the scoped detached spawn (the path where
-        # _wp_build_claude_scope_args is invoked). Since the blanket
-        # --dangerously-skip-permissions is now the tmux-spawn default, reject
-        # every non-scoped path — attached, blanket skip-permissions, or
-        # VNX_WORKER_SCOPED unset/falsey — so an unscoped working-tree-only
-        # worker can never silently reach git commit/push.
+        # _wp_build_claude_scope_args is invoked). Scoped is the default since the
+        # 14-08 flip, so only an EXPLICIT opt-out (VNX_WORKER_BLANKET_SKIP=1 or
+        # VNX_WORKER_SCOPED=0/false/no/off) — or an attached session — leaves the
+        # worker unscoped; reject those so an unscoped working-tree-only worker can
+        # never silently reach git commit/push.
         if working_tree_only and not (
             skip_permissions
             and (worker_scoped_enabled() or worker_permission_enforcement_enabled())
@@ -2497,10 +2501,9 @@ class TmuxInteractiveDispatch:
                 dispatch_id=dispatch_id,
                 failure_reason=(
                     "working_tree_only requires a scoped detached spawn "
-                    "(skip_permissions + explicit VNX_ENFORCE_WORKER_PERMISSIONS=1 "
-                    "or VNX_WORKER_SCOPED=1; scoped is opt-in now that blanket "
-                    "skip-permissions is the default); refusing unscoped dispatch "
-                    "where the commit/push deny would not bind"
+                    "(scoped is the default; refusing the explicit opt-out path — "
+                    "VNX_WORKER_BLANKET_SKIP=1 or VNX_WORKER_SCOPED=0/false/no/off "
+                    "— where the commit/push deny would not bind)"
                 ),
             )
 
