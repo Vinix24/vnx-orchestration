@@ -23,14 +23,16 @@ keeps binding unchanged.
 
 from __future__ import annotations
 
+import fcntl
+import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
-from envelope_types import EnvelopeGovernError, EnvelopeSpec, _AdapterResult
+from envelope_types import EnvelopeSpec, _AdapterResult
 from envelope_prepare import _verify_role_application
 from envelope_govern_support import (
     _archive_dispatch_events,
@@ -49,6 +51,89 @@ logger = logging.getLogger(__name__)
 # records) and the observable-only L2 phase (#1415, db7a6046) is superseded.
 _CONTRACT_ENFORCE_MARKER = "VNX_CONTRACT_ENFORCE_VIOLATION"
 
+# OI-1179: greppable marker for a dispatch whose WORK succeeded but whose
+# receipt could not be written (a proof-chain gap, NOT a work failure). Each
+# trail record carries this marker so governance can query the gap and claim
+# the dispatch instead of writing it off as failed.
+_RECEIPT_EMIT_FAILURE_MARKER = "VNX_RECEIPT_EMIT_FAILURE"
+
+# Trail filename: append-only NDJSON written next to the receipt ledger
+# (falling back to the data dir when the state dir is the very thing that
+# refused the write). Consumed by governance to surface proof-chain gaps.
+_RECEIPT_EMIT_FAILURES_FILENAME = "receipt_emit_failures.ndjson"
+
+
+def _record_receipt_emit_failure(
+    spec: EnvelopeSpec,
+    reason: str,
+    *,
+    work_status: str,
+) -> None:
+    """Record — loudly and durably — that a dispatch has no proof chain.
+
+    The receipt write failed, but that is a PROOF problem, not a WORK problem:
+    the dispatch's work fate is ``work_status`` regardless of whether the
+    receipt landed. This function logs an ERROR (never silent) and appends a
+    greppable NDJSON trail record so governance can claim the receiptless
+    dispatch instead of writing it off as failed.
+
+    Best-effort write: the state dir may be exactly the location that refused
+    the receipt write (a read-only version store), so the trail is attempted
+    in the state dir first and the data dir second. If neither is writable,
+    the ERROR log line remains the trail — the gap is never silent.
+    """
+    record = {
+        "marker": _RECEIPT_EMIT_FAILURE_MARKER,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "dispatch_id": spec.dispatch_id,
+        "terminal_id": spec.terminal_id,
+        "provider": spec.provider,
+        "work_status": work_status,
+        "reason": reason,
+    }
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    targets = [spec.state_dir, spec.data_dir]
+    for target in targets:
+        if target is None:
+            continue
+        try:
+            path = Path(target) / _RECEIPT_EMIT_FAILURES_FILENAME
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    fh.write(line)
+                    fh.flush()
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            logger.error(
+                "envelope._govern: %s dispatch=%s work_status=%s — receipt emit "
+                "failed, proof-chain gap recorded at %s: %s",
+                _RECEIPT_EMIT_FAILURE_MARKER,
+                spec.dispatch_id,
+                work_status,
+                path,
+                reason,
+            )
+            return
+        except OSError as _trail_exc:
+            logger.warning(
+                "envelope._govern: could not write proof-chain-gap trail to %s "
+                "dispatch=%s: %s",
+                target,
+                spec.dispatch_id,
+                _trail_exc,
+            )
+    logger.error(
+        "envelope._govern: %s dispatch=%s work_status=%s — receipt emit failed "
+        "and NO proof-chain-gap trail could be written (state and data dirs "
+        "both refused): %s",
+        _RECEIPT_EMIT_FAILURE_MARKER,
+        spec.dispatch_id,
+        work_status,
+        reason,
+    )
+
 
 # ---------------------------------------------------------------------------
 # GOVERN
@@ -66,8 +151,12 @@ def _govern(
 ) -> tuple:
     """Emit unified_report then dispatch receipt. Returns (report_path, receipt_path).
 
-    Fail-closed contract: raises EnvelopeGovernError when receipt_path is None or
-    absent on disk after emit — never silently loses a receipt.
+    OI-1179: the work fate and the receipt fate are decoupled. A failed receipt
+    emit does NOT raise and does NOT flip a successful dispatch to failed —
+    instead it records a proof-chain gap (loud error log + a
+    ``receipt_emit_failures.ndjson`` trail record carrying
+    ``VNX_RECEIPT_EMIT_FAILURE``) and returns ``receipt_path=None``, so the
+    caller's status/returncode still reflect whether the WORK succeeded.
     Report is emitted first so the receipt can carry the linkage (ADR-005 ordering).
 
     Idempotent dedup: when the receipt NDJSON already contains a line for this
@@ -165,10 +254,11 @@ def _govern(
         except OSError:
             pass  # can't read report file — skip validation, don't break receipt
 
-    # RECEIPT second — fail-closed, with idempotent dedup. The end-of-dispatch
-    # event clear runs in finally so the live stream is truncated even when the
-    # fail-closed receipt emit raises EnvelopeGovernError.
+    # RECEIPT second — with idempotent dedup. A failed emit records a
+    # proof-chain gap (OI-1179) instead of raising: the end-of-dispatch event
+    # clear still runs in finally, and the caller's work status is preserved.
     receipt_path: Optional[Path] = None
+    _emit_failed = False  # OI-1179: guard so a raise and a None-return are not double-recorded
     try:
         ndjson_path = spec.state_dir / "t0_receipts.ndjson"
         if _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id):
@@ -237,7 +327,7 @@ def _govern(
                 # ADR-005: emit cost event BEFORE receipt write. provider_dispatch
                 # and recovery raise on failure (fail-loud); the envelope is the
                 # third receipt path and matches them, but wraps in try/except so a
-                # cost-log failure never breaks the fail-closed receipt contract.
+                # cost-log failure never breaks the receipt write.
                 try:
                     from provider_costs import emit_provider_cost  # noqa: PLC0415
                     from project_scope import resolve_stamp_project_id, TenantUnresolved  # noqa: PLC0415
@@ -354,20 +444,34 @@ def _govern(
                     warnings=_contract_warnings or None,
                 )
             except Exception as exc:
-                raise EnvelopeGovernError(
-                    f"envelope._govern: receipt emit raised for dispatch={spec.dispatch_id}: {exc}"
-                ) from exc
+                # OI-1179: a receipt-emit failure is a PROOF problem, not a WORK
+                # problem. Raising EnvelopeGovernError here would bubble to
+                # _dispatch_*_via_envelope and turn a successful dispatch into
+                # exit code 1 (booked as `failed`) even though the work itself
+                # succeeded. Record the proof-chain gap loudly (log + trail)
+                # and return a None receipt so the caller's status/returncode
+                # still reflect the WORK.
+                _record_receipt_emit_failure(
+                    spec, str(exc), work_status=adapter_result.status,
+                )
+                receipt_path = None
+                _emit_failed = True
 
-            if receipt_path is None:
-                raise EnvelopeGovernError(
-                    f"envelope._govern: receipt_path is None after emit "
-                    f"(fail-closed) dispatch={spec.dispatch_id}"
-                )
-            if not receipt_path.exists():
-                raise EnvelopeGovernError(
-                    f"envelope._govern: receipt file absent on disk after emit "
-                    f"path={receipt_path} dispatch={spec.dispatch_id} (fail-closed)"
-                )
+            if not _emit_failed:
+                if receipt_path is None:
+                    # emit returned nothing without raising — same proof-chain gap.
+                    _record_receipt_emit_failure(
+                        spec,
+                        "receipt_path is None after emit",
+                        work_status=adapter_result.status,
+                    )
+                elif not receipt_path.exists():
+                    _record_receipt_emit_failure(
+                        spec,
+                        f"receipt file absent on disk after emit path={receipt_path}",
+                        work_status=adapter_result.status,
+                    )
+                    receipt_path = None
     finally:
         # OI-878/OI-902: truncate the live event stream now that the archive
         # (top of _govern) and the receipt write are complete. Best-effort.

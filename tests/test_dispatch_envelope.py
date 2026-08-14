@@ -5,8 +5,8 @@ Verifies:
 2. Failure path: spawn error -> BOTH report AND receipt emitted, status "failure".
 3. Timeout path: spawn timed_out -> BOTH report AND receipt emitted, status "timeout".
 4. Stopped_early path (claude-only): spawn stopped_early -> BOTH report AND receipt, status "success".
-5. Fail-closed: receipt emit raises -> EnvelopeGovernError (non-zero, no silent loss).
-6. Fail-closed: receipt_path returns None -> EnvelopeGovernError.
+5. Receipt-emit failure -> proof-chain gap recorded, work status preserved (OI-1179).
+6. receipt_path returns None -> proof-chain gap recorded, work status preserved (OI-1179).
 7. Idempotent dedup: pre-existing receipt line -> GOVERN skips write, no double-emit.
 8. Flag-off: VNX_UNIFIED_ENVELOPE unset -> legacy dispatch called, envelope NOT invoked.
 9. Flag-on: VNX_UNIFIED_ENVELOPE=1 + lanes contains lane -> envelope invoked.
@@ -15,6 +15,7 @@ Verifies:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -30,7 +31,6 @@ sys.path.insert(0, str(SCRIPTS_LIB))
 import dispatch_envelope
 import provider_dispatch
 from dispatch_envelope import (
-    EnvelopeGovernError,
     EnvelopeSpec,
     LaneRouter,
     run_envelope,
@@ -257,32 +257,62 @@ class TestEnvelopeEventArchiveClear:
         mock_clear.assert_called_once_with(spec.terminal_id, spec.dispatch_id)
 
 
-class TestEnvelopeFailClosed:
-    """GOVERN must raise EnvelopeGovernError when receipt is missing — never silent."""
+class TestEnvelopeReceiptEmitFailure:
+    """OI-1179: a failed receipt emit is a proof-chain gap, not a work failure.
 
-    def test_receipt_emit_raises_fail_closed(self, spec):
+    The dispatch's WORK status is preserved (success -> returncode 0, receipt_path
+    None) and the gap is recorded loudly to receipt_emit_failures.ndjson with the
+    VNX_RECEIPT_EMIT_FAILURE marker so governance can claim it instead of writing
+    it off as failed.
+    """
+
+    def _run(self, spec, codex_result, *, receipt_side_effect=None, receipt_return=_UNSET):
         _, _, mock_report, mock_receipt = _stub_governance(
-            spec, receipt_side_effect=RuntimeError("disk full")
+            spec, receipt_side_effect=receipt_side_effect, receipt_return=receipt_return,
         )
-        codex_result = _FakeCodexResult(returncode=0)
-
         with patch("provider_spawns.codex_spawn.spawn_codex", return_value=codex_result), \
              patch("governance_emit.emit_unified_report", mock_report), \
              patch("governance_emit.emit_dispatch_receipt", mock_receipt):
-            with pytest.raises(EnvelopeGovernError, match="receipt emit raised"):
-                run_envelope(spec, lane="codex")
+            return run_envelope(spec, lane="codex")
 
-    def test_none_receipt_path_fail_closed(self, spec):
-        _, _, mock_report, mock_receipt = _stub_governance(
-            spec, receipt_return=None
-        )
+    def _trail(self, spec):
+        trail = spec.state_dir / "receipt_emit_failures.ndjson"
+        assert trail.exists(), "proof-chain-gap trail must be written"
+        return [
+            json.loads(line)
+            for line in trail.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_receipt_emit_raises_preserves_work_status(self, spec):
         codex_result = _FakeCodexResult(returncode=0)
+        result = self._run(spec, codex_result, receipt_side_effect=RuntimeError("disk full"))
 
-        with patch("provider_spawns.codex_spawn.spawn_codex", return_value=codex_result), \
-             patch("governance_emit.emit_unified_report", mock_report), \
-             patch("governance_emit.emit_dispatch_receipt", mock_receipt):
-            with pytest.raises(EnvelopeGovernError, match="receipt_path is None"):
-                run_envelope(spec, lane="codex")
+        assert result.status == "success"
+        assert result.returncode == 0
+        assert result.receipt_path is None
+
+        records = self._trail(spec)
+        assert len(records) == 1  # single record — no double-record
+        assert records[0]["marker"] == "VNX_RECEIPT_EMIT_FAILURE"
+        assert records[0]["work_status"] == "success"
+        assert records[0]["dispatch_id"] == spec.dispatch_id
+        assert "disk full" in records[0]["reason"]
+
+    def test_none_receipt_path_preserves_work_status(self, spec):
+        codex_result = _FakeCodexResult(returncode=0)
+        result = self._run(spec, codex_result, receipt_return=None)
+
+        assert result.status == "success"
+        assert result.returncode == 0
+        assert result.receipt_path is None
+
+        records = self._trail(spec)
+        assert len(records) == 1
+        assert records[0]["marker"] == "VNX_RECEIPT_EMIT_FAILURE"
+        assert records[0]["work_status"] == "success"
+        assert records[0]["dispatch_id"] == spec.dispatch_id
+        assert "receipt_path is None" in records[0]["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -441,32 +471,56 @@ class TestClaudeEnvelopeEmitsBothReportAndReceipt:
 # ---------------------------------------------------------------------------
 
 
-class TestClaudeEnvelopeFailClosed:
-    """GOVERN must raise EnvelopeGovernError when receipt is missing — never silent (claude lane)."""
+class TestClaudeEnvelopeReceiptEmitFailure:
+    """OI-1179: a failed receipt emit is a proof-chain gap, not a work failure (claude lane)."""
 
-    def test_receipt_emit_raises_fail_closed(self, spec_claude):
+    def _run(self, spec_claude, claude_result, *, receipt_side_effect=None, receipt_return=_UNSET):
         _, _, mock_report, mock_receipt = _stub_governance(
-            spec_claude, receipt_side_effect=RuntimeError("disk full")
+            spec_claude, receipt_side_effect=receipt_side_effect, receipt_return=receipt_return,
         )
-        claude_result = _FakeClaudeResult(returncode=0)
-
         with patch("provider_spawns.claude_spawn.spawn_claude", return_value=claude_result), \
              patch("governance_emit.emit_unified_report", mock_report), \
              patch("governance_emit.emit_dispatch_receipt", mock_receipt):
-            with pytest.raises(EnvelopeGovernError, match="receipt emit raised"):
-                run_envelope(spec_claude, lane="claude-subprocess")
+            return run_envelope(spec_claude, lane="claude-subprocess")
 
-    def test_none_receipt_path_fail_closed(self, spec_claude):
-        _, _, mock_report, mock_receipt = _stub_governance(
-            spec_claude, receipt_return=None
-        )
+    def _trail(self, spec_claude):
+        trail = spec_claude.state_dir / "receipt_emit_failures.ndjson"
+        assert trail.exists(), "proof-chain-gap trail must be written"
+        return [
+            json.loads(line)
+            for line in trail.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_receipt_emit_raises_preserves_work_status(self, spec_claude):
         claude_result = _FakeClaudeResult(returncode=0)
+        result = self._run(spec_claude, claude_result, receipt_side_effect=RuntimeError("disk full"))
 
-        with patch("provider_spawns.claude_spawn.spawn_claude", return_value=claude_result), \
-             patch("governance_emit.emit_unified_report", mock_report), \
-             patch("governance_emit.emit_dispatch_receipt", mock_receipt):
-            with pytest.raises(EnvelopeGovernError, match="receipt_path is None"):
-                run_envelope(spec_claude, lane="claude-subprocess")
+        assert result.status == "success"
+        assert result.returncode == 0
+        assert result.receipt_path is None
+
+        records = self._trail(spec_claude)
+        assert len(records) == 1
+        assert records[0]["marker"] == "VNX_RECEIPT_EMIT_FAILURE"
+        assert records[0]["work_status"] == "success"
+        assert records[0]["dispatch_id"] == spec_claude.dispatch_id
+        assert "disk full" in records[0]["reason"]
+
+    def test_none_receipt_path_preserves_work_status(self, spec_claude):
+        claude_result = _FakeClaudeResult(returncode=0)
+        result = self._run(spec_claude, claude_result, receipt_return=None)
+
+        assert result.status == "success"
+        assert result.returncode == 0
+        assert result.receipt_path is None
+
+        records = self._trail(spec_claude)
+        assert len(records) == 1
+        assert records[0]["marker"] == "VNX_RECEIPT_EMIT_FAILURE"
+        assert records[0]["work_status"] == "success"
+        assert records[0]["dispatch_id"] == spec_claude.dispatch_id
+        assert "receipt_path is None" in records[0]["reason"]
 
 
 # ---------------------------------------------------------------------------

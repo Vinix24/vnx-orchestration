@@ -3,7 +3,7 @@
 Covers:
 1. state-dir guard: inherited VNX_STATE_DIR without EXPLICIT flag is ignored + warning logged.
 2. state-dir guard: VNX_STATE_DIR + EXPLICIT=1 is honored.
-3. events-dir guard: inherited VNX_DATA_DIR without EXPLICIT flag is ignored + warning logged.
+3. events-dir guard: VNX_DATA_DIR without EXPLICIT flag is HONORED (OI-1179).
 4. events-dir guard: VNX_DATA_DIR + EXPLICIT=1 resolves under that dir.
 5. events-dir guard: VNX_PROJECT_ID (no EXPLICIT) resolves central path.
 6. events_path in receipt: present after a successful provider-dispatch flow with EventStore.
@@ -112,21 +112,22 @@ class TestStateDirGuard:
 # ---------------------------------------------------------------------------
 
 class TestEventsDirGuard:
-    def test_no_explicit_flag_ignores_inherited_vnx_data_dir(self, monkeypatch, tmp_path, caplog):
-        """VNX_DATA_DIR without EXPLICIT=1 is ignored; falls back to central dir."""
-        wrong = str(tmp_path / "wrong_events")
-        monkeypatch.setenv("VNX_DATA_DIR", wrong)
+    def test_vnx_data_dir_honored_without_explicit_flag(self, monkeypatch, tmp_path):
+        """OI-1179: VNX_DATA_DIR set is honored WITHOUT VNX_DATA_DIR_EXPLICIT=1.
+
+        The old two-flag trap ignored a set VNX_DATA_DIR unless
+        VNX_DATA_DIR_EXPLICIT=1 was ALSO set, silently falling back to the
+        canonical resolver and (in a central install) landing on the read-only
+        pinned version store. A set VNX_DATA_DIR must be respected directly.
+        """
+        data_dir = str(tmp_path / "operator_data")
+        monkeypatch.setenv("VNX_DATA_DIR", data_dir)
         monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
-        monkeypatch.setenv("VNX_PROJECT_ID", "my-proj")
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
-        with caplog.at_level(logging.WARNING, logger="event_store"):
-            result = _events_dir()
+        result = _events_dir()
 
-        assert str(result) != wrong + "/events"
-        assert "VNX_DATA_DIR" in caplog.text
-        assert "VNX_DATA_DIR_EXPLICIT" in caplog.text
-        # Central path via VNX_PROJECT_ID
-        assert result == Path.home() / ".vnx-data" / "my-proj" / "events"
+        assert result == Path(data_dir).expanduser().resolve() / "events"
 
     def test_with_explicit_flag_honors_vnx_data_dir(self, monkeypatch, tmp_path):
         """VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 resolves to that dir/events."""

@@ -39,28 +39,20 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _canonical_data_dir() -> Optional[Path]:
-    """Resolve VNX_DATA_DIR via the canonical vnx_paths resolver (central-mode aware)."""
-    try:
-        lib_dir = str(Path(__file__).resolve().parent)
-        if lib_dir not in sys.path:
-            sys.path.insert(0, lib_dir)
-        from vnx_paths import resolve_paths
-        return Path(resolve_paths()["VNX_DATA_DIR"])
-    except Exception:
-        return None
-
-
 def _default_data_dir() -> Path:
-    env = os.environ.get("VNX_DATA_DIR", "")
-    if env:
-        return Path(env)
-    # A raw _repo_root() walk resolves the KEYSTONE (not the project's
-    # ~/.vnx-data/<project>) in a central install. See #1023.
-    canonical = _canonical_data_dir()
-    if canonical is not None:
-        return canonical
-    return _repo_root() / ".vnx-data"
+    """Resolve the VNX data dir, failing loud on a read-only version store.
+
+    OI-1172/OI-1179: the previous fallback walked ``_repo_root() / ".vnx-data"``
+    when the canonical resolver returned None, which resolves the keystone
+    (``~/.vnx-system/versions/<v>/.vnx-data``) in a central install — a
+    read-only pinned version store the daemon then tried to write to. The
+    shared resolver honors a set ``VNX_DATA_DIR`` directly, falls back through
+    ``VNX_PROJECT_ID`` and the canonical resolver, and raises
+    ``DataDirResolutionError`` naming the chain instead of returning a path
+    under ``~/.vnx-system/versions/``.
+    """
+    from data_dir_resolution import resolve_data_dir_fail_loud
+    return resolve_data_dir_fail_loud()
 
 
 def _default_state_dir() -> Path:

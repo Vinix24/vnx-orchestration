@@ -22,8 +22,8 @@ forever.
 Fix: ``dispatch_envelope._govern`` now archives the live stream under the
 dispatch's own id BEFORE writing the receipt (so the receipt carries
 ``events_path``) and clears the live file AFTER the receipt, in a finally so the
-clear survives a fail-closed EnvelopeGovernError.  The boundary guard of #1276
-stays as the second line of defense.
+clear survives a receipt-emit failure (a proof-chain gap, OI-1179).  The
+boundary guard of #1276 stays as the second line of defense.
 
 Every test here is RED on origin/main (no end-teardown in the envelope path)
 and GREEN with the fix.
@@ -154,8 +154,13 @@ class TestGovernEndTeardown:
         assert not live.exists() or live.stat().st_size == 0
 
     def test_govern_clears_even_when_receipt_raise(self, dirs):
-        """The clear runs in finally: a fail-closed receipt failure must not leave
-        the live file holding the dispatch's events."""
+        """The clear runs in finally: a receipt-emit failure must not leave
+        the live file holding the dispatch's events.
+
+        OI-1179: the failed receipt emit is a proof-chain gap, not a raise —
+        ``_govern`` records it and returns ``receipt_path=None`` so the WORK
+        status is preserved. The end-teardown still runs.
+        """
         state_dir, data_dir, events_dir = dirs
         dispatch_id = "oi902-govern-receipt-raise"
 
@@ -167,16 +172,18 @@ class TestGovernEndTeardown:
                 "governance_emit.emit_dispatch_receipt",
                 side_effect=RuntimeError("receipt disk failure"),
             ), patch("governance_emit.emit_unified_report", return_value=Path("/tmp/fake-report.md")):
-                with pytest.raises(Exception):
-                    _govern(
-                        spec, _AdapterResult(returncode=0, completion_text="done", status="success"), start, end,
-                    )
+                _report, receipt_path = _govern(
+                    spec, _AdapterResult(returncode=0, completion_text="done", status="success"), start, end,
+                )
+
+        # OI-1179: no raise — the gap is recorded, the receipt path is None.
+        assert receipt_path is None
 
         live = events_dir / "T2.ndjson"
         archive = events_dir / "archive" / "T2" / f"{dispatch_id}.ndjson"
         # Archive happened before the receipt emit (top of _govern).
         assert archive.exists() and archive.stat().st_size > 0
-        # Clear still ran in finally despite the raised receipt write.
+        # Clear still ran in finally despite the failed receipt write.
         assert not live.exists() or live.stat().st_size == 0
 
     def test_govern_does_not_mislabel_previous_dispatch(self, dirs):
