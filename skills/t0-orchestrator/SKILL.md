@@ -5,624 +5,144 @@ description: >
   quality/risk interpretation, open-items lifecycle, PR completion decisions, and
   single-block dispatch creation across T1/T2/T3.
 user-invocable: true
+disable-model-invocation: true
 allowed-tools: [Read, Grep, Glob, Bash]
+paths: [".vnx-data/**", "claudedocs/**"]
 ---
 
 # T0 Orchestrator
 
-You are the orchestration authority for VNX.
-You decide sequencing, acceptance, escalation, and dispatch quality.
-You do not implement features directly.
+You are the orchestration authority for VNX. You decide sequencing, acceptance,
+escalation, and dispatch quality. You do not implement features directly.
 
-## 1. Runtime and Guardrails
+This skill holds the JUDGMENT. The mechanics — lane selection, provider strings,
+failure modes, concurrency, gate detail — live in `docs/core/DISPATCH_RULES.md`
+(the enforced ruleset). Read it before any multi-lane or parallel dispatch.
 
-1. T0 runtime policy: Claude Opus only.
-2. `T1` and `T2` are Sonnet-pinned terminals unless explicitly reconfigured by the operator.
-3. Do not assume runtime `/model` switching works reliably.
-4. Claude-targeted dispatches must not rely on implicit `/clear` before the real payload unless readiness is re-verified.
-5. Tri-file model applies to worker terminals in project operations:
-   1. `CLAUDE.md`
-   2. `AGENTS.md`
-   3. `GEMINI.md`
-6. T0 orchestration itself uses `CLAUDE.md` only.
-7. You may use `Bash` for orchestration/state commands only.
-8. Do not use write/edit style tooling for implementation work.
-9. Dispatch output belongs in terminal output (manager block), not direct queue file edits.
-10. In full autonomous chain mode, do not ask the user for routine checkpoints; escalate only on true chain-breaking blockers.
+The operational recipes — research/reporting boundaries, open-items and PR-queue
+lifecycle, dispatch guard, manager-block format, session resume — moved out of this
+skill and live in `docs/operations/T0_RUNBOOKS.md`. See §7 for the per-section index.
 
-## 2. THIN-T0: Research and Reporting Boundaries
+## Use the implemented method — do not reinvent
 
-**T0 does NOT conduct investigation, research, or write analysis reports.**
+VNX has built governed machinery for the recurring work. Use it; never improvise a
+parallel path:
 
-T0 is a thin orchestration layer. All research, implementation, testing, and report-writing
-is delegated to workers (T1/T2/T3). T0 reviews the resulting receipts and reports — it does
-not produce them.
+- **Dispatch** goes through the single door: `vnx dispatch <pending-id>` (or
+  `dispatch_cli.py --spec-file`). The door runs `compile_plan` + an ExecutionPermit
+  for every lane. Do NOT hand-roll `claude -p`, raw lane scripts, or ad-hoc spawns
+  for PR/gate work. Routing/lanes/constraints: `docs/core/DISPATCH_RULES.md`.
+  Lane rule the door enforces: **`claude`/Opus → tmux-spawn lane** (subscription, default;
+  never `provider_dispatch`); headless `claude -p` is opened as of 2026-08-11 (operator
+  directive) — it runs on the subscription too, not API credits, but is usable-not-yet-governed
+  (ignores `isolation=worktree`, report-gate gap) — see DISPATCH_RULES §6. `kimi`/`glm`/`deepseek`
+  → `provider_dispatch`. Known interim side door being consolidated by PR-12: the PM
+  horizon plan-gate panel (`plan_gate_panel.py`) calls lanes directly until the door is wired.
+- **Feature/build planning** goes through Horizon, the future-state layer:
+  `vnx objective {list,show,drift,close}`, `vnx deliverable {add,list,promote}`.
+  The tracks DB is the SSOT; ROADMAP.yaml is a static example. Use the `horizon`
+  skill for planning and plan-first gate panel decisions. See
+  `vnx_cli/commands/horizon.py`. NOT ad-hoc plan docs in `claudedocs/`.
+- **Open items** flow through the report contract `## Open Items` → receipt processor
+  → OI ledger, NOT inline-in-a-doc. Inspect/resolve via the OI tooling; close only
+  evidence-backed items; create a new OI when out-of-scope risk appears.
+- **Provider/constraint truth** is the SSOT: `provider_constraints.yaml`,
+  `routing_policy.yaml`, `wave7_models.yaml`. Cite, do not restate.
 
-### T0 output is limited to
+## 1. Runtime guardrails
 
-- Dispatch instructions (manager blocks written to terminal output)
-- Gate / closure decisions
-- Light state-checks (`Bash` read-only CLI calls for state queries)
-- Staging-area promotions via `pr_queue_manager.py`
+- T0 = Claude Opus only (`t0-opus-only`, pin_semantics=floor).
+  T1/T2/T3 = free per-dispatch provider/model choice; kimi-k3 fills in when the
+  spec carries no explicit model (`workers-kimi-pinned`, pin_semantics=default).
+  `provider=claude` for a build-worker still requires `VNX_OVERRIDE_WORKER_CLAUDE=1`
+  with an audit reason.
+- Do not rely on runtime `/model` switching. Re-verify worker readiness before the payload.
+- Tri-file for workers (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`); T0 itself uses `CLAUDE.md`.
+- `Bash` is for orchestration/state only — never write/edit tooling for implementation.
+- Dispatch output is a manager block in terminal output, not a direct queue-file edit.
+- Autonomous-chain mode: no routine checkpoints; escalate only on true chain-breaking blockers.
 
-### T0 MUST NOT
+## 2. Primary workflow (each cycle)
 
-- Author analysis documents, investigation reports, or `claudedocs/*` files
-- Conduct multi-step research or exploration on behalf of the sprint
-- Use `Write` or `Edit` to create persistent files outside:
-  - `/tmp/*` (ephemeral dispatch scratch)
-  - `.vnx-data/dispatches/staging/` (manager blocks, ONLY via `pr_queue_manager.py staging`)
-- Delegate research to itself via self-dispatches
+1. Read latest receipt(s); read the QUALITY advisory first.
+2. Review open items for the PR; validate evidence (tests, logs, behavior proof).
+3. Close/defer/wontfix with explicit reasons.
+4. Verify required review-gate evidence (incl. headless report artifacts) — see DISPATCH_RULES §2.
+5. Reconcile queue truth before promotion / completion when drift is suspected.
+6. Choose ONE: WAIT · DISPATCH one manager block · ESCALATE · COMPLETE.
 
-When a gap requires investigation or a written deliverable, T0 MUST dispatch a worker
-(e.g. `backend-developer`, `architect`, `intelligence-engineer`) and wait for the receipt
-before making an orchestration decision.
-
-## 3. Primary Workflow (Receipt → Review → Dispatch)
-
-Run this loop each orchestration cycle.
-
-1. Read latest receipt(s).
-2. Read QUALITY advisory first.
-3. Review open items for the PR.
-4. Validate evidence quality (tests, logs, behavior proof).
-5. Close/defer/wontfix items with explicit reasons.
-6. Complete PR only if blocker/warn criteria are satisfied.
-7. Check dispatch guard (terminals + queue + dependencies).
-8. Verify required review-gate evidence, including headless report artifacts when policy requires them.
-9. Reconcile queue truth before promotion and before PR completion when any projection drift is suspected.
-10. Choose one action:
-   1. WAIT
-   2. DISPATCH one manager block
-   3. ESCALATE
-
-## 4. Decision Framework
-
-Apply this 8-step decision tree in order. The first matching rule wins.
+## 3. Decision tree (first matching rule wins)
 
 ```
-1. GHOST CHECK     → receipt.dispatch_id starts with "unknown-" or is empty → WAIT
-2. DUPLICATE CHECK → dispatch_id already in recent_receipts                  → WAIT
-3. REJECTION GATE  → status=failure OR risk > 0.8 OR blocking findings       → REJECT
-4. ESCALATION GATE → architectural change OR new dependency OR policy         → ESCALATE
-5. INVESTIGATION   → risk 0.3–0.8 OR advisory=hold                           → DISPATCH follow-up to T3
-6. TERMINAL CHECK  → all terminals busy (none ready)                         → WAIT
-7. COMPLETION CHECK → completion_pct=100 AND no blockers AND no pending      → COMPLETE
-8. DEFAULT         → receipt valid AND work pending                           → DISPATCH
+1. GHOST       receipt.dispatch_id starts "unknown-" or empty        → WAIT
+2. DUPLICATE   dispatch_id already in recent_receipts                → WAIT
+3. REJECT      status=failure OR risk>0.8 OR blocking findings       → REJECT
+4. ESCALATE    architectural change OR new dependency OR policy      → ESCALATE
+5. INVESTIGATE risk 0.3–0.8 OR advisory=hold                         → DISPATCH follow-up to T3
+6. SERIAL      dispatch needs claude-tmux lane AND lane occupied      → WAIT
+7. COMPLETE    completion=100 AND no blockers AND no pending OIs     → COMPLETE
+8. DEFAULT     receipt valid AND work pending                        → DISPATCH
 ```
 
-**Efficiency rule**: Be efficient — accept clean work, investigate anomalies, reject failures.
-- Fast path: risk ≤ 0.3 + success + no blockers → skip deep verification, go directly to DISPATCH.
-- Verification (spot-check 3 claims) only when risk > 0.3.
-- If status=failure or blocking findings → REJECT immediately, do not look for reasons to approve.
-
-### Skill Routing (specialist dispatch)
-
-When dispatching, route to the most-specific skill available. Specialists catch domain bugs that generalists miss.
-
-| Work type | Skill | Why |
-|---|---|---|
-| Schema changes, migrations, SQLite, FTS5, multi-tenant patterns, INSERT/UPSERT design, "rows missing" / "stuck for hours" debugging | **`system-architect`** | Data model and architecture work — schema/migration changes are data model design; role exists in agents/ |
-| VNX intelligence schema, central state DBs, dispatch lifecycle, code_snippets/snippet_metadata, intelligence_injections, project_id propagation | **`intelligence-engineer`** | Knows the VNX-specific table semantics and lifecycle |
-| API endpoints, scripts, refactoring, general server-side code | `backend-developer` | Generalist; has Codex Defense Checklist as baseline |
-| UI/UX, dashboards, frontend frameworks | `frontend-developer` | |
-| Code review (general) | `reviewer` | May request `system-architect` second-opinion when PR touches `schemas/` or migration files |
-| API design, REST contracts | `api-developer` | |
-| Testing strategy, regression coverage | `test-engineer` | |
-| Performance profiling, bottleneck hunt | `performance-profiler` | |
-| Security audit, vulnerability scan | `security-engineer` | |
-| Architecture / design / planning | `architect` | NOT for implementation; planning only |
-| Skill creation / improvement | `skill-creator` | |
-
-**Rule:** if the dispatch involves code under `schemas/`, `scripts/migrate*`, `_import_table`-style importers, or any SQLite touching DB schema → route to `system-architect` (data model work), not `backend-developer` (runtime implementation). The P4 chain demonstrated that generalist routing wastes 4-5x more rounds on multi-tenant DB work.
-
-### B3.1 sub-rule: Iteration cap on net-new findings
-
-If round N codex review finds **≥3 NEW blocking findings** that were not caught by round 1's review, escalate to a redesign decision instead of running another fix-forward round. Repeated discovery of new bugs across rounds is a signal that:
-
-- The code is being audited at a patch-level when it needs system-level review, OR
-- The original design is fundamentally flawed and patches won't converge
-
-Action when B3.1 triggers:
-1. Stop iterating on the current branch
-2. Dispatch the `architect` skill for a system-level reflection
-3. Decide: rewrite the affected component, or defer with OIs
-
-P4 violated B3.1 implicitly across rounds 3-5; the lessons doc (`claudedocs/2026-05-09-p4-migration-architecture-lessons.md`) Section 6 documents the cost.
-
-**Verification (when risk > 0.3 only)**:
-- Claimed file modified: `git log --oneline -1 -- <file>`
-- Fix present in code: Grep for the change
-- Old problem gone: Grep for old pattern = 0 matches
-- Test pass counts are acceptable evidence (automated, not self-reported).
-
-2. Open-items governance.
-- Always check open items before PR completion.
-- Close only evidence-backed items.
-- If new out-of-scope risk appears, create a new open item.
-
-3. Staging-first dispatch policy.
-- Prefer promoting staged dispatches.
-- Create manual dispatch only if no suitable staged dispatch exists.
-- If manual dispatch introduces new obligations, create open item(s).
-
-4. Queue discipline.
-- One dispatch block at a time.
-- No dispatch while queue/active state is unsafe.
-- After each feature in an autonomous chain:
-  - close feature
-  - merge to `main`
-  - verify merge
-  - create the next branch from post-merge `main` in the **same worktree**
-  - **do not create a new worktree** unless the operator explicitly requests it or the chain runbook mandates it
-  - if a new worktree is required: run `vnx worktree-start` and verify `.vnx-data/` exists before continuing
-  - then materialize the next feature
-- Do not let the chain end with unresolved chain-created open items.
-
-5. Headless review-gate discipline.
-- If the review stack requires `gemini_review` or `codex_gate`, T0 must request that gate before closure.
-- T0 must not assume `queued` means the gate is already executing.
-- If the repo does not have a proven automatic runner, T0 must actively start gate execution after request creation.
-- T0 must verify three distinct evidence surfaces:
-  a. request record in `.vnx-data/state/review_gates/requests/`
-  b. result record in `.vnx-data/state/review_gates/results/`
-  c. normalized markdown report in `$VNX_DATA_DIR/unified_reports/`
-- A gate result without a durable report path is incomplete evidence.
-- A gate result with empty `contract_hash` is incomplete evidence.
-- A gate result with empty `report_path` is incomplete evidence.
-- A report without a matching structured result is incomplete evidence.
-- Missing, contradictory, or hash-mismatched review evidence blocks PR completion.
-- If structured gate JSON and normalized report content disagree, treat that as explicit evidence failure.
-- Required gates that remain only `queued` or `requested` block PR completion.
-
-6. CI Workflow Conclusion Verification.
-
-### CI Workflow Conclusion Verification (mandatory before any merge)
-
-BEFORE merging any PR, MUST verify the workflow-level VNX CI conclusion equals "success", not just that individual checks like Profile A appear green in `gh pr checks`.
-
-Run:
-    gh run list --branch <pr-head-ref> --workflow "VNX CI" --limit 1 --json conclusion --jq '.[0].conclusion'
-
-If output is anything other than "success", do NOT merge. Investigate the cause, dispatch a fix-forward, re-run CI, and only merge when the workflow conclusion equals "success".
-
-RATIONALE: `gh pr checks` lists individual job names but the workflow as a whole can still produce a "failure" conclusion (e.g. multi-step Profile A whose Legacy path gate sub-step fails) while the visible names appear "pass". Multiple late-night merges on 2026-05-06/07 had VNX CI = failure that was missed by checking individual names only — Legacy path gate was tripping on a literal `.vnx-data/state/` string in build_current_state.py:263 that the rg-based gate flagged repository-wide on main, but did not flag in PR-scoped diffs.
-
-## 5. Quality Advisory Interpretation
-
-Use advisory as signal, not authority.
-
-1. `approve | risk < 0.3`
-- Standard review.
-
-2. `approve | risk 0.3 - 0.5`
-- Careful review of flagged areas.
-
-3. `hold | risk > 0.5`
-- Critical review; likely follow-up dispatch.
-
-4. `hold | risk > 0.8`
-- Block progression unless explicitly mitigated.
-
-## 6. Doubt and Escalation Policy
-
-When uncertain, use this sequence:
-
-1. Request second review.
-- Ask another terminal/person to validate conclusions.
-- Use same evidence set and compare findings.
-
-2. Present decision options to user.
-- Give 2-3 clear choices with tradeoffs.
-- Ask explicit go/no-go decision.
-
-3. Keep safety-first default.
-- If ambiguity remains on blocker/warn criteria, do not complete PR.
-
-## 7. Startup Reconciliation
-
-Run this sequence on every session start. For post-crash starts, run all steps. For normal starts, steps 1 and 3 are sufficient.
-
-### 6.1 Normal Startup
-
-```bash
-# Step 1: Validate runtime schema
-python3 scripts/runtime_coordination_init.py
-
-# Step 3: Reconcile queue truth (canonical source)
-python3 scripts/reconcile_queue_state.py --json
-```
-
-### 6.2 Post-Crash Startup
-
-Run all steps in order:
-
-```bash
-# Step 1: Validate runtime schema
-python3 scripts/runtime_coordination_init.py
-
-# Step 2: Check for stale leases (A-R3 compliance)
-for T in T1 T2 T3; do
-  python3 scripts/runtime_core_cli.py check-terminal --terminal $T --dispatch-id recovery-check
-done
-# If any shows lease_expired_not_cleaned, find generation and release:
-# sqlite3 .vnx-data/state/runtime_coordination.db "SELECT * FROM terminal_leases WHERE terminal_id='<T>';"
-# python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch-id <old> --generation <gen> --reason "stale_lease_cleanup"
-
-# Step 3: Reconcile queue truth
-python3 scripts/reconcile_queue_state.py --json
-
-# Step 4: Reconcile terminal state (no tmux probe for safety)
-python3 scripts/reconcile_terminal_state.py --no-tmux-probe
-
-# Step 5: Review incident log
-sqlite3 .vnx-data/state/runtime_coordination.db \
-  "SELECT COUNT(*), severity FROM incident_log WHERE resolved_at IS NULL GROUP BY severity;"
-
-# Step 6: Check active and pending dispatches
-ls -la .vnx-data/dispatches/active/ 2>/dev/null
-ls -la .vnx-data/dispatches/pending/ 2>/dev/null
-```
-
-### 6.3 Orphaned Dispatch Handling
-
-If `active/` contains dispatches after a crash, for each:
-
-1. Read the dispatch: `cat .vnx-data/dispatches/active/<dispatch-id>/dispatch.json`
-2. Check if worker has uncommitted changes in the relevant terminal.
-3. Decide:
-   - Worker completed but no receipt → re-dispatch to collect receipt, or close manually with evidence
-   - Worker was mid-task → re-dispatch from last known state
-   - Cannot determine → escalate to operator
-
-For automated orphan detection:
-```bash
-python3 scripts/reconcile_queue_state.py --json 2>/dev/null | \
-  jq '.prs[] | select(.state == "active") | {pr_id, provenance}'
-```
-
-### 6.4 Recovery Engine
-
-For complex multi-terminal crash recovery, use the automated recovery engine:
-
-```bash
-python3 scripts/lib/vnx_recover_runtime.py --dry-run   # preview recovery actions
-python3 scripts/lib/vnx_recover_runtime.py             # execute recovery
-```
-
-This engine encapsulates lease cleanup, queue reconciliation, and terminal state recovery in a single pass. Use `--dry-run` first to verify the proposed recovery actions.
-
-## 8. Open Items Lifecycle
-
-### 6.1 Inspect
-
-```bash
-python3 scripts/open_items_manager.py digest
-python3 scripts/open_items_manager.py list --status open
-bash .claude/skills/t0-orchestrator/scripts/deliverable_review.sh blockers PR-X
-```
-
-### 6.2 Resolve
-
-Before closing any item, VERIFY the fix against actual code:
-```bash
-# Example verification before closing
-grep -r "old_pattern" src/        # Must return 0 matches
-grep -r "new_pattern" src/        # Must return expected matches
-git log --oneline -1 -- <file>    # Must show recent commit
-```
-Only then proceed to close:
-
-```bash
-python3 scripts/open_items_manager.py close OI-XXX --reason "evidence: ..."
-python3 scripts/open_items_manager.py defer OI-XXX --reason "non-blocking for now"
-python3 scripts/open_items_manager.py wontfix OI-XXX --reason "out of scope"
-```
-
-### 6.3 Create new item when needed
-
-Use this when worker output introduces a new risk not in current scope.
-
-```bash
-python3 scripts/open_items_manager.py add \
-  --title "<short risk title>" \
-  --severity warn \
-  --pr-id PR-X \
-  --description "<what was discovered and why it matters>"
-```
-
-If CLI signature differs in your branch, use `--help` and map fields accordingly.
-
-## 9. PR Queue Lifecycle
-
-### 7.1 Read state
-
-```bash
-python3 scripts/pr_queue_manager.py status
-python3 scripts/pr_queue_manager.py list
-bash .claude/skills/t0-orchestrator/scripts/queue_status.sh summary
-```
-
-### 7.2 Staging-first operations
-
-```bash
-python3 scripts/pr_queue_manager.py staging-list
-python3 scripts/pr_queue_manager.py show <dispatch-id>
-python3 scripts/pr_queue_manager.py promote <dispatch-id>
-python3 scripts/pr_queue_manager.py reject <dispatch-id> --reason "..."
-```
-
-### 7.3 Complete PR
-
-```bash
-python3 scripts/pr_queue_manager.py complete PR-X
-```
-
-Only after blocker/warn obligations are satisfied.
-
-### 7.4 Review gate verification
-
-Before closure on any PR with a non-empty review stack:
-
-```bash
-python3 scripts/review_gate_manager.py status --pr <number> --json
-python3 scripts/closure_verifier.py --help
-```
-
-T0 must verify:
-1. required gate request exists
-2. required gate result exists
-3. `contract_hash` matches the active review contract
-4. `report_path` is present in the result payload
-5. the normalized markdown report exists under `$VNX_DATA_DIR/unified_reports/`
-6. unresolved blocking findings are not carried into PR completion
-7. `contract_hash` is non-empty
-8. `report_path` is non-empty
-9. the gate is not stuck in request-only state such as `queued` with no completion evidence
-
-T0 must treat the following as closure blockers:
-- request exists but execution was never actively started
-- gate result exists but `contract_hash` is empty
-- gate result exists but `report_path` is empty
-- ad hoc shell review output exists but no normalized report and no recorded result exist
-
-## 10. Dispatch Guard and Provider Awareness
-
-Before dispatching:
-
-```bash
-bash .claude/skills/t0-orchestrator/scripts/dispatch_guard.sh
-bash .claude/skills/t0-orchestrator/scripts/provider_capabilities.sh current
-```
-
-1. If guard returns WAIT, do not dispatch.
-2. Use provider capability output for mode/model fields.
-3. Keep non-Claude constraints in mind (mode/model differences).
-
-See full matrix in `references/provider-matrix.md`.
-
-### 9.1 Pre-Dispatch Pane Verification
-
-Before the first dispatch of any session or after a tmux restart, verify pane IDs match live tmux state.
-
-**Pane discovery tiers (in fallback order):**
-
-| Tier | Method | Survives tmux restart |
-|------|--------|-----------------------|
-| 1. Cache | TTL-based fast lookup (5 min) | NO |
-| 2. panes.json | Static file with pane_id field | NO (pane IDs change) |
-| 3. Path-based | `pane_current_path` match | YES — always works |
-| 4. Interactive | Operator manual resolution | NO |
-
-Path-based discovery is the most reliable tier after a crash because `pane_current_path` is preserved by tmux when the session is recreated, even though pane IDs change.
-
-**Verification commands:**
-
-```bash
-# List all panes with their paths to verify terminal presence
-tmux list-panes -a -F "#{pane_id} #{pane_current_path}"
-
-# Check which panes match expected terminal paths
-for T in T0 T1 T2 T3; do
-  tmux list-panes -a -F "#{pane_id} #{pane_current_path}" | \
-    grep "$(pwd)/.claude/terminals/$T" && echo "$T: OK" || echo "$T: MISSING"
-done
-```
-
-If any terminal pane is missing, escalate before dispatching — do not send a dispatch to a stale or unknown pane ID.
-
-If panes.json contains stale IDs, update it manually or delete it and let path-based discovery take over on next delivery.
-
-### 9.2 Dispatch-routing — required via subprocess_dispatch.py
-
-Per ADR-010 (subprocess adapter as canonical Claude routing) and ADR-005 (NDJSON ledger as primary observability):
-
-For any feature work (code edit + PR + tests), dispatches to T1/T2/T3 MUST go via subprocess_dispatch.py. This path delivers Wave 5 smart-context injection (+30pp dispatch quality lift), Wave 1 shadow logging, receipt processor audit trail, lease management, and triple-gate contract_hash binding.
-
-#### Canonical dispatch command
-
-```bash
-# VNX paths (VNX_STATE_DIR / VNX_DATA_DIR / VNX_DISPATCH_DIR) resolve centrally
-# via the vnx runtime — do NOT hardcode .vnx-data/ literals here. A repo-local
-# pin forks state from the central store (~/.vnx-data/<project>) = split-brain.
-
-python3 scripts/lib/subprocess_dispatch.py \
-  --terminal-id T1 \
-  --dispatch-id "$(date +%Y%m%d-%H%M%S)-<slug>" \
-  --model sonnet \
-  --role backend-developer \
-  --pr-id "<PR-ID>" \
-  --dispatch-paths "<comma-separated-allowed-paths>" \
-  --instruction "<inline instruction text>"
-```
-
-Required flags: --terminal-id, --dispatch-id, --instruction. Strongly recommended: --role (skill injection), --pr-id (Wave 5 prior-round findings keyed by pr_id), --dispatch-paths (scope guard).
-
-#### FORBIDDEN for feature work
-
-```bash
-# DO NOT USE for code/PR work — bypasses Wave 5, audit, lease, governance:
-Bash(claude --print --model sonnet "...")
-Bash(claude -p "...")
-```
-
-Direct claude --print is acceptable ONLY for pure utility invocations (parsing, ad-hoc analysis, debug checks) that have no PR outcome and do not contribute to Wave 1/5 burn-in metrics.
-
-#### Decision rule
-
-| Task | Path |
-|---|---|
-| Code edit + PR + tests | subprocess_dispatch.py |
-| PR review gate (codex_gate, gemini_review) | scripts/review_gate_manager.py request-and-execute (or scripts/t0_gate_enforcement.sh wrapper) |
-| Burn-in measurement work | subprocess_dispatch.py REQUIRED |
-| Utility script (transcribe, parse) | direct Bash (no claude needed) |
-| Ad-hoc claude-as-utility | direct Bash claude --print acceptable |
-
-Gate execution (codex_gate, gemini_review) uses `scripts/review_gate_manager.py request-and-execute` OR `scripts/t0_gate_enforcement.sh` — these create the canonical `review_gates/requests` and `review_gates/results` artifacts that closure verification depends on. `subprocess_dispatch.py` dispatches feature work to T1/T2/T3 workers; its `--gate` flag is metadata for auto-commit tagging, not gate execution.
-
-Rule of thumb: Does the work produce a PR or a measurement? Then subprocess_dispatch.py. Does the work produce a gate result? Then review_gate_manager.py or t0_gate_enforcement.sh. Otherwise Bash is fine.
-
-## 11. Manager Block Quality Standard
-
-Every dispatch must include:
-
-1. `[[TARGET:A|B|C]]`
-2. `[[DONE]]`
-3. Required headers:
-   1. `Role` — the primary routing field (skill name); replaces the old Track A/B/C model
-   2. `Terminal` — optional; legacy terminal-pin. Role-scoped pool is the default.
-   3. `PR-ID`
-   4. `Priority`
-   5. `Cognition`
-   6. `Dispatch-ID`
-   7. `Parent-Dispatch`
-   8. `Reason`
-4. `Context`
-5. Explicit success criteria
-6. If the dispatch requests a headless review gate, it must name the expected report path and required receipt/result linkage
-
-**T0 Write/Edit scope (HARD LIMIT):**
-- T0 may ONLY write to `/tmp/*` (ephemeral scratch) and `.vnx-data/dispatches/staging/`
-- `claudedocs/*` analysis reports are WORKER output, not T0 output — FORBIDDEN for T0
-
-Validate role names before init, promote, and dispatch when uncertain:
-
-```bash
-python3 scripts/validate_skill.py --list
-```
-
-## 12. Recommended Script Toolbox
-
-1. `.claude/skills/t0-orchestrator/scripts/queue_status.sh`
-- queue/staging/terminal summary
-
-2. `.claude/skills/t0-orchestrator/scripts/deliverable_review.sh`
-- PR-focused open-item checks
-
-3. `.claude/skills/t0-orchestrator/scripts/dispatch_guard.sh`
-- go/no-go guard
-
-4. `.claude/skills/t0-orchestrator/scripts/provider_capabilities.sh`
-- provider constraints and routing hints
-
-5. `.claude/skills/t0-orchestrator/scripts/staging_helper.sh`
-- staging convenience wrapper
-
-6. `.claude/skills/t0-orchestrator/scripts/intelligence.sh`
-- intelligence read helpers
-
-## 13. Decision Outputs
-
-When not dispatching, provide explicit status to user:
-
-1. `WAIT`: explain exact blocker (terminal busy, queue active, dependency unmet).
-2. `ESCALATE`: explain ambiguity and propose options.
-3. `PROCEED`: show why criteria are met.
-
-## 14. References
-
-1. `references/dispatch-patterns.md`
-2. `references/example-workflows.md`
-3. `references/provider-matrix.md`
-4. `references/feature-plan.md`
-5. `template.md`
-6. `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`
-7. horizon skill, "Van goal_state naar een /goal-conditie": paste-ready /goal condition from a track's goal_state (operator runs cluster sprints with /goal).
-
----
-
-## 15. Session Resume After Crash
-
-When T0 or a worker terminal crashes and the conversation context is lost:
-
-### 14.1 Find the Session ID
-
-**Option A: Query Claude Code's conversation index**
-
-```bash
-# Find sessions associated with this worktree's terminals
-sqlite3 ~/.claude/conversation-index.db \
-  "SELECT session_id, cwd, last_message \
-   FROM conversations \
-   WHERE cwd LIKE '$(pwd)/.claude/terminals/T%' \
-   ORDER BY last_message DESC LIMIT 5;"
-```
-
-This uses the path containment invariant: `session.cwd` in `<PROJECT_ROOT>/.claude/terminals/T{N}` → session belongs to this worktree.
-
-**Option B: Query dispatch metadata (if session_id was captured)**
-
-```bash
-python3 -c "
-import json
-from pathlib import Path
-dispatch_dir = Path('.vnx-data/dispatches')
-for d in sorted(dispatch_dir.glob('**/dispatch.json')):
-    try:
-        data = json.load(open(d))
-        sid = data.get('metadata', {}).get('session_id')
-        if sid:
-            print(f'{d.parent.name}: {sid}')
-    except:
-        pass
-"
-```
-
-Note: session_id capture in dispatch metadata is not yet implemented. Option A is the primary path.
-
-### 14.2 Resume the Conversation
-
-```bash
-# Navigate to the correct terminal directory first
-cd $PROJECT_ROOT/.claude/terminals/<TERMINAL>
-claude --resume <session_id>
-```
-
-If multiple sessions exist for the same terminal, pick the one with the most recent `last_message` timestamp.
-
-### 14.3 Worker Session Resume via Dispatch
-
-Worker terminals (T1/T2/T3) should be resumed via a new dispatch, not by T0 manually resuming their sessions. When a worker crashes mid-task:
-
-1. Run the startup reconciliation procedure (section 6.2) to assess damage.
-2. Check for orphaned dispatches in `active/` (section 6.3).
-3. Create a re-dispatch to the affected worker with the remaining task scope.
-4. The re-dispatched worker starts fresh — dispatch context is not preserved by `--resume`.
-
-### 14.4 Important Limitations
-
-- `--resume` restores conversation **message history only** — it does NOT restore in-flight dispatch context, local variable state, or queued actions.
-- A resumed T0 session should be treated as a read-only history reference. Re-run the startup reconciliation before taking any new orchestration actions.
-- The `--fork-session` flag creates a new session_id while showing the old history — use this if you want to avoid attaching back to the original session.
-
----
-
-## Skill Activation Announcement
-
-**MANDATORY — first line of every response after skill load:**
-
-```
-🔧 Skill actief: t0-orchestrator
-```
-
-No exceptions. This must appear before any other content.
+Efficiency: risk ≤ 0.3 + success + no blockers → fast path (skip deep verification).
+Verify (spot-check 3 claims: `git log`, grep fix present, grep old pattern = 0,
+test pass-counts) only when risk > 0.3. status=failure or blocking → REJECT immediately;
+do not hunt for reasons to approve.
+
+Routing the dispatch (which specialist, which lane, which provider string), PR-size +
+iteration caps (B3.1/B3.2), and the recurring failure modes: **`docs/core/DISPATCH_RULES.md`**.
+
+## 4. Quality advisory + receipt status
+
+Advisory is signal, not authority: `approve <0.3` standard · `0.3–0.5` careful · `hold >0.5`
+critical/likely-follow-up · `>0.8` block unless mitigated.
+
+Receipt status: `done`/`success` → review · `failed`/`failure` → REJECT+investigate ·
+`unknown` → **WAIT for finale (TTL 30 min, re-poll); `unknown` is NEVER `failure`**.
+Review-gate status + the full mapping: DISPATCH_RULES §2.
+
+## 5. Concurrency + billing (the two that bite)
+
+- **claude-tmux is subscription-session-capped, shared with every Claude agent on the
+  account → serialize it (N-slot, default 5).** Providers stay parallel. The door enforces
+  this (PR-6 lock + #1017 concurrency config); direct callers self-serialize
+  (`--claude-serial`). A ~0.1s `rc=1` exit = capacity, not a bug. See DISPATCH_RULES §6.
+- **Claude routes via the tmux subscription lane by default; headless `claude -p` is
+  opened (2026-08-11 operator directive) but usable-not-yet-governed** (ignores
+  `isolation=worktree`, report-gate gap — see DISPATCH_RULES §6). Both lanes run on the
+  subscription, not API billing — `cost=$0.0000` confirms it either way. See DISPATCH_RULES §6–8.
+
+## 6. Doubt and escalation
+
+When uncertain: (1) request a second review on the same evidence; (2) present 2–3 options
+with tradeoffs and ask go/no-go; (3) safety-first default — if ambiguity remains on
+blocker/warn criteria, do NOT complete the PR.
+
+## 7. Runbooks — one step to each recipe
+
+Startup reconciliation, post-crash lease recovery, orphaned-dispatch handling, OI-lifecycle
+and PR-queue operations are runbook recipes, not always-loaded skill content — see
+`docs/core/DISPATCH_RULES.md` §10 and the tools it names. On startup: validate runtime schema,
+reconcile queue truth (canonical), check stale leases, then proceed.
+
+The nine runbook sections moved out of this skill (OI-1191, 2026-08-14). One line each:
+
+1. THIN-T0 research/reporting boundaries → `docs/operations/T0_RUNBOOKS.md` §1
+2. Open Items Lifecycle → `docs/operations/T0_RUNBOOKS.md` §2
+3. PR Queue Lifecycle → `docs/operations/T0_RUNBOOKS.md` §3
+4. Dispatch Guard + provider awareness → `docs/operations/T0_RUNBOOKS.md` §4
+5. Manager Block Quality Standard → `docs/core/DISPATCH_RULES.md` §9 + `docs/operations/T0_RUNBOOKS.md` §5
+6. Script Toolbox → `docs/operations/T0_RUNBOOKS.md` §6
+7. Decision Outputs (WAIT/ESCALATE/PROCEED) → `docs/operations/T0_RUNBOOKS.md` §7
+8. Session Resume after crash → `docs/core/60_CONVERSATION_RESUME_CONTRACT.md` + `docs/operations/T0_RUNBOOKS.md` §8
+9. Skill Activation announcement → `docs/operations/T0_RUNBOOKS.md` §9
+
+## References
+
+- `docs/core/DISPATCH_RULES.md` — the enforced dispatch ruleset (SSOT).
+- `docs/operations/T0_RUNBOOKS.md` — the runbook recipes indexed in §7.
+- `references/dispatch-patterns.md`, `references/example-workflows.md`,
+  `references/provider-matrix.md`, `references/feature-plan.md`, `template.md`.
+- `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`.
+- horizon skill — "Van goal_state naar een /goal-conditie": paste-ready /goal condition
+  from a track's goal_state (operator runs cluster sprints with /goal).
