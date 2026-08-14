@@ -14,7 +14,6 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
-import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,42 +36,28 @@ _OVERSIZE_FLAG_SUFFIX = ".oversize"
 
 
 def _events_dir() -> Path:
-    """Resolve the events directory: CENTRAL ($HOME/.vnx-data/<project_id>/events) by default.
+    """Resolve the events directory, failing loud on a read-only version store.
 
-    VNX_DATA_DIR override is honored ONLY when VNX_DATA_DIR_EXPLICIT=1 is also set,
-    mirroring the guard in provider_dispatch._resolve_data_dir() (OI-126, sweep H2).
-    Without the explicit flag, an inherited VNX_DATA_DIR in the shell environment
-    would cause a tmp-worktree dispatch to write its event stream to the wrong project
-    directory while the receipt lands in the central ledger — the split that caused
-    live event-stream loss on 2026-06-10 when a provider dispatch ran from a
-    tmp-worktree and the worktree was cleaned up before the stream could be read.
+    OI-1179: the previous two-flag guard honored ``VNX_DATA_DIR`` ONLY when
+    ``VNX_DATA_DIR_EXPLICIT=1`` was also set, so an operator who set a
+    legitimate ``VNX_DATA_DIR`` (worktree/CI override) was silently ignored and
+    the fallback landed on the read-only pinned version store
+    ``~/.vnx-system/versions/<v>/.vnx-data`` — where the append then failed
+    with a permission error.
 
-    Resolution order:
-    1. VNX_DATA_DIR_EXPLICIT=1 + VNX_DATA_DIR set → VNX_DATA_DIR/events
-    2. VNX_PROJECT_ID set → $HOME/.vnx-data/<project_id>/events  (central ledger)
-    3. Fallback → .vnx-data/events relative to repo root  (backwards-compat for
-       single-project environments that never set VNX_PROJECT_ID)
+    Resolution order is now env-first and shared with
+    ``headless_dispatch_daemon._default_data_dir`` via
+    ``data_dir_resolution.resolve_data_dir_fail_loud``:
+    1. VNX_DATA_DIR set           → VNX_DATA_DIR/events
+    2. VNX_PROJECT_ID set         → $HOME/.vnx-data/<project_id>/events  (central ledger)
+    3. Fallback → canonical resolver (vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+
+    Every step is refused with a ``DataDirResolutionError`` naming the chain if
+    it would land under ``~/.vnx-system/versions/`` — a read-only version store
+    is never a valid data dir.
     """
-    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
-    vnx_data = os.environ.get("VNX_DATA_DIR", "")
-    if vnx_data and not explicit_flag:
-        logger.warning(
-            "event_store._events_dir: VNX_DATA_DIR=%r ignored (VNX_DATA_DIR_EXPLICIT not set); "
-            "falling back to central events dir to prevent cross-project stream loss (OI-126 H2)",
-            vnx_data,
-        )
-    if explicit_flag and vnx_data:
-        return Path(vnx_data).expanduser().resolve() / "events"
-    project_id = os.environ.get("VNX_PROJECT_ID", "")
-    if project_id:
-        return Path.home() / ".vnx-data" / project_id / "events"
-    # Backwards-compat: no explicit VNX_DATA_DIR and no VNX_PROJECT_ID. Route
-    # through the canonical resolver (VNX_HOME + project-marker aware), which
-    # resolves ~/.vnx-data/<project>. A __file__ walk (script_dir.parent.parent)
-    # would resolve the keystone (~/.vnx-system/current/.vnx-data) in a central
-    # install, losing the event stream. See #1023.
-    from vnx_paths import resolve_paths
-    return Path(resolve_paths()["VNX_DATA_DIR"]) / "events"
+    from data_dir_resolution import resolve_data_dir_fail_loud
+    return resolve_data_dir_fail_loud() / "events"
 
 
 class EventStore:

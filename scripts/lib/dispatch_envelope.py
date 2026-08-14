@@ -6,9 +6,11 @@ and/or "claude-subprocess".
 
 Seams: PREPARE -> ROUTE -> EXECUTE -> GOVERN
 
-GOVERN is fail-closed: a missing receipt_path raises EnvelopeGovernError — never
-silently loses a receipt. Report is emitted before the receipt so the receipt carries
-the linkage even when the report file is new (ADR-005).
+GOVERN decouples the work fate from the receipt fate (OI-1179): a missing
+receipt_path is recorded as a proof-chain gap (loud log + trail) — never silent
+and never flipped into a `failed` work status. Report is emitted before the
+receipt so the receipt carries the linkage even when the report file is new
+(ADR-005).
 
 Per-lane dual-receipt safety: GOVERN emits both report AND receipt. When the
 receipt NDJSON already contains a line for this dispatch_id (e.g. written by
@@ -345,7 +347,11 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
     """Run PREPARE -> ROUTE -> EXECUTE -> GOVERN for the given lane.
 
     Returns EnvelopeResult on success / failure / timeout.
-    Raises EnvelopeGovernError when GOVERN cannot confirm a receipt (fail-closed).
+
+    OI-1179: a receipt-emit failure no longer raises — ``_govern`` records a
+    proof-chain gap (loud error log + ``receipt_emit_failures.ndjson`` trail)
+    and returns ``receipt_path=None``, so ``returncode`` still reflects whether
+    the WORK succeeded, never whether the proof landed.
     """
     # ROUTE
     router = LaneRouter()
@@ -420,7 +426,6 @@ def run_envelope_plan(
     Raises:
         PermissionError: permit was not issued by issue_permit for this plan.
         ValueError: plan.lane is not "provider".
-        EnvelopeGovernError: GOVERN cannot confirm receipt (fail-closed).
     """
     from dispatch_internal import is_valid_instruction_hash, require_permit  # noqa: PLC0415
 
@@ -649,7 +654,6 @@ def run_envelope_headless_plan(
     Raises:
         PermissionError: permit was not issued by issue_permit for this plan.
         ValueError: plan.lane is not "claude_headless".
-        EnvelopeGovernError: GOVERN cannot confirm receipt (fail-closed).
     """
     from dispatch_internal import is_valid_instruction_hash, require_permit  # noqa: PLC0415
 
