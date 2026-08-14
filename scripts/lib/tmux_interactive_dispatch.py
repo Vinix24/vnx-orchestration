@@ -1219,7 +1219,7 @@ class TmuxInteractiveDispatch:
         self,
         dispatch_id: str,
         label: str,
-        model: str = "unknown",
+        model: str = "",
         *,
         integrity=None,
         permission_posture: "dict | None" = None,
@@ -2284,6 +2284,7 @@ class TmuxInteractiveDispatch:
                         _pg_report = build_process_gone_failure_report(
                             dispatch_id,
                             liveness_reason=_liveness.reason,
+                            model=model,
                             terminal_id=label or "",
                         )
                         _reports_dir = self._state_dir.parent / "unified_reports"
@@ -2364,6 +2365,7 @@ class TmuxInteractiveDispatch:
                             _hb_report = build_heartbeat_failure_report(
                                 dispatch_id=dispatch_id,
                                 verdict=_hb_verdict,
+                                model=model,
                                 terminal_id=label or "",
                             )
                             _reports_dir = (

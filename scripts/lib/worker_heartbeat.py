@@ -335,7 +335,7 @@ def build_process_gone_failure_report(
     dispatch_id: str,
     *,
     liveness_reason: str,
-    model: str = "unknown",
+    model: str = "",
     provider: str = "unknown",
     terminal_id: str = "",
 ) -> str:
@@ -395,7 +395,7 @@ def build_heartbeat_failure_report(
     dispatch_id: str,
     verdict: SilenceVerdict,
     *,
-    model: str = "unknown",
+    model: str = "",
     provider: str = "unknown",
     terminal_id: str = "",
 ) -> str:

@@ -1263,7 +1263,7 @@ def spawn_kimi(
             target=_heartbeat_monitor_loop,
             args=(
                 proc, heartbeat_log_path, dispatch_id, terminal_id,
-                model or "unknown", _hb_stop, _hb_killed,
+                model or "", _hb_stop, _hb_killed,
             ),
             daemon=True,
             name=f"kimi-heartbeat-{dispatch_id}",

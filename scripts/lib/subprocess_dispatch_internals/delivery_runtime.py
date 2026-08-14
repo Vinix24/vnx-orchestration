@@ -52,6 +52,7 @@ def _silence_heartbeat_loop(
     interval: float = 30.0,
     process_cell: list | None = None,
     adapter: object | None = None,
+    model: str = "",
 ) -> None:
     """Monitor the EventStore for silence and kill the worker if stuck.
 
@@ -129,6 +130,7 @@ def _silence_heartbeat_loop(
                 _report = build_heartbeat_failure_report(
                     dispatch_id=dispatch_id,
                     verdict=verdict,
+                    model=model,
                     terminal_id=terminal_id,
                 )
                 from vnx_paths import resolve_paths
