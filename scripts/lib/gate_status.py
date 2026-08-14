@@ -114,6 +114,26 @@ def canonical_status(result: Dict[str, Any]) -> str:
     return status
 
 
+def has_complete_evidence(result: Dict[str, Any]) -> bool:
+    """True when a gate result carries a complete evidence trail (OI-1178).
+
+    A gate that actually ran and produced a verdict materializes BOTH a
+    non-empty ``contract_hash`` (the hashed contract it judged) and a
+    non-empty ``report_path`` (the on-disk report of its findings). An
+    infra failure booked by ``gate_recorder.record_failure`` carries
+    neither: ``report_path`` is always "" and ``contract_hash`` echoes
+    whatever the never-executed request carried, typically "". Requiring
+    BOTH non-empty separates "a gate ran and decided" from "the gate never
+    ran" — the latter must never be summed up as a PASS.
+    """
+    contract_hash = result.get("contract_hash")
+    report_path = result.get("report_path")
+    return (
+        isinstance(contract_hash, str) and bool(contract_hash.strip())
+        and isinstance(report_path, str) and bool(report_path.strip())
+    )
+
+
 def has_producer_identity(result: Dict[str, Any]) -> bool:
     """True when a gate result carries a producer identity (OI-1093).
 

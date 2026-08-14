@@ -104,6 +104,8 @@ _g_show_results() {
 
   python3 -c "
 import json, os, glob, sys
+sys.path.insert(0, '$VNX_HOME/scripts/lib')
+from gate_status import has_complete_evidence, is_pass
 
 gate_dir = '$gate_dir'
 pr = '$pr'
@@ -121,6 +123,7 @@ for f in glob.glob(os.path.join(gate_dir, '*.json')):
             'blocking': len(d.get('blocking_findings', [])),
             'summary': d.get('summary', '')[:60],
             'recorded_at': d.get('recorded_at', '?')[:19],
+            'detail': d,
         })
     except Exception:
         pass
@@ -134,8 +137,20 @@ fmt = '  {:<20} {:<8} {:<10} {:<8} {}'
 print(fmt.format('Gate', 'PR', 'Status', 'Blocking', 'Recorded'))
 print('  ' + '-'*68)
 for r in results:
+    d = r['detail']
     status = r['status']
-    marker = 'PASS' if status == 'completed' else 'FAIL' if status == 'failed' else status[:8]
+    # OI-1178: a gate that never ran must never read as PASS. Classify the
+    # canonical statuses explicitly and fall back to is_pass() + evidence so a
+    # hand-authored or drifting record cannot masquerade as a decided pass.
+    if status == 'unavailable':
+        marker = 'UNAVAIL'
+    elif status in ('not_executable', 'not_configured'):
+        marker = 'NOEXEC'
+    elif status in ('failed', 'fail', 'blocked'):
+        marker = 'FAIL'
+    else:
+        passed, _ = is_pass(d)
+        marker = 'PASS' if (passed and has_complete_evidence(d)) else status[:8]
     print(fmt.format(str(r['gate'])[:19], str(r['pr'])[:7], marker, str(r['blocking']), r['recorded_at']))
 "
 }
@@ -288,7 +303,7 @@ HELP
     if [ "$exit_code" -eq 0 ]; then
       log "[gate] Gate '$only_gate': PASS"
     else
-      err "[gate] Gate '$only_gate': FAIL (exit $exit_code)"
+      err "[gate] Gate '$only_gate': did not PASS (exit $exit_code)"
     fi
     return "$exit_code"
 
@@ -317,7 +332,7 @@ HELP
     if [ "$exit_code" -eq 0 ]; then
       log "[gate] All gates PASS for PR $pr_number"
     else
-      err "[gate] One or more gates FAILED for PR $pr_number (exit $exit_code)"
+      err "[gate] One or more gates did not PASS for PR $pr_number (exit $exit_code)"
     fi
     return "$exit_code"
   fi
