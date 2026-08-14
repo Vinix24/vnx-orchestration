@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
@@ -121,7 +122,7 @@ class TestCodexIsolation:
                 exit_code = provider_dispatch._dispatch_codex(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("iso-codex-001")
+        mock_create.assert_called_once_with("iso-codex-001", base_ref=None)
         mock_remove.assert_called_once_with("iso-codex-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
@@ -152,7 +153,7 @@ class TestCodexIsolation:
             exit_code = provider_dispatch._dispatch_codex(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("default-iso-codex")
+        mock_create.assert_called_once_with("default-iso-codex", base_ref=None)
         mock_remove.assert_called_once_with("default-iso-codex", terminal_id="T1")
         assert captured.get("cwd") == _FAKE_WT_PATH
 
@@ -207,7 +208,7 @@ class TestGeminiIsolation:
             exit_code = provider_dispatch._dispatch_gemini(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("iso-gemini-001")
+        mock_create.assert_called_once_with("iso-gemini-001", base_ref=None)
         mock_remove.assert_called_once_with("iso-gemini-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
@@ -236,7 +237,7 @@ class TestGeminiIsolation:
             exit_code = provider_dispatch._dispatch_gemini(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("default-iso-gemini")
+        mock_create.assert_called_once_with("default-iso-gemini", base_ref=None)
         mock_remove.assert_called_once_with("default-iso-gemini", terminal_id="T1")
         assert captured.get("cwd") == _FAKE_WT_PATH
 
@@ -271,7 +272,7 @@ class TestKimiIsolation:
             exit_code = provider_dispatch._dispatch_kimi(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("iso-kimi-001")
+        mock_create.assert_called_once_with("iso-kimi-001", base_ref=None)
         mock_remove.assert_called_once_with("iso-kimi-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
@@ -301,7 +302,7 @@ class TestKimiIsolation:
             exit_code = provider_dispatch._dispatch_kimi(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("default-iso-kimi")
+        mock_create.assert_called_once_with("default-iso-kimi", base_ref=None)
         mock_remove.assert_called_once_with("default-iso-kimi", terminal_id="T1")
         assert captured.get("cwd") == _FAKE_WT_PATH
 
@@ -341,7 +342,7 @@ class TestLiteLLMIsolation:
             exit_code = provider_dispatch._dispatch_litellm(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("iso-litellm-001")
+        mock_create.assert_called_once_with("iso-litellm-001", base_ref=None)
         mock_remove.assert_called_once_with("iso-litellm-001", terminal_id="T1")
         assert captured["cwd"] == _FAKE_WT_PATH
 
@@ -376,7 +377,7 @@ class TestLiteLLMIsolation:
             exit_code = provider_dispatch._dispatch_litellm(args)
 
         assert exit_code == 0
-        mock_create.assert_called_once_with("default-iso-litellm")
+        mock_create.assert_called_once_with("default-iso-litellm", base_ref=None)
         mock_remove.assert_called_once_with("default-iso-litellm", terminal_id="T1")
         assert captured.get("cwd") == _FAKE_WT_PATH
 
@@ -392,7 +393,7 @@ class TestProviderWorktreeHelpers:
              patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=tmp_path) as mock_create:
             result = provider_dispatch._create_provider_worktree("helper-create-test")
         assert result == tmp_path
-        mock_create.assert_called_once_with("helper-create-test", project_root=consumer_root)
+        mock_create.assert_called_once_with("helper-create-test", project_root=consumer_root, base_ref=None)
 
     def test_create_raises_on_runtime_error(self):
         with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=Path("/tmp/consumer")), \
@@ -468,7 +469,7 @@ class TestCodexIsolationFailLoud:
             exit_code = provider_dispatch._dispatch_codex(args)
 
         assert exit_code == 1
-        mock_create.assert_called_once_with("fail-loud-codex")
+        mock_create.assert_called_once_with("fail-loud-codex", base_ref=None)
         assert spawn_called == [], "spawn_codex must NOT be called when worktree creation fails"
 
 
@@ -496,7 +497,7 @@ class TestGeminiIsolationFailLoud:
             exit_code = provider_dispatch._dispatch_gemini(args)
 
         assert exit_code == 1
-        mock_create.assert_called_once_with("fail-loud-gemini")
+        mock_create.assert_called_once_with("fail-loud-gemini", base_ref=None)
         assert spawn_called == [], "spawn_gemini must NOT be called when worktree creation fails"
 
 
@@ -525,7 +526,7 @@ class TestKimiIsolationFailLoud:
             exit_code = provider_dispatch._dispatch_kimi(args)
 
         assert exit_code == 1
-        mock_create.assert_called_once_with("fail-loud-kimi")
+        mock_create.assert_called_once_with("fail-loud-kimi", base_ref=None)
         assert spawn_called == [], "spawn_kimi must NOT be called when worktree creation fails"
 
 
@@ -559,7 +560,7 @@ class TestLiteLLMIsolationFailLoud:
             exit_code = provider_dispatch._dispatch_litellm(args)
 
         assert exit_code == 1
-        mock_create.assert_called_once_with("fail-loud-litellm")
+        mock_create.assert_called_once_with("fail-loud-litellm", base_ref=None)
         assert spawn_called == [], "spawn_litellm must NOT be called when worktree creation fails"
 
 
@@ -1163,3 +1164,183 @@ class TestOi1106BaseFromClaimNotPlanBaseRef:
         assert any("claim" in (r.getMessage() or "").lower() for r in records), (
             "expected a loud degradation log mentioning the claim fallback"
         )
+
+
+# ---------------------------------------------------------------------------
+# OI-1176: base_ref must flow spec -> _prepare_provider_workdir ->
+# _create_provider_worktree -> create_dispatch_worktree, for EVERY provider lane.
+# Before the fix _prepare_provider_workdir called _create_provider_worktree
+# (dispatch_id) with no base_ref, so a dispatch with base_ref=origin/<branch>
+# silently isolated on origin/main. The VNX_DISPATCH_LEGACY=1 rollback routes
+# straight here, so the rollback button was also the base_ref-drop button.
+# ---------------------------------------------------------------------------
+
+
+class TestProviderBaseRefThreading:
+    def _init_diverged_repo(self, tmp_path, monkeypatch) -> Path:
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        # Divergent feature branch so origin/feature != origin/main.
+        subprocess.run(
+            ["git", "-C", str(local), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        (local / "feature.txt").write_text("feature\n")
+        subprocess.run(
+            ["git", "-C", str(local), "add", "feature.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "commit", "-m", "feature commit"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "push", "-u", "origin", "feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(local), "checkout", "main"],
+            check=True, capture_output=True,
+        )
+        return local
+
+    def _rev_parse(self, root: Path, ref: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", ref], text=True
+        ).strip()
+
+    def _run_dispatch(self, dispatch_fn, provider, argv, spawn_target, local, model_patches):
+        captured = {}
+
+        def fake_spawn(**kwargs):
+            wt = kwargs.get("cwd")
+            captured["head"] = subprocess.check_output(
+                ["git", "-C", str(wt), "rev-parse", "HEAD"], text=True
+            ).strip()
+            return _make_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+        mock_event_store.clear = MagicMock()
+
+        patches = [
+            patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=local),
+            patch("provider_dispatch._emit_governance", side_effect=_noop_governance),
+            patch("provider_dispatch._enrich_instruction", return_value="noop"),
+            patch("event_store.EventStore", return_value=mock_event_store),
+            patch(spawn_target, side_effect=fake_spawn),
+        ]
+        for target, ret in model_patches:
+            patches.append(patch(target, return_value=ret))
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            args = provider_dispatch._build_parser().parse_args(argv)
+            exit_code = dispatch_fn(args)
+
+        return exit_code, captured.get("head")
+
+    @pytest.mark.parametrize(
+        "provider, dispatch_fn_name, spawn_target, model_patches",
+        [
+            ("codex", "_dispatch_codex", "provider_spawns.codex_spawn.spawn_codex",
+             [("provider_dispatch._resolve_codex_model", "gpt-test")]),
+            ("kimi", "_dispatch_kimi", "provider_spawns.kimi_spawn.spawn_kimi",
+             [("provider_dispatch._kimi_resolve_requested_key", "kimi-k3"),
+              ("provider_dispatch._kimi_resolve_cli_model_arg", "kimi-k3")]),
+            ("gemini", "_dispatch_gemini", "provider_spawns.gemini_spawn.spawn_gemini",
+             []),
+        ],
+        ids=["codex", "kimi", "gemini"],
+    )
+    def test_worktree_based_on_spec_base_ref(
+        self, provider, dispatch_fn_name, spawn_target, model_patches, tmp_path, monkeypatch
+    ):
+        """A provider dispatch with --base-ref origin/feature isolates on that
+        branch, not origin/main.  Fails without the OI-1176 fix (worktree HEAD
+        would be origin/main)."""
+        local = self._init_diverged_repo(tmp_path, monkeypatch)
+        feature_sha = self._rev_parse(local, "origin/feature")
+        main_sha = self._rev_parse(local, "origin/main")
+        assert feature_sha != main_sha, "fixture: feature must diverge from main"
+
+        argv = [
+            "--provider", provider,
+            "--terminal-id", "T1",
+            "--dispatch-id", f"oi1176-{provider}",
+            "--instruction", "noop",
+            "--model", "sonnet",
+            "--base-ref", "origin/feature",
+        ]
+        dispatch_fn = getattr(provider_dispatch, dispatch_fn_name)
+        exit_code, head = self._run_dispatch(
+            dispatch_fn, provider, argv, spawn_target, local, model_patches
+        )
+
+        assert exit_code == 0
+        assert head == feature_sha, (
+            f"{provider} worktree HEAD {head!r} != spec base_ref origin/feature "
+            f"{feature_sha!r} — base_ref was dropped (silent origin/main fallback)"
+        )
+        assert head != main_sha
+
+    def test_unresolvable_base_ref_fails_loud(self, tmp_path, monkeypatch):
+        """An unresolvable base_ref raises RuntimeError from the allocator and
+        creates NO worktree — never a silent origin/main fallback."""
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=local):
+            with pytest.raises(RuntimeError, match="cannot resolve base_ref"):
+                provider_dispatch._create_provider_worktree(
+                    "oi1176-unresolvable", base_ref="origin/does-not-exist"
+                )
+
+        wt_dir = local / ".vnx-data" / "worktrees" / "dispatch-oi1176-unresolvable"
+        assert not wt_dir.exists()
+
+    def test_unresolvable_base_ref_aborts_dispatch(self, tmp_path, monkeypatch):
+        """End-to-end: _dispatch_codex with an unresolvable --base-ref aborts
+        (return 1) and never reaches spawn — the isolation guarantee never
+        silently deviates."""
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        spawn_called = []
+
+        def fake_spawn(**kwargs):
+            spawn_called.append(kwargs)
+            return _make_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+        mock_event_store.clear = MagicMock()
+
+        argv = [
+            "--provider", "codex",
+            "--terminal-id", "T1",
+            "--dispatch-id", "oi1176-bad-ref",
+            "--instruction", "noop",
+            "--model", "sonnet",
+            "--base-ref", "origin/does-not-exist",
+        ]
+        with ExitStack() as stack:
+            stack.enter_context(patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=local))
+            stack.enter_context(patch("provider_dispatch._emit_governance", side_effect=_noop_governance))
+            stack.enter_context(patch("provider_dispatch._enrich_instruction", return_value="noop"))
+            stack.enter_context(patch("provider_dispatch._resolve_codex_model", return_value="gpt-test"))
+            stack.enter_context(patch("event_store.EventStore", return_value=mock_event_store))
+            stack.enter_context(patch("provider_spawns.codex_spawn.spawn_codex", side_effect=fake_spawn))
+            args = provider_dispatch._build_parser().parse_args(argv)
+            exit_code = provider_dispatch._dispatch_codex(args)
+
+        assert exit_code == 1
+        assert spawn_called == [], "spawn_codex must NOT run when base_ref is unresolvable"
+        assert not (local / ".vnx-data" / "worktrees" / "dispatch-oi1176-bad-ref").exists()

@@ -1266,6 +1266,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--deadline-seconds", type=int, default=900,
         help="Total deadline in seconds for the dispatch (default 900, matches spawn_claude default).",
     )
+    parser.add_argument(
+        "--base-ref", default=None, dest="base_ref",
+        help=(
+            "Base ref for the isolated dispatch worktree (mirrors the tmux lane's "
+            "--base-ref and the dispatch spec's plan.base_ref). Threads the spec value "
+            "into create_dispatch_worktree so a fix-forward or PR-base dispatch is "
+            "isolated on the correct merge-base. Unset -> origin/main (or "
+            "VNX_BENCH_WORKTREE_BASE_REF for the benchmark harness)."
+        ),
+    )
     return parser
 
 
@@ -1468,12 +1478,19 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
         _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
 
 
-def _create_provider_worktree(dispatch_id: str) -> Path:
+def _create_provider_worktree(dispatch_id: str, base_ref: Optional[str] = None) -> Path:
     """Create an isolated worktree for a provider dispatch.
 
     Always called (isolation default-on since OI-1090).  Returns the worktree
     Path on success, raises RuntimeError on failure — no shared-checkout
     fallback.
+
+    *base_ref* (the dispatch spec's ``plan.base_ref``) is threaded straight into
+    create_dispatch_worktree so the provider lane isolates on the same merge-base
+    the tmux lane honors.  None lets create_dispatch_worktree apply its own
+    precedence (VNX_BENCH_WORKTREE_BASE_REF, then origin/main).  An unresolvable
+    explicit base_ref fails LOUD inside create_dispatch_worktree — there is no
+    silent fallback to origin/main.
 
     Resolves the CONSUMER project root explicitly (dispatch_worktree_isolation.
     resolve_consumer_project_root) and threads it into create_dispatch_worktree
@@ -1487,7 +1504,7 @@ def _create_provider_worktree(dispatch_id: str) -> Path:
         resolve_consumer_project_root,
     )
     project_root = resolve_consumer_project_root()
-    wt_path = create_dispatch_worktree(dispatch_id, project_root=project_root)
+    wt_path = create_dispatch_worktree(dispatch_id, project_root=project_root, base_ref=base_ref)
     logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
     return wt_path
 
@@ -1499,8 +1516,16 @@ def _prepare_provider_workdir(
 
     Always creates an isolated worktree (default-on since OI-1090).
     Raises RuntimeError on failure — no shared-checkout fallback.
+
+    OI-1176: threads args.base_ref (the dispatch spec's plan.base_ref) into
+    _create_provider_worktree.  Every provider lane goes through here, so a
+    fix-forward dispatch isolated on origin/<branch> keeps that branch instead
+    of silently falling back to origin/main.
     """
-    isolation_worktree = _create_provider_worktree(args.dispatch_id)
+    base_ref = getattr(args, "base_ref", None)
+    if not isinstance(base_ref, str):
+        base_ref = None
+    isolation_worktree = _create_provider_worktree(args.dispatch_id, base_ref=base_ref)
 
     # VNX_BENCH_REQUIRE_ISOLATION: the benchmark's fail-closed assertion that
     # isolation must be active.  Since isolation is now unconditional, this
