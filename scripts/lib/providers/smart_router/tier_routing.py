@@ -3,11 +3,9 @@
 Tier→provider mappings (honoring provider_constraints.yaml):
   tier-zero → DeepSeek (deepseek-v4-flash) via Claude-harness key-auth
                (DEEPSEEK_API_KEY required); fallback Codex via provider lane.
-               Local-gemma route preserved but unused — reactivate when
-               gemma-4-12b-integration ships.
   tier-low  → DeepSeek (deepseek-v4-flash) via Claude-harness key-auth
-               (DEEPSEEK_API_KEY required); fallback Codex via provider lane
-               (kimi quota exhausted 2026-08-02, OI-940)
+               (DEEPSEEK_API_KEY required); runtime fallback Kimi CLI
+               (kimi-k3, kimi-via-cli-only) then Codex.
   tier-mid  → sonnet-5  (canonical registry key — see wave7_models.yaml)
   tier-high → opus-5    (canonical registry key — see wave7_models.yaml)
 
@@ -17,6 +15,15 @@ identity (dispatch-20260802-model-ssot-en-ketenlink). The previous 4-series
 ids (claude-sonnet-4-6 / claude-opus-4-8) were not registry keys and would
 reject with model-not-in-current-registry the moment tier-mid/tier-high
 actually routed; the fleet now runs the 5-series.
+
+Availability is a runtime signal, not a code comment. Each non-Claude lane is
+gated by ``availability.lane_available`` (env vars, CLI presence, cooldown) at
+decision time. A lane that fails on quota/auth is recorded by
+``availability.record_lane_failure`` and auto-recovers after its cooldown
+period — no code edit or release required to bring it back. Kimi is a regular
+route in the tier map again (through the availability check), and local-gemma
+stays disabled via the availability layer's explicit reason, not as a
+commented-out block.
 
 Constraint references (provider_constraints.yaml):
   kimi-via-cli-only: Kimi must use lane='kimi_cli', never via=api/moonshot
@@ -29,6 +36,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from .cost_tier import TIER_ZERO, TIER_LOW, TIER_MID, TIER_HIGH
@@ -44,41 +52,48 @@ class TierRoute:
     lane: str
     env_requirements: tuple = field(default_factory=tuple)
     fallback: Optional["TierRoute"] = None
+    reason: Optional[str] = None  # why this route was chosen over its primary
 
 
-# ── tier-zero / tier-low routes ──
-# DeepSeek flash via claude-harness is the primary route for both entry tiers
-# (operator decision 2026-08-02: skip local models for now).  When
-# DEEPSEEK_API_KEY is absent, both fall back to Codex via provider lane
-# (kimi quota exhausted 2026-08-02, OI-940).  resolve_tier_route() creates
-# routes on the fly so the tier field is correct in every return value.
+def _codex_route(tier: str, reason: Optional[str] = None) -> TierRoute:
+    """Codex vangnet — the last-resort provider lane (OI-940)."""
+    return TierRoute(
+        tier=tier,
+        provider="codex",
+        model="gpt-5.5",
+        lane="provider",
+        reason=reason,
+    )
 
-# Preserved but unused: local Gemma route. Reactivate when gemma-4-12b-integration
-# ships (queued track). The Gemma chain (primary + Ollama fallback) is intact below
-# but never returned by resolve_tier_route.
-# _ROUTE_LOCAL_GEMMA_FALLBACK = TierRoute(
-#     tier=TIER_ZERO,
-#     provider="ollama",
-#     model="gemma:4b",
-#     lane="ollama",
-# )
-# _ROUTE_LOCAL_GEMMA = TierRoute(
-#     tier=TIER_ZERO,
-#     provider="local-gemma",
-#     model="gemma-4b-e4b-mlx",
-#     lane="mlx",
-#     fallback=_ROUTE_LOCAL_GEMMA_FALLBACK,
-# )
 
-# Preserved but unused: Kimi CLI route (kimi-via-cli-only constraint).  Kimi quota
-# was exhausted 2026-08-02 (OI-940); Codex is the active fallback.  Reactivate when
-# quota is restored or a new Kimi model tier is added.
-# _ROUTE_KIMI = TierRoute(
-#     tier=TIER_LOW,
-#     provider="kimi",
-#     model="kimi-k2",
-#     lane="kimi_cli",
-# )
+def _deepseek_route(tier: str) -> TierRoute:
+    """DeepSeek flash via claude-harness key-auth (deepseek-chat discontinued
+    2026-07-24)."""
+    return TierRoute(
+        tier=tier,
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        lane="claude_harness_keyed",
+        env_requirements=("DEEPSEEK_API_KEY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+        fallback=_codex_route(tier),
+    )
+
+
+def _kimi_route(tier: str, reason: Optional[str] = None) -> TierRoute:
+    """Kimi CLI route (kimi-via-cli-only: never via=api/moonshot).
+
+    kimi-k3 is the canonical registry key (kimi_cli.default_model in
+    wave7_models.yaml). Codex remains the vangnet behind it.
+    """
+    return TierRoute(
+        tier=tier,
+        provider="kimi",
+        model="kimi-k3",
+        lane="kimi_cli",
+        fallback=_codex_route(tier),
+        reason=reason,
+    )
+
 
 _ROUTE_MID = TierRoute(
     tier=TIER_MID,
@@ -95,48 +110,75 @@ _ROUTE_HIGH = TierRoute(
 )
 
 
-def _deepseek_available(env: dict) -> bool:
-    """DeepSeek harness is allowed only when DEEPSEEK_API_KEY is present.
+def _deepseek_has_key(env: dict) -> bool:
+    """True when DEEPSEEK_API_KEY is present (static check, no cooldown).
 
-    Implements deepseek-harness-subscription-blocked: own key + hardening required;
-    routing through the production OAuth subscription is blocked.
+    Kept separate from the full availability check so the missing-key case
+    preserves the pre-existing behaviour (codex fallback, kimi NOT consulted)
+    while the key-present-but-in-cooldown case can fall through to kimi.
+    Implements deepseek-harness-subscription-blocked: own key + hardening
+    required; routing through the production OAuth subscription is blocked.
     """
     return bool(env.get("DEEPSEEK_API_KEY"))
 
 
-def resolve_tier_route(tier: str, env: Optional[dict] = None) -> TierRoute:
+def resolve_tier_route(
+    tier: str,
+    env: Optional[dict] = None,
+    state_dir: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> TierRoute:
     """Resolve a cost tier to a TierRoute.
 
-    For tier-zero and tier-low: prefers DeepSeek claude-harness (key-auth) when
-    DEEPSEEK_API_KEY is present; falls back to Codex via provider lane (kimi quota
-    exhausted 2026-08-02, OI-940; local models skipped until gemma-4-12b-integration
-    ships). Unknown tier strings default to tier-high.
+    Entry tiers (zero/low) prefer DeepSeek claude-harness when DEEPSEEK_API_KEY
+    is present; a missing key falls back to Codex (existing behaviour). When
+    DeepSeek has a key but is in cooldown after a quota/auth failure, the router
+    falls back to Kimi CLI (kimi-via-cli-only) and then Codex — availability is
+    read at decision time so a restored lane rejoins without a release. Unknown
+    tier strings default to tier-high.
     """
     _env = env if env is not None else dict(os.environ)
 
     if tier in (TIER_ZERO, TIER_LOW):
-        if _deepseek_available(_env):
-            return TierRoute(
-                tier=tier,
-                provider="deepseek",
-                model="deepseek-v4-flash",  # deepseek-chat discontinued 2026-07-24
-                lane="claude_harness_keyed",
-                env_requirements=("DEEPSEEK_API_KEY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-                fallback=TierRoute(
-                    tier=tier,
-                    provider="codex",
-                    model="gpt-5.5",
-                    lane="provider",
-                ),
-            )
-        return TierRoute(
-            tier=tier,
-            provider="codex",
-            model="gpt-5.5",
-            lane="provider",
-        )
+        return _resolve_entry_tier_route(tier, _env, state_dir, now)
 
     if tier == TIER_MID:
         return _ROUTE_MID
 
     return _ROUTE_HIGH
+
+
+def _resolve_entry_tier_route(
+    tier: str,
+    env: dict,
+    state_dir: Optional[Path],
+    now: Optional[float],
+) -> TierRoute:
+    from .availability import lane_available  # noqa: PLC0415
+
+    deepseek_ok, deepseek_reason = lane_available(
+        "deepseek", env=env, state_dir=state_dir, now=now,
+    )
+    if deepseek_ok:
+        return _deepseek_route(tier)
+
+    if _deepseek_has_key(env):
+        # Key present but DeepSeek is in cooldown → try Kimi before the vangnet.
+        kimi_ok, kimi_reason = lane_available(
+            "kimi", env=env, state_dir=state_dir, now=now,
+        )
+        if kimi_ok:
+            return _kimi_route(
+                tier,
+                reason=f"deepseek unavailable ({deepseek_reason}); using kimi",
+            )
+        return _codex_route(
+            tier,
+            reason=(
+                f"deepseek unavailable ({deepseek_reason}); "
+                f"kimi unavailable ({kimi_reason}); using codex"
+            ),
+        )
+
+    # Missing key → existing behaviour: Codex vangnet (kimi not consulted).
+    return _codex_route(tier)

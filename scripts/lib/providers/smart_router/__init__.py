@@ -11,6 +11,12 @@ from __future__ import annotations
 import os as _os
 from typing import Optional
 
+from .availability import (  # noqa: F401
+    cooldown_seconds,
+    lane_available,
+    lane_cooldown_remaining,
+    record_lane_failure,
+)
 from .classifier import (  # noqa: F401
     RouteCandidate,
     RouteDecision,
@@ -34,6 +40,10 @@ __all__ = [
     "classify_dispatch",
     "TierRoute",
     "resolve_tier_route",
+    "lane_available",
+    "lane_cooldown_remaining",
+    "cooldown_seconds",
+    "record_lane_failure",
     "route_dispatch",
 ]
 

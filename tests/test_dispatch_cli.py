@@ -3304,6 +3304,50 @@ class TestSmartRouterPreValidate:
         assert "provider:     claude" in captured.out, captured.out
         assert "model:        sonnet" in captured.out, captured.out
 
+    def test_tier_high_routing_failure_falls_back_to_opus_not_sonnet(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """OI-1187: a tier-high dispatch whose routing fails must NOT silently
+        land on sonnet (a quality class drop). The fallback must know the tier:
+        tier-high falls back to opus-5 (equal class)."""
+        from providers.smart_router.cost_tier import TIER_HIGH
+        from providers.smart_router.door_routing import DoorRouteResult
+
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Fix typo in docstring\n\nCorrect a spelling error.\n",
+            staging_id="20260814-oi1187-high",
+            dispatch_id="20260814-oi1187-high",
+            provider="auto",
+            target_slot="T1",
+        )
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        # Simulate the router classifying tier-high but failing to APPLY the
+        # route (provider-not-mapped). The door's fallback must honor the tier.
+        with patch(
+            "dispatch_cli._resolve_router_pre_validate",
+            return_value=DoorRouteResult(
+                decline_reason="provider-not-mapped",
+                tier=TIER_HIGH,
+            ),
+        ):
+            rc = run_dispatch(spec_file, dry_run=True)
+
+        captured = capsys.readouterr()
+        assert rc == 0, (
+            f"tier-high routing failure must still produce an executable plan, "
+            f"got rc={rc}\nstdout:\n{captured.out}\nstderr:\n{captured.err}"
+        )
+        assert "REJECT" not in captured.out, f"unexpected reject:\n{captured.out}"
+        assert "model:        opus-5" in captured.out, (
+            f"tier-high fallback must be opus-5 (equal class), got:\n{captured.out}"
+        )
+        assert "model:        sonnet" not in captured.out, (
+            f"tier-high fallback must not silently drop to sonnet:\n{captured.out}"
+        )
+
     def test_explicit_provider_overrides_router(self, tmp_path, monkeypatch):
         """An explicit provider+model in the spec must NOT be touched by the router
         (worker-provider-free-choice, pin_semantics=default)."""

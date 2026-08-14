@@ -1043,7 +1043,7 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
         return frozenset()
 
 
-def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[tuple[Provider, str, str]]":
+def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResult]":
     """Run the smart router on a DispatchSpec BEFORE validate().
 
     OI-962: the router must resolve provider+model BEFORE validate() tests
@@ -1051,9 +1051,11 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[tuple[Provider
     (including the empty/None→auto bridge alias), this reads the instruction
     file and consults the tier-routing engine.
 
-    Returns (provider, model, route_reason) when the router has a
-    recommendation, or None when routing should be skipped (T0, router
-    disabled, or router error).
+    Returns a DoorRouteResult carrying (provider, model, route_reason) when the
+    router has a recommendation, or a decline_reason (+ tier when the
+    classifier ran) when routing should be skipped (T0, router disabled,
+    provider-not-mapped, classifier error). Returns None on an unexpected
+    error outside the router (e.g. an unreadable instruction file).
 
     Fail-open: never raises — returns None on any error.
     """
@@ -1073,13 +1075,41 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[tuple[Provider
             instruction_text=instruction_text,
             file_paths=file_paths,
         )
-    except Exception:
+    except Exception as exc:
         logger.warning(
             "smart-router pre-validate: router call failed, dispatch "
             "falls through to default lane (fail-open). Error: %s",
+            exc,
             exc_info=True,
         )
         return None
+
+
+# OI-1187: tier-aware fallback for a router decline. Keys are the canonical
+# cost_tier constants (TIER_HIGH / TIER_MID) kept as literals here because
+# dispatch_cli avoids a module-level import of the smart_router package (the
+# router is imported lazily inside _resolve_router_pre_validate). A tier-high
+# decline must land on opus-5 (equal class), never silently on sonnet.
+_TIER_FALLBACK_MODEL: dict[str, str] = {
+    "tier-high": "opus-5",
+    "tier-mid": "sonnet-5",
+}
+
+
+def _tier_aware_fallback_model(tier: Optional[str], spec_model: Optional[str]) -> str:
+    """Pick the claude-lane fallback model when the router declines to route.
+
+    An explicit spec.model always wins. Otherwise the fallback is tier-aware:
+    a tier-high dispatch the classifier could not route lands on opus-5 (equal
+    class) and tier-mid on sonnet-5, never silently a class down (OI-1187).
+    A tier the classifier did not determine (None) keeps the historical
+    "sonnet" last resort.
+    """
+    if spec_model:
+        return spec_model
+    if tier:
+        return _TIER_FALLBACK_MODEL.get(tier, "sonnet")
+    return "sonnet"
 
 
 def build_runtime_snapshot(
@@ -1668,16 +1698,16 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
     # then validate() tests the resolved values against constraints.  This
     # keeps governance intact: a route that violates constraints is still
     # rejected by the full validation chain — only the order changed.
-    # Deterministic fallback: when the router returns None (T0, disabled,
-    # tier-mid/high routing to claude), AUTO resolves to CLAUDE so
+    # Deterministic fallback: when the router declines (T0, disabled,
+    # provider-not-mapped, classifier error), AUTO resolves to CLAUDE so
     # compile_plan never sees an unresolved AUTO.  This is the same
     # hard-default the old bridge alias provided, now applied AFTER the
     # router had its chance to fill in a cheaper provider.
     door_route_reason: Optional[str] = None
     if spec.provider == Provider.AUTO:
         result = _resolve_router_pre_validate(spec)
-        if result is not None:
-            new_provider, new_model, route_reason = result
+        if result is not None and result.route is not None:
+            new_provider, new_model, route_reason = result.route
             spec = dataclasses.replace(spec, provider=new_provider, model=new_model)
             door_route_reason = route_reason
         else:
@@ -1685,18 +1715,28 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             # a classifier/resolver exception, or a tier whose TierRoute.provider
             # has no _TIER_PROVIDER_TO_ENUM entry) — fall back to CLAUDE. OI-1050:
             # this must set provider AND model TOGETHER, in the same replace() call
-            # that resolves the router's own success path above (line 1550-1552).
-            # Setting provider alone previously left spec.model=None, and the
-            # workers-kimi-pinned "default" pin semantics then filled effective_model
-            # from ITS OWN pin (kimi-k3) whenever spec.model was empty — producing a
-            # spec with provider=claude and model=kimi-k3, which kimi-via-cli-only
-            # correctly rejects. Defaulting model here, in the same statement as the
-            # provider, makes that half-filled combination unreachable rather than
-            # merely unlikely — spec.model is only used when the caller already set
-            # one; otherwise it lands on the same "sonnet" default every other
-            # claude-lane fallback in this function already uses.
-            spec = dataclasses.replace(spec, provider=Provider.CLAUDE, model=spec.model or "sonnet")
-            door_route_reason = "smart-router:no-route,fallback=claude"
+            # that resolves the router's own success path above. Setting provider
+            # alone previously left spec.model=None, and the workers-kimi-pinned
+            # "default" pin semantics then filled effective_model from ITS OWN pin
+            # (kimi-k3) whenever spec.model was empty — producing a spec with
+            # provider=claude and model=kimi-k3, which kimi-via-cli-only correctly
+            # rejects.
+            #
+            # OI-1187: the fallback model is tier-aware. A tier-high dispatch whose
+            # routing failed must never silently land on sonnet (a quality class
+            # drop); it falls back to opus-5 (equal class) instead. Only when the
+            # classifier did not determine a tier (or the router returned None on an
+            # unexpected error) does the historical "sonnet" default apply.
+            tier = result.tier if result is not None else None
+            fallback_model = _tier_aware_fallback_model(tier, spec.model)
+            spec = dataclasses.replace(spec, provider=Provider.CLAUDE, model=fallback_model)
+            decline_reason = result.decline_reason if result is not None else None
+            if decline_reason:
+                door_route_reason = (
+                    f"smart-router:no-route,reason={decline_reason},fallback={fallback_model}"
+                )
+            else:
+                door_route_reason = f"smart-router:no-route,fallback={fallback_model}"
 
     vspec = validate(spec, project_id=project_id, repo_root=repo_root)
     if isinstance(vspec, Reject):
