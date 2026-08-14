@@ -125,6 +125,17 @@ def _plan_oi_resolved_at(state_dir: Path, track_id: str, project_id: str = PROJE
     return row[0] if row else None
 
 
+def _plan_oi_resolution_reason(state_dir: Path, track_id: str, project_id: str = PROJECT_ID):
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    row = conn.execute(
+        "SELECT resolution_reason FROM track_open_items "
+        "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+        (track_id, project_id, f"OI-PLAN-{track_id}"),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
 def _derived_status(state_dir: Path, track_id: str, project_id: str = PROJECT_ID):
     t = tracks_lib.get_track(state_dir, track_id, project_id)
     return t.get("derived_status") if t else None
@@ -145,6 +156,19 @@ def _plan_attest_args(
         track_id=track_id,
         reason=reason,
         approval_id=approval_id,
+        json=json,
+    )
+
+
+def _plan_missing_reasons_args(
+    state_dir: Path,
+    *,
+    project_id: str = PROJECT_ID,
+    json: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        state_dir=str(state_dir),
+        project_id=project_id,
         json=json,
     )
 
@@ -598,6 +622,83 @@ def test_plan_gate_attest_resolves_blocker_and_writes_audit(tmp_path):
     assert details["reason"] == "already shipped+merged pre-gate"
     assert details["approval_id"] == "APR-1"
     assert details["track_id"] == "T"
+
+
+def test_plan_gate_attest_writes_resolution_reason(tmp_path):
+    """Resolving with a reason must persist resolution_reason — measured by reading
+    the row back (not by the function's return value)."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="shipped", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+
+    rc = planning_cli.cmd_plan_gate_attest(
+        _plan_attest_args(sd, "T", reason="already shipped+merged pre-gate", approval_id="APR-1")
+    )
+    assert rc == 0
+    assert _plan_oi_resolution_reason(sd, "T") == "[attest:APR-1] already shipped+merged pre-gate"
+
+
+def test_resolve_plan_blocker_panel_reason_tag(tmp_path):
+    """The panel path tags its recorded reason with ``[panel]`` so a later audit can
+    tell a panel pass from an operator attestation."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+
+    resolved = planning_cli._resolve_plan_blocker(
+        sd, "T", PROJECT_ID,
+        reason="PASS (2 pass / 0 revise / 0 block, 3 seats)", resolver="panel",
+    )
+    assert resolved is True
+    assert _plan_oi_resolution_reason(sd, "T") == "[panel] PASS (2 pass / 0 revise / 0 block, 3 seats)"
+
+
+@pytest.mark.parametrize("bad_reason", ["", "   ", "\t\n"])
+def test_resolve_plan_blocker_empty_reason_fails_closed(tmp_path, bad_reason):
+    """A resolution without a non-empty reason must FAIL and leave resolved_at
+    untouched — the fail-closed check lives in the write layer, not the CLI."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+
+    with pytest.raises(ValueError):
+        planning_cli._resolve_plan_blocker(
+            sd, "T", PROJECT_ID, reason=bad_reason, resolver="attest", approval_id="APR-1"
+        )
+
+    assert _plan_oi_resolved_at(sd, "T") is None
+    assert _derived_status(sd, "T") == "blocked"
+
+
+def test_plan_gate_missing_reasons_lists_reasonless_row(tmp_path, capsys):
+    """The read-only report surfaces a resolved plan-gate blocker that carries no
+    resolution_reason (the pre-fix write path dropped it)."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    # Simulate a pre-fix resolution: resolved_at set, resolution_reason dropped.
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute(
+        "UPDATE track_open_items SET resolved_at = ? "
+        "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+        ("2026-08-14T10:00:00.000000Z", "T", PROJECT_ID, "OI-PLAN-T"),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = planning_cli.cmd_plan_gate_missing_reasons(_plan_missing_reasons_args(sd))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "T" in out
+    assert "2026-08-14T10:00:00.000000Z" in out
+
+
+def test_plan_gate_missing_reasons_empty_is_success(tmp_path, capsys):
+    """A DB with no reasonless rows is a clean success, not a failure (exit 0)."""
+    sd = _build_db_plan_gate(tmp_path)
+    rc = planning_cli.cmd_plan_gate_missing_reasons(_plan_missing_reasons_args(sd))
+    assert rc == 0
+    assert "no resolved plan-gate blockers" in capsys.readouterr().out
 
 
 def test_plan_gate_attest_requires_reason_and_approval_id(tmp_path):

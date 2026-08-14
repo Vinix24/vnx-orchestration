@@ -1804,27 +1804,72 @@ def _seed_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bool:
     return True
 
 
-def _resolve_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bool:
-    """Resolve the OI-PLAN-<track> blocker (the plan gate passed). Returns True when a
-    row was resolved; reconciles the track so derived_status reflects the unblock."""
+def _compose_plan_resolution_reason(
+    resolver: str, reason: str, approval_id: Optional[str] = None
+) -> str:
+    """Canonical ``resolution_reason`` for a plan-gate blocker.
+
+    Prefixes the operator/panel reason with a resolver tag so a later audit can
+    tell a panel pass from an operator attestation without parsing free text:
+    ``[panel] PASS (2 pass / 0 revise / 0 block, 3 seats)`` vs
+    ``[attest:APR-1] already shipped+merged pre-gate``.
+    """
+    tag = f"{resolver}:{approval_id}" if approval_id else resolver
+    return f"[{tag}] {reason.strip()}"
+
+
+def _resolve_plan_blocker(
+    state_dir: Path,
+    track_id: str,
+    project_id: str,
+    *,
+    reason: str,
+    resolver: str,
+    approval_id: Optional[str] = None,
+) -> bool:
+    """Resolve the OI-PLAN-<track> blocker (the plan gate passed), recording WHO
+    cleared it and WHY in ``resolution_reason``.
+
+    Fail-closed: an empty/whitespace reason raises ValueError — a plan-gate
+    blocker must never be cleared without a non-empty ``resolution_reason``. This
+    is the write-layer half of the bug this fixes: the CLI demanded a reason and
+    the UPDATE dropped it, leaving 87 resolved rows with no reason.
+
+    Delegates the UPDATE to ``tracks_lib.unlink_open_item`` (the single write path
+    to ``resolution_reason``) so there is exactly one place that resolves an OI row
+    — two write paths to the same column is what caused the drift.
+
+    Returns True when a row was resolved; False when the gate is unsupported, not
+    seeded, or already resolved. Reconciles the track on success.
+    """
+    reason_text = (reason or "").strip()
+    if not reason_text:
+        raise ValueError(
+            "plan blocker resolution requires a non-empty resolution_reason "
+            f"(track {track_id!r}); refusing to clear without recording why"
+        )
     conn = _db_conn(state_dir)
-    rowcount = 0
     try:
         if not _plan_gate_supported(conn):
             return False
         oi = _plan_blocker_oi(track_id)
-        cur = conn.execute(
-            "UPDATE track_open_items SET resolved_at = ? "
-            "WHERE track_id = ? AND project_id = ? AND oi_id = ? "
-            "AND link_type = 'blocks' AND resolved_at IS NULL",
-            (_now_utc(), track_id, project_id, oi),
-        )
-        rowcount = cur.rowcount
-        conn.commit()
+        row = conn.execute(
+            "SELECT resolved_at FROM track_open_items "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+            (track_id, project_id, oi),
+        ).fetchone()
     finally:
         conn.close()
+    if row is None or row["resolved_at"] is not None:
+        # Not seeded, or already resolved: nothing to clear (honest no-op).
+        return False
+    full_reason = _compose_plan_resolution_reason(resolver, reason_text, approval_id)
+    tracks_lib.unlink_open_item(
+        state_dir, track_id, project_id, oi, "blocks",
+        reason=full_reason, actor=resolver,
+    )
     track_reconciler.reconcile_track(state_dir, track_id, project_id)
-    return rowcount > 0
+    return True
 
 
 def _emit_plan_gate_pass_record(
@@ -2329,8 +2374,17 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
         # away from blocked. If a second blocker (a hard dependency, another OI) or a
         # schema gap leaves it blocked, say so — never claim unblocked dishonestly. A
         # DB/reconciler failure here returns a defined exit code, not a crash.
+        summary = result["summary"]
+        panel_reason = (
+            f"{result['decision']} ({summary['pass_count']} pass / "
+            f"{summary['revise_count']} revise / {summary['block_count']} block, "
+            f"{len(panel)} seats)"
+        )
         try:
-            resolved = _resolve_plan_blocker(state_dir, args.track_id, args.project_id)
+            resolved = _resolve_plan_blocker(
+                state_dir, args.track_id, args.project_id,
+                reason=panel_reason, resolver="panel",
+            )
             post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
         except Exception as exc:
             print(
@@ -2477,7 +2531,10 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
     }
 
     try:
-        resolved = _resolve_plan_blocker(state_dir, track_id, project_id)
+        resolved = _resolve_plan_blocker(
+            state_dir, track_id, project_id,
+            reason=reason, resolver="attest", approval_id=approval_id,
+        )
     except Exception as exc:
         print(f"plan-gate attest: unexpected error resolving blocker: {exc}", file=sys.stderr)
         return 1
@@ -2546,6 +2603,64 @@ def cmd_plan_gate_attest(args: argparse.Namespace) -> int:
         print(f"\nvnx horizon plan-gate attest — {track_id} (project '{project_id}')\n")
         print(f"  attested: {reason} (approval={approval_id})")
         print(f"  plan gate cleared. derived_status={derived}.\n")
+    return 0
+
+
+def cmd_plan_gate_missing_reasons(args: argparse.Namespace) -> int:
+    """Read-only audit: list RESOLVED plan-gate blockers that carry no
+    ``resolution_reason`` (the rows the pre-fix write path dropped the reason on).
+
+    Never rewrites them — backfilling a reason after the fact is worse than an
+    empty one. Lists track-id, project-id and the resolution date so the operator
+    can dispose of each row by hand. Exit 0 with an empty list when there is
+    nothing to dispose (a clean DB is a success, not a failure).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    conn = _db_conn(state_dir)
+    rows: list[dict[str, Any]] = []
+    try:
+        if not _has_table(conn, "track_open_items"):
+            print(
+                "plan-gate missing-reasons: track_open_items absent "
+                "(apply migrations 0022+0030 first)",
+                file=sys.stderr,
+            )
+            return 1
+        if not (
+            _has_col(conn, "track_open_items", "resolved_at")
+            and _has_col(conn, "track_open_items", "resolution_reason")
+        ):
+            print(
+                "plan-gate missing-reasons: resolution_reason column absent "
+                "(apply migration 0030 first)",
+                file=sys.stderr,
+            )
+            return 1
+        cur = conn.execute(
+            "SELECT track_id, project_id, oi_id, resolved_at, linked_at "
+            "FROM track_open_items "
+            "WHERE oi_id LIKE ? AND project_id = ? AND resolved_at IS NOT NULL "
+            "AND (resolution_reason IS NULL OR TRIM(resolution_reason) = '') "
+            "ORDER BY resolved_at ASC",
+            (f"{_PLAN_OI_PREFIX}%", (args.project_id or "").strip()),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps({"unreported": rows, "count": len(rows)}, indent=2, default=str))
+    elif not rows:
+        print("no resolved plan-gate blockers without a resolution_reason")
+    else:
+        print(
+            f"{len(rows)} resolved plan-gate blocker(s) without a resolution_reason:\n"
+        )
+        for r in rows:
+            print(
+                f"  {r['track_id']}  (project {r['project_id']})  "
+                f"resolved {r['resolved_at']}"
+            )
     return 0
 
 
@@ -2833,6 +2948,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="operator approval token (REQUIRED)",
     )
     p_pattest.set_defaults(func=cmd_plan_gate_attest)
+
+    p_pmiss = pg_sub.add_parser(
+        "missing-reasons",
+        help="list resolved plan-gate blockers with no resolution_reason (read-only)",
+    )
+    _common(p_pmiss)
+    p_pmiss.set_defaults(func=cmd_plan_gate_missing_reasons)
 
     return parser
 

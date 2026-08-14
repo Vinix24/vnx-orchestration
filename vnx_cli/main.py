@@ -758,6 +758,12 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     p_patt.add_argument("--approval-id", dest="approval_id", default=None,
                         help="operator approval token (REQUIRED)")
 
+    p_pmiss = subs.add_parser(
+        "missing-reasons",
+        help="list resolved plan-gate blockers with no resolution_reason (read-only)",
+    )
+    _common_horizon_args(p_pmiss)
+
 
 def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     horizon_parser = subparsers.add_parser(
