@@ -348,11 +348,14 @@ def test_door_route_t0_never_routed():
     assert result.decline_reason == DECLINE_T0_NEVER_ROUTES
 
 
-def test_door_route_auto_fills_provider():
+def test_door_route_auto_fills_provider(monkeypatch):
     """With provider=AUTO and DEEPSEEK_API_KEY present, tier-low resolves to
-    deepseek-harness."""
+    deepseek-harness (when the tier-low staging flag is on at full canary)."""
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import resolve_door_route
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_LOW", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -376,6 +379,8 @@ def test_door_route_auto_fallback_codex(monkeypatch):
     from providers.smart_router.door_routing import resolve_door_route
 
     _force_kimi(monkeypatch, present=False)
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_LOW", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -447,6 +452,8 @@ def test_door_route_unknown_provider_fails_loud(monkeypatch):
             tier=tier, provider="future-provider", model="future-model", lane="provider",
         ),
     )
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_LOW", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
     with pytest.raises(RegistryLookupError):
         resolve_door_route(
@@ -504,10 +511,13 @@ def test_door_route_fail_open_on_broken_input():
     assert result is not None
 
 
-def test_door_route_tier_mid_resolves_claude():
+def test_door_route_tier_mid_resolves_claude(monkeypatch):
     """tier-mid now maps to a concrete Provider.CLAUDE choice (enum-gap fix)."""
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import resolve_door_route
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_MID", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -525,10 +535,13 @@ def test_door_route_tier_mid_resolves_claude():
     assert "tier=tier-mid" in reason
 
 
-def test_door_route_tier_high_resolves_claude():
+def test_door_route_tier_high_resolves_claude(monkeypatch):
     """tier-high maps to Provider.CLAUDE (opus-5), not a silent decline."""
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import resolve_door_route
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_HIGH", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -565,3 +578,137 @@ def test_door_route_t0_stays_unrouted_when_mid_tier():
     )
     assert result.route is None, "T0 must never be routed"
     assert result.decline_reason == DECLINE_T0_NEVER_ROUTES
+
+
+# ---------------------------------------------------------------------------
+# door_routing — AUTO-staging gate (dispatch 20260814s-a)
+# ---------------------------------------------------------------------------
+
+def test_door_route_staging_tier_disabled_declines(monkeypatch):
+    """A classified tier that is not enabled declines, naming the tier."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import resolve_door_route
+    from providers.smart_router.staging import DECLINE_TIER_DISABLED
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_HIGH", "1")  # tier-high on, tier-zero off
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a helper function",
+        file_paths=["src/foo.py"],
+        loc_estimate=10,
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+    )
+    assert result.route is None
+    assert result.decline_reason == f"{DECLINE_TIER_DISABLED}:tier-zero"
+    assert result.tier == "tier-zero"
+
+
+def test_door_route_staging_tier_on_others_off(monkeypatch):
+    """tier-zero on while tier-high off: the one routes, the other declines."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import resolve_door_route
+    from providers.smart_router.staging import DECLINE_TIER_DISABLED
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_ZERO", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
+
+    routed = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a helper function",
+        file_paths=["src/foo.py"],
+        loc_estimate=10,
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+    )
+    assert routed.route is not None
+    assert routed.tier == "tier-zero"
+
+    declined = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="implement a large feature",
+        file_paths=["src/foo.py"],
+        loc_estimate=350,
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+    )
+    assert declined.route is None
+    assert declined.decline_reason == f"{DECLINE_TIER_DISABLED}:tier-high"
+    assert declined.tier == "tier-high"
+
+
+def test_door_route_canary_zero_routes_nothing(monkeypatch):
+    """An enabled tier at canary 0 declines every dispatch into the control group."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import resolve_door_route
+    from providers.smart_router.staging import DECLINE_CANARY_CONTROL
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_ZERO", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "0")
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a helper function",
+        file_paths=["src/foo.py"],
+        loc_estimate=10,
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+    )
+    assert result.route is None
+    assert result.decline_reason == f"{DECLINE_CANARY_CONTROL}:tier-zero"
+
+
+def test_door_route_kill_switch_wins_over_staging(monkeypatch):
+    """VNX_SMART_ROUTER_DISABLE wins even when staging is fully open."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import (
+        DECLINE_ROUTER_DISABLED,
+        resolve_door_route,
+    )
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_ZERO", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
+
+    result = resolve_door_route(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a helper function",
+        file_paths=["src/foo.py"],
+        loc_estimate=10,
+        env={"VNX_SMART_ROUTER_DISABLE": "1"},
+    )
+    assert result.route is None
+    assert result.decline_reason == DECLINE_ROUTER_DISABLED
+
+
+def test_door_route_canary_same_dispatch_same_group(monkeypatch):
+    """The same dispatch re-evaluated falls in the same canary group."""
+    from dispatch_spec import Provider
+    from providers.smart_router.door_routing import resolve_door_route
+
+    monkeypatch.setenv("VNX_SMART_ROUTER_TIER_ZERO", "1")
+    monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "50")
+
+    kwargs = dict(
+        spec_provider=Provider.AUTO,
+        spec_model=None,
+        target_slot="T1",
+        instruction_text="add a helper function",
+        file_paths=["src/foo.py"],
+        loc_estimate=10,
+        env={"DEEPSEEK_API_KEY": "sk-test"},
+    )
+    first = resolve_door_route(**kwargs)
+    second = resolve_door_route(**kwargs)
+    assert (first.route is None) == (second.route is None), (
+        "the same dispatch must fall in the same canary group on re-evaluation"
+    )
+    assert first.decline_reason == second.decline_reason
+    assert first.route == second.route

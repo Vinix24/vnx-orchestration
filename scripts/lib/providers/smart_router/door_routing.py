@@ -11,7 +11,11 @@ the existing behaviour — a routing *bug* must never block a dispatch. But an
 unknown provider/model (a provider string the registry does not know) is drift
 between the router and the registry, and raises RegistryLookupError naming what
 was missing and where it was looked for. T0 is never routed (t0-opus-only is a
-floor, not an advisory). The router is default-on since 2026-08-02.
+floor, not an advisory). Routing is gated by the staging layer (``.staging``)
+since 2026-08-14: after the kill-switch, a per-tier enable flag and a
+deterministic canary fraction decide whether the router hands back a route or
+declines to the legacy path — the rollout starts from zero and ramps up via
+operator-config, never in one leap.
 
 Every decline path carries an explicit reason (OI-1187) so a no-route is
 distinguishable in the dry-run output and receipt. Before this, a T0 skip, an
@@ -90,6 +94,7 @@ def resolve_door_route(
     file_paths: Optional[list[str]] = None,
     loc_estimate: int = 0,
     env: Optional[dict] = None,
+    dispatch_id: Optional[str] = None,
 ) -> DoorRouteResult:
     """Resolve a concrete provider + model for a dispatch without an explicit one.
 
@@ -111,6 +116,10 @@ def resolve_door_route(
         file_paths: List of dispatch file paths (for LOC-aware classification).
         loc_estimate: Estimated LOC of the change.
         env: Process environment dict (defaults to os.environ).
+        dispatch_id: The dispatch's stable id, used to seed the deterministic
+            canary bucket when provided; the door call site does not pass it
+            yet, so the fallback is the dispatch's own content (target slot +
+            instruction + paths).
     """
     # Gate 1: T0 never routes. t0-opus-only is a floor, not an advisory.
     if target_slot == "T0":
@@ -147,6 +156,19 @@ def resolve_door_route(
             exc_info=True,
         )
         return DoorRouteResult(decline_reason=DECLINE_CLASSIFIER_ERROR)
+
+    # Staging gate — UNDER the kill-switch (checked above), so a kill-switch
+    # always wins. The rollout is per-tier + a deterministic canary fraction:
+    # a tier that is not enabled, or a dispatch that falls in the control half
+    # of the canary, declines here and follows the legacy path. The decline
+    # reason carries the tier so the control group is recognisable in the trail.
+    from .staging import dispatch_group_key, load_staging_config, staging_verdict  # noqa: PLC0415
+
+    staging_config = load_staging_config()
+    group_key = dispatch_group_key(dispatch_id, target_slot, instruction_text, file_paths)
+    staging_decline = staging_verdict(tier, group_key, staging_config)
+    if staging_decline is not None:
+        return DoorRouteResult(decline_reason=staging_decline, tier=tier)
 
     # Tier routing + provider enum — fail-loud (ADR-036 §2). The classifier
     # worked; an unknown provider/model is registry drift and must surface, not
@@ -198,6 +220,7 @@ def apply_door_route(
         instruction_text=vspec.instruction_text,
         file_paths=file_paths,
         env=_env,
+        dispatch_id=spec.dispatch_id,
     )
     if result.route is None:
         if result.decline_reason is None:

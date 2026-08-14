@@ -187,6 +187,33 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "migration-consolidation-and-tenancy-cut trigger.",
         writable=False,
         subsystem="migration-mechanisms", status="PARK"),
+
+    # AUTO-staging per tier + canary (dispatch 20260814s-a): phased rollout of
+    # smart-router AUTO routing. Defaults OFF so the rollout starts from zero —
+    # operator-config ramps it up per tier + a deterministic canary fraction.
+    # subsystem is a NEW flag-backed name (disjoint from the flag-less
+    # "provider-routing"), so the cockpit never double-represents one subsystem.
+    "VNX_SMART_ROUTER_TIER_ZERO": _e(
+        "VNX_SMART_ROUTER_TIER_ZERO", "bool", "0", "dispatch",
+        "Route tier-zero (trivial reformat) dispatches through the smart router.",
+        subsystem="smart-router-staging", status="LIVE"),
+    "VNX_SMART_ROUTER_TIER_LOW": _e(
+        "VNX_SMART_ROUTER_TIER_LOW", "bool", "0", "dispatch",
+        "Route tier-low (script edit) dispatches through the smart router.",
+        subsystem="smart-router-staging", status="LIVE"),
+    "VNX_SMART_ROUTER_TIER_MID": _e(
+        "VNX_SMART_ROUTER_TIER_MID", "bool", "0", "dispatch",
+        "Route tier-mid (multi-file/design) dispatches through the smart router.",
+        subsystem="smart-router-staging", status="LIVE"),
+    "VNX_SMART_ROUTER_TIER_HIGH": _e(
+        "VNX_SMART_ROUTER_TIER_HIGH", "bool", "0", "dispatch",
+        "Route tier-high (architectural/security) dispatches through the smart router.",
+        subsystem="smart-router-staging", status="LIVE"),
+    "VNX_SMART_ROUTER_CANARY_PCT": _e(
+        "VNX_SMART_ROUTER_CANARY_PCT", "string", "0", "dispatch",
+        "Canary fraction (0-100) of an enabled tier's traffic routed via the smart "
+        "router; the rest follows the legacy path. Deterministic per dispatch.",
+        subsystem="smart-router-staging", status="LIVE"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
