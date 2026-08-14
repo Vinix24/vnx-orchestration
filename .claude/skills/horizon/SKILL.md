@@ -136,6 +136,58 @@ dependencies (`add_dependency(N, N-1, kind=hard)`); the reconciler shows N block
 done. Pipelining allowed: plan + gate feature N+1 while N executes, but N+1 cannot activate
 until N is done. A feature with ghost/`unknown:unknown` receipts does not advance the queue.
 
+## Van goal_state naar een /goal-conditie
+
+`/goal` is a session-scoped Stop-hook (https://code.claude.com/docs/en/goal): after each round a
+small fast model (default Haiku) reads the condition plus the conversation and answers yes/no.
+Hard limits: the evaluator runs NO commands and reads NO files (it judges only what appeared in
+the conversation; "all tests pass" works only because the agent ran them and their output landed
+in the transcript); max 4000 chars; one active goal per session (a new goal replaces the old);
+the goal changes no permissions (without auto-mode every tool call still prompts); no round
+clause -> it runs until the condition holds; `/goal clear` and `/clear` both stop it.
+
+The track `goal_state` is the CONTRACT: complete, numbered, written for a human.
+It does NOT go into `/goal` verbatim. Convert it in four steps:
+
+1. **Separate contract from measure.** The `/goal` condition is the *measurable
+   projection* of the contract, not the contract itself.
+2. **Make every point provable from your own output.** Each point is something the
+   agent can show each round: a table with N rows, each PASS/FAIL, from real
+   commands whose output is in this conversation. The table is the evidence the
+   evaluator reads, not a claim.
+3. **Add at least one external counter.** The evaluator believes what the agent
+   prints, so a self-reported-only condition can declare itself green ("passes by
+   its own measure, not the intent"). Add at least one condition the agent cannot
+   colour: main's CI workflow conclusion is `success`; a named open item is
+   closed; a PR number is merged.
+4. **Bound the runtime.** End with a stop clause: a max round count plus an
+   emergency-stop independent of progress (e.g. "stop if main is red after a
+   merge").
+
+### `@horizon goal-condition <track_id>`
+
+Read the track via the existing helpers: tracks live in `runtime_coordination.db`
+(NOT the empty `tracks.db`, OI-1189); `goal_state` is 100% filled,
+`instruction_template` 0% filled and unused.
+
+    vnx objective show <track_id> --json        # goal_state + track_open_items
+    gh run list --branch main --workflow "VNX CI" --limit 1 --json conclusion --jq '.[0].conclusion'
+
+Then: (1) compress the goal_state into a numbered PASS/FAIL list, each point provable from
+command output in the conversation; (2) add external counters: main's CI conclusion, the track's
+open items from `track_open_items`, and any OI-/PR- named in the goal_state; (3) add a stop
+clause; (4) print ONE copy-paste block under 4000 chars, labelling each point `[self]` or
+`[external]` so it is visible where the goal could fool itself. **Warn** when the condition has
+zero external counters (`gh` unreachable AND no linked open items AND no named OI/PR): `WARN: no external counter, this goal can self-declare green`.
+
+Worked example, `smart-routing-cluster` (goal_state: ten numbered conditions plus
+"all ten provable and OI-1176..OI-1188 closed with evidence"):
+
+    [self]     0 of 100 consecutive AUTO-dispatches get "no choice"; each None cause traceable
+    [self]     fallback-chain test fails without the fix (quota/auth skips the lane; same chain)
+    [external] main VNX CI conclusion is `success`; OI-1176..OI-1188 closed; OI-PLAN resolved
+    stop:      max 30 rounds, or stop if main is red after a merge
+
 ## Mechanics (do not restate — cite)
 
 Dispatch rules + lanes: `docs/core/DISPATCH_RULES.md`. Provider constraints (hard guard-rails):
