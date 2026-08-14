@@ -1,7 +1,13 @@
-"""Tests for tier_routing — constraint enforcement and route resolution (PR-2).
+"""Tests for tier_routing — registry-driven routes and fallback-chain walking.
 
-Covers: codex-as-vangnet (OI-940), deepseek-harness-subscription-blocked,
-default-on router (2026-08-02), and route_dispatch() wiring.
+Covers (ADR-036 + OI-1185):
+- model identity and provider strings come from wave7_models.yaml (no Python
+  literals on the routing path); tier-mid/tier-high resolve to claude
+- the fallback chain is walked at decision time: a primary lane that is
+  unavailable (missing key, CLI absent, or cooldown) is skipped and the next
+  step takes over; missing key and cooldown follow the SAME chain
+- codex is the terminal vangnet; claude is the ungated mid/high lane
+- door_routing fails loud (RegistryLookupError) on an unknown provider
 """
 from __future__ import annotations
 
@@ -16,10 +22,24 @@ from providers.smart_router.cost_tier import TIER_HIGH, TIER_LOW, TIER_MID, TIER
 from providers.smart_router.tier_routing import TierRoute, resolve_tier_route
 
 
-def test_tier_zero_uses_codex_when_no_key():
-    """tier-zero without DEEPSEEK_API_KEY falls back to Codex (was local-gemma;
-    local models skipped per operator decision 2026-08-02, pending
-    gemma-4-12b-integration)."""
+def _force_kimi(monkeypatch, present: bool):
+    """Deterministically set the kimi CLI presence on PATH."""
+    import shutil as _shutil
+
+    monkeypatch.setattr(
+        _shutil,
+        "which",
+        (lambda name: "/usr/local/bin/kimi") if present else (lambda name: None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Registry-driven provider/model identity (ADR-036)
+# ---------------------------------------------------------------------------
+
+def test_tier_zero_uses_codex_when_no_key_and_no_kimi(monkeypatch):
+    """tier-zero without DEEPSEEK_API_KEY and no kimi CLI falls back to Codex."""
+    _force_kimi(monkeypatch, present=False)
     route = resolve_tier_route(TIER_ZERO, env={})
     assert route.provider == "codex"
     assert route.model == "gpt-5.5"
@@ -30,53 +50,37 @@ def test_tier_zero_uses_deepseek_with_key():
     """tier-zero with DEEPSEEK_API_KEY uses deepseek-v4-flash via claude-harness."""
     env = {"DEEPSEEK_API_KEY": "sk-test-123"}
     route = resolve_tier_route(TIER_ZERO, env=env)
-    assert route.provider == "deepseek"
+    assert route.provider == "deepseek-harness"
     assert route.model == "deepseek-v4-flash"
     assert route.lane == "claude_harness_keyed"
     assert "DEEPSEEK_API_KEY" in route.env_requirements
     assert route.fallback is not None
-    assert route.fallback.provider == "codex"
-    assert route.fallback.model == "gpt-5.5"
-
-
-def test_tier_zero_deepseek_fallback_is_codex():
-    """tier-zero deepseek route's fallback is Codex."""
-    env = {"DEEPSEEK_API_KEY": "sk-test-123"}
-    route = resolve_tier_route(TIER_ZERO, env=env)
-    assert route.fallback is not None
-    assert route.fallback.provider == "codex"
-    assert route.fallback.model == "gpt-5.5"
+    assert route.fallback.provider == "kimi"
+    assert route.fallback.model == "kimi-k3"
+    assert route.fallback.fallback is not None
+    assert route.fallback.fallback.provider == "codex"
+    assert route.fallback.fallback.model == "gpt-5.5"
 
 
 def test_tier_mid_uses_sonnet():
     route = resolve_tier_route(TIER_MID, env={})
     assert route.provider == "claude"
-    # canonical registry key (model-ssot-en-ketenlink) — the old claude-sonnet-4-6
-    # string is not a wave7_models.yaml key and rejected with
-    # model-not-in-current-registry the moment tier-mid actually routes.
     assert route.model == "sonnet-5"
+    assert route.lane == "tmux_interactive"
 
 
 def test_tier_high_uses_opus():
     route = resolve_tier_route(TIER_HIGH, env={})
     assert route.provider == "claude"
-    # canonical registry key — the fleet runs Opus 5 (model-ssot-en-ketenlink).
     assert route.model == "opus-5"
 
 
-def test_tier_low_no_key_uses_codex():
-    """Without DEEPSEEK_API_KEY, both tier-zero and tier-low fall back to Codex
-    (kimi quota exhausted 2026-08-02, OI-940)."""
+def test_tier_low_no_key_no_kimi_uses_codex(monkeypatch):
+    """Without DEEPSEEK_API_KEY and no kimi CLI, tier-low falls back to Codex."""
+    _force_kimi(monkeypatch, present=False)
     route = resolve_tier_route(TIER_LOW, env={})
     assert route.provider == "codex"
     assert route.model == "gpt-5.5"
-    assert route.lane == "provider"
-
-
-def test_tier_low_codex_fallback_is_provider_lane():
-    """Codex vangnet routes via the provider lane (dispatch_envelope.ProviderAdapter)."""
-    route = resolve_tier_route(TIER_LOW, env={})
-    assert route.provider == "codex"
     assert route.lane == "provider"
 
 
@@ -84,35 +88,25 @@ def test_tier_low_with_deepseek_key_uses_harness():
     """With DEEPSEEK_API_KEY, tier-low uses DeepSeek claude_harness_keyed."""
     env = {"DEEPSEEK_API_KEY": "sk-test-123"}
     route = resolve_tier_route(TIER_LOW, env=env)
-    assert route.provider == "deepseek"
+    assert route.provider == "deepseek-harness"
     assert route.lane == "claude_harness_keyed"
     assert "DEEPSEEK_API_KEY" in route.env_requirements
 
 
 def test_tier_low_deepseek_route_uses_v4_flash():
-    """tier-low DeepSeek route must use deepseek-v4-flash — deepseek-chat was
-    discontinued by the provider on 2026-07-24."""
+    """tier-low DeepSeek route must use deepseek-v4-flash."""
     env = {"DEEPSEEK_API_KEY": "sk-test-123"}
     route = resolve_tier_route(TIER_LOW, env=env)
-    assert route.provider == "deepseek"
+    assert route.provider == "deepseek-harness"
     assert route.model == "deepseek-v4-flash"
 
 
-def test_deepseek_harness_blocked_without_key():
-    """Empty DEEPSEEK_API_KEY falls back to Codex (kimi quota exhausted, OI-940)."""
+def test_deepseek_harness_blocked_without_key(monkeypatch):
+    """Empty DEEPSEEK_API_KEY falls back through the chain (kimi absent -> codex)."""
+    _force_kimi(monkeypatch, present=False)
     route = resolve_tier_route(TIER_LOW, env={"DEEPSEEK_API_KEY": ""})
     assert route.provider == "codex"
     assert route.model == "gpt-5.5"
-
-
-def test_deepseek_harness_fallback_is_codex():
-    """DeepSeek harness route's fallback is Codex (was Kimi, OI-940)."""
-    env = {"DEEPSEEK_API_KEY": "sk-test-123"}
-    route = resolve_tier_route(TIER_LOW, env=env)
-    assert route.fallback is not None
-    assert route.fallback.provider == "codex"
-    assert route.fallback.model == "gpt-5.5"
-    assert route.fallback.lane == "provider"
 
 
 def test_unknown_tier_defaults_to_opus():
@@ -122,25 +116,32 @@ def test_unknown_tier_defaults_to_opus():
 
 
 # ---------------------------------------------------------------------------
-# Availability wiring — cooldown drives runtime fallback (Problem 2)
+# Fallback-chain walking — missing key and cooldown share one chain (OI-1185)
 # ---------------------------------------------------------------------------
 
+def test_missing_key_lands_on_kimi_when_kimi_present(monkeypatch):
+    """Missing DEEPSEEK_API_KEY walks the same chain as cooldown: kimi next."""
+    _force_kimi(monkeypatch, present=True)
+    route = resolve_tier_route(TIER_LOW, env={})
+    assert route.provider == "kimi"
+    assert route.model == "kimi-k3"
+    assert route.lane == "kimi_cli"
 
-def test_tier_low_deepseek_cooldown_falls_back_to_kimi(tmp_path, monkeypatch):
-    """DeepSeek in cooldown with a key → Kimi CLI (kimi-via-cli-only) before
-    the Codex vangnet."""
-    import shutil as _shutil
 
+def test_primary_quota_failure_lands_on_fallback(tmp_path, monkeypatch):
+    """Primary lane in quota cooldown -> fallback lane takes over (OI-1185).
+
+    Without the fallback-chain walk this fails: resolve_tier_route would return
+    the primary deepseek-harness route even while it was in cooldown, because
+    nothing walked its ``fallback`` field.
+    """
     from providers.smart_router.availability import record_lane_failure
 
+    _force_kimi(monkeypatch, present=True)
     state_dir = tmp_path / "state"
     now = 1_000_000.0
     record_lane_failure(
-        "deepseek", "429 quota-exhausted", state_dir=state_dir,
-        now=now,
-    )
-    monkeypatch.setattr(
-        _shutil, "which", lambda name: "/usr/local/bin/kimi" if name == "kimi" else None,
+        "deepseek-harness", "quota exhausted", state_dir=state_dir, now=now,
     )
     route = resolve_tier_route(
         TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
@@ -148,27 +149,71 @@ def test_tier_low_deepseek_cooldown_falls_back_to_kimi(tmp_path, monkeypatch):
     assert route.provider == "kimi"
     assert route.model == "kimi-k3"
     assert route.lane == "kimi_cli"
-    assert "deepseek unavailable" in route.reason
+    assert "deepseek-harness unavailable" in route.reason
+
+
+def test_missing_key_and_cooldown_follow_same_chain(tmp_path, monkeypatch):
+    """Missing key and cooldown both land on kimi — the SAME chain (OI-1185)."""
+    from providers.smart_router.availability import record_lane_failure
+
+    _force_kimi(monkeypatch, present=True)
+    state_dir = tmp_path / "state"
+    now = 5_000_000.0
+    record_lane_failure(
+        "deepseek-harness", "quota exhausted", state_dir=state_dir, now=now,
+    )
+
+    cooldown_route = resolve_tier_route(
+        TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
+    )
+    missing_key_route = resolve_tier_route(
+        TIER_LOW, env={}, state_dir=state_dir, now=now,
+    )
+
+    assert cooldown_route.provider == "kimi"
+    assert missing_key_route.provider == "kimi"
+    assert cooldown_route.lane == missing_key_route.lane
+    assert cooldown_route.model == missing_key_route.model
+
+
+def test_missing_key_and_cooldown_both_land_on_codex_when_kimi_absent(tmp_path, monkeypatch):
+    """Both causes still share one chain when kimi is absent -> codex vangnet."""
+    from providers.smart_router.availability import record_lane_failure
+
+    _force_kimi(monkeypatch, present=False)
+    state_dir = tmp_path / "state"
+    now = 6_000_000.0
+    record_lane_failure(
+        "deepseek-harness", "quota exhausted", state_dir=state_dir, now=now,
+    )
+
+    cooldown_route = resolve_tier_route(
+        TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
+    )
+    missing_key_route = resolve_tier_route(
+        TIER_LOW, env={}, state_dir=state_dir, now=now,
+    )
+
+    assert cooldown_route.provider == "codex"
+    assert missing_key_route.provider == "codex"
 
 
 def test_tier_low_deepseek_cooldown_kimi_unavailable_falls_back_to_codex(tmp_path, monkeypatch):
-    """DeepSeek in cooldown and kimi CLI absent → Codex vangnet, reason visible."""
-    import shutil as _shutil
-
+    """DeepSeek in cooldown and kimi CLI absent -> Codex vangnet, reason visible."""
     from providers.smart_router.availability import record_lane_failure
 
+    _force_kimi(monkeypatch, present=False)
     state_dir = tmp_path / "state"
     now = 2_000_000.0
     record_lane_failure(
-        "deepseek", "403 auth", state_dir=state_dir, now=now,
+        "deepseek-harness", "quota exhausted", state_dir=state_dir, now=now,
     )
-    monkeypatch.setattr(_shutil, "which", lambda name: None)
     route = resolve_tier_route(
         TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
     )
     assert route.provider == "codex"
     assert route.model == "gpt-5.5"
-    assert "deepseek unavailable" in route.reason
+    assert "deepseek-harness unavailable" in route.reason
     assert "kimi unavailable" in route.reason
 
 
@@ -179,15 +224,37 @@ def test_tier_low_deepseek_reengages_after_cooldown(tmp_path):
     state_dir = tmp_path / "state"
     now = 3_000_000.0
     record_lane_failure(
-        "deepseek", "429", state_dir=state_dir, now=now,
+        "deepseek-harness", "quota exhausted", state_dir=state_dir, now=now,
     )
     route = resolve_tier_route(
         TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"},
         state_dir=state_dir, now=now + 3601,
     )
-    assert route.provider == "deepseek"
+    assert route.provider == "deepseek-harness"
     assert route.model == "deepseek-v4-flash"
 
+
+def test_auth_failure_keeps_lane_out_past_waiting(tmp_path, monkeypatch):
+    """An auth failure is non-recoverable: waiting past the quota window does
+    NOT bring the lane back (operator must clear the state)."""
+    from providers.smart_router.availability import record_lane_failure
+
+    _force_kimi(monkeypatch, present=True)
+    state_dir = tmp_path / "state"
+    now = 4_000_000.0
+    record_lane_failure(
+        "deepseek-harness", "403 auth", state_dir=state_dir, now=now,
+    )
+    route = resolve_tier_route(
+        TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"},
+        state_dir=state_dir, now=now + 999_999,
+    )
+    assert route.provider == "kimi"
+
+
+# ---------------------------------------------------------------------------
+# route_dispatch wiring
+# ---------------------------------------------------------------------------
 
 def test_route_dispatch_disabled_via_flag():
     """route_dispatch() returns None when VNX_SMART_ROUTER_DISABLE=1."""
@@ -229,7 +296,7 @@ def test_route_dispatch_auto_route_enabled():
 
 
 def test_route_dispatch_high_loc():
-    """route_dispatch() with LOC=350 → tier-high → Opus."""
+    """route_dispatch() with LOC=350 -> tier-high -> Opus."""
     from providers.smart_router import route_dispatch
 
     env = {"VNX_AUTO_ROUTE": "1"}
@@ -243,10 +310,8 @@ def test_route_dispatch_high_loc():
 # door_routing — resolve_door_route / apply_door_route
 # ---------------------------------------------------------------------------
 
-
 def test_door_route_explicit_provider_overrules_router():
-    """An explicit provider+model in the spec must win over the router
-    (worker-provider-free-choice, pin_semantics=default)."""
+    """An explicit provider+model in the spec must win over the router."""
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import (
         DECLINE_EXPLICIT_PROVIDER,
@@ -305,11 +370,12 @@ def test_door_route_auto_fills_provider():
     assert "tier=tier-low" in reason
 
 
-def test_door_route_auto_fallback_codex():
-    """Without DEEPSEEK_API_KEY, tier-low falls back to codex, not kimi
-    (OI-940 kimi quota exhausted)."""
+def test_door_route_auto_fallback_codex(monkeypatch):
+    """Without DEEPSEEK_API_KEY and no kimi CLI, tier-low falls back to codex."""
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import resolve_door_route
+
+    _force_kimi(monkeypatch, present=False)
 
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
@@ -322,7 +388,7 @@ def test_door_route_auto_fallback_codex():
     )
     assert result.route is not None
     provider, model, reason = result.route
-    assert provider == Provider.CODEX, "tier-low without DEEPSEEK_API_KEY must fall back to codex"
+    assert provider == Provider.CODEX, "tier-low without key/kimi must fall back to codex"
     assert model == "gpt-5.5"
     assert "codex" in reason.lower()
 
@@ -347,8 +413,7 @@ def test_door_route_disabled_via_flag():
 
 
 def test_door_route_disabled_via_legacy_flag():
-    """VNX_AUTO_ROUTE=0 (legacy opt-in default-off) also disables, with the
-    same router-disabled reason as the primary kill-switch."""
+    """VNX_AUTO_ROUTE=0 (legacy opt-in default-off) also disables."""
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import (
         DECLINE_ROUTER_DISABLED,
@@ -366,14 +431,12 @@ def test_door_route_disabled_via_legacy_flag():
     assert result.decline_reason == DECLINE_ROUTER_DISABLED
 
 
-def test_door_route_provider_not_mapped_declines_with_reason(monkeypatch):
-    """A tier route whose provider string has no _TIER_PROVIDER_TO_ENUM entry
-    declines with provider-not-mapped and carries the classified tier (OI-1187)."""
+def test_door_route_unknown_provider_fails_loud(monkeypatch):
+    """A provider string the registry does not know raises RegistryLookupError
+    (ADR-036 §2 fail-loud) — not a silent decline."""
     from dispatch_spec import Provider
-    from providers.smart_router.door_routing import (
-        DECLINE_PROVIDER_NOT_MAPPED,
-        resolve_door_route,
-    )
+    from providers.provider_registry import RegistryLookupError
+    from providers.smart_router.door_routing import resolve_door_route
     from providers.smart_router.tier_routing import TierRoute
     import providers.smart_router.tier_routing as tier_routing_module
 
@@ -385,18 +448,16 @@ def test_door_route_provider_not_mapped_declines_with_reason(monkeypatch):
         ),
     )
 
-    result = resolve_door_route(
-        spec_provider=Provider.AUTO,
-        spec_model=None,
-        target_slot="T1",
-        instruction_text="add a helper function",
-        file_paths=["src/foo.py"],
-        loc_estimate=50,
-        env={},
-    )
-    assert result.route is None
-    assert result.decline_reason == DECLINE_PROVIDER_NOT_MAPPED
-    assert result.tier is not None
+    with pytest.raises(RegistryLookupError):
+        resolve_door_route(
+            spec_provider=Provider.AUTO,
+            spec_model=None,
+            target_slot="T1",
+            instruction_text="add a helper function",
+            file_paths=["src/foo.py"],
+            loc_estimate=50,
+            env={},
+        )
 
 
 def test_door_route_classifier_error_declines_with_reason(monkeypatch):
@@ -433,8 +494,6 @@ def test_door_route_fail_open_on_broken_input():
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import resolve_door_route
 
-    # Empty instruction text and zero LOC still classifies (tier-zero or tier-low);
-    # the router returns a DoorRouteResult either way, never raises.
     result = resolve_door_route(
         spec_provider=Provider.AUTO,
         spec_model=None,
@@ -488,8 +547,7 @@ def test_door_route_tier_high_resolves_claude():
 
 
 def test_door_route_t0_stays_unrouted_when_mid_tier():
-    """T0 is never routed even when the classifier would land on tier-mid —
-    t0-opus-only is a floor, not an advisory."""
+    """T0 is never routed even when the classifier would land on tier-mid."""
     from dispatch_spec import Provider
     from providers.smart_router.door_routing import (
         DECLINE_T0_NEVER_ROUTES,

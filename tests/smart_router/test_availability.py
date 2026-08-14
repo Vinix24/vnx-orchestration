@@ -1,10 +1,12 @@
-"""Tests for the smart-router availability + cooldown layer (dispatch-20260814a).
+"""Tests for the smart-router availability + cooldown layer.
 
 Covers:
 - decision-time gates: env vars, CLI presence, disabled lanes, unknown lanes
 - cooldown lifecycle: record → active → re-engage after the period
-- cooldown duration sourced from the incident taxonomy (PROVIDER_OUTAGE),
-  no own duration/backoff/override math (OI-1188)
+- per-class cooldown (OI-1185): a 429 cools down in seconds, an exhausted
+  quota in hours, and an auth failure never auto-recovers
+- cooldown duration sourced from the incident taxonomy (single clock,
+  OI-1188), no own duration/backoff/override math
 - fail-open: corrupt cooldown state reads as not-in-cooldown; best-effort
   record_lane_failure never raises
 """
@@ -39,13 +41,13 @@ def state_dir(tmp_path):
 class TestLaneGates:
 
     def test_deepseek_requires_env_var(self, state_dir):
-        ok, reason = lane_available("deepseek", env={}, state_dir=state_dir)
+        ok, reason = lane_available("deepseek-harness", env={}, state_dir=state_dir)
         assert ok is False
         assert "DEEPSEEK_API_KEY" in reason
 
     def test_deepseek_available_with_key(self, state_dir):
         ok, _ = lane_available(
-            "deepseek", env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir,
+            "deepseek-harness", env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir,
         )
         assert ok is True
 
@@ -87,26 +89,60 @@ class TestCooldownLifecycle:
     def test_record_then_remaining_then_reengage(self, state_dir):
         now = 1_000.0
         record_lane_failure(
-            "deepseek", "429 quota-exhausted", state_dir=state_dir,
+            "deepseek-harness", "quota exhausted", state_dir=state_dir,
             now=now,
         )
-        assert lane_cooldown_remaining("deepseek", state_dir=state_dir, now=now) == pytest.approx(3600.0)
-        assert lane_cooldown_remaining("deepseek", state_dir=state_dir, now=now + 3600) == 0.0
+        assert lane_cooldown_remaining("deepseek-harness", state_dir=state_dir, now=now) == pytest.approx(3600.0)
+        assert lane_cooldown_remaining("deepseek-harness", state_dir=state_dir, now=now + 3600) == 0.0
 
     def test_lane_available_respects_cooldown(self, state_dir):
         now = 2_000.0
         record_lane_failure(
-            "deepseek", "403 auth", state_dir=state_dir, now=now,
+            "deepseek-harness", "quota exhausted", state_dir=state_dir, now=now,
         )
         ok, reason = lane_available(
-            "deepseek", env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
+            "deepseek-harness", env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
         )
         assert ok is False
         assert "cooldown" in reason
 
         ok, _ = lane_available(
-            "deepseek", env={"DEEPSEEK_API_KEY": "sk-test"},
+            "deepseek-harness", env={"DEEPSEEK_API_KEY": "sk-test"},
             state_dir=state_dir, now=now + 3601,
+        )
+        assert ok is True
+
+    def test_auth_failure_never_auto_recovers(self, state_dir):
+        """An auth failure (403) is non-recoverable: waiting past the quota
+        window does NOT bring the lane back (operator intervention required)."""
+        now = 2_500.0
+        record_lane_failure(
+            "deepseek-harness", "403 auth", state_dir=state_dir, now=now,
+        )
+        assert lane_cooldown_remaining(
+            "deepseek-harness", state_dir=state_dir, now=now,
+        ) == float("inf")
+
+        # Even far in the future the lane stays out — an expired key does not
+        # improve by waiting (OI-1185).
+        ok, _ = lane_available(
+            "deepseek-harness", env={"DEEPSEEK_API_KEY": "sk-test"},
+            state_dir=state_dir, now=now + 999_999,
+        )
+        assert ok is False
+
+    def test_rate_limit_recovers_in_seconds(self, state_dir):
+        """A 429 cools down in seconds and the lane re-engages on its own."""
+        now = 3_500.0
+        record_lane_failure(
+            "deepseek-harness", "429 too many requests", state_dir=state_dir, now=now,
+        )
+        assert lane_cooldown_remaining(
+            "deepseek-harness", state_dir=state_dir, now=now,
+        ) == pytest.approx(60.0)
+        ok, _ = lane_available(
+            "deepseek-harness", env={"DEEPSEEK_API_KEY": "sk-test"},
+            state_dir=state_dir, now=now + 61,
         )
         assert ok is True
 
@@ -122,27 +158,44 @@ class TestCooldownLifecycle:
         data = json.loads(cooldown_file.read_text(encoding="utf-8"))
         assert data["lane"] == "kimi"
         assert data["until"] == pytest.approx(now + 3600)
+        assert data["failure_class"] == "provider_quota_exhausted"
+        assert data["recoverable"] is True
 
     def test_no_cooldown_file_means_active(self, state_dir):
-        assert lane_cooldown_remaining("deepseek", state_dir=state_dir, now=0.0) == 0.0
+        assert lane_cooldown_remaining("deepseek-harness", state_dir=state_dir, now=0.0) == 0.0
 
 
 # ---------------------------------------------------------------------------
-# Cooldown duration config
+# Cooldown duration config (single clock, OI-1188)
 # ---------------------------------------------------------------------------
 
 class TestCooldownSeconds:
 
     def test_delegates_to_incident_taxonomy(self):
         """cooldown_seconds() must lean on the canonical incident taxonomy
-        (PROVIDER_OUTAGE contract), not carry its own duration (OI-1188)."""
+        (PROVIDER_QUOTA_EXHAUSTED default), not carry its own duration (OI-1188)."""
         from incident_taxonomy import IncidentClass, get_cooldown_seconds
 
-        assert cooldown_seconds() == get_cooldown_seconds(IncidentClass.PROVIDER_OUTAGE, 0)
+        assert cooldown_seconds() == get_cooldown_seconds(IncidentClass.PROVIDER_QUOTA_EXHAUSTED, 0)
 
     def test_default_is_one_hour(self):
-        """The PROVIDER_OUTAGE base cooldown is one hour (3600s)."""
+        """The quota-exhausted base cooldown is one hour (3600s)."""
         assert cooldown_seconds() == 3600
+
+    def test_rate_limit_is_seconds(self):
+        from incident_taxonomy import IncidentClass
+
+        assert cooldown_seconds(IncidentClass.PROVIDER_RATE_LIMIT) == 60
+
+    def test_quota_is_hours(self):
+        from incident_taxonomy import IncidentClass
+
+        assert cooldown_seconds(IncidentClass.PROVIDER_QUOTA_EXHAUSTED) == 3600
+
+    def test_auth_is_zero(self):
+        from incident_taxonomy import IncidentClass
+
+        assert cooldown_seconds(IncidentClass.PROVIDER_AUTH_FAILURE) == 0
 
     def test_no_own_time_arithmetic(self, monkeypatch):
         """cooldown_seconds() returns get_cooldown_seconds verbatim — it does no
@@ -163,7 +216,7 @@ class TestCooldownSeconds:
 
         from incident_taxonomy import IncidentClass
 
-        assert captured["incident_class"] == IncidentClass.PROVIDER_OUTAGE
+        assert captured["incident_class"] == IncidentClass.PROVIDER_QUOTA_EXHAUSTED
         assert captured["retry_count"] == 0
 
 
@@ -176,8 +229,8 @@ class TestFailOpen:
     def test_corrupt_cooldown_state_reads_as_active(self, state_dir):
         cooldown_dir = state_dir / "router_lane_cooldown"
         cooldown_dir.mkdir()
-        (cooldown_dir / "deepseek.json").write_text("{not valid json", encoding="utf-8")
-        assert lane_cooldown_remaining("deepseek", state_dir=state_dir, now=1.0) == 0.0
+        (cooldown_dir / "deepseek-harness.json").write_text("{not valid json", encoding="utf-8")
+        assert lane_cooldown_remaining("deepseek-harness", state_dir=state_dir, now=1.0) == 0.0
 
     def test_record_lane_failure_is_best_effort(self, state_dir):
         # Invalid lane name raises inside the try and must be swallowed.

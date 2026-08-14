@@ -434,8 +434,8 @@ class TestVertexRoutingInRun:
         mock_urlopen.assert_not_called()
         assert result["status"] == "completed"
 
-    def test_vertex_api_error_produces_failed_result(self, gate_env, monkeypatch):
-        """When Vertex API raises, run() must return a failed result record."""
+    def test_vertex_api_error_produces_unavailable_result(self, gate_env, monkeypatch):
+        """When Vertex API raises, run() must book an unavailable record (OI-1178)."""
         monkeypatch.setenv("VNX_GEMINI_ROUTING", "vertex")
         monkeypatch.setenv("VNX_VERTEX_PROJECT", "error-test-proj")
 
@@ -458,7 +458,7 @@ class TestVertexRoutingInRun:
                 pr_number=1,
             )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] == "vertex_api_error"
         assert "Connection refused" in result["reason_detail"]
 

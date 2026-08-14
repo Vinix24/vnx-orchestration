@@ -239,19 +239,23 @@ def _writer_output_gate_artifacts() -> Dict[str, Any]:
 
 
 def _writer_output_gate_recorder_failure() -> Dict[str, Any]:
-    """Shape produced by scripts/lib/gate_recorder.py:record_failure."""
+    """Shape produced by scripts/lib/gate_recorder.py:record_failure.
+
+    Execution-level reasons (timeout here) book ``unavailable``, never
+    ``failed`` (OI-1178).
+    """
     return {
         "gate": "codex_gate",
         "pr_id": "100",
         "pr_number": 100,
-        "status": "failed",
+        "status": "unavailable",
         "reason": "timeout",
         "reason_detail": "Gate exceeded 600s",
         "duration_seconds": 600.0,
         "partial_output_lines": 0,
         "runner_pid": 1234,
         "killed_at": "2026-04-29T00:00:00Z",
-        "summary": "Gate execution timeout: Gate exceeded 600s",
+        "summary": "codex_gate UNAVAILABLE (gate did not run — timeout: Gate exceeded 600s) — NOT a review fail",
         "contract_hash": "abc123",
         "report_path": "",
         "blocking_findings": [],

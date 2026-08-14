@@ -1054,13 +1054,16 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResul
     Returns a DoorRouteResult carrying (provider, model, route_reason) when the
     router has a recommendation, or a decline_reason (+ tier when the
     classifier ran) when routing should be skipped (T0, router disabled,
-    provider-not-mapped, classifier error). Returns None on an unexpected
-    error outside the router (e.g. an unreadable instruction file).
+    classifier error). Returns None on an unexpected error outside the router
+    (e.g. an unreadable instruction file).
 
-    Fail-open: never raises — returns None on any error.
+    Fail-open for the classifier and other unexpected errors — but fail-loud for
+    registry drift (ADR-036 §2): a RegistryLookupError (unknown provider/model)
+    propagates so the door rejects instead of silently falling back to CLAUDE.
     """
     try:
         from providers.smart_router.door_routing import resolve_door_route  # noqa: PLC0415
+        from providers.provider_registry import RegistryLookupError  # noqa: PLC0415
 
         # Read instruction text (same logic as validate Rule 5 — the file
         # has already passed staging validation so this is a cheap re-read).
@@ -1075,6 +1078,10 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResul
             instruction_text=instruction_text,
             file_paths=file_paths,
         )
+    except RegistryLookupError:
+        # ADR-036 §2: unknown provider/model is drift, not a routing bug — the
+        # door must reject loudly rather than fall back to the default lane.
+        raise
     except Exception as exc:
         logger.warning(
             "smart-router pre-validate: router call failed, dispatch "
@@ -1740,21 +1747,32 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
     # keeps governance intact: a route that violates constraints is still
     # rejected by the full validation chain — only the order changed.
     # Deterministic fallback: when the router declines (T0, disabled,
-    # provider-not-mapped, classifier error), AUTO resolves to CLAUDE so
-    # compile_plan never sees an unresolved AUTO.  This is the same
-    # hard-default the old bridge alias provided, now applied AFTER the
-    # router had its chance to fill in a cheaper provider.
+    # classifier error), AUTO resolves to CLAUDE so compile_plan never sees an
+    # unresolved AUTO.  This is the same hard-default the old bridge alias
+    # provided, now applied AFTER the router had its chance to fill in a
+    # cheaper provider.
     door_route_reason: Optional[str] = None
     if spec.provider == Provider.AUTO:
-        result = _resolve_router_pre_validate(spec)
+        try:
+            from providers.provider_registry import RegistryLookupError  # noqa: PLC0415
+
+            result = _resolve_router_pre_validate(spec)
+        except RegistryLookupError as exc:
+            # ADR-036 §2: an unknown provider/model is drift between the router
+            # and the registry — reject loudly, never silently fall back to the
+            # default lane. No dispatch, no receipt of a half-run.
+            _emit_reject(Reject(
+                "router-registry-drift",
+                str(exc),
+            ))
+            return 1
         if result is not None and result.route is not None:
             new_provider, new_model, route_reason = result.route
             spec = dataclasses.replace(spec, provider=new_provider, model=new_model)
             door_route_reason = route_reason
         else:
             # Router declined or could not resolve (T0, VNX_SMART_ROUTER_DISABLE,
-            # a classifier/resolver exception, or a tier whose TierRoute.provider
-            # has no _TIER_PROVIDER_TO_ENUM entry) — fall back to CLAUDE. OI-1050:
+            # or a classifier exception) — fall back to CLAUDE. OI-1050:
             # this must set provider AND model TOGETHER, in the same replace() call
             # that resolves the router's own success path above. Setting provider
             # alone previously left spec.model=None, and the workers-kimi-pinned

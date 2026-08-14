@@ -1176,3 +1176,53 @@ def run_panel(
         "panelists": [r.__dict__ for r in results],
         "doc_truncation": doc_truncation,
     }
+
+
+def build_decision_ref(
+    decision: str,
+    panelists: List[Dict[str, Any]],
+    *,
+    reports_base: str = "unified_reports",
+    source: str = "plan-gate",
+    set_at: Optional[str] = None,
+) -> str:
+    """Render the JSON ``decision_ref`` payload for a plan-gate round (OI-1190).
+
+    ``panelists`` is ``run_panel``'s ``panelists`` list (the ``PanelistResult.__dict__``
+    form). ``reports`` collects every panelist that actually delivered a report
+    (``dispatched`` is True — a report file exists on disk); ``rejected_alternatives``
+    collects the scoring block/revise panelists with their findings + rationale, so the
+    reasons an approach was rejected survive on the track rather than only in the
+    name-pattern-matchable report files. Returns a compact JSON string (the
+    ``tracks.decision_ref`` payload written via ``tracks.set_decision_ref``).
+    """
+    reports: List[str] = []
+    rejected: List[Dict[str, Any]] = []
+    for p in panelists:
+        report_path = (p.get("report_path") or "").strip()
+        if p.get("dispatched") and report_path:
+            path = report_path if report_path.endswith(".md") else f"{report_path}.md"
+            reports.append(f"{reports_base}/{path}")
+        # A rejected alternative is a SCORING block/revise verdict: the lane actually
+        # reviewed the plan and gave concrete reasons. parse_error (fail-safe revise)
+        # and no_verdict (synthesized) lanes saw no real verdict — no reason to record.
+        if (
+            p.get("dispatched")
+            and not p.get("parse_error")
+            and not p.get("no_verdict")
+            and str(p.get("verdict", "")).lower() in ("block", "revise")
+        ):
+            rejected.append({
+                "panelist": p.get("label", ""),
+                "verdict": str(p.get("verdict", "")).lower(),
+                "findings": list(p.get("blocking_findings") or []),
+                "rationale": str(p.get("rationale", "")),
+            })
+    payload = {
+        "reports": reports,
+        "decision": decision,
+        "rejected_alternatives": rejected,
+        "set_at": set_at or datetime.now(timezone.utc).isoformat(),
+        "source": source,
+    }
+    return json.dumps(payload, sort_keys=True)

@@ -4,6 +4,10 @@ providers:
   anthropic:
     enabled: true
     api_key_env: ANTHROPIC_API_KEY
+    # dispatch_enum: the dispatch Provider enum value (dispatch_spec.Provider)
+    # this section routes to. ADR-036: provider identity is read from this
+    # registry, never hard-coded in Python on the routing path.
+    dispatch_enum: claude
     models:
       opus:
         litellm_name: "anthropic/claude-opus-4-8"
@@ -91,6 +95,7 @@ providers:
   openai:
     enabled: true
     api_key_env: OPENAI_API_KEY
+    dispatch_enum: codex
     models:
       gpt-5.5:
         litellm_name: "openai/gpt-5.5"
@@ -157,6 +162,7 @@ providers:
   deepseek_harness:
     enabled: true
     api_key_env: DEEPSEEK_API_KEY
+    dispatch_enum: deepseek-harness
     # OI-867: the working DeepSeek route — claude_harness_keyed, uses its own
     # API key via the Anthropic-compatible DeepSeek endpoint.  No proxy.
     models:
@@ -236,6 +242,7 @@ providers:
   local_gemma:
     enabled: true
     api_key_env: ""  # no API key; runs entirely on-device via MLX or Ollama
+    dispatch_enum: local-gemma
     models:
       gemma-4b-local:
         litellm_name: ""  # local only; not via LiteLLM
@@ -258,6 +265,7 @@ providers:
   kimi_cli:
     enabled: true
     api_key_env: ""  # no API key; OAuth via `kimi login`
+    dispatch_enum: kimi
     # WS1 (20260721-kimi-lane-hardening): explicit default, independent of YAML key
     # order — _resolve_kimi_model_label() reads this flag rather than "first dict key".
     default_model: kimi-k3
@@ -311,3 +319,47 @@ providers:
         # through — disabled here so the pre-flight registry check rejects it instead of a
         # worker silently receiving a dead `-m` string.
         dispatch_allowed: false
+
+# ---------------------------------------------------------------------------
+# Static router tier map (ADR-036) — model identity + provider strings for the
+# cost-tier router (tier_routing.py) are read from this block, never from Python
+# literals. `provider` names a registry section key above; `model` names a model
+# key under that section; `lane` is the dispatch lane. `fallback` is the ordered
+# chain the tier router walks when a lane is unavailable at decision time
+# (missing key / CLI absent / cooldown — OI-1185: all three causes walk the same
+# chain). provider_registry.load_tier_map() validates every reference and raises
+# RegistryLookupError (naming what+where) on anything this registry does not
+# know.
+# ---------------------------------------------------------------------------
+routing:
+  tier_map:
+    tier-zero:
+      provider: deepseek_harness
+      model: deepseek-v4-flash
+      lane: claude_harness_keyed
+      fallback:
+        - provider: kimi_cli
+          model: kimi-k3
+          lane: kimi_cli
+        - provider: openai
+          model: gpt-5.5
+          lane: provider
+    tier-low:
+      provider: deepseek_harness
+      model: deepseek-v4-flash
+      lane: claude_harness_keyed
+      fallback:
+        - provider: kimi_cli
+          model: kimi-k3
+          lane: kimi_cli
+        - provider: openai
+          model: gpt-5.5
+          lane: provider
+    tier-mid:
+      provider: anthropic
+      model: sonnet-5
+      lane: tmux_interactive
+    tier-high:
+      provider: anthropic
+      model: opus-5
+      lane: tmux_interactive

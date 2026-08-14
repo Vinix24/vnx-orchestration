@@ -42,9 +42,24 @@ class HorizonColumnMissingError(RuntimeError):
     pass
 
 
+class DecisionRefColumnMissingError(RuntimeError):
+    """Raised when a decision_ref write is requested but tracks.decision_ref is absent.
+
+    Fail-closed (D5): a store predating migration 0033 lacks the decision_ref column.
+    We refuse loudly and point the operator at `vnx migrate` instead of silently
+    dropping the plan-gate decision pointer.
+    """
+    pass
+
+
 def _tracks_has_horizon(conn: sqlite3.Connection) -> bool:
     """True when the tracks table carries the horizon column (migration 0027)."""
     return any(row[1] == "horizon" for row in conn.execute("PRAGMA table_info('tracks')"))
+
+
+def _tracks_has_decision_ref(conn: sqlite3.Connection) -> bool:
+    """True when the tracks table carries the decision_ref column (migration 0033)."""
+    return any(row[1] == "decision_ref" for row in conn.execute("PRAGMA table_info('tracks')"))
 
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued":  frozenset({"active", "parked"}),
@@ -365,6 +380,59 @@ def update_authored_fields(
                 (*updates.values(), track_id, project_id),
             )
             conn.commit()
+
+        updated = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        return dict(updated)
+    finally:
+        conn.close()
+
+
+def set_decision_ref(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+    decision_ref: str,
+    *,
+    actor: str = "system",
+) -> dict[str, Any]:
+    """Write the plan-gate decision pointer onto a track (OI-1190).
+
+    ``decision_ref`` is a JSON string (built by plan_gate_panel.build_decision_ref)
+    pointing at the plan-gate report(s) plus the rejected alternatives with their
+    reasons. It is machine-derived evidence, not authored ROADMAP content, so it has
+    its own writer rather than riding update_authored_fields. Emits a
+    ``track_decision_ref_set`` audit event (ADR-005).
+
+    Raises TrackNotFoundError if the track does not exist, and
+    DecisionRefColumnMissingError on a store predating migration 0033.
+    """
+    conn = _get_conn(state_dir)
+    try:
+        row = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        if not row:
+            raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+
+        if not _tracks_has_decision_ref(conn):
+            raise DecisionRefColumnMissingError(
+                f"Cannot set decision_ref on track {track_id!r}: the tracks table "
+                "has no 'decision_ref' column (store predates migration 0033). "
+                "Run `vnx migrate` to add it, then retry."
+            )
+
+        _emit_track_event(
+            state_dir, "track_decision_ref_set", track_id, project_id, actor, {}
+        )
+        conn.execute(
+            "UPDATE tracks SET decision_ref = ? WHERE track_id = ? AND project_id = ?",
+            (decision_ref, track_id, project_id),
+        )
+        conn.commit()
 
         updated = conn.execute(
             "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",

@@ -213,6 +213,27 @@ def _apply_migration_0032(state_dir: Path) -> None:
     conn.close()
 
 
+def _apply_migration_0033(state_dir: Path) -> None:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    schema_migration.apply_script_if_below(
+        conn, 33, (_MIGRATIONS / "0033_track_decision_ref.sql").read_text(encoding="utf-8")
+    )
+    conn.commit()
+    conn.close()
+
+
+def _show_args(
+    state_dir: Path,
+    track_id: str,
+    *,
+    project_id: str = PROJECT_ID,
+    json: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        state_dir=str(state_dir), project_id=project_id, track_id=track_id, json=json,
+    )
+
+
 def _close_args(
     state_dir: Path,
     track_id: str,
@@ -693,3 +714,57 @@ def test_plan_gate_attest_failed_evidence_write_is_loud_not_silent(tmp_path, cap
     assert _plan_oi_resolved_at(sd, "T") is not None
     captured = capsys.readouterr()
     assert "plan_gate_pass evidence NOT written" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# OI-1190: `objective show` surfaces the track's decision_ref (text + --json).
+# ---------------------------------------------------------------------------
+
+def _set_decision_ref_raw(state_dir: Path, track_id: str, payload: str, project_id: str = PROJECT_ID) -> None:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "UPDATE tracks SET decision_ref = ? WHERE track_id = ? AND project_id = ?",
+        (payload, track_id, project_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_objective_show_text_surfaces_decision_ref(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0033(sd)
+    tracks_lib.create_track(sd, "feat-show", PROJECT_ID, title="t", goal_state="shipped", phase="queued")
+    _set_decision_ref_raw(
+        sd, "feat-show",
+        json.dumps({
+            "reports": ["unified_reports/plan-gate-feat-show-opus-abc12345.md",
+                        "unified_reports/plan-gate-feat-show-kimi-6789abcd.md"],
+            "decision": "PASS", "rejected_alternatives": [], "set_at": "x", "source": "plan-gate",
+        }),
+    )
+
+    assert planning_cli.cmd_objective_show(_show_args(sd, "feat-show")) == 0
+    out = capsys.readouterr().out
+    assert "decision_ref: PASS (2 report(s), 0 rejected alternative(s))" in out
+
+
+def test_objective_show_text_absent_decision_ref_renders_dash(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0033(sd)
+    tracks_lib.create_track(sd, "feat-noref", PROJECT_ID, title="t", goal_state="shipped", phase="queued")
+
+    assert planning_cli.cmd_objective_show(_show_args(sd, "feat-noref")) == 0
+    out = capsys.readouterr().out
+    assert "decision_ref: -" in out
+
+
+def test_objective_show_json_includes_decision_ref(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0033(sd)
+    tracks_lib.create_track(sd, "feat-json", PROJECT_ID, title="t", goal_state="shipped", phase="queued")
+    payload = '{"decision": "PASS", "reports": [], "rejected_alternatives": [], "set_at": "x", "source": "plan-gate"}'
+    _set_decision_ref_raw(sd, "feat-json", payload)
+
+    assert planning_cli.cmd_objective_show(_show_args(sd, "feat-json", json=True)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["decision_ref"] == payload

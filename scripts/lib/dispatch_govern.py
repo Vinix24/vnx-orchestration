@@ -215,7 +215,7 @@ def ensure_receipt(
     synthesized_receipt = SynthesizedLaneReceipt(
         dispatch_id=spec.dispatch_id,
         terminal_id=spec.terminal_id,
-        model=spec.model or "unknown",
+        model=spec.model or "",
         lane=lane,
         failure_reason=raw.failure_reason,
         contract_status=contract_status,
@@ -594,10 +594,11 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     receipt_data = raw.receipt or {}
     # Same source order as the synthesized-receipt path above (line ~205):
     # worker-authored receipt first, then spec.model (the real dispatch value,
-    # e.g. "sonnet"/"opus"), and only "unknown" when neither is set. Before this
-    # fix, a worker receipt with no "model" key fell straight to "unknown" even
-    # though spec.model carried the real value — OI-1001.
-    _model = receipt_data.get("model") or spec.model or "unknown"
+    # e.g. "sonnet"/"opus"). OI-1184: no "unknown" fallback — an undeterminable
+    # model is left empty for the fail-closed validator to refuse. Before
+    # OI-1001, a worker receipt with no "model" key fell straight to "unknown"
+    # even though spec.model carried the real value.
+    _model = receipt_data.get("model") or spec.model or ""
     _exit_code = int(receipt_data.get("exit_code", 0) or 0)
     _raw_token = receipt_data.get("token_usage") or raw.token_usage or {}
     _token_usage = {

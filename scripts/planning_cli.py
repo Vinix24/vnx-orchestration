@@ -319,6 +319,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  next_up  : {bool(track.get('next_up'))}")
     print(f"  pr_ref   : {track.get('pr_ref') or '-'}")
     print(f"  delivery : {_format_pr_delivery(delivery_entries)}")
+    print(f"  decision_ref: {_format_decision_ref(track.get('decision_ref'))}")
     print(f"  goal     : {track.get('goal_state') or '-'}")
     print(f"  depends  : {', '.join(deps) if deps else '(none)'}")
     if open_items:
@@ -1686,6 +1687,27 @@ def _format_pr_delivery(entries: list[dict[str, Any]]) -> str:
     return ", ".join(f"#{e['pr_number']} {e['delivery_kind']}" for e in entries)
 
 
+def _format_decision_ref(decision_ref: Optional[str]) -> str:
+    """Compact one-line summary of a track's decision_ref (OI-1190).
+
+    ``decision_ref`` is the JSON payload written by plan_gate_panel.build_decision_ref:
+    decision + report count + rejected-alternative count. An absent field renders '-';
+    an unparseable one is echoed raw rather than guessed at.
+    """
+    if not decision_ref:
+        return "-"
+    try:
+        payload = json.loads(decision_ref)
+    except (json.JSONDecodeError, ValueError):
+        return decision_ref
+    decision = payload.get("decision", "?")
+    reports = payload.get("reports") or []
+    rejected = payload.get("rejected_alternatives") or []
+    n_reports = len(reports) if isinstance(reports, list) else 0
+    n_rejected = len(rejected) if isinstance(rejected, list) else 0
+    return f"{decision} ({n_reports} report(s), {n_rejected} rejected alternative(s))"
+
+
 def _append_coordination_event(
     conn: sqlite3.Connection,
     *,
@@ -2257,6 +2279,26 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"plan-gate run failed: {exc}", file=sys.stderr)
         return 1
+
+    # OI-1190: persist the durable half of the plan decision onto the track — the
+    # report path(s) + the rejected alternatives with their reasons — so the decision
+    # is findable from the track (previously only name-pattern-matchable from
+    # unified_reports/). Written for EVERY outcome (PASS/REVISE/BLOCK/INFRA_FAIL), not
+    # just PASS: a REVISE/BLOCK is exactly when the rejected alternatives matter most.
+    # Best-effort: a decision_ref write must never break the gate it hangs off (same
+    # contract as _emit_plan_gate_pass_record).
+    try:
+        payload = plan_gate_panel.build_decision_ref(
+            result["decision"], result["panelists"], source="plan-gate"
+        )
+        tracks_lib.set_decision_ref(
+            state_dir, args.track_id, args.project_id, payload, actor="system"
+        )
+    except Exception as exc:  # vnx-silent-except: decision_ref persistence must never break the gate
+        print(
+            f"WARNING: could not persist decision_ref for track {args.track_id}: {exc}",
+            file=sys.stderr,
+        )
 
     if args.json:
         print(json.dumps(result, indent=2))

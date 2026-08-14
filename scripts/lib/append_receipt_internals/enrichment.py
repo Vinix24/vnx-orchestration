@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .common import _emit, facade
+from .common import SCRIPTS_DIR, _emit, facade
 from .validation import _is_completion_event, _is_subprocess_intermediate_completion
 
 
@@ -52,7 +53,7 @@ def _enrich_session_metadata(enriched: Dict[str, Any], state_dir: Path) -> None:
         session_meta = {
             "session_id": "unknown",
             "terminal": str(enriched.get("terminal") or "unknown"),
-            "model": "unknown",
+            "model": "",
             "provider": "unknown",
         }
 
@@ -65,7 +66,16 @@ def _enrich_session_metadata(enriched: Dict[str, Any], state_dir: Path) -> None:
         enriched["session_id"] = session_meta.get("session_id") or "unknown"
     if not enriched.get("terminal"):
         enriched["terminal"] = session_meta.get("terminal", "unknown")
-    enriched.setdefault("model", session_meta.get("model", "unknown"))
+    # OI-1184: never default the model to the fake literal "unknown". The
+    # resolved model is stamped only when it is a real, non-sentinel value;
+    # otherwise the field stays absent so the fail-closed
+    # ``_validate_model_present`` refuses the receipt loudly. An undeterminable
+    # model must surface, not land in the ledger as a fake name.
+    sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+    from providers.model_normalizer import is_unknown_model  # noqa: PLC0415
+    resolved_model = str(session_meta.get("model") or "").strip()
+    if resolved_model and not is_unknown_model(resolved_model):
+        enriched.setdefault("model", resolved_model)
     enriched.setdefault("provider", session_meta.get("provider", "unknown"))
     if "token_usage" in session_meta:
         enriched.setdefault("token_usage", session_meta["token_usage"])

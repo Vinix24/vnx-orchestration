@@ -94,12 +94,31 @@ class IncidentClass(str, Enum):
     Scope: single terminal lease."""
 
     # -- External dependency-level incidents --
-    PROVIDER_OUTAGE = "provider_outage"
-    """A provider lane (Claude, Kimi, GLM, DeepSeek, Codex) failed on quota,
-    auth (403/429), or is otherwise unavailable at decision or execution time.
+    # Provider failures are split into three classes (PR-0 / OI-1185) because
+    # they have different recovery physics: a 429 clears in seconds, an
+    # exhausted quota in hours, and an auth failure (expired/revoked key) never
+    # improves by waiting. classify_provider_failure() maps a lane-failure
+    # reason to exactly one of these.
+    PROVIDER_RATE_LIMIT = "provider_rate_limit"
+    """A provider lane returned 429 (rate limited). Transient: waiting clears
+    it, so the cooldown is short (seconds) and the lane re-engages on its own.
     Detected by: a lane failure recorded by the smart-router availability layer
-    (record_lane_failure) or a provider-dispatch error.
-    Scope: a provider lane across dispatches until its cooldown budget clears."""
+    (record_lane_failure) whose reason matches the 429/rate-limit markers."""
+
+    PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
+    """A provider lane exhausted its quota or balance (402/insufficient quota).
+    Longer-lived: the cooldown is measured in hours, doubling on repeat up to
+    the cap. Re-engages automatically once the budget clears.
+    Detected by: a lane failure recorded by record_lane_failure that is neither
+    a rate limit nor an auth failure."""
+
+    PROVIDER_AUTH_FAILURE = "provider_auth_failure"
+    """A provider lane failed auth (401/403, invalid/expired/revoked key).
+    Waiting never fixes this — an expired key does not improve with time — so
+    there is no automatic recovery: the lane stays out until an operator
+    intervenes (rotates the key) and clears the cooldown state.
+    Detected by: a lane failure recorded by record_lane_failure whose reason
+    matches the auth markers."""
 
     # -- Workflow-level incidents --
     RESUME_FAILED = "resume_failed"
@@ -372,8 +391,34 @@ RECOVERY_CONTRACTS: Dict[IncidentClass, RecoveryContract] = {
         ),
     ),
 
-    IncidentClass.PROVIDER_OUTAGE: RecoveryContract(
-        incident_class=IncidentClass.PROVIDER_OUTAGE,
+    IncidentClass.PROVIDER_RATE_LIMIT: RecoveryContract(
+        incident_class=IncidentClass.PROVIDER_RATE_LIMIT,
+        default_severity=Severity.WARNING,
+        retry_budget=RetryBudget(
+            max_retries=4,
+            cooldown_seconds=60,
+            backoff_factor=2.0,
+            max_cooldown_seconds=600,
+        ),
+        escalation=EscalationRule(
+            escalate_after_retries=3,
+            escalate_to="T0",
+            halt_auto_recovery=False,
+            dead_letter_eligible=False,
+        ),
+        permitted_actions=(
+            RecoveryAction.ESCALATE_TO_OPERATOR,
+        ),
+        description=(
+            "A provider lane was rate limited (429). Transient — waiting clears "
+            "it. Cooldown the lane for a minute, doubling on repeat up to ten "
+            "minutes. Escalate to T0 after the third consecutive failure. "
+            "The lane re-engages automatically once its cooldown budget clears."
+        ),
+    ),
+
+    IncidentClass.PROVIDER_QUOTA_EXHAUSTED: RecoveryContract(
+        incident_class=IncidentClass.PROVIDER_QUOTA_EXHAUSTED,
         default_severity=Severity.WARNING,
         retry_budget=RetryBudget(
             max_retries=3,
@@ -391,10 +436,36 @@ RECOVERY_CONTRACTS: Dict[IncidentClass, RecoveryContract] = {
             RecoveryAction.ESCALATE_TO_OPERATOR,
         ),
         description=(
-            "A provider lane failed on quota, auth (403/429), or availability. "
-            "Cooldown the lane for one hour, doubling on repeat up to four hours. "
-            "Escalate to T0 after the second consecutive failure. "
+            "A provider lane exhausted its quota or balance. Long-lived — "
+            "cooldown the lane for one hour, doubling on repeat up to four "
+            "hours. Escalate to T0 after the second consecutive failure. "
             "The lane re-engages automatically once its cooldown budget clears."
+        ),
+    ),
+
+    IncidentClass.PROVIDER_AUTH_FAILURE: RecoveryContract(
+        incident_class=IncidentClass.PROVIDER_AUTH_FAILURE,
+        default_severity=Severity.ERROR,
+        retry_budget=RetryBudget(
+            max_retries=0,
+            cooldown_seconds=0,
+            backoff_factor=1.0,
+            max_cooldown_seconds=0,
+        ),
+        escalation=EscalationRule(
+            escalate_after_retries=0,
+            escalate_to="operator",
+            halt_auto_recovery=True,
+            dead_letter_eligible=False,
+        ),
+        permitted_actions=(
+            RecoveryAction.ESCALATE_TO_OPERATOR,
+        ),
+        description=(
+            "A provider lane failed auth (401/403, invalid/expired/revoked key). "
+            "Waiting never fixes this, so there is no automatic recovery: the "
+            "lane stays out until an operator rotates the key and clears the "
+            "cooldown state. Escalates to the operator immediately."
         ),
     ),
 
@@ -556,6 +627,44 @@ def get_cooldown_seconds(
     budget = contract.retry_budget
     cooldown = budget.cooldown_seconds * (budget.backoff_factor ** retry_count)
     return min(int(cooldown), budget.max_cooldown_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Provider failure classification (OI-1185: one chain for all failure causes)
+# ---------------------------------------------------------------------------
+
+_AUTH_FAILURE_MARKERS = (
+    "401", "403", "unauthorized", "forbidden", "not authenticated",
+    "invalid api key", "invalid_api_key", "authentication", "auth",
+    "access denied", "bad credentials",
+)
+
+_RATE_LIMIT_MARKERS = (
+    "429", "rate limit", "rate_limit", "ratelimit", "too many requests",
+)
+
+
+def classify_provider_failure(reason: str) -> IncidentClass:
+    """Map a lane-failure reason to its provider incident class.
+
+    Deterministic keyword match, most-specific first (OI-1185): an expired key
+    never improves by waiting, so auth outranks rate-limit, and a 429 outranks
+    the quota default.
+
+      - auth markers (401/403/unauthorized/...)  -> PROVIDER_AUTH_FAILURE
+      - rate-limit markers (429/too-many-requests) -> PROVIDER_RATE_LIMIT
+      - anything else (quota/balance/402/...)    -> PROVIDER_QUOTA_EXHAUSTED
+
+    Quota is the catch-all default: the availability layer only calls this for
+    quota/auth/rate-limit failures, and an unrecognized reason is treated as
+    the long-lived (hours) class rather than the transient (seconds) one.
+    """
+    lowered = (reason or "").lower()
+    if any(marker in lowered for marker in _AUTH_FAILURE_MARKERS):
+        return IncidentClass.PROVIDER_AUTH_FAILURE
+    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+        return IncidentClass.PROVIDER_RATE_LIMIT
+    return IncidentClass.PROVIDER_QUOTA_EXHAUSTED
 
 
 # ---------------------------------------------------------------------------

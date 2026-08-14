@@ -432,8 +432,13 @@ class TestVertexRunnerReturnsGateResultShape:
         assert isinstance(result["blocking_findings"], list)
         assert isinstance(result["duration_seconds"], float)
 
-    def test_vertex_failure_result_matches_failed_shape(self, gate_env, monkeypatch):
-        """Vertex API error must produce a result with status='failed' and reason field."""
+    def test_vertex_failure_result_matches_unavailable_shape(self, gate_env, monkeypatch):
+        """Vertex API error books unavailable (non-execution) with reason field.
+
+        A ConnectionError reaching the Vertex REST call means the review never
+        ran, so the result is ``unavailable`` (OI-1178), not ``failed`` — but it
+        must still carry the canonical reason/reason_detail fields.
+        """
         monkeypatch.setenv("VNX_GEMINI_ROUTING", "vertex")
         monkeypatch.setenv("VNX_VERTEX_PROJECT", "failure-shape-proj")
 
@@ -449,7 +454,7 @@ class TestVertexRunnerReturnsGateResultShape:
                 pr_number=42,
             )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert "reason" in result
         assert result["reason"] == "vertex_api_error"
         assert "Simulated Vertex quota error" in result.get("reason_detail", "")

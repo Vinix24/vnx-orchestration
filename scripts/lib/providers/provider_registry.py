@@ -40,6 +40,47 @@ class ProviderConfig:
     api_key_env: str
     models: Dict[str, ProviderModel] = field(default_factory=dict)
     default_model: Optional[str] = None
+    # dispatch_enum: the dispatch Provider enum value (dispatch_spec.Provider)
+    # this registry section routes to. Sourced from YAML (ADR-036); absent for
+    # sections the static router never emits (deepseek litellm-proxy, moonshot,
+    # zai, google).
+    dispatch_enum: Optional[str] = None
+
+
+class RegistryLookupError(LookupError):
+    """A provider or model key was not found in wave7_models.yaml.
+
+    Raised on the fail-loud routing path (ADR-036 §2): the message names what
+    was missing and where it was looked for (the registry path). It is
+    intentionally NOT a silent None — a provider/model the registry does not
+    know is drift between the router and the registry, and must surface.
+    """
+
+
+@dataclass(frozen=True)
+class TierRouteStep:
+    """One resolved step in a tier's route chain (primary or fallback).
+
+    ``provider`` is the dispatch enum value (dispatch_spec.Provider), derived
+    from the registry section's ``dispatch_enum`` — NOT the registry section
+    key. ``model`` is the registry model key (validated to exist). ``lane`` is
+    the dispatch lane name.
+    """
+
+    provider: str
+    model: str
+    lane: str
+
+
+@dataclass(frozen=True)
+class TierRouteSpec:
+    """Resolved route chain for one cost tier (primary + ordered fallbacks)."""
+
+    tier: str
+    provider: str
+    model: str
+    lane: str
+    fallback: tuple = ()  # tuple[TierRouteStep, ...]
 
 
 def _parse_model(data: dict) -> ProviderModel:
@@ -65,11 +106,13 @@ def _parse_provider(data: dict) -> ProviderConfig:
     for model_key, model_data in (data.get("models") or {}).items():
         models[model_key] = _parse_model(model_data)
     default_model_raw = data.get("default_model")
+    dispatch_enum_raw = data.get("dispatch_enum")
     return ProviderConfig(
         enabled=bool(data.get("enabled", False)),
         api_key_env=str(data.get("api_key_env") or ""),
         models=models,
         default_model=str(default_model_raw) if default_model_raw is not None else None,
+        dispatch_enum=str(dispatch_enum_raw) if dispatch_enum_raw is not None else None,
     )
 
 
@@ -105,3 +148,94 @@ def get_default_model(
     if cfg is None or not cfg.enabled or not cfg.models:
         return None
     return next(iter(cfg.models.values()))
+
+
+def _resolve_step(
+    entry: dict,
+    providers: Dict[str, ProviderConfig],
+    path: Path,
+    where: str,
+) -> TierRouteStep:
+    """Resolve one tier-map step (primary or fallback) against the registry.
+
+    Validates the provider key exists and is enabled, carries a dispatch_enum,
+    and the model key exists and is dispatch_allowed. Any gap raises
+    RegistryLookupError naming what+where (ADR-036 §2).
+    """
+    provider_key = entry.get("provider")
+    model_key = entry.get("model")
+    lane = entry.get("lane")
+    cfg = providers.get(provider_key)
+    if cfg is None:
+        raise RegistryLookupError(
+            f"provider {provider_key!r} referenced by {where} is not in the registry "
+            f"(checked {path})"
+        )
+    if not cfg.enabled:
+        raise RegistryLookupError(
+            f"provider {provider_key!r} referenced by {where} is disabled in {path}"
+        )
+    if not cfg.dispatch_enum:
+        raise RegistryLookupError(
+            f"provider {provider_key!r} referenced by {where} has no dispatch_enum "
+            f"in {path}; add a dispatch_enum to the {provider_key} section"
+        )
+    model = cfg.models.get(model_key)
+    if model is None:
+        raise RegistryLookupError(
+            f"model {model_key!r} referenced by {where} is not under provider "
+            f"{provider_key!r} in {path}"
+        )
+    if not model.dispatch_allowed:
+        raise RegistryLookupError(
+            f"model {model_key!r} under {provider_key!r} (referenced by {where}) is "
+            f"dispatch_allowed=false in {path}"
+        )
+    return TierRouteStep(provider=cfg.dispatch_enum, model=model_key, lane=lane)
+
+
+def load_tier_map(registry_path: Optional[Path] = None) -> Dict[str, TierRouteSpec]:
+    """Resolve the static router's tier map from the registry (ADR-036).
+
+    Reads the top-level ``routing.tier_map`` block and resolves every referenced
+    provider/model against the ``providers`` sections. Raises RegistryLookupError
+    (naming what+where) on any unknown provider key, missing dispatch_enum, or
+    unknown/disabled model key — never a silent None. This is the fail-loud half
+    of ADR-036: a malformed registry fails at load, before any dispatch reaches
+    the lookup.
+    """
+    path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
+    try:
+        with open(path) as fh:
+            raw = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        raise RegistryLookupError(f"registry file not found at {path}") from None
+    except yaml.YAMLError as exc:
+        raise RegistryLookupError(f"malformed registry yaml at {path}: {exc}") from exc
+
+    providers = load(path)
+    tier_map = ((raw.get("routing") or {}).get("tier_map")) or {}
+    result: Dict[str, TierRouteSpec] = {}
+    for tier, entry in tier_map.items():
+        if not isinstance(entry, dict):
+            raise RegistryLookupError(
+                f"routing.tier_map[{tier!r}] is not a mapping in {path}"
+            )
+        where = f"routing.tier_map[{tier!r}]"
+        primary = _resolve_step(entry, providers, path, where)
+        fallback: tuple = ()
+        raw_fallbacks = entry.get("fallback") or []
+        steps = []
+        for idx, fb in enumerate(raw_fallbacks):
+            steps.append(
+                _resolve_step(fb, providers, path, f"{where}.fallback[{idx}]")
+            )
+        fallback = tuple(steps)
+        result[str(tier)] = TierRouteSpec(
+            tier=str(tier),
+            provider=primary.provider,
+            model=primary.model,
+            lane=primary.lane,
+            fallback=fallback,
+        )
+    return result

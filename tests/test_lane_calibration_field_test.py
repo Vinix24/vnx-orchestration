@@ -93,13 +93,18 @@ def test_cli_json_output_is_valid():
 
 # ── tier-zero env-branch coverage ───────────────────────────────────────────
 # resolve_tier_route('tier-zero') returns different routes depending on whether
-# DEEPSEEK_API_KEY is in the environment. The calibration corpus pins env={},
-# which exercises the no-key codex fallback. These tests explicitly cover both
-# branches so the route is verified regardless of where the suite runs.
+# DEEPSEEK_API_KEY is in the environment and whether the kimi CLI is on PATH
+# (OI-1185: missing key and cooldown walk the SAME chain). The calibration
+# corpus pins env={} + kimi-absent (see the runner), which exercises the codex
+# terminal vangnet. These tests cover every branch explicitly with kimi mocked
+# so the route is verified regardless of where the suite runs.
 
 
-def test_tier_zero_without_deepseek_key_routes_to_codex():
-    """Without DEEPSEEK_API_KEY, tier-zero -> codex / gpt-5.5 / provider lane."""
+def test_tier_zero_without_deepseek_key_routes_to_codex(monkeypatch):
+    """Without DEEPSEEK_API_KEY and without the kimi CLI, tier-zero -> codex."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     route = lc.resolve_tier_route("tier-zero", env={})
     assert route.tier == "tier-zero"
     assert route.provider == "codex"
@@ -107,15 +112,32 @@ def test_tier_zero_without_deepseek_key_routes_to_codex():
     assert route.lane == "provider"
 
 
+def test_tier_zero_without_key_but_kimi_present_routes_to_kimi(monkeypatch):
+    """OI-1185: a missing key walks the SAME chain as cooldown — kimi is a
+    regular step before the codex vangnet."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/kimi")
+    route = lc.resolve_tier_route("tier-zero", env={})
+    assert route.tier == "tier-zero"
+    assert route.provider == "kimi"
+    assert route.model == "kimi-k3"
+    assert route.lane == "kimi_cli"
+
+
 def test_tier_zero_with_deepseek_key_routes_to_deepseek():
-    """With DEEPSEEK_API_KEY, tier-zero -> deepseek / deepseek-v4-flash / claude_harness_keyed."""
+    """With DEEPSEEK_API_KEY, tier-zero -> deepseek-harness / deepseek-v4-flash / claude_harness_keyed."""
     route = lc.resolve_tier_route("tier-zero", env={"DEEPSEEK_API_KEY": "sk-test"})
     assert route.tier == "tier-zero"
-    assert route.provider == "deepseek"
+    assert route.provider == "deepseek-harness"
     assert route.model == "deepseek-v4-flash"
     assert route.lane == "claude_harness_keyed"
-    # Fallback is codex when the primary deepseek-harness is unavailable.
+    # Fallback chain is kimi then codex (OI-1185: one chain for all causes).
     assert route.fallback is not None
-    assert route.fallback.provider == "codex"
-    assert route.fallback.model == "gpt-5.5"
-    assert route.fallback.lane == "provider"
+    assert route.fallback.provider == "kimi"
+    assert route.fallback.model == "kimi-k3"
+    assert route.fallback.lane == "kimi_cli"
+    assert route.fallback.fallback is not None
+    assert route.fallback.fallback.provider == "codex"
+    assert route.fallback.fallback.model == "gpt-5.5"
+    assert route.fallback.fallback.lane == "provider"
