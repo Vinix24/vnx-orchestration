@@ -3105,6 +3105,11 @@ class TestSmartRouterPreValidate:
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        # AUTO-staging (20260814s-a) defaults every tier OFF: enable tier-zero at
+        # full canary so the router resolves (else it declines and the door falls
+        # back to the claude lane, which this test does not mock).
+        monkeypatch.setenv("VNX_SMART_ROUTER_TIER_ZERO", "1")
+        monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
         with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
              patch("dispatch_cli.run_envelope_plan") as mock_envelope:
@@ -3165,6 +3170,11 @@ class TestSmartRouterPreValidate:
         data_dir.mkdir(parents=True)
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        # AUTO-staging (20260814s-a) defaults every tier OFF: enable tier-zero at
+        # full canary so the router resolves a real provider (codex vangnet)
+        # instead of declining to the claude fallback this test does not mock.
+        monkeypatch.setenv("VNX_SMART_ROUTER_TIER_ZERO", "1")
+        monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
         # Simulate what dispatch_bridge.stage_spec_bundle does with provider=None.
         from dispatch_bridge import _canonical_provider
@@ -3254,6 +3264,11 @@ class TestSmartRouterPreValidate:
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        # AUTO-staging (20260814s-a) defaults every tier OFF: enable tier-mid at
+        # full canary so the router actually resolves (else it declines and the
+        # fallback this test guards against fires).
+        monkeypatch.setenv("VNX_SMART_ROUTER_TIER_MID", "1")
+        monkeypatch.setenv("VNX_SMART_ROUTER_CANARY_PCT", "100")
 
         rc = run_dispatch(spec_file, dry_run=True)
         captured = capsys.readouterr()
