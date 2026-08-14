@@ -70,6 +70,32 @@ class TestTierAdmissionAllow:
         result = check_tier_admission("claude", "default")
         assert result.is_allowed() is True
 
+    def test_kimi_allowed_under_coding_strict(self):
+        result = check_tier_admission("kimi", "coding-strict")
+        assert result.decision == "allow"
+        assert result.adapter_tier == 1
+        assert result.required_tier == 1
+
+    def test_glm_allowed_under_coding_strict(self):
+        result = check_tier_admission("glm", "coding-strict")
+        assert result.decision == "allow"
+        assert result.adapter_tier == 1
+
+    def test_deepseek_allowed_under_coding_strict(self):
+        result = check_tier_admission("deepseek", "coding-strict")
+        assert result.decision == "allow"
+        assert result.adapter_tier == 1
+
+    def test_glm_harness_allowed_under_coding_strict(self):
+        result = check_tier_admission("glm-harness", "coding-strict")
+        assert result.decision == "allow"
+        assert result.adapter_tier == 1
+
+    def test_deepseek_harness_allowed_under_coding_strict(self):
+        result = check_tier_admission("deepseek-harness", "coding-strict")
+        assert result.decision == "allow"
+        assert result.adapter_tier == 1
+
 
 class TestTierAdmissionReject:
     def test_ollama_rejected_under_coding_strict(self):
