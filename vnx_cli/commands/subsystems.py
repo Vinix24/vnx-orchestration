@@ -85,6 +85,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Central-DB read mode for the runtime coordination store "
         "(per-project vs central vs shadow)."
     ),
+    "smart-router-staging": (
+        "Phased smart-router AUTO routing rollout (per-tier enable + "
+        "deterministic canary fraction)."
+    ),
     "cross-project-federation": "Cross-project intelligence federation (not yet implemented).",
 }
 
@@ -105,6 +109,7 @@ _ROW_ORDER: List[str] = [
     "horizon-planning",
     "headless-dispatch-routing",
     "central-db-routing",
+    "smart-router-staging",
     # PARK-with-trigger / CUT
     "migration-mechanisms",
     "within-db-tenancy",
