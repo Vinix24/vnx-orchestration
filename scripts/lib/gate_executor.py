@@ -351,6 +351,8 @@ class GateExecutorMixin:
         gates: List[Dict[str, Any]] = []
         has_required_failure = False
 
+        from gate_status import has_complete_evidence, is_pass
+
         for req in request_result.get("requested", []):
             gate_name = req.get("gate", "")
             req_status = req.get("status", "")
@@ -360,14 +362,26 @@ class GateExecutorMixin:
                     gate=gate_name,
                     pr_number=pr_number,
                 )
+                passed, pass_reason = is_pass(exec_result)
+                # A gate is decided PASS only when it both passed semantically
+                # AND carried a complete evidence trail. An infra failure books
+                # ``unavailable`` (never ``failed``) and carries no contract_hash
+                # or report_path; either missing means "did not run", which must
+                # never sum up to a PASS (OI-1178).
+                decided_pass = bool(passed) and has_complete_evidence(exec_result)
                 gates.append({
                     "gate": gate_name,
                     "request_status": req_status,
                     "execution_status": exec_result.get("status", "unknown"),
+                    "passed": decided_pass,
+                    "pass_reason": pass_reason,
                     "report_path": exec_result.get("report_path", ""),
                     "contract_hash": exec_result.get("contract_hash", ""),
                     "detail": exec_result,
                 })
+                required = req.get("required", True)
+                if gate_name != "claude_github_optional" and required and not decided_pass:
+                    has_required_failure = True
             else:
                 gates.append({
                     "gate": gate_name,

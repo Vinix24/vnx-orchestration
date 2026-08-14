@@ -89,7 +89,7 @@ class TestGateRecorderRegisterEmit:
             results_dir=recorder_env["results_dir"],
         )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         events = _read_register_events(recorder_env)
         assert events == [], f"Expected no register events for timeout; got: {events}"
 
@@ -135,7 +135,7 @@ class TestGateRecorderRegisterEmit:
             results_dir=recorder_env["results_dir"],
         )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         events = _read_register_events(recorder_env)
         assert events == []
 
@@ -169,7 +169,7 @@ class TestGateRecorderRegisterEmit:
             results_dir=recorder_env["results_dir"],
         )
 
-        assert out["status"] == "failed"
+        assert out["status"] == "unavailable"
         events = _read_register_events(recorder_env)
         assert events == [], (
             f"reason={reason!r} must not emit gate_failed; got: {events}"

@@ -281,7 +281,7 @@ class TestTimeoutStallStructuredFailure:
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
             result = runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] in ("timeout", "stall")
 
         # Structured failure fields for T0
@@ -297,13 +297,13 @@ class TestTimeoutStallStructuredFailure:
         result_file = cert_env["results_dir"] / "pr-1-gemini_review.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
-        assert saved["status"] == "failed"
+        assert saved["status"] == "unavailable"
 
-        # Request updated to failed
+        # Request updated to unavailable
         req_file = cert_env["requests_dir"] / "pr-1-gemini_review.json"
         assert req_file.exists()
         req = json.loads(req_file.read_text(encoding="utf-8"))
-        assert req["status"] == "failed"
+        assert req["status"] == "unavailable"
 
     def test_stall_failure_distinct_from_timeout(self, cert_env, monkeypatch):
         """Stall failure must be distinguishable from timeout in the result."""
@@ -341,7 +341,7 @@ class TestTimeoutStallStructuredFailure:
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
             result = runner.run(gate="gemini_review", request_payload=payload, pr_number=2)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] == "stall"
         assert "stall threshold" in result["reason_detail"]
 
@@ -371,7 +371,7 @@ class TestTimeoutStallStructuredFailure:
              patch("gate_runner.select.select", return_value=([], [], [])):
             result = runner.run(gate="gemini_review", request_payload=payload, pr_number=3)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] == "exit_nonzero"
         assert "code 1" in result["reason_detail"]
 
@@ -550,14 +550,14 @@ class TestArtifactStability:
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
             result = runner.run(gate="gemini_review", request_payload=payload, pr_number=31)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         # No report should exist for a timeout failure
         assert not Path(report_path).exists()
-        # Result file exists but status is failed
+        # Result file exists but status is unavailable
         result_file = cert_env["results_dir"] / "pr-31-gemini_review.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
-        assert saved["status"] == "failed"
+        assert saved["status"] == "unavailable"
         assert saved["report_path"] == ""
 
     def test_result_rollback_on_write_failure(self, cert_env, monkeypatch):
@@ -598,7 +598,7 @@ class TestArtifactStability:
              patch.object(Path, "write_text", selective_write):
             result = runner.run(gate="gemini_review", request_payload=payload, pr_number=32)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] == "artifact_materialization_failed"
         # Report should be cleaned up (rolled back) — GATE-11
         assert not Path(report_path).exists()

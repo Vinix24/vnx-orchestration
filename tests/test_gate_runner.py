@@ -309,7 +309,7 @@ class TestTimeoutKill:
                 pr_number=1,
             )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] in ("timeout", "stall")
         assert result["required_reruns"] == ["gemini_review"]
         assert mock_killpg.called or mock_proc.kill.called
@@ -364,7 +364,7 @@ class TestStallDetection:
                 pr_number=1,
             )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] == "stall"
         assert "stall threshold" in result["reason_detail"]
         assert mock_killpg.called or mock_proc.kill.called
@@ -457,7 +457,7 @@ class TestArtifactAtomicity:
                 pr_number=1,
             )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] == "artifact_materialization_failed"
 
     def test_no_report_path_produces_failure(self, gate_env, monkeypatch):
@@ -499,7 +499,7 @@ class TestArtifactAtomicity:
                 pr_number=1,
             )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert "report_path" in result["reason_detail"].lower() or result["reason"] == "artifact_materialization_failed"
 
 
@@ -741,7 +741,7 @@ class TestCodexGateExecution:
                 pr_number=1,
             )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] in ("timeout", "stall")
         assert mock_killpg.called or mock_proc.kill.called
 
@@ -946,7 +946,7 @@ class TestGateWorktreeCheckout:
              patch("gate_runner.os.killpg"):
             result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] in ("timeout", "stall")
         mock_remove.assert_called_once_with(fake_worktree, project_root=None)
 
@@ -978,14 +978,14 @@ class TestGateWorktreeCheckout:
         mock_popen.assert_not_called()
         mock_remove.assert_not_called()
 
-        assert result["status"] == "failed"
+        assert result["status"] == "unavailable"
         assert result["reason"] == "worktree_checkout_failed"
         assert "no route to host" in result["reason_detail"]
 
         result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
-        assert saved["status"] == "failed"
+        assert saved["status"] == "unavailable"
         assert saved["reason"] == "worktree_checkout_failed"
 
     def test_project_root_threaded_from_gate_runner_constructor(

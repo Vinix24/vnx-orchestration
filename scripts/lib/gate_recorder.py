@@ -49,6 +49,8 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     "empty_review_content", "validation_failed",
     # Network / auth
     "network_error", "auth_error",
+    # Vertex REST path (gemini_review) API failures (OI-1178)
+    "vertex_api_error",
 })
 
 
@@ -226,9 +228,23 @@ def record_failure(
     requests_dir: Path,
     results_dir: Path,
 ) -> Dict[str, Any]:
-    """Record a failed gate execution (timeout/stall/error)."""
+    """Record a failed gate execution (timeout/stall/error).
+
+    Execution-level failures — reasons in :data:`EXECUTION_FAILURE_REASONS`
+    — mean the gate never produced a verdict (crash, timeout, infra error).
+    Those are absence of evidence and book ``unavailable`` (OI-1178), never
+    ``failed``: a non-execution must not read as a rejected PR. A real
+    verdict failure (the gate ran and found a blockade) still books
+    ``failed``, but that path flows through
+    :func:`gate_artifacts.materialize_artifacts`, not here.
+    """
     now = utc_now_iso()
-    request_payload["status"] = "failed"
+    reason = result["reason"]
+    reason_detail = result["reason_detail"]
+    is_execution_failure = reason in EXECUTION_FAILURE_REASONS
+    status = "unavailable" if is_execution_failure else "failed"
+
+    request_payload["status"] = status
     request_payload["failed_at"] = now
     persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
 
@@ -236,20 +252,24 @@ def record_failure(
         "gate": gate,
         "pr_id": pr_id or (str(pr_number) if pr_number else ""),
         "pr_number": pr_number,
-        "status": "failed",
-        "reason": result["reason"],
-        "reason_detail": result["reason_detail"],
+        "status": status,
+        "reason": reason,
+        "reason_detail": reason_detail,
         "duration_seconds": result["duration_seconds"],
         "partial_output_lines": result["partial_output_lines"],
         "runner_pid": result["runner_pid"],
         "killed_at": now,
-        "summary": f"Gate execution {result['reason']}: {result['reason_detail']}",
+        "summary": (
+            f"{gate} UNAVAILABLE (gate did not run — {reason}: {reason_detail}) — NOT a review fail"
+            if is_execution_failure
+            else f"Gate execution {reason}: {reason_detail}"
+        ),
         "contract_hash": request_payload.get("contract_hash", ""),
         "report_path": "",
         "blocking_findings": [],
         "advisory_findings": [],
         "required_reruns": [gate],
-        "residual_risk": f"Gate {result['reason']}. Re-run required.",
+        "residual_risk": f"Gate {reason}. Re-run required.",
         "recorded_at": now,
     }
 
@@ -259,7 +279,7 @@ def record_failure(
 
     # Emit gate_failed for codex_gate only when the gate itself reported a verdict
     # failure (not for infrastructure/execution errors like timeout or stall).
-    if gate == "codex_gate" and result["reason"] not in EXECUTION_FAILURE_REASONS:
+    if gate == "codex_gate" and reason not in EXECUTION_FAILURE_REASONS:
         try:
             from gate_register_emit import emit_codex_gate_to_register
             emit_codex_gate_to_register(

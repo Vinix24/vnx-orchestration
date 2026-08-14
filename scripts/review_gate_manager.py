@@ -277,13 +277,20 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
     )
     print(json.dumps(result, indent=2))
     if result.get("has_required_failure"):
-        failed_gates = [
+        # OI-1178: surface every required gate that did not PASS, not just the
+        # not_executable/not_configured ones. An executed gate that booked
+        # ``unavailable`` (did not run) or ``failed`` (ran and found a blockade)
+        # is a non-pass and must be named here so the operator sees which gate.
+        non_pass_gates = [
             g["gate"] for g in result.get("gates", [])
-            if g.get("execution_status") in ("not_executable", "not_configured")
-            and g.get("gate") != "claude_github_optional"
+            if g.get("gate") != "claude_github_optional"
+            and (
+                g.get("passed") is False
+                or g.get("execution_status") in ("not_executable", "not_configured")
+            )
         ]
         print(
-            f"ERROR: required gates not executable: {', '.join(failed_gates)}",
+            f"ERROR: required gates did not PASS: {', '.join(non_pass_gates)}",
             file=sys.stderr,
         )
         return 1
