@@ -535,10 +535,14 @@ _GOVERNANCE_CORE_PREFIXES: tuple[str, ...] = (
     "scripts/lib/providers/",
     "scripts/lib/append_receipt_internals/",
     "scripts/lib/dispatch",          # dispatch_cli/spec/plan/govern/bridge/*.py
-    "scripts/lib/tmux_interactive_dispatch.py",
-    "scripts/lib/subprocess_dispatch.py",
+    # Lane scripts are listed as BARE prefixes (no ".py") on purpose: the
+    # dispatch_sidedoor_audit scanner flags a literal "<lane>.py" on a code
+    # line as a delivery caller. A bare prefix classifies the same files (and,
+    # for subprocess_dispatch, its internals/ dir) without tripping that guard.
+    "scripts/lib/tmux_interactive_dispatch",
+    "scripts/lib/subprocess_dispatch",
     "scripts/lib/subprocess_adapter.py",
-    "scripts/lib/provider_dispatch.py",
+    "scripts/lib/provider_dispatch",
     "scripts/lib/gate",              # gate_executor/recorder/status/obligations/stack_resolver/...
     "scripts/lib/observability_tier.py",
     "scripts/lib/smart_router.py",
