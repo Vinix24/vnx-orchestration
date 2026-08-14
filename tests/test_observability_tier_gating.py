@@ -10,6 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -26,7 +27,10 @@ from observability_tier import (
 )
 
 
-EXPECTED_ADAPTERS = {"claude", "codex", "gemini", "litellm", "ollama"}
+EXPECTED_ADAPTERS = {
+    "claude", "codex", "gemini", "litellm", "ollama",
+    "kimi", "glm", "deepseek", "glm-harness", "deepseek-harness",
+}
 
 
 class TestAdapterTierRegistry:
@@ -75,6 +79,32 @@ class TestAdapterTierRegistry:
         # Worst case is legacy path (no streaming)
         assert ADAPTER_MINIMUM_TIERS["gemini"] == 3
 
+    def test_kimi_default_is_tier_1(self):
+        # kimi_cli stream-json emits per-event content blocks (text/thinking/
+        # tool_use/tool_result) with observability_tier=1 — live streaming.
+        assert ADAPTER_DEFAULT_TIERS["kimi"] == 1
+
+    def test_kimi_minimum_is_tier_1(self):
+        # No final-only fallback path for kimi; worst case still streams.
+        assert ADAPTER_MINIMUM_TIERS["kimi"] == 1
+
+    def test_glm_default_is_tier_1(self):
+        # glm-harness rides the full claude CLI streaming harness.
+        assert ADAPTER_DEFAULT_TIERS["glm"] == 1
+
+    def test_deepseek_default_is_tier_1(self):
+        # deepseek-harness rides the full claude CLI streaming harness.
+        assert ADAPTER_DEFAULT_TIERS["deepseek"] == 1
+
+    def test_harness_spellings_default_is_tier_1(self):
+        # The receipt provider strings are "glm-harness"/"deepseek-harness".
+        assert ADAPTER_DEFAULT_TIERS["glm-harness"] == 1
+        assert ADAPTER_DEFAULT_TIERS["deepseek-harness"] == 1
+
+    def test_harness_spellings_minimum_is_tier_1(self):
+        assert ADAPTER_MINIMUM_TIERS["glm-harness"] == 1
+        assert ADAPTER_MINIMUM_TIERS["deepseek-harness"] == 1
+
 
 class TestResolveEffectiveTier:
     def test_claude_returns_tier_1(self):
@@ -112,6 +142,34 @@ class TestResolveEffectiveTier:
     def test_case_insensitive_provider(self, monkeypatch):
         monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
         assert resolve_effective_tier("GEMINI") == resolve_effective_tier("gemini")
+
+    def test_kimi_resolves_to_tier_1_not_generic_2(self):
+        assert resolve_effective_tier("kimi") == 1
+
+    def test_glm_resolves_to_tier_1_not_generic_2(self):
+        assert resolve_effective_tier("glm") == 1
+
+    def test_deepseek_resolves_to_tier_1_not_generic_2(self):
+        assert resolve_effective_tier("deepseek") == 1
+
+    def test_glm_harness_resolves_to_tier_1(self):
+        assert resolve_effective_tier("glm-harness") == 1
+
+    def test_deepseek_harness_resolves_to_tier_1(self):
+        assert resolve_effective_tier("deepseek-harness") == 1
+
+
+class TestUnknownProviderWarning:
+    def test_unknown_provider_logs_warning_with_name(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            tier = resolve_effective_tier("totally-unknown-provider")
+        assert tier == 2
+        assert "totally-unknown-provider" in caplog.text
+
+    def test_known_provider_does_not_log_warning(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            assert resolve_effective_tier("kimi") == 1
+        assert "no registered tier" not in caplog.text
 
 
 class TestGovernanceMinTiers:
