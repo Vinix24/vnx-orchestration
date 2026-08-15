@@ -225,6 +225,24 @@ jobs:
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 
+      - name: Docs file:line reference guard
+        run: |
+          set -euo pipefail
+          # Fail CI when a living docs/ citation (file.py:123) drifts from the
+          # tree — the lane-conformity-matrix and its peers must stay honest as
+          # code shifts. Scoped to explicit line numbers in living docs only
+          # (_archive/examples/investigations/governance-decisions are frozen
+          # point-in-time artifacts); code fences are skipped. See OI-1107.
+          python3 "$GITHUB_WORKSPACE/scripts/ci/check_docs_file_line_refs.py"
+
+      - name: Run docs file:line reference guard unit tests
+        run: |
+          set -euo pipefail
+          pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_ci_check_docs_file_line_refs.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_pytest_safe
+
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-latest

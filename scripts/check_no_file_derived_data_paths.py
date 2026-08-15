@@ -39,6 +39,23 @@ AST-based, so comments and docstrings never trip it. Two violation shapes:
    ``plan_gate_panel.py`` blocked every plan-gate fleet-wide (2026-07-31) while
    passing shape-1 detection — the gate tested the mechanism, not the input.
 
+3. REPO-ROOT resolution (OI-1145) — two new shapes for the same class one level
+   up: deriving the REPO ROOT (not just the data dir) from ``__file__``.
+   (a) a canonical repo-root resolver (``resolve_project_root``) fed a
+   ``__file__``-anchored argument, e.g. ``resolve_project_root(__file__)``; and
+   (b) a ``.git``-marker finder (``_find_repo_root`` / ``_find_project_root`` /
+   ``_find_git_root`` / ``_git_root_from``) fed a ``__file__``-anchored start
+   path, e.g. ``_find_repo_root(Path(__file__).resolve().parent)`` — the exact
+   construct that landed the plan-gate seat ledger in the fabric keystone
+   instead of the project (fixed by reversing to CWD-first; the ``__file__``
+   fallback that remains is grandfathered). Raw ``parents[N]`` upward walks
+   that do NOT carry a ``.vnx-data``/``ROADMAP.yaml`` marker stay OUT of scope:
+   the depth-to-root depends on each file's location, so a depth rule false-
+   positives on legit ``_LIB_DIR = Path(__file__).resolve().parents[2]``
+   lib-dir derivations (e.g. ``providers/provider_lanes/*``). The marker shape
+   (1) and the resolver/finder shapes (2/3) are the precise signals.
+
+
 Scope
 -----
 ``scripts/lib/`` — the shared runtime library that runs in BOTH dev and central
@@ -232,6 +249,67 @@ GRANDFATHERED_RESOLVER_ANCHORS: Dict[str, Set[str]] = {
     },
 }
 
+# OI-1145 grandfathered repo-root RESOLVER anchors (shape 3a): existing
+# resolve_project_root(__file__) sites. Each is a pre-existing repo-root
+# resolution that would resolve the fabric checkout in a central install; the
+# migration to a CWD-first / threaded-repo-root resolution belongs to follow-up
+# work, so these are grandfathered the same way the data-resolver anchors are —
+# the gate blocks NEW occurrences and any change to a grandfathered line.
+GRANDFATHERED_REPO_ROOT_ANCHORS: Dict[str, Set[str]] = {
+    "scripts/lib/envelope_govern_support.py": {
+        "resolve_project_root(__file__)",
+    },
+    "scripts/lib/dispatch_worktree_isolation.py": {
+        "resolve_project_root(__file__)",
+    },
+    "scripts/lib/plan_gate_effectiveness_probe.py": {
+        "project_root.resolve_project_root(__file__)",
+    },
+    "scripts/lib/tmux_worktree.py": {
+        "resolve_project_root(__file__)",
+    },
+    "scripts/lib/migration_inventory.py": {
+        "resolve_project_root(__file__)",
+    },
+    "scripts/lib/governance_effectiveness_probe.py": {
+        "project_root.resolve_project_root(__file__)",
+    },
+    "scripts/lib/pool_worktree_manager.py": {
+        "resolve_project_root(__file__)",
+    },
+    "scripts/lib/intelligence_backfill.py": {
+        "resolve_project_root(__file__)",
+    },
+    "scripts/lib/gate_worktree.py": {
+        "resolve_project_root(__file__)",
+    },
+}
+
+# OI-1145 grandfathered repo-root FINDER anchors (shape 3b): existing .git-marker
+# finder calls fed a __file__ anchor. plan_gate_panel's entry is the DEFENSIVE
+# FALLBACK left after the OI-1145 fix reversed the order to CWD-first (the cwd
+# leg now wins; __file__ only fires when cwd is not a project checkout). It is
+# grandfathered so the gate can pass while still blocking any NEW finder call
+# anchored on __file__.
+GRANDFATHERED_REPO_ROOT_FINDERS: Dict[str, Set[str]] = {
+    "scripts/lib/plan_gate_panel.py": {
+        "_find_repo_root(Path(__file__).resolve().parent)",
+    },
+    "scripts/lib/migration_linter.py": {
+        "_find_project_root(Path(__file__))",
+    },
+    # _git_root_from(here) where ``here`` is a __file__-anchored local: the
+    # canonical vnx_paths resolver is tried FIRST; the git-root walk only fires
+    # in the except-Exception last resort (mirrors the grandfathered data-path
+    # fallbacks above).
+    "scripts/lib/strategy/roadmap.py": {
+        "_git_root_from(here)",
+    },
+    "scripts/lib/strategy/decisions.py": {
+        "_git_root_from(here)",
+    },
+}
+
 # Canonical data/state-dir resolver entry points that must never be fed a
 # __file__-derived anchor (shape 2). Attribute form
 # (``project_root.resolve_data_dir``) and bare form (``from project_root import
@@ -242,6 +320,25 @@ RESOLVER_FN_NAMES = frozenset({
     "resolve_data_dir",
     "resolve_state_dir",
     "resolve_dispatch_dir",
+})
+
+# OI-1145 shape 3a: the canonical REPO-ROOT resolver fed a __file__ anchor.
+# Previously deliberately excluded (resolve_project_root resolves a repo root,
+# not a .vnx-data dir); the plan-gate opus-seat failure (OI-1145) showed the
+# same keystone bug applies one level up — the resolver honors caller_file
+# FIRST, so in a central install it returns the fabric checkout, not the
+# project.
+REPO_ROOT_RESOLVER_FN_NAMES = frozenset({
+    "resolve_project_root",
+})
+
+# OI-1145 shape 3b: subprocess-free .git-marker finders fed a __file__ anchor.
+# Keyed by NAME, not by the walk shape, so the same precise signal as shape 2.
+REPO_ROOT_FINDER_FN_NAMES = frozenset({
+    "_find_repo_root",
+    "_find_project_root",
+    "_find_git_root",
+    "_git_root_from",
 })
 
 
@@ -386,6 +483,30 @@ def _is_resolver_call(node: ast.AST) -> bool:
     return False
 
 
+def _is_repo_root_resolver_call(node: ast.AST) -> bool:
+    """True for calls to the canonical repo-root resolver (shape 3a)."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in REPO_ROOT_RESOLVER_FN_NAMES
+    if isinstance(func, ast.Attribute):
+        return func.attr in REPO_ROOT_RESOLVER_FN_NAMES
+    return False
+
+
+def _is_repo_root_finder_call(node: ast.AST) -> bool:
+    """True for calls to a .git-marker repo-root finder (shape 3b)."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in REPO_ROOT_FINDER_FN_NAMES
+    if isinstance(func, ast.Attribute):
+        return func.attr in REPO_ROOT_FINDER_FN_NAMES
+    return False
+
+
 def _resolver_call_args(node: ast.Call) -> List[ast.AST]:
     """All argument expressions of a call (positional + keyword values)."""
     return list(node.args) + [kw.value for kw in node.keywords]
@@ -406,6 +527,28 @@ def check_source(source: str) -> List[Tuple[int, str]]:
     for node in ast.walk(tree):
         # Shape 2 (input side): a canonical resolver fed a __file__ anchor.
         if _is_resolver_call(node):
+            if any(
+                _references_file_anchor(arg, anchored)
+                for arg in _resolver_call_args(node)
+            ):
+                key = (getattr(node, "lineno", 0), _segment(source, node))
+                if key not in seen:
+                    seen.add(key)
+                    violations.append(key)
+            continue
+        # Shape 3a (OI-1145): the canonical repo-root resolver fed a __file__ anchor.
+        if _is_repo_root_resolver_call(node):
+            if any(
+                _references_file_anchor(arg, anchored)
+                for arg in _resolver_call_args(node)
+            ):
+                key = (getattr(node, "lineno", 0), _segment(source, node))
+                if key not in seen:
+                    seen.add(key)
+                    violations.append(key)
+            continue
+        # Shape 3b (OI-1145): a .git-marker finder fed a __file__ anchor.
+        if _is_repo_root_finder_call(node):
             if any(
                 _references_file_anchor(arg, anchored)
                 for arg in _resolver_call_args(node)
@@ -470,7 +613,12 @@ def scan_dir(root: Path) -> List[Tuple[str, int, str]]:
             source = py.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        allowed = GRANDFATHERED.get(rel, set()) | GRANDFATHERED_RESOLVER_ANCHORS.get(rel, set())
+        allowed = (
+            GRANDFATHERED.get(rel, set())
+            | GRANDFATHERED_RESOLVER_ANCHORS.get(rel, set())
+            | GRANDFATHERED_REPO_ROOT_ANCHORS.get(rel, set())
+            | GRANDFATHERED_REPO_ROOT_FINDERS.get(rel, set())
+        )
         for lineno, seg in _dedup_violations(source):
             if seg in allowed:
                 continue
@@ -489,17 +637,21 @@ def main(argv: List[str] | None = None) -> int:
 
     violations = scan_dir(root)
     if not violations:
-        print("[central-mode-paths] PASS — no __file__-derived data-path literals.")
+        print(
+            "[central-mode-paths] PASS — no __file__-anchored data-path or "
+            "repo-root derivations."
+        )
         return 0
 
     print(f"[central-mode-paths] FAIL — {len(violations)} violation(s):\n")
     for rel, lineno, seg in violations:
         print(
             f"::error file={rel},line={lineno}::central-mode path bug: "
-            f"'{seg}' derives a .vnx-data/ROADMAP path from __file__.\n"
-            f"In a central install this resolves the keystone, not "
-            f"~/.vnx-data/<project>. Route through vnx_paths.resolve_data_root()/"
-            f"resolve_state_dir() (VNX_HOME + project-marker aware). See #1023.\n"
+            f"'{seg}' anchors a .vnx-data/ROADMAP path or repo root on __file__.\n"
+            f"In a central install this resolves the keystone, not the project.\n"
+            f"Route data/state through vnx_paths.resolve_* (VNX_HOME + project-marker\n"
+            f"aware) and resolve the repo root CWD-first (or thread repo_root).\n"
+            f"See #1023 and OI-1145.\n"
         )
     return 1
 

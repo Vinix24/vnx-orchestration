@@ -81,6 +81,26 @@ class InvalidTransitionError(ValueError):
     pass
 
 
+class GoalTooThinError(ValueError):
+    """A track goal below the plan-gate's minimum meaningful length was refused.
+
+    Mirrors ``planning_cli.PlanRefusal``'s refusal form (measured length +
+    threshold) so a set-goal refusal reads the same as the gate's own, but the
+    remediation points at setting a longer goal rather than at ``--doc``. Carries
+    the measured length and the threshold so callers can render the refusal
+    without recomputing either.
+    """
+
+    def __init__(self, length: int, threshold: int) -> None:
+        self.length = length
+        self.threshold = threshold
+        super().__init__(
+            f"set-goal refused: goal too thin to be a plan "
+            f"(measured {length} meaningful chars, threshold {threshold}). "
+            f"Provide a goal of at least {threshold} meaningful characters."
+        )
+
+
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
@@ -380,6 +400,71 @@ def update_authored_fields(
                 (*updates.values(), track_id, project_id),
             )
             conn.commit()
+
+        updated = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        return dict(updated)
+    finally:
+        conn.close()
+
+
+def set_goal(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+    goal: str,
+    *,
+    min_goal_chars: int,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    """Set a track's ``goal_state``, validated against the plan-gate threshold.
+
+    The only operator-facing way to repair a too-thin goal after creation:
+    ``objective add`` / ``track new --goal`` set the goal once, and no other verb
+    updates it. The threshold is supplied by the caller from the plan-gate's own
+    source (``plan_gate_panel.load_goal_min_chars``) so the two can never drift
+    apart; the length is measured the same way the gate measures it (after
+    whitespace-stripping).
+
+    Refuses (``GoalTooThinError``) when the new goal is below ``min_goal_chars``
+    meaningful characters. Never touches ``phase``, ``derived_status``,
+    ``phase_changed_at``, or ``completed_at`` — filling in a goal is not
+    progress. Emits a ``track_goal_set`` audit event carrying the old and new
+    goal values so a silent overwrite of the queue is impossible to hide.
+
+    Raises ``TrackNotFoundError`` when the track does not exist.
+    """
+    if actor not in ("operator", "T0", "system"):
+        raise ValueError(f"Invalid actor: {actor!r}. Must be 'operator', 'T0', or 'system'")
+    if not isinstance(goal, str):
+        raise GoalTooThinError(length=0, threshold=min_goal_chars)
+
+    measured = len(goal.strip())
+    if measured < min_goal_chars:
+        raise GoalTooThinError(length=measured, threshold=min_goal_chars)
+
+    conn = _get_conn(state_dir)
+    try:
+        row = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        if not row:
+            raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+
+        old_goal = row["goal_state"]
+
+        _emit_track_event(
+            state_dir, "track_goal_set", track_id, project_id, actor,
+            {"old_goal": old_goal, "new_goal": goal},
+        )
+        conn.execute(
+            "UPDATE tracks SET goal_state = ? WHERE track_id = ? AND project_id = ?",
+            (goal, track_id, project_id),
+        )
+        conn.commit()
 
         updated = conn.execute(
             "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",

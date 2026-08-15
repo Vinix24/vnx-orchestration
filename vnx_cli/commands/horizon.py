@@ -195,6 +195,12 @@ def _cmd_set_lane_hint(args: Any) -> int:
     return pc.cmd_objective_set_lane_hint(args)
 
 
+def _cmd_set_goal(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_set_goal(args)
+
+
 _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_add,
     "list": _cmd_list,
@@ -208,6 +214,7 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "reopen": _cmd_reopen,
     "link-pr": _cmd_link_pr,
     "set-lane-hint": _cmd_set_lane_hint,
+    "set-goal": _cmd_set_goal,
 }
 
 

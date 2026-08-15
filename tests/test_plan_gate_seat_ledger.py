@@ -150,6 +150,46 @@ def test_resolve_seat_ledger_path_none_without_data_dir():
     assert pgp._resolve_seat_ledger_path(None) is None
 
 
+def test_resolve_seat_ledger_path_prefers_cwd_over_file(monkeypatch, tmp_path):
+    """OI-1145: the governed project (cwd) wins over the package checkout.
+
+    In a central install ``__file__`` sits inside the fabric version-tree, so a
+    ``__file__``-first walk lands the seat ledger in the read-only keystone. The
+    resolver must consult ``Path.cwd()`` first and short-circuit before ever
+    touching ``__file__``.
+    """
+    calls = []
+    cwd_root = tmp_path / "project-root"
+
+    def _fake_find(start):
+        calls.append(start)
+        if start.resolve() == Path.cwd().resolve():
+            return cwd_root
+        return tmp_path / "keystone"
+
+    monkeypatch.setattr(pgp, "_find_repo_root", _fake_find)
+    ledger = pgp._resolve_seat_ledger_path("/some/data_dir")
+
+    assert ledger == cwd_root / pgp.SEAT_LEDGER_RELPATH
+    assert len(calls) == 1  # cwd short-circuits; __file__ is never consulted
+    assert calls[0].resolve() == Path.cwd().resolve()
+
+
+def test_resolve_seat_ledger_path_falls_back_to_file(monkeypatch, tmp_path):
+    """__file__ remains the fallback when cwd is not inside a project checkout."""
+    file_root = tmp_path / "fabric"
+
+    def _fake_find(start):
+        if start.resolve() == Path.cwd().resolve():
+            return None
+        return file_root
+
+    monkeypatch.setattr(pgp, "_find_repo_root", _fake_find)
+    ledger = pgp._resolve_seat_ledger_path("/some/data_dir")
+
+    assert ledger == file_root / pgp.SEAT_LEDGER_RELPATH
+
+
 def test_find_repo_root_walks_to_git_marker(tmp_path):
     (tmp_path / ".git").mkdir()
     nested = tmp_path / "a" / "b" / "c"
