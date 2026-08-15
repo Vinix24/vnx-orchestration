@@ -9,9 +9,12 @@ Delegated from `bin/vnx`:
   vnx deliverable add --objective <track_id> --output-kind <kind> --title "..."
   vnx deliverable list [--objective <track_id>] [--json]
   vnx deliverable promote <dispatch_id>
+  vnx deliverable close <dispatch_id> --evidence <pr>
 
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
 `vnx deliverable promote` is the human gate (proposed -> ready).
+`vnx deliverable close` closes the loop (ready -> completed) on an
+operator-attested delivering PR.
 `vnx promote` (top-level) is the PR-queue command — NOT the same.
 
 Planning turn-on (auto-seed + advisory drift):
@@ -1720,11 +1723,13 @@ def _append_coordination_event(
     actor: str,
     reason: Optional[str] = None,
     project_id: str = "vnx-dev",
+    metadata: Optional[dict] = None,
 ) -> None:
     if not _has_table(conn, "coordination_events"):
         return
     event_id = str(uuid.uuid4()).replace("-", "")[:16]
     ts = _now_utc()
+    metadata_json = json.dumps(metadata or {}, default=str)
     has_pid = _has_col(conn, "coordination_events", "project_id")
     if has_pid:
         conn.execute(
@@ -1732,10 +1737,10 @@ def _append_coordination_event(
             INSERT INTO coordination_events
                 (event_id, event_type, entity_type, entity_id,
                  from_state, to_state, actor, reason, metadata_json, occurred_at, project_id)
-            VALUES (?, ?, 'dispatch', ?, ?, ?, ?, ?, '{}', ?, ?)
+            VALUES (?, ?, 'dispatch', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (event_id, event_type, dispatch_id,
-             from_state, to_state, actor, reason, ts, project_id),
+             from_state, to_state, actor, reason, metadata_json, ts, project_id),
         )
     else:
         conn.execute(
@@ -1743,10 +1748,10 @@ def _append_coordination_event(
             INSERT INTO coordination_events
                 (event_id, event_type, entity_type, entity_id,
                  from_state, to_state, actor, reason, metadata_json, occurred_at)
-            VALUES (?, ?, 'dispatch', ?, ?, ?, ?, ?, '{}', ?)
+            VALUES (?, ?, 'dispatch', ?, ?, ?, ?, ?, ?, ?)
             """,
             (event_id, event_type, dispatch_id,
-             from_state, to_state, actor, reason, ts),
+             from_state, to_state, actor, reason, metadata_json, ts),
         )
 
 
@@ -2325,6 +2330,141 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
         conn.close()
 
     print(f"Promoted {dispatch_id}: proposed -> ready")
+    return 0
+
+
+def cmd_deliverable_close(args: argparse.Namespace) -> int:
+    """Close (afboeken) a deliverable: ready -> completed, operator-attested.
+
+    The missing half of the deliverable lifecycle: ``promote`` gates
+    proposed -> ready, but nothing moves a ready deliverable to a terminal
+    state once its work lands via a burn-PR. Ready deliverables would otherwise
+    stay ready forever. This verb closes that loop.
+
+    Human-gated by construction: ``--evidence <pr>`` is REQUIRED (a PR number,
+    not a bare flag) and must normalize via ``_normalize_pr_ref`` to ``#NNN``.
+    The evidence is an OPERATOR ATTESTATION: VNX records it structurally (who,
+    when, what) but does NOT verify the PR's merge state at close time. That is
+    deliberate. The deliverable plane is the lightweight NO-NODE model — a
+    single dispatch row, not a track with a reconciler — so there is no merge
+    evidence gather to reuse, and bolting live ``gh`` verification onto it would
+    make close fail whenever gh is unreachable (the exact degradation the
+    objective-close path already struggles with). The operator signed at
+    promote; the operator signs again here, and the attestation is named as
+    such in the audit event so it is never mistaken for a verified merge.
+
+    ADR-007: the lookup AND the audit event both carry the resolved project_id.
+    No silent 'vnx-dev' fallback — an empty project_id is refused with exit 2.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = (args.project_id or "").strip()
+    dispatch_id = args.dispatch_id
+
+    if not project_id:
+        print(
+            "deliverable close: --project-id is required (ADR-007): no project_id "
+            "was supplied and none could be resolved. No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    raw_evidence = getattr(args, "evidence", None)
+    pr_ref = _normalize_pr_ref(raw_evidence) if raw_evidence else None
+    if pr_ref is None:
+        print(
+            "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, "
+            "as #NNN or NNN). It records an operator attestation of what delivered "
+            "the work — not just a bare flag. No change made.",
+            file=sys.stderr,
+        )
+        return 2
+    evidence_number = int(pr_ref.lstrip("#"))
+
+    conn = _db_conn(state_dir)
+    try:
+        row = conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, project_id),
+        ).fetchone()
+
+        if row is None:
+            print(
+                f"deliverable close: deliverable not found: {dispatch_id!r} "
+                f"(project {project_id!r}). No change made.",
+                file=sys.stderr,
+            )
+            return 1
+
+        current_state = row["state"]
+
+        if current_state == "completed":
+            if args.json:
+                print(json.dumps({
+                    "deliverable": dispatch_id,
+                    "project_id": project_id,
+                    "action": "noop_already_closed",
+                    "applied": False,
+                }, indent=2, default=str))
+            else:
+                print(f"\nvnx deliverable close — {dispatch_id} (project '{project_id}')\n")
+                print(f"  already closed (state={current_state}).\n")
+            return 0
+
+        if current_state != "ready":
+            hint = (
+                "Promote it first with `vnx deliverable promote "
+                f"{dispatch_id}`." if current_state == "proposed" else ""
+            )
+            print(
+                f"deliverable close: cannot close {dispatch_id!r}: expected state "
+                f"'ready', found {current_state!r}. {hint}No change made.".strip(),
+                file=sys.stderr,
+            )
+            return 2
+
+        now = _now_utc()
+        conn.execute(
+            """
+            UPDATE dispatches
+            SET state = 'completed', pr_ref = ?, updated_at = ?
+            WHERE dispatch_id = ? AND project_id = ? AND state = 'ready'
+            """,
+            (pr_ref, now, dispatch_id, project_id),
+        )
+        _append_coordination_event(
+            conn,
+            event_type="deliverable_completed",
+            dispatch_id=dispatch_id,
+            from_state="ready",
+            to_state="completed",
+            actor="operator",
+            reason=f"deliverable close: PR {pr_ref} (operator attestation)",
+            project_id=project_id,
+            metadata={
+                "evidence_pr": evidence_number,
+                "pr_ref": pr_ref,
+                "attestation": "operator",
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "deliverable": dispatch_id,
+            "project_id": project_id,
+            "from_state": "ready",
+            "to_state": "completed",
+            "evidence_pr": evidence_number,
+            "pr_ref": pr_ref,
+            "attestation": "operator",
+            "action": "closed",
+            "applied": True,
+        }, indent=2, default=str))
+    else:
+        print(f"\nvnx deliverable close — {dispatch_id} (project '{project_id}')\n")
+        print(f"  ready -> completed (operator attestation: PR {pr_ref})\n")
     return 0
 
 
@@ -4268,6 +4408,21 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_dpromote)
     p_dpromote.add_argument("dispatch_id")
     p_dpromote.set_defaults(func=cmd_deliverable_promote)
+
+    p_dclose = dlv_sub.add_parser(
+        "close",
+        help="afboeken (done): close a ready deliverable -> completed "
+             "(operator-attested PR evidence)",
+    )
+    _common(p_dclose)
+    p_dclose.add_argument("dispatch_id")
+    p_dclose.add_argument(
+        "--evidence", required=True, metavar="PR",
+        help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
+             "attestation of what delivered the work; VNX does not verify the "
+             "merge state at close time.",
+    )
+    p_dclose.set_defaults(func=cmd_deliverable_close)
 
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)

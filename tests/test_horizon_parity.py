@@ -326,6 +326,7 @@ _DELIVERABLE_ARGV = {
     "add": ["--objective", "delegate-track", "--output-kind", "doc", "--title", "Delegate deliverable"],
     "list": [],
     "promote": ["dlv-fake-id"],
+    "close": ["dlv-fake-id", "--evidence", "123"],
 }
 _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],

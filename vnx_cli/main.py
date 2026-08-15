@@ -749,6 +749,20 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
     _common_horizon_args(p_dpromote)
     p_dpromote.add_argument("dispatch_id")
 
+    p_dclose = subs.add_parser(
+        "close",
+        help="afboeken (done): close a ready deliverable -> completed "
+             "(operator-attested PR evidence)",
+    )
+    _common_horizon_args(p_dclose)
+    p_dclose.add_argument("dispatch_id")
+    p_dclose.add_argument(
+        "--evidence", required=True, metavar="PR",
+        help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
+             "attestation of what delivered the work; VNX does not verify the "
+             "merge state at close time.",
+    )
+
 
 def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     """Register the plan-gate-domain verbs under `vnx horizon plan-gate`."""
