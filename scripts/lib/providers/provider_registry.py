@@ -83,6 +83,23 @@ class TierRouteSpec:
     fallback: tuple = ()  # tuple[TierRouteStep, ...]
 
 
+@dataclass(frozen=True)
+class TierLadderRung:
+    """One rung of the cost-ordered escalation ladder.
+
+    Carries the resolved primary (provider/model/lane) plus the primary model's
+    output cost read from the registry, so the ladder's ordering is derived from
+    the registry's own prices — never a Python literal (ADR-036).
+    """
+
+    tier: str
+    provider: str
+    model: str
+    lane: str
+    output_cost_per_mtok: float
+    fallback: tuple = ()  # tuple[TierRouteStep, ...]
+
+
 def _parse_model(data: dict) -> ProviderModel:
     context_window_raw = data.get("context_window")
     cli_model_arg_raw = data.get("cli_model_arg")
@@ -239,3 +256,76 @@ def load_tier_map(registry_path: Optional[Path] = None) -> Dict[str, TierRouteSp
             fallback=fallback,
         )
     return result
+
+
+def _output_cost_for(
+    spec: TierRouteSpec,
+    providers: Dict[str, ProviderConfig],
+    path: Path,
+) -> float:
+    """Resolve a tier's primary model output cost ($/Mtok) from the registry.
+
+    ``spec.provider`` is the dispatch enum (e.g. "claude"), not the registry
+    section key (e.g. "anthropic"); walk the sections by their dispatch_enum to
+    find the model and read its registered price. Fails loud when the model is
+    not found — the ladder must never invent a price.
+    """
+    for cfg in providers.values():
+        if cfg.dispatch_enum != spec.provider:
+            continue
+        model = cfg.models.get(spec.model)
+        if model is not None:
+            return model.cost_output_per_mtok
+    raise RegistryLookupError(
+        f"cannot resolve output cost for {spec.provider!r}/{spec.model!r} "
+        f"(tier {spec.tier!r}) in {path}"
+    )
+
+
+def load_tier_ladder(registry_path: Optional[Path] = None) -> List[TierLadderRung]:
+    """Return the escalation ladder in the tier_map's authored order, validated.
+
+    The ladder is DERIVED from the registry (ADR-036): each tier's primary model
+    cost is read from wave7_models.yaml — never a Python literal. The ``routing.
+    tier_map`` block is itself the ladder: its authored order IS the climb order
+    (tier-zero first, tier-high last), and two invariants are enforced fail-loud
+    so a drift that would make escalation a no-op surfaces at load, not silently:
+
+      1. no two tiers may resolve to the same primary (provider, model) — a
+         duplicate rung means tier_from + 1 changes nothing;
+      2. primary cost must be strictly increasing along the authored order — a
+         higher rung must actually be more expensive, otherwise "escalation" is
+         a price cut in disguise.
+    """
+    path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
+    tier_map = load_tier_map(path)
+    providers = load(path)
+    rungs: List[TierLadderRung] = []
+    seen = set()
+    for spec in tier_map.values():
+        key = (spec.provider, spec.model)
+        if key in seen:
+            raise RegistryLookupError(
+                f"routing.tier_map has duplicate rungs: {spec.provider!r}/"
+                f"{spec.model!r} appears in more than one tier ({path}); merge "
+                "them or give them a real difference"
+            )
+        seen.add(key)
+        rungs.append(
+            TierLadderRung(
+                tier=spec.tier,
+                provider=spec.provider,
+                model=spec.model,
+                lane=spec.lane,
+                output_cost_per_mtok=_output_cost_for(spec, providers, path),
+                fallback=spec.fallback,
+            )
+        )
+    for lo, hi in zip(rungs, rungs[1:]):
+        if not (lo.output_cost_per_mtok < hi.output_cost_per_mtok):
+            raise RegistryLookupError(
+                f"routing.tier_map is not a strict cost ladder: {hi.tier!r} "
+                f"({hi.model} @ {hi.output_cost_per_mtok}) is not more expensive "
+                f"than {lo.tier!r} ({lo.model} @ {lo.output_cost_per_mtok}) in {path}"
+            )
+    return rungs

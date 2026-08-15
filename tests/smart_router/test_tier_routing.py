@@ -93,12 +93,16 @@ def test_tier_low_with_deepseek_key_uses_harness():
     assert "DEEPSEEK_API_KEY" in route.env_requirements
 
 
-def test_tier_low_deepseek_route_uses_v4_flash():
-    """tier-low DeepSeek route must use deepseek-v4-flash."""
+def test_tier_low_deepseek_route_uses_v4_pro():
+    """tier-low DeepSeek route must use deepseek-v4-pro (the daily workhorse).
+
+    tier-zero and tier-low were identical (both deepseek-v4-flash) — an
+    escalation from zero to low changed nothing. tier-low now sits one rung up
+    the cost ladder on deepseek-v4-pro (OI-1221)."""
     env = {"DEEPSEEK_API_KEY": "sk-test-123"}
     route = resolve_tier_route(TIER_LOW, env=env)
     assert route.provider == "deepseek-harness"
-    assert route.model == "deepseek-v4-flash"
+    assert route.model == "deepseek-v4-pro"
 
 
 def test_deepseek_harness_blocked_without_key(monkeypatch):
@@ -231,7 +235,7 @@ def test_tier_low_deepseek_reengages_after_cooldown(tmp_path):
         state_dir=state_dir, now=now + 3601,
     )
     assert route.provider == "deepseek-harness"
-    assert route.model == "deepseek-v4-flash"
+    assert route.model == "deepseek-v4-pro"
 
 
 def test_auth_failure_keeps_lane_out_past_waiting(tmp_path, monkeypatch):
@@ -369,7 +373,7 @@ def test_door_route_auto_fills_provider(monkeypatch):
     assert result.route is not None
     provider, model, reason = result.route
     assert provider == Provider.DEEPSEEK_HARNESS
-    assert model == "deepseek-v4-flash"
+    assert model == "deepseek-v4-pro"
     assert "tier=tier-low" in reason
 
 
