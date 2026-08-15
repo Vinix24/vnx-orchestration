@@ -209,69 +209,89 @@ class TestWorktreeFailureSafetyNet:
 
 
 class TestOversizeConsumer:
-    """On origin/main, the oversize warning at event_store.py:150 only logs a
-    warning. It fired 36 times without any consumer. The fix adds a persistent
-    flag file that the dispatcher can surface without tailing the log."""
+    """On origin/main, the oversize warning at event_store.py only logs a
+    warning (36 times, no consumer). The fix replaces that warning with a
+    size-based rotation: archive + truncate, so the file self-heals. The
+    .oversize flag is now a persistent marker written only when a rotation
+    FAILS."""
 
-    def test_oversize_writes_flag_file(self, tmp_path, tmp_events):
+    def test_oversize_rotates_instead_of_warns(self, tmp_path, tmp_events):
         if not _HAS_OI858_CONSTANTS:
             pytest.fail(
                 "GAP 3: _OVERSIZE_FLAG_SUFFIX does not exist on origin/main. "
                 "The oversize flag file mechanism was never implemented."
             )
 
-        store = EventStore(events_dir=tmp_events)
+        store = EventStore(events_dir=tmp_events, rotation_threshold_bytes=500)
         terminal = "T1"
 
-        payload = "x" * 100000  # 100KB per event
-        for i in range(200):  # 200 * ~100KB = ~20MB > 10MB warning threshold
+        payload = "x" * 200  # ~250B/event -> ~12KB total, well over the 500B threshold
+        for i in range(50):
             store.append(terminal, {
                 "type": "text",
                 "data": {"msg": f"event-{i}", "padding": payload},
-                "dispatch_id": "oi858-oversize-test",
-            }, dispatch_id="oi858-oversize-test")
+                "dispatch_id": "oi858-rotate-test",
+            }, dispatch_id="oi858-rotate-test")
 
-        flag_path = tmp_events / f"{terminal}{_OVERSIZE_FLAG_SUFFIX}"
-        assert flag_path.exists(), (
-            "GAP 3: oversize flag file was not created. "
-            f"Expected {flag_path} to exist. On origin/main, the warning "
-            "was log-only and fired 36 times without any consumer."
+        live = tmp_events / f"{terminal}.ndjson"
+        assert live.stat().st_size <= 500 + 1000, (
+            "GAP 3: live file grew unbounded. On origin/main the oversize "
+            "condition was log-only; the fix must rotate (archive+truncate) so "
+            "the live file stays bounded."
+        )
+        archives = list(
+            (tmp_events / "archive" / terminal).glob("size-rotation-*.ndjson")
+        )
+        assert len(archives) > 0, (
+            "GAP 3: rotation must archive the oversize stream under the "
+            "per-dispatch archive dir."
+        )
+        assert store.oversize_flags() == [], (
+            "GAP 3: a successful rotation leaves no oversize flag behind."
         )
 
-    def test_oversize_flag_cleared_on_teardown(self, tmp_path, tmp_events):
+    def test_oversize_flag_written_only_on_rotation_failure(self, tmp_path, tmp_events):
         if not _HAS_OI858_CONSTANTS:
             pytest.fail("GAP 3: oversize flag constants not available on origin/main.")
 
-        store = EventStore(events_dir=tmp_events)
+        store = EventStore(events_dir=tmp_events, rotation_threshold_bytes=500)
         terminal = "T1"
 
-        payload = "x" * 100000
-        for i in range(200):
+        # Block the archive dir so rotation fails: archive/T1 is a regular file.
+        archive_dir = tmp_events / "archive"
+        archive_dir.mkdir()
+        (archive_dir / terminal).write_text("block")
+
+        payload = "x" * 200
+        for i in range(50):
             store.append(terminal, {
                 "type": "text",
                 "data": {"msg": f"event-{i}", "padding": payload},
-                "dispatch_id": "oi858-clear-flag",
-            }, dispatch_id="oi858-clear-flag")
+                "dispatch_id": "oi858-rotate-fail",
+            }, dispatch_id="oi858-rotate-fail")
 
         flag_path = tmp_events / f"{terminal}{_OVERSIZE_FLAG_SUFFIX}"
-        assert flag_path.exists(), "Flag must be created by oversize condition"
-
-        store.clear(terminal, archive_dispatch_id="oi858-clear-flag")
-        assert not flag_path.exists(), (
-            "Flag file must be removed on clear() — stale flags would cause false alarms"
+        assert flag_path.exists(), (
+            "GAP 3: when rotation fails, the .oversize flag must be written so "
+            "the still-oversize condition stays visible to the operator."
         )
 
     def test_oversize_flags_method(self, tmp_path, tmp_events):
         if not _HAS_OI858_CONSTANTS:
             pytest.fail("GAP 3: oversize_flags() method does not exist on origin/main.")
 
-        store = EventStore(events_dir=tmp_events)
+        store = EventStore(events_dir=tmp_events, rotation_threshold_bytes=500)
         terminal = "T1"
 
         assert store.oversize_flags() == [], "No flags initially"
 
-        payload = "x" * 100000
-        for i in range(200):
+        # Block the archive dir so rotation fails and writes a flag.
+        archive_dir = tmp_events / "archive"
+        archive_dir.mkdir()
+        (archive_dir / terminal).write_text("block")
+
+        payload = "x" * 200
+        for i in range(50):
             store.append(terminal, {
                 "type": "text",
                 "data": {"msg": f"event-{i}", "padding": payload},
@@ -279,9 +299,9 @@ class TestOversizeConsumer:
             }, dispatch_id="oi858-flags-method")
 
         flags = store.oversize_flags()
-        assert len(flags) > 0, "oversize_flags() must return flag files"
+        assert len(flags) > 0, "oversize_flags() must return flag files after a failed rotation"
 
-        store.clear(terminal, archive_dispatch_id="oi858-flags-method")
+        store.clear(terminal)
         assert store.oversize_flags() == [], "oversize_flags() must be empty after clear"
 
 

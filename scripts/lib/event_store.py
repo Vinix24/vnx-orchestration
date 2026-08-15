@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,14 +25,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Size warning threshold (10 MB per contract)
-_SIZE_WARNING_BYTES = 10 * 1024 * 1024
+# Size-rotation threshold (10 MB). Once the live stream exceeds this it is
+# archived to the per-dispatch archive dir and truncated to 0 — a size-based
+# rotation, not a log-only warning. Configurable per instance via the
+# ``rotation_threshold_bytes`` ctor arg or the VNX_EVENT_STREAM_MAX_BYTES env
+# var; this module constant is the default and stays patchable for tests.
+_SIZE_ROTATION_BYTES = 10 * 1024 * 1024
+_SIZE_ROTATION_ENV = "VNX_EVENT_STREAM_MAX_BYTES"
 # Hard upper bound (50 MB): auto-truncate with emergency archive to prevent
-# lane blockage when teardown never runs. Deliberately higher than the warning
-# threshold so the warning fires first and gives operators time to react.
+# lane blockage when the size rotation keeps failing. Deliberately higher than
+# the rotation threshold so rotation handles the normal case first.
 _SIZE_HARD_LIMIT_BYTES = 50 * 1024 * 1024
-# Flag file written alongside the oversize NDJSON to make the condition visible
-# to the dispatcher and the operator dashboard (ADR-005 observability).
+# Flag file written alongside the oversize NDJSON when a size rotation FAILS,
+# keeping the still-oversize condition visible to the dispatcher and the
+# operator dashboard (ADR-005 observability).
 _OVERSIZE_FLAG_SUFFIX = ".oversize"
 
 
@@ -63,8 +70,15 @@ def _events_dir() -> Path:
 class EventStore:
     """NDJSON event store with per-terminal files and file locking."""
 
-    def __init__(self, events_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        events_dir: Optional[Path] = None,
+        rotation_threshold_bytes: Optional[int] = None,
+    ) -> None:
         self._events_dir = events_dir or _events_dir()
+        # None means "resolve at write time" so the module default stays
+        # patchable in tests even after the store is constructed.
+        self._rotation_threshold_bytes = rotation_threshold_bytes
         self._sequences: Dict[str, int] = {}
         # Last dispatch_id appended per terminal (OI-878). Used to detect a
         # dispatch boundary on the write side so a live file that still holds a
@@ -79,6 +93,132 @@ class EventStore:
         seq = self._sequences.get(terminal, 0) + 1
         self._sequences[terminal] = seq
         return seq
+
+    def _rotation_threshold(self) -> int:
+        """Resolve the size-rotation threshold.
+
+        Precedence: explicit ctor arg > VNX_EVENT_STREAM_MAX_BYTES env var >
+        module default (_SIZE_ROTATION_BYTES). The module default stays
+        patchable so tests can construct a store without an explicit value and
+        still lower the threshold.
+        """
+        if self._rotation_threshold_bytes is not None:
+            return int(self._rotation_threshold_bytes)
+        env = os.environ.get(_SIZE_ROTATION_ENV)
+        if env:
+            try:
+                return int(env)
+            except ValueError:
+                logger.warning(
+                    "event_store: invalid %s=%r — using default %d bytes",
+                    _SIZE_ROTATION_ENV,
+                    env,
+                    _SIZE_ROTATION_BYTES,
+                )
+        return _SIZE_ROTATION_BYTES
+
+    def _oversize_flag_path(self, terminal: str) -> Path:
+        return self._terminal_path(terminal).with_suffix(_OVERSIZE_FLAG_SUFFIX)
+
+    def _write_oversize_flag(self, terminal: str) -> None:
+        """Persist the still-oversize marker after a failed rotation."""
+        try:
+            self._oversize_flag_path(terminal).write_text(
+                f"oversize:{terminal}:rotation-failed:"
+                f"{datetime.now(timezone.utc).isoformat()}\n"
+            )
+        except OSError:
+            pass
+
+    def _remove_oversize_flag(self, terminal: str) -> None:
+        try:
+            self._oversize_flag_path(terminal).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _size_rotation_archive_id() -> str:
+        """Unique archive id for a size rotation.
+
+        Uses a timestamp namespace (like the existing ``emergency-*`` backstop)
+        so it never collides with the per-dispatch teardown archive
+        ``{dispatch_id}.ndjson`` — the teardown writes that same filename later
+        and would otherwise overwrite the rotation's events.
+        """
+        return "size-rotation-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+    def _rotate_on_size(self, terminal: str) -> None:
+        """Rotate the live stream once it exceeds the size threshold.
+
+        Archives the current content to
+        ``events/archive/{terminal}/size-rotation-{ts}.ndjson`` (the existing
+        per-dispatch archive layout, not a second schema) and truncates the live
+        file to 0 bytes. The copy and the truncate happen under a single
+        LOCK_EX on the live file, so a concurrent appender that is blocked on
+        the lock writes into the fresh file afterwards — it can never lose an
+        event to a truncate that lands between the archive read and the clear.
+
+        Never raises: a failed rotation logs ERROR (visible) and leaves the
+        live file in place, so a broken log rotation never blocks the dispatch.
+        The hard-limit backstop still bounds worst-case growth.
+        """
+        path = self._terminal_path(terminal)
+        if not path.exists():
+            return
+        threshold = self._rotation_threshold()
+        rotated_size: Optional[int] = None
+        tmp: Optional[Path] = None
+        try:
+            with open(path, "ab+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    # Double-checked under the lock: another process may have
+                    # rotated while we waited, dropping the size back below the
+                    # threshold.
+                    size = os.fstat(f.fileno()).st_size
+                    if size <= threshold:
+                        return
+                    dest = (
+                        self.archive_dir(terminal)
+                        / f"{self._size_rotation_archive_id()}.ndjson"
+                    )
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = dest.with_name(dest.name + ".tmp")
+                    f.seek(0)
+                    with open(tmp, "wb") as tmp_f:
+                        shutil.copyfileobj(f, tmp_f)
+                    os.replace(tmp, dest)
+                    tmp = None
+                    f.seek(0)
+                    f.truncate(0)
+                    f.flush()
+                    rotated_size = size
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception as exc:  # vnx-silent-except: a broken rotation must never block the dispatch — fail visibly and continue
+            logger.error(
+                "event_store: size rotation failed for %s (threshold %d bytes): %s",
+                path,
+                threshold,
+                exc,
+                exc_info=True,
+            )
+            self._write_oversize_flag(terminal)
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return
+
+        self._sequences.pop(terminal, None)
+        self._remove_oversize_flag(terminal)
+        logger.info(
+            "event_store: rotated %s (%d bytes) over %d-byte threshold",
+            path,
+            rotated_size,
+            threshold,
+        )
 
     def _rotate_at_dispatch_boundary(self, terminal: str, new_dispatch_id: str) -> None:
         """Enforce the per-dispatch ring buffer on the write side (OI-878).
@@ -216,36 +356,12 @@ class EventStore:
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-        # Size warning + oversize flag file so the condition is visible to the
-        # dispatcher dashboard (not just the log stream). Previously 36 warnings
-        # fired without any consumer (OI-858, Cluster E1).
-        #
-        # OI-1095: the warning must fire ONCE per threshold crossing, not once
-        # per write action. A long-running provider-lane worker produces events
-        # at high frequency — six identical warnings in a six-line tail is noise,
-        # not an alarm.  The oversize flag file doubles as the "already warned"
-        # guard: it is written alongside the first warning and removed on
-        # clear(). Subsequent writes update the flag (so it always reflects the
-        # current size) but skip the log warning until the next dispatch cycle.
-        try:
-            st = path.stat()
-            if st.st_size > _SIZE_WARNING_BYTES:
-                flag_path = path.with_suffix(_OVERSIZE_FLAG_SUFFIX)
-                already_warned = flag_path.exists()
-                if not already_warned:
-                    logger.warning(
-                        "event_store: %s exceeds %d bytes — operator intervention recommended",
-                        path,
-                        _SIZE_WARNING_BYTES,
-                    )
-                # Write/update the flag file so the dispatcher can surface this
-                # without tailing the log. The flag is terminal-scoped and lives
-                # next to the NDJSON file so it is visible in `vnx pool status`.
-                flag_path.write_text(
-                    f"oversize:{terminal}:{st.st_size}:{datetime.now(timezone.utc).isoformat()}\n"
-                )
-        except OSError:
-            pass
+        # Size-based rotation: once the live stream exceeds the rotation
+        # threshold, archive it to the per-dispatch archive dir and truncate to
+        # 0 so the file can never grow unbounded. This replaces the old log-only
+        # "operator intervention recommended" warning (OI-858) that fired every
+        # dispatch and changed nothing.
+        self._rotate_on_size(terminal)
 
         # Hard upper bound: if the file has grown past the hard limit (50 MB),
         # auto-truncate with an emergency archive so the lane doesn't block.
@@ -370,10 +486,11 @@ class EventStore:
     def oversize_flags(self) -> list[Path]:
         """Return paths to all oversize flag files currently present.
 
-        Each flag file indicates a terminal whose event file has exceeded the
-        soft warning threshold and has NOT been cleared since.  The dispatcher
-        can call this to surface the condition in ``vnx pool status`` without
-        tailing the log stream (OI-858 consumer).
+        Each flag file marks a terminal whose event file exceeded the size-
+        rotation threshold but whose rotation FAILED — i.e. the live file is
+        still oversize and needs manual attention. A successful rotation removes
+        the flag. The dispatcher can call this to surface the condition in
+        ``vnx pool status`` without tailing the log stream (OI-858 consumer).
         """
         if not self._events_dir.exists():
             return []
