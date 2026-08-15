@@ -17,7 +17,14 @@ Scope — deliberately narrow, so it never false-alarms on a doc edit:
   would falsify what they recorded.  Skipped: ``docs/_archive/``,
   ``docs/examples/`` (illustrative), ``docs/investigations/`` (dated triage
   reports), ``docs/governance/decisions/`` (Nygard ADRs, whose own survey cites
-  are explicitly "not re-grepped to a line number").
+  are explicitly "not re-grepped to a line number"), and
+  ``docs/internal/{plans,intelligence}/`` (historical proposals that cite an
+  architecture that no longer exists).
+* **Only tracked docs.**  Gitignored trees (``docs/internal/``,
+  ``docs/orchestration/``) live on the maintainer's checkout but never ship,
+  and their citations point at a local-only architecture CI has never seen.
+  Scanning them made the check fail locally while CI stayed green.  They are
+  not living repo docs, so untracked files are skipped outright.
 * **Code fences are skipped.**  A fenced block is a literal listing or schema
   example (``scripts/lib/foo.py:10-20`` in a JSON example is a placeholder,
   not a citation).  Real citations live inline in backtick prose.
@@ -50,6 +57,14 @@ _EXEMPT_DOC_SUBDIRS = frozenset({
     "examples",
     "investigations",
     "governance/decisions",
+    # Historical proposals and design notes (docs/internal/{plans,intelligence})
+    # that cite an architecture that no longer exists (dispatcher_v8_minimal.sh,
+    # unified_state_manager_v2.py, receipt_processor_v4.sh, ...).  "Correcting"
+    # their line numbers to today's values would falsify what they recorded.
+    # They are also gitignored, so they never ship; keep them carved out here so
+    # the check never false-alarms if one is ever re-added to the tree.
+    "internal/plans",
+    "internal/intelligence",
 })
 
 # Extensions we treat as "a file" in a citation.  Covering the observed set
@@ -160,11 +175,23 @@ def is_live_doc(doc_rel: str) -> bool:
     )
 
 
-def iter_live_docs(docs_dir: Path) -> list[Path]:
-    """Return every living .md under *docs_dir*, frozen subdirs excluded."""
+def iter_live_docs(docs_dir: Path, paths: list[str] | None = None) -> list[Path]:
+    """Return every living .md under *docs_dir*, untracked and frozen subdirs excluded.
+
+    *paths* is the tracked-file list (repo-relative posix paths) when known.
+    When provided, a doc is scanned only if it is tracked: gitignored trees such
+    as ``docs/internal/`` and ``docs/orchestration/`` live on the maintainer's
+    checkout but never ship, and their line numbers describe a local-only
+    architecture that CI has never seen.
+    """
+    tracked = None
+    if paths is not None:
+        tracked = {p for p in paths if p.startswith("docs/") and p.endswith(".md")}
     docs: list[Path] = []
     for md in sorted(docs_dir.rglob("*.md")):
         rel = md.relative_to(docs_dir).as_posix()
+        if tracked is not None and "docs/" + rel not in tracked:
+            continue
         if is_live_doc(rel):
             docs.append(md)
     return docs
@@ -173,7 +200,7 @@ def iter_live_docs(docs_dir: Path) -> list[Path]:
 def check_docs(docs_dir: Path, repo_root: Path, paths: list[str]) -> list[str]:
     """Return violation strings for every drifted citation in living docs."""
     violations: list[str] = []
-    for md in iter_live_docs(docs_dir):
+    for md in iter_live_docs(docs_dir, paths):
         text = md.read_text(encoding="utf-8", errors="ignore")
         for line_no, ref, linespec in scan_markdown(text):
             violation = check_ref(ref, linespec, repo_root, paths)
