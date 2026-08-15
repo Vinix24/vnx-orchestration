@@ -1,7 +1,8 @@
 # Worker Permissions
 
 > Status: current as of 2026-08-15 (scoped worker-mode is the fabric default,
-> with the `mcp__` tool namespace denied explicitly; revising the 03-08
+> with the `mcp__` tool namespace denied explicitly, and `dispatch_paths`
+> narrowing `file_write_scope` per dispatch (OI-1196); revising the 03-08
 > blanket-skip ratification and the 14-08 mcp-scoped-default flip).
 > Covers the two dispatch lanes that spawn a headless/detached Claude worker:
 > the tmux-spawn lane (`tmux_interactive_dispatch.py`) and the subprocess lane
@@ -80,15 +81,18 @@ Project SSOT for scoped-mode profiles. Each role under `profiles:` declares:
 | Key | Meaning | Enforced how |
 |---|---|---|
 | `allowed_tools` / `denied_tools` | Claude Code tool allow/deny list | **Hard-enforced** via `--allowedTools`/`--disallowedTools` — scoped mode is the default, so this binds unless the dispatch explicitly opts out (`VNX_WORKER_BLANKET_SKIP=1` or falsy `VNX_WORKER_SCOPED`) |
-| `bash_allow_patterns` / `bash_deny_patterns` | Shell glob patterns describing expected/forbidden Bash commands | **Advisory only** — rendered into the instruction preamble via `generate_permission_preamble()`; `match_bash_deny()` exists (`scripts/lib/worker_permissions.py:320-328`) but nothing in the dispatch path calls it at Bash-tool time, so it is not a real-time gate |
-| `file_write_scope` | Glob patterns for where the role may write | **Advisory only** — same preamble-only path; `match_file_write_scope()` (`scripts/lib/worker_permissions.py:331-338`) is unused outside tests |
+| `bash_allow_patterns` / `bash_deny_patterns` | Shell glob patterns describing expected/forbidden Bash commands | Rendered into the instruction preamble via `generate_permission_preamble()` (always) **and** real-time-gated via `match_bash_deny()` in the PreToolUse hook (`scripts/hooks/pretooluse_worker_scope_enforce.py`) — but that hook is a no-op unless `VNX_ENFORCE_WORKER_PERMISSIONS=1` (default **OFF**), so outside that opt-in the preamble is the only effect |
+| `file_write_scope` | Glob patterns for where the role may write | Same preamble-only-by-default story as above, via `match_file_write_scope()` (`scripts/lib/worker_permissions.py`) in the same hook — real-time-gated, `VNX_ENFORCE_WORKER_PERMISSIONS=1` required. OI-1196 (15-08): the hook also narrows this to a dispatch's own declared `dispatch_paths` when present (never wider than the role — see below); previously `dispatch_paths` had no enforcement channel at all, only the `_scope_note()` prompt text |
 | `mcp_servers` | Per-role allowlist of named MCP servers | **Hard-enforced** via a scoped `--mcp-config` (`resolve_role_mcp_config()`) — takes effect in scoped mode (the default), and only when `requires_mcp=False`. An empty list (the default; no shipped role currently declares one) keeps the `{"mcpServers":{}}` posture. A named server not defined in the ambient global config (`~/.claude.json`, or `VNX_GLOBAL_MCP_CONFIG_PATH` override) is skipped and logged, never fabricated |
 | `terminal_assignments` | `T1`/`T2`/`T3` → expected role | Checked by `validate_dispatch_permissions()`, called from `subprocess_dispatch_internals/skill_injection.py:_inject_permission_profile` — a mismatch only **logs a warning**, it does not block the dispatch |
 
 Current profiles (`.vnx/worker_permissions.yaml`): `backend-developer`,
-`test-engineer`, `frontend-developer`, `architect`, `database-engineer`,
-`intelligence-engineer`, `security-engineer`. `terminal_assignments` maps
-`T1: backend-developer`, `T2: test-engineer`, `T3: frontend-developer`.
+`quality-engineer`, `frontend-developer`, `system-architect`,
+`security-engineer`, `code-reviewer`, `research-analyst` (OI-1100 renamed
+`test-engineer`→`quality-engineer` and `architect`→`system-architect`, and
+dropped the never-dispatched `database-engineer`/`intelligence-engineer`
+entries). `terminal_assignments` maps `T1: backend-developer`,
+`T2: quality-engineer`, `T3: frontend-developer`.
 
 An unknown/missing role, or a profile with no `allowed_tools`, falls back to
 `default_code_worker_profile()` (`Read, Write, Edit, MultiEdit, Bash, Grep,
@@ -100,6 +104,52 @@ empty ambient-MCP config bind on every detached dispatch unless the operator
 explicitly opts out (`VNX_WORKER_BLANKET_SKIP=1` or falsy `VNX_WORKER_SCOPED`).
 `.vnx/worker_permissions.yaml` therefore has runtime effect by default; it only
 stops mattering for a dispatch that opts back into blanket skip.
+
+## OI-1196 — `dispatch_paths` narrows `file_write_scope`, per dispatch
+
+A dispatch's own `--dispatch-paths` (tmux lane; plain strings, optionally
+suffixed `:access` where `access` is a `PathAccess` value — `read` / `write`
+/ `read_write` / `create`, default `read_write`) can narrow a role's
+`file_write_scope` further, down to just the paths that dispatch declared.
+It can only narrow, never widen: `scripts/lib/worker_permissions.py`'s
+`match_file_write_scope()` requires the role check to pass first, then —
+only when the dispatch declared paths — a second, independent check against
+the write-granting subset of those paths (entries with `access=read` are
+excluded: this mechanism enforces WRITE scope only, so `read` honestly means
+"not a write grant", not an additional read-side restriction the fabric does
+not otherwise have).
+
+Wiring: `TmuxInteractiveDispatch._spawn_session()` JSON-encodes
+`dispatch_paths` into the worker's pane as `VNX_DISPATCH_PATHS` (alongside
+the existing `VNX_WORKER_ROLE`); `pretooluse_worker_scope_enforce.py` reads
+it via `resolve_dispatch_write_scope()` and passes the result into
+`match_file_write_scope()`. No `dispatch_paths` declared → `None` → identical
+to pre-OI-1196 behavior (role scope alone). `dispatch_paths` declared but
+every entry is `access=read` → an empty (not `None`) write-scope list → every
+write is blocked, correctly reflecting "this dispatch does no writing".
+
+Fail-open, deliberately and narrowly: a missing or malformed
+`VNX_DISPATCH_PATHS` degrades to `None` (no per-dispatch narrowing) rather
+than blocking. This is safe because it only removes the EXTRA narrowing —
+the role's `file_write_scope` check runs unconditionally either way, so
+malformed dispatch-scope data can never widen a worker past its role's
+bound, only fail to apply a tightening beyond it. This mechanism inherits
+the same `VNX_ENFORCE_WORKER_PERMISSIONS` gate as `file_write_scope` above
+(default OFF): the plumbing gap described in OI-1196 is closed, but the
+fleet-wide enforcement default is a separate, already-documented decision
+this change does not alter.
+
+The typed `DispatchSpec.dispatch_paths` surface (`scripts/lib/dispatch_spec.py`,
+part of the single-entry dispatch door) has its own, independent `access`
+field on each `DispatchPath`. `dispatch_spec.write_paths()` is the first code
+that actually reads it (OI-1196) — it filters to the write-granting subset,
+mirroring the CLI-string logic above via the shared
+`WRITE_GRANTING_PATH_ACCESS` constant. It is not yet wired to the tmux lane's
+`--dispatch-paths` (that bridge is `dispatch_cli.py`/`dispatch_bridge.py`,
+outside this change) — today the two `dispatch_paths` concepts (typed
+`DispatchPath` tuples in the door's spec, and the plain path-string CLI list
+in the tmux/hook enforcement path above) are parsed independently rather than
+sharing one object.
 
 ## The fail-closed exception: `working_tree_only`
 

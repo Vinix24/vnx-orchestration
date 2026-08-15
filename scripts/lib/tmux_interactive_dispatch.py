@@ -1395,6 +1395,7 @@ class TmuxInteractiveDispatch:
         dispatch_id: str = "",
         session_uuid: "str | None" = None,
         role: "str | None" = None,
+        dispatch_paths: "list[str] | None" = None,
     ) -> "tuple[str, str] | None":
         """Create a detached session; return (pane_id, window_id) or None.
 
@@ -1410,12 +1411,21 @@ class TmuxInteractiveDispatch:
         worker-scope PreToolUse enforcement hook
         (scripts/hooks/pretooluse_worker_scope_enforce.py) can resolve which
         role's permission profile to enforce (spike E3 gap).
+
+        When ``dispatch_paths`` is provided it is JSON-encoded and exported as
+        ``VNX_DISPATCH_PATHS`` (OI-1196) so the same hook can narrow the
+        role's file_write_scope to this dispatch's declared paths — never
+        wider than the role, only sharper. Before this, ``dispatch_paths``
+        only reached the worker as prose (``_scope_note()``) and
+        ``dispatch_metadata``; it had no enforcement channel at all.
         """
         args = ["new-session", "-d", "-s", session, "-c", str(cwd)]
         if dispatch_id:
             args += ["-e", f"VNX_CURRENT_DISPATCH_ID={dispatch_id}"]
         if session_uuid:
             args += ["-e", f"VNX_CLAUDE_SESSION_ID={session_uuid}"]
+        if dispatch_paths:
+            args += ["-e", f"VNX_DISPATCH_PATHS={json.dumps(list(dispatch_paths))}"]
         if role:
             args += ["-e", f"VNX_WORKER_ROLE={role}"]
         args += ["-P", "-F", "#{pane_id}"]
@@ -2727,8 +2737,20 @@ class TmuxInteractiveDispatch:
         window_id: "str | None" = None
         try:
             # 1. Spawn detached session
+            _spawn_dispatch_paths: "list[str] | None"
+            if isinstance(dispatch_paths, str):
+                _spawn_dispatch_paths = [dispatch_paths]
+            elif dispatch_paths:
+                _spawn_dispatch_paths = list(dispatch_paths)
+            else:
+                _spawn_dispatch_paths = None
             spawned = self._spawn_session(
-                session, cwd, dispatch_id, session_uuid=session_uuid, role=role
+                session,
+                cwd,
+                dispatch_id,
+                session_uuid=session_uuid,
+                role=role,
+                dispatch_paths=_spawn_dispatch_paths,
             )
             if spawned is None:
                 self._emit_event(

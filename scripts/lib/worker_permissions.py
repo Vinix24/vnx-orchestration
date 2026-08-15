@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from dispatch_spec import PathAccess, WRITE_GRANTING_PATH_ACCESS
+
 logger = logging.getLogger(__name__)
 
 # Essential tools a headless code worker needs to read, write, and commit code.
@@ -70,6 +72,14 @@ FALLBACK_FILE_WRITE_SCOPE = [
     "*/*/*/*/*",   # 4 levels deep
     "*/*/*/*/*/*",  # 5 levels deep
 ]
+
+# OI-1196: which PathAccess values grant write capability, when parsing raw
+# --dispatch-paths CLI entries below. Re-exported from dispatch_spec (the
+# single source of truth for what PathAccess values mean) rather than
+# redeclared, so the CLI-string surface (this module) and the typed
+# DispatchSpec surface (dispatch_spec.write_paths) can never disagree about
+# which access values grant write.
+WRITE_GRANTING_ACCESS = WRITE_GRANTING_PATH_ACCESS
 
 # Empty ambient-MCP config string handed to `claude --mcp-config`. Paired with
 # `--strict-mcp-config` this makes a worker reach ZERO MCP servers (no Supabase,
@@ -606,7 +616,7 @@ def _check_fallback_write_scope(file_path: str, max_depth: int = 6) -> bool:
     return len(parts) <= max_depth
 
 
-def match_file_write_scope(file_path: str, profile: PermissionProfile) -> bool:
+def _match_role_scope(file_path: str, profile: PermissionProfile) -> bool:
     """Return True if file_path is within any of the profile's file_write_scope globs.
 
     An empty scope means no restriction (returns True).  The fallback
@@ -623,3 +633,77 @@ def match_file_write_scope(file_path: str, profile: PermissionProfile) -> bool:
         if fnmatch.fnmatch(file_path, scope):
             return True
     return False
+
+
+def _parse_dispatch_path_entry(raw: str) -> "tuple[str, PathAccess]":
+    """Split one raw ``--dispatch-paths`` entry into ``(path, access)``.
+
+    Accepts a bare path (e.g. ``"scripts/lib/foo.py"``), which defaults to
+    ``PathAccess.READ_WRITE`` so a dispatch declared before this change (or
+    written by a caller that never learns the suffix syntax) behaves exactly
+    as before. Optionally accepts a ``"path:access"`` suffix where ``access``
+    is a legal :class:`PathAccess` value (``read``/``write``/``read_write``/
+    ``create``). A trailing segment that is not a legal PathAccess value is
+    treated as part of the path rather than a delimiter — repo-relative
+    paths do not contain ``:`` in practice, so this is conservative rather
+    than silently misparsing a real path that happens to contain one.
+    """
+    if ":" in raw:
+        path, _, suffix = raw.rpartition(":")
+        try:
+            return path, PathAccess(suffix)
+        except ValueError:
+            pass
+    return raw, PathAccess.READ_WRITE
+
+
+def resolve_dispatch_write_scope(dispatch_paths: "list[str] | None") -> "list[str] | None":
+    """Resolve raw ``dispatch_paths`` entries into write-granting scope globs.
+
+    Returns ``None`` when *dispatch_paths* is empty/falsy — "this dispatch
+    declared no per-path scope", which callers must treat as "apply no
+    dispatch-level narrowing" (pre-OI-1196 behavior, unchanged).
+
+    Returns a list (possibly empty) otherwise. An empty list is NOT the same
+    as ``None``: it means the dispatch DID declare dispatch_paths but every
+    entry carried ``access=read`` (or another non-write access), so nothing
+    in this dispatch is in write scope. This mirrors the fabric's existing
+    "absent field is not the same as zero" convention — see
+    :func:`match_file_write_scope` for how the two are distinguished.
+    """
+    if not dispatch_paths:
+        return None
+    out: list[str] = []
+    for raw in dispatch_paths:
+        path, access = _parse_dispatch_path_entry(raw)
+        if access in WRITE_GRANTING_ACCESS:
+            out.append(path)
+    return out
+
+
+def match_file_write_scope(
+    file_path: str,
+    profile: PermissionProfile,
+    dispatch_write_scope: "list[str] | None" = None,
+) -> bool:
+    """Return True if file_path may be written under *profile*, narrowed by *dispatch_write_scope*.
+
+    Two independent checks, both of which must pass — this is intersection,
+    never union, so a dispatch-declared scope can only narrow a role's
+    file_write_scope, never widen it (OI-1196: "never wider than the role"):
+
+      1. The role check (:func:`_match_role_scope`) — unchanged from before
+         this change, always applies.
+      2. The dispatch check — only when *dispatch_write_scope* is not
+         ``None``. ``None`` means no dispatch-level scope was declared, so
+         behavior is identical to before this change. A list (including an
+         empty one — see :func:`resolve_dispatch_write_scope`) means the
+         dispatch DID declare per-path scope, and *file_path* must match one
+         of its write-granting globs; an empty list therefore blocks every
+         write, which is correct when every declared path was read-only.
+    """
+    if not _match_role_scope(file_path, profile):
+        return False
+    if dispatch_write_scope is None:
+        return True
+    return any(fnmatch.fnmatch(file_path, scope) for scope in dispatch_write_scope)

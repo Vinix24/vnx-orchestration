@@ -5450,6 +5450,49 @@ class TestWorkerRoleExport(_LaneTestCase):
         self.assertNotIn("VNX_WORKER_ROLE", " ".join(ns_cmd))
 
 
+class TestDispatchPathsExport(_LaneTestCase):
+    """OI-1196: _spawn_session exports VNX_DISPATCH_PATHS into the pane env."""
+
+    def _new_session_cmd(self, fake: FakeTmux) -> list:
+        cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertTrue(cmds, "new-session was not invoked")
+        return cmds[0]
+
+    def test_dispatch_paths_exported_as_json(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(
+            lane, role="backend-developer", dispatch_paths=["scripts/lib/foo.py", "tests/test_foo.py"]
+        )
+
+        self.assertTrue(result.success, result.failure_reason)
+        ns_cmd = self._new_session_cmd(fake)
+        self.assertIn("-e", ns_cmd)
+        expected = f'VNX_DISPATCH_PATHS={json.dumps(["scripts/lib/foo.py", "tests/test_foo.py"])}'
+        self.assertIn(expected, ns_cmd)
+
+    def test_dispatch_paths_absent_when_none(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, role="backend-developer", dispatch_paths=None)
+
+        self.assertTrue(result.success, result.failure_reason)
+        ns_cmd = self._new_session_cmd(fake)
+        self.assertNotIn("VNX_DISPATCH_PATHS", " ".join(ns_cmd))
+
+    def test_dispatch_paths_str_normalized_to_single_element_list(self):
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(
+            lane, role="backend-developer", dispatch_paths="scripts/lib/foo.py"
+        )
+
+        self.assertTrue(result.success, result.failure_reason)
+        ns_cmd = self._new_session_cmd(fake)
+        expected = f'VNX_DISPATCH_PATHS={json.dumps(["scripts/lib/foo.py"])}'
+        self.assertIn(expected, ns_cmd)
+
+
 class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
     """Worktree-allocation seam: the worker-scope PreToolUse hook is registered
     in the fresh worktree's .claude/settings.local.json before the session spawns."""

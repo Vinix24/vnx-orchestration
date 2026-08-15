@@ -61,6 +61,17 @@ class PathAccess(str, Enum):
     CREATE     = "create"
 
 
+# OI-1196: which PathAccess values grant WRITE capability on a DispatchPath.
+# WRITE, READ_WRITE, and CREATE all denote intent to mutate the path; READ is
+# the one value that withholds it. This governs WRITE scope only — the fabric
+# has no separate read-scope enforcement gate (Read/Grep are unrestricted for
+# any worker with those tools allowed), so a READ-access path is honestly
+# "excluded from write scope", not "reads are additionally restricted".
+# Single source of truth: scripts/lib/worker_permissions.py imports this
+# rather than redeclaring which access values mean "write".
+WRITE_GRANTING_PATH_ACCESS = frozenset({PathAccess.WRITE, PathAccess.READ_WRITE, PathAccess.CREATE})
+
+
 # ---------------------------------------------------------------------------
 # Deadline bounds — single source of truth (deadline-passthrough)
 # ---------------------------------------------------------------------------
@@ -84,6 +95,30 @@ class DispatchPath:
     path: PurePosixPath
     access: PathAccess = PathAccess.READ_WRITE
     materialize_at_cwd: bool = False
+
+
+def write_paths(paths: "tuple[DispatchPath, ...]") -> list[str]:
+    """Return the POSIX path strings among *paths* whose access grants write.
+
+    OI-1196: this is the first place ``DispatchPath.access`` is actually
+    consulted for a decision. Before this change, ``validate()`` accepted
+    and carried the field through into ``ValidatedSpec.normalized_paths``
+    untouched, but nothing ever read it back — ``access`` was decoration
+    that suggested a rights model with no enforcement behind it. A
+    ``PathAccess.READ`` entry is excluded (see WRITE_GRANTING_PATH_ACCESS);
+    everything else is included.
+
+    Not yet wired to the tmux-lane ``--dispatch-paths`` CLI surface
+    (``scripts/lib/worker_permissions.resolve_dispatch_write_scope``, which
+    enforces the write-scope narrowing this function's output is meant to
+    feed): that surface currently carries plain path strings sourced from
+    ``dispatch_cli.py``/``dispatch_bridge.py`` (the single-entry dispatch
+    door's staging/bridge layer), which are outside this change's file
+    boundary. Once that bridge threads typed ``DispatchPath`` objects
+    through instead of bare strings, it should call this function rather
+    than re-deriving which access values mean "write".
+    """
+    return [str(dp.path) for dp in paths if dp.access in WRITE_GRANTING_PATH_ACCESS]
 
 
 # ---------------------------------------------------------------------------
