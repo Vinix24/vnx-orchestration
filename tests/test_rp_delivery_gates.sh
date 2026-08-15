@@ -50,16 +50,17 @@ mkdir -p "$STATE_DIR" "$RECEIPTS_PENDING_DIR" "$RECEIPTS_PROCESSED_DIR"
 touch "$PROCESSING_LOG"
 
 MOCK_CALL_LOG="$TMP_ROOT/mock_calls"
+MOCK_ARGV_LOG="$TMP_ROOT/mock_argv"
 MOCK_LOADED_BUFFER="$TMP_ROOT/mock_loaded_buffer"
 MOCK_PASTE_FAIL_FLAG="$TMP_ROOT/mock_paste_fail"
 MOCK_LOADBUFFER_FAIL_FLAG="$TMP_ROOT/mock_loadbuffer_fail"
 MOCK_CAPTURE_RESPONSE_FILE="$TMP_ROOT/mock_capture_response"
-touch "$MOCK_CALL_LOG" "$MOCK_CAPTURE_RESPONSE_FILE"
+touch "$MOCK_CALL_LOG" "$MOCK_ARGV_LOG" "$MOCK_CAPTURE_RESPONSE_FILE"
 
 reset_mocks() {
-    rm -f "$MOCK_CALL_LOG" "$MOCK_LOADED_BUFFER" "$MOCK_PASTE_FAIL_FLAG" "$MOCK_LOADBUFFER_FAIL_FLAG"
+    rm -f "$MOCK_CALL_LOG" "$MOCK_ARGV_LOG" "$MOCK_LOADED_BUFFER" "$MOCK_PASTE_FAIL_FLAG" "$MOCK_LOADBUFFER_FAIL_FLAG"
     : > "$MOCK_CAPTURE_RESPONSE_FILE"
-    touch "$MOCK_CALL_LOG"
+    touch "$MOCK_CALL_LOG" "$MOCK_ARGV_LOG"
     rm -rf "${RECEIPTS_PENDING_DIR:?}"/* "${RECEIPTS_PROCESSED_DIR:?}"/* 2>/dev/null
     unset VNX_RECEIPT_T0_PUSH VNX_RECEIPT_DIGEST_THRESHOLD VNX_RECEIPT_VERIFY_MAX_RETRIES
 }
@@ -87,6 +88,11 @@ get_pane_id_smart() { echo "test:0.0"; }
 tmux() {
     local subcmd="$1"
     echo "$subcmd" >> "$MOCK_CALL_LOG"
+    # Full argv log (OI-1144): lets the named-buffer tests assert that
+    # load-buffer/paste-buffer carry the SAME -b <name> and that delete-buffer
+    # removes it, without disturbing the existing subcommand-only $MOCK_CALL_LOG
+    # assertions elsewhere in this file.
+    echo "$*" >> "$MOCK_ARGV_LOG"
     case "$subcmd" in
         load-buffer)
             if [ -f "$MOCK_LOADBUFFER_FAIL_FLAG" ]; then
@@ -378,6 +384,50 @@ for n in 1 2 3 4 5 6; do
 done
 assert_eq "1" "$IDLIST_ALL_PRESENT" \
     "T10: digest message lists all 6 pending dispatch_ids (under the 10-id cap)"
+
+# ===========================================================================
+# Test 11 (OI-1144, push=1): load-buffer/paste-buffer address a NAMED buffer,
+# the same name on both, and delete-buffer removes it afterwards
+# ===========================================================================
+reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
+write_pending "d-1144-1.json" "d-1144"
+set_capture_response ""
+_retry_pending_receipts
+
+assert_eq "1" "$(grep -c '^load-buffer -b ' "$MOCK_ARGV_LOG")" \
+    "T11 (OI-1144): load-buffer carries a -b <name>"
+assert_eq "1" "$(grep -c '^paste-buffer -b ' "$MOCK_ARGV_LOG")" \
+    "T11 (OI-1144): paste-buffer carries a -b <name>"
+
+LOAD_BUF_NAME=$(grep '^load-buffer ' "$MOCK_ARGV_LOG" | sed -n 's/.*-b \([^ ]*\).*/\1/p')
+PASTE_BUF_NAME=$(grep '^paste-buffer ' "$MOCK_ARGV_LOG" | sed -n 's/.*-b \([^ ]*\).*/\1/p')
+assert_eq "$LOAD_BUF_NAME" "$PASTE_BUF_NAME" \
+    "T11 (OI-1144): load and paste address the SAME buffer name"
+assert_eq "1" "$(grep -c "^delete-buffer -b ${LOAD_BUF_NAME}" "$MOCK_ARGV_LOG")" \
+    "T11 (OI-1144): buffer is deleted after use (no stack accumulation)"
+unset VNX_RECEIPT_T0_PUSH
+
+# ===========================================================================
+# Test 12 (OI-1144, argv-opbouw): two deliveries build two DISTINCT buffer
+# names, so a simultaneous crossing is structurally impossible. NOTE: this
+# asserts the argv (distinct names), NOT a live tmux race — the shell can't
+# run two deliveries truly concurrently in one process.
+# ===========================================================================
+reset_mocks
+export VNX_RECEIPT_T0_PUSH=1
+write_pending "d-a-1.json" "dispatch-A"
+write_pending "d-b-1.json" "dispatch-B"
+set_capture_response ""
+_retry_pending_receipts
+
+DISTINCT_LOAD_NAMES=$(grep '^load-buffer ' "$MOCK_ARGV_LOG" | sed -n 's/.*-b \([^ ]*\).*/\1/p' | sort -u)
+assert_eq "2" "$(printf '%s\n' "$DISTINCT_LOAD_NAMES" | wc -l | tr -d ' ')" \
+    "T12 (OI-1144): two deliveries build two DISTINCT buffer names (argv, not a live race)"
+# Every load-buffer carries an explicit -b: none may fall back to the anonymous stack.
+assert_eq "0" "$(grep -c '^load-buffer -$' "$MOCK_ARGV_LOG")" \
+    "T12 (OI-1144): no load-buffer falls back to the anonymous '-' stack"
+unset VNX_RECEIPT_T0_PUSH
 
 # --- Cleanup ---
 rm -rf "$TMP_ROOT"

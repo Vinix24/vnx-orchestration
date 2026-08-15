@@ -44,6 +44,52 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     return data
 
 
+def _registry_key_for(provider: Optional[str], sub_provider: Optional[str]) -> Optional[str]:
+    """Resolve a provider string to its wave7_models.yaml registry key.
+
+    Mirrors providers.constraint_enforcer._registry_key_for (ADR-036): provider
+    identity is read from the registry, never from a literal string match, so an
+    allowlist on provider cannot be sidestepped by a different provider string
+    that routes to the same models (OI-1217 — glm-harness/litellm:zai -> zai).
+    """
+    raw = (provider or "").strip().lower()
+    if raw.startswith("litellm:"):
+        parts = raw.split(":", 2)
+        base, sub = "litellm", (parts[1] if len(parts) > 1 and parts[1] else sub_provider)
+    else:
+        base, sub = raw, sub_provider
+    base_norm = (base or "").lower()
+    sub_norm = (sub or "").lower()
+    if base_norm == "claude":
+        return "anthropic"
+    if base_norm == "codex":
+        return "openai"
+    if base_norm == "gemini":
+        return "google"
+    if base_norm == "kimi":
+        return "kimi_cli"
+    if base_norm in ("deepseek-harness", "deepseek_harness"):
+        return "deepseek_harness"
+    if base_norm in ("glm-harness", "glm_harness"):
+        return "zai"
+    if base_norm == "litellm":
+        return sub_norm or None
+    return base_norm.replace("-", "_") or None
+
+
+def _provider_identity_matches(
+    provider: Optional[str],
+    sub_provider: Optional[str],
+    spec_provider: str,
+) -> bool:
+    """Match provider identity by registry key, not literal string (see above)."""
+    spec_key = _registry_key_for(str(spec_provider), None)
+    actual_key = _registry_key_for(provider, sub_provider)
+    if spec_key is None or actual_key is None:
+        return False
+    return actual_key == spec_key
+
+
 class ConstraintEnforcer:
     """Loads and enforces provider constraints at dispatch pre-flight."""
 
@@ -103,7 +149,7 @@ class ConstraintEnforcer:
                     logger.warning("[%s] %s", cid, msg)
 
             elif rule == "require_route":
-                if self._check_require_route(c, provider, sub_provider, model, terminal_id, role):
+                if self._check_require_route(c, provider, sub_provider, model, terminal_id, role, via):
                     if self._is_overridden(c):
                         logger.warning("Constraint %s overridden by env var", cid)
                         continue
@@ -157,6 +203,7 @@ class ConstraintEnforcer:
         model: Optional[str],
         terminal_id: Optional[str],
         role: Optional[str],
+        via: Optional[str],
     ) -> bool:
         """Return True if the constraint is violated (required route NOT met)."""
         rr = constraint.get("required_route", {})
@@ -165,19 +212,20 @@ class ConstraintEnforcer:
 
         spec_provider = rr.get("provider")
         if spec_provider:
-            if provider and provider.lower() in self._NATIVE_CLI_PROVIDERS:
-                if not self._match_value(provider, spec_provider):
-                    return False
-            else:
-                effective_provider = sub_provider or provider
-                if not self._match_value(effective_provider, spec_provider):
-                    return False
+            if not _provider_identity_matches(provider, sub_provider, str(spec_provider)):
+                return False
 
         spec_role = rr.get("role")
         if spec_role:
             effective_role = terminal_id or role
             if not self._match_value(effective_role, spec_role):
                 return False
+
+        spec_via = rr.get("via")
+        # Enforced only when the caller declares a via: an absent via is "route
+        # unspecified", not the forbidden direct route the allowlist refuses.
+        if spec_via and via is not None and not self._match_value(via, spec_via):
+            return True
 
         spec_model = rr.get("model")
         if spec_model:

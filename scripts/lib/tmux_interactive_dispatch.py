@@ -14,6 +14,7 @@ binary. No Anthropic SDK is imported anywhere in this module.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -446,7 +447,78 @@ def _worker_scope_hook_entry() -> dict:
     }
 
 
-def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
+def _permissions_from_file(settings_file: Path) -> "dict | None":
+    """Return the ``permissions`` block of *settings_file*, or None.
+
+    Fail-open: an unreadable or malformed main-checkout settings file must not
+    abort the hook write — the hook is fail-open anyway, so a corrupt source
+    degrades to "nothing to merge" with a warning.
+    """
+    if not settings_file.exists():
+        return None
+    try:
+        data = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning(
+            "interactive: worker-scope hook settings: could not read %s for "
+            "permissions merge; skipping",
+            settings_file,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    permissions = data.get("permissions")
+    return copy.deepcopy(permissions) if isinstance(permissions, dict) else None
+
+
+def _merge_permissions_into(target: dict, source: dict) -> None:
+    """Deep-merge *source* into *target* in place (source supplements target).
+
+    Rule lists (allow/deny/ask) are UNIONed target-first; nested dicts recurse;
+    any other value is taken from *source* (local overrides tracked). Used to
+    fold the gitignored settings.local.json permissions over the tracked
+    settings.json permissions in the main checkout.
+    """
+    for key, value in source.items():
+        if key not in target:
+            target[key] = copy.deepcopy(value)
+            continue
+        existing = target[key]
+        if isinstance(existing, list) and isinstance(value, list):
+            for item in value:
+                if item not in existing:
+                    existing.append(item)
+        elif isinstance(existing, dict) and isinstance(value, dict):
+            _merge_permissions_into(existing, value)
+        else:
+            target[key] = copy.deepcopy(value)
+
+
+def _read_main_checkout_permissions(main_checkout_root: Path) -> "dict | None":
+    """Collect the main checkout's project ``permissions`` block (OI-1161).
+
+    A fresh dispatch worktree receives the tracked ``.claude/settings.json`` via
+    ``git worktree add`` but NOT the gitignored ``.claude/settings.local.json``.
+    Both are folded together (local supplements tracked) so the worktree worker
+    keeps every permission it would have had in the main checkout. Returns None
+    when neither file carries a ``permissions`` block, so the write degrades to
+    hook-only.
+    """
+    merged: "dict | None" = None
+    for filename in ("settings.json", "settings.local.json"):
+        perms = _permissions_from_file(main_checkout_root / ".claude" / filename)
+        if perms is None:
+            continue
+        if merged is None:
+            merged = copy.deepcopy(perms)
+        else:
+            _merge_permissions_into(merged, perms)
+    return merged
+
+
+def _write_worker_scope_hook_settings(
+    worktree_root: Path, main_checkout_root: "Path | None" = None
+) -> Path:
     """Register the worker-scope PreToolUse enforcement hook in a dispatch worktree.
 
     Writes/merges ``.claude/settings.local.json`` (gitignored; spike-proven to be
@@ -461,6 +533,13 @@ def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
 
     Idempotent: an identical hook command is never registered twice. Existing
     unrelated keys and hook entries in the file are preserved.
+
+    OI-1161: also carries over the ``permissions`` block from
+    *main_checkout_root* (None → hook-only, the pre-fix behaviour) so a worktree
+    worker keeps the project permissions it would have in the main checkout. The
+    hook configuration written here wins: main-checkout permissions only fill in
+    when the worktree file does not already define ``permissions``, and a key
+    present in both is surfaced via a warning rather than silently resolved.
 
     Returns the settings file path written.
     """
@@ -489,6 +568,20 @@ def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
     )
     if not already_registered:
         pre_tool_use.append(_worker_scope_hook_entry())
+
+    # OI-1161: fill in the main checkout's permissions (hook wins on conflict).
+    if main_checkout_root is not None:
+        main_permissions = _read_main_checkout_permissions(main_checkout_root)
+        if main_permissions is not None:
+            if "permissions" in data:
+                logger.warning(
+                    "interactive: worker-scope hook settings: 'permissions' exists "
+                    "in both the worktree settings.local.json and the main "
+                    "checkout; keeping the worktree value (hook wins) and NOT "
+                    "merging the main-checkout permissions"
+                )
+            else:
+                data["permissions"] = main_permissions
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = settings_path.with_suffix(settings_path.suffix + ".tmp")
@@ -2630,7 +2723,10 @@ class TmuxInteractiveDispatch:
                 # from the first tool call. Best-effort: the hook is fail-open
                 # anyway, so a failed write must never abort the dispatch.
                 try:
-                    _write_worker_scope_hook_settings(Path(cwd))
+                    # OI-1161: pass the main checkout root so the worktree's
+                    # settings.local.json also carries the project permissions a
+                    # worker would have had in the main checkout.
+                    _write_worker_scope_hook_settings(Path(cwd), self._project_root)
                     # OI-804 (ADR-005 audit gap): a successful state mutation —
                     # the settings.local.json registration — emits a coordination
                     # event so the write lands in the audit trail. Best-effort

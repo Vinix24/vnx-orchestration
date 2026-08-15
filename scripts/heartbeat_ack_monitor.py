@@ -622,9 +622,22 @@ class HeartbeatACKMonitor:
                 tmp.write(notification)
                 tmp_path = tmp.name
 
+            # OI-1144: named buffer (pid + dispatch_id) instead of tmux's
+            # anonymous "most recent buffer" stack, so two simultaneous ACKs
+            # can't cross each other's content (same TOCTOU-on-shared-state
+            # mechanism fixed in tmux_adapter OI-1136 and
+            # tmux_interactive_dispatch OI-1126). Deleted after use so a
+            # long-running monitor never accumulates one named buffer per ACK.
+            buffer_name = f"vnx-ack-{os.getpid()}-{re.sub(r'[^A-Za-z0-9_]', '_', dispatch_id)}"
+
             # Load buffer and paste to T0
-            subprocess.run(['tmux', 'load-buffer', tmp_path], check=True, capture_output=True)
-            subprocess.run(['tmux', 'paste-buffer', '-t', t0_pane], check=True, capture_output=True)
+            try:
+                subprocess.run(['tmux', 'load-buffer', '-b', buffer_name, tmp_path], check=True, capture_output=True)
+                subprocess.run(['tmux', 'paste-buffer', '-b', buffer_name, '-t', t0_pane], check=True, capture_output=True)
+            finally:
+                # Best-effort cleanup: never let a delete error mask the paste
+                # outcome already computed above.
+                subprocess.run(['tmux', 'delete-buffer', '-b', buffer_name], capture_output=True)
 
             # Press Enter twice to submit (handle bracketed paste)
             # Added delay to ensure CLI processes the text before Enter

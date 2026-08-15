@@ -97,6 +97,28 @@ def _effective_provider(provider: Optional[str], sub_provider: Optional[str]) ->
     return sub or base
 
 
+def _provider_identity_matches(
+    provider: Optional[str],
+    sub_provider: Optional[str],
+    spec_provider: str,
+) -> bool:
+    """Match provider identity by wave7_models.yaml registry key, not literal string.
+
+    A provider string that routes to a known registry provider (glm-harness -> zai,
+    litellm:zai -> zai) must count as that provider even when it is not the exact
+    string the constraint names — otherwise an allowlist on provider+model is
+    sidestepped by presenting a different provider string that routes to the same
+    models (OI-1217). Resolving both sides through _registry_key_for is the
+    fail-closed form: every string that routes to the provider is covered, and a
+    new alias cannot silently slide past the allowlist.
+    """
+    spec_key = _registry_key_for(str(spec_provider), None)
+    actual_key = _registry_key_for(provider, sub_provider)
+    if spec_key is None or actual_key is None:
+        return _match_value(_effective_provider(provider, sub_provider), spec_provider)
+    return actual_key == spec_key
+
+
 def _route_forbidden(
     constraint: Mapping[str, Any],
     provider: Optional[str],
@@ -131,6 +153,7 @@ def _required_route_missing(
     model: Optional[str],
     terminal_id: Optional[str],
     role: Optional[str],
+    via: Optional[str],
 ) -> bool:
     required = constraint.get("required_route") or {}
     if not isinstance(required, Mapping):
@@ -138,7 +161,7 @@ def _required_route_missing(
 
     spec_provider = required.get("provider")
     if spec_provider:
-        if not _match_value(_effective_provider(provider, sub_provider), spec_provider):
+        if not _provider_identity_matches(provider, sub_provider, str(spec_provider)):
             return False
 
     spec_role = required.get("role")
@@ -146,6 +169,14 @@ def _required_route_missing(
         effective_role = terminal_id or role
         if not _match_value(effective_role, spec_role):
             return False
+
+    spec_via = required.get("via")
+    # A required via is enforced only when the caller declares one: an absent via
+    # is "route unspecified", not the forbidden direct route this allowlist exists
+    # to refuse. Production always stamps via (_via_for_provider /
+    # _constraint_via_for_provider), so this guard only relaxes direct test calls.
+    if spec_via and via is not None and not _match_value(via, spec_via):
+        return True
 
     spec_model = required.get("model")
     if spec_model and not _model_matches(model, spec_model):
@@ -527,7 +558,7 @@ class ConstraintEnforcer:
                         override_applied=override_applied,
                     )
             elif rule == "require_route":
-                if _required_route_missing(constraint, provider, sub_provider, model, terminal_id, role):
+                if _required_route_missing(constraint, provider, sub_provider, model, terminal_id, role, via):
                     violation = _violation_from_constraint(
                         constraint,
                         "Required route not met",

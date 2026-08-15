@@ -48,11 +48,20 @@ version: 1
 # literal. ``provider`` + ``model`` below name a wave7_models.yaml entry; the
 # tiebreaker resolver validates the pair against the registry and fails LOUD on
 # an unknown provider/model (the same fail-loud contract the static router
-# uses). Default fable-5 (the top reasoning rung) via the anthropic section.
+# uses). ``provider`` is the registry SECTION key (deepseek_harness), which the
+# resolver maps to its dispatch enum (deepseek-harness) for the lane.
+#
+# OI-1219 (2026-08-15): the default used to be fable-5 via the anthropic
+# section, which routes to the claude/tmux lane. That lane was caught three
+# times on the same day delivering-without-content: a 741-token empty run
+# (OI-1211), a placeholder receipt that stayed failed (OI-1202), and a
+# tiebreaker timeout that governance synthesized into a body the parser then
+# reported as "parse failure". deepseek-harness / deepseek-v4-pro delivered
+# 100% of its dispatches that same day, so the tiebreaker now runs there.
 tiebreaker:
   max_rounds: 2
-  provider: anthropic
-  model: fable-5
+  provider: deepseek_harness
+  model: deepseek-v4-pro
 # Minimum meaningful characters (whitespace-stripped) a track's goal_state must
 # carry to stand in for the plan when `plan-gate run` is invoked WITHOUT --doc.
 # The length is measured AFTER stripping whitespace, so a goal of 200 spaces is
