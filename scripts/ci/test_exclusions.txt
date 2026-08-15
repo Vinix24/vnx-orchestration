@@ -30,6 +30,9 @@
 # a collection-order bisect was deliberately NOT attempted. The workflow
 # filters it out by name in the same -k expression so the file's other seven
 # tests keep running (OI-1051 versmald, PR #1434).
+# OI-1213 recheck (2026-08-15): not the preflight-hook mechanism — solo 8 green,
+# plus tests/test_mc_v4_columns.py neighbour 32 green. Root cause stays the
+# unattributed collection-order effect (OI-1121).
 #
 # dispatch 20260802-w20b-1310-red-classify (2026-08-02) added the 42 files below
 # citing OI-946..OI-953: PR #1310 widened this same sweep from 831 files (the
@@ -55,6 +58,24 @@
 # flipped red in the full sweep on the CI image (35 fails, all inside those
 # 6 files) and returned to this list with the failure named per entry.
 # 23 files (491 tests) stay de-quarantined; that sweep had no other reds.
+#
+# 2026-08-15 OI-1213 re-assessment: the six OI-1133 group-check entries below
+# were re-checked against the OI-1213 preflight-hook mechanism
+# (migrate_future_system registers register_preflight(30, ...) at import; a
+# fixture that skips 0029 and applies 0030 fails once that import happens).
+# Verdict: NONE of the six is OI-1213 (clean-env solo + tests/test_mc_v4_columns.py
+# neighbour all green; none has a 0029/0030 skip fixture). Two of them
+# (test_receipt_processor_autopr_rejected_mirror.py, test_receipt_processor_bootstrap.py)
+# are red in the sweep for a now-explained reason: the vnx_paths.sh cross-project
+# guard (scripts/lib/vnx_paths.sh:221-228) unsets an explicit VNX_STATE_DIR pin
+# when VNX_HOME points elsewhere (on CI: the vendored $WORKSPACE/.claude/vnx-system),
+# then falls back to $VNX_DATA_DIR/state. There is a SECOND trigger, order-dependent:
+# vnx_init calls vnx_paths.ensure_env() (scripts/vnx_init.py:736 ->
+# scripts/lib/vnx_paths.py:570-575) which does os.environ.setdefault("VNX_HOME", ...);
+# in a combined run test_init_migrate_bootstrap.py injects VNX_HOME into the process
+# env, and the two receipt-processor tests spawn bash WITHOUT env= so they inherit it.
+# The fix lives in vnx_paths.sh + the subprocess env pinning, not in these files.
+# Full write-up: claudedocs/test-quarantaine-verklaring-20260815.md.
 #
 tests/integration/test_gemini_streaming_gated.py
 tests/migrations/test_auto_apply.py
@@ -114,7 +135,7 @@ tests/test_headless_inspect.py
 # nobody reads. No heavy-dep stack (sqlite3 + in-repo modules only).
 tests/test_horizon_schema_migration_fix.py
 tests/test_horizon_skill_alias.py  # OI-951: doc/content drift the test already asserts against, red on main too
-tests/test_init_migrate_bootstrap.py  # OI-1133 group-check: solo-green locally, 18/32 failed in PR#1458 Profile A sweep (vnx init/migrate exit non-zero on the CI image; OI-946 class)
+tests/test_init_migrate_bootstrap.py  # OI-1133 group-check: 18/32 failed in PR#1458 Profile A sweep (vnx init/migrate exit non-zero on the CI image; OI-946 class). Not OI-1213 (2026-08-15): autouse fixture already isolates _PREFLIGHT_HOOKS; 56 green clean-env solo+neighbour
 tests/test_installer_no_template_leak.py
 tests/test_intelligence_ab_framework.py
 tests/test_intelligence_pipeline_e2e.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
@@ -143,13 +164,13 @@ tests/test_project_status_hook.py
 tests/test_provider_dispatch_contract_integration.py
 tests/test_provider_dispatch_deepseek_harness.py
 tests/test_provider_dispatch_entry.py
-tests/test_quality_advisory_pipeline.py  # OI-1133 group-check: solo-green locally, 2/43 failed in PR#1458 Profile A sweep (NoneType .status; OI-948 class)
+tests/test_quality_advisory_pipeline.py  # OI-1133 group-check: 2/43 failed in PR#1458 Profile A sweep (NoneType .status; OI-948 class). Not OI-1213 (2026-08-15): no migration fixture; 67 green clean-env solo+neighbour
 tests/test_queue_reconciliation_certification.py
 tests/test_quickstart_validation.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_classifier.py
 tests/test_receipt_instruction_hash.py
-tests/test_receipt_processor_autopr_rejected_mirror.py  # OI-1133 group-check: solo-green locally, 6/6 failed in PR#1458 Profile A sweep (outcome_status resolves None)
-tests/test_receipt_processor_bootstrap.py  # OI-1133 group-check: solo-green locally, 6/10 failed in PR#1458 Profile A sweep (bootstrap returns rc=1)
+tests/test_receipt_processor_autopr_rejected_mirror.py  # OI-1133 group-check: 6/6 failed in PR#1458 Profile A sweep (outcome_status resolves None). Not OI-1213 (2026-08-15): VNX_HOME guard clobbers the explicit VNX_STATE_DIR pin (vnx_paths.sh:221-228) -> shell-lane DB update lands in $VNX_DATA_DIR/state; see header
+tests/test_receipt_processor_bootstrap.py  # OI-1133 group-check: 6/10 failed in PR#1458 Profile A sweep (bootstrap returns rc=1). Not OI-1213 (2026-08-15): VNX_HOME guard clobbers VNX_STATE_DIR -> PROCESSING_LOG falls back to $VNX_DATA_DIR/state -> tee fails rc=1; see header
 tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
 tests/test_receipt_v2_pr5_schema_cutover.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
@@ -172,8 +193,8 @@ tests/test_subprocess_cheap_lane.py
 tests/test_subprocess_dispatch_identity.py
 tests/test_subprocess_health.py
 tests/test_subprocess_w3e_robustness.py
-tests/test_t0_decision_log.py  # OI-1133 group-check: solo-green locally, 2/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection)
-tests/test_t0_escalations_log.py  # OI-1133 group-check: solo-green locally, 1/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection)
+tests/test_t0_decision_log.py  # OI-1133 group-check: 2/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection). Not OI-1213 (2026-08-15): no migration fixture; green clean-env solo+neighbour
+tests/test_t0_escalations_log.py  # OI-1133 group-check: 1/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection). Not OI-1213 (2026-08-15): no migration fixture; green clean-env solo+neighbour
 tests/test_t0_skill_consistency.py
 tests/test_t0_skill_slim.py  # OI-951: doc/content drift the test already asserts against, red on main too
 tests/test_tenant_stamp_fail_closed.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
