@@ -134,12 +134,15 @@ def _specs():
 
 def _did2files():
     return {
-        # vnx_cli / bin are outside backend-developer's scope and are its own work.
-        "D1-too-narrow": {"vnx_cli/main.py", "bin/vnx"},
+        # Makefile is backend-developer's own work (root build file, per the
+        # ownership map) but still outside its scope — vnx_cli/** and bin/**
+        # moved inside in dispatch 20260815-opsch-w2-rolescope-fix, so a
+        # root build file is the remaining "own work outside scope" fixture.
+        "D1-too-narrow": {"Makefile"},
         # docs/core belongs to system-architect — single other role.
         "D2-misrouted": {"docs/core/SUBSYSTEMS.md"},
-        # own work + another role's work — undecidable.
-        "D3-mixed": {"vnx_cli/main.py", "docs/core/SUBSYSTEMS.md"},
+        # own work (Makefile) + another role's work (docs/core) — undecidable.
+        "D3-mixed": {"Makefile", "docs/core/SUBSYSTEMS.md"},
         # no ownership rule — undecidable.
         "D4-unknown": {"CLAUDE.md"},
         # scripts/** is inside backend-developer's scope — not outside.
