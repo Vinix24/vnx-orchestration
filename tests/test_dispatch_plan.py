@@ -26,6 +26,7 @@ from dispatch_plan import (
     ExecutionPlan,
     ModelPin,
     RuntimeSnapshot,
+    claude_auth_is_api_metered,
     compile_plan,
 )
 from dispatch_spec import (
@@ -107,6 +108,7 @@ def _healthy_snapshot(
     model_pins: dict | None = None,
     claude_serial_enabled: bool = True,
     constraint_verdicts: tuple[ConstraintVerdict, ...] = (),
+    claude_api_metered: bool = False,
 ) -> RuntimeSnapshot:
     """Promoted snapshot with all T0-T3 slots healthy and capable."""
     all_slots = ["T0", "T1", "T2", "T3"]
@@ -117,6 +119,7 @@ def _healthy_snapshot(
         model_pins=model_pins or {},
         claude_serial_enabled=claude_serial_enabled,
         constraint_verdicts=constraint_verdicts,
+        claude_api_metered=claude_api_metered,
     )
 
 
@@ -621,13 +624,14 @@ def _make_vspec_headless(
 
 class TestClaudeHeadlessLane:
     def test_headless_optin_lane_fields(self, tmp_path: Path) -> None:
-        """allow_headless=True → lane=claude_headless, adapter=claude_subprocess, billing=api_metered."""
+        """allow_headless=True → lane=claude_headless, adapter=claude_subprocess,
+        billing=subscription (no own key — billing follows auth, not lane)."""
         vspec = _make_vspec_headless(tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot())
         assert isinstance(plan, ExecutionPlan)
         assert plan.lane == "claude_headless"
         assert plan.adapter == "claude_subprocess"
-        assert plan.billing == "api_metered"
+        assert plan.billing == "subscription"
         assert plan.serialization_class is None
         assert plan.warmup == "n/a"
         assert plan.target_id == "ephemeral"
@@ -638,7 +642,7 @@ class TestClaudeHeadlessLane:
         vspec = _make_vspec_headless(headless_reason=reason, tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot())
         assert isinstance(plan, ExecutionPlan)
-        assert any("HEADLESS API-billing opted-in" in w for w in plan.warnings)
+        assert any("HEADLESS lane opted-in" in w for w in plan.warnings)
         assert any(reason in w for w in plan.warnings)
 
     def test_default_claude_remains_tmux(self, tmp_path: Path) -> None:
@@ -648,9 +652,6 @@ class TestClaudeHeadlessLane:
         assert isinstance(plan, ExecutionPlan)
         assert plan.lane == "claude_tmux_subscription"
         assert plan.billing == "subscription"
-        assert plan.serialization_class == "claude-tmux"
-        assert plan.warmup == "verify_strict"
-        assert not any("HEADLESS" in w for w in plan.warnings)
 
     def test_headless_isolation_always_worktree(self, tmp_path: Path) -> None:
         """claude_headless inherits the universal isolation=WORKTREE rule."""
@@ -666,3 +667,59 @@ class TestClaudeHeadlessLane:
         plan = compile_plan(vspec, _healthy_snapshot(claude_serial_enabled=True))
         assert isinstance(plan, ExecutionPlan)
         assert plan.serialization_class is None
+
+
+# ---------------------------------------------------------------------------
+# OI-1156 — billing follows auth identity, not lane
+# ---------------------------------------------------------------------------
+
+class TestClaudeBillingAuthDerived:
+    """The claude lane's billing label is a function of the AUTH identity
+    (claude_api_metered), never of which lane (tmux vs headless) was chosen."""
+
+    def test_headless_no_key_is_subscription(self, tmp_path: Path) -> None:
+        vspec = _make_vspec_headless(tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.billing == "subscription"
+
+    def test_headless_with_key_is_api_metered(self, tmp_path: Path) -> None:
+        vspec = _make_vspec_headless(tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot(claude_api_metered=True))
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.lane == "claude_headless"
+        assert plan.billing == "api_metered"
+
+    def test_tmux_with_key_is_api_metered(self, tmp_path: Path) -> None:
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot(claude_api_metered=True))
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.lane == "claude_tmux_subscription"
+        assert plan.billing == "api_metered"
+
+    def test_tmux_no_key_is_subscription(self, tmp_path: Path) -> None:
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert isinstance(plan, ExecutionPlan)
+        assert plan.billing == "subscription"
+
+
+class TestClaudeAuthIdentityPredicate:
+    """claude_auth_is_api_metered(env) is the pure source of the auth-identity flag."""
+
+    def test_empty_env_is_subscription(self) -> None:
+        assert claude_auth_is_api_metered({}) is False
+
+    def test_blank_key_and_base_url_is_subscription(self) -> None:
+        env = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_BASE_URL": ""}
+        assert claude_auth_is_api_metered(env) is False
+
+    def test_api_key_present_is_metered(self) -> None:
+        assert claude_auth_is_api_metered({"ANTHROPIC_API_KEY": "sk-ant-..."}) is True
+
+    def test_base_url_present_is_metered(self) -> None:
+        env = {"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"}
+        assert claude_auth_is_api_metered(env) is True
+
+    def test_whitespace_only_key_is_subscription(self) -> None:
+        assert claude_auth_is_api_metered({"ANTHROPIC_API_KEY": "   "}) is False

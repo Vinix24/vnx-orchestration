@@ -417,6 +417,25 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
             "which preserves the lane's current 3600s default)"
         ),
     )
+    dispatch_parser.add_argument(
+        "--allow-headless",
+        action="store_true",
+        default=False,
+        dest="allow_headless",
+        help=(
+            "opt into the claude_headless lane (claude -p). Requires "
+            "--headless-reason and a claude provider. The lane runs on the "
+            "subscription unless an own ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL "
+            "is present."
+        ),
+    )
+    dispatch_parser.add_argument(
+        "--headless-reason",
+        default=None,
+        dest="headless_reason",
+        metavar="REASON",
+        help="required human-readable justification when --allow-headless is set",
+    )
 
 
 def _register_track_subparser(subparsers: argparse.Action) -> None:

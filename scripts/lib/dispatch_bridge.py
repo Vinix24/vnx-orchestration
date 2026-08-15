@@ -378,6 +378,8 @@ def deliver_via_door(
     pr_id: Optional[str] = None,
     project_id: Optional[str] = None,
     deadline_seconds: Optional[int] = None,
+    allow_headless: bool = False,
+    headless_reason: Optional[str] = None,
 ) -> bool:
     """Gated delivery for the in-process python callers (pool_worker_runner, claude_adapter,
     headless_dispatch_daemon). When ``VNX_SINGLE_ENTRY_DISPATCH=1`` route through the door
@@ -395,6 +397,13 @@ def deliver_via_door(
     re-enforces the same [300, 14400] bounds at the trust boundary, so an out-of-range
     value fails loud at staging (bridge_dispatch returns 1) even if a caller skips its own
     validation.
+
+    ``allow_headless`` / ``headless_reason`` (OI-1174): threaded through to
+    ``bridge_dispatch`` so the pip-CLI door (``vnx dispatch-agent``) reaches the
+    claude_headless lane the same way the bridge's own ``--allow-headless`` CLI
+    does. The door's validate() re-enforces the reason-required + claude-only
+    rules, so a caller that skips its own check still fails loud. Defaults False /
+    None reproduce byte-identical prior behavior.
 
     Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
     and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
@@ -414,6 +423,8 @@ def deliver_via_door(
             pr_id=pr_id,
             project_id=project_id,
             deadline_seconds=deadline_seconds if deadline_seconds is not None else 3600,
+            allow_headless=allow_headless,
+            headless_reason=headless_reason,
         ) == 0
     return bool(legacy())
 

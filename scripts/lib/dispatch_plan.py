@@ -79,6 +79,13 @@ class RuntimeSnapshot:
     # OI-943: worker-claude-override gate outcome, threaded from build_runtime_snapshot
     # so the door can persist target_slot + override reason onto the dispatch row.
     worker_claude_override_reason: Optional[str] = None
+    # OI-1156: auth-derived billing signal for the claude lane. compile_plan is
+    # pure (no env reads), so the door computes this from the process env and
+    # passes it in. True when ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL are present
+    # (key-auth / redirected endpoint = metered), False for the subscription
+    # session (keychain OAuth). The headless lane (claude -p) runs on the SAME
+    # Max subscription unless this is True — measured 2026-08-11.
+    claude_api_metered: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +101,7 @@ class ExecutionPlan:
     lane: str                           # "claude_tmux_subscription" | "provider"
     adapter: str                        # "tmux_claude" | "provider"
     target_id: str                      # "ephemeral" for the leaseless claude lane
-    billing: str                        # "subscription" | "provider_metered"
+    billing: str                        # "subscription" | "api_metered" | "provider_metered" | "local"
     serialization_class: Optional[str]  # "claude-tmux" | None
     isolation: Isolation                # always Isolation.WORKTREE
     require_worktree: bool              # always True
@@ -184,6 +191,23 @@ class ExecutionPlan:
 # compile_plan — pure, total
 # ---------------------------------------------------------------------------
 
+def claude_auth_is_api_metered(env: Mapping[str, str]) -> bool:
+    """Return True when the claude auth identity is metered (own key / redirect).
+
+    OI-1156: billing follows AUTH IDENTITY, not lane. ``claude -p`` (headless)
+    runs on the Max subscription by default — measured 2026-08-11 via auth
+    state (no ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL, keychain
+    subscriptionType=max). The metered identity is the presence of an own key
+    or a base-URL redirect (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL), which
+    switches the claude CLI to key-auth / a redirected endpoint and off the
+    subscription. Pure: the caller supplies the env mapping; compile_plan never
+    reads the environment itself.
+    """
+    return bool((env.get("ANTHROPIC_API_KEY") or "").strip()) or bool(
+        (env.get("ANTHROPIC_BASE_URL") or "").strip()
+    )
+
+
 def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPlan | Reject:
     """Map ValidatedSpec + RuntimeSnapshot to exactly one ExecutionPlan or one Reject.
 
@@ -235,7 +259,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     if is_claude_headless:
         lane = "claude_headless"
         adapter = "claude_subprocess"
-        warnings.append(f"HEADLESS API-billing opted-in: {spec.headless_reason}")
+        warnings.append(f"HEADLESS lane opted-in: {spec.headless_reason}")
     elif is_claude_lane:
         lane = "claude_tmux_subscription"
         adapter = "tmux_claude"
@@ -248,10 +272,15 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # kimi runs on a flat CLI-OAuth subscription (kimi-via-cli-only), and
     # local-gemma runs on-device with no API cost. Labeling both as
     # provider_metered overstated cost and hid their real quota model.
-    if is_claude_headless:
-        billing = "api_metered"
-    elif is_claude_lane:
-        billing = "subscription"
+    #
+    # OI-1156: the CLAUDE lane's label is auth-derived, not lane-derived.
+    # claude -p (headless) and the tmux lane both run on the Max subscription
+    # unless an own ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL is present — the
+    # snapshot's claude_api_metered flag carries that measurement in so
+    # compile_plan stays pure. A headless dispatch with no key of its own is
+    # therefore "subscription", not "api_metered".
+    if is_claude_lane:
+        billing = "api_metered" if snapshot.claude_api_metered else "subscription"
     elif provider == Provider.KIMI:
         billing = "subscription"
     elif provider == Provider.LOCAL_GEMMA:

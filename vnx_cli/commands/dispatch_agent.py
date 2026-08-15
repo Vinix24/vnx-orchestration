@@ -334,6 +334,38 @@ def vnx_dispatch_agent(args) -> int:
             file=sys.stderr,
         )
 
+    # OI-1174: --allow-headless / --headless-reason passthrough. Headless is a
+    # door-only claude lane (the legacy subprocess fallback has no headless knob),
+    # and it requires a non-empty reason — the SAME rules dispatch_spec Rule 12
+    # enforces at the door. Fail fast here so a half-wired flag can never silently
+    # dispatch a non-headless worker instead of the lane the caller asked for.
+    allow_headless = getattr(args, "allow_headless", False)
+    headless_reason = getattr(args, "headless_reason", None)
+    if allow_headless:
+        if not (headless_reason or "").strip():
+            print(
+                "Error: --allow-headless requires --headless-reason (a human-readable "
+                "justification for the headless-lane opt-in).",
+                file=sys.stderr,
+            )
+            return 1
+        if provider != "claude":
+            print(
+                f"Error: --allow-headless is only valid for the claude lane, got "
+                f"provider {provider!r} (resolved from --model {model!r}).",
+                file=sys.stderr,
+            )
+            return 1
+        if not single_entry_enabled():
+            print(
+                "Error: --allow-headless requires the single-entry dispatch door "
+                "(VNX_DISPATCH_LEGACY=1 / VNX_SINGLE_ENTRY_DISPATCH=0 disables it). "
+                "The legacy dispatch lane cannot honor a headless request. Unset "
+                "VNX_DISPATCH_LEGACY / VNX_SINGLE_ENTRY_DISPATCH to use the door.",
+                file=sys.stderr,
+            )
+            return 1
+
     # Derive the project_id from the TARGET project (--project-dir), not the
     # CLI/engine cwd. Without this the door falls back to _resolve_project_id()
     # which reads the engine location (vnx-dev), so a consumer dispatch lands its
@@ -363,6 +395,8 @@ def vnx_dispatch_agent(args) -> int:
         model=model,
         project_id=project_id,
         deadline_seconds=deadline_seconds,
+        allow_headless=allow_headless,
+        headless_reason=headless_reason,
     )
 
     status = "done" if success else "failed"

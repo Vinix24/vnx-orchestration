@@ -70,10 +70,10 @@ fallback_chain:
 # consulted at scripts/lib/dispatch_bridge.py (pre-stage reject) and
 # scripts/lib/dispatch_cli.py::_execute_claude_headless (the last gate
 # before spawn) instead of a hardcoded env-only check. Every OTHER entry in
-# this block (force_headless, claude_serial_under_load, codex_retry_once,
-# kimi_quota_fail_fast, tmux_spawn_max_runtime, haiku_receipt_nondeterminism)
-# remains DECLARATIVE — exposed by load_lane_safety() for tooling/tests, but
-# not read by any runtime gating decision. Do not rely on them as live guards.
+# this block (claude_serial_under_load, codex_retry_once, kimi_quota_fail_fast,
+# tmux_spawn_max_runtime, haiku_receipt_nondeterminism) remains DECLARATIVE —
+# exposed by load_lane_safety() for tooling/tests, but not read by any runtime
+# gating decision. Do not rely on them as live guards.
 lane_safety:
   # claude-headless-lane-block (OI-223 fold-in). OPENED 2026-08-11 (operator
   # directive, dispatch-20260811c-b): the prior block reason — "claude -p is
@@ -101,28 +101,15 @@ lane_safety:
     override_env: "VNX_OVERRIDE_CLAUDE_HEADLESS"
     reason: "Opened 2026-08-11 (operator directive, dispatch-20260811c-b): claude -p runs on the Max subscription, not API credits — measured 2026-08-11 via auth state (no key/base-url, keychain subscriptionType=max). The 2026-06-15 API-metered cutover this block cited was never carried out by Anthropic. Still usable-but-not-governed: ignores isolation=worktree, and the report-gate miss from 2026-08-05 — see the comment above."
 
-  # Anthropic Claude Code interactive-session hang (Issues #63390 + #64153).
-  # Measured 2026-06-04/05: opus-4-8/4-7 + sonnet-5 hang for hours or exit
-  # in 0.1s on complex content via the interactive tmux lane. The headless
-  # `claude -p` path is unaffected. Force these models to the headless lane
-  # until Anthropic ships a fix.
-  #
-  # SUPERSEDED (2026-06-15 empirical re-test, scripts/benchmark/field-tests/
-  # runners/lane_adapter.py HEADLESS_FORCED_MODELS): opus-4-8/4-7/sonnet-4-6
-  # completed trivial tasks cleanly on the tmux lane post-cutover; the hang did
-  # NOT reproduce, so that runner emptied its forced-model set. Left DECLARATIVE
-  # here (not wired into routing) deliberately: forcing these models onto
-  # headless would fight headless_block above and re-introduce the exact
-  # API-billing exposure OI-223 closes. Re-activate only via an explicit
-  # operator decision if the hang reproduces on a t3-complex (>1h) run.
-  force_headless:
-    models:
-      - claude-opus-4-8
-      - claude-opus-4-8
-      - claude-sonnet-5
-    reason: "Anthropic interactive-hang (#63390 + #64153)"
-    review_trigger: "Anthropic fix-release OR 2026-06-15 billing cutover"
-    monitored_by: "OI-215 (weekly GitHub issue check)"
+  # force_headless REMOVED (2026-08-15, OI-1174): it was dead config — never read
+  # by any runtime gating decision, only asserted-present by a test. Its premise
+  # (force claude-opus-4-8 / claude-sonnet-5 onto headless to dodge an
+  # interactive-session hang, Issues #63390 + #64153) was empirically retracted
+  # 2026-06-15 (the hang did not reproduce post-cutover) and it would fight
+  # headless_block above. Headless is now reached only via the explicit
+  # allow_headless=true opt-in on the DispatchSpec, so a "force these models
+  # headless" knob would be a half-wired second door into the same lane. A test
+  # pins its ABSENCE (tests/test_routing_policy.py::test_force_headless_removed).
 
   # Subscription per-prompt-complexity throttle observed under parallel claude
   # load: many sequential complex dispatches exhaust capacity mid-run. Pace
