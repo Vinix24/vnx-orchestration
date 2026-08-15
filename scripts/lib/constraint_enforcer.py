@@ -103,7 +103,7 @@ class ConstraintEnforcer:
                     logger.warning("[%s] %s", cid, msg)
 
             elif rule == "require_route":
-                if self._check_require_route(c, model, terminal_id, role):
+                if self._check_require_route(c, provider, sub_provider, model, terminal_id, role):
                     if self._is_overridden(c):
                         logger.warning("Constraint %s overridden by env var", cid)
                         continue
@@ -152,6 +152,8 @@ class ConstraintEnforcer:
     def _check_require_route(
         self,
         constraint: Dict[str, Any],
+        provider: Optional[str],
+        sub_provider: Optional[str],
         model: Optional[str],
         terminal_id: Optional[str],
         role: Optional[str],
@@ -160,6 +162,16 @@ class ConstraintEnforcer:
         rr = constraint.get("required_route", {})
         if not rr:
             return False
+
+        spec_provider = rr.get("provider")
+        if spec_provider:
+            if provider and provider.lower() in self._NATIVE_CLI_PROVIDERS:
+                if not self._match_value(provider, spec_provider):
+                    return False
+            else:
+                effective_provider = sub_provider or provider
+                if not self._match_value(effective_provider, spec_provider):
+                    return False
 
         spec_role = rr.get("role")
         if spec_role:

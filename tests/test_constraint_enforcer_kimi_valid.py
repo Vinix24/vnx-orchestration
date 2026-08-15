@@ -106,5 +106,7 @@ class TestExistingConstraintsNotRegressed:
     def test_zai_via_openrouter_allowed(self, enforcer: ConstraintEnforcer, monkeypatch):
         # glm-via-harness-only now blocks plain litellm:zai entirely (GLM must run via
         # glm-harness); override it to isolate the zai-via-openrouter-only behavior under test.
+        # model=glm-5.2 clears the deprecated-glm-models allowlist (a zai route must declare
+        # the single approved GLM version).
         monkeypatch.setenv("VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY", "1")
-        enforcer.enforce(provider="litellm", sub_provider="zai", via="openrouter")
+        enforcer.enforce(provider="litellm", sub_provider="zai", model="glm-5.2", via="openrouter")

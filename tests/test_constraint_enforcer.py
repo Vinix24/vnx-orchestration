@@ -7,7 +7,7 @@ Covers every constraint in provider_constraints.yaml:
   - workers-kimi-pinned     (require_route, warn, override)
   - no-anthropic-sdk        (forbid_import — warning at runtime)
   - zai-via-openrouter-only (forbid_route, blocking)
-  - deprecated-glm-models   (forbid_route, blocking)
+  - deprecated-glm-models   (require_route allowlist, blocking)
   - deepseek-harness-subscription-blocked (forbid_route, blocking)
 
 Plus: file-not-found, bad version, override env var, non-matching routes.
@@ -77,7 +77,7 @@ class TestKimiViaCliOnly:
 
 
 # ---------------------------------------------------------------------------
-# t0-opus-only — require_route role=T0 model=claude-opus-4-8
+# t0-opus-only — require_route role=T0 model=opus-5
 # ---------------------------------------------------------------------------
 
 class TestT0OpusOnly:
@@ -89,7 +89,7 @@ class TestT0OpusOnly:
 
     def test_t0_with_opus_allowed(self, real_enforcer: ConstraintEnforcer, caplog):
         with caplog.at_level("WARNING"):
-            real_enforcer.enforce(terminal_id="T0", model="claude-opus-4-8")
+            real_enforcer.enforce(terminal_id="T0", model="opus-5")
         assert "t0-opus-only" not in caplog.text
 
     def test_t0_override_env(self, real_enforcer: ConstraintEnforcer, caplog, monkeypatch):
@@ -173,13 +173,14 @@ class TestZaiViaOpenrouterOnly:
         # zai-via-openrouter-only permits openrouter (it forbids only DIRECT). The newer
         # glm-via-harness-only constraint would otherwise block plain litellm:zai entirely
         # (GLM must run via glm-harness); set its benchmark/legacy override to isolate the
-        # constraint under test here.
+        # constraint under test here. model=glm-5.2 clears the deprecated-glm-models
+        # allowlist (a zai route must declare the single approved GLM version).
         monkeypatch.setenv("VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY", "1")
-        real_enforcer.enforce(provider="litellm", sub_provider="zai", via="openrouter")
+        real_enforcer.enforce(provider="litellm", sub_provider="zai", model="glm-5.2", via="openrouter")
 
 
 # ---------------------------------------------------------------------------
-# deprecated-glm-models — forbid_route provider=zai model=[glm-4.5, glm-4.6]
+# deprecated-glm-models — require_route allowlist provider=zai model=glm-5.2
 # ---------------------------------------------------------------------------
 
 class TestDeprecatedGlmModels:
@@ -206,6 +207,26 @@ class TestDeprecatedGlmModels:
 
     def test_glm52_allowed(self, real_enforcer: ConstraintEnforcer):
         real_enforcer.enforce(provider="zai", model="glm-5.2")
+
+    def test_glm53_blocked(self, real_enforcer: ConstraintEnforcer):
+        """A not-yet-released version is blocked: the allowlist admits only glm-5.2."""
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            real_enforcer.enforce(provider="zai", model="glm-5.3")
+
+    def test_glm99_blocked(self, real_enforcer: ConstraintEnforcer):
+        """A nonexistent future version is blocked, not merely unlisted."""
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            real_enforcer.enforce(provider="zai", model="glm-9.9")
+
+    def test_glm_block_message_names_allowed_version(self, real_enforcer: ConstraintEnforcer):
+        violations = real_enforcer.check_constraints(provider="zai", model="glm-5.3")
+        glm_v = next(v for v in violations if v.code == "deprecated-glm-models")
+        assert "glm-5.2" in glm_v.message
+
+    def test_non_zai_provider_with_glm_model_unaffected(self, real_enforcer: ConstraintEnforcer):
+        """The allowlist is scoped to provider zai; a glm-named model on another
+        provider is not this constraint's concern."""
+        real_enforcer.enforce(provider="claude", model="glm-5.3")
 
 
 # ---------------------------------------------------------------------------
