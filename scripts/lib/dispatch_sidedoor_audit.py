@@ -75,6 +75,11 @@ _RAW_CLAUDE_PATTERNS = [
 # this set that spawns `claude -p` is a NEW receipt-bypass side door and fails the gate until
 # audited here (or routed via a governed lane).
 KNOWN_RAW_CLAUDE_CALLERS = frozenset({
+    # read-only measurement probe: spawns claude -p to measure the mcp__ tool surface of a SCOPED
+    # session. That surface is only observable from inside a session; `claude mcp list` reads the
+    # stored config and demonstrably ignores the scoping flags, so it measures configuration, not
+    # the session. Delivers no work and produces no receipt-obligated output.
+    "scripts/analysis/mcp_namespace_probe.py",
     "scripts/conversation_analyzer/deep_analyzer.py",
     "scripts/f39/replay_harness/single_replay.py",
     "scripts/headless_trigger.py",
