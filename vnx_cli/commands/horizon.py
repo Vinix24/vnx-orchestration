@@ -268,11 +268,18 @@ def _cmd_plan_gate_attest(args: Any) -> int:
     return pc.cmd_plan_gate_attest(args)
 
 
+def _cmd_plan_gate_missing_reasons(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_plan_gate_missing_reasons(args)
+
+
 _PLAN_GATE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "seed": _cmd_plan_gate_seed,
     "run": _cmd_plan_gate_run,
     "status": _cmd_plan_gate_status,
     "attest": _cmd_plan_gate_attest,
+    "missing-reasons": _cmd_plan_gate_missing_reasons,
 }
 
 
