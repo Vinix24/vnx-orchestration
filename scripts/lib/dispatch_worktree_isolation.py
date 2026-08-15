@@ -682,9 +682,10 @@ def remove_dispatch_worktree(
             if _current_head and _current_head != _claim_main_head:
                 log.warning(
                     "OI-975 HEAD-JUMP DETECTED: main checkout HEAD changed "
-                    "during dispatch %s: was %s, now %s — something ran "
-                    "'git checkout' in the main checkout while this dispatch "
-                    "was active",
+                    "during dispatch %s (was %s, now %s) — the checkout no longer "
+                    "matches what this dispatch was launched against, so any "
+                    "post-dispatch verification on this checkout may measure "
+                    "different code than the dispatch actually built",
                     dispatch_id,
                     _claim_main_head[:12],
                     _current_head[:12],

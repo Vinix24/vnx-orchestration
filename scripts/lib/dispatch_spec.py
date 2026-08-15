@@ -167,6 +167,18 @@ class DispatchSpec:
     instruction_sha256: Optional[str] = None  # P0-3: caller may pre-bind hash; validate() verifies
     allow_headless: bool = False              # PR-5: explicit opt-in to the claude_headless lane
     headless_reason: Optional[str] = None    # PR-5: mandatory non-empty reason when allow_headless=True
+    # OI-1214: a post-merge-verification dispatch measures the CURRENT checkout
+    # (proof that a just-merged PR is actually live), so it is only meaningful
+    # when the local main checkout is current. This is a typed boolean declared by
+    # the caller — the simplest form that fits the spec's existing declared fields
+    # (mirrors `irreversible` / `allow_headless` / `requires_mcp`) and cannot
+    # collide with the free-form `tags`/intelligence vocabulary the way a magic tag
+    # string would. Default False means a normal build dispatch carries NO burden:
+    # the door logs the lag number for every dispatch but only REFUSES when this
+    # flag is set AND the checkout is behind — a door that blocked everything on
+    # lag would be worse than the problem it fixes. Like `irreversible`, it is a
+    # caller declaration, never derived from instruction text or role.
+    post_merge_verification: bool = False
     # DERIVED-not-declared (deliberately absent): lane, billing, serialization_class
     # — compile_plan owns them. Do not add here.
 
