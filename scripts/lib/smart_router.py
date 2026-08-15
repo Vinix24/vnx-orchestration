@@ -68,14 +68,25 @@ class GovernanceVariantResult:
 class GateWeightResolution:
     """Final review-gate weight for a dispatch.
 
-    ``source`` is "explicit" when the spec declared a gate (router never
-    overrides) or "derived" when the router filled a silent spec.
-    ``governance_variant`` is "" on the explicit path (no derivation ran).
+    ``source`` is "explicit" when the spec declared a gate (the router never
+    overrides it) or "derived" when the router filled a silent spec. On BOTH
+    paths ``governance_variant`` carries the variant the path derivation
+    produced, so an explicit gate is never a silent override of an unknown
+    weight — the trace always names what it replaced.
+
+    ``override_direction`` is "" when the chosen gate matches the derived gate
+    (or the path was derived with no explicit gate), else "upgrade",
+    "downgrade", or "strict-downgrade". "strict-downgrade" marks the one move
+    the mechanism treats as its most dangerous: an override that lightens a
+    coding-strict derivation (the heaviest variant class, picked exactly at
+    irreversible work). It is not blocked, only marked, so a later sweep can
+    find it.
     """
     gate: str
     source: str
     governance_variant: str
     reason: str
+    override_direction: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +790,28 @@ def derive_governance_variant(
     )
 
 
+def _gate_override_direction(derived: GovernanceVariantResult, explicit_gate: str) -> str:
+    """Direction of an explicit gate vs the gate the derivation produced.
+
+    Uses ``_GATE_WEIGHT`` (the heaviness ladder over the closed Gate enum) so
+    "upgrade"/"downgrade" have a defined meaning, not a feeling. Returns ""
+    when the two weights are equal (no override) or either gate is unknown
+    (no false direction claim). "strict-downgrade" marks the special case: an
+    override that lightens a coding-strict derivation — the heaviest variant
+    class, chosen exactly at irreversible work — so a later sweep can find the
+    most dangerous move distinctly from an ordinary downgrade.
+    """
+    derived_weight = _GATE_WEIGHT.get(derived.gate)
+    chosen_weight = _GATE_WEIGHT.get(explicit_gate)
+    if derived_weight is None or chosen_weight is None:
+        return ""
+    if chosen_weight > derived_weight:
+        return "upgrade"
+    if chosen_weight < derived_weight:
+        return "strict-downgrade" if derived.variant == "coding-strict" else "downgrade"
+    return ""
+
+
 def resolve_gate(
     explicit_gate: str = "",
     *,
@@ -789,24 +822,43 @@ def resolve_gate(
     """Resolve the review-gate weight for a dispatch.
 
     An explicit gate on the spec always wins: the router fills in, it never
-    overrides (worker-provider-free-choice, pin_semantics=default). When the spec
-    is silent, the router derives a governance_variant and maps it to a gate
+    overrides (worker-provider-free-choice, pin_semantics=default). But the
+    derivation still runs on the explicit path so the trace names what the
+    override replaced: ``governance_variant`` carries the derived variant, and
+    ``reason``/``override_direction`` say whether the explicit gate is heavier
+    or lighter than it — an override is never silent about its direction, and a
+    coding-strict -> lighter override is marked distinctly. When the spec is
+    silent, the router derives a governance_variant and maps it to a gate
     weight; the variant, direction and reason are carried in ``reason`` so the
     trace is never silent about a lighter-than-baseline gate.
     """
     gate = (explicit_gate or "").strip()
-    if gate:
-        return GateWeightResolution(
-            gate=gate,
-            source="explicit",
-            governance_variant="",
-            reason=f"gate={gate} declared on spec; router did not override",
-        )
     derived = derive_governance_variant(
         dispatch_paths=dispatch_paths,
         task_class=task_class,
         irreversible=irreversible,
     )
+    if gate:
+        direction = _gate_override_direction(derived, gate)
+        if direction:
+            reason = (
+                f"gate={gate} declared on spec; OVERRIDES derived "
+                f"governance_variant={derived.variant!r} (gate={derived.gate}) "
+                f"- {direction.upper()}; {derived.reason}"
+            )
+        else:
+            reason = (
+                f"gate={gate} declared on spec; matches derived "
+                f"governance_variant={derived.variant!r} (gate={derived.gate}); "
+                f"router did not override"
+            )
+        return GateWeightResolution(
+            gate=gate,
+            source="explicit",
+            governance_variant=derived.variant,
+            reason=reason,
+            override_direction=direction,
+        )
     return GateWeightResolution(
         gate=derived.gate,
         source="derived",

@@ -1925,6 +1925,23 @@ def test_seat_labels_unknown_variant_fails_loud():
         pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "not-a-variant")
 
 
+def test_seat_override_direction_upgrade_when_operator_adds_seats():
+    assert pgp.seat_override_direction("minimal", 0, 2) == "upgrade"
+
+
+def test_seat_override_direction_downgrade_when_operator_removes_seats():
+    assert pgp.seat_override_direction("default", 2, 1) == "downgrade"
+
+
+def test_seat_override_direction_strict_downgrade_from_coding_strict():
+    assert pgp.seat_override_direction("coding-strict", 3, 1) == "strict-downgrade"
+
+
+def test_seat_override_direction_empty_when_counts_match():
+    assert pgp.seat_override_direction("coding-strict", 3, 3) == ""
+    assert pgp.seat_override_direction("minimal", 0, 0) == ""
+
+
 def test_cmd_plan_gate_run_passes_filtered_panel_to_run_panel(tmp_path, monkeypatch):
     """--panel-seats filters the configured panel and run_panel receives exactly
     those seats. Asserts on the dispatcher mock's calls (the seats it was

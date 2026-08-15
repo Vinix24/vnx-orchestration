@@ -96,7 +96,7 @@ class TestResolveGate:
         )
         assert result.gate == "codex_gate"
         assert result.source == "explicit"
-        assert result.governance_variant == ""
+        assert result.governance_variant == "minimal"
 
     def test_explicit_gate_wins_even_when_router_would_be_stricter(self):
         result = resolve_gate(
@@ -138,6 +138,68 @@ class TestTraceVisibility:
     def test_baseline_gate_direction_is_unchanged(self):
         result = resolve_gate(dispatch_paths=["scripts/lib/some_utility.py"])
         assert "direction=unchanged" in result.reason
+
+
+class TestOverrideTrace:
+    """The explicit gate is never a silent override: the trace names the derived
+    weight, the chosen weight, and the direction. A downgrade from coding-strict
+    (the heaviest variant class) is marked distinctly from an ordinary downgrade.
+    """
+
+    def test_migration_ci_gate_override_is_strict_downgrade(self):
+        result = resolve_gate(
+            explicit_gate="ci_gate",
+            dispatch_paths=["scripts/migrations/0034_drop_column.py"],
+        )
+        assert result.gate == "ci_gate"
+        assert result.source == "explicit"
+        assert result.governance_variant == "coding-strict"
+        assert result.override_direction == "strict-downgrade"
+        assert "coding-strict" in result.reason
+        assert "STRICT-DOWNGRADE" in result.reason
+
+    def test_docs_codex_gate_override_is_upgrade(self):
+        result = resolve_gate(
+            explicit_gate="codex_gate",
+            dispatch_paths=["docs/operations/dispatch-rules.md"],
+        )
+        assert result.gate == "codex_gate"
+        assert result.source == "explicit"
+        assert result.governance_variant == "minimal"
+        assert result.override_direction == "upgrade"
+        assert "minimal" in result.reason
+        assert "codex_gate" in result.reason
+        assert "UPGRADE" in result.reason
+
+    def test_override_equal_to_derived_is_not_flagged(self):
+        result = resolve_gate(
+            explicit_gate="codex_gate",
+            dispatch_paths=["scripts/lib/some_utility.py"],
+        )
+        assert result.governance_variant == "default"
+        assert result.override_direction == ""
+        assert "OVERRIDES" not in result.reason
+        assert "did not override" in result.reason
+
+    def test_no_override_derived_path_is_unchanged(self):
+        result = resolve_gate(dispatch_paths=["scripts/lib/dispatch_cli.py"])
+        assert result.source == "derived"
+        assert result.governance_variant == "coding-strict"
+        assert result.override_direction == ""
+
+    def test_strict_downgrade_distinct_from_ordinary_downgrade(self):
+        strict = resolve_gate(
+            explicit_gate="ci_gate",
+            dispatch_paths=["scripts/migrations/0034_drop_column.py"],
+        )
+        ordinary = resolve_gate(
+            explicit_gate="ci_gate",
+            dispatch_paths=["scripts/lib/some_utility.py"],
+        )
+        assert strict.override_direction == "strict-downgrade"
+        assert ordinary.override_direction == "downgrade"
+        assert "STRICT-DOWNGRADE" in strict.reason
+        assert "STRICT-DOWNGRADE" not in ordinary.reason
 
 
 class TestVocabularyGuard:

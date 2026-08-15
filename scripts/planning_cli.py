@@ -2329,17 +2329,30 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
         print(f"plan-gate run failed: {exc}", file=sys.stderr)
         return 1
 
+    # Seat-override direction (operator ladder, 2026-08-15): when the operator
+    # sizes the panel away from the derived seat count, the trace names the
+    # derived count, the chosen count, and the direction — a downgrade from
+    # coding-strict is marked STRICT-DOWNGRADE so a later sweep can find it.
+    # The same count derived vs chosen is NOT an override (a same-count relabel
+    # keeps the panel's heft, so the direction is empty and no override is
+    # claimed).
+    override_direction = ""
+    if chosen_by == "operator":
+        override_direction = plan_gate_panel.seat_override_direction(
+            gov.variant, len(derived_labels), len(panel),
+        )
+
     gov_trace = (
         f"weight={gov.variant} new_feature={gov.is_new_feature} "
         f"-> {len(panel)} seat(s) by {chosen_by}"
     )
-    if chosen_by == "operator":
-        if len(derived_labels) != len(panel):
-            print(
-                f"plan-gate override: derived {len(derived_labels)} seat(s) "
-                f"({gov.variant}); operator chose {len(panel)} seat(s).",
-                file=sys.stderr,
-            )
+    if override_direction:
+        gov_trace += (
+            f"; OVERRIDES derived {len(derived_labels)} seat(s) "
+            f"({gov.variant}) - {override_direction.upper()}"
+        )
+    if override_direction:
+        print(f"plan-gate override: {gov_trace}.", file=sys.stderr)
     else:
         print(f"plan-gate seats: {gov_trace}.", file=sys.stderr)
 

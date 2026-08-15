@@ -257,6 +257,30 @@ def seat_labels_for_governance_variant(
             f"known variants: {sorted(GOVERNANCE_VARIANT_SEAT_LABELS)}"
         )
     return list(labels)
+
+
+def seat_override_direction(
+    derived_variant: str, derived_count: int, chosen_count: int,
+) -> str:
+    """Direction of an operator seat override vs the variant-derived seat count.
+
+    Returns "" when the counts match (no override), "upgrade" when the operator
+    added seats, "downgrade" when they removed seats, or "strict-downgrade" when
+    they removed seats from a coding-strict derivation — the heaviest variant
+    class, where a lighter panel must be findable by a later sweep. Mirrors
+    ``smart_router``'s gate override direction on the seat-count axis: the seat
+    COUNT is the override axis, not the label set (a same-count relabel is not
+    an override).
+    """
+    if chosen_count == derived_count:
+        return ""
+    if chosen_count > derived_count:
+        return "upgrade"
+    if derived_variant == "coding-strict":
+        return "strict-downgrade"
+    return "downgrade"
+
+
 _OPEN_FENCE = "```" + VERDICT_FENCE
 _VALID_VERDICTS = {"pass", "revise", "block"}
 
