@@ -94,6 +94,6 @@ Reference: `provider_constraints.yaml` constraint `deepseek-harness-subscription
 
 ## See also
 
-- `claudedocs/wave7-litellm-bridge-deepseek-kimi-glm.md` — Wave 7 design doc
-- `claudedocs/project_deepseek_v4_pro_paths.md` (memory) — Path A/B/C/D analysis
+- `claudedocs/archive/wave7-litellm-bridge-deepseek-kimi-glm.md` — Wave 7 design doc
+- `project_deepseek_v4_pro_paths.md` (memory, formerly claudedocs/) — retracted: the Path A/B/C/D analysis is no longer present (date not determinable; the file was never git-tracked)
 - ADR-003, ADR-010, ADR-013, ADR-016

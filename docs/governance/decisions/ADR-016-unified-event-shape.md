@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-05-15
 **Decided by:** Operator (Vincent van Deth)
-**Resolves:** Wave 4.6 PR-4.6.6 — per `claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md` §Phase 6
+**Resolves:** Wave 4.6 PR-4.6.6 — per `claudedocs/archive/wave4.6-provider-dispatch-generalization-design-2026-05-13.md` §Phase 6
 
 ## Context
 
@@ -69,7 +69,7 @@ Concrete changes:
 
 - ADR-005 — Append-only NDJSON audit ledger (EventStore is the persistence layer this ADR extends)
 - ADR-010 — SubprocessAdapter Claude routing (source of claude events)
-- `claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md` §Phase 6
+- `claudedocs/archive/wave4.6-provider-dispatch-generalization-design-2026-05-13.md` §Phase 6
 - `scripts/lib/canonical_event.py` — CanonicalEvent, EventShapeError, from_provider_event()
 - `scripts/lib/event_store.py` — EventStore.append() enforcement
 - Wave 4.6 PR-4.6.2–4.6.5 — spawn handler extraction (prereqs for this ADR)

@@ -32,6 +32,27 @@
 
 version: 1
 
+# Stop-rule (operator ladder, 2026-08-15, punten 7-9 OPSCHALING-cluster).
+# After ``max_rounds`` panel rounds that do not certify a PASS, the gate stops
+# running the full panel and decides via a SINGLE tiebreaker instead. The
+# measurement over 820 reports showed a five-seat panel converges with the
+# first seat in 89.4% of cases; seats 4 and 5 each moved the outcome 1.7%.
+# A third full round buys ~nothing and keeps the track blocked, so above the
+# threshold the gate asks one model a binary question and records the result.
+#
+# max_rounds: the panel-round threshold. At/above this count the tiebreaker
+#   runs INSTEAD of the full panel. Default 2 (a third round is the tiebreaker).
+#   Configurable here; a malformed value falls back to the code default.
+#
+# The tiebreaker model comes from the registry (ADR-036), never a Python
+# literal. ``provider`` + ``model`` below name a wave7_models.yaml entry; the
+# tiebreaker resolver validates the pair against the registry and fails LOUD on
+# an unknown provider/model (the same fail-loud contract the static router
+# uses). Default fable-5 (the top reasoning rung) via the anthropic section.
+tiebreaker:
+  max_rounds: 2
+  provider: anthropic
+  model: fable-5
 # Minimum meaningful characters (whitespace-stripped) a track's goal_state must
 # carry to stand in for the plan when `plan-gate run` is invoked WITHOUT --doc.
 # The length is measured AFTER stripping whitespace, so a goal of 200 spaces is

@@ -3,7 +3,7 @@
 **Status:** Accepted — Implemented by Wave 6 (see ADR-018)
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
-**Resolves:** Wave 4.5 prerequisite + PRD-VNX-UH-002 §6 FR-12 + inventory finding "Workers are hardcoded T0..T3 across 25+ files" (`claudedocs/2026-05-09-vnx-replan-inventory.md`)
+**Resolves:** Wave 4.5 prerequisite + PRD-VNX-UH-002 §6 FR-12 + inventory finding "Workers are hardcoded T0..T3 across 25+ files" (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-replan-inventory.md`)
 **Cross-references:** ADR-010 (subprocess adapter), ADR-011 (manager+worker hierarchy), ADR-012 (hybrid interactive + headless)
 
 ## Context
@@ -78,7 +78,7 @@ Concrete contract:
 
 ## Implementation note
 
-- The migration is a Wave 4.5 task per `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §5. It is gated on Wave 4 completion (subprocess adapter feature parity) but does not block earlier waves.
+- The migration is a Wave 4.5 task per `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §5. It is gated on Wave 4 completion (subprocess adapter feature parity) but does not block earlier waves.
 - The migration order is: (1) ship `worker_registry.py` + `vnx_workers.default.yaml`, (2) switch `runtime_facade.CANONICAL_TERMINALS` to call the registry, (3) switch `decision_executor.TERMINAL_TO_TRACK` to a config-driven projection, (4) switch `vnx_doctor_checks.expected_terminals` to runtime computation, (5) migrate the long tail (intelligence, build_t0_state, pr_queue_manager, etc.) in subsequent PRs. Each step is independently mergeable.
 - The `aliases` field is the seam that lets the migration be incremental — files that have not yet been refactored continue to see the legacy IDs they expect.
 
@@ -91,9 +91,9 @@ Concrete contract:
 - ADR-016 — Unified event shape (workers emit CanonicalEvent regardless of provider)
 - ADR-018 — Elastic worker pool (Wave 6 implementation of this ADR; adds PoolManager, schema v13,
   provider-mix per pool, queue-aware scaling)
-- `claudedocs/PRD-VNX-UH-002-v1.0-DRAFT.md` §6 FR-12 — the functional requirement this ADR redeems
-- `claudedocs/2026-05-09-vnx-replan-inventory.md` — the inventory that surfaced the 77-file blast radius
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §5 (Wave 4.5) — the wave this ADR unlocks
+- `claudedocs/archive/PRD-VNX-UH-002-v1.0-DRAFT.md` §6 FR-12 — the functional requirement this ADR redeems
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-replan-inventory.md` — the inventory that surfaced the 77-file blast radius
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §5 (Wave 4.5) — the wave this ADR unlocks
 - `scripts/lib/runtime_facade.py:49,199` — the canonical authority being replaced
 - `scripts/lib/decision_executor.py:31-33` — the track-letter mapping being projected from config
 - `scripts/lib/vnx_doctor_checks.py:492` — the expected-terminals set being recomputed at runtime

@@ -1,6 +1,6 @@
 # ADR-011 — Manager+Worker Hierarchy with Explicit Depth>1 (vs Subagents Depth-1)
 
-**Status:** Accepted (primary architecture decision) — with a **Conditional / Pilot** sub-decision (2026-05-09 amendment) for tactical subagent use inside VNX workers, narrowed to read-only parallel-fanout via `VNX_T1_TACTICAL_SUBAGENTS=1` flag. The original Tentative section has been resolved by the Wave 0.5 subagent research dispatch (`claudedocs/2026-05-09-vnx-subagent-tactical-research.md`).
+**Status:** Accepted (primary architecture decision) — with a **Conditional / Pilot** sub-decision (2026-05-09 amendment) for tactical subagent use inside VNX workers, narrowed to read-only parallel-fanout via `VNX_T1_TACTICAL_SUBAGENTS=1` flag. The original Tentative section has been resolved by the Wave 0.5 subagent research dispatch (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-subagent-tactical-research.md`).
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Cross-references:** ADR-003 (OAuth-only Claude routing, no SDK), ADR-010 (subprocess adapter), ADR-012 (hybrid interactive + headless)
@@ -9,7 +9,7 @@
 
 VNX runs as a multi-terminal orchestration system with one master orchestrator (T0) and N workers (T1, T2, T3, …). Workers are **separate Claude Code processes** with their own `CLAUDE.md`, their own tool budget, their own dispatch envelope, and their own receipt — they are not subagents in the Anthropic Task-tool sense. Workers can themselves dispatch follow-up work (e.g., T1 emitting a follow-up dispatch for T3 review, or a hypothetical sub-orchestrator pool spawning short-lived sub-workers). Hierarchy depth in VNX is therefore explicitly **greater than 1**.
 
-Claude Code natively offers a Task-tool subagent pattern. Per Perplexity verification on 2026-05-09 (`claudedocs/2026-05-09-vnx-platform-features-verification.md`, Claim 1):
+Claude Code natively offers a Task-tool subagent pattern. Per Perplexity verification on 2026-05-09 (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-platform-features-verification.md`, Claim 1):
 
 - v1.0.64 release note (2025-07-30: "Fixed unintended access to the recursive agent tool") establishes **depth-1 as the explicit, intentional architecture**.
 - Subagents return only a condensed summary (1,000–2,000 tokens) to the parent — no recursion path.
@@ -117,11 +117,11 @@ The Anthropic-documented Django parallel-search example (4 Explore subagents, 3m
 
 #### Citations
 
-- Subagent depth-1 + condensed-summary return: `code.claude.com/docs/en/sub-agents`; v1.0.64 release note (Jul 30 2025); `claudedocs/2026-05-09-vnx-platform-features-verification.md` Claim 1.
+- Subagent depth-1 + condensed-summary return: `code.claude.com/docs/en/sub-agents`; v1.0.64 release note (Jul 30 2025); `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-platform-features-verification.md` Claim 1.
 - `agent_id`/`agent_type` in hook payloads: v2.1.117 changelog (April 2026); `code.claude.com/docs/en/hooks`; `claudefa.st/blog/guide/changelog`.
 - Universal `updatedToolOutput` for all tools: v2.1.121 release notes (May 2026); `wotai.co/blog/claude-code-2-1-121`; `code.claude.com/docs/en/hooks`.
 - Parallel Explore subagents wall-clock benchmark: `code.claude.com/docs/en/sub-agents` (Django 4-fanout example, 3m40s vs 14min sequential, surfaced via `nimbalyst.com/blog/claude-code-subagents-guide` 2026 guide).
-- Companion research: `claudedocs/2026-05-09-vnx-subagent-tactical-research.md` (full Q1-Q4 analysis with sources).
+- Companion research: `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-subagent-tactical-research.md` (full Q1-Q4 analysis with sources).
 
 ## Reasoning
 
@@ -161,8 +161,8 @@ The Anthropic-documented Django parallel-search example (4 Explore subagents, 3m
 
 ## See also
 
-- `claudedocs/2026-05-09-vnx-platform-features-verification.md` — Claims 1 (subagent depth-1) and 3 (Multiagent Sessions flat coordinator)
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 (moat M5) and §5 (no flatten-to-subagents adoption)
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-platform-features-verification.md` — Claims 1 (subagent depth-1) and 3 (Multiagent Sessions flat coordinator)
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 (moat M5) and §5 (no flatten-to-subagents adoption)
 - ADR-003 — OAuth-only Claude routing (no SDK)
 - ADR-010 — Subprocess adapter as the depth>1 spawn mechanism
 - ADR-012 — Hybrid interactive + headless execution (every depth>1 worker can run in either mode)

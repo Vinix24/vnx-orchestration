@@ -325,6 +325,78 @@ class TestMapping:
 
 
 # ---------------------------------------------------------------------------
+# OI-1207 — multi-PR pr_ref handling (single / multiple / junk / empty)
+# ---------------------------------------------------------------------------
+
+class TestMultiPrRef:
+    """OI-1207: a pr_ref naming MULTIPLE PRs must not be silently dropped.
+
+    The old ``_parse_pr_number`` did ``int()`` on the whole string, so
+    ``#1228,#1229`` parsed to None and the track vanished from the PR lookup.
+    The bridge now uses the canonical ``_parse_pr_numbers`` (via track_reconciler)
+    and registers a track under EVERY number it names, and resolves an open item
+    against the union of the tracks its PRs name.
+    """
+
+    @pytest.mark.parametrize("pr_ref,expected", [
+        ("#100", frozenset({100})),                            # single number
+        ("100", frozenset({100})),                             # single bare number
+        ("  #42  ", frozenset({42})),                          # surrounding whitespace
+        ("#1228,#1229,#1230", frozenset({1228, 1229, 1230})),  # multiple numbers
+        ("#100 junk #200, #300", frozenset({100, 200, 300})),  # junk between numbers
+        ("#908,#909", frozenset({908, 909})),                  # comma list
+        ("908 909", frozenset({908, 909})),                    # space-separated list
+        ("", frozenset()),                                     # empty string
+        (None, frozenset()),                                   # missing
+        ("not-a-pr", frozenset()),                             # entirely junk
+    ])
+    def test_parse_pr_numbers_variants(self, pr_ref, expected):
+        """Show what the parser returns per case (the behavior, not the label)."""
+        assert track_reconciler._parse_pr_numbers(pr_ref) == expected
+
+    def test_multi_pr_track_registered_under_every_number(self, state_dir):
+        """A track pr_ref '#1228,#1229,#1230' must appear under ALL three numbers."""
+        _mk_track(state_dir, "feat-multi", pr_ref="#1228,#1229,#1230")
+        conn = bridge._open_conn(state_dir)
+        try:
+            by_pr, _ = bridge._load_tracks_by_pr(conn, PROJECT_ID)
+        finally:
+            conn.close()
+        assert by_pr[1228] == ["feat-multi"]
+        assert by_pr[1229] == ["feat-multi"]
+        assert by_pr[1230] == ["feat-multi"]
+
+    def test_oi_matching_any_pr_of_multi_pr_track_links(self, state_dir):
+        """An open item pointing at ONE of a multi-PR track's numbers resolves."""
+        _mk_track(state_dir, "feat-multi", pr_ref="#1228,#1229,#1230")
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#1229")],
+        )
+        assert res.linked == 1 and res.ok
+        assert _rows(state_dir, "OI-1")[0]["track_id"] == "feat-multi"
+
+    def test_multi_pr_oi_matching_one_track_links(self, state_dir):
+        """An OI naming several PRs that ALL belong to one track links there."""
+        _mk_track(state_dir, "feat-multi", pr_ref="#1228,#1229,#1230")
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#1228,#1229")],
+        )
+        assert res.linked == 1 and res.ok
+        assert _rows(state_dir, "OI-1")[0]["track_id"] == "feat-multi"
+
+    def test_multi_pr_oi_fanning_out_to_two_tracks_is_unmappable(self, state_dir):
+        """An OI whose PRs fan out to two DIFFERENT tracks is genuinely ambiguous."""
+        _mk_track(state_dir, "feat-a", pr_ref="#100")
+        _mk_track(state_dir, "feat-b", pr_ref="#200")
+        res = bridge.import_open_items_to_tracks(
+            state_dir, PROJECT_ID, open_items=[_oi("OI-1", pr_id="#100,#200")],
+        )
+        assert "OI-1" in res.unmappable
+        assert res.linked == 0
+        assert _rows(state_dir, "OI-1") == []
+
+
+# ---------------------------------------------------------------------------
 # R4.2 — load ALL links + supersede obsolete (remap + closure)
 # ---------------------------------------------------------------------------
 

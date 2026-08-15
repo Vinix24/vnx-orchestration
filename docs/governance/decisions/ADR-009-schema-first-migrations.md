@@ -7,7 +7,7 @@
 
 ## Context
 
-The P4 data migration (PR #432, `scripts/migrate_to_central_vnx.py` ~1757 LOC) consolidated four per-project SQLite stores into the central VNX state DBs. It took **nine codex review rounds** and three `--apply` attempts to converge. The full reflection lives in `claudedocs/2026-05-09-p4-migration-architecture-lessons.md`.
+The P4 data migration (PR #432, `scripts/migrate_to_central_vnx.py` ~1757 LOC) consolidated four per-project SQLite stores into the central VNX state DBs. It took **nine codex review rounds** and three `--apply` attempts to converge. The full reflection lives in `claudedocs/archive/2026-05-09-p4-migration-architecture-lessons.md`.
 
 A pattern emerged across rounds 7, 8, and 9: each round surfaced a different instance of the **same bug class** — a hardcoded column list, table tuple, or index projection that should have been derived from schema introspection.
 
@@ -83,7 +83,7 @@ Concretely:
 ## Cross-references
 
 - ADR-007 — Multi-tenant `project_id` stamping pattern (the constraint pattern that depends on schema-first migrations to stay maintainable)
-- `claudedocs/2026-05-09-p4-migration-architecture-lessons.md` §1.2, §1.3, §2 (T1+T3+T6 bug patterns), §4.1 (schema-first beats imperative-first), §4.2 (composite uniqueness as default), §7 (action items)
+- `claudedocs/archive/2026-05-09-p4-migration-architecture-lessons.md` §1.2, §1.3, §2 (T1+T3+T6 bug patterns), §4.1 (schema-first beats imperative-first), §4.2 (composite uniqueness as default), §7 (action items)
 - PR #432 (round-6 `_rebuild_one_table_dynamic` introduction; rounds 7/8/9 fix-forward)
 - Open items OI-1375 + OI-1376 (post-432 rewrite required for migration 0016)
 - `scripts/migrate_to_central_vnx.py` (canonical helpers `_rebuild_one_table_dynamic`, `_collect_columns`, `_collect_indexes`)

@@ -39,6 +39,7 @@ import schema_migration  # noqa: E402
 import tracks  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
+import plan_gate_tiebreaker as pgt  # noqa: E402
 
 from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
 
@@ -365,6 +366,76 @@ def test_seat_count_matches_ladder(tmp_path, monkeypatch):
         "new feature always runs the full panel"
     )
     assert len(captured2[0]["panel"]) == len(pgp.DEFAULT_PANEL)
+
+
+# ---------------------------------------------------------------------------
+# Stop-rule inheritance: the batch drives the SAME shared path, so a track at
+# the round threshold gets the tiebreaker, not a third full panel.
+# ---------------------------------------------------------------------------
+
+def test_batch_inherits_tiebreaker_after_two_panel_rounds(tmp_path, monkeypatch):
+    """A track that already has two panel rounds gets the tiebreaker in the
+    batch, NOT a third full panel.
+
+    The batch calls ``run_plan_gate_for_track`` (the single shared path the
+    interactive ``plan-gate run`` also drives). That path carries the stop-rule
+    from #1520, so a track at the threshold routes to ``run_tiebreaker`` — the
+    batch does not grow a second panel call that would skip the stop-rule. This
+    asserts on WHICH function ran (tiebreaker vs panel), not a log line.
+    """
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    state_dir = _bootstrap(tmp_path)
+    _make_track(state_dir, "feat-tb", _THICK_GOAL)
+    _seed_blocker(state_dir, "feat-tb")
+
+    # Force two completed panel rounds into an isolated seat ledger so the next
+    # gate run hits the stop-rule threshold (read back from disk, not a return
+    # value — the same "meet de state" discipline as the tiebreaker suite).
+    ledger = tmp_path / ".vnx-attest" / "plan-gate-seats.ndjson"
+    monkeypatch.setattr(pgp, "_resolve_seat_ledger_path", lambda data_dir: ledger)
+    pgt.record_round(ledger, track_id="feat-tb", project_id="p1", round_number=1, outcome="panel")
+    pgt.record_round(ledger, track_id="feat-tb", project_id="p1", round_number=2, outcome="panel")
+    assert pgt.read_round_count(ledger, "feat-tb", "p1") == 2
+
+    panel_calls = {"n": 0}
+    tb_calls = {"n": 0}
+
+    def _no_panel(doc_path, *, doc_text=None, track_id, project_id, panel, data_dir, **kw):
+        panel_calls["n"] += 1
+        return _pass_result(track_id, project_id, panel)
+
+    def _tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
+                    last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+        tb_calls["n"] += 1
+        return pgt.TiebreakerResult(
+            outcome="START", model="fable-5", round=round_number,
+            required_change="", rationale="good enough",
+        )
+
+    monkeypatch.setattr(pgp, "run_panel", _no_panel)
+    monkeypatch.setattr(pgt, "run_tiebreaker", _tiebreaker)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+
+    # _resolve_plan_blocker stays REAL so the tiebreaker resolution actually
+    # lands on the track (and the blocker actually clears).
+    summary = planning_cli._execute_batch(
+        ["feat-tb"], state_dir=str(state_dir), project_id="p1",
+        run_kwargs={}, restart=False, min_goal_chars=200,
+    )
+
+    assert summary["interrupted"] is False
+    assert summary["skipped"] == []
+    # Exactly ONE tiebreaker, zero full-panel runs: the stop-rule inherited.
+    assert tb_calls["n"] == 1
+    assert panel_calls["n"] == 0
+
+    rec = summary["results"][0]
+    assert rec["outcome"] == "PASS"
+    assert rec["decision"] == "START"
+    assert rec["variant"] == "tiebreaker"
+    assert rec["seats"] == 0
+    assert rec["still_blocked"] is False
+    assert "tiebreaker START" in rec["detail"]
 
 
 def test_batch_renders_tally_line_and_outcome_labels(tmp_path, monkeypatch, capsys):

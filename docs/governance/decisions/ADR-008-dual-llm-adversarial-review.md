@@ -7,7 +7,7 @@
 
 ## Context
 
-VNX dispatches code through one or more worker terminals (T1/T2/T3) and accumulates each PR through a series of gates before merge. Anthropic shipped native Code Review on 2026-03-09, and the strategic replan (`claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §1) names the question explicitly: "do we still need a custom review pipeline now that the platform vendor ships one?"
+VNX dispatches code through one or more worker terminals (T1/T2/T3) and accumulates each PR through a series of gates before merge. Anthropic shipped native Code Review on 2026-03-09, and the strategic replan (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §1) names the question explicitly: "do we still need a custom review pipeline now that the platform vendor ships one?"
 
 The answer is yes — but the reasoning is structural, not feature-driven. Anthropic Code Review reviews **Claude work using Claude.** The reviewer and the author share the same model family, the same training cutoff, and the same blind spots. Empirically through the spring 2026 PR chains:
 
@@ -87,7 +87,7 @@ Concretely:
 - Operator memory `feedback_gate_enforcement_failure_f28` (prior incident)
 - Operator memory `feedback_codex_findings_must_be_parsed`, `feedback_codex_5_2_structured_findings` (codex_gate parsing details)
 - Operator memory `feedback_review_gate_full_lifecycle` (request→execute→report→record→verify)
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M3, §5 (no replacement by Anthropic Code Review)
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M3, §5 (no replacement by Anthropic Code Review)
 - T0 `.claude/terminals/T0/CLAUDE.md` §"Headless Review Enforcement", §"Operator Policies" A1/B1-B4
 - `scripts/review_gate_manager.py`, `scripts/closure_verifier.py`, `scripts/lib/codex_parser.py`
 - `.vnx-data/state/review_gates/{requests,results}/`, `$VNX_DATA_DIR/unified_reports/headless/`

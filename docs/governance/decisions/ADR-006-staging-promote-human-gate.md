@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
-**Resolves:** Codification of M2 (staging→promote gate) from `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4
+**Resolves:** Codification of M2 (staging→promote gate) from `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4
 
 ## Context
 
@@ -16,7 +16,7 @@ There is no architectural path from "worker requests a follow-up task" or "T0 pl
 
 This pattern has been challenged from several directions in 2026:
 
-- Industry-research synthesis (`claudedocs/2026-05-09-vnx-industry-research.md` Topic 1, Topic 9) noted that Anthropic's experimental Agent Teams ships `TaskCreated` / `TaskCompleted` / `TeammateIdle` hooks — but **no architectural human-approval gate** between team-lead decision and teammate execution. Microsoft Agent Framework v1.0 has the primitive but is Azure-coupled.
+- Industry-research synthesis (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` Topic 1, Topic 9) noted that Anthropic's experimental Agent Teams ships `TaskCreated` / `TaskCompleted` / `TeammateIdle` hooks — but **no architectural human-approval gate** between team-lead decision and teammate execution. Microsoft Agent Framework v1.0 has the primitive but is Azure-coupled.
 - Operator memories `feedback_dispatch_via_pending.md` and `feedback_no_manager_block_output.md` document recurring proposals to "auto-drain pending → active" or "skip the promote for low-risk dispatches." Each such proposal has been rejected and the memory updated.
 - Recent T0 orchestrator behavior in autonomous mode (per `feature kickoff checklist` and the F60 / overnight-feature workflow) has tightened toward longer autonomous chains, which raises a recurring question: should we relax the human gate when the operator is asleep?
 
@@ -39,7 +39,7 @@ Concrete rules:
 
 Five reinforcing reasons for the mandatory human gate:
 
-1. **The human gate is the moat.** Per `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M2): "Agent Teams has `TaskCreated` hooks but no architectural approval gate; MAF v1.0 has the primitive but is Azure-coupled." No competing system — Managed Agents, Agent Teams, CrewAI, smolagents, OpenCode/CAO — ships a mandatory human gate on every dispatch. VNX's distinguishing structural feature is exactly this gate. Removing it would erase the principal differentiator versus Managed Agents (per ADR-004).
+1. **The human gate is the moat.** Per `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M2): "Agent Teams has `TaskCreated` hooks but no architectural approval gate; MAF v1.0 has the primitive but is Azure-coupled." No competing system — Managed Agents, Agent Teams, CrewAI, smolagents, OpenCode/CAO — ships a mandatory human gate on every dispatch. VNX's distinguishing structural feature is exactly this gate. Removing it would erase the principal differentiator versus Managed Agents (per ADR-004).
 
 2. **The audit trail only means something with consent.** Per ADR-005, the NDJSON ledger records every dispatch's lifecycle. The semantic content of "this dispatch was approved" is encoded by the `pending/` → `active/` transition — without the human action, the ledger only records "the system wanted to do this." With the human action, it records "the operator authorized this." For a glass-box governance system per ADR-004, that distinction is the entire point of having an audit trail.
 
@@ -81,7 +81,7 @@ A note on the F28 gate-enforcement failure (memory `feedback_gate_enforcement_fa
 - ADR-003 — OAuth-only Claude routing (the gate sits between operator-consent and Claude execution)
 - ADR-004 — VNX as alternative to Managed Agents (the gate is the moat)
 - ADR-005 — Append-only NDJSON audit ledger (the ledger records consent points)
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M2) — strategic-moat justification
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M2) — strategic-moat justification
 - `CLAUDE.md` (project root) "Workflow" + "Rules" sections — codified gate references
 - `.claude/terminals/T0/CLAUDE.md` "Worker Dispatch Standards", "Permissions and Hard Guardrails" — gate enforcement at the orchestrator layer
 - Memory: `feedback_dispatch_via_pending.md` — pending/ vs staging/ vs tmux
