@@ -211,9 +211,21 @@ _BLOCKED_FIRST_COMPONENTS = frozenset({".git", ".vnx-data"})
 
 _VALID_TARGET_SLOTS = frozenset({"T0", "T1", "T2", "T3"})
 
-# Cost-tier vocabulary (mirrors providers.smart_router.cost_tier) — the
-# escalation signal on receipts must come from this closed set.
-_VALID_TIERS = frozenset({"tier-zero", "tier-low", "tier-mid", "tier-high"})
+# Cost-tier vocabulary — the escalation signal on receipts must come from this
+# closed set. It spans the four classifier scope buckets (mirrors
+# providers.smart_router.cost_tier) PLUS the three escalation-only rungs of the
+# cost ladder (OI-1229): a model-named rung is reachable only by climbing, never
+# by classification, but it is a legal tier_from/tier_to value on an escalation
+# dispatch, so it must pass the door's Rule 14 tier check.
+_VALID_TIERS = frozenset({
+    "tier-zero",
+    "tier-low",
+    "tier-mid",
+    "tier-high",
+    "kimi-k3",
+    "gpt-5.5",
+    "fable-5",
+})
 
 
 def _validate_dispatch_path(dp: DispatchPath) -> Optional[str]:

@@ -42,6 +42,21 @@ def _force_kimi(monkeypatch, present: bool):
     )
 
 
+# The full cost ladder (OI-1229): every dispatchable model, cheapest first. The
+# four scope buckets (TIER_*) are the classifier's entry rungs; the three
+# model-named rungs are escalation destinations only — reachable by climbing,
+# never by classification.
+LADDER_ORDER = [
+    TIER_ZERO,
+    TIER_LOW,
+    "kimi-k3",
+    "gpt-5.5",
+    TIER_MID,
+    TIER_HIGH,
+    "fable-5",
+]
+
+
 # ---------------------------------------------------------------------------
 # Ladder invariants — derived from the registry
 # ---------------------------------------------------------------------------
@@ -72,11 +87,20 @@ def test_ladder_tier_zero_and_low_are_distinct():
 def test_ladder_order_is_cheapest_first():
     """The authored tier order climbs from the cheapest to the most expensive."""
     ladder = load_tier_ladder()
-    assert [rung.tier for rung in ladder] == [
-        TIER_ZERO,
-        TIER_LOW,
-        TIER_MID,
-        TIER_HIGH,
+    assert [rung.tier for rung in ladder] == LADDER_ORDER
+
+
+def test_ladder_covers_every_dispatchable_model():
+    """Seven rungs — one per dispatchable model — in strict cost order (OI-1229)."""
+    ladder = load_tier_ladder()
+    assert [(r.tier, r.model, r.output_cost_per_mtok) for r in ladder] == [
+        (TIER_ZERO, "deepseek-v4-flash", 0.28),
+        (TIER_LOW, "deepseek-v4-pro", 0.87),
+        ("kimi-k3", "kimi-k3", 2.50),
+        ("gpt-5.5", "gpt-5.5", 10.00),
+        (TIER_MID, "sonnet-5", 15.00),
+        (TIER_HIGH, "opus-5", 25.00),
+        ("fable-5", "fable-5", 50.00),
     ]
 
 
@@ -171,7 +195,7 @@ def test_load_tier_ladder_fails_on_non_monotonic_cost(tmp_path):
 def test_escalate_rejected_result_climbs_one_tier():
     esc = escalate_tier(TIER_LOW, "20260815-rejected-attempt")
     assert esc.tier_from == TIER_LOW
-    assert esc.tier_to == TIER_MID
+    assert esc.tier_to == "kimi-k3"
     assert esc.parent_dispatch == "20260815-rejected-attempt"
 
 
@@ -184,18 +208,29 @@ def test_escalate_from_mid_to_high():
 
 
 def test_escalate_at_top_returns_none():
-    assert escalate_tier(TIER_HIGH, "d-top").tier_to is None
+    assert escalate_tier("fable-5", "d-top").tier_to is None
 
 
 def test_escalate_unknown_tier_returns_none():
     assert escalate_tier("tier-unknown", "d-unknown").tier_to is None
 
 
+def test_escalate_model_named_rungs_climb_in_cost_order():
+    """The three escalation-only rungs slot into the climb at their cost position."""
+    assert escalate_tier("kimi-k3", "d1").tier_to == "gpt-5.5"
+    assert escalate_tier("gpt-5.5", "d2").tier_to == TIER_MID
+    assert escalate_tier(TIER_HIGH, "d3").tier_to == "fable-5"
+    assert escalate_tier("fable-5", "d4").tier_to is None
+
+
 def test_next_tier_matches_escalate_tier():
     assert next_tier(TIER_ZERO) == TIER_LOW
-    assert next_tier(TIER_LOW) == TIER_MID
+    assert next_tier(TIER_LOW) == "kimi-k3"
+    assert next_tier("kimi-k3") == "gpt-5.5"
+    assert next_tier("gpt-5.5") == TIER_MID
     assert next_tier(TIER_MID) == TIER_HIGH
-    assert next_tier(TIER_HIGH) is None
+    assert next_tier(TIER_HIGH) == "fable-5"
+    assert next_tier("fable-5") is None
 
 
 # ---------------------------------------------------------------------------
@@ -218,5 +253,5 @@ def test_quality_escalation_climbs_where_fallback_stays(monkeypatch):
 
     esc = escalate_tier(TIER_LOW, "d-rejected")
     assert esc.tier_from == TIER_LOW
-    assert esc.tier_to == TIER_MID
+    assert esc.tier_to == "kimi-k3"
     assert esc.parent_dispatch == "d-rejected"

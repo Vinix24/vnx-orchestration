@@ -331,14 +331,34 @@ providers:
 # RegistryLookupError (naming what+where) on anything this registry does not
 # know.
 #
-# COST LADDER (OI-1221): the four tiers form an ordered ladder over the
-# dispatchable models, cheapest first. A tier higher is demonstrably more
-# expensive AND more capable, so a quality escalation actually climbs:
+# COST LADDER (OI-1221, extended OI-1229): seven rungs, cheapest first — the
+# seven dispatchable (provider, model) pairs in ascending output cost. A tier
+# higher is demonstrably more expensive AND more capable, so a quality
+# escalation actually climbs:
 #
 #   tier-zero  deepseek-v4-flash  $0.28/Mtok out
 #   tier-low   deepseek-v4-pro    $0.87/Mtok out   (the daily workhorse)
+#   kimi-k3    kimi-k3            $2.50/Mtok out
+#   gpt-5.5    gpt-5.5           $10.00/Mtok out
 #   tier-mid   sonnet-5          $15.00/Mtok out
 #   tier-high  opus-5            $25.00/Mtok out
+#   fable-5    fable-5           $50.00/Mtok out
+#
+# NOT on the ladder (measured 2026-08-15 over wave7_models.yaml):
+#   * glm-5.2 ($2.42/Mtok out) — the `zai` section carries NO `dispatch_enum`
+#     (its route runs via `litellm:zai`/OpenRouter, not a dispatch Provider), so
+#     it is not a dispatchable model and is correctly excluded. gemini-2.5-pro
+#     (`google`) is excluded the same way — no `dispatch_enum` either.
+#   * local-gemma — local-only inference, kept off the map (disabled via the
+#     availability layer, LOCAL_GEMMA_DISABLED_REASON).
+#   * alternate/older models under a lane's section (haiku, gpt-5.4, opus /
+#     opus-4.x, kimi-k2-7, deepseek-v4-pro-default) are not their own rungs:
+#     each rung pins one (provider, model) pair.
+#
+# The four tier-zero/low/mid/high rungs are ALSO the classifier's scope buckets
+# (cost_tier.classify_dispatch): a NEW dispatch enters the ladder at one of them.
+# The three model-named rungs (kimi-k3, gpt-5.5, fable-5) are escalation
+# destinations only — reachable by climbing, never by classification.
 #
 # Two mechanisms, opposite in intent, are deliberately kept apart:
 #   * AVAILABILITY fallback (the `fallback` list below) — an unavailable lane is
@@ -376,6 +396,18 @@ routing:
         - provider: openai
           model: gpt-5.5
           lane: provider
+    kimi-k3:
+      provider: kimi_cli
+      model: kimi-k3
+      lane: kimi_cli
+      fallback:
+        - provider: openai
+          model: gpt-5.5
+          lane: provider
+    gpt-5.5:
+      provider: openai
+      model: gpt-5.5
+      lane: provider
     tier-mid:
       provider: anthropic
       model: sonnet-5
@@ -383,4 +415,8 @@ routing:
     tier-high:
       provider: anthropic
       model: opus-5
+      lane: tmux_interactive
+    fable-5:
+      provider: anthropic
+      model: fable-5
       lane: tmux_interactive
