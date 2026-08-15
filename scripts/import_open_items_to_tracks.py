@@ -117,6 +117,7 @@ if str(_LIB) not in sys.path:
 import tracks  # noqa: E402  (single-writer primitives — D1)
 from plan_gate_enforcement import PLAN_OI_PREFIX  # noqa: E402  (synthetic plan-gate OI prefix — canonical home)
 from vnx_ids import PROJECT_ID_RE  # noqa: E402  (canonical project-id format — ADR-007)
+from track_reconciler import _parse_pr_numbers  # noqa: E402  (canonical multi-PR parser — OI-1207)
 
 DB_FILENAME = "runtime_coordination.db"
 OPEN_ITEMS_FILENAME = "open_items.json"
@@ -197,16 +198,6 @@ class BridgeResult:
 # ---------------------------------------------------------------------------
 # Read helpers (no track_open_items mutation lives here — D1)
 # ---------------------------------------------------------------------------
-
-def _parse_pr_number(pr_ref: Optional[str]) -> Optional[int]:
-    """Parse '#756', '756', '  #42 ' -> int. Returns None on failure."""
-    if not pr_ref:
-        return None
-    try:
-        return int(str(pr_ref).strip().lstrip("#").strip())
-    except (TypeError, ValueError):
-        return None
-
 
 def _open_conn(state_dir: str | Path) -> sqlite3.Connection:
     """Open the bridge connection used for BOTH the upfront reads and the single
@@ -300,15 +291,22 @@ def _load_open_items(state_dir: str | Path, *, path: Optional[Path] = None) -> L
 def _load_tracks_by_pr(
     conn: sqlite3.Connection, project_id: str
 ) -> Tuple[Dict[int, List[str]], set]:
-    """Return (pr_number -> [track_id...], {all track_ids}) for the tenant."""
+    """Return (pr_number -> [track_id...], {all track_ids}) for the tenant.
+
+    OI-1207: a track's ``pr_ref`` may name MULTIPLE PRs (``#1228,#1229,#1230`` —
+    a track that landed across several PRs). Parse with the canonical multi-PR
+    parser and register the track under EVERY number it names, so an open item
+    pointing at any one of them resolves. The old ``_parse_pr_number`` did
+    ``int()`` on the whole string and returned None for any multi-PR ref, which
+    silently dropped the track from the lookup (23 of 154 tracks on vnx-dev).
+    """
     by_pr: Dict[int, List[str]] = {}
     track_ids: set = set()
     for row in conn.execute(
         "SELECT track_id, pr_ref FROM tracks WHERE project_id = ?", (project_id,)
     ):
         track_ids.add(row["track_id"])
-        pr = _parse_pr_number(row["pr_ref"])
-        if pr is not None:
+        for pr in _parse_pr_numbers(row["pr_ref"]):
             by_pr.setdefault(pr, []).append(row["track_id"])
     return by_pr, track_ids
 
@@ -384,8 +382,18 @@ def _resolve_target_track(
         return None
     if explicit and explicit in track_ids:
         return (explicit, link_type)
-    pr = _parse_pr_number(oi.get("pr_id"))
-    candidates = by_pr.get(pr, []) if pr is not None else []
+    # OI-1207: parse the OI's ``pr_id`` with the multi-PR parser and consider ALL
+    # of its numbers ("alle", not "eerste"/"laatste"). The OI is a single blocking
+    # item whose ``pr_id`` names the PR(s) that resolve it; the correct choice is
+    # the UNION of candidate tracks: if every named PR maps to exactly one track
+    # it links there, if they fan out to more than one track that is genuinely
+    # ambiguous (unmappable). The old single-number parse dropped a multi-PR
+    # ``pr_id`` straight to None, which read as "unmappable" with no trace.
+    candidates: List[str] = []
+    for pr in sorted(_parse_pr_numbers(oi.get("pr_id"))):
+        for track_id in by_pr.get(pr, []):
+            if track_id not in candidates:
+                candidates.append(track_id)
     if len(candidates) == 1:
         return (candidates[0], link_type)
     result.unmappable.append(oi.get("id", "<no-id>"))

@@ -78,6 +78,26 @@ _MILESTONE_RANK = {
     "1.x": 9,
 }
 
+# Feature-block keys the ROADMAP format supports (union of every consumer in the
+# roadmap toolchain: this seeder, build_feature_plan, build_pr_queue, and
+# pr_queue_manager). A key outside this set is a typo (e.g. ``goal_stat`` for
+# ``goal_state``) that used to vanish without a trace — the feature would be
+# seeded WITHOUT that field. OI-1168: validate strictly so a typo fails LOUD.
+#
+# ``merge_policy`` is carried by the shipped ROADMAP.yaml and read by
+# pr_queue_manager even though this seeder does not project it into a track.
+_ALLOWED_FEATURE_KEYS: frozenset = frozenset({
+    "feature_id",
+    "title",
+    "status",
+    "milestone",
+    "risk_class",
+    "merge_policy",
+    "depends_on",
+    "notes",
+    "pr_queue",
+})
+
 
 def _milestone_rank(milestone: Optional[str]) -> int:
     return _MILESTONE_RANK.get(str(milestone), 5)
@@ -175,12 +195,50 @@ def _row_matches(existing: dict[str, Any], desired: dict[str, Any]) -> bool:
     return True
 
 
+def _validate_feature(feature: dict[str, Any], index: int) -> None:
+    """Fail LOUD on a feature block with an unknown or empty key (OI-1168).
+
+    A key outside ``_ALLOWED_FEATURE_KEYS`` is a typo that used to be dropped
+    silently: ``goal_stat`` instead of ``goal_state`` seeds a track WITHOUT the
+    intended field and nothing complains. Raise with the offending key, the
+    feature that carries it, and the allowed set so the author can fix the file.
+    ``feature_id`` (the track identity) must be present AND non-empty: an empty
+    identity used to be filtered out by the old ``_load_roadmap`` list
+    comprehension, silently dropping the whole feature (fail-closed on form, not
+    just on presence).
+    """
+    name = feature.get("feature_id") or f"#<index {index}>"
+    unknown = [k for k in feature if k not in _ALLOWED_FEATURE_KEYS]
+    if unknown:
+        raise ValueError(
+            f"ROADMAP.yaml feature {name!r} has unknown key(s) {unknown}; "
+            f"allowed keys are {sorted(_ALLOWED_FEATURE_KEYS)}. Fix the key name "
+            "(a typo like `goal_stat` for `goal_state` is silently ignored by "
+            "the seeder)."
+        )
+    if not str(feature.get("feature_id") or "").strip():
+        raise ValueError(
+            f"ROADMAP.yaml feature #{index} has an empty 'feature_id' — every "
+            "feature needs a non-empty identity, otherwise it is silently "
+            "dropped from the seed."
+        )
+
+
 def _load_roadmap(roadmap_path: Path) -> list[dict[str, Any]]:
     data = yaml.safe_load(roadmap_path.read_text(encoding="utf-8")) or {}
     features = data.get("features") or []
     if not isinstance(features, list):
         raise ValueError(f"ROADMAP.yaml `features` is not a list in {roadmap_path}")
-    return [f for f in features if isinstance(f, dict) and f.get("feature_id")]
+    result: list[dict[str, Any]] = []
+    for index, feature in enumerate(features):
+        if not isinstance(feature, dict):
+            raise ValueError(
+                f"ROADMAP.yaml feature #{index} is a {type(feature).__name__} in "
+                f"{roadmap_path}, expected a mapping."
+            )
+        _validate_feature(feature, index)
+        result.append(feature)
+    return result
 
 
 def seed(
@@ -354,7 +412,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         from project_root import resolve_project_root
         roadmap_path = resolve_project_root(__file__) / "ROADMAP.yaml"
 
-    report = seed(state_dir, roadmap_path, args.project_id, apply=args.apply)
+    try:
+        report = seed(state_dir, roadmap_path, args.project_id, apply=args.apply)
+    except ValueError as exc:
+        # OI-1168: a ROADMAP.yaml with an unknown/empty feature key is a loud
+        # failure, not a warning — surface it cleanly and exit non-zero.
+        print(f"[seed] ERROR: {exc}", file=sys.stderr)
+        return 1
     _print_report(report)
 
     if args.report:

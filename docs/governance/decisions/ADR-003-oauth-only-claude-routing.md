@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
-**Resolves:** Codification of M6 (CLI-OAuth Claude routing) from `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4
+**Resolves:** Codification of M6 (CLI-OAuth Claude routing) from `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4
 
 ## Context
 
@@ -11,7 +11,7 @@ VNX drives Claude through `claude -p --output-format stream-json` invoked as a s
 
 Three industry signals in Q2 2026 push toward adopting the Anthropic Python SDK or the new Claude Agent SDK at the transport layer:
 
-1. The **Claude Agent SDK** (`claude-agent-sdk` Python package) now ships typed `HookEventMessage` events, `atexit`-based orphan cleanup, and a control-protocol message bus that re-implements much of `subprocess_adapter.py` natively (~600 LOC of VNX duplication per `claudedocs/2026-05-09-vnx-industry-research.md` Topic 2).
+1. The **Claude Agent SDK** (`claude-agent-sdk` Python package) now ships typed `HookEventMessage` events, `atexit`-based orphan cleanup, and a control-protocol message bus that re-implements much of `subprocess_adapter.py` natively (~600 LOC of VNX duplication per `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` Topic 2).
 2. **Anthropic Managed Agents** (launched 2026-04-08) is the hosted execution path that the SDK is the natural client for.
 3. Strategic-replan synthesis (Topic 2) initially proposed migrating the transport layer to the SDK as a "REPLACE" verdict.
 
@@ -70,7 +70,7 @@ VNX's value proposition depends on a Claude credential model the operator alread
 
 ## Amendment (2026-05-15): API-key + CLI explicitly permitted
 
-After the June 15 2026 Anthropic Agent SDK credit changes, the operator commissioned strategic research (`claudedocs/agent-sdk-vs-claude-p-cli-strategic-comparison-2026-05-15.md`) comparing Agent SDK direct-API usage against `claude -p` subprocess on the same API key. The verdict: stay with `claude -p` subprocess for the governed worker dispatch path; Agent SDK can be a follow-up provider option for non-governed use cases.
+After the June 15 2026 Anthropic Agent SDK credit changes, the operator commissioned strategic research (`claudedocs/archive/agent-sdk-vs-claude-p-cli-strategic-comparison-2026-05-15.md`) comparing Agent SDK direct-API usage against `claude -p` subprocess on the same API key. The verdict: stay with `claude -p` subprocess for the governed worker dispatch path; Agent SDK can be a follow-up provider option for non-governed use cases.
 
 This amendment makes the routing matrix explicit:
 
@@ -92,6 +92,6 @@ The Wave 4.6 finalization PR may introduce Agent SDK as an opt-in fifth provider
 - `CLAUDE.md` (project root) — "Subprocess Adapter Feature Flag" section
 - `scripts/lib/subprocess_adapter.py` — canonical Claude transport
 - `scripts/lib/subprocess_dispatch.py` — canonical dispatch entry point
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M6) — strategic-moat justification
-- `claudedocs/2026-05-09-vnx-industry-research.md` Topic 2 — the rejected SDK-adoption recommendation
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M6) — strategic-moat justification
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` Topic 2 — the rejected SDK-adoption recommendation
 - Memory: `feedback_avoid_claude_sdk_use_cli_oauth.md` — operator licensing-constraint feedback

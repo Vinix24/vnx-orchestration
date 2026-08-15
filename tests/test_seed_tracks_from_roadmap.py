@@ -29,6 +29,8 @@ for p in (_LIB, _SCRIPTS):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+import yaml
+
 import schema_migration
 import tracks as tracks_lib
 
@@ -267,3 +269,73 @@ def test_events_emitted(tmp_path, roadmap):
     lines = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
     types = {e["event_type"] for e in lines}
     assert "track_created" in types
+
+
+# ---------------------------------------------------------------------------
+# OI-1168 — unknown/empty feature-block keys fail LOUD instead of vanishing
+# ---------------------------------------------------------------------------
+
+def _write_roadmap(tmp_path: Path, features: list[dict]) -> Path:
+    """Write a minimal ROADMAP.yaml from a list of feature dicts."""
+    doc = yaml.safe_dump(
+        {"roadmap_id": "test", "features": features}, sort_keys=False
+    )
+    p = tmp_path / "ROADMAP.yaml"
+    p.write_text(doc, encoding="utf-8")
+    return p
+
+
+class TestKeyValidation:
+    def test_valid_block_passes(self, tmp_path):
+        p = _write_roadmap(tmp_path, [{
+            "feature_id": "feat-a", "title": "A", "risk_class": "high",
+            "depends_on": [], "milestone": "1.0", "status": "planned",
+            "merge_policy": "human", "notes": "notes", "pr_queue": [],
+        }])
+        state_dir = _make_db(tmp_path)
+        report = seeder.seed(state_dir, p, "vnx-dev", apply=False)
+        assert report["summary"]["created"] == 1
+
+    def test_unknown_key_fails_loud_with_key_and_feature(self, tmp_path):
+        p = _write_roadmap(tmp_path, [{
+            "feature_id": "feat-a", "title": "A", "goal_stat": "planned",
+        }])
+        state_dir = _make_db(tmp_path)
+        with pytest.raises(ValueError) as excinfo:
+            seeder.seed(state_dir, p, "vnx-dev", apply=False)
+        msg = str(excinfo.value)
+        assert "goal_stat" in msg              # the offending key
+        assert "feat-a" in msg                 # the feature carrying it
+        assert "allowed keys" in msg           # the list of allowed keys
+
+    def test_case_only_difference_is_unknown(self, tmp_path):
+        p = _write_roadmap(tmp_path, [{
+            "feature_id": "feat-a", "title": "A", "Goal_State": "planned",
+        }])
+        state_dir = _make_db(tmp_path)
+        with pytest.raises(ValueError, match="Goal_State"):
+            seeder.seed(state_dir, p, "vnx-dev", apply=False)
+
+    def test_dry_run_fails_as_hard_as_apply(self, tmp_path):
+        p = _write_roadmap(tmp_path, [{
+            "feature_id": "feat-a", "title": "A", "goal_stat": "planned",
+        }])
+        state_dir = _make_db(tmp_path)
+        with pytest.raises(ValueError, match="goal_stat"):
+            seeder.seed(state_dir, p, "vnx-dev", apply=False)
+        with pytest.raises(ValueError, match="goal_stat"):
+            seeder.seed(state_dir, p, "vnx-dev", apply=True)
+
+    def test_empty_feature_id_fails_loud(self, tmp_path):
+        """Fail-closed on form: a key that exists but is empty must be as loud
+        as a key that does not exist (the old loader silently dropped it)."""
+        p = _write_roadmap(tmp_path, [{"feature_id": "", "title": "A"}])
+        state_dir = _make_db(tmp_path)
+        with pytest.raises(ValueError, match="feature_id"):
+            seeder.seed(state_dir, p, "vnx-dev", apply=False)
+
+    def test_non_dict_feature_element_fails_loud(self, tmp_path):
+        p = _write_roadmap(tmp_path, ["not-a-mapping"])
+        state_dir = _make_db(tmp_path)
+        with pytest.raises(ValueError, match="mapping"):
+            seeder.seed(state_dir, p, "vnx-dev", apply=False)

@@ -217,11 +217,11 @@ whole is "done" when:
 | FM-8 | Concurrent migration 0018 | `BEGIN IMMEDIATE` with 30s timeout; per-project DBs are physically separate |
 | FM-10 | Membership race | Partial unique index `idx_pool_membership_active` blocks second active row |
 
-Full failure mode register (FM-1 through FM-12) in `claudedocs/wave6-workers-n-architecture.md` §9.
+Full failure mode register (FM-1 through FM-12) in `claudedocs/archive/wave6-workers-n-architecture.md` §9.
 
 ## References
 
-- `claudedocs/wave6-workers-n-architecture.md` — full Wave 6 design (schema, PR breakdown,
+- `claudedocs/archive/wave6-workers-n-architecture.md` — full Wave 6 design (schema, PR breakdown,
   sequencing, operator interaction model, failure modes, timeline)
 - ADR-011 — worker isolation (process-per-worker, depth>1 hierarchy)
 - ADR-013 — workers=N as configuration (design-only predecessor; implemented by Wave 6)

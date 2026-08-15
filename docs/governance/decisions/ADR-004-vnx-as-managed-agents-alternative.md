@@ -9,7 +9,7 @@
 
 On 2026-04-08 Anthropic launched **Claude Managed Agents** — a serverless agent runtime where each agent runs in a gVisor-isolated container on Anthropic infrastructure, with default-deny network egress, scoped filesystem (`/workspace` writable, `/source` read-only), built-in OAuth for user-delegated actions, and pricing at $0.08/session-hour plus standard token costs. Notion, Rakuten, and Sentry are in production on it ([Anthropic Managed Agents InfoQ](https://www.infoq.com/news/2026/04/anthropic-managed-agents/)). Three feature updates shipped by 2026-05-07.
 
-Industry-research synthesis in `claudedocs/2026-05-09-vnx-industry-research.md` (Topic 12) initially recommended "ADOPT alongside — Managed Agents is the right substrate for *production* agent execution; VNX's local-first 4-terminal model remains correct for *development* and *governance experimentation*." The closing 250-word summary went further: "VNX should pivot to a **thin governance layer over Claude Agent SDK + MCP + Managed Agents** — keep the audit/gate/review IP, drop the subprocess plumbing."
+Industry-research synthesis in `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` (Topic 12) initially recommended "ADOPT alongside — Managed Agents is the right substrate for *production* agent execution; VNX's local-first 4-terminal model remains correct for *development* and *governance experimentation*." The closing 250-word summary went further: "VNX should pivot to a **thin governance layer over Claude Agent SDK + MCP + Managed Agents** — keep the audit/gate/review IP, drop the subprocess plumbing."
 
 The operator has rejected this pivot framing explicitly. VNX's strategic purpose is to be a **self-hosted alternative** to Managed Agents — same coordination + governance + audit goals, but on operator hardware, with Claude Code OAuth login (no per-session billing), no vendor lock-in, and full visibility into the runtime. "Just use Managed Agents" defeats the purpose of building VNX. Per the operator's memory (`project_vnx_is_alternative_not_layer.md`), Managed Agents is "the commoditization VNX is competing with, not a target to converge onto."
 
@@ -48,7 +48,7 @@ The combined effect: VNX's strategic moat is not "we built it ourselves" — it 
 
 ### Accepted
 
-- The Wave 5 differentiation features in `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §7.3 are the active development priority once Waves 0-4 close: (1) 3-Layer Trigger System + HTTP/webhook receiver, (2) optional Docker/Podman sandbox isolation, (3) `vnx init` PyPI quickstart. Each closes a parity gap with Managed Agents while preserving VNX's structural advantages.
+- The Wave 5 differentiation features in `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §7.3 are the active development priority once Waves 0-4 close: (1) 3-Layer Trigger System + HTTP/webhook receiver, (2) optional Docker/Podman sandbox isolation, (3) `vnx init` PyPI quickstart. Each closes a parity gap with Managed Agents while preserving VNX's structural advantages.
 - A differentiation table is maintained in the public-facing PRD-UH-002 v1.0 (per strategic-replan §10 D3 / D4) showing "what Managed Agents does well that VNX matches" vs "what Managed Agents structurally can't do that VNX uniquely offers."
 - The VNX public narrative shifts from "universal headless harness" (PRD-UH-001 v1.3) to "self-hosted alternative to Managed Agents with full glass-box governance" (PRD-UH-002 v1.0 framing, per strategic-replan §10 D4 default = clean break).
 - Industry research that surfaces Managed Agents (or any vendor-managed agent runtime — Cloudflare Workers AI agents, Vercel AI runtime, Replit Agent, etc.) as a "platform shift to adopt" is reframed as **competitive/commoditization signal** that informs *what VNX must beat or differentiate from*, not a migration target.
@@ -56,7 +56,7 @@ The combined effect: VNX's strategic moat is not "we built it ourselves" — it 
 
 ### Rejected
 
-- "Pivot to thin governance layer over Managed Agents" — the closing recommendation of `claudedocs/2026-05-09-vnx-industry-research.md` §250-word summary.
+- "Pivot to thin governance layer over Managed Agents" — the closing recommendation of `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` §250-word summary.
 - "Wrap Managed Agents with our gating" patterns — VNX governance does not sit downstream of a hosted Claude execution; it sits over the operator's own subprocess execution.
 - "Consume Managed Agents service" as a deployment target. VNX's deployment target is the operator's own hardware (or a future PyPI-installable footprint per Wave 5 candidate 3), not Anthropic's runtime.
 - Cloudflare Dynamic Workers, Daytona, E2B, Fly Machines, Vercel Sandbox, or other hosted Agent SDK substrates as the VNX runtime layer. These are valid for projects whose requirements differ; they are not valid for VNX given M6 + this ADR.
@@ -65,7 +65,7 @@ The combined effect: VNX's strategic moat is not "we built it ourselves" — it 
 ## Implementation note
 
 - `CLAUDE.md` (project root) is updated in Wave 0 to add a Q2 2026 platform-shift note pointing at this ADR and ADR-003.
-- The differentiation table in §7.1 / §7.2 of `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` is the canonical reference until PRD-UH-002 v1.0 supersedes it.
+- The differentiation table in §7.1 / §7.2 of `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` is the canonical reference until PRD-UH-002 v1.0 supersedes it.
 - Wave 5 candidate selection (operator decision D5 in the strategic replan) is the next concrete output of this positioning.
 
 ## See also
@@ -73,7 +73,7 @@ The combined effect: VNX's strategic moat is not "we built it ourselves" — it 
 - ADR-003 — OAuth-only Claude routing via `claude -p` subprocess
 - ADR-005 — Append-only NDJSON audit ledger as primary observability surface
 - ADR-006 — Staging→promote with mandatory human approval gate
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §1, §4, §7 — strategic positioning
-- `claudedocs/2026-05-09-vnx-industry-research.md` Topic 12, Topic 15, §250-word summary — the rejected pivot framing
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §1, §4, §7 — strategic positioning
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` Topic 12, Topic 15, §250-word summary — the rejected pivot framing
 - Memory: `project_vnx_is_alternative_not_layer.md` — operator strategic-intent feedback
 - Memory: `project_vnx_strategic_direction.md` — VNX evolution from governance-first to multi-manager system

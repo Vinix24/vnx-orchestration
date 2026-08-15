@@ -44,7 +44,7 @@ Chains are recorded in `.vnx-data/chains/` with three states (`approved/`, `runn
 3. **Without chain-dispatch, autonomous mode is either a slippery slope or impossible.** Two failure modes:
    - **Slippery slope.** "Just don't gate the autonomous loop" — leads to AI-to-AI handoff (a worker's follow-up dispatch auto-executes; T0's planned next step auto-executes). ADR-006 forbids this categorically. Without a formal chain primitive, every "autonomous mode" patch tends to slide here.
    - **Impossible.** "Promote every dispatch by hand even in autonomous mode" — kills the F46–F58 + 200-PR cadence the operator actually achieves. The operator runs four parallel deployments; per-step approval is not workable at that throughput.
-   Chain-dispatch is the only shape that preserves the M2 moat (mandatory human approval per `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4) while enabling the workflow operators need. It is the smallest viable resolution.
+   Chain-dispatch is the only shape that preserves the M2 moat (mandatory human approval per `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4) while enabling the workflow operators need. It is the smallest viable resolution.
 
 4. **The audit ledger's value depends on consent being explicit, not implicit.** Per ADR-005, NDJSON entries record every dispatch's lifecycle. Per ADR-006, the consent encoding is the `pending/` → `active/` transition. If autonomous mode silently skipped the gate, the ledger would record "the system did this" without the matching "the operator authorized this." Chain-dispatch keeps the consent encoding intact: the chain spec is the consent, the chain hash is its cryptographic anchor, every promote within the chain references the hash, and the operator's signature on the chain spec is auditable for years afterwards.
 
@@ -65,7 +65,7 @@ Chains are recorded in `.vnx-data/chains/` with three states (`approved/`, `runn
 - The chain spec is signed/hashed in NDJSON for replay-audit per ADR-005's append-only ledger contract. The spec itself is stored on disk under `.vnx-data/chains/`; the hash is the only thing in the ledger.
 - T0 may dispatch within the chain without operator action, **but only when the dispatch's scope matches the chain spec.** Out-of-scope dispatches (different repo, different file paths, different dispatch type) are written to `pending/` and wait for interactive promote, exactly like a non-autonomous dispatch.
 - Operator wake-up triggers (E1–E6 in T0's CLAUDE.md, plus the chain spec's `escalation_triggers`) are evaluated at every chain step. When any trigger fires, the chain transitions to `terminated/` and the operator is notified via the daily digest channel and (if configured) email.
-- Chain audit appends to the NDJSON ledger continuously; `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` Wave 0.5 lists the chain-runner observability work as a tracked deliverable.
+- Chain audit appends to the NDJSON ledger continuously; `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` Wave 0.5 lists the chain-runner observability work as a tracked deliverable.
 - `dispatcher_supervisor.sh` and the lease-sweep ticker are extended to detect chain-runner drift (e.g. a chain that has been `running/` for longer than its `max_wallclock` without a terminate event).
 
 ### Rejected
@@ -93,8 +93,8 @@ Chains are recorded in `.vnx-data/chains/` with three states (`approved/`, `runn
 - ADR-008 — Dual-LLM adversarial review (applies per-PR within a chain by default; chain spec may declare alternate gating posture)
 - ADR-010 — Subprocess adapter (chain-promoted dispatches use the same delivery primitive as interactive ones)
 - ADR-011 — Manager+worker hierarchy (a chain may dispatch across multiple workers; chain hash is shared across them)
-- `claudedocs/PRD-VNX-UH-002-v1.0-DRAFT.md` §6 FR-13 — the functional requirement this ADR redeems
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M2 moat) and §5 (Wave 0.5) — strategic context
+- `claudedocs/archive/PRD-VNX-UH-002-v1.0-DRAFT.md` §6 FR-13 — the functional requirement this ADR redeems
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M2 moat) and §5 (Wave 0.5) — strategic context
 - `.claude/terminals/T0/CLAUDE.md` — the prose specification of "full autonomous mode for the next 4-feature hardening lane" that this ADR replaces with a formal contract
 - `CLAUDE.md` (project root) "Auto Mode Active" pattern — the operator's expressed preference for continuous execution that this ADR makes governable
 - Memory: `feedback_dispatch_via_pending.md` — pending/ remains the only correct dispatch landing zone, even under chain-dispatch
