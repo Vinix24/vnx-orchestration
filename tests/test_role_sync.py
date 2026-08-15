@@ -611,5 +611,90 @@ class TestDualCliParity:
         assert "not found" in (r.stdout + r.stderr).lower()
 
 
+# ---------------------------------------------------------------------------
+# OI-1228: sync-vervuiling. `vnx role sync --apply` mirrors the canonical role
+# into .claude/terminals/T0/AGENTS.md (Codex) and GEMINI.md (Gemini/Kimi).
+# Disposition: IGNORE — they are generated mirrors of the tracked
+# role-orchestrator.md, so a git copy would be redundant and would drift.
+# Without the ignore rule, every fresh sync leaves two untracked files and
+# merge_preflight.sh Check 1 (git cleanliness) blocks the merge.
+# ---------------------------------------------------------------------------
+
+TERMINAL_PROVIDER_MIRRORS = (
+    ".claude/terminals/T0/AGENTS.md",
+    ".claude/terminals/T0/GEMINI.md",
+)
+
+
+class TestSyncGitCleanliness:
+    def test_repo_gitignore_ignores_terminals_provider_mirrors(self):
+        """This repo's own .gitignore must cover the two provider mirrors, or a
+        dev checkout of vnx-orchestration re-pollutes its working copy on every
+        sync. Pins the IGNORE disposition at its source (the repo .gitignore,
+        not a global excludesfile)."""
+        for rel in TERMINAL_PROVIDER_MIRRORS:
+            r = subprocess.run(
+                ["git", "check-ignore", "-v", "--no-index", rel],
+                capture_output=True, text=True, cwd=str(REPO),
+            )
+            assert r.returncode == 0, f"{rel} is not git-ignored (OI-1228)"
+            assert rel in r.stdout
+            assert ".gitignore" in r.stdout, (
+                f"{rel} ignored by {r.stdout.strip()!r}, not this repo's .gitignore"
+            )
+
+    def test_apply_leaves_working_tree_clean_when_source_is_tracked(self, tmp_path):
+        """End-to-end, faithful to the real repo: the authored source
+        (CLAUDE.md + role-orchestrator.md) is committed first, so a fresh
+        `vnx role sync --apply` that materializes the provider mirrors must
+        leave `git status --porcelain` empty — the exact signal
+        merge_preflight.sh Check 1 reads. With the mirrors untracked they would
+        appear here as `?? .claude/terminals/T0/AGENTS.md` (see the negative
+        control below)."""
+        project = _make_project(tmp_path, "consumer")
+        _init_git(project)
+        (project / ".gitignore").write_text((REPO / ".gitignore").read_text())
+
+        t0 = project / ".claude" / "terminals" / "T0"
+        (t0 / "role-orchestrator.md").write_text(SHIPPED_ROLE.read_text())
+        subprocess.run(["git", "add", ".claude", ".gitignore"], cwd=str(project), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "track authored source"], cwd=str(project), check=True)
+
+        r = _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+
+        assert (t0 / "AGENTS.md").exists()
+        assert (t0 / "GEMINI.md").exists()
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=str(project),
+        ).stdout
+        assert status == ""
+
+    def test_without_ignore_rule_the_mirrors_do_pollute(self, tmp_path):
+        """Negative control: the same sync against a project whose .gitignore
+        does NOT ignore the mirrors leaves them untracked. Proves the clean
+        assertion above is produced by the ignore rule, not by a vacuous pass
+        (git collapses an all-untracked directory, so a project with no tracked
+        source would mask the pollution)."""
+        project = _make_project(tmp_path, "consumer")
+        _init_git(project)
+        # Deliberately no .gitignore.
+
+        t0 = project / ".claude" / "terminals" / "T0"
+        (t0 / "role-orchestrator.md").write_text(SHIPPED_ROLE.read_text())
+        subprocess.run(["git", "add", ".claude"], cwd=str(project), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "track authored source"], cwd=str(project), check=True)
+
+        r = _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=str(project),
+        ).stdout
+        assert ".claude/terminals/T0/AGENTS.md" in status
+        assert ".claude/terminals/T0/GEMINI.md" in status
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

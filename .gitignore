@@ -143,10 +143,16 @@ scripts/benchmark/field-tests/tasks.local.yaml
 .vnx-attest/
 .vnx/config.yml
 
-# Tri-file rolbestanden in de repo-root: door `vnx role sync --apply` gegenereerd
-# uit de canonieke rol, niet met de hand geschreven.
+# Tri-file rolbestanden (AGENTS.md / GEMINI.md): gegenereerde mirrors van de
+# canonieke rol, niet met de hand geschreven. `vnx role sync --apply` spiegelt
+# de rol naar .claude/terminals/T0/ (Codex/Gemini/Kimi-orchestrator); de
+# repo-root-versies schrijft patch-agent-files. Alleen de authored bron
+# (role-orchestrator.md) hoort in git — een verse sync mag de git-status niet
+# vervuilen (OI-1228: merge_preflight Check 1 blokkeert dan op untracked files).
 /AGENTS.md
 /GEMINI.md
+.claude/terminals/T0/AGENTS.md
+.claude/terminals/T0/GEMINI.md
 
 # Sessie-logs: eigen inhoud, maar met dagbedragen aan AI-kosten en klantcontext.
 # Deze repo is publiek, dus die gaan er niet in. Backup staat buiten git in de
