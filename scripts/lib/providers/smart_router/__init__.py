@@ -27,7 +27,13 @@ from .classifier import (  # noqa: F401
     write_route_decision,
 )
 from .cost_tier import classify_dispatch  # noqa: F401
-from .tier_routing import TierRoute, resolve_tier_route  # noqa: F401
+from .tier_routing import (  # noqa: F401
+    TierEscalation,
+    TierRoute,
+    escalate_tier,
+    next_tier,
+    resolve_tier_route,
+)
 
 __all__ = [
     "classify_task",
@@ -39,7 +45,10 @@ __all__ = [
     "RouteDecision",
     "classify_dispatch",
     "TierRoute",
+    "TierEscalation",
     "resolve_tier_route",
+    "next_tier",
+    "escalate_tier",
     "lane_available",
     "lane_cooldown_remaining",
     "cooldown_seconds",
@@ -56,7 +65,7 @@ def route_dispatch(
 ) -> Optional[TierRoute]:
     """Smart router entry point. Default-on since 2026-08-02.
 
-    Tier-low routing (deepseek-v4-flash, codex fallback) is active by default.
+    Tier-low routing (deepseek-v4-pro, codex fallback) is active by default.
     Operators can disable it with VNX_SMART_ROUTER_DISABLE=1. The old VNX_AUTO_ROUTE
     opt-in flag is still honoured for backward compat but is superseded.
 

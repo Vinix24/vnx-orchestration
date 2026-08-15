@@ -330,6 +330,27 @@ providers:
 # chain). provider_registry.load_tier_map() validates every reference and raises
 # RegistryLookupError (naming what+where) on anything this registry does not
 # know.
+#
+# COST LADDER (OI-1221): the four tiers form an ordered ladder over the
+# dispatchable models, cheapest first. A tier higher is demonstrably more
+# expensive AND more capable, so a quality escalation actually climbs:
+#
+#   tier-zero  deepseek-v4-flash  $0.28/Mtok out
+#   tier-low   deepseek-v4-pro    $0.87/Mtok out   (the daily workhorse)
+#   tier-mid   sonnet-5          $15.00/Mtok out
+#   tier-high  opus-5            $25.00/Mtok out
+#
+# Two mechanisms, opposite in intent, are deliberately kept apart:
+#   * AVAILABILITY fallback (the `fallback` list below) — an unavailable lane is
+#     skipped and the next chain step takes over ON THE SAME TIER. It is a
+#     safety net, never an escalation.
+#   * QUALITY escalation (tier_routing.escalate_tier) — a REJECTED result fires
+#     a followup dispatch one tier UP (tier_to = tier_from + 1), linked by
+#     parent_dispatch. It climbs the ladder; it never walks the fallback list.
+# provider_registry.load_tier_ladder() enforces both invariants fail-loud: no
+# two tiers may resolve to the same primary (a duplicate rung escalates
+# nowhere) and primary cost must be strictly increasing (a higher rung must
+# actually be more expensive).
 # ---------------------------------------------------------------------------
 routing:
   tier_map:
@@ -346,7 +367,7 @@ routing:
           lane: provider
     tier-low:
       provider: deepseek_harness
-      model: deepseek-v4-flash
+      model: deepseek-v4-pro
       lane: claude_harness_keyed
       fallback:
         - provider: kimi_cli
