@@ -159,6 +159,64 @@ def _split_sql_statements(sql: str) -> list[str]:
     return statements
 
 
+# ---------------------------------------------------------------------------
+# Ordered-migration prerequisite guard (OI-1213)
+# ---------------------------------------------------------------------------
+
+# The future-system numbered walk has HARD ordering dependencies between
+# migrations. The per-version preflight hooks (registered by
+# migrate_future_system at import) enforce these — but ONLY when that module has
+# been imported into the process. A direct caller of apply_script_if_below (e.g.
+# a test fixture) applying 0030 without 0029 therefore got the check sometimes
+# and not others: silent, import-order-dependent behaviour. Measured 2026-08-15:
+# tests/test_close_track_if_done.py applied 0030 after skipping 0029 — passed
+# solo, and 26 tests failed once tests/test_mc_v4_columns.py had imported
+# migrate_future_system earlier in the same sweep.
+#
+# This registry makes the dependency UNCONDITIONAL: apply_script_if_below
+# refuses to apply ``target`` when its prerequisite migration's columns are
+# absent, no matter what has (or has not) been imported. Column identities are
+# sourced from schema_manifest (ADR-009 schema-first), imported lazily inside
+# the check so schema_migration keeps no import-time manifest dependency.
+#
+# Map: target version -> (prerequisite version, prerequisite table).
+_MIGRATION_PREREQUISITES: dict[int, tuple[int, str]] = {
+    30: (29, "tracks"),  # 0030 (track_open_items.resolved_at) requires 0029 (tracks.track_type)
+}
+
+
+def _assert_migration_prerequisite(conn: sqlite3.Connection, target_version: int) -> None:
+    """Fail loudly when applying *target_version* without its prerequisite migration.
+
+    Consults _MIGRATION_PREREQUISITES; a missing entry is a no-op. The prerequisite
+    is checked by COLUMN PRESENCE (the columns the prerequisite migration
+    introduces), not by user_version, so a DB that lies about its version still
+    fails rather than silently applying onto a broken store. Column identities
+    come from schema_manifest.columns_introduced_at (ADR-009).
+    """
+    prereq = _MIGRATION_PREREQUISITES.get(target_version)
+    if prereq is None:
+        return
+    prereq_version, table = prereq
+    # Lazy import: schema_manifest is a leaf module (imports no schema_migration),
+    # but importing it at module scope would still add an eager manifest build to
+    # every schema_migration consumer. Resolve it only when a guarded version is
+    # actually applied.
+    from schema_manifest import columns_introduced_at
+
+    required = columns_introduced_at(prereq_version, table)
+    if not required:
+        return
+    present = {r[1] for r in conn.execute(f"PRAGMA table_info('{table}')")}
+    missing = [c for c in required if c not in present]
+    if missing:
+        raise RuntimeError(
+            f"Migration {target_version:04d} requires migration {prereq_version:04d}: "
+            f"{table} is missing column(s) {missing}. Apply migration "
+            f"{prereq_version:04d} before {target_version:04d} (OI-1213)."
+        )
+
+
 def apply_script_if_below(
     conn: sqlite3.Connection,
     target_version: int,
@@ -175,6 +233,8 @@ def apply_script_if_below(
     """
     if get_user_version(conn) >= target_version:
         return False
+
+    _assert_migration_prerequisite(conn, target_version)
 
     for hook in _PREFLIGHT_HOOKS.get(target_version, []):
         hook(conn)  # raises on failure; prevents any SQL from executing

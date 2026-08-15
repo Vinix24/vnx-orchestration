@@ -117,6 +117,7 @@ class SweepResult:
     recovered: list = field(default_factory=list)   # dispatch_ids promoted to dead_letter
     skipped_alive: list = field(default_factory=list)  # dispatch_ids with a live orchestrator
     skipped_no_pid: list = field(default_factory=list)  # eligible but no PID resolved (still recovered)
+    skipped_protected: list = field(default_factory=list)  # excluded by caller (e.g. the invoking dispatch)
     capped: bool = False
     dry_run: bool = False
     errors: list = field(default_factory=list)
@@ -128,6 +129,7 @@ class SweepResult:
             "recovered_count": len(self.recovered),
             "skipped_alive": list(self.skipped_alive),
             "skipped_no_pid": list(self.skipped_no_pid),
+            "skipped_protected": list(self.skipped_protected),
             "capped": self.capped,
             "dry_run": self.dry_run,
             "errors": list(self.errors),
@@ -308,6 +310,7 @@ def sweep(
     max_orphans: int = DEFAULT_MAX_ORPHANS,
     dry_run: bool = False,
     pid_alive: "Optional[Callable[[Optional[int]], bool]]" = None,
+    exclude_ids: "Optional[set[str]]" = None,
 ) -> SweepResult:
     """Recover up to ``max_orphans`` dead-PID orphaned active dispatches.
 
@@ -324,6 +327,12 @@ def sweep(
         pid_alive:   Injectable PID-liveness predicate (defaults to
                      :func:`is_pid_alive`). Tests override it; production never
                      does.
+        exclude_ids: Dispatch ids that must never be recovered, even if their
+                     PID reads dead — used by the unified orphan sweep to fence
+                     off the dispatch invoking it (which may be alive under a
+                     liveness signal this module cannot see). Excluded orphans
+                     are recorded in ``skipped_protected`` and never consume the
+                     cap.
 
     Returns:
         :class:`SweepResult` — never raises on a per-orphan error (recorded in
@@ -332,11 +341,22 @@ def sweep(
     state_dir = state_dir if state_dir is not None else (data_dir / "state")
     liveness = pid_alive if pid_alive is not None else is_pid_alive
     result = SweepResult(dry_run=dry_run)
+    protected = exclude_ids or set()
 
     orphans = discover_orphans(data_dir, state_dir, project_id)
     result.scanned = len(orphans)
 
     for orphan in orphans:
+        # Exclusion is checked FIRST, before liveness and the cap: a protected
+        # orphan is never recovered no matter what its PID probe says, and it
+        # never consumes the flood budget.
+        if orphan.dispatch_id in protected:
+            result.skipped_protected.append(orphan.dispatch_id)
+            logger.info(
+                "crash_recovery: SKIP %s — excluded by caller (never recovered)",
+                orphan.dispatch_id,
+            )
+            continue
         # Liveness is checked BEFORE the cap so that a live orphan never trips
         # the cap or stops the scan — only genuinely recoverable (dead-PID)
         # orphans consume the budget.
