@@ -332,6 +332,8 @@ _PLAN_GATE_ARGV = {
     "status": ["delegate-track"],
     "attest": ["delegate-track", "--reason", "operator override", "--approval-id", "token-xyz"],
     "missing-reasons": [],
+    "backfill-reason": ["delegate-track", "--reason", "operator backfill", "--approval-id", "token-xyz"],
+    "reblock": ["delegate-track", "--reason", "operator reblock", "--approval-id", "token-xyz"],
 }
 
 

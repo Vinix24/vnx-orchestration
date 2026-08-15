@@ -173,6 +173,58 @@ def _plan_missing_reasons_args(
     )
 
 
+def _plan_backfill_args(
+    state_dir: Path,
+    track_id: str,
+    *,
+    reason: str = "",
+    approval_id: str = "",
+    project_id: str = PROJECT_ID,
+    json: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        state_dir=str(state_dir),
+        project_id=project_id,
+        track_id=track_id,
+        reason=reason,
+        approval_id=approval_id,
+        json=json,
+    )
+
+
+def _plan_reblock_args(
+    state_dir: Path,
+    track_id: str,
+    *,
+    reason: str = "",
+    approval_id: str = "",
+    project_id: str = PROJECT_ID,
+    json: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        state_dir=str(state_dir),
+        project_id=project_id,
+        track_id=track_id,
+        reason=reason,
+        approval_id=approval_id,
+        json=json,
+    )
+
+
+def _lift_plan_blocker_reasonless(
+    state_dir: Path, track_id: str, resolved_at: str, project_id: str = PROJECT_ID
+) -> None:
+    """Simulate a pre-fix lift: resolved_at set, resolution_reason dropped."""
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "UPDATE track_open_items SET resolved_at = ? "
+        "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+        (resolved_at, track_id, project_id, f"OI-PLAN-{track_id}"),
+    )
+    conn.commit()
+    conn.close()
+
+
 def _history_count(state_dir: Path, track_id: str, project_id: str = PROJECT_ID) -> int:
     conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
     n = conn.execute(
@@ -758,6 +810,187 @@ def test_plan_gate_attest_still_blocked_reports_plainly(tmp_path, capsys):
     assert _derived_status(sd, "T") == "blocked"  # but still blocked by the dependency
     assert len(_track_events(sd, "T", "plan_gate_attest")) == 1
     assert "STILL" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# plan-gate backfill-reason
+# ---------------------------------------------------------------------------
+
+def test_plan_gate_backfill_reason_fills_reasonless_resolved_row(tmp_path):
+    """backfill records the missing resolution_reason on an already-resolved row,
+    leaving resolved_at untouched — measured by reading the row back."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="shipped", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    _lift_plan_blocker_reasonless(sd, "T", "2026-08-14T10:00:00.000000Z")
+
+    rc = planning_cli.cmd_plan_gate_backfill_reason(
+        _plan_backfill_args(sd, "T", reason="already shipped+merged pre-gate", approval_id="APR-2")
+    )
+    assert rc == 0
+    assert _plan_oi_resolution_reason(sd, "T") == "[backfill:APR-2] already shipped+merged pre-gate"
+    assert _plan_oi_resolved_at(sd, "T") == "2026-08-14T10:00:00.000000Z"  # untouched
+
+    events = _track_events(sd, "T", "plan_gate_backfill")
+    assert len(events) == 1
+    assert events[0]["details"]["reason"] == "already shipped+merged pre-gate"
+    assert events[0]["details"]["approval_id"] == "APR-2"
+
+
+def test_plan_gate_backfill_reason_unresolved_row_fails_and_leaves_row(tmp_path, capsys):
+    """backfill on a still-blocked row is refused with an explicit pointer to attest,
+    and the row is left untouched."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)  # unresolved
+
+    rc = planning_cli.cmd_plan_gate_backfill_reason(
+        _plan_backfill_args(sd, "T", reason="x", approval_id="APR-1")
+    )
+    assert rc == 1
+    assert "attest" in capsys.readouterr().err
+    assert _plan_oi_resolved_at(sd, "T") is None
+    assert _plan_oi_resolution_reason(sd, "T") is None
+    assert _track_events(sd, "T", "plan_gate_backfill") == []
+
+
+def test_plan_gate_backfill_reason_existing_reason_fails_and_preserves(tmp_path, capsys):
+    """Overwriting an existing resolution_reason is falsification: refused, the
+    existing reason is shown, and it stays put."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="shipped", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    planning_cli._resolve_plan_blocker(
+        sd, "T", PROJECT_ID, reason="shipped pre-gate", resolver="attest", approval_id="APR-9"
+    )
+    original = _plan_oi_resolution_reason(sd, "T")
+    assert original == "[attest:APR-9] shipped pre-gate"
+
+    rc = planning_cli.cmd_plan_gate_backfill_reason(
+        _plan_backfill_args(sd, "T", reason="second", approval_id="APR-2")
+    )
+    assert rc == 1
+    assert original in capsys.readouterr().err  # existing reason shown
+    assert _plan_oi_resolution_reason(sd, "T") == original  # unchanged
+
+
+def test_plan_gate_backfill_reason_no_seeded_blocker_fails(tmp_path, capsys):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    rc = planning_cli.cmd_plan_gate_backfill_reason(
+        _plan_backfill_args(sd, "T", reason="x", approval_id="APR-1")
+    )
+    assert rc == 1
+    assert "nothing to backfill" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad_reason", ["", "   ", "\t\n"])
+def test_plan_gate_backfill_reason_empty_reason_refused(tmp_path, bad_reason):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    _lift_plan_blocker_reasonless(sd, "T", "2026-08-14T10:00:00.000000Z")
+
+    rc = planning_cli.cmd_plan_gate_backfill_reason(
+        _plan_backfill_args(sd, "T", reason=bad_reason, approval_id="APR-1")
+    )
+    assert rc == 2
+    assert _plan_oi_resolution_reason(sd, "T") is None
+    assert _track_events(sd, "T", "plan_gate_backfill") == []
+
+
+# ---------------------------------------------------------------------------
+# plan-gate reblock
+# ---------------------------------------------------------------------------
+
+def test_plan_gate_reblock_puts_back_lifted_blocker_and_blocks(tmp_path):
+    """reblock clears resolved_at again and the track reconciles back to blocked,
+    with the prior resolution history preserved in resolution_reason."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    _lift_plan_blocker_reasonless(sd, "T", "2026-08-14T10:00:00.000000Z")
+
+    # Reconcile so the (wrong) lift is reflected before we re-block — proves the
+    # reblock is what flips derived_status back to blocked.
+    planning_cli.track_reconciler.reconcile_track(sd, "T", PROJECT_ID)
+    assert _derived_status(sd, "T") != "blocked"
+
+    rc = planning_cli.cmd_plan_gate_reblock(
+        _plan_reblock_args(sd, "T", reason="gate still has work", approval_id="APR-3")
+    )
+    assert rc == 0
+    assert _plan_oi_resolved_at(sd, "T") is None  # blocking again
+    assert _derived_status(sd, "T") == "blocked"
+
+    reason = _plan_oi_resolution_reason(sd, "T")
+    assert reason.startswith("[reblock:APR-3] gate still has work")
+    assert "2026-08-14T10:00:00.000000Z" in reason  # prior resolved_at preserved
+    assert "prior reason: (none)" in reason
+
+    events = _track_events(sd, "T", "plan_gate_reblock")
+    assert len(events) == 1
+    assert events[0]["details"]["approval_id"] == "APR-3"
+    assert events[0]["details"]["prior_resolved_at"] == "2026-08-14T10:00:00.000000Z"
+
+
+def test_plan_gate_reblock_preserves_prior_reason(tmp_path):
+    """A wrongly-lifted row that DID carry a reason keeps that reason visible,
+    embedded in the reversal note — nothing is silently wiped."""
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    planning_cli._resolve_plan_blocker(
+        sd, "T", PROJECT_ID, reason="shipped pre-gate", resolver="attest", approval_id="APR-9"
+    )
+
+    rc = planning_cli.cmd_plan_gate_reblock(
+        _plan_reblock_args(sd, "T", reason="was wrong", approval_id="APR-4")
+    )
+    assert rc == 0
+    reason = _plan_oi_resolution_reason(sd, "T")
+    assert reason.startswith("[reblock:APR-4] was wrong")
+    assert "prior reason: [attest:APR-9] shipped pre-gate" in reason
+    assert _derived_status(sd, "T") == "blocked"
+
+
+def test_plan_gate_reblock_already_blocked_fails(tmp_path, capsys):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)  # already unresolved
+
+    rc = planning_cli.cmd_plan_gate_reblock(
+        _plan_reblock_args(sd, "T", reason="x", approval_id="APR-1")
+    )
+    assert rc == 1
+    assert "nothing to put back" in capsys.readouterr().err
+    assert _plan_oi_resolved_at(sd, "T") is None
+    assert _track_events(sd, "T", "plan_gate_reblock") == []
+
+
+def test_plan_gate_reblock_no_seeded_blocker_fails(tmp_path, capsys):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    rc = planning_cli.cmd_plan_gate_reblock(
+        _plan_reblock_args(sd, "T", reason="x", approval_id="APR-1")
+    )
+    assert rc == 1
+    assert "nothing to put back" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad_reason", ["", "   ", "\t\n"])
+def test_plan_gate_reblock_empty_reason_refused(tmp_path, bad_reason):
+    sd = _build_db_plan_gate(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    planning_cli._seed_plan_blocker(sd, "T", PROJECT_ID)
+    _lift_plan_blocker_reasonless(sd, "T", "2026-08-14T10:00:00.000000Z")
+
+    rc = planning_cli.cmd_plan_gate_reblock(
+        _plan_reblock_args(sd, "T", reason=bad_reason, approval_id="APR-1")
+    )
+    assert rc == 2
+    assert _plan_oi_resolved_at(sd, "T") is not None  # still lifted (unchanged)
+    assert _track_events(sd, "T", "plan_gate_reblock") == []
 
 
 # ---------------------------------------------------------------------------

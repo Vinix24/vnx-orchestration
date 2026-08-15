@@ -318,6 +318,53 @@ class TestOiClose:
                 reason="should fail"
             )
 
+    def test_unlink_backfill_sets_reason_on_resolved_row(self, state_dir):
+        """backfill=True fills resolution_reason on an ALREADY-resolved row and
+        leaves resolved_at untouched (single write path for retroactive fill)."""
+        tracks_lib.create_track(state_dir, "feat-bf", PROJECT_ID, "TB", "GB", phase="active")
+        tracks_lib.link_open_item(
+            state_dir, "feat-bf", PROJECT_ID, "OI-BF", "blocks", "manual"
+        )
+        tracks_lib.unlink_open_item(
+            state_dir, "feat-bf", PROJECT_ID, "OI-BF", "blocks", reason="original"
+        )
+        db = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        before = conn.execute(
+            "SELECT resolved_at, resolution_reason FROM track_open_items "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ?",
+            ("feat-bf", PROJECT_ID, "OI-BF"),
+        ).fetchone()
+        conn.close()
+
+        tracks_lib.unlink_open_item(
+            state_dir, "feat-bf", PROJECT_ID, "OI-BF", "blocks",
+            reason="[backfill:APR-1] later recorded", backfill=True,
+        )
+        conn = sqlite3.connect(str(db))
+        conn.row_factory = sqlite3.Row
+        after = conn.execute(
+            "SELECT resolved_at, resolution_reason FROM track_open_items "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ?",
+            ("feat-bf", PROJECT_ID, "OI-BF"),
+        ).fetchone()
+        conn.close()
+        assert after["resolved_at"] == before["resolved_at"]  # untouched
+        assert after["resolution_reason"] == "[backfill:APR-1] later recorded"
+
+    def test_unlink_backfill_unresolved_row_raises(self, state_dir):
+        """backfill=True on a still-open row raises ValueError (nothing to backfill)."""
+        tracks_lib.create_track(state_dir, "feat-bf2", PROJECT_ID, "TB2", "GB2", phase="active")
+        tracks_lib.link_open_item(
+            state_dir, "feat-bf2", PROJECT_ID, "OI-BF2", "blocks", "manual"
+        )
+        with pytest.raises(ValueError, match="not yet resolved"):
+            tracks_lib.unlink_open_item(
+                state_dir, "feat-bf2", PROJECT_ID, "OI-BF2", "blocks",
+                reason="[backfill:APR-1] later recorded", backfill=True,
+            )
+
     def test_unlink_writes_event(self, state_dir):
         tracks_lib.create_track(state_dir, "feat-7", PROJECT_ID, "T7", "G7", phase="active")
         tracks_lib.link_open_item(

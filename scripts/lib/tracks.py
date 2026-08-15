@@ -787,11 +787,22 @@ def unlink_open_item(
     actor: str = "operator",
     conn: Optional[sqlite3.Connection] = None,
     event_sink: Optional[list] = None,
+    backfill: bool = False,
 ) -> None:
     """Close a track↔OI link non-destructively (resolved_at + reason; row kept).
+
     Requires migration 0030. A caller ``conn`` (owns=False) defers BOTH commit AND
-    the ``track_oi_closed`` event — ``event_sink`` REQUIRED, conn must target the
-    state_dir DB (D3; C3-N1/C3-N2). Raises TrackNotFoundError/ValueError/RuntimeError."""
+    the event — ``event_sink`` REQUIRED, conn must target the state_dir DB
+    (D3; C3-N1/C3-N2). Raises TrackNotFoundError/ValueError/RuntimeError.
+
+    ``backfill=True`` turns this into the retroactive-fill form (plan-gate
+    backfill-reason): the row must ALREADY be resolved and only
+    ``resolution_reason`` is written (``resolved_at`` is left untouched), emitting
+    ``track_oi_reason_backfilled`` instead of ``track_oi_closed``. The caller
+    decides whether overwriting an existing reason is legitimate (the
+    ``plan-gate backfill-reason`` verb refuses a non-empty one; a reblock composes
+    the prior reason into the new value). This stays the single write path to
+    ``resolution_reason`` — a second path is what drifted before."""
     valid_link_types = frozenset({"blocks", "warns", "related"})
     if link_type not in valid_link_types:
         raise ValueError(f"Invalid link_type: {link_type!r}. Must be one of {sorted(valid_link_types)}")
@@ -822,20 +833,38 @@ def unlink_open_item(
                 f"Open item not found: track={track_id!r} project={project_id!r} "
                 f"oi_id={oi_id!r} link_type={link_type!r}"
             )
-        if row["resolved_at"] is not None:
-            raise ValueError(
-                f"Open item already resolved: track={track_id!r} oi_id={oi_id!r} "
-                f"link_type={link_type!r} (resolved_at={row['resolved_at']!r})"
+        if backfill:
+            if row["resolved_at"] is None:
+                raise ValueError(
+                    f"Open item not yet resolved: track={track_id!r} oi_id={oi_id!r} "
+                    f"link_type={link_type!r} (resolved_at is NULL); backfill only "
+                    "fills a reason on an already-resolved row"
+                )
+            _conn.execute(
+                "UPDATE track_open_items SET resolution_reason = ? "
+                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
+                (reason.strip(), track_id, project_id, oi_id, link_type),
             )
-        _conn.execute(
-            "UPDATE track_open_items SET resolved_at = ?, resolution_reason = ? "
-            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
-            (_now_utc(), reason.strip(), track_id, project_id, oi_id, link_type),
-        )
-        _emit_or_defer(
-            event_sink, state_dir, "track_oi_closed", track_id, project_id, actor,
-            {"oi_id": oi_id, "link_type": link_type, "reason": reason},
-        )
+            _emit_or_defer(
+                event_sink, state_dir, "track_oi_reason_backfilled", track_id,
+                project_id, actor,
+                {"oi_id": oi_id, "link_type": link_type, "reason": reason},
+            )
+        else:
+            if row["resolved_at"] is not None:
+                raise ValueError(
+                    f"Open item already resolved: track={track_id!r} oi_id={oi_id!r} "
+                    f"link_type={link_type!r} (resolved_at={row['resolved_at']!r})"
+                )
+            _conn.execute(
+                "UPDATE track_open_items SET resolved_at = ?, resolution_reason = ? "
+                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = ?",
+                (_now_utc(), reason.strip(), track_id, project_id, oi_id, link_type),
+            )
+            _emit_or_defer(
+                event_sink, state_dir, "track_oi_closed", track_id, project_id, actor,
+                {"oi_id": oi_id, "link_type": link_type, "reason": reason},
+            )
         if owns:
             _conn.commit()
     except Exception:

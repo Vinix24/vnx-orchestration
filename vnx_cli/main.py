@@ -764,6 +764,26 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     )
     _common_horizon_args(p_pmiss)
 
+    p_pbackfill = subs.add_parser(
+        "backfill-reason",
+        help="record the missing resolution_reason on an already-resolved plan-gate blocker",
+    )
+    _common_horizon_args(p_pbackfill)
+    p_pbackfill.add_argument("track_id")
+    p_pbackfill.add_argument("--reason", default=None, help="operator reason (REQUIRED)")
+    p_pbackfill.add_argument("--approval-id", dest="approval_id", default=None,
+                             help="operator approval token (REQUIRED)")
+
+    p_preblock = subs.add_parser(
+        "reblock",
+        help="put back a wrongly-lifted plan-gate blocker (track is blocked again)",
+    )
+    _common_horizon_args(p_preblock)
+    p_preblock.add_argument("track_id")
+    p_preblock.add_argument("--reason", default=None, help="operator reason (REQUIRED)")
+    p_preblock.add_argument("--approval-id", dest="approval_id", default=None,
+                            help="operator approval token (REQUIRED)")
+
 
 def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     horizon_parser = subparsers.add_parser(

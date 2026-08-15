@@ -1769,12 +1769,20 @@ def _plan_gate_supported(conn: sqlite3.Connection) -> bool:
     )
 
 
-def _seed_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bool:
+def _seed_plan_blocker(
+    state_dir: Path, track_id: str, project_id: str, reason: Optional[str] = None
+) -> bool:
     """Seed the synthetic OI-PLAN-<track> blocker so the track is born plan-gated.
 
     Idempotent (INSERT OR IGNORE on the track_open_items PK). Returns True once the
     blocker exists and the track reconciles to blocked; False on a DB that predates
     the plan-gate schema (graceful no-op).
+
+    ``reason`` turns this into the RE-BLOCK form (plan-gate reblock): the existing
+    resolved row's ``resolved_at`` is cleared in the SAME UPDATE that records the
+    reversal ``resolution_reason``, so the history that the gate was once lifted
+    is preserved on the row instead of being silently wiped. Same path as ``seed``
+    — reblock must not grow a second write path to ``track_open_items``.
     """
     conn = _db_conn(state_dir)
     try:
@@ -1792,11 +1800,18 @@ def _seed_plan_blocker(state_dir: Path, track_id: str, project_id: str) -> bool:
         # Re-seed must RE-block: clear resolved_at so a track whose plan gate
         # previously passed is gated again (e.g. a mid-flight plan change). Without
         # this, INSERT OR IGNORE silently no-ops on the resolved row.
-        conn.execute(
-            "UPDATE track_open_items SET resolved_at = NULL "
-            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
-            (track_id, project_id, oi),
-        )
+        if reason is None:
+            conn.execute(
+                "UPDATE track_open_items SET resolved_at = NULL "
+                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+                (track_id, project_id, oi),
+            )
+        else:
+            conn.execute(
+                "UPDATE track_open_items SET resolved_at = NULL, resolution_reason = ? "
+                "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+                (reason, track_id, project_id, oi),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -1813,9 +1828,31 @@ def _compose_plan_resolution_reason(
     tell a panel pass from an operator attestation without parsing free text:
     ``[panel] PASS (2 pass / 0 revise / 0 block, 3 seats)`` vs
     ``[attest:APR-1] already shipped+merged pre-gate``.
+
+    The backfill and reblock verbs reuse this with resolver tags ``backfill`` and
+    ``reblock`` respectively, so a later reader can tell a reason recorded at
+    resolution time (``panel``/``attest``) from one added after the fact.
     """
     tag = f"{resolver}:{approval_id}" if approval_id else resolver
     return f"[{tag}] {reason.strip()}"
+
+
+def _compose_plan_reblock_reason(
+    reason: str, approval_id: str, resolved_at: str, prior_reason: Optional[str]
+) -> str:
+    """Canonical ``resolution_reason`` for a re-blocked plan-gate blocker.
+
+    Records the reversal AND preserves the history that the gate was once lifted:
+    the original ``resolved_at`` and the prior ``resolution_reason`` (when it had
+    one) are embedded, so re-blocking a wrongly-lifted row never silently wipes
+    the evidence it was ever open. A reasonless prior resolution reads ``(none)``.
+    """
+    prior = (prior_reason or "").strip() or "(none)"
+    head = _compose_plan_resolution_reason("reblock", reason, approval_id)
+    return (
+        f"{head} (reversing a wrongly-lifted plan-gate blocker; "
+        f"was resolved {resolved_at}; prior reason: {prior})"
+    )
 
 
 def _resolve_plan_blocker(
@@ -2664,6 +2701,242 @@ def cmd_plan_gate_missing_reasons(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_gate_backfill_reason(args: argparse.Namespace) -> int:
+    """Operator disposition: record the missing ``resolution_reason`` on an ALREADY
+    resolved OI-PLAN blocker (the rows the pre-fix write path left reasonless).
+
+    Backfill is NOT a resolution — the gate was already cleared. This writes only
+    the reason (never ``resolved_at``) and stamps it ``[backfill:<approval-id>]``
+    so a later reader can tell it apart from a reason recorded at resolution time
+    (``[panel] ...`` / ``[attest:...] ...``).
+
+    Human-gated: --reason AND --approval-id are BOTH required. Refuses a row that
+    is NOT resolved (that is ``attest``'s job, named explicitly in the error) and
+    a row that ALREADY carries a non-empty reason (overwriting one is
+    falsification, not backfill — the existing reason is shown so the operator
+    sees what they would erase).
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    reason = (getattr(args, "reason", None) or "").strip()
+    approval_id = (getattr(args, "approval_id", None) or "").strip()
+    if not reason or not approval_id:
+        print(
+            "plan-gate backfill-reason: --reason and --approval-id are both "
+            "required (the operator's gate token). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"plan-gate backfill-reason: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 1
+
+    conn = _db_conn(state_dir)
+    try:
+        if not _plan_gate_supported(conn):
+            print(
+                "plan-gate backfill-reason: plan-gate schema absent "
+                "(need track_open_items + tracks.derived_status); apply migrations "
+                "0022/0028/0030 first",
+                file=sys.stderr,
+            )
+            return 1
+        oi = _plan_blocker_oi(track_id)
+        row = conn.execute(
+            "SELECT resolved_at, resolution_reason FROM track_open_items "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+            (track_id, project_id, oi),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        print(
+            f"plan-gate backfill-reason: no plan-gate blocker seeded for track "
+            f"{track_id!r} (project {project_id!r}); nothing to backfill.",
+            file=sys.stderr,
+        )
+        return 1
+    if row["resolved_at"] is None:
+        print(
+            f"plan-gate backfill-reason: track {track_id!r} is still blocked "
+            "(the OI-PLAN blocker is unresolved). backfill fills a reason on an "
+            "already-resolved row — to resolve it now, use `plan-gate attest`.",
+            file=sys.stderr,
+        )
+        return 1
+    existing = (row["resolution_reason"] or "").strip()
+    if existing:
+        print(
+            f"plan-gate backfill-reason: track {track_id!r} already carries a "
+            f"resolution_reason; overwriting it is falsification, not backfill. "
+            f"Existing reason: {existing!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    full_reason = _compose_plan_resolution_reason("backfill", reason, approval_id)
+    try:
+        tracks_lib.unlink_open_item(
+            state_dir, track_id, project_id, oi, "blocks",
+            reason=full_reason, actor="backfill", backfill=True,
+        )
+    except Exception as exc:
+        print(f"plan-gate backfill-reason: unexpected error: {exc}", file=sys.stderr)
+        return 1
+
+    tracks_lib._emit_track_event(
+        state_dir, "plan_gate_backfill", track_id, project_id, "operator",
+        {"reason": reason, "approval_id": approval_id, "track_id": track_id},
+    )
+
+    if args.json:
+        print(json.dumps({
+            "track_id": track_id,
+            "project_id": project_id,
+            "action": "backfilled",
+            "applied": True,
+            "resolution_reason": full_reason,
+        }, indent=2, default=str))
+    else:
+        print(
+            f"\nvnx horizon plan-gate backfill-reason — {track_id} "
+            f"(project '{project_id}')\n"
+        )
+        print(f"  backfilled: {reason} (approval={approval_id})")
+        print(f"  resolution_reason: {full_reason}\n")
+    return 0
+
+
+def cmd_plan_gate_reblock(args: argparse.Namespace) -> int:
+    """Operator disposition: put back a wrongly-lifted plan-gate blocker.
+
+    For a track whose OI-PLAN blocker was cleared without a real gate pass, this
+    re-blocks it: ``resolved_at`` is cleared via the SAME path ``seed`` uses
+    (``_seed_plan_blocker``) and the reversal is recorded in ``resolution_reason``
+    with the prior resolution history embedded — the row keeps visible evidence it
+    was once lifted, plus a reason saying it was turned back.
+
+    Human-gated: --reason AND --approval-id are BOTH required. Refuses when there
+    is already an UNRESOLVED plan blocker (nothing to put back) and when no
+    blocker was ever seeded. After re-blocking, verifies ``derived_status``
+    actually reflects the block, exactly as ``seed`` does.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    reason = (getattr(args, "reason", None) or "").strip()
+    approval_id = (getattr(args, "approval_id", None) or "").strip()
+    if not reason or not approval_id:
+        print(
+            "plan-gate reblock: --reason and --approval-id are both required "
+            "(the operator's gate token). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"plan-gate reblock: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 1
+
+    conn = _db_conn(state_dir)
+    try:
+        if not _plan_gate_supported(conn):
+            print(
+                "plan-gate reblock: plan-gate schema absent "
+                "(need track_open_items + tracks.derived_status); apply migrations "
+                "0022/0028/0030 first",
+                file=sys.stderr,
+            )
+            return 1
+        oi = _plan_blocker_oi(track_id)
+        row = conn.execute(
+            "SELECT resolved_at, resolution_reason FROM track_open_items "
+            "WHERE track_id = ? AND project_id = ? AND oi_id = ? AND link_type = 'blocks'",
+            (track_id, project_id, oi),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        print(
+            f"plan-gate reblock: no plan-gate blocker seeded for track {track_id!r} "
+            f"(project {project_id!r}); nothing to put back.",
+            file=sys.stderr,
+        )
+        return 1
+    if row["resolved_at"] is None:
+        print(
+            f"plan-gate reblock: track {track_id!r} already has an unresolved "
+            "plan-gate blocker; there is nothing to put back.",
+            file=sys.stderr,
+        )
+        return 1
+
+    composed = _compose_plan_reblock_reason(
+        reason, approval_id, row["resolved_at"], row["resolution_reason"],
+    )
+    if not _seed_plan_blocker(state_dir, track_id, project_id, reason=composed):
+        print(
+            "plan-gate reblock: plan-gate schema absent (need track_open_items + "
+            "tracks.derived_status); apply migrations 0022/0028/0030 first",
+            file=sys.stderr,
+        )
+        return 1
+
+    post = tracks_lib.get_track(state_dir, track_id, project_id)
+    derived = post.get("derived_status") if isinstance(post, dict) else None
+    if derived != "blocked":
+        print(
+            f"plan-gate reblock: track {track_id!r} re-blocked (resolved_at cleared), "
+            f"but derived_status={derived!r} does not reflect the block. The "
+            "reconciler did not mark it blocked — investigate before relying on the gate.",
+            file=sys.stderr,
+        )
+        return 1
+
+    tracks_lib._emit_track_event(
+        state_dir, "plan_gate_reblock", track_id, project_id, "operator",
+        {
+            "reason": reason,
+            "approval_id": approval_id,
+            "track_id": track_id,
+            "prior_resolved_at": row["resolved_at"],
+            "prior_reason": row["resolution_reason"],
+        },
+    )
+
+    if args.json:
+        print(json.dumps({
+            "track_id": track_id,
+            "project_id": project_id,
+            "action": "reblocked",
+            "applied": True,
+            "derived_status": derived,
+            "resolution_reason": composed,
+        }, indent=2, default=str))
+    else:
+        print(f"\nvnx horizon plan-gate reblock — {track_id} (project '{project_id}')\n")
+        print(f"  reblocked: {reason} (approval={approval_id})")
+        print(f"  derived_status={derived}")
+        print(f"  resolution_reason: {composed}\n")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -2955,6 +3228,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(p_pmiss)
     p_pmiss.set_defaults(func=cmd_plan_gate_missing_reasons)
+
+    p_pbackfill = pg_sub.add_parser(
+        "backfill-reason",
+        help="record the missing resolution_reason on an already-resolved plan-gate blocker",
+    )
+    _common(p_pbackfill)
+    p_pbackfill.add_argument("track_id")
+    p_pbackfill.add_argument("--reason", default="", help="operator reason (REQUIRED)")
+    p_pbackfill.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_pbackfill.set_defaults(func=cmd_plan_gate_backfill_reason)
+
+    p_preblock = pg_sub.add_parser(
+        "reblock",
+        help="put back a wrongly-lifted plan-gate blocker (track is blocked again)",
+    )
+    _common(p_preblock)
+    p_preblock.add_argument("track_id")
+    p_preblock.add_argument("--reason", default="", help="operator reason (REQUIRED)")
+    p_preblock.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_preblock.set_defaults(func=cmd_plan_gate_reblock)
 
     return parser
 
