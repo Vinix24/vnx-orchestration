@@ -14,7 +14,11 @@
 #                    keys: provider, model (str|list), role (str|list),
 #                          task_class (str|list), via (str)
 #   required_route   optional, used with rule=require_route
-#                    keys: provider, model, role (str|list)
+#                    keys: provider, model, role (str|list), via (str|list)
+#                    provider is a wave7_models.yaml registry key: the enforcer
+#                    resolves the incoming provider string to that key, so every
+#                    alias routing to the same provider (glm-harness, litellm:zai
+#                    -> zai) is covered without repeating the set in the YAML.
 #   forbidden_import optional, used with rule=forbid_import
 #                    keys: patterns (list of substrings or simple regex)
 #   reason           human-readable justification (cite memory ref or ADR)
@@ -107,16 +111,21 @@ constraints:
     override_allowed: false
 
   - id: zai-via-openrouter-only
-    rule: forbid_route
-    forbidden_route:
+    rule: require_route
+    required_route:
       provider: zai
-      via: direct
+      via: [openrouter, claude_harness_openrouter]
     reason: >-
       Native Zhipu integration is deferred. Wave 7 PR-7.3 routes GLM through
       OpenRouter; direct Zhipu API calls bypass the cost-tracking pipeline and
-      the fallback chain configured in routing_policy.yaml. Only GLM-5.2 is an
-      allowed version (deprecated-glm-models, operator directive 2026-08-03:
-      GLM-4.5/4.6/5/5.1 blocked).
+      the fallback chain configured in routing_policy.yaml. This is an allowlist,
+      not a blocklist: the zai provider may only reach OpenRouter via an approved
+      route (the plain openrouter runner or the claude-harness openrouter lane),
+      and the direct Zhipu API route is refused. A blocklist of one forbidden
+      route (via=direct) lets every route never listed through; routes are
+      structurally open-ended, so only an allowlist enforces the
+      one-approved-route decision. Admitting another route is a deliberate
+      one-line operator change to this via list.
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false
@@ -137,6 +146,10 @@ constraints:
       listed through; model versions are structurally open-ended, so only an
       allowlist enforces the one-approved-version decision. Admitting a newer
       version is a deliberate one-line operator change to this model value.
+      `provider: zai` is the wave7_models.yaml registry identity: the enforcer
+      resolves every provider string that routes to it (zai, litellm:zai,
+      glm-harness) to that key, so the allowlist cannot be sidestepped by
+      presenting a different provider string for the same models (OI-1217).
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false

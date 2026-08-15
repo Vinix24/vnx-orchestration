@@ -6,7 +6,7 @@ Covers every constraint in provider_constraints.yaml:
   - t0-opus-only            (require_route, warn, override)
   - workers-kimi-pinned     (require_route, warn, override)
   - no-anthropic-sdk        (forbid_import — warning at runtime)
-  - zai-via-openrouter-only (forbid_route, blocking)
+  - zai-via-openrouter-only (require_route allowlist, blocking)
   - deprecated-glm-models   (require_route allowlist, blocking)
   - deepseek-harness-subscription-blocked (forbid_route, blocking)
 
@@ -160,7 +160,7 @@ class TestNoAnthropicSdk:
 
 
 # ---------------------------------------------------------------------------
-# zai-via-openrouter-only — forbid_route provider=zai via=direct
+# zai-via-openrouter-only — require_route allowlist provider=zai via=[openrouter, claude_harness_openrouter]
 # ---------------------------------------------------------------------------
 
 class TestZaiViaOpenrouterOnly:
@@ -170,7 +170,7 @@ class TestZaiViaOpenrouterOnly:
             real_enforcer.enforce(provider="zai", via="direct")
 
     def test_zai_via_openrouter_allowed(self, real_enforcer: ConstraintEnforcer, monkeypatch):
-        # zai-via-openrouter-only permits openrouter (it forbids only DIRECT). The newer
+        # zai-via-openrouter-only is an allowlist over via: openrouter clears. The newer
         # glm-via-harness-only constraint would otherwise block plain litellm:zai entirely
         # (GLM must run via glm-harness); set its benchmark/legacy override to isolate the
         # constraint under test here. model=glm-5.2 clears the deprecated-glm-models
@@ -227,6 +227,92 @@ class TestDeprecatedGlmModels:
         """The allowlist is scoped to provider zai; a glm-named model on another
         provider is not this constraint's concern."""
         real_enforcer.enforce(provider="claude", model="glm-5.3")
+
+
+# ---------------------------------------------------------------------------
+# OI-1217 — the deprecated-glm-models allowlist must cover EVERY provider string
+# that routes to the zai registry provider (resolved via _registry_key_for), not
+# just the literal "zai" string named in the constraint.
+# ---------------------------------------------------------------------------
+
+ZAI_ROUTES = [
+    ("zai", None),
+    ("litellm:zai", None),
+    ("litellm", "zai"),
+    ("glm-harness", None),
+    ("glm-harness", "zai"),
+]
+
+
+class TestDeprecatedGlmModelsCoverAllZaiRoutes:
+
+    @pytest.mark.parametrize("provider,sub_provider", ZAI_ROUTES)
+    def test_deprecated_model_refused_on_every_zai_route(
+        self, real_enforcer: ConstraintEnforcer, provider, sub_provider
+    ):
+        """A non-allowed GLM version must be refused no matter which provider
+        string routes to zai (OI-1217)."""
+        for bad_model in ("glm-4.5", "glm-5", "glm-5.1", "glm-5.3"):
+            with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+                real_enforcer.enforce(
+                    provider=provider, sub_provider=sub_provider, model=bad_model
+                )
+
+    @pytest.mark.parametrize("provider,sub_provider", ZAI_ROUTES)
+    def test_glm52_allowed_on_every_zai_route(
+        self, real_enforcer: ConstraintEnforcer, provider, sub_provider
+    ):
+        """glm-5.2 stays allowed on every route to zai."""
+        violations = real_enforcer.check_constraints(
+            provider=provider, sub_provider=sub_provider, model="glm-5.2"
+        )
+        blocking = [v for v in violations if v.severity == "blocking"]
+        assert not [v for v in blocking if v.code == "deprecated-glm-models"], blocking
+
+    def test_glm_harness_without_sub_provider_fails_loud(self, real_enforcer: ConstraintEnforcer):
+        """Fail-closed test (OI-1217): glm-harness is a Provider enum member that
+        routes to zai but is not the literal string named in the constraint. It
+        must NOT silently pass a deprecated model."""
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            real_enforcer.enforce(provider="glm-harness", model="glm-5")
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            real_enforcer.enforce(provider="glm-harness", model="glm-5.1")
+
+
+# ---------------------------------------------------------------------------
+# OI-1205 — zai-via-openrouter-only is an allowlist over via, not a blocklist.
+# ---------------------------------------------------------------------------
+
+class TestZaiViaOpenrouterOnlyAllowlist:
+
+    def test_direct_route_refused(self, real_enforcer: ConstraintEnforcer):
+        with pytest.raises(HardConstraintViolation, match="zai-via-openrouter-only"):
+            real_enforcer.enforce(provider="zai", via="direct")
+
+    def test_openrouter_route_allowed(self, real_enforcer: ConstraintEnforcer, monkeypatch):
+        monkeypatch.setenv("VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY", "1")
+        real_enforcer.enforce(
+            provider="litellm", sub_provider="zai", model="glm-5.2", via="openrouter"
+        )
+
+    def test_harness_openrouter_route_allowed(self, real_enforcer: ConstraintEnforcer):
+        """The production glm-harness lane (via=claude_harness_openrouter) clears
+        the allowlist — it fronts OpenRouter, never the direct Zhipu API."""
+        real_enforcer.enforce(
+            provider="glm-harness", sub_provider="zai",
+            model="glm-5.2", via="claude_harness_openrouter",
+        )
+
+    def test_reason_matches_rule(self, real_enforcer: ConstraintEnforcer):
+        """The YAML reason and rule say the same thing: an allowlist over via."""
+        constraint = next(
+            c for c in real_enforcer._constraints if c.get("id") == "zai-via-openrouter-only"
+        )
+        assert constraint["rule"] == "require_route"
+        assert constraint["required_route"]["via"] == ["openrouter", "claude_harness_openrouter"]
+        reason = constraint.get("reason", "")
+        assert "allowlist" in reason
+        assert "not a blocklist" in reason
 
 
 # ---------------------------------------------------------------------------
