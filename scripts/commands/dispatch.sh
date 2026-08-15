@@ -211,7 +211,10 @@ Single-entry gate (the default lane). Staged forms route through the door:
                                Does NOT kill the holder — use the printed pid if needed.
   VNX_DISPATCH_LEGACY=1        Force legacy path even when gate is on
 
-Headless (api_metered) lane: set allow_headless=true + headless_reason in dispatch-spec.json.
+Headless lane: set allow_headless=true + headless_reason in dispatch-spec.json.
+  Billing is auth-derived, not lane-derived (dispatch_plan.claude_auth_is_api_metered):
+  without an own ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL a headless dispatch bills as
+  "subscription", not "api_metered".
   The --adapter subprocess / VNX_ADAPTER / VNX_AUTO_ROUTE flags are LEGACY-ONLY
   (cmd_dispatch path when VNX_SINGLE_ENTRY_DISPATCH is unset) and have no effect here.
 HELP

@@ -1622,7 +1622,11 @@ def _execute_claude_headless(
     data_dir: Path,
     role: Optional[str] = None,
 ) -> int:
-    """Execute a validated claude_headless plan via ClaudeSubprocessAdapter (headless api_metered).
+    """Execute a validated claude_headless plan via ClaudeSubprocessAdapter.
+
+    Billing is auth-derived, not lane-derived (OI-1156): without an own
+    ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL this bills as ``subscription``, not
+    ``api_metered`` — see dispatch_plan.claude_auth_is_api_metered.
 
     Delegates all permit verification, TOCTOU check, and GOVERN to
     run_envelope_headless_plan — same security contract as the provider lane.

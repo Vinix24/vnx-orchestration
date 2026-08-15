@@ -645,7 +645,12 @@ def run_envelope_headless_plan(
     data_dir: Path,
     role: Optional[str] = None,
 ) -> EnvelopeResult:
-    """Execute a validated ExecutionPlan for the claude_headless lane (api_metered billing).
+    """Execute a validated ExecutionPlan for the claude_headless lane.
+
+    Billing is auth-derived, not lane-derived (OI-1156): a headless dispatch
+    without an own ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL bills as
+    ``subscription``, not ``api_metered`` — see
+    dispatch_plan.claude_auth_is_api_metered.
 
     Headless lane routes to ClaudeSubprocessAdapter (spawn_claude, claude -p) with the
     same require_permit + instruction-sha256 TOCTOU verify + fail-closed GOVERN as the

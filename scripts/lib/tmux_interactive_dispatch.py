@@ -392,7 +392,10 @@ def _sanitize_session_name(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default ON since 15-08)
+# Worker-scope PreToolUse enforcement hook wiring (spike E1/E2). Whether
+# enforcement is ON or OFF is decided by
+# worker_permissions.worker_permission_enforcement_enabled() — that resolver
+# is the single source of truth for the default; do not restate it here.
 # ---------------------------------------------------------------------------
 
 # Command anchors the hook at the FABRIC install root, never the worktree or
@@ -527,9 +530,11 @@ def _write_worker_scope_hook_settings(
     the git-tracked ``.claude/settings.json``, so the worktree's git status stays
     clean and the worker can never accidentally commit the registration.
 
-    The hook itself is gated on ``VNX_ENFORCE_WORKER_PERMISSIONS`` (default ON
-    since 15-08), so registering it unconditionally binds on every scoped spawn
-    unless the dispatch explicitly opts out.
+    The hook itself is gated on ``VNX_ENFORCE_WORKER_PERMISSIONS`` via
+    ``worker_permissions.worker_permission_enforcement_enabled()`` (that
+    resolver is the single source of truth for the default). Registering the
+    hook unconditionally is safe because the hook is a no-op when enforcement
+    is off.
 
     Idempotent: an identical hook command is never registered twice. Existing
     unrelated keys and hook entries in the file are preserved.
@@ -2607,13 +2612,15 @@ class TmuxInteractiveDispatch:
 
         # D2.2 scoping precondition (fail-closed): a working-tree-only dispatch's
         # commit/push deny only binds in the scoped detached spawn (the path where
-        # _wp_build_claude_scope_args is invoked). Both the scoped posture and the
-        # ADR-012 enforcement default ON (14-08 and 15-08 respectively), and either
-        # predicate alone forces the scoped spawn that carries the deny — so only
-        # opting out of BOTH (VNX_WORKER_BLANKET_SKIP=1 / falsy VNX_WORKER_SCOPED
-        # AND VNX_WORKER_ENFORCEMENT_SKIP=1 / falsy VNX_ENFORCE_WORKER_PERMISSIONS)
-        # — or an attached session — leaves the worker unscoped; reject those so an
-        # unscoped working-tree-only worker can never silently reach git commit/push.
+        # _wp_build_claude_scope_args is invoked). The scoped posture defaults ON
+        # (worker_scoped_enabled); ADR-012 enforcement's default lives in
+        # worker_permissions.worker_permission_enforcement_enabled() (single source
+        # of truth). Either predicate alone forces the scoped spawn that carries
+        # the deny — so only opting out of BOTH (VNX_WORKER_BLANKET_SKIP=1 / falsy
+        # VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / falsy
+        # VNX_ENFORCE_WORKER_PERMISSIONS) — or an attached session — leaves the
+        # worker unscoped; reject those so an unscoped working-tree-only worker can
+        # never silently reach git commit/push.
         if working_tree_only and not (
             skip_permissions
             and (worker_scoped_enabled() or worker_permission_enforcement_enabled())
@@ -2623,11 +2630,12 @@ class TmuxInteractiveDispatch:
                 dispatch_id=dispatch_id,
                 failure_reason=(
                     "working_tree_only requires a scoped detached spawn "
-                    "(both the scoped posture and ADR-012 enforcement default ON; "
-                    "refusing the full opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
+                    "(the commit/push deny binds only when either the scoped "
+                    "posture or ADR-012 enforcement is active; refusing the full "
+                    "opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
                     "falsy VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / "
-                    "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the commit/push "
-                    "deny would not bind)"
+                    "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the deny would "
+                    "not bind)"
                 ),
             )
 
@@ -2717,7 +2725,8 @@ class TmuxInteractiveDispatch:
 
             if worktree_handle is not None:
                 # Worker-scope PreToolUse enforcement hook (gated by
-                # VNX_ENFORCE_WORKER_PERMISSIONS, default ON since 15-08;
+                # VNX_ENFORCE_WORKER_PERMISSIONS via
+                # worker_permissions.worker_permission_enforcement_enabled();
                 # spike E1/E2): register the hook in the fresh worktree BEFORE
                 # the tmux session spawns so cwd-based settings discovery has it
                 # from the first tool call. Best-effort: the hook is fail-open

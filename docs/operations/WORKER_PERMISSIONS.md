@@ -265,11 +265,12 @@ if working_tree_only and not (
         ...
         failure_reason=(
             "working_tree_only requires a scoped detached spawn "
-            "(both the scoped posture and ADR-012 enforcement default ON; "
-            "refusing the full opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
+            "(the commit/push deny binds only when either the scoped "
+            "posture or ADR-012 enforcement is active; refusing the full "
+            "opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
             "falsy VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / "
-            "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the commit/push "
-            "deny would not bind)"
+            "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the deny would "
+            "not bind)"
         ),
     )
 ```
