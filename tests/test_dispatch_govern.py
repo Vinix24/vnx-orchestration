@@ -24,6 +24,7 @@ from dispatch_govern import (
     ensure_receipt,
     govern,
     _split_yaml_frontmatter,
+    _report_declares_failure,
     _synthesize,
     _git_changes,
     _git_summary,
@@ -593,6 +594,20 @@ def test_govern_body_override_passed_to_emit(tmp_data, tmp_state, monkeypatch):
 # _synthesize() — direct unit tests
 # ---------------------------------------------------------------------------
 
+def test_report_declares_failure_detects_body_and_frontmatter():
+    """_report_declares_failure: explicit failure literals (bold body field or
+    frontmatter status) count; absent/unknown/success statuses do not."""
+    body_failure = "**Status**: failed\n**Failure-Reason**: heartbeat_killed\n" + _valid_body()
+    assert _report_declares_failure(body_failure) is True
+
+    fm_failure = "---\nstatus: failure\n---\n" + _valid_body()
+    assert _report_declares_failure(fm_failure) is True
+
+    assert _report_declares_failure(_valid_body()) is False  # no status field
+    assert _report_declares_failure("**Status**: done\n" + _valid_body()) is False
+    assert _report_declares_failure("**Status**: unknown\n" + _valid_body()) is False
+
+
 def test_synthesize_contains_all_required_sections(tmp_data, tmp_state):
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
@@ -1149,6 +1164,46 @@ def test_ensure_receipt_appended_when_no_worker_receipt(tmp_data, tmp_state):
     assert receipt["failure_reason"] == "tmux_receipt_deadline_exceeded"
 
 
+def test_ensure_receipt_authored_status_is_done(tmp_data, tmp_state):
+    """OI-1202: a successful tmux dispatch (valid worker report = contract_status
+    "authored") must NOT leave a 'failed' receipt in the ledger. The fallback
+    receipt derives status="done" from the authored evidence, so failure counts
+    are not polluted by a dispatch that demonstrably completed."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="authored", permission_enforcement="soft")
+
+    assert receipts_file.exists(), "ensure_receipt must create t0_receipts.ndjson"
+    receipt = json.loads(receipts_file.read_text().splitlines()[0])
+    assert receipt["status"] == "done", (
+        f"authored fallback receipt must carry status='done', got {receipt['status']!r}"
+    )
+    assert receipt["source"] == "tmux_interactive_lane_synthesized"
+    assert receipt["synthesized"] is True
+
+
+def test_ensure_receipt_synthesized_status_stays_failed(tmp_data, tmp_state):
+    """OI-1202: a genuinely failed dispatch (no valid report = contract_status
+    "synthesized") keeps status="failed" — the failure signal stays where it
+    belongs instead of being diluted into a neutral 'unknown'."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    assert receipts_file.exists(), "ensure_receipt must create t0_receipts.ndjson"
+    receipt = json.loads(receipts_file.read_text().splitlines()[0])
+    assert receipt["status"] == "failed", (
+        f"synthesized fallback receipt must keep status='failed', got {receipt['status']!r}"
+    )
+    assert receipt["source"] == "tmux_interactive_lane_synthesized"
+
+
 def test_ensure_receipt_includes_report_path_when_provided(tmp_data, tmp_state):
     """Lane-synthesized receipt includes report_path when a report was emitted."""
     spec = _make_spec(tmp_data, tmp_state)
@@ -1388,6 +1443,64 @@ def test_govern_timeout_appends_synthesized_receipt(tmp_data, tmp_state, monkeyp
     assert len(synthesized) == 1, f"Expected exactly 1 lane-synthesized receipt, got {synthesized}"
     assert synthesized[0]["synthesized"] is True
     assert synthesized[0]["dispatch_id"] == spec.dispatch_id
+
+
+def test_govern_authored_report_no_receipt_status_done(tmp_data, tmp_state, monkeypatch):
+    """OI-1202: a successful tmux dispatch whose worker receipt never landed (but
+    whose valid 4-heading report did) must NOT leave a 'failed' receipt. The
+    lane-synthesized fallback derives status='done' from the authored report."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    (reports_dir / "test-govern-001.md").write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    govern(spec, raw, lane="tmux_interactive")
+
+    assert receipts_file.exists(), "ensure_receipt must create t0_receipts.ndjson"
+    synthesized = [json.loads(l) for l in receipts_file.read_text().splitlines()
+                   if json.loads(l).get("source") == "tmux_interactive_lane_synthesized"]
+    assert len(synthesized) == 1
+    assert synthesized[0]["status"] == "done", (
+        f"authored fallback receipt must be 'done', got {synthesized[0]['status']!r}"
+    )
+
+
+def test_govern_authored_failure_report_no_receipt_status_failed(tmp_data, tmp_state, monkeypatch):
+    """OI-1202: a worker report that passes the 4-heading contract but DECLARES
+    failure (**Status**: failed, the heartbeat-kill shape) must stay 'failed' —
+    the fallback must not dress a declared failure as success."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    failed_body = (
+        "**Dispatch-ID**: test-govern-001\n"
+        "**Status**: failed\n"
+        "**Failure-Reason**: heartbeat_killed\n\n"
+        + _valid_body()
+    )
+    (reports_dir / "test-govern-001.md").write_text(failed_body, encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    govern(spec, raw, lane="tmux_interactive")
+
+    assert receipts_file.exists(), "ensure_receipt must create t0_receipts.ndjson"
+    synthesized = [json.loads(l) for l in receipts_file.read_text().splitlines()
+                   if json.loads(l).get("source") == "tmux_interactive_lane_synthesized"]
+    assert len(synthesized) == 1
+    assert synthesized[0]["status"] == "failed", (
+        f"declared-failure fallback receipt must stay 'failed', got {synthesized[0]['status']!r}"
+    )
 
 
 def test_govern_normal_path_no_synthesized_receipt(tmp_data, tmp_state, monkeypatch):

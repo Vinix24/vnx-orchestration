@@ -321,6 +321,20 @@ def test_synthesized_receipt_optional_fields_omitted_when_absent():
     assert "report_path" not in receipt
 
 
+def test_synthesized_receipt_status_is_passable():
+    """OI-1202: the caller derives status from contract_status (authored -> done)
+    and passes it explicitly. The field must serialize through, not be shadowed
+    by the "failed" default."""
+    kw = _synth_kwargs()
+    kw["contract_status"] = "authored"
+    kw["status"] = "done"
+    receipt = SynthesizedLaneReceipt(**kw).to_dict()
+    assert receipt["status"] == "done"
+    assert receipt["contract_status"] == "authored"
+    assert receipt["source"] == "tmux_interactive_lane_synthesized"
+    assert receipt["synthesized"] is True
+
+
 def test_synthesized_receipt_receipt_kind_closed_set_raises():
     kw = _synth_kwargs()
     kw["receipt_kind"] = "bogus"
