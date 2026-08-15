@@ -1237,6 +1237,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gate", default="")
     parser.add_argument("--dispatch-paths", default="")
     parser.add_argument("--pr-id", default=None)
+    parser.add_argument("--work-ref", default=None)
     parser.add_argument(
         "--auto-route", action="store_true",
         help="Use smart_router to auto-select provider+model (opt-in, default off).",
@@ -1732,6 +1733,7 @@ def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
         instruction=args.instruction,
         role=getattr(args, "role", None),
         pr_id=getattr(args, "pr_id", None),
+        work_ref=getattr(args, "work_ref", None),
         state_dir=state_dir,
         data_dir=data_dir,
     )
@@ -1772,6 +1774,7 @@ def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
         instruction=args.instruction,
         role=getattr(args, "role", None),
         pr_id=getattr(args, "pr_id", None),
+        work_ref=getattr(args, "work_ref", None),
         state_dir=state_dir,
         data_dir=data_dir,
     )

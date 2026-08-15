@@ -1216,6 +1216,7 @@ class TmuxInteractiveDispatch:
         if receipt is None:
             return receipt
         try:
+            import os  # noqa: PLC0415
             from phantom_guard import record_phantom_if_any  # noqa: PLC0415
             _tok = pane_tokens or {}
             verdict = record_phantom_if_any(
@@ -1229,6 +1230,13 @@ class TmuxInteractiveDispatch:
                 base_sha=base_sha,
                 receipts_file=str(self._receipts_file),
                 state_dir=self._state_dir,
+                # OI-1137: a fix-forward dispatch's own worktree reads empty even though the
+                # worker pushed onto an existing branch. Thread the work target (from the door's
+                # env the tmux pane inherited) so the guard weighs the pushed branch diff.
+                work_ref=os.environ.get("VNX_WORK_REF") or None,
+                pr_id=os.environ.get("VNX_PR_ID") or None,
+                parent_dispatch=os.environ.get("VNX_PARENT_DISPATCH") or None,
+                repo=worktree_path,
             )
         except Exception as exc:  # noqa: BLE001 — never block a real completion on a guard error
             logger.error(

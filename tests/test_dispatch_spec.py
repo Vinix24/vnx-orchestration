@@ -600,3 +600,47 @@ class TestRule13TrackId:
         spec = _valid_spec(ifile, track_id="totally-nonexistent-track")
         result = _do_validate(spec, monkeypatch)
         assert isinstance(result, ValidatedSpec)
+
+
+# ---------------------------------------------------------------------------
+# Rule 15 — work_ref format (OI-1137)
+# ---------------------------------------------------------------------------
+
+class TestRule15WorkRef:
+    def test_default_none_passes(self, tmp_path, monkeypatch):
+        """work_ref defaults to None → ValidatedSpec (rule only fires when set)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+        assert result.spec.work_ref is None
+
+    @pytest.mark.parametrize("valid_ref", [
+        "dispatch/20260815-fix-forward",
+        "dispatch/foo.bar_baz-1",
+        "origin/dispatch/20260815-fix-forward",       # remote prefix is stripped before validation
+        "refs/heads/dispatch/20260815-fix-forward",   # refs prefix is stripped before validation
+    ])
+    def test_accepts_valid_work_ref(self, tmp_path, monkeypatch, valid_ref):
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, work_ref=valid_ref)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    @pytest.mark.parametrize("bad_ref", [
+        "   ",                 # whitespace-only collapses to empty after strip
+        "has spaces",
+        "dispatch/foo..bar",   # ".." is forbidden in a branch name
+        "dispatch/foo~1",      # "~" is forbidden
+        "dispatch/foo:bar",    # ":" is forbidden
+        "dispatch/foo?x",      # "?" is forbidden
+        "-dispatch/foo",       # may not start with "-"
+        "dispatch/foo/",       # may not end with "/"
+        "dispatch/foo.",       # may not end with "."
+    ])
+    def test_rejects_bad_work_ref(self, tmp_path, monkeypatch, bad_ref):
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, work_ref=bad_ref)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "bad-work-ref"

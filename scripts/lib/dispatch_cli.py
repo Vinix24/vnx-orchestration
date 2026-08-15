@@ -185,6 +185,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         skill=(raw.get("skill") or None),
         task_class=(raw.get("task_class") or None),
         pr_id=(raw.get("pr_id") or None),
+        work_ref=(raw.get("work_ref") or None),
         track_id=(raw.get("track_id") or None),
         # Chain-link (dispatch-20260802-model-ssot-en-ketenlink).
         parent_dispatch=(raw.get("parent_dispatch") or None),
@@ -2010,6 +2011,13 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                 os.environ["VNX_TIER_FROM"] = plan.tier_from
             if plan.tier_to:
                 os.environ["VNX_TIER_TO"] = plan.tier_to
+            # OI-1137: the work-ref / pr-id are exported so the tmux-lane phantom-guard can
+            # weigh the pushed branch diff for a fix-forward dispatch (its own worktree reads
+            # empty). Same fallback pattern as VNX_PARENT_DISPATCH above.
+            if plan.work_ref:
+                os.environ["VNX_WORK_REF"] = plan.work_ref
+            if plan.pr_id:
+                os.environ["VNX_PR_ID"] = plan.pr_id
             # The resolved model is exported too, so governance corrective
             # receipts (phantom_guard / pr_enforcement) can record the model the
             # dispatch ran without threading a parameter through every call site.

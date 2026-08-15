@@ -175,6 +175,9 @@ def stage_spec_bundle(
     headless_reason: Optional[str] = None,
     post_merge_verification: bool = False,
     pr_id: Optional[str] = None,
+    # OI-1137: explicit work-ref — the branch a fix-forward dispatch delivers onto, so the
+    # phantom-guard weighs the pushed branch diff when the own worktree reads empty.
+    work_ref: Optional[str] = None,
     tags: tuple[str, ...] = (),
     data_dir: Optional[Path] = None,
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
@@ -273,6 +276,9 @@ def stage_spec_bundle(
         "provider": _canonical_provider(provider).value,
         "model": model or None,
         "pr_id": pr_id or None,
+        # OI-1137: explicit work-ref, stripped of an origin//refs/ prefix so the
+        # resolver fetches origin/<name> without double-prefixing.
+        "work_ref": (work_ref or "").strip() or None,
         # Chain-link fields (dispatch-20260802-model-ssot-en-ketenlink).
         "task_class": (task_class or "").strip() or None,
         "parent_dispatch": (parent_dispatch or "").strip() or None,
@@ -447,6 +453,7 @@ def deliver_via_door(
     model: Optional[str] = None,
     gate: str = "",
     pr_id: Optional[str] = None,
+    work_ref: Optional[str] = None,
     project_id: Optional[str] = None,
     deadline_seconds: Optional[int] = None,
     allow_headless: bool = False,
@@ -492,6 +499,7 @@ def deliver_via_door(
             model=model,
             gate=gate,
             pr_id=pr_id,
+            work_ref=work_ref,
             project_id=project_id,
             deadline_seconds=deadline_seconds if deadline_seconds is not None else 3600,
             allow_headless=allow_headless,
@@ -519,6 +527,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--gate", default="")
     parser.add_argument("--pr-id", default=None, dest="pr_id")
+    parser.add_argument("--work-ref", default=None, dest="work_ref")
     parser.add_argument("--parent-dispatch", default=None, dest="parent_dispatch")
     parser.add_argument("--task-class", default=None, dest="task_class")
     parser.add_argument("--tier-from", default=None, dest="tier_from")
@@ -577,6 +586,7 @@ def main(argv: Optional[list] = None) -> int:
         model=args.model,
         gate=args.gate,
         pr_id=args.pr_id,
+        work_ref=args.work_ref,
         parent_dispatch=args.parent_dispatch,
         task_class=args.task_class,
         tier_from=args.tier_from,

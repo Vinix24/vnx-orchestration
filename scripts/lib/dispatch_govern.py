@@ -269,6 +269,10 @@ class GovernSpec:
     pr_id: Optional[str] = None
     base_sha: Optional[str] = None
     worktree_path: Optional[Path] = None
+    # OI-1137: explicit work-ref (branch a fix-forward delivers onto). The tmux lane does not
+    # know this value from the plan (it runs in a separate pane); govern() falls back to the
+    # door's VNX_WORK_REF env var when the spec does not carry it.
+    work_ref: Optional[str] = None
     model: Optional[str] = None
     # When role="plan-reviewer" the worker's report is a free-form review ending
     # with a vnx-plan-verdict fence — it intentionally lacks the standard contract
@@ -396,6 +400,13 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
             base_sha=spec.base_sha,
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
             state_dir=spec.state_dir,
+            # OI-1137: a fix-forward dispatch's own worktree reads empty even though the worker
+            # pushed onto an existing branch. Thread the work target so the guard weighs the
+            # pushed branch diff (spec first, then the door's env the tmux pane inherited).
+            work_ref=spec.work_ref or os.environ.get("VNX_WORK_REF") or None,
+            pr_id=spec.pr_id or os.environ.get("VNX_PR_ID") or None,
+            parent_dispatch=spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None,
+            repo=spec.worktree_path,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("govern: phantom-guard check failed (non-fatal) dispatch=%s: %s", dispatch_id, exc)

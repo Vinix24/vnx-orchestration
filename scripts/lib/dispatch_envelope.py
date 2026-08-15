@@ -375,6 +375,7 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
         task_class=spec.task_class,
         tier_from=spec.tier_from,
         tier_to=spec.tier_to,
+        work_ref=spec.work_ref,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify raw+injections reconstruct it
@@ -486,6 +487,7 @@ def run_envelope_plan(
         task_class=plan.task_class,
         tier_from=plan.tier_from,
         tier_to=plan.tier_to,
+        work_ref=plan.work_ref,
     )
 
     enriched_instruction = _prepare(spec)
@@ -504,6 +506,7 @@ def run_envelope_plan(
         task_class=spec.task_class,
         tier_from=spec.tier_from,
         tier_to=spec.tier_to,
+        work_ref=spec.work_ref,
     )
 
     # INTEGRITY — the bundle dir is the pending/<id>/ that hosts instruction.md.
@@ -717,6 +720,7 @@ def run_envelope_headless_plan(
         task_class=plan.task_class,
         tier_from=plan.tier_from,
         tier_to=plan.tier_to,
+        work_ref=plan.work_ref,
     )
 
     enriched_instruction = _prepare(spec)
@@ -735,6 +739,7 @@ def run_envelope_headless_plan(
         task_class=spec.task_class,
         tier_from=spec.tier_from,
         tier_to=spec.tier_to,
+        work_ref=spec.work_ref,
     )
 
     # INTEGRITY — persist the enriched final prompt + verify reconstruction

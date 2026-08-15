@@ -40,6 +40,10 @@ class EnvelopeSpec:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    # OI-1137: explicit work-ref — the branch a fix-forward dispatch delivers onto,
+    # so the phantom-guard can weigh the pushed branch diff when the own worktree
+    # reads empty. Optional; None for a normal dispatch.
+    work_ref: Optional[str] = None
 
 
 @dataclass
