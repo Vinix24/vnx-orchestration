@@ -56,7 +56,10 @@ WORK_START_NO_PROGRESS = "no_progress"
 # old blanket --dangerously-skip-permissions default rested on the worktree
 # argument — worktree isolation bounds the FILESYSTEM, not the NETWORK, and an
 # MCP server talks to a service outside the checkout. Blanket skip is now the
-# explicit opt-out (VNX_WORKER_BLANKET_SKIP=1, or VNX_WORKER_SCOPED=0/false/no/off).
+# explicit opt-out, and it takes BOTH opt-outs because both predicates default
+# ON (scoped since 14-08, ADR-012 enforcement since 15-08):
+# VNX_WORKER_BLANKET_SKIP=1 (or falsy VNX_WORKER_SCOPED) AND
+# VNX_WORKER_ENFORCEMENT_SKIP=1 (or falsy VNX_ENFORCE_WORKER_PERMISSIONS).
 #
 # OI-1099: the decision predicates worker_scoped_enabled /
 # worker_permission_enforcement_enabled resolve in ONE place — the canonical
@@ -360,7 +363,10 @@ def _default_launch_command(
         # posture (role allow-list + empty ambient MCP) since the 14-08 flip —
         # worktree isolation bounds the filesystem, not the network, and an MCP
         # server talks to a service outside the checkout. The else branch is the
-        # explicit opt-out (VNX_WORKER_BLANKET_SKIP=1 or VNX_WORKER_SCOPED=0).
+        # explicit opt-out, which requires BOTH predicates off since enforcement
+        # also defaulted ON on 15-08: VNX_WORKER_BLANKET_SKIP=1 / falsy
+        # VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / falsy
+        # VNX_ENFORCE_WORKER_PERMISSIONS.
         if worker_scoped_enabled() or worker_permission_enforcement_enabled():
             profile = _wp_resolve_worker_profile(role)
             scope_args = _wp_build_claude_scope_args(
@@ -2508,11 +2514,13 @@ class TmuxInteractiveDispatch:
 
         # D2.2 scoping precondition (fail-closed): a working-tree-only dispatch's
         # commit/push deny only binds in the scoped detached spawn (the path where
-        # _wp_build_claude_scope_args is invoked). Scoped is the default since the
-        # 14-08 flip, so only an EXPLICIT opt-out (VNX_WORKER_BLANKET_SKIP=1 or
-        # VNX_WORKER_SCOPED=0/false/no/off) — or an attached session — leaves the
-        # worker unscoped; reject those so an unscoped working-tree-only worker can
-        # never silently reach git commit/push.
+        # _wp_build_claude_scope_args is invoked). Both the scoped posture and the
+        # ADR-012 enforcement default ON (14-08 and 15-08 respectively), and either
+        # predicate alone forces the scoped spawn that carries the deny — so only
+        # opting out of BOTH (VNX_WORKER_BLANKET_SKIP=1 / falsy VNX_WORKER_SCOPED
+        # AND VNX_WORKER_ENFORCEMENT_SKIP=1 / falsy VNX_ENFORCE_WORKER_PERMISSIONS)
+        # — or an attached session — leaves the worker unscoped; reject those so an
+        # unscoped working-tree-only worker can never silently reach git commit/push.
         if working_tree_only and not (
             skip_permissions
             and (worker_scoped_enabled() or worker_permission_enforcement_enabled())
@@ -2522,9 +2530,11 @@ class TmuxInteractiveDispatch:
                 dispatch_id=dispatch_id,
                 failure_reason=(
                     "working_tree_only requires a scoped detached spawn "
-                    "(scoped is the default; refusing the explicit opt-out path — "
-                    "VNX_WORKER_BLANKET_SKIP=1 or VNX_WORKER_SCOPED=0/false/no/off "
-                    "— where the commit/push deny would not bind)"
+                    "(both the scoped posture and ADR-012 enforcement default ON; "
+                    "refusing the full opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
+                    "falsy VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / "
+                    "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the commit/push "
+                    "deny would not bind)"
                 ),
             )
 

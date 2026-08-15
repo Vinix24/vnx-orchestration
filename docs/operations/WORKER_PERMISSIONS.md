@@ -225,8 +225,9 @@ review/plan write — no commit, no push). The commit/push deny
 (`Bash(git commit)`, `Bash(git commit:*)`, `Bash(git push)`,
 `Bash(git push:*)`) is only appended by `build_claude_scope_args(...,
 working_tree_only=True)` — a function that only runs in scoped mode. Scoped is
-the default, so a `working_tree_only` dispatch gets the deny automatically; it
-only loses it if the operator explicitly opts out.
+the default (both the launch posture and the ADR-012 enforcement predicate are
+ON), so a `working_tree_only` dispatch gets the deny automatically; it only
+loses it if the operator opts out of BOTH layers.
 
 `tmux_interactive_dispatch.py` closes that gap by refusing to run the opt-out
 paths, rather than silently downgrading protection:
@@ -241,16 +242,21 @@ if working_tree_only and not (
         ...
         failure_reason=(
             "working_tree_only requires a scoped detached spawn "
-            "(scoped is the default; refusing the explicit opt-out path — "
-            "VNX_WORKER_BLANKET_SKIP=1 or VNX_WORKER_SCOPED=0/false/no/off "
-            "— where the commit/push deny would not bind)"
+            "(both the scoped posture and ADR-012 enforcement default ON; "
+            "refusing the full opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
+            "falsy VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / "
+            "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the commit/push "
+            "deny would not bind)"
         ),
     )
 ```
 
 In practice: a `working_tree_only` dispatch runs scoped by default. It must
-**not** set `VNX_WORKER_BLANKET_SKIP=1` or a falsy `VNX_WORKER_SCOPED`, or it
-fails closed before any worker spawns.
+**not** opt out of BOTH layers — `VNX_WORKER_BLANKET_SKIP=1` (or falsy
+`VNX_WORKER_SCOPED`) AND `VNX_WORKER_ENFORCEMENT_SKIP=1` (or falsy
+`VNX_ENFORCE_WORKER_PERMISSIONS`) — or it fails closed before any worker
+spawns. Either layer alone still forces the scoped spawn (the two predicates
+are OR-ed in the precondition), so the deny still binds.
 
 ## The unbypassable exception: Claude Code's own dangerous-rm gate (OI-104)
 
