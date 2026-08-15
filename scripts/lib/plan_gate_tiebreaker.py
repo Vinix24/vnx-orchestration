@@ -386,16 +386,35 @@ def record_round(
     outcome: str,
     model: str = "",
     timestamp: Optional[str] = None,
+    governance_variant: str = "",
+    gov_trace: str = "",
 ) -> bool:
     """Append a ``plan_gate_round`` record to the seat ledger.
 
     The record carries the round number, the outcome of that round
     (``panel`` for a full-panel round, ``tiebreak:START``/``tiebreak:STOP`` for
-    a tiebreaker round), and the model that decided it. Append-only and
-    hash-chained via ``append_chained_entry`` (the same primitive the seat
-    records use), so the round history is tamper-evident alongside the seat
-    verdicts. Best-effort and non-raising: round persistence must never break
-    the gate it hangs off (same contract as ``_emit_seat_records``).
+    a tiebreaker round), the model that decided it, and — since 2026-08-15 —
+    the governance decision that sized the round: ``governance_variant`` (the
+    seat-ladder variant that determined which seats the plan-gate got) and
+    ``gov_trace`` (the human-readable derivation: weight, new-feature flag,
+    seat count, chosen-by, and any operator override direction). The variant is
+    the OUTCOME; the trace is the REASON. Both are needed to reconstruct the
+    decision after the fact — a variant alone says which ladder step fired, but
+    not why (derived vs operator override, upgrade vs downgrade).
+
+    Missing-vs-empty is deliberately "always present, empty string when none":
+    both fields are written on EVERY round record, and an empty value means "no
+    governance decision was derived for this round" (a tiebreaker round carries
+    ``governance_variant="tiebreaker"`` and the panel round's trace, so only a
+    synthetic/legacy writer leaves them empty). A record MISSING the field is
+    an older-schema record, not a same-schema empty one — the distinction is
+    load-bearing for a later sweep that diffs old vs new records.
+
+    Append-only and hash-chained via ``append_chained_entry`` (the same
+    primitive the seat records use), so the round history is tamper-evident
+    alongside the seat verdicts. Best-effort and non-raising: round persistence
+    must never break the gate it hangs off (same contract as
+    ``_emit_seat_records``).
 
     Returns True when a record was appended, False when no ledger path was
     given or the append failed (the caller treats False as "not recorded" and
@@ -413,6 +432,8 @@ def record_round(
             "round": int(round_number),
             "outcome": outcome,
             "model": model,
+            "governance_variant": governance_variant,
+            "gov_trace": gov_trace,
             "recorded_at": timestamp or datetime.now(timezone.utc).isoformat(),
         }
         append_chained_entry(ledger, record)

@@ -172,6 +172,32 @@ def test_round_counter_is_per_track(tmp_path):
     assert pgt.read_round_count(ledger, "trk-b", "p1") == 0
 
 
+def test_record_round_always_writes_governance_fields_even_when_empty(tmp_path):
+    """A round record always carries ``governance_variant`` + ``gov_trace``.
+
+    The write path must not silently drop the pair when the writer derived
+    none: an empty string (same-schema "no derivation") is distinct from a
+    MISSING field (an older-schema record). A later sweep diffs the two, so the
+    fields must be present on every new record. Fails as soon as the fields fall
+    out of ``record_round``'s record dict.
+    """
+    ledger = tmp_path / "plan-gate-seats.ndjson"
+    assert pgt.record_round(
+        ledger, track_id="trk", project_id="p1", round_number=1, outcome="panel",
+    ) is True
+
+    rounds = [
+        rec for _ln, rec, _h in walk_chain(ledger)
+        if rec.get("type") == pgt.ROUND_RECORD_TYPE
+    ]
+    assert len(rounds) == 1
+    rec = rounds[0]
+    assert "governance_variant" in rec, "governance_variant must always be written"
+    assert "gov_trace" in rec, "gov_trace must always be written"
+    assert rec["governance_variant"] == ""
+    assert rec["gov_trace"] == ""
+
+
 def test_should_run_tiebreaker_threshold(tmp_path):
     """Below the threshold the full panel runs; at/above it the tiebreaker runs.
     Default threshold is 2 (read from the code default when no config overrides)."""

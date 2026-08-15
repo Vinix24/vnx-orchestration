@@ -438,6 +438,63 @@ def test_batch_inherits_tiebreaker_after_two_panel_rounds(tmp_path, monkeypatch)
     assert "tiebreaker START" in rec["detail"]
 
 
+def test_panel_round_records_governance_variant_and_trace_to_seat_ledger(tmp_path, monkeypatch):
+    """A non-PASS panel round persists the governance decision that sized it.
+
+    ``governance_variant`` (the seat-ladder outcome) + ``gov_trace`` (the reason:
+    weight, seat count, chosen-by) used to be printed to stderr and dropped — the
+    on-disk ``plan_gate_round`` record carried the round number and outcome but
+    not WHY the round had the seats it had. This drives the REAL
+    ``run_plan_gate_for_track`` write path (only ``run_panel`` is stubbed, to a
+    REVISE so ``record_round`` fires) and reads the seat ledger back from disk,
+    so the assertion is on what LANDED, not on an in-memory dict. Fails as soon
+    as either field falls out of the ``record_round`` call in
+    ``run_plan_gate_for_track`` (or out of ``record_round``'s record dict).
+    """
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    state_dir = _bootstrap(tmp_path)
+    _make_track(state_dir, "feat-gov", _THICK_GOAL)
+    _seed_blocker(state_dir, "feat-gov")
+
+    ledger = tmp_path / ".vnx-attest" / "plan-gate-seats.ndjson"
+    monkeypatch.setattr(pgp, "_resolve_seat_ledger_path", lambda data_dir: ledger)
+
+    def _revise(doc_path, *, doc_text=None, track_id, project_id, panel, data_dir, **kw):
+        return {
+            "track_id": track_id, "project_id": project_id, "decision": "REVISE",
+            "summary": {"decision": "REVISE", "pass_count": 0,
+                        "revise_count": 2, "block_count": 0,
+                        "rationale": "gaps remain"},
+            "panelists": [], "doc_truncation": {"truncated": False},
+        }
+
+    monkeypatch.setattr(pgp, "run_panel", _revise)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+
+    summary = planning_cli._execute_batch(
+        ["feat-gov"], state_dir=str(state_dir), project_id="p1",
+        run_kwargs={}, restart=False, min_goal_chars=200,
+    )
+    assert summary["results"][0]["outcome"] == "REVISE"
+
+    from ndjson_hash_chain import walk_chain  # noqa: PLC0415
+    rounds = [
+        rec for _ln, rec, _h in walk_chain(ledger)
+        if rec.get("type") == pgt.ROUND_RECORD_TYPE
+    ]
+    assert rounds, "expected a plan_gate_round record for the REVISE panel round"
+    rec = rounds[-1]
+    assert rec["governance_variant"] == "default", (
+        "the derived seat-ladder variant must land on the round record"
+    )
+    assert "weight=default" in rec["gov_trace"], (
+        "the gov_trace must carry the derived weight"
+    )
+    assert "seat(s) by derived" in rec["gov_trace"], (
+        "the gov_trace must carry the seat count + chosen-by"
+    )
+
+
 def test_batch_renders_tally_line_and_outcome_labels(tmp_path, monkeypatch, capsys):
     """The rendered batch output carries the per-outcome tally, the per-track
     seat count, and the Dutch REFUSED_THIN label — and the tally sums to the
