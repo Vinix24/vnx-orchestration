@@ -175,9 +175,10 @@ ROLE_TO_TASK_CLASS: Dict[str, str] = {
 }
 
 # The classifier's fallthrough class. Roles mapping HERE carry no discriminating
-# signal (builder roles do refactors/debugging/docs in the same lane, and
-# "backend-developer" is additionally the fabric's no-role-resolved sentinel —
-# dispatch_govern._FAKE_DEFAULT_ROLE), so for them the instruction text decides.
+# signal (builder roles do refactors/debugging/docs in the same lane), so for
+# them the instruction text decides. The no-role-resolved sentinel is
+# "identity_unresolved" (dispatch_identity._IDENTITY_UNRESOLVED) — unmapped, so
+# it reaches the same instruction-text fallthrough.
 _DEFAULT_TASK_CLASS = "01_code_generation"
 
 
@@ -202,7 +203,7 @@ def classify_task(
       3. Role-based fallback for default-class (builder) roles. Builder roles map
          to the classifier's own default, so step 1 skipping them changes nothing
          for a no-regex-match instruction — and keeps the instruction text
-         deciding for the no-role-resolved sentinel ("backend-developer").
+         deciding for the no-role-resolved sentinel ("identity_unresolved").
       4. Default: 01_code_generation (safest default — most dispatches are code work)
 
     dispatch_paths is reserved for future signal enrichment (e.g. docs-only paths

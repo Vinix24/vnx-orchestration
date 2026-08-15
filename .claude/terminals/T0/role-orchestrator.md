@@ -85,7 +85,7 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 
 **Role selection (hard):**
 
-- `backend-developer` is the sentinel default for "no role resolved" (`_FAKE_DEFAULT_ROLE`, `scripts/lib/dispatch_govern.py:51`) and is stripped from the receipt trail — never choose it out of convenience. Pick a role deliberately; if none fits, motivate that in the dispatch.
+- `identity_unresolved` is the sentinel default for "no role resolved" (`_IDENTITY_UNRESOLVED` / `_FAKE_DEFAULT_ROLE`, `scripts/lib/dispatch_identity.py:39-40`) and is stripped from the receipt trail — never choose it out of convenience. Pick a role deliberately; if none fits, motivate that in the dispatch.
 - The role follows the work, not the terminal.
 
 | Work | Role |
