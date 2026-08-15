@@ -5700,6 +5700,105 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
         ]
         self.assertEqual(len(ours), 1, "hook must be registered exactly once (idempotent)")
 
+    def test_write_hook_settings_carries_main_checkout_permissions(self):
+        """OI-1161: the worktree settings.local.json carries the main checkout's
+        permissions block alongside the worker-scope hook."""
+        from tmux_interactive_dispatch import _write_worker_scope_hook_settings
+
+        main = self.state_dir / "main-checkout"
+        (main / ".claude").mkdir(parents=True)
+        (main / ".claude" / "settings.json").write_text(
+            json.dumps(
+                {
+                    "permissions": {
+                        "allow": ["Skill(database-engineer)", "Skill(debugger)"],
+                        "ask": ["Bash(git push:*)"],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        wt = self.state_dir / "wt-perm"
+        wt.mkdir()
+        settings_path = _write_worker_scope_hook_settings(wt, main)
+
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        # Hook still registered.
+        hook_commands = [
+            h.get("command", "")
+            for e in data["hooks"]["PreToolUse"]
+            for h in e.get("hooks", [])
+        ]
+        self.assertTrue(
+            any("pretooluse_worker_scope_enforce.sh" in c for c in hook_commands)
+        )
+        # Permissions carried over verbatim.
+        self.assertEqual(
+            data["permissions"]["allow"],
+            ["Skill(database-engineer)", "Skill(debugger)"],
+        )
+        self.assertEqual(data["permissions"]["ask"], ["Bash(git push:*)"])
+
+    def test_write_hook_settings_hook_wins_on_permissions_conflict(self):
+        """OI-1161: a permissions key present in BOTH the worktree settings and
+        the main checkout → the worktree (hook) value wins and the conflict is
+        surfaced via a warning, never silently resolved."""
+        from tmux_interactive_dispatch import _write_worker_scope_hook_settings
+
+        main = self.state_dir / "main-checkout"
+        (main / ".claude").mkdir(parents=True)
+        (main / ".claude" / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["Skill(main-only)"]}}),
+            encoding="utf-8",
+        )
+
+        wt = self.state_dir / "wt-conflict"
+        (wt / ".claude").mkdir(parents=True)
+        (wt / ".claude" / "settings.local.json").write_text(
+            json.dumps({"permissions": {"allow": ["Skill(worktree-only)"]}}),
+            encoding="utf-8",
+        )
+
+        with self.assertLogs("tmux_interactive_dispatch", level="WARNING") as cm:
+            settings_path = _write_worker_scope_hook_settings(wt, main)
+
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        # Worktree (hook) side wins: main's entry is not merged in.
+        self.assertEqual(data["permissions"]["allow"], ["Skill(worktree-only)"])
+        self.assertNotIn("Skill(main-only)", data["permissions"]["allow"])
+        # The conflict is visible in the log output.
+        self.assertTrue(
+            any("permissions" in msg and "hook wins" in msg for msg in cm.output),
+            f"conflict warning not emitted: {cm.output}",
+        )
+
+    def test_write_hook_settings_main_without_permissions_is_hook_only(self):
+        """OI-1161: a main checkout with no permissions block → hook-only, no
+        crash (the pre-fix behaviour is preserved)."""
+        from tmux_interactive_dispatch import _write_worker_scope_hook_settings
+
+        main = self.state_dir / "main-empty"
+        (main / ".claude").mkdir(parents=True)
+        (main / ".claude" / "settings.json").write_text(
+            '{"someOtherKey": true}', encoding="utf-8"
+        )
+
+        wt = self.state_dir / "wt-hookonly"
+        wt.mkdir()
+        settings_path = _write_worker_scope_hook_settings(wt, main)
+
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        self.assertNotIn("permissions", data)
+        hook_commands = [
+            h.get("command", "")
+            for e in data["hooks"]["PreToolUse"]
+            for h in e.get("hooks", [])
+        ]
+        self.assertTrue(
+            any("pretooluse_worker_scope_enforce.sh" in c for c in hook_commands)
+        )
+
     def test_write_hook_settings_corrupt_file_raises(self):
         from tmux_interactive_dispatch import _write_worker_scope_hook_settings
 
