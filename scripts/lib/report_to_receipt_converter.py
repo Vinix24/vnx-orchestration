@@ -619,18 +619,98 @@ def _check_branch_on_origin(dispatch_id: str) -> bool:
         return False
 
 
+def _parse_pr_number(pr_ref: Optional[str]) -> Optional[int]:
+    """Parse a PR reference (``#1234``, ``1234``) into an int; None when unparseable."""
+    if not pr_ref:
+        return None
+    try:
+        return int(str(pr_ref).strip().lstrip("#").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _verify_pr_exists(pr_number: int, *, timeout: int = 15) -> bool:
+    """Return True when *pr_number* resolves to a real PR on GitHub.
+
+    Uses ``gh pr view <n> --json state`` so existence is MEASURED against the
+    remote — never taken from a report at face value (OI-1203: a number the
+    worker types into its own report is a claim, not evidence).  Returns False
+    on any error (missing ``gh``, non-zero exit, unparseable output, timeout).
+    """
+    gh = shutil.which("gh")
+    if not gh:
+        return False
+    try:
+        result = subprocess.run(
+            [gh, "pr", "view", str(pr_number), "--json", "state"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if result.returncode != 0:
+            return False
+        data = json.loads(result.stdout or "{}")
+        return isinstance(data, dict)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return False
+
+
+def _resolve_output_kind(merged: Optional[Dict[str, Any]]) -> str:
+    """Resolve the dispatch's output_kind, defaulting to ``pr``.
+
+    The report content (frontmatter/body) is the declared source.  A dispatch
+    that never stamps one is assumed to be PR-producing — the same assumption
+    the pre-OI-1203 branch-on-origin check made for every success claim.
+    """
+    kind = (merged or {}).get("output_kind") or ""
+    kind = str(kind).strip().lower()
+    return kind or "pr"
+
+
+def _check_pr_delivery(dispatch_id: str, merged: Dict[str, Any]) -> List[str]:
+    """Delivery check for an ``output_kind=pr`` success claim (OI-1203).
+
+    A PR dispatch may only book success when work is demonstrably delivered:
+    either a ``pr_ref`` that resolves to a real PR on GitHub (queried — a
+    number the worker typed is a claim, not evidence), or a branch that is
+    actually on origin.  Both failing means the work was left uncommitted or
+    unpushed in a (possibly reaped) worktree, and the success claim is refused.
+    """
+    pr_ref = str(merged.get("pr_ref") or "").strip() if merged else ""
+    pr_exists = False
+    if pr_ref:
+        pr_number = _parse_pr_number(pr_ref)
+        if pr_number is not None:
+            pr_exists = _verify_pr_exists(pr_number)
+
+    if pr_exists:
+        return []
+    if _check_branch_on_origin(dispatch_id):
+        return []
+
+    if pr_ref:
+        return [
+            f"pr_ref_not_verified: pr_ref={pr_ref!r} resolves to no real PR and "
+            f"branch dispatch/{dispatch_id} is not on origin"
+        ]
+    return [f"branch_not_on_origin: dispatch/{dispatch_id} not found on origin"]
+
+
 def _run_fail_closed_checks(
-    text: str, dispatch_id: str, body_result: Any,
+    text: str,
+    dispatch_id: str,
+    body_result: Any,
+    merged: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    """Run the three fail-closed validation checks for terminal-success receipts.
+    """Run the fail-closed validation checks for terminal-success receipts.
 
     Returns a list of violation strings.  An empty list means all checks passed
     and the receipt may carry its claimed success status.
 
-    Checks (OI-1035, OI-1011, OI-1002, OI-659, OI-1017):
+    Checks (OI-1035, OI-1011, OI-1002, OI-659, OI-1017, OI-1203):
       1. Frontmatter validates against ``schemas/unified_report_v1.json``.
       2. The four mandatory headings are present (body contract).
-      3. The dispatch branch exists on origin (``git ls-remote``).
+      3. For an ``output_kind=pr`` dispatch, work is demonstrably delivered —
+         a verified PR or a branch on origin (OI-1203). Non-pr dispatches are
+         untouched by this check (a document/analysis has no PR to deliver).
     """
     violations: List[str] = []
 
@@ -652,11 +732,11 @@ def _run_fail_closed_checks(
         if body_result.placeholder:
             violations.append("body_contract: placeholder_summary")
 
-    # Check 3: branch exists on origin (real git ls-remote, never mocked)
-    if not _check_branch_on_origin(dispatch_id):
-        violations.append(
-            f"branch_not_on_origin: dispatch/{dispatch_id} not found on origin"
-        )
+    # Check 3 (OI-1203): delivery — only for output_kind=pr. A dispatch that
+    # produces a document or analysis has no PR to deliver and must not be
+    # blocked by the absence of a pushed branch.
+    if _resolve_output_kind(merged) == "pr":
+        violations.extend(_check_pr_delivery(dispatch_id, merged or {}))
 
     return violations
 
@@ -807,7 +887,7 @@ def build_receipt_from_report(
 
     if is_terminal_success:
         fail_closed_violations = _run_fail_closed_checks(
-            text, dispatch_id, body_result,
+            text, dispatch_id, body_result, merged=merged,
         )
         if fail_closed_violations:
             logger.warning(
