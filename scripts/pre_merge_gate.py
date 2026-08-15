@@ -14,9 +14,10 @@ Exit codes:
   40 - Unexpected internal error
 
 Usage:
-  python pre_merge_gate.py --pr PR-6
-  python pre_merge_gate.py --pr PR-6 --json
-  python pre_merge_gate.py --pr PR-6 --output-file gate_result.json
+  python pre_merge_gate.py --pr 1522
+  python pre_merge_gate.py --pr 1522 --json
+  python pre_merge_gate.py --pr 1522 --output-file gate_result.json
+  python pre_merge_gate.py                # gate the local working copy (HEAD)
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 _LOG = logging.getLogger(__name__)
 
@@ -80,6 +81,106 @@ SKIPPED_UNVERIFIED = "SKIPPED_UNVERIFIED"
 
 def _utc_now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------------------
+# PR reference resolution
+# ---------------------------------------------------------------------------
+
+class PRRefResolutionError(Exception):
+    """Raised when ``--pr`` cannot be resolved to a real PR head.
+
+    The gate must stop with a non-zero exit in every one of these cases —
+    missing ``gh``, a non-zero ``gh pr view`` exit, unparseable output, a
+    missing ``headRefOid``, or no resolvable merge-base. Silently falling
+    back to HEAD would reproduce the exact OI-1141 bug this guards against.
+    """
+
+
+class ResolvedPRRef(NamedTuple):
+    """A ``--pr`` reference resolved against GitHub, ready for diff checks."""
+
+    pr_ref: str
+    head_ref: str       # headRefOid — the commit the PR head points at
+    head_ref_name: str  # headRefName — the PR's source branch
+    merge_base: str     # git merge-base origin/main <head_ref>
+
+
+def resolve_pr_ref(pr_ref: str, project_root: Path) -> ResolvedPRRef:
+    """Resolve ``--pr <pr_ref>`` to the PR's real head and its merge-base.
+
+    The head comes from GitHub (``gh pr view <pr_ref> --json
+    headRefName,headRefOid``), never from the local checkout — the local
+    branch for this PR may lag behind or not exist at all. The comparison
+    target is ``git merge-base origin/main <head>`` (then ``origin/master``
+    as fallback), never the tip of ``origin/main``: a tip-vs-tip diff makes a
+    PR that simply hasn't rebased look like a revert (OI-1141).
+
+    Raises :class:`PRRefResolutionError` on every failure mode. Callers must
+    let it propagate — catching it and falling back to HEAD is the bug.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", pr_ref, "--json", "headRefName,headRefOid"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError:
+        raise PRRefResolutionError(
+            f"gh CLI not available — cannot resolve --pr {pr_ref} to its head"
+        )
+    except subprocess.TimeoutExpired:
+        raise PRRefResolutionError(
+            f"gh pr view {pr_ref} timed out — cannot resolve the PR head"
+        )
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        reason = stderr[:200] if stderr else f"exit code {result.returncode}"
+        raise PRRefResolutionError(
+            f"gh pr view {pr_ref} failed: {reason}"
+        )
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise PRRefResolutionError(
+            f"gh pr view {pr_ref} returned unparseable output — cannot resolve the PR head"
+        )
+
+    head_ref = (payload.get("headRefOid") or "").strip()
+    head_ref_name = (payload.get("headRefName") or "").strip()
+    if not head_ref:
+        raise PRRefResolutionError(
+            f"gh pr view {pr_ref} returned no headRefOid — cannot resolve the PR head"
+        )
+
+    for base_ref in ("origin/main", "origin/master"):
+        try:
+            mb = subprocess.run(
+                ["git", "merge-base", base_ref, head_ref],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        if mb.returncode == 0 and mb.stdout.strip():
+            return ResolvedPRRef(
+                pr_ref=pr_ref,
+                head_ref=head_ref,
+                head_ref_name=head_ref_name,
+                merge_base=mb.stdout.strip(),
+            )
+
+    raise PRRefResolutionError(
+        f"could not resolve a merge-base for {head_ref[:12]}: neither "
+        "origin/main nor origin/master is available locally — fetch the "
+        f"base branch before gating --pr {pr_ref}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +597,8 @@ def check_pr_size(
             "lines_added": None,
             "lines_removed": None,
             "lines_changed": None,
+            "head_ref": head_ref,
+            "merge_base": None,
         }
 
     totals = _diff_numstat_totals(project_root, merge_base, head_ref)
@@ -507,6 +610,8 @@ def check_pr_size(
             "lines_added": None,
             "lines_removed": None,
             "lines_changed": None,
+            "head_ref": head_ref,
+            "merge_base": merge_base,
         }
 
     total_added, total_removed = totals
@@ -529,6 +634,8 @@ def check_pr_size(
         "lines_added": total_added,
         "lines_removed": total_removed,
         "lines_changed": total,
+        "head_ref": head_ref,
+        "merge_base": merge_base,
     }
 
 
@@ -666,7 +773,7 @@ def check_shell_syntax(project_root: Path) -> Dict[str, Any]:
     }
 
 
-def check_net_deletion(project_root: Path) -> Dict[str, Any]:
+def check_net_deletion(project_root: Path, head_ref: str = "HEAD") -> Dict[str, Any]:
     """Check for mass file deletion and large net line deletion in the PR diff.
 
     Two independent sub-checks run in parallel:
@@ -679,9 +786,13 @@ def check_net_deletion(project_root: Path) -> Dict[str, Any]:
     and is SKIPPED_UNVERIFIED — a merge gate that can't see the diff must
     not assume it's small (OI-1140). The two sub-checks are independent, so
     one failing does not skip evaluation of the other.
+
+    ``head_ref`` defaults to HEAD (gate the working copy); pass the resolved
+    PR head OID when gating a remote PR so the diff measures the PR, not the
+    local checkout (OI-1141).
     """
-    deleted = _get_deleted_files(project_root)
-    net_line = _get_net_line_deletion(project_root)
+    deleted = _get_deleted_files(project_root, head_ref)
+    net_line = _get_net_line_deletion(project_root, head_ref)
 
     # Determine file-deletion verdict
     if deleted is None:
@@ -1006,12 +1117,17 @@ def _is_artifact_path(path: str) -> bool:
     return lower.endswith(".pdf") or lower.endswith(".xlsx") or lower.endswith(".xls")
 
 
-def _get_deleted_files(project_root: Path) -> Optional[List[str]]:
-    """Return list of files deleted in current PR branch vs base. None on failure."""
+def _get_deleted_files(project_root: Path, head_ref: str = "HEAD") -> Optional[List[str]]:
+    """Return list of files deleted in current PR branch vs base. None on failure.
+
+    ``head_ref`` defaults to HEAD (gate the working copy); pass the resolved
+    PR head OID when gating a remote PR so the diff measures the PR, not the
+    local checkout (OI-1141).
+    """
     for base_ref in ("origin/main", "origin/master"):
         try:
             result = subprocess.run(
-                ["git", "diff", "--diff-filter=D", "--name-only", f"{base_ref}...HEAD"],
+                ["git", "diff", "--diff-filter=D", "--name-only", f"{base_ref}...{head_ref}"],
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
@@ -1024,7 +1140,7 @@ def _get_deleted_files(project_root: Path) -> Optional[List[str]]:
 
     try:
         result = subprocess.run(
-            ["git", "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
+            ["git", "diff", "--diff-filter=D", "--name-only", f"{head_ref}~1", head_ref],
             cwd=str(project_root),
             capture_output=True,
             text=True,
@@ -1056,15 +1172,16 @@ def _parse_numstat_net(numstat_output: str) -> int:
     return total_removed - total_added
 
 
-def _get_net_line_deletion(project_root: Path) -> Optional[int]:
+def _get_net_line_deletion(project_root: Path, head_ref: str = "HEAD") -> Optional[int]:
     """Return net lines deleted (removed - added) for current PR vs origin/main.
 
-    Returns None on git failure.
+    ``head_ref`` defaults to HEAD (gate the working copy); pass the resolved
+    PR head OID when gating a remote PR (OI-1141). Returns None on git failure.
     """
     for base_ref in ("origin/main", "origin/master"):
         try:
             result = subprocess.run(
-                ["git", "diff", "--numstat", f"{base_ref}...HEAD"],
+                ["git", "diff", "--numstat", f"{base_ref}...{head_ref}"],
                 cwd=str(project_root),
                 capture_output=True,
                 text=True,
@@ -1077,7 +1194,7 @@ def _get_net_line_deletion(project_root: Path) -> Optional[int]:
 
     try:
         result = subprocess.run(
-            ["git", "diff", "--numstat", "HEAD~1", "HEAD"],
+            ["git", "diff", "--numstat", f"{head_ref}~1", head_ref],
             cwd=str(project_root),
             capture_output=True,
             text=True,
@@ -1141,10 +1258,18 @@ def run_gate_checks(
     dispatch_dir: Path,
     skip_pytest: bool = False,
     ci_workflow_name: Optional[str] = None,
+    pr_head: Optional["ResolvedPRRef"] = None,
 ) -> Dict[str, Any]:
     """Run all gate checks and produce a merged verdict.
 
     Returns a structured result with per-check status and overall verdict.
+
+    ``pr_head`` is the resolved PR reference (see :func:`resolve_pr_ref`).
+    When it is set, the diff-based checks (``pr_size``, ``net_deletion``)
+    measure ``merge_base(origin/main, pr_head.head_ref)..pr_head.head_ref`` —
+    the PR as it exists on GitHub — instead of the local HEAD. When it is
+    None, the gate measures the local working copy (HEAD), the unchanged
+    default (OI-1141).
 
     A check that returns SKIPPED_UNVERIFIED (couldn't establish an answer —
     see check_ci_workflow, check_pytest) blocks the verdict exactly like
@@ -1153,6 +1278,8 @@ def run_gate_checks(
     kept distinguishable in the result via ``skipped_unverified_count`` and
     per-check ``status``, even though both drive the same HOLD verdict.
     """
+    head_ref = pr_head.head_ref if pr_head is not None else "HEAD"
+
     checks: List[Dict[str, Any]] = []
 
     checks.append(check_open_items(pr_id, state_dir))
@@ -1160,10 +1287,10 @@ def run_gate_checks(
     checks.append(check_git_cleanliness(project_root))
     checks.append(check_contract_verification(pr_id, dispatch_dir, project_root, state_dir))
     checks.append(check_quality_advisory(project_root))
-    checks.append(check_pr_size(project_root))
+    checks.append(check_pr_size(project_root, head_ref=head_ref))
     checks.append(check_artifacts(pr_id, dispatch_dir, project_root))
     checks.append(check_shell_syntax(project_root))
-    checks.append(check_net_deletion(project_root))
+    checks.append(check_net_deletion(project_root, head_ref=head_ref))
     checks.append(check_ci_workflow(project_root, workflow_name=ci_workflow_name))
 
     if not skip_pytest:
@@ -1178,6 +1305,17 @@ def run_gate_checks(
 
     return {
         "pr_id": pr_id,
+        "pr_ref": (
+            {
+                "resolved": True,
+                "pr_ref": pr_head.pr_ref,
+                "head_ref": pr_head.head_ref,
+                "head_ref_name": pr_head.head_ref_name,
+                "merge_base": pr_head.merge_base,
+            }
+            if pr_head is not None
+            else {"resolved": False, "head_ref": "HEAD"}
+        ),
         "verdict": verdict,
         "checked_at": _utc_now_iso(),
         "total_checks": len(checks),
@@ -1218,6 +1356,16 @@ def format_human_readable(result: Dict[str, Any]) -> str:
     verdict_icon = "✅" if verdict == "GO" else "🚫"
     lines.append(f"\n{verdict_icon}  Gate verdict for {pr_id}: {verdict}")
     lines.append(f"   Checked at: {result.get('checked_at', '?')}")
+
+    pr_ref = result.get("pr_ref")
+    if pr_ref and pr_ref.get("resolved"):
+        lines.append(
+            f"   PR ref: head={pr_ref['head_ref'][:12]} "
+            f"branch={pr_ref['head_ref_name']} "
+            f"merge-base={pr_ref['merge_base'][:12]}"
+        )
+    elif pr_ref:
+        lines.append("   PR ref: HEAD (local working copy)")
     lines.append(
         f"   Checks: {result.get('go_count', 0)} GO, {result.get('hold_count', 0)} HOLD"
         f" ({result.get('skipped_unverified_count', 0)} unverified)\n"
@@ -1247,8 +1395,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--pr",
-        required=True,
-        help="PR identifier (e.g. PR-6)",
+        required=False,
+        default=None,
+        help=(
+            "PR number (or branch/URL) to gate. Resolves the PR head via "
+            "`gh pr view --json headRefName,headRefOid` and measures the "
+            "merge-base..head range — never the local working copy. Omit to "
+            "gate the local working copy (HEAD)."
+        ),
     )
     parser.add_argument(
         "--project-root",
@@ -1298,13 +1452,22 @@ def main() -> int:
     state_dir = Path(paths["VNX_STATE_DIR"])
     dispatch_dir = Path(paths["VNX_DISPATCH_DIR"])
 
+    pr_head = None
+    if args.pr is not None:
+        try:
+            pr_head = resolve_pr_ref(args.pr, project_root)
+        except PRRefResolutionError as exc:
+            print(f"pre_merge_gate: {exc}", file=sys.stderr)
+            return 10  # invalid arguments / missing data (--pr not resolvable)
+
     result = run_gate_checks(
-        pr_id=args.pr,
+        pr_id=args.pr if args.pr is not None else "HEAD",
         project_root=project_root,
         state_dir=state_dir,
         dispatch_dir=dispatch_dir,
         skip_pytest=args.skip_pytest,
         ci_workflow_name=args.ci_workflow_name,
+        pr_head=pr_head,
     )
 
     if args.store:

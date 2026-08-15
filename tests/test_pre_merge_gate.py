@@ -611,8 +611,8 @@ class TestCheckNetDeletion:
         """The two sub-checks are independent (per the check's own docstring):
         file-deletion resolving fine must not mask a net-line-deletion
         sub-check that failed to compute -> SKIPPED_UNVERIFIED, not GO."""
-        monkeypatch.setattr(pre_merge_gate, "_get_deleted_files", lambda project_root: [])
-        monkeypatch.setattr(pre_merge_gate, "_get_net_line_deletion", lambda project_root: None)
+        monkeypatch.setattr(pre_merge_gate, "_get_deleted_files", lambda project_root, head_ref: [])
+        monkeypatch.setattr(pre_merge_gate, "_get_net_line_deletion", lambda project_root, head_ref: None)
         result = check_net_deletion(tmp_path)
         assert result["status"] == SKIPPED_UNVERIFIED
         assert result["status"] != "GO"
@@ -623,8 +623,8 @@ class TestCheckNetDeletion:
         """HOLD from one sub-check must still win even if the other sub-check
         is unverifiable -- unverified must not water down a real HOLD."""
         many_deleted = [f"file_{i}.py" for i in range(DELETION_FILE_HOLD)]
-        monkeypatch.setattr(pre_merge_gate, "_get_deleted_files", lambda project_root: many_deleted)
-        monkeypatch.setattr(pre_merge_gate, "_get_net_line_deletion", lambda project_root: None)
+        monkeypatch.setattr(pre_merge_gate, "_get_deleted_files", lambda project_root, head_ref: many_deleted)
+        monkeypatch.setattr(pre_merge_gate, "_get_net_line_deletion", lambda project_root, head_ref: None)
         result = check_net_deletion(tmp_path)
         assert result["status"] == "HOLD"
 
