@@ -85,148 +85,158 @@
 # The fix lives in vnx_paths.sh + the subprocess env pinning, not in these files.
 # Full write-up: claudedocs/test-quarantaine-verklaring-20260815.md.
 #
-tests/integration/test_gemini_streaming_gated.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/migrations/test_auto_apply.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/pool/test_pool_lease_e2e.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_adapter_conformance.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_adr007_dispatches_repair.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_adr007_structural_conformance.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_agent_stream_sse.py  # OI-906: hangs a single-process run (loops in time.sleep forever), red on main (see header)
-tests/test_agent_validation.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_auto_commit_stash_isolation.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_auto_report_integration.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_behavior_contracts.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_bench_headless_routing.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_bench_seed_integrity.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+# 2026-08-15 OI-1227 re-measurement (dispatch-fwd-02): the 98 entries that
+# carried only the generic OI-906 inventory reason were each run SOLO with the
+# Profile A invocation (pytest -q <file> -p no:cacheprovider --timeout=180,
+# 90s wall-cap, clean env). Disposition per entry: B = red solo with the named
+# error class (measurement, not the 2026-08-01 inventory), D = hangs past the
+# 90s wall-cap. tests/test_dispatch_serialization.py ran 21/21 green solo (A)
+# and is REMOVED from this list - its 21 tests rejoin the Profile A sweep.
+# No C cases: nothing measured green solo but red in the sweep. The two OI-867
+# deepseek split entries were re-confirmed identical by this sweep.
+#
+#
+tests/integration/test_gemini_streaming_gated.py  # OI-1227: red solo — TestDefaultOffBehavior expects 'done' got 'failed' (1 failed, 6 passed)
+tests/migrations/test_auto_apply.py  # OI-1227: red solo — sqlite3.OperationalError: no such table: dispatches (2 failed, 7 passed)
+tests/pool/test_pool_lease_e2e.py  # OI-1227: red solo — project-id resolution yields 'vnx-dev' not 'test-project' (2 failed, 6 passed)
+tests/test_adapter_conformance.py  # OI-1227: red solo — HeadlessAdapter.shutdown() unexpected kwarg 'graceful' (1 failed, 30 passed)
+tests/test_adr007_dispatches_repair.py  # OI-1227: red solo — 70-line gate flags run() at 78 lines (2 failed, 65 passed)
+tests/test_adr007_structural_conformance.py  # OI-1227: red solo — sqlite3: cannot start a transaction within a transaction (1 failed, 1 passed)
+tests/test_agent_stream_sse.py  # OI-1227: hangs — exceeds 90s wall-cap solo (per-test --timeout=180), no output within cap
+tests/test_agent_validation.py  # OI-1227: red solo — T0IntelligenceGatherer: 'Developer' not valid (1 failed)
+tests/test_auto_commit_stash_isolation.py  # OI-1227: exceeds 90s wall-cap solo (per-test --timeout=180)
+tests/test_auto_report_integration.py  # OI-1227: red solo — manual report status parsed 'contract_invalid' not 'success' (1 failed, 38 passed)
+tests/test_behavior_contracts.py  # OI-1227: red solo — routing_policy lanes missing BehaviorContract: kimi x4 (1 failed, 22 passed)
+tests/test_bench_headless_routing.py  # OI-1227: red solo — 'claude-sonnet-4-6' not in HEADLESS_FORCED_MODELS (3 failed, 2 passed)
+tests/test_bench_seed_integrity.py  # OI-1227: red solo — expected 9 task verifiers, found 13 (1 failed, 13 passed)
 tests/test_billing_safety.py  # OI-951: doc/content drift the test already asserts against, red on main too
-tests/test_build_t0_state_exception_handling.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_build_t0_state_exception_handling.py  # OI-1227: red solo — build_t0_state.py exited 1 on main (1 failed, 1 passed)
 tests/test_burnin_certification.py  # hangs without VNX_HEADLESS_CLI=echo; covered by burn-in-headless.yml
-tests/test_busy_terminal_certification.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_ci_gate.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_claude_github_review_linkage.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_busy_terminal_certification.py  # OI-1227: red solo — rc_check_terminal call not found in busy-term dispatch (6 failed, 5 errors, 35 passed)
+tests/test_ci_gate.py  # OI-1227: red solo — closure-verifier gate rejects/misses report_path + contract hash (5 failed, 17 passed)
+tests/test_claude_github_review_linkage.py  # OI-1227: red solo — MagicMock not JSON serializable in request handler (3 failed, 33 passed)
 tests/test_cleanup_stale_vnx_sessions.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
-tests/test_cli_flag_forwarding.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_cli_flag_forwarding.py  # OI-1227: red solo — RGM lambda got unexpected kwarg 'strict' (1 failed, 17 passed)
 tests/test_cli_init.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_close_track_if_done.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
-tests/test_codex_pr311_findings.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_codex_r2_fixes.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_codex_pr311_findings.py  # OI-1227: red solo — IntelligenceSelector._record_pattern_usage missing (3 failed, 12 passed)
+tests/test_codex_r2_fixes.py  # OI-1227: red solo — ((count++)) post-increment still present in dispatcher loop (1 failed, 11 passed)
 tests/test_constraint_enforcer.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
-tests/test_context_rotation.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_conversation_analyzer.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_conversation_resume.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dashboard_feature.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dashboard_kanban_certification.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dashboard_sse_empty_file.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_delivery_failure_codes.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dispatch_agent_default_instruction.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dispatch_daemon.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dispatch_manifest.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dispatch_serialization.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_dispatcher_drain_lifecycle.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_error_contracts.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_future_state_reconciliation.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_gate_dispatch_id.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_gate_evidence_accuracy.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_gate_execution_certification.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_gate_runner.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_gate_status_schema.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_gemini_prompt_no_duplicate.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_governance_blockers_fix.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_governance_digest_certification.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_governance_digest_runner.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_headless_dispatch_daemon_wave5.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_headless_inspect.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_context_rotation.py  # OI-1227: red solo — project-id scoping resolves to worktree path not isolated home (1 failed, 53 passed)
+tests/test_conversation_analyzer.py  # OI-1227: red solo — memory suggestions empty where rows expected (2 failed, 65 passed)
+tests/test_conversation_resume.py  # OI-1227: red solo — serve_dashboard resume api broken: session-id/conflict asserts fail (4 failed, 16 passed)
+tests/test_dashboard_feature.py  # OI-1227: red solo — serve_dashboard._format_duration missing (11 failed, 51 passed)
+tests/test_dashboard_kanban_certification.py  # OI-1227: red solo — serve_dashboard._DIR_TO_STAGE missing (6 failed, 9 passed)
+tests/test_dashboard_sse_empty_file.py  # OI-1227: exceeds 90s wall-cap solo (per-test --timeout=180)
+tests/test_delivery_failure_codes.py  # OI-1227: red solo — ValueError: substring not found in 8 setup errors (21 passed)
+tests/test_dispatch_agent_default_instruction.py  # OI-1227: red solo — default-instruction subprocess rc != 0 (2 failed, 17 passed)
+tests/test_dispatch_daemon.py  # OI-1227: red solo — daemon lifecycle file-move/audit-log asserts fail (2 failed, 8 passed)
+tests/test_dispatch_manifest.py  # OI-1227: red solo — auto-commit dispatch-id assert not True (1 failed, 8 passed)
+tests/test_dispatcher_drain_lifecycle.py  # OI-1227: red solo — subprocess_dispatch recovery module attr error (3 failed, 16 passed)
+tests/test_error_contracts.py  # OI-1227: red solo — '|| true' suppression still present in shell critical path (1 failed, 3 passed)
+tests/test_future_state_reconciliation.py  # OI-1227: red solo — health-beacon lambda unexpected kwarg on writes-fail path (2 failed, 37 passed)
+tests/test_gate_dispatch_id.py  # OI-1227: red solo — dispatch-id propagation to claude-github assert False (1 failed, 11 passed)
+tests/test_gate_evidence_accuracy.py  # OI-1227: red solo — verdict='fail' with non-terminal status must still enforce report_path (4 failed, 16 passed)
+tests/test_gate_execution_certification.py  # OI-1227: red solo — MagicMock vs int comparison in evidence-chain lifecycle (10 failed, 3 passed)
+tests/test_gate_runner.py  # OI-1227: red solo — default stall threshold 180 != expected 60 (1 failed, 29 passed)
+tests/test_gate_status_schema.py  # OI-1227: red solo — status=completed not accepted as pass (1 failed, 25 passed)
+tests/test_gemini_prompt_no_duplicate.py  # OI-1227: red solo — FILE: markers appear >once in inlined prompt (3 failed, 1 passed)
+tests/test_governance_blockers_fix.py  # OI-1227: red solo — recorded_ts not assigned from now_ts (2 failed, 28 passed)
+tests/test_governance_digest_certification.py  # OI-1227: red solo — digest file not created (14 failed, 34 passed)
+tests/test_governance_digest_runner.py  # OI-1227: red solo — digest runner output missing (11 failed, 20 passed)
+tests/test_headless_dispatch_daemon_wave5.py  # OI-1227: red solo — deliver_with_recovery not called on fallback path (2 failed, 11 passed)
+tests/test_headless_inspect.py  # OI-1227: red solo — HealthSummary.status_label missing (13 failed, 8 passed)
 # tests/test_horizon_parity.py — REPAIRED (OI-1065): the pip-CLI/engine flag drift
 # (vnx horizon add --lane-hint, close --attest/--pr/--max-gh-calls, plan-gate
 # attest delegation) was the red this exclusion hid. Suite is 85/85 green and
 # now rejoins the Profile A sweep so new drift fails the PR, not a red suite
 # nobody reads. No heavy-dep stack (sqlite3 + in-repo modules only).
-tests/test_horizon_schema_migration_fix.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_horizon_schema_migration_fix.py  # OI-1227: red solo — pre-27 store migration to horizon fails (8 failed, 27 passed)
 tests/test_horizon_skill_alias.py  # OI-951: doc/content drift the test already asserts against, red on main too
 tests/test_init_migrate_bootstrap.py  # OI-1133 group-check: 18/32 failed in PR#1458 Profile A sweep (vnx init/migrate exit non-zero on the CI image; OI-946 class). Not OI-1213 (2026-08-15): autouse fixture already isolates _PREFLIGHT_HOOKS; 56 green clean-env solo+neighbour
-tests/test_installer_no_template_leak.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_intelligence_ab_framework.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_installer_no_template_leak.py  # OI-1227: red solo — developer machine paths found in shipped sources (2 failed, 6 passed)
+tests/test_intelligence_ab_framework.py  # OI-1227: red solo — AB-framework conn lambda unexpected kwarg 'timeout' (2 failed, 9 passed)
 tests/test_intelligence_pipeline_e2e.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
 tests/test_learning_feature.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
 tests/test_learning_loop_exception_handling.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
 tests/test_learning_loop_tz.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
-tests/test_litellm_agentic_runner.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_llm_decision_router.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_litellm_agentic_runner.py  # OI-1227: red solo — full-loop subprocess rc != 0 (1 failed, 17 passed)
+tests/test_llm_decision_router.py  # OI-1227: red solo — decision comparison failed (1 failed, 18 passed)
 tests/test_migrate_future_system.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_migrate_pool_seed.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
-tests/test_observability_linkage.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_open_items_gate_certification.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_pattern_id_stability.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_pattern_matching.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_per_pr_closure.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_observability_linkage.py  # OI-1227: red solo — events-dir guard NotADirectoryError (4 failed, 13 passed)
+tests/test_open_items_gate_certification.py  # OI-1227: red solo — serve_dashboard._read_gate_config missing (2 failed, 8 passed)
+tests/test_pattern_id_stability.py  # OI-1227: red solo — IntelligenceSelector._record_pattern_usage missing (1 failed, 8 passed)
+tests/test_pattern_matching.py  # OI-1227: red solo — ModuleNotFoundError: cli_output (1 collection error)
+tests/test_per_pr_closure.py  # OI-1227: red solo — 'contradiction_gemini_review' missing from evidence set (9 failed, 13 passed)
 tests/test_plan_gate_panel.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_planning_api.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_planning_cli.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
-tests/test_planning_cli_objective.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_pool_manager_real_spawn.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_pool_provider_mix_integration.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_pool_state_repo.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_pr10_provider_string_canon.py  # OI-867: stale vs the deepseek proxy/harness split — 2 tests expect the registry key "deepseek", the split maps "deepseek_harness" (measured 2026-08-15: 2 failed, 38 passed)
-tests/test_pr2_requeue_clear_context.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_project_status_hook.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_provider_dispatch_contract_integration.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_provider_dispatch_deepseek_harness.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_provider_dispatch_entry.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_planning_cli_objective.py  # OI-1227: red solo — objective list missing feat-b (2 failed, 13 passed)
+tests/test_pool_manager_real_spawn.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (1 failed, 9 passed)
+tests/test_pool_provider_mix_integration.py  # OI-1227: red solo — terminal_leases has no column 'state' (1 failed, 15 passed)
+tests/test_pool_state_repo.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (6 failed, 3 passed)
+tests/test_pr10_provider_string_canon.py  # OI-1227: registry key 'deepseek_harness' != 'deepseek' (OI-867 deepseek proxy/harness split)
+tests/test_pr2_requeue_clear_context.py  # OI-1227: red solo — absent ClearContext defaults 'true' != 'false' (1 failed, 15 passed)
+tests/test_project_status_hook.py  # OI-1227: red solo — project-status hook subprocess rc != 0 (1 failed, 2 passed)
+tests/test_provider_dispatch_contract_integration.py  # OI-1227: red solo — litellm tool-shape lane None != 'openai_tools' (2 failed, 17 passed)
+tests/test_provider_dispatch_deepseek_harness.py  # OI-1227: red solo — missing-key handler writes no receipt line (1 failed, 9 passed)
+tests/test_provider_dispatch_entry.py  # OI-1227: red solo — litellm route subprocess rc != 0 (1 failed, 17 passed)
 tests/test_quality_advisory_pipeline.py  # OI-1133 group-check: 2/43 failed in PR#1458 Profile A sweep (NoneType .status; OI-948 class). Not OI-1213 (2026-08-15): no migration fixture; 67 green clean-env solo+neighbour
-tests/test_queue_reconciliation_certification.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_queue_reconciliation_certification.py  # OI-1227: red solo — 'hash_gemini_review' missing from evidence keys (4 failed, 34 passed)
 tests/test_quickstart_validation.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
-tests/test_receipt_classifier.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_receipt_instruction_hash.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_receipt_classifier.py  # OI-1227: red solo — classifier_providers.ollama_provider.subprocess missing (1 failed, 15 passed)
+tests/test_receipt_instruction_hash.py  # OI-1227: red solo — manifest sha256 read failed (2 failed, 7 passed)
 tests/test_receipt_processor_autopr_rejected_mirror.py  # OI-1133 group-check: 6/6 failed in PR#1458 Profile A sweep (outcome_status resolves None). Not OI-1213 (2026-08-15): VNX_HOME guard clobbers the explicit VNX_STATE_DIR pin (vnx_paths.sh:221-228) -> shell-lane DB update lands in $VNX_DATA_DIR/state; see header
 tests/test_receipt_processor_bootstrap.py  # OI-1133 group-check: 6/10 failed in PR#1458 Profile A sweep (bootstrap returns rc=1). Not OI-1213 (2026-08-15): VNX_HOME guard clobbers VNX_STATE_DIR -> PROCESSING_LOG falls back to $VNX_DATA_DIR/state -> tee fails rc=1; see header
 tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
 tests/test_receipt_v2_pr5_schema_cutover.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
 tests/test_repo_map.py  # CI image: red in the minimal image on two measured stacks — without tree-sitter repo_map.py raises NameError (_TSParser, latent scripts/lib bug, repair needs own dispatch; scripts/lib is out of scope here), and the networkx PageRank tests need the undeclared networkx+numpy+scipy stack. Installing networkx alone makes it WORSE (27 failed vs 13): repo_map leaves its positional fallback and nx.pagerank crashes on missing numpy, which also breaks the green test_repo_map_provider_coverage.py.
-tests/test_review_adapters.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_roadmap_consistency.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_review_adapters.py  # OI-1227: red solo — ValueError not raised for unknown adapter (7 failed, 28 passed)
+tests/test_roadmap_consistency.py  # OI-1227: red solo — PR_QUEUE.md stale vs build_pr_queue.py (1 failed, 3 passed)
 tests/test_routing_policy.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
-tests/test_runtime_coordination_schema_drift.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_runtime_facade_registry_integration.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_safe_autonomy_cutover.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_schema_init_view_ordering.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_semantics_cleanup.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_serve_dashboard_api.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_session_ids_staleness.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_runtime_coordination_schema_drift.py  # OI-1227: red solo — schema-code drift: columns referenced but absent (1 failed, 9 passed)
+tests/test_runtime_facade_registry_integration.py  # OI-1227: red solo — Invalid terminal_id 'A0' must match ^T[0-9]+$ (1 failed, 19 passed)
+tests/test_safe_autonomy_cutover.py  # OI-1227: red solo — ModuleNotFoundError: fpd_certification (3 failed, 35 passed)
+tests/test_schema_init_view_ordering.py  # OI-1227: red solo — legacy v21 bootstrap first run fails (3 failed, 15 passed)
+tests/test_semantics_cleanup.py  # OI-1227: red solo — ValueError: substring not found in 8 setup errors (5 passed)
+tests/test_serve_dashboard_api.py  # OI-1227: red solo — serve_dashboard._read_gate_config missing (4 failed, 63 passed)
+tests/test_session_ids_staleness.py  # OI-1227: red solo — read_events_with_timeout does not refresh session_id (1 failed, 5 passed)
 tests/test_sessionstart_hook.py  # OI-951: doc/content drift the test already asserts against, red on main too
-tests/test_strategy_roadmap.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_strategy_roadmap_real_file.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_subprocess_adapter_pr3.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_subprocess_cheap_lane.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_subprocess_dispatch_identity.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_subprocess_health.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_subprocess_w3e_robustness.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_strategy_roadmap.py  # OI-1227: red solo — roadmap file not found (RoadmapValidationError) (1 failed, 33 passed)
+tests/test_strategy_roadmap_real_file.py  # OI-1227: red solo — committed roadmap not found (RoadmapValidationError) (1 failed)
+tests/test_subprocess_adapter_pr3.py  # OI-1227: red solo — session-id extraction 'ses_other' != 'ses_abc123' (1 failed, 25 passed)
+tests/test_subprocess_cheap_lane.py  # OI-1227: red solo — cheap-lane routes to kimi, expected None (5 failed, 30 passed)
+tests/test_subprocess_dispatch_identity.py  # OI-1227: red solo — delivered env leaks ANTHROPIC_AUTH_TOKEN (1 failed, 5 passed)
+tests/test_subprocess_health.py  # OI-1227: red solo — deliver-with-recovery file not found (3 failed, 13 passed)
+tests/test_subprocess_w3e_robustness.py  # OI-1227: red solo — cannot import _classify_completion from delivery (3 failed, 14 passed)
 tests/test_t0_decision_log.py  # OI-1133 group-check: 2/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection). Not OI-1213 (2026-08-15): no migration fixture; green clean-env solo+neighbour
 tests/test_t0_escalations_log.py  # OI-1133 group-check: 1/60 failed in PR#1458 Profile A sweep (same-length source-replacement cursor detection). Not OI-1213 (2026-08-15): no migration fixture; green clean-env solo+neighbour
-tests/test_t0_skill_consistency.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_t0_skill_consistency.py  # OI-1227: red solo — no bash blocks found in CLAUDE.md (2 failed, 6 passed)
 tests/test_t0_skill_slim.py  # OI-951: doc/content drift the test already asserts against, red on main too
 tests/test_tenant_stamp_fail_closed.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
-tests/test_terminal_state_reconciler.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_tmux_adapter.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_tmux_adapter_interface.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_terminal_state_reconciler.py  # OI-1227: red solo — reconciler 'idle' != 'blocked' (2 failed, 10 passed)
+tests/test_tmux_adapter.py  # OI-1227: red solo — ModuleNotFoundError: tmux_adapter_cli (3 failed, 42 passed)
+tests/test_tmux_adapter_interface.py  # OI-1227: red solo — TmuxAdapter.shutdown() unexpected kwarg 'graceful' (2 failed, 27 passed)
 tests/test_tmux_interactive_dispatch.py  # fails / exceeds per-test timeout (OI-906)
 tests/test_tmux_worktree.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
-tests/test_track_cli.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_track_v23_cli.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_track_cli.py  # OI-1227: red solo — track db file not found (15 failed, 3 passed)
+tests/test_track_v23_cli.py  # OI-1227: red solo — track v23 subprocess ret != 0 (4 failed, 6 passed)
 tests/test_vnx_cli.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
-tests/test_vnx_start_runtime.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_vnx_start_runtime.py  # OI-1227: red solo — VNX var set mismatch (1 failed, 46 passed)
 tests/test_w5b_small_fixes.py  # OI-947: learning_loop.ensure_env AttributeError, red on main too
-tests/test_w_init_project_id_threading.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_w_init_project_id_threading.py  # OI-1227: red solo — migration linter flags new DEFAULT 'vnx-dev' (1 failed, 26 passed)
 tests/test_wave4_central_install_e2e.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
 tests/test_wave4_cmd_update.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
 tests/test_wave4_path_resolver.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
 tests/test_wave4_regen_settings_target.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
 tests/test_wave4_save_restore.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
 tests/test_wave4_write_guard.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
-tests/test_wave7_deepseek_smoke.py  # OI-867: stale vs the deepseek proxy/harness split — smoke routes litellm:deepseek to a model on dispatch_allowed: false (measured 2026-08-15: 1 failed, 12 passed)
-tests/test_week_1_skills.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_wheel_install.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_wiring_completeness.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
-tests/test_worker_heartbeat.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/test_wave7_deepseek_smoke.py  # OI-1227: smoke routes litellm:deepseek on dispatch_allowed:false (OI-867 deepseek proxy/harness split)
+tests/test_week_1_skills.py  # OI-1227: red solo — vendored vnx-system dispatcher file not found (1 failed, 3 passed)
+tests/test_wheel_install.py  # OI-1227: red solo — wheel-install smoke exit 1 (1 failed)
+tests/test_wiring_completeness.py  # OI-1227: red solo — smart-router route not called (1 failed, 13 passed)
+tests/test_worker_heartbeat.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (1 failed, 20 passed)
 tests/test_worker_state_dir.py  # OI-950: wave4 central-install assumes GH Actions runner HOME layout, red on main too
-tests/unit/test_codex_event_normalizer.py  # OI-906: red on main in the 2026-08-01 full-suite inventory; rejoin needs a repair dispatch (see header)
+tests/unit/test_codex_event_normalizer.py  # OI-1227: red solo — unknown-event type expected 'error' got 'info' (4 failed, 31 passed)
