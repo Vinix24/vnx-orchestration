@@ -153,3 +153,61 @@ class TestVocabularyGuard:
     def test_baseline_gate_is_the_heaviest(self):
         assert _GATE_BASELINE == "codex_gate"
         assert _GATE_WEIGHT["codex_gate"] == max(_GATE_WEIGHT.values())
+
+
+class TestIrreversibility:
+    def test_explicit_irreversible_flag_forces_coding_strict(self):
+        result = derive_governance_variant(
+            dispatch_paths=["docs/operations/foo.md"], irreversible=True,
+        )
+        assert result.variant == "coding-strict"
+        assert result.gate == "codex_gate"
+        assert "irreversible" in result.reason
+
+    def test_schema_migration_path_is_irreversible(self):
+        result = derive_governance_variant(
+            dispatch_paths=["schemas/migrations/0034_x.sql"]
+        )
+        assert result.variant == "coding-strict"
+        assert "irreversible" in result.reason
+
+    def test_fleet_default_path_is_irreversible(self):
+        result = derive_governance_variant(dispatch_paths=["skills/foo/bar.md"])
+        assert result.variant == "coding-strict"
+
+    def test_receipt_format_path_is_irreversible(self):
+        result = derive_governance_variant(
+            dispatch_paths=["scripts/lib/ndjson_hash_chain.py"]
+        )
+        assert result.variant == "coding-strict"
+
+    def test_irreversible_path_wins_over_light_reversible_paths(self):
+        result = derive_governance_variant(
+            dispatch_paths=["docs/foo.md", "agents/t0.md"]
+        )
+        assert result.variant == "coding-strict"
+
+    def test_resolve_gate_irreversible_forces_coding_strict(self):
+        result = resolve_gate(
+            dispatch_paths=["docs/operations/foo.md"], irreversible=True,
+        )
+        assert result.gate == "codex_gate"
+        assert result.governance_variant == "coding-strict"
+
+
+class TestNewFeatureAxis:
+    def test_code_generation_task_class_is_new_feature(self):
+        result = derive_governance_variant(task_class="01_code_generation")
+        assert result.is_new_feature is True
+
+    def test_new_feature_axis_is_independent_of_path_variant(self):
+        result = derive_governance_variant(
+            dispatch_paths=["docs/operations/foo.md"],
+            task_class="01_code_generation",
+        )
+        assert result.variant == "minimal"
+        assert result.is_new_feature is True
+
+    def test_non_code_generation_is_not_new_feature(self):
+        result = derive_governance_variant(task_class="04_documentation")
+        assert result.is_new_feature is False

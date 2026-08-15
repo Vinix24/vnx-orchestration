@@ -106,6 +106,13 @@ class DispatchSpec:
     model: Optional[str] = None
     skill: Optional[str] = None
     task_class: Optional[str] = None
+    # Operator-declared irreversibility (plan-gate weight ladder, 2026-08-15):
+    # a deletion/rename or a big architecture refactor cannot be walked back, so
+    # it forces the strictest governance variant. Path-derivable irreversible
+    # categories (schema migrations, fleet defaults, the receipt/ledger format)
+    # need no flag; this field covers the two that are NOT path-derivable. It is
+    # a declaration by the caller, never derived from instruction text or role.
+    irreversible: bool = False
     pr_id: Optional[str] = None
     track_id: Optional[str] = None  # structural link to a tracks-table row (TL-D1); validated at the door
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor

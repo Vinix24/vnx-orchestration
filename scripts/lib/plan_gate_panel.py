@@ -211,6 +211,52 @@ def filter_panel_seats(
     # panel composition stays stable and auditable against the config.
     wanted = set(labels)
     return [s for s in seats if s["label"] in wanted]
+
+
+# ---------------------------------------------------------------------------
+# Governance-variant seat ladder (operator ladder, 2026-08-15). The panel SIZE
+# derives from the governance variant, not a flat "every plan gets the full
+# panel". The ladder, from lightest to heaviest:
+#   minimal (docs, reversible)           -> 0 seats (no panel runs at all)
+#   business-light / light               -> 1 seat  (opus)
+#   default (code)                       -> 2 seats (opus, kimi)
+#   coding-strict (core / irreversible)  -> 3 seats (opus, kimi, glm-5.2-harness)
+#   new feature (task_class 01_code_generation) -> full panel, regardless of variant
+# Labels are ordered to match DEFAULT_PANEL so filter_panel_seats keeps the
+# configured (auditable) order; the tuple length IS the seat count, so there is
+# no second count dict to drift.
+# ---------------------------------------------------------------------------
+GOVERNANCE_VARIANT_SEAT_LABELS: Dict[str, tuple[str, ...]] = {
+    "minimal": (),
+    "business-light": ("opus",),
+    "light": ("opus",),
+    "default": ("opus", "kimi"),
+    "coding-strict": ("opus", "kimi", "glm-5.2-harness"),
+}
+
+
+def seat_labels_for_governance_variant(
+    seats: List[Dict[str, str]], variant: str, *, is_new_feature: bool = False
+) -> List[str]:
+    """The seat labels a governance variant entitles a plan to, for one run.
+
+    A new feature (``is_new_feature``) always gets every configured seat — the
+    full diverse-family panel — because a new feature is the highest
+    blast-radius code change and must never be sized down by a coincidentally
+    light path. Otherwise the variant selects an ordered prefix of the
+    configured panel (``minimal`` selects none). Fail-loud on an unknown
+    variant: a variant the ladder does not know must never silently shrink to
+    zero seats.
+    """
+    if is_new_feature:
+        return [s["label"] for s in seats]
+    labels = GOVERNANCE_VARIANT_SEAT_LABELS.get(variant)
+    if labels is None:
+        raise ValueError(
+            f"plan-gate panel: unknown governance variant {variant!r}; "
+            f"known variants: {sorted(GOVERNANCE_VARIANT_SEAT_LABELS)}"
+        )
+    return list(labels)
 _OPEN_FENCE = "```" + VERDICT_FENCE
 _VALID_VERDICTS = {"pass", "revise", "block"}
 

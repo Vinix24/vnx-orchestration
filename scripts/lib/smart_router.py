@@ -58,6 +58,10 @@ class GovernanceVariantResult:
     reason: str        # why this variant was chosen (deterministic rule fired)
     gate: str          # the review-gate weight this variant resolves to
     direction: str     # "up" | "unchanged" | "down" vs the codex_gate baseline
+    # Independent axis (plan-gate weight ladder): True when task_class is
+    # 01_code_generation. A new feature runs the full panel regardless of the
+    # path-derived variant, so the plan-gate needs this carried alongside.
+    is_new_feature: bool = False
 
 
 @dataclass(frozen=True)
@@ -587,6 +591,49 @@ _CATEGORY_TO_VARIANT: dict[str, str] = {
 # silent downgrade.
 _CATEGORY_RANK: dict[str, int] = {"docs": 0, "business": 1, "code": 2, "core": 3}
 
+# Irreversible change categories (operator ladder, 2026-08-15). The three
+# PATH-DERIVABLE categories classify to the strictest variant (coding-strict)
+# no matter what the reversible ladder above would say, because a change that
+# cannot be walked back never gets a lighter gate:
+#   (1) schema migrations (scripts/migrations/, schemas/migrations/),
+#   (2) fleet defaults written by `vnx role sync` / `vnx init`
+#       (.claude/terminals/, .claude/skills/, agents/, skills/),
+#   (3) the append-only receipt/ledger format (ndjson_hash_chain, ndjson_io,
+#       receipt_schema, append_receipt_internals).
+# The other two (deletions/renames, big architecture refactors) are NOT
+# path-derivable — a rename looks like a normal edit — and need the spec's
+# explicit ``irreversible`` flag instead. Each entry maps a path prefix to the
+# human category name for the trace. Note agents/ and skills/ also appear in
+# _BUSINESS_PREFIXES; the irreversible check runs FIRST so the fleet-default
+# meaning wins over the reversible "non-code deliverable" meaning.
+_IRREVERSIBLE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("scripts/migrations/", "schema-migration"),
+    ("schemas/migrations/", "schema-migration"),
+    (".claude/terminals/", "fleet-default"),
+    (".claude/skills/", "fleet-default"),
+    ("agents/", "fleet-default"),
+    ("skills/", "fleet-default"),
+    ("scripts/lib/append_receipt_internals/", "receipt-format"),
+    ("scripts/lib/ndjson_hash_chain.py", "receipt-format"),
+    ("scripts/lib/ndjson_io.py", "receipt-format"),
+    ("scripts/lib/receipt_schema.py", "receipt-format"),
+)
+
+
+def _irreversible_path_category(path: str) -> Optional[str]:
+    """Return the irreversible category name a path falls under, else None.
+
+    First-match wins; deterministic. Called before the reversible category
+    ladder so an irreversible change is never silently sized down.
+    """
+    p = str(path).strip().lstrip("./")
+    if not p:
+        return None
+    for prefix, category in _IRREVERSIBLE_PREFIXES:
+        if _matches_prefix(p, prefix):
+            return category
+    return None
+
 
 def _matches_prefix(path: str, prefix: str) -> bool:
     """True when ``path`` equals the prefix's bare dir or lives under it."""
@@ -664,6 +711,7 @@ def derive_governance_variant(
     dispatch_paths: Optional[Sequence[str]] = None,
     *,
     task_class: Optional[str] = None,
+    irreversible: bool = False,
 ) -> GovernanceVariantResult:
     """Derive a governance variant from the signals the router already has.
 
@@ -673,8 +721,41 @@ def derive_governance_variant(
     role are deliberately NOT signals here: path + task_class already pin the
     risk class deterministically, and text/role guessing is exactly the
     ambiguity a model would be for; this rule has none.
+
+    Irreversibility overrides the reversible ladder: an explicit ``irreversible``
+    flag, or any path under an irreversible category (schema migrations, fleet
+    defaults, the append-only receipt/ledger format), forces coding-strict — a
+    change that cannot be walked back never gets a lighter gate. ``is_new_feature``
+    is an INDEPENDENT axis (task_class == 01_code_generation) carried on the
+    result so the plan-gate can size its panel to the full seat set for a new
+    feature regardless of the path-derived variant.
     """
+    is_new_feature = task_class == "01_code_generation"
     paths = [p for p in (dispatch_paths or []) if p and str(p).strip()]
+
+    irreversible_hit: Optional[str] = None
+    for p in paths:
+        irreversible_hit = _irreversible_path_category(str(p))
+        if irreversible_hit:
+            break
+
+    if irreversible or irreversible_hit:
+        if irreversible:
+            reason = "explicit irreversible=true on spec"
+            if irreversible_hit:
+                reason += f"; also path-derived {irreversible_hit}"
+        else:
+            reason = f"irreversible path category={irreversible_hit!r}"
+        variant = "coding-strict"
+        gate = GOVERNANCE_VARIANT_GATE[variant]
+        return GovernanceVariantResult(
+            variant=variant,
+            reason=reason,
+            gate=gate,
+            direction=_direction_for(gate),
+            is_new_feature=is_new_feature,
+        )
+
     if paths:
         category = max(
             (_path_category(str(p)) for p in paths),
@@ -694,6 +775,7 @@ def derive_governance_variant(
         reason=reason,
         gate=gate,
         direction=_direction_for(gate),
+        is_new_feature=is_new_feature,
     )
 
 
@@ -702,6 +784,7 @@ def resolve_gate(
     *,
     dispatch_paths: Optional[Sequence[str]] = None,
     task_class: Optional[str] = None,
+    irreversible: bool = False,
 ) -> GateWeightResolution:
     """Resolve the review-gate weight for a dispatch.
 
@@ -722,6 +805,7 @@ def resolve_gate(
     derived = derive_governance_variant(
         dispatch_paths=dispatch_paths,
         task_class=task_class,
+        irreversible=irreversible,
     )
     return GateWeightResolution(
         gate=derived.gate,
