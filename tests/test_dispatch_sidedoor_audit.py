@@ -203,3 +203,112 @@ def test_raw_scan_covers_extensionless_shebang_scripts(tmp_path):
     # an extensionless NON-shebang data file is not scanned as a script
     (binp / "data").write_text('claude -p something\n', encoding="utf-8")
     assert "bin/data" not in audit_mod.scan_raw_claude_spawns(root=tmp_path)
+
+
+# --- OI-1220: an argparse `help=` string documents the flag, it does not invoke it. ---
+# PR #1531 added a `--allow-headless` flag whose help prose mentions "(claude -p)"; the raw
+# scan flagged `vnx_cli/main.py` even though the full diff was two `add_argument` calls. The
+# help-string exemption below fixes that false positive WITHOUT blinding the gate to a real
+# spawn: a spawn is an argv list or a subprocess/shell call, never a `help=`-bound string.
+
+
+def test_help_string_with_claude_p_is_not_flagged(tmp_path):
+    # OI-1220: the exact PR #1531 shape — a parenthesized, multi-line help string — must not trip.
+    scripts = tmp_path / "vnx_cli"
+    scripts.mkdir()
+    (scripts / "main.py").write_text(
+        'dispatch_parser.add_argument(\n'
+        '    "--allow-headless",\n'
+        '    action="store_true",\n'
+        '    help=(\n'
+        '        "opt into the claude_headless lane (claude -p). Requires "\n'
+        '        "--headless-reason and a claude provider. The lane runs on the "\n'
+        '        "subscription unless an own ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL "\n'
+        '        "is present."\n'
+        '    ),\n'
+        ')\n',
+        encoding="utf-8",
+    )
+    found = audit_mod.scan_raw_claude_spawns(root=tmp_path)
+    assert "vnx_cli/main.py" not in found, (
+        "help= string with 'claude -p' false-flagged as raw claude spawn (OI-1220)"
+    )
+
+
+def test_single_line_help_string_with_claude_p_is_not_flagged(tmp_path):
+    # OI-1220: a bare one-line help= literal is the same documentation channel.
+    scripts = tmp_path / "vnx_cli"
+    scripts.mkdir()
+    (scripts / "main.py").write_text(
+        'parser.add_argument("--allow-headless", help="opt into the claude -p lane")\n',
+        encoding="utf-8",
+    )
+    found = audit_mod.scan_raw_claude_spawns(root=tmp_path)
+    assert "vnx_cli/main.py" not in found, (
+        "single-line help= string with 'claude -p' false-flagged as raw claude spawn"
+    )
+
+
+def test_docstring_with_claude_p_is_not_flagged(tmp_path):
+    # OI-1220: the docstring channel is already skipped by _code_lines; pin it explicitly.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "prose.py").write_text(
+        '"""Documents the claude -p primitive without ever spawning it.\n'
+        'The raw receipt-bypass primitive is `claude -p` / `claude --print`.\n'
+        '"""\n'
+        'def describe():\n'
+        '    return "headless lane"\n',
+        encoding="utf-8",
+    )
+    found = audit_mod.scan_raw_claude_spawns(root=tmp_path)
+    assert "scripts/prose.py" not in found, (
+        "docstring-only mention of claude -p false-flagged as raw claude spawn"
+    )
+
+
+def test_argv_list_spawn_in_same_file_as_help_string_is_flagged(tmp_path):
+    # OI-1220 negative: the help-string exemption must NOT blind the gate to a real argv spawn
+    # in the same file.
+    scripts = tmp_path / "vnx_cli"
+    scripts.mkdir()
+    (scripts / "main.py").write_text(
+        'parser.add_argument("--allow-headless", help="opt into the claude -p lane")\n'
+        'cmd = ["claude", "--model", m, "--print", p]\n',
+        encoding="utf-8",
+    )
+    found = audit_mod.scan_raw_claude_spawns(root=tmp_path)
+    assert "vnx_cli/main.py" in found, (
+        "help-string exemption blinded the gate to a real argv spawn in the same file"
+    )
+
+
+def test_subprocess_run_spawn_in_same_file_as_help_string_is_flagged(tmp_path):
+    # OI-1220 negative: an argv subprocess.run spawn next to a help string is still a spawn.
+    scripts = tmp_path / "vnx_cli"
+    scripts.mkdir()
+    (scripts / "main.py").write_text(
+        'parser.add_argument("--allow-headless", help="opt into the claude -p lane")\n'
+        'subprocess.run(["claude", "-p", "--verbose"])\n',
+        encoding="utf-8",
+    )
+    found = audit_mod.scan_raw_claude_spawns(root=tmp_path)
+    assert "vnx_cli/main.py" in found, (
+        "help-string exemption blinded the gate to a real subprocess argv spawn"
+    )
+
+
+def test_shell_string_spawn_is_not_treated_as_help_string(tmp_path):
+    # OI-1220: the executable-string distinction is the whole point — a shell-string spawn is
+    # NOT bound to `help=`, so it must still be flagged even though it is a quoted string.
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "runner.py").write_text(
+        'parser.add_argument("--allow-headless", help="opt into the claude -p lane")\n'
+        'subprocess.run("claude -p", shell=True)\n',
+        encoding="utf-8",
+    )
+    found = audit_mod.scan_raw_claude_spawns(root=tmp_path)
+    assert "scripts/runner.py" in found, (
+        "shell-string spawn false-negatived as if it were a help= documentation string"
+    )
