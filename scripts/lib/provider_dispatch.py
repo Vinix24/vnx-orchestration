@@ -30,7 +30,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 logger = logging.getLogger(__name__)
 
-from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
+from dispatch_identity import (  # single canonical sentinel (dispatch-20260804-190000)
+    _IDENTITY_UNRESOLVED,
+    normalize_role,
+)
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
@@ -1279,6 +1282,25 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _worker_role_env(role: Optional[str]) -> Optional[Dict[str, str]]:
+    """Build the ``VNX_WORKER_ROLE`` env overlay for a provider-lane worker.
+
+    Mirrors ``TmuxInteractiveDispatch._spawn_session`` (the claude/tmux lane): a
+    genuinely-set role in the dispatch spec is exported as ``VNX_WORKER_ROLE`` so
+    the worker-scope PreToolUse enforcement hook
+    (``scripts/hooks/pretooluse_worker_scope_enforce.py``) resolves the role's
+    permission profile instead of the restrictive code-worker fallback (OI-1209).
+    A missing role stays missing — nothing is exported and the fallback stands,
+    which is the existing, desired behavior. ``normalize_role`` strips the empty
+    sentinel and ``identity_unresolved`` so neither leaks into the worker env as
+    a fabricated role.
+    """
+    resolved = normalize_role(role)
+    if not resolved:
+        return None
+    return {"VNX_WORKER_ROLE": resolved}
+
+
 def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
     """Benchmark claude lane via `claude -p` in a materialized isolated cell.
 
@@ -1648,6 +1670,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
             cwd=worker_cwd,
+            extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -2097,6 +2120,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 lane=lane_key,
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
+                extra_env=_worker_role_env(getattr(args, "role", None)),
             )
         else:
             result = spawn_litellm(
@@ -2109,6 +2133,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 tool_call_shape=_tool_call_shape,
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
+                extra_env=_worker_role_env(getattr(args, "role", None)),
             )
         end_time = datetime.now(timezone.utc)
 
@@ -2215,6 +2240,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
                 (getattr(args, "task_class", "") or "").strip()
                 or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
             ) or None,
+            extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -2342,6 +2368,7 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             cwd=worker_cwd,
             total_deadline=float(args.deadline_seconds),
+            extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -2417,6 +2444,7 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
             cwd=worker_cwd,
             event_writer=event_store.append if event_store is not None else None,
             total_deadline=float(args.deadline_seconds),
+            extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
         model_used = result.model or model
@@ -2497,6 +2525,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             event_writer=event_store.append,
             cwd=worker_cwd,
+            extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
 
