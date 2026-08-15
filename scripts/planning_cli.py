@@ -2300,6 +2300,203 @@ def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
     return 0
 
 
+def _last_round_findings(seat_ledger_path, track_id: str, project_id: str) -> list:
+    """The blocking findings the seats raised in the last panel round.
+
+    Read back from the seat ledger (the same store the round counter lives in)
+    so the STOP aftermath records what the seats ACTUALLY said, not an
+    in-memory copy. Returns the ``blocking_findings`` from the last round's
+    block/revise seats. Empty when the ledger is absent or no findings were
+    recorded. Read-only; never raises.
+    """
+    if seat_ledger_path is None or not Path(seat_ledger_path).exists():
+        return []
+    findings: list = []
+    try:
+        from ndjson_hash_chain import walk_chain  # noqa: PLC0415
+        for _ln, rec, _h in walk_chain(Path(seat_ledger_path)):
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("type") != pgp_seat_record_type():
+                continue
+            if rec.get("track_id") != track_id:
+                continue
+            if rec.get("project_id") not in (None, project_id):
+                continue
+            if rec.get("verdict") not in ("block", "revise"):
+                continue
+            # The seat ledger does not carry findings (only the effective
+            # verdict + model). The findings live in the report files named in
+            # the decision_ref; for the STOP aftermath we carry the seat's
+            # rationale as the open-item text when no findings list is
+            # available, so a track always has SOMETHING concrete recorded.
+            rationale = (rec.get("rationale") or "").strip()
+            if rationale:
+                findings.append(rationale)
+    except Exception:  # vnx-silent-except: STOP aftermath must not crash the gate
+        return findings
+    return findings
+
+
+def pgp_seat_record_type() -> str:
+    """The seat-ledger record type (lazy import to avoid a circular at load)."""
+    import plan_gate_panel  # noqa: PLC0415
+    return plan_gate_panel.SEAT_RECORD_TYPE
+
+
+def _run_tiebreaker_round(
+    args: argparse.Namespace,
+    *,
+    state_dir: Path,
+    data_dir: str,
+    seat_ledger_path,
+    tb_cfg: dict,
+    round_number: int,
+    panel,
+) -> int:
+    """Run the single tiebreaker round and resolve the blocker either way.
+
+    Called by ``cmd_plan_gate_run`` once the stop-rule threshold is reached.
+    The tiebreaker's outcome is binary:
+      START -> clear the gate (the plan is good enough to build), with a
+               ``resolution_reason`` that names the tiebreaker model + round.
+      STOP  -> record the last round's findings as open items (punt 9), then
+               clear the blocker with a ``resolution_reason`` that names the
+               tiebreaker model + round + outcome. A blocker may not vanish
+               without a reason since #1511; both outcomes carry one.
+
+    A ``TiebreakerParseError`` (no fence, wrong outcome, a findings list, more
+    than one change) is a loud failure: exit 1, the track stays blocked, the
+    operator sees the raw model output. We never silently fill in a decision.
+    """
+    import plan_gate_tiebreaker  # noqa: PLC0415
+
+    try:
+        result = plan_gate_tiebreaker.run_tiebreaker(
+            args.doc,
+            track_id=args.track_id, project_id=args.project_id,
+            round_number=round_number,
+            last_round_findings=_last_round_findings(
+                seat_ledger_path, args.track_id, args.project_id,
+            ),
+            data_dir=data_dir,
+            timeout_seconds=getattr(args, "seat_timeout", None),
+            config=tb_cfg,
+        )
+    except plan_gate_tiebreaker.TiebreakerParseError as exc:
+        print(
+            f"plan-gate tiebreaker FAILED to parse the decision: {exc}. "
+            "The track stays blocked. The model's answer did not satisfy the "
+            "strict contract (binary START/STOP, at most one change, no "
+            f"findings list). Raw output:\n{(exc.raw or '')[:1200]}",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:
+        print(f"plan-gate tiebreaker failed: {exc}", file=sys.stderr)
+        return 1
+
+    # Record the tiebreaker round in the seat ledger (outcome names the
+    # decision so the round history is auditable alongside the seat verdicts).
+    plan_gate_tiebreaker.record_round(
+        seat_ledger_path,
+        track_id=args.track_id, project_id=args.project_id,
+        round_number=round_number,
+        outcome=f"tiebreak:{result.outcome}", model=result.model,
+    )
+
+    if result.outcome == plan_gate_tiebreaker.STOP:
+        # Punt 9: the last round's findings become open items via the existing
+        # open-items path (not a loose note). Best-effort: a failed recording
+        # must not block the STOP resolution, but it IS surfaced.
+        oi_state_dir = plan_gate_tiebreaker.open_items_state_dir_for(seat_ledger_path)
+        recorded = plan_gate_tiebreaker.remaining_findings_to_open_items(
+            track_id=args.track_id, project_id=args.project_id,
+            findings=_last_round_findings(seat_ledger_path, args.track_id, args.project_id),
+            dispatch_id=f"plan-tiebreak-{args.track_id}-{round_number}",
+            state_dir=oi_state_dir,
+        )
+        if recorded:
+            print(
+                f"  STOP: recorded {len(recorded)} open item(s) from the last "
+                f"round's findings.",
+                file=sys.stderr,
+            )
+
+    # Both START and STOP clear the blocker, with a resolution_reason that
+    # names the tiebreaker (which model, which round, which outcome). A blocker
+    # may not vanish without a reason since #1511; this path respects that.
+    reason = (
+        plan_gate_tiebreaker.start_open_items_reason(result)
+        if result.outcome == plan_gate_tiebreaker.START
+        else plan_gate_tiebreaker.stop_open_items_reason(result)
+    )
+    try:
+        resolved = _resolve_plan_blocker(
+            state_dir, args.track_id, args.project_id,
+            reason=reason, resolver="tiebreaker",
+        )
+        post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+    except Exception as exc:
+        print(
+            f"tiebreaker {result.outcome}, but unblocking track {args.track_id} "
+            f"failed: {exc}. Track state unchanged — investigate before promoting.",
+            file=sys.stderr,
+        )
+        return 1
+    derived = post.get("derived_status") if isinstance(post, dict) else None
+    if derived == "blocked":
+        print(
+            f"tiebreaker {result.outcome}, but track {args.track_id} is STILL "
+            f"blocked (plan blocker resolved={resolved}; another blocker or hard "
+            "dependency remains). Promote stays refused — clear the remaining "
+            "blocker first.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Emit a durable plan_gate_pass record so the merge gate recognises this
+    # resolution (resolver="run", scope names the tiebreaker, seats=0 because
+    # no seats certified this round). Best-effort: surface a warning when the
+    # record is not written, never a silent success.
+    wrote = _emit_plan_gate_pass_record(
+        repo_root=getattr(args, "repo_root", None),
+        track_id=args.track_id, project_id=args.project_id, resolver="run",
+        seats=0, scope=f"tiebreaker:{result.outcome}",
+        reason=(
+            f"tiebreaker {result.outcome} (model={result.model}, "
+            f"round={result.round})"
+        ),
+    )
+    if not wrote:
+        print(
+            f"WARNING: plan_gate_pass evidence NOT written for track "
+            f"{args.track_id} (resolver=run, tiebreaker {result.outcome}). "
+            "The plan blocker IS resolved, but the durable pass record is "
+            "missing - the merge gate may not recognize this pass.",
+            file=sys.stderr,
+        )
+
+    change_clause = f" required change: {result.required_change!r}." if result.required_change else ""
+    if args.json:
+        print(json.dumps({
+            "decision": "PASS" if result.outcome == plan_gate_tiebreaker.START else "STOP",
+            "tiebreaker": {
+                "outcome": result.outcome, "model": result.model,
+                "round": result.round, "required_change": result.required_change,
+                "rationale": result.rationale,
+            },
+            "resolved": resolved, "derived_status": derived,
+        }, indent=2))
+    else:
+        print(
+            f"tiebreaker {result.outcome} — plan gate cleared by {result.model} "
+            f"(round {result.round}).{_plan_blocker_oi(args.track_id)} "
+            f"resolved={resolved}; track derived_status={derived}.{change_clause}"
+        )
+    return 0
+
+
 def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     """Run the plan-first panel over a plan doc; on PASS, resolve the OI-PLAN blocker.
 
@@ -2448,6 +2645,36 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             )
         return 0
 
+    # Stop-rule (operator ladder, 2026-08-15, punten 7-9). After max_rounds
+    # panel rounds that do not certify a PASS, the gate stops running the full
+    # panel and decides via a SINGLE tiebreaker instead. The round counter
+    # lives in the seat ledger (the existing plan-gate state) — read back from
+    # disk, not an in-memory counter, so a restart still sees the threshold.
+    # The ijkmeting over 820 reports showed a 5-seat panel converges with the
+    # first seat in 89.4% of cases; a third full round buys ~nothing.
+    import plan_gate_tiebreaker
+
+    seat_ledger_path = plan_gate_panel._resolve_seat_ledger_path(data_dir)
+    tb_cfg = plan_gate_tiebreaker.load_tiebreaker_config()
+    rounds_done = plan_gate_tiebreaker.read_round_count(
+        seat_ledger_path, args.track_id, args.project_id,
+    )
+    if plan_gate_tiebreaker.should_run_tiebreaker(
+        seat_ledger_path, args.track_id, args.project_id,
+        max_rounds=tb_cfg["max_rounds"],
+    ):
+        print(
+            f"plan-gate stop-rule: {rounds_done} panel round(s) done "
+            f"(threshold {tb_cfg['max_rounds']}) — running the tiebreaker "
+            f"(model={tb_cfg['model']}) instead of the full panel.",
+            file=sys.stderr,
+        )
+        return _run_tiebreaker_round(
+            args, state_dir=state_dir, data_dir=data_dir,
+            seat_ledger_path=seat_ledger_path, tb_cfg=tb_cfg,
+            round_number=rounds_done + 1, panel=panel,
+        )
+
     try:
         result = plan_gate_panel.run_panel(
             doc, track_id=args.track_id, project_id=args.project_id, data_dir=data_dir,
@@ -2457,6 +2684,17 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"plan-gate run failed: {exc}", file=sys.stderr)
         return 1
+
+    # Record this panel round in the seat ledger so the stop-rule's counter
+    # persists across restarts. Recorded for EVERY non-PASS outcome (a PASS
+    # clears the gate; no further round is needed). Best-effort: a failed
+    # record must never break the gate (same contract as the seat records).
+    if result["decision"] != "PASS":
+        plan_gate_tiebreaker.record_round(
+            seat_ledger_path,
+            track_id=args.track_id, project_id=args.project_id,
+            round_number=rounds_done + 1, outcome="panel",
+        )
 
     # OI-1190: persist the durable half of the plan decision onto the track — the
     # report path(s) + the rejected alternatives with their reasons — so the decision
