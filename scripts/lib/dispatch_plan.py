@@ -122,6 +122,9 @@ class ExecutionPlan:
     pr_id: Optional[str] = None         # OI-982: carried from DispatchSpec so the fix-forward
                                         # diff fallback in _resolve_fix_forward_diff works.
                                         # NOT in digest() — advisory only.
+    work_ref: Optional[str] = None      # OI-1137: explicit work-ref (the branch a fix-forward
+                                        # delivers onto) so the phantom-guard weighs the pushed
+                                        # branch diff. NOT in digest() — advisory only.
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): advisory receipt
     # metadata, NOT in digest() — like ``role``, it must not perturb the permit
     # fingerprint. parent_dispatch / tier_from / tier_to / task_class.
@@ -399,6 +402,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         route_reason=",".join(fired),
         role=spec.role,
         pr_id=spec.pr_id,
+        work_ref=spec.work_ref,
         # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): copied from the
         # door-computed snapshot so the receipt can say which dispatch this one
         # continues and on which tier.

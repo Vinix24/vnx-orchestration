@@ -149,6 +149,11 @@ class DispatchSpec:
     # a declaration by the caller, never derived from instruction text or role.
     irreversible: bool = False
     pr_id: Optional[str] = None
+    # OI-1137: explicit work-ref — the branch a fix-forward dispatch delivers onto, so the
+    # phantom-guard can weigh the pushed branch diff when the own worktree reads empty.
+    # Optional; None for a normal dispatch. A bare branch name (dispatch/<id>) or an
+    # origin/-prefixed form is accepted; the resolver normalizes the prefix away.
+    work_ref: Optional[str] = None
     track_id: Optional[str] = None  # structural link to a tracks-table row (TL-D1); validated at the door
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
     # this dispatch continues (retry / fix-forward / escalation), the tier
@@ -206,6 +211,28 @@ class ValidatedSpec:
 # ---------------------------------------------------------------------------
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$")
+
+# OI-1137: git-ref shape validation for an explicit work_ref. Branch names (which is what
+# work_ref carries) disallow whitespace, "..", "@{", and a set of reserved chars; they may
+# contain "/" (unlike _ID_RE) and may not start with "-", end with "/" or ".", or be "@".
+_GIT_REF_INVALID = re.compile(r"[\s~^:?*\[\]\\]|\.\.|@\{")
+
+
+def _validate_branch_ref(raw: str) -> "str | None":
+    """Return an error string if raw is not a valid git branch name, else None."""
+    if not raw or raw != raw.strip():
+        return "empty or has leading/trailing whitespace"
+    if len(raw) > 255:
+        return "exceeds 255 chars"
+    if raw == "@":
+        return "reserved name '@'"
+    if raw.startswith("-"):
+        return "may not start with '-'"
+    if raw.startswith("/") or raw.endswith("/") or raw.endswith("."):
+        return "may not start with '/', end with '/', or end with '.'"
+    if _GIT_REF_INVALID.search(raw):
+        return "contains a character git forbids in a branch name"
+    return None
 
 _BLOCKED_FIRST_COMPONENTS = frozenset({".git", ".vnx-data"})
 
@@ -410,6 +437,22 @@ def validate(
             return Reject(
                 "bad-tier-value",
                 f"{_tier_field} {_tier_val!r} is not one of {sorted(_VALID_TIERS)}",
+            )
+
+    # Rule 15 — work_ref format (OI-1137). An explicit work-ref is a git branch name (may
+    # contain "/"), validated with git's own ref rules. Strip a leading origin/ or refs/heads/
+    # prefix before validating, since the resolver normalizes those away at use time.
+    if spec.work_ref is not None:
+        _work_ref = spec.work_ref.strip()
+        for _prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
+            if _work_ref.startswith(_prefix):
+                _work_ref = _work_ref[len(_prefix):]
+                break
+        _err = _validate_branch_ref(_work_ref)
+        if _err is not None:
+            return Reject(
+                "bad-work-ref",
+                f"work_ref {spec.work_ref!r} is not a valid branch name ({_err})",
             )
 
     return ValidatedSpec(

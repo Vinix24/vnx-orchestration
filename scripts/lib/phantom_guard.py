@@ -209,6 +209,83 @@ def resolve_pr_head_branch(
         return None
 
 
+def _normalize_branch_name(branch: str) -> str:
+    """Strip common ref prefixes from a work_ref so it can be fetched as origin/<name>.
+
+    ``work_ref`` may be declared as a bare branch name (``dispatch/20260815-foo``) or with a
+    remote/refs prefix (``origin/dispatch/20260815-foo``). The fetch below always targets
+    ``origin/<name>``, so a leading prefix must not double up.
+    """
+    name = (branch or "").strip()
+    for prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name
+
+
+def resolve_pushed_work_diff(
+    *,
+    work_ref: Optional[str] = None,
+    pr_id: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
+    base_ref: str = "origin/main",
+    repo: Optional[Path] = None,
+) -> str:
+    """Resolve the PUSHED branch diff for a dispatch that declared a work target (fix-forward).
+
+    A fix-forward dispatch commits onto an EXISTING branch and pushes there, so its own
+    worktree/branch diff reads empty even though real work landed (the OI-1137 false-reject).
+    This resolves the branch where that work actually went — precedence: explicit ``work_ref``
+    > ``pr_id`` (resolved via gh) > ``parent_dispatch``-derived ``dispatch/<parent>`` — and
+    returns its diff against ``base_ref``. For a fix-forward, ``base_ref`` is the parent's
+    branch tip (the point this dispatch branched from), so the diff isolates THIS dispatch's
+    contribution rather than the parent's prior work.
+
+    MONOTONIC — the guard-preservation property. This only ever returns a NON-EMPTY diff when
+    pushed work actually exists; on any failure (no target declared, gh unresolvable, branch
+    not pushed, bad ref) it returns '' so the caller keeps its own (empty) diff and the phantom
+    decision is unchanged. It never downgrades a non-empty diff to empty, and a plain dispatch
+    (no work_ref/pr_id/parent_dispatch) short-circuits to '' without touching gh/git. So the
+    guard's core function — reject an evidence-free success receipt — is never weakened.
+    """
+    branch: Optional[str] = _normalize_branch_name(work_ref or "") or None
+    if not branch:
+        _pr = (pr_id or "").strip()
+        if _pr:
+            try:
+                branch = resolve_pr_head_branch(_pr, repo=repo)
+            except Exception as exc:  # noqa: BLE001 — fail-open, never manufacture evidence
+                _LOG.warning("phantom_guard: pr_id resolution failed pr_id=%s: %s", _pr, exc)
+                branch = None
+    if not branch:
+        _parent = (parent_dispatch or "").strip()
+        if _parent:
+            try:
+                from dispatch_worktree_isolation import _sanitize_dispatch_id  # noqa: PLC0415
+                branch = f"dispatch/{_sanitize_dispatch_id(_parent)}"
+            except Exception as exc:  # noqa: BLE001 — fail-open
+                _LOG.warning(
+                    "phantom_guard: parent_dispatch branch derivation failed parent=%s: %s",
+                    _parent, exc,
+                )
+                branch = None
+    if not branch:
+        return ""
+    cwd = str(repo) if repo else None
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=cwd, capture_output=True, text=True, timeout=30, check=False,
+        )
+        return compute_branch_diff(f"origin/{branch}", base_ref=base_ref, repo=repo)
+    except Exception as exc:  # noqa: BLE001 — best-effort; never raise, never false-reject
+        _LOG.warning(
+            "phantom_guard: pushed-work diff resolution failed branch=%s: %s", branch, exc,
+        )
+        return ""
+
+
 def compute_worktree_diff(worktree_path: Path, *, base_ref: str = "origin/main") -> str:
     """Diff a worker's worktree (committed branch tip + uncommitted) against base_ref.
 
@@ -277,6 +354,10 @@ def guard_at_govern(
     worktree_diff: Optional[str] = None,
     task_class: Optional[str] = None,
     read_only: Optional[bool] = None,
+    work_ref: Optional[str] = None,
+    pr_id: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
+    repo: Optional[Path] = None,
 ) -> PhantomVerdict:
     """Inline govern-time phantom check for BOTH lanes (claude tmux via dispatch_govern.govern,
     providers via dispatch_envelope._govern — the kimi/glm/deepseek fabrication vector).
@@ -289,6 +370,12 @@ def guard_at_govern(
          GovernSpec — not torn down until after govern),
       2. else the dispatch's own branch ``dispatch/<sanitized id>`` (still-present isolated branch),
       3. else ABSTAIN — return ok (an unresolvable/torn-down ref must never read as "empty diff").
+
+    Fix-forward fallback (OI-1137): when the own diff above reads EMPTY (or the own ref is
+    unresolvable) AND the dispatch declares a work target (``work_ref`` / ``pr_id`` /
+    ``parent_dispatch``), the PUSHED branch diff is weighed in via ``resolve_pushed_work_diff``.
+    This is strictly MONOTONIC — it only ever upgrades an empty diff to a non-empty one when real
+    pushed work exists, never the reverse, so a plain evidence-free dispatch is still rejected.
 
     Honors ``VNX_OVERRIDE_PHANTOM_GUARD=1`` (operator escape for a legitimate no-op delivery). This
     function performs NO receipt I/O — the caller appends the corrective ``failed`` receipt on a
@@ -310,7 +397,20 @@ def guard_at_govern(
                 branch = f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
                 diff = compute_branch_diff(branch, base_ref=base)
         except Exception as exc:  # CalledProcessError / missing ref / reaped worktree
-            return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
+            # A declared work target is still resolvable from the PUSHED branch even when the own
+            # worktree/branch is gone (the fix-forward shape) — try that before abstaining.
+            diff = resolve_pushed_work_diff(
+                work_ref=work_ref, pr_id=pr_id, parent_dispatch=parent_dispatch,
+                base_ref=base, repo=repo,
+            )
+            if not (diff or "").strip():
+                return _ok(f"phantom-guard ABSTAINED — worker diff unresolvable ({type(exc).__name__})")
+    # Fix-forward fallback (monotonic: only upgrades an empty own diff, never a non-empty one).
+    if not (diff or "").strip():
+        diff = resolve_pushed_work_diff(
+            work_ref=work_ref, pr_id=pr_id, parent_dispatch=parent_dispatch,
+            base_ref=base, repo=repo,
+        ) or diff
     return phantom_guard(
         status=status, worktree_diff=diff, token_usage=token_usage, role=role,
         task_class=task_class, read_only=read_only,
@@ -330,6 +430,10 @@ def record_phantom_if_any(
     state_dir: Optional[Path] = None,
     task_class: Optional[str] = None,
     read_only: Optional[bool] = None,
+    work_ref: Optional[str] = None,
+    pr_id: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
+    repo: Optional[Path] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
 
@@ -350,6 +454,7 @@ def record_phantom_if_any(
         dispatch_id=dispatch_id, role=role, status=status, token_usage=token_usage,
         worktree_path=worktree_path, base_sha=base_sha, worktree_diff=worktree_diff,
         task_class=task_class, read_only=read_only,
+        work_ref=work_ref, pr_id=pr_id, parent_dispatch=parent_dispatch, repo=repo,
     )
     if verdict.is_phantom and state_dir:
         try:

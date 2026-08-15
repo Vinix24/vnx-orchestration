@@ -206,6 +206,7 @@ def merge_pr(
         "register_ok": False,
         "error": "",
         "dry_run": dry_run,
+        "overlaps": [],
     }
 
     # Query PR metadata before merge (needed for receipt)
@@ -213,6 +214,15 @@ def merge_pr(
     if pr_data:
         result["pr_title"] = pr_data.get("title", "")
         result["branch"] = pr_data.get("headRefName", "")
+
+    # OI-1091: warn (never block) when another OPEN dispatch branch touches the same files as
+    # the branch being merged. Best-effort; a git/network failure degrades to no warning.
+    if result["branch"]:
+        try:
+            from file_scope_overlap import warn_overlaps  # noqa: PLC0415
+            result["overlaps"] = warn_overlaps(result["branch"], repo=SCRIPT_DIR.parent)
+        except Exception as exc:  # noqa: BLE001 — an overlap check must never block a merge
+            log.warning("file-scope overlap check failed for PR #%s: %s", pr_number, exc)
 
     if dry_run:
         result["success"] = True
