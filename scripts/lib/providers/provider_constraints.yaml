@@ -227,3 +227,35 @@ constraints:
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
+
+  - id: worker-permission-enforcement-on
+    rule: forbid_route
+    forbidden_route:
+      via: enforcement_skip
+    reason: >-
+      Worker write-boundary enforcement (worker_permissions.
+      worker_permission_enforcement_enabled) defaults ON since 2026-08-15
+      (operator directive, dispatch 20260815-enforce-default-on). OI-1196
+      wired dispatch_paths into file_write_scope but shipped inert: the
+      PreToolUse hook opens with `if not
+      worker_permission_enforcement_enabled(): return "allow", None` and the
+      predicate defaulted OFF, so a dispatch declaring only
+      scripts/lib/smart_router.py still scored ALLOW on a write to /etc/hosts
+      (measured on main). The unenforced-boundary posture (enforcement_skip)
+      is therefore forbidden by default. Opt-outs: VNX_WORKER_ENFORCEMENT_SKIP=1
+      (per-dispatch, same shape as VNX_WORKER_BLANKET_SKIP) or falsy
+      VNX_ENFORCE_WORKER_PERMISSIONS. The binding enforcement lives in
+      worker_permissions + pretooluse_worker_scope_enforce.py, not the door
+      router; this entry records the decision in the SSOT. BLAST-RADIUS
+      (measured pre-flip 2026-08-15, scripts/analysis/worker_scope_enforcement_measure.py):
+      156 of 347 linkable dispatches would be blocked — 110 declared no
+      dispatch_paths and wrote outside their role file_write_scope
+      (vnx_cli/, docs/, schemas/, templates/, hooks/, configs/, bin/, .github/,
+      .vnx/); of the 46 that declared paths, 43 wrote within role scope but
+      outside their declared dispatch_paths and 28 wrote at least one file
+      outside role scope too; plus a bare-directory fnmatch gap (23 dispatches
+      declared a directory path that fnmatch does not match as a prefix).
+      Operator finding to review before merge.
+    enforcement: code_warn
+    audit_severity: warn
+    override_allowed: true

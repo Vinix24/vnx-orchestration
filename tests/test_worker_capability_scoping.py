@@ -301,7 +301,9 @@ class TestWorkerScopedEnabled:
 
 class TestTmuxDetachedNoStall:
     """Detached worker gets the scoped allow-list by default (no TTY to answer
-    prompts); VNX_WORKER_BLANKET_SKIP=1 opts into --dangerously-skip-permissions."""
+    prompts); opting into --dangerously-skip-permissions now requires BOTH
+    VNX_WORKER_BLANKET_SKIP=1 (scoped, 14-08) AND VNX_WORKER_ENFORCEMENT_SKIP=1
+    (ADR-012 enforcement, 15-08)."""
 
     def test_detached_spawn_is_scoped_by_default(self):
         cmd = _default_launch_command("sonnet", skip_permissions=True)
@@ -309,7 +311,10 @@ class TestTmuxDetachedNoStall:
         assert "--allowedTools" in cmd
 
     def test_detached_spawn_blanket_skip_has_no_allowed_tools(self, monkeypatch):
+        monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
+        monkeypatch.delenv("VNX_WORKER_ENFORCEMENT_SKIP", raising=False)
         monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
+        monkeypatch.setenv("VNX_WORKER_ENFORCEMENT_SKIP", "1")
         cmd = _default_launch_command("sonnet", skip_permissions=True)
         assert SKIP_FLAG in cmd
         assert "--allowedTools" not in cmd

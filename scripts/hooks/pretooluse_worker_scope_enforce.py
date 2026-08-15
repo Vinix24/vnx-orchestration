@@ -27,10 +27,12 @@ Claude Code hook contract (2.1+):
   exit   : 0 always — decision is communicated via JSON output, never exit code
 
 Gate: VNX_ENFORCE_WORKER_PERMISSIONS (see worker_permissions.
-worker_permission_enforcement_enabled(); default OFF). Unset/falsy → this hook
-is a pure no-op: every branch below returns ("allow", None) before any matcher
-runs. This mirrors the flag that already gates the coarse launch-time posture —
-this hook is the fine-grained (per-command, per-path glob) layer on top of it.
+worker_permission_enforcement_enabled(); default ON since 15-08). An explicit
+opt-out (VNX_WORKER_ENFORCEMENT_SKIP=1 or a falsy
+VNX_ENFORCE_WORKER_PERMISSIONS) → this hook is a pure no-op: every branch below
+returns ("allow", None) before any matcher runs. This mirrors the flag that
+already gates the coarse launch-time posture — this hook is the fine-grained
+(per-command, per-path glob) layer on top of it.
 
 Role resolution: VNX_WORKER_ROLE env var, exported into the worker's tmux pane
 by TmuxInteractiveDispatch._spawn_session() (E3 gap, closed in the same

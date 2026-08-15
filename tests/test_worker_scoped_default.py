@@ -10,7 +10,9 @@ All spawn tests call the real ``_default_launch_command`` / the real
 ``worker_scoped_enabled`` (no mocked predicates):
 
   1. worker_scoped_enabled() is True with no env vars set
-  2. VNX_WORKER_BLANKET_SKIP=1 -> spawn line carries --dangerously-skip-permissions
+  2. blanket skip requires BOTH opt-outs (VNX_WORKER_BLANKET_SKIP=1 AND
+     VNX_WORKER_ENFORCEMENT_SKIP=1, since 15-08 enforcement is also default-ON)
+     -> spawn line carries --dangerously-skip-permissions
   3. default spawn line has --mcp-config '{"mcpServers":{}}' BEFORE --strict-mcp-config
   4. requires_mcp=True omits the MCP flags (still scoped otherwise)
   5. the import-fallback stub delivers the scoped posture, not blanket-skip
@@ -49,9 +51,14 @@ class TestWorkerScopedEnabledDefault:
 
 class TestBlanketSkipOptOutSpawn:
     def test_blanket_skip_flag_emits_skip(self, monkeypatch):
+        # Blanket skip is the posture only when BOTH predicates are opted out:
+        # VNX_WORKER_BLANKET_SKIP=1 (scoped, 14-08) AND
+        # VNX_WORKER_ENFORCEMENT_SKIP=1 (ADR-012 enforcement, 15-08).
         monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
         monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
+        monkeypatch.delenv("VNX_WORKER_ENFORCEMENT_SKIP", raising=False)
         monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
+        monkeypatch.setenv("VNX_WORKER_ENFORCEMENT_SKIP", "1")
         cmd = _default_launch_command("sonnet", skip_permissions=True)
         assert SKIP_FLAG in cmd
         assert "--mcp-config" not in cmd

@@ -300,19 +300,45 @@ def worker_scoped_enabled() -> bool:
 
 
 def worker_permission_enforcement_enabled() -> bool:
-    """Whether ADR-012 worker-permission ENFORCEMENT is active (default OFF).
+    """Whether ADR-012 worker-permission ENFORCEMENT is active (default ON since 15-08).
 
-    Distinct from the scoped-spawn default owned by :func:`worker_scoped_enabled`
-    (default ON since 14-08): that flag decides the spawn-time posture (scoped
-    allow-list vs blanket skip), while this flag gates the ADR-012 hook-layer
-    enforcement — role-derived ``--allowedTools`` / ``--disallowedTools`` /
-    ``--permission-mode`` through the PreToolUse hook, plus the ``enforced``
-    receipt marker. It stays default OFF independent of the scoped-spawn flip,
-    so the two can be toggled separately.
+    Second default flip on the same axis as the 14-08 mcp-scoped-default. OI-1196
+    (#1509) made ``dispatch_paths`` flow into ``file_write_scope``, and the
+    enforcement is behaviourally verified — a dispatch declaring only
+    ``scripts/lib/smart_router.py`` may write there and is blocked on
+    ``worker_permissions.py``, ``docs/README.md`` and ``/etc/hosts``. But it
+    shipped OFF. Measured on main with the stock env:
+
+        worker_scoped_enabled()                 = True
+        worker_permission_enforcement_enabled() = False
+        evaluate({'tool_name':'Write','tool_input':{'file_path':'/etc/hosts'}})
+          -> ALLOW    (the dispatch declared only smart_router.py)
+
+    ``pretooluse_worker_scope_enforce.py::evaluate`` opens with
+    ``if not worker_permission_enforcement_enabled(): return "allow", None`` —
+    the entire boundary was inert. The old OFF-default rationale ("preserves
+    the historical skip-permissions behavior exactly") no longer applies: that
+    behavior was already superseded by the 14-08 scoped-default flip, which this
+    flag deliberately does NOT mirror. It now defaults ON, independent of the
+    scoped-spawn switch in :func:`worker_scoped_enabled`.
+
+    Opt-outs (enforcement is the default):
+      - ``VNX_WORKER_ENFORCEMENT_SKIP=1`` — explicit per-dispatch opt out of the
+        hook-layer enforcement, same shape as ``VNX_WORKER_BLANKET_SKIP``.
+      - ``VNX_ENFORCE_WORKER_PERMISSIONS`` falsy (``0`` / ``false`` / ``no`` /
+        ``off``) — the legacy switch, kept for backward compat, also disables
+        enforcement.
 
     Truthy values: ``1``, ``true``, ``yes``, ``on``.
     """
-    return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
+    if os.environ.get("VNX_WORKER_ENFORCEMENT_SKIP", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+    return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "1").strip().lower() in (
         "1",
         "true",
         "yes",

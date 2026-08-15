@@ -1,14 +1,15 @@
-"""ADR-012 worker-permission enforcement feature flag — default-OFF safety tests.
+"""ADR-012 worker-permission enforcement feature flag — default-ON tests (15-08).
 
 Covers both launch lanes:
   * tmux interactive lane (_default_launch_command)
   * provider/headless lane (subprocess_adapter._build_worker_scope_args)
 
 Verifies:
-  - Flag OFF/absent → byte-for-byte current behavior (--dangerously-skip-permissions).
-  - Flag ON → role-scoped --allowedTools / --permission-mode and no skip flag.
+  - Flag absent (default ON) and truthy → scoped spawn, no skip flag.
+  - Explicit opt-outs (VNX_WORKER_ENFORCEMENT_SKIP=1, or falsy
+    VNX_ENFORCE_WORKER_PERMISSIONS) → byte-for-byte blanket skip.
   - Unknown role falls back to the functional code-worker profile.
-  - Receipt marker is only emitted when the flag is ON.
+  - Receipt marker is emitted when the flag is ON (now the default).
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -68,10 +70,13 @@ def _extract_receipt_from_protocol(protocol: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestWorkerPermissionEnforcementEnabled:
-    def test_default_off(self):
+    def test_default_on(self):
+        # Both VNX_WORKER_ENFORCEMENT_SKIP and VNX_ENFORCE_WORKER_PERMISSIONS
+        # unset → enforcement is the default (since 15-08).
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("VNX_ENFORCE_WORKER_PERMISSIONS", None)
-            assert worker_permission_enforcement_enabled() is False
+            os.environ.pop("VNX_WORKER_ENFORCEMENT_SKIP", None)
+            assert worker_permission_enforcement_enabled() is True
 
     @pytest.mark.parametrize("truthy", ["1", "true", "True", "yes", "on"])
     def test_truthy_values(self, truthy):
@@ -80,7 +85,17 @@ class TestWorkerPermissionEnforcementEnabled:
 
     @pytest.mark.parametrize("falsy", ["0", "false", "no", "off", ""])
     def test_falsy_values(self, falsy):
-        with patch.dict(os.environ, {"VNX_ENFORCE_WORKER_PERMISSIONS": falsy}, clear=False):
+        with patch.dict(
+            os.environ, {"VNX_ENFORCE_WORKER_PERMISSIONS": falsy}, clear=False
+        ):
+            os.environ.pop("VNX_WORKER_ENFORCEMENT_SKIP", None)
+            assert worker_permission_enforcement_enabled() is False
+
+    @pytest.mark.parametrize("skip", ["1", "true", "True", "yes", "on"])
+    def test_worker_enforcement_skip_optout(self, skip):
+        # Explicit per-dispatch opt-out takes precedence over the default-ON.
+        with patch.dict(os.environ, {"VNX_WORKER_ENFORCEMENT_SKIP": skip}, clear=False):
+            os.environ.pop("VNX_ENFORCE_WORKER_PERMISSIONS", None)
             assert worker_permission_enforcement_enabled() is False
 
 
@@ -312,3 +327,40 @@ class TestBuildClaudeScopeArgs:
         assert "Read" in args[args.index("--allowedTools") + 1]
         assert "--disallowedTools" in args
         assert "WebSearch" in args[args.index("--disallowedTools") + 1]
+
+
+# ---------------------------------------------------------------------------
+# Import-fault fallback stub (tmux_interactive_dispatch lines 78-141)
+# ---------------------------------------------------------------------------
+
+class TestImportFallbackStubEnforcement:
+    def test_fallback_enforcement_predicate_is_true(self):
+        # Force the `import worker_permissions` inside tmux_interactive_dispatch
+        # to fail: the inline fallback worker_permission_enforcement_enabled()
+        # must return True (fail-closed into the enforcing posture since 15-08),
+        # never False — an import fault must not silently drop the file-write
+        # boundary back to the blanket-skip posture.
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(SCRIPTS_LIB)!r})\n"
+            "import builtins\n"
+            "_real_import = builtins.__import__\n"
+            "def _blocked(name, *a, **k):\n"
+            "    if name == 'worker_permissions':\n"
+            "        raise ImportError('blocked for test')\n"
+            "    return _real_import(name, *a, **k)\n"
+            "builtins.__import__ = _blocked\n"
+            "import tmux_interactive_dispatch as t\n"
+            "assert t._WP_AVAILABLE is False, 'worker_permissions import was not blocked'\n"
+            "print('ENFORCEMENT=' + repr(t.worker_permission_enforcement_enabled()))\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True
+        )
+        assert proc.returncode == 0, proc.stderr
+        value_line = next(
+            line[len("ENFORCEMENT="):]
+            for line in proc.stdout.splitlines()
+            if line.startswith("ENFORCEMENT=")
+        )
+        assert value_line == "True"

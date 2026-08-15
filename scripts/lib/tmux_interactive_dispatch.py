@@ -78,16 +78,19 @@ try:
 except Exception:  # pragma: no cover - sibling import is available in-tree
     EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
     _WP_AVAILABLE = False
-    # Import-fault fallback (OI-1099 + 14-08 flip): fail CLOSED into the scoped
-    # posture — never silently re-open the wider blanket-skip blast radius. These
-    # inline predicates return the new defaults (scoped ON, ADR-012 enforcement
-    # OFF) so the normal code path below still assembles a scoped spawn; only the
-    # canonical worker_permissions module owns the real, env-driven decision.
+    # Import-fault fallback (OI-1099 + 14-08/15-08 flips): fail CLOSED into the
+    # scoped posture — never silently re-open the wider blanket-skip blast radius.
+    # These inline predicates return the current fleet defaults (scoped ON,
+    # ADR-012 enforcement ON since 15-08) so the normal code path below still
+    # assembles a scoped, enforcing spawn on an import fault; only the canonical
+    # worker_permissions module owns the real, env-driven decision. "Fail-closed"
+    # now means enforcement ON: an import fault must not silently drop the
+    # fine-grained file-write boundary, so this stub mirrors the 15-08 flip.
     def worker_scoped_enabled():  # type: ignore[misc]
         return True
 
     def worker_permission_enforcement_enabled():  # type: ignore[misc]
-        return False
+        return True
 
     def classify_permission_posture(argv, role=None):  # type: ignore[misc]
         # OI-864 fallback: classify from the actual argv tokens, never by
@@ -382,7 +385,7 @@ def _sanitize_session_name(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default OFF)
+# Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default ON since 15-08)
 # ---------------------------------------------------------------------------
 
 # Command anchors the hook at the FABRIC install root, never the worktree or
@@ -446,9 +449,9 @@ def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
     the git-tracked ``.claude/settings.json``, so the worktree's git status stays
     clean and the worker can never accidentally commit the registration.
 
-    The hook itself is gated on ``VNX_ENFORCE_WORKER_PERMISSIONS`` (default OFF),
-    so registering it unconditionally is a guaranteed no-op until the fleet-wide
-    flip happens as a separate human-gated decision.
+    The hook itself is gated on ``VNX_ENFORCE_WORKER_PERMISSIONS`` (default ON
+    since 15-08), so registering it unconditionally binds on every scoped spawn
+    unless the dispatch explicitly opts out.
 
     Idempotent: an identical hook command is never registered twice. Existing
     unrelated keys and hook entries in the file are preserved.
@@ -2610,12 +2613,12 @@ class TmuxInteractiveDispatch:
                 )
 
             if worktree_handle is not None:
-                # Worker-scope PreToolUse enforcement hook (gated ON by
-                # VNX_ENFORCE_WORKER_PERMISSIONS, default OFF; spike E1/E2):
-                # register the hook in the fresh worktree BEFORE the tmux session
-                # spawns so cwd-based settings discovery has it from the first
-                # tool call. Best-effort: the hook is fail-open anyway, so a
-                # failed write must never abort the dispatch.
+                # Worker-scope PreToolUse enforcement hook (gated by
+                # VNX_ENFORCE_WORKER_PERMISSIONS, default ON since 15-08;
+                # spike E1/E2): register the hook in the fresh worktree BEFORE
+                # the tmux session spawns so cwd-based settings discovery has it
+                # from the first tool call. Best-effort: the hook is fail-open
+                # anyway, so a failed write must never abort the dispatch.
                 try:
                     _write_worker_scope_hook_settings(Path(cwd))
                     # OI-804 (ADR-005 audit gap): a successful state mutation —
