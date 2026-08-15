@@ -83,7 +83,28 @@ jobs:
             exit 1
           fi
 
-      - name: Run Profile A (doctor + full test suite)
+      - name: Classify CI profile (docs-only vs full sweep)
+        id: classify-profile
+        run: |
+          set -euo pipefail
+          # Same diff-range convention as the lint-patterns job below: the
+          # three-dot range against the base ref for PRs, against the parent
+          # commit for pushes. fetch-depth: 0 above makes origin/<base> available.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            diff_range="origin/${{ github.base_ref }}...HEAD"
+          else
+            diff_range="HEAD^...HEAD"
+          fi
+          # A diff that fails (e.g. no base ref) yields an empty list, which
+          # classify_ci_profile.py maps to "heavy" — fail closed, never light.
+          git diff --name-only "$diff_range" > "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt" 2>/dev/null || true
+          profile="$(python3 "$GITHUB_WORKSPACE/scripts/ci/classify_ci_profile.py" --paths-file "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt")"
+          echo "CI profile: ${profile}"
+          echo "Changed paths:"
+          cat "$GITHUB_WORKSPACE/.vnx-ci-changed-paths.txt"
+          echo "profile=${profile}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Profile A (doctor + scope-appropriate suite)
         env:
           VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
           VNX_DATA_DIR: ${{ github.workspace }}/.vnx-data
@@ -95,7 +116,30 @@ jobs:
           else
             echo "[skip] progress_state checksum not available"
           fi
-          # Full-suite sweep: pytest tests/ at directory level so every test file
+
+          if [ "${{ steps.classify-profile.outputs.profile }}" = "light" ]; then
+            # Light profile — docs-only PR (classify_ci_profile.py returned
+            # "light"). Doctor already ran above; add only the doc link/lint
+            # checks that actually exercise documentation, then stop. Kept
+            # deliberately small and proven rather than a broad "doc-ish" sweep
+            # whose coverage nobody can bound:
+            #   * test_docs_index.py           — DOCS_INDEX.md links resolve and
+            #                                    no stale unreachable docs bloat
+            #   * test_docs_archive.py         — docs/_archive integrity and the
+            #                                    ARCHIVED_MANIFEST matches disk
+            #   * test_subsystems_md_exists.py — docs/core/SUBSYSTEMS.md SSOT
+            # All three are stdlib-only (no DB, no heavy deps) and also run in
+            # the full sweep below, so they stay green on main.
+            pytest -q \
+              "$GITHUB_WORKSPACE/tests/test_docs_index.py" \
+              "$GITHUB_WORKSPACE/tests/test_docs_archive.py" \
+              "$GITHUB_WORKSPACE/tests/test_subsystems_md_exists.py" \
+              -p no:cacheprovider
+            exit 0
+          fi
+
+          # Full-suite sweep (heavy profile — code, unclassifiable, or empty
+          # diff): pytest tests/ at directory level so every test file
           # is exercised, not the handful of explicit files listed before.
           #
           # The sweep targets $GITHUB_WORKSPACE/tests — the real checkout — NOT
