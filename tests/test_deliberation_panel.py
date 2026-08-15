@@ -485,3 +485,97 @@ class TestCoverageAwareDegradation:
             dp.run_deliberation("sweep", "q", dispatcher=flaky, roster=ROSTER, max_workers=3)
         warnings = [r for r in caplog.records if "usable report" in r.message]
         assert warnings, "a failed seat must be logged loudly, never silently"
+
+
+FIVE_ROSTER = [
+    ("codex", "gpt-5.5"),
+    ("kimi", "k2"),
+    ("claude", "sonnet"),
+    ("glm-harness", "glm-5.2"),
+    ("deepseek-harness", "deepseek-v4-pro"),
+]
+
+
+class TestSynthesisCoverageGate:
+    """OI-1154: below a minimum number of DELIVERED seats the synthesis refuses
+    LOUDLY — naming delivered AND expected — instead of silently synthesizing
+    over a handful of seats (e.g. 1 of 5). The gate decides on the SAME
+    present/total count ``coverage`` reports (OI-1150), never its own tally."""
+
+    def test_synthesis_refuses_below_min_seats_with_both_counts(self):
+        def one_of_five(provider, model, prompt, did):
+            if provider != "codex":
+                return "[dispatch error: down]"
+            return "ok"
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=one_of_five, roster=FIVE_ROSTER,
+            max_workers=5, min_seats=3,
+        )
+        assert res.synthesis_refused_reason, "a 1-of-5 synthesis must be refused"
+        assert "refusing synthesis" in res.synthesis_refused_reason
+        assert "1/5" in res.synthesis_refused_reason  # delivered/expected both named
+        assert "minimum 3" in res.synthesis_refused_reason
+        # nothing was synthesized, and the downstream stages were skipped
+        assert res.synthesis == ""
+        assert res.contrarian == "" and res.factcheck == ""
+
+    def test_synthesis_proceeds_at_min_seats(self):
+        def three_of_five(provider, model, prompt, did):
+            if provider in ("kimi", "deepseek-harness"):
+                return "[dispatch error: down]"
+            return f"ok-{provider}"
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=three_of_five, roster=FIVE_ROSTER,
+            max_workers=5, min_seats=3,
+        )
+        assert res.synthesis_refused_reason == ""
+        assert not res.degraded_synthesis
+        assert res.synthesis  # exactly at the floor, the synthesis runs
+
+    def test_allow_degraded_lets_one_of_five_through_visibly(self):
+        def one_of_five(provider, model, prompt, did):
+            if provider != "codex":
+                return "[dispatch error: down]"
+            return f"ok-{provider}"
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=one_of_five, roster=FIVE_ROSTER,
+            max_workers=5, min_seats=3, allow_degraded=True,
+        )
+        assert res.synthesis_refused_reason == ""
+        assert res.degraded_synthesis is True
+        assert res.synthesis  # the escape lets the synthesis run degraded
+        report = res.to_report()
+        assert "--allow-degraded" in report  # the choice is visible in the output
+
+    def test_refusal_is_rendered_in_report(self):
+        def one_of_five(provider, model, prompt, did):
+            if provider != "codex":
+                return "[dispatch error: down]"
+            return "ok"
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=one_of_five, roster=FIVE_ROSTER,
+            max_workers=5, min_seats=3,
+        )
+        report = res.to_report()
+        assert "REFUSED" in report
+        assert "1/5" in report
+
+    def test_no_gate_when_min_seats_is_none(self):
+        """min_seats=None (the default) keeps the pre-gate behaviour: no refusal,
+        no degraded flag — existing callers that bound coverage their own way are
+        unaffected."""
+        def one_of_five(provider, model, prompt, did):
+            if provider != "codex":
+                return "[dispatch error: down]"
+            return f"ok-{provider}"
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=one_of_five, roster=FIVE_ROSTER, max_workers=5,
+        )
+        assert res.synthesis_refused_reason == ""
+        assert not res.degraded_synthesis
+        assert res.synthesis

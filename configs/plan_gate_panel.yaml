@@ -59,6 +59,16 @@ tiebreaker:
 # still refused. Read by scripts/lib/plan_gate_panel.py::load_goal_min_chars.
 goal_min_chars: 200
 
+# Coverage floor for the DELIBERATION panel's synthesis stage (OI-1154): below
+# this many DELIVERED seat reports the synthesis refuses LOUDLY instead of
+# silently building a report from a handful of seats (e.g. 1 of 5). The refusal
+# names delivered and expected seats, and decides on the SAME present/total
+# count the coverage line already shows (OI-1150) — never its own tally. The
+# operator can consciously proceed below the floor with `vnx panel --allow-degraded`.
+# Read by scripts/lib/plan_gate_panel.py::load_synthesis_min_seats.
+# Default 3: a majority of the five-seat deliberation roster.
+synthesis_min_seats: 3
+
 seats:
   - label: opus
     provider: claude

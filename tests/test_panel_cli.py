@@ -11,6 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class _FakeResult:
+    synthesis_refused_reason = ""
+
     def to_report(self) -> str:
         return "# fake panel report\n"
 
@@ -124,3 +126,59 @@ def test_dispatcher_factory_receives_non_plan_reviewer_role(tmp_path, monkeypatc
     assert rc == 0
     assert calls["role"] == "deliberation-panelist"
     assert calls["role"] != "plan-reviewer"
+
+
+def test_panel_passes_config_min_seats_and_allow_degraded_to_run_deliberation(tmp_path, monkeypatch):
+    """OI-1154: the synthesis coverage floor comes from the config loader (not a
+    Python literal), and the --allow-degraded escape is forwarded to the panel."""
+    panel = _load_panel_cli()
+    calls = {}
+
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        return lambda provider, model, prompt, dispatch_id: "ok"
+
+    def fake_run_deliberation(*args, **kwargs):
+        calls["kwargs"] = kwargs
+        return _FakeResult()
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_dispatcher_factory)
+    monkeypatch.setattr("plan_gate_panel.load_synthesis_min_seats", lambda config_path=None: 7)
+    monkeypatch.setattr(panel, "run_deliberation", fake_run_deliberation)
+
+    rc = panel.main([
+        "sweep", "audit src/", "--seats", "codex,claude",
+        "--out", str(tmp_path / "report.md"), "--allow-degraded",
+    ])
+
+    assert rc == 0
+    assert calls["kwargs"]["min_seats"] == 7
+    assert calls["kwargs"]["allow_degraded"] is True
+
+
+def test_panel_refusal_returns_nonzero_and_loud(tmp_path, monkeypatch, capsys):
+    """A refused synthesis must not look like success: the CLI exits non-zero and
+    prints the refusal (with delivered/expected counts) to stderr."""
+    panel = _load_panel_cli()
+
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        return lambda provider, model, prompt, dispatch_id: "ok"
+
+    class _RefusingResult:
+        synthesis_refused_reason = "refusing synthesis: 1/5 lenses delivered (minimum 3)"
+
+        def to_report(self) -> str:
+            return "# fake panel report\n"
+
+    def fake_run_deliberation(*args, **kwargs):
+        return _RefusingResult()
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_dispatcher_factory)
+    monkeypatch.setattr("plan_gate_panel.load_synthesis_min_seats", lambda config_path=None: 3)
+    monkeypatch.setattr(panel, "run_deliberation", fake_run_deliberation)
+
+    rc = panel.main(["sweep", "audit src/", "--out", str(tmp_path / "report.md")])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "SYNTHESIS REFUSED" in captured.err
+    assert "1/5" in captured.err

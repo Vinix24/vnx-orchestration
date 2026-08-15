@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`vnx panel` runner — multi-provider deliberation panel for complex, multi-view questions.
 
-    python3 scripts/panel.py <mode> "<question>" [--context-file F] [--timeout S] [--out F] [--seats LIST]
+    python3 scripts/panel.py <mode> "<question>" [--context-file F] [--timeout S] [--out F] [--seats LIST] [--allow-degraded]
 
 Modes: sweep | research | architecture | strategy. Runs the 4-stage deliberation
 (diverge → contrarian → verify → synthesis) via the governed review-lane dispatcher, then
@@ -60,6 +60,12 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--timeout", type=int, default=900, help="per-panelist timeout seconds")
     parser.add_argument("--out", default=None, help="write the report here (default: unified_reports/)")
     parser.add_argument("--seats", default=None, help="comma-list of seats to run; default = full fleet")
+    parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help="proceed with the synthesis even when fewer than the configured "
+             "minimum seats delivered a report (the choice is stamped on the report)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -76,7 +82,10 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"panel: cannot read --context-file: {exc}", file=sys.stderr)
             return 2
 
-    from plan_gate_panel import _make_default_dispatcher  # noqa: PLC0415
+    from plan_gate_panel import (  # noqa: PLC0415
+        _make_default_dispatcher,
+        load_synthesis_min_seats,
+    )
     # Pass a REAL data_dir: the claude/tmux lane writes each report to
     # <data_dir>/unified_reports/<id>.md and _read_report falls back to that path. With
     # data_dir=None the claude-lane reports (fan-out + synthesis) are written but never found
@@ -90,12 +99,20 @@ def main(argv: "list[str] | None" = None) -> int:
     # which a plan-reviewer-role worker correctly rejected as not a plan, corrupting the
     # panel stage.
     dispatcher = _make_default_dispatcher(data_dir, args.timeout, role="deliberation-panelist")
+    # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
+    min_seats = load_synthesis_min_seats()
 
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     if roster is None:
-        result = run_deliberation(args.mode, args.question, dispatcher=dispatcher, context=context)
+        result = run_deliberation(
+            args.mode, args.question, dispatcher=dispatcher, context=context,
+            min_seats=min_seats, allow_degraded=args.allow_degraded,
+        )
     else:
-        result = run_deliberation(args.mode, args.question, dispatcher=dispatcher, context=context, roster=roster)
+        result = run_deliberation(
+            args.mode, args.question, dispatcher=dispatcher, context=context, roster=roster,
+            min_seats=min_seats, allow_degraded=args.allow_degraded,
+        )
     report = result.to_report()
 
     out = Path(args.out) if args.out else (_resolve_reports_dir() / f"panel-{args.mode}-{uuid.uuid4().hex[:8]}.md")
@@ -106,6 +123,9 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"panel: could not write report: {exc}", file=sys.stderr)
 
     print(report)
+    if result.synthesis_refused_reason:
+        print(f"[panel] SYNTHESIS REFUSED: {result.synthesis_refused_reason}", file=sys.stderr)
+        return 1
     return 0
 
 
