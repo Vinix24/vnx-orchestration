@@ -26,7 +26,6 @@ import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
-import plan_gate_enforcement as pge  # noqa: E402
 from ndjson_hash_chain import walk_chain  # noqa: E402
 
 
@@ -1889,6 +1888,60 @@ def test_filter_panel_seats_rejects_unknown_label_listing_configured():
         assert lbl in msg
 
 
+# --------------------------------------------------------------------------
+# Governance-variant seat ladder (operator ladder, 2026-08-15): the panel size
+# derives from the variant, not a flat full panel. Asserts on the ordered label
+# prefix per rung and on the full-panel behaviour for a new feature.
+# --------------------------------------------------------------------------
+
+def test_seat_labels_minimal_is_empty():
+    assert pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "minimal") == []
+
+
+def test_seat_labels_default_is_opus_kimi():
+    labels = pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "default")
+    assert labels == ["opus", "kimi"]
+
+
+def test_seat_labels_coding_strict_is_three_families():
+    labels = pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "coding-strict")
+    assert labels == ["opus", "kimi", "glm-5.2-harness"]
+
+
+def test_seat_labels_light_is_single_opus_seat():
+    assert pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "light") == ["opus"]
+    assert pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "business-light") == ["opus"]
+
+
+def test_seat_labels_new_feature_is_full_panel_regardless_of_variant():
+    labels = pgp.seat_labels_for_governance_variant(
+        pgp.DEFAULT_PANEL, "minimal", is_new_feature=True,
+    )
+    assert labels == [s["label"] for s in pgp.DEFAULT_PANEL]
+
+
+def test_seat_labels_unknown_variant_fails_loud():
+    with pytest.raises(ValueError, match="unknown governance variant"):
+        pgp.seat_labels_for_governance_variant(pgp.DEFAULT_PANEL, "not-a-variant")
+
+
+def test_seat_override_direction_upgrade_when_operator_adds_seats():
+    assert pgp.seat_override_direction("minimal", 0, 2) == "upgrade"
+
+
+def test_seat_override_direction_downgrade_when_operator_removes_seats():
+    assert pgp.seat_override_direction("default", 2, 1) == "downgrade"
+
+
+def test_seat_override_direction_strict_downgrade_from_coding_strict():
+    assert pgp.seat_override_direction("coding-strict", 3, 1) == "strict-downgrade"
+
+
+def test_seat_override_direction_empty_when_counts_match():
+    assert pgp.seat_override_direction("coding-strict", 3, 3) == ""
+    assert pgp.seat_override_direction("minimal", 0, 0) == ""
+
+
 def test_cmd_plan_gate_run_passes_filtered_panel_to_run_panel(tmp_path, monkeypatch):
     """--panel-seats filters the configured panel and run_panel receives exactly
     those seats. Asserts on the dispatcher mock's calls (the seats it was
@@ -1977,13 +2030,15 @@ def _fake_pass_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **k
     }
 
 
-def test_cmd_plan_gate_run_light_plan_runs_fewer_seats_than_heavy(tmp_path, monkeypatch):
-    """VNX_PLAN_GATE_COMPLEX_ONLY=1: a LIGHT plan runs the reduced 2-seat panel
-    while a HEAVY plan keeps the full panel — the scope read-site sizes the gate."""
+def test_cmd_plan_gate_run_ladder_sizes_panel_from_variant(tmp_path, monkeypatch):
+    """The governance variant sizes the panel: default (code) -> 2 seats
+    (opus+kimi), coding-strict (core) -> 3 seats (opus, kimi, glm-5.2-harness),
+    and a new feature (task_class 01_code_generation) -> the full 5-seat panel
+    even on a docs path. Asserts on the actual providers dispatched, not just
+    the seat count."""
     import argparse
 
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
-    monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "1")
     seen_panels: list = []
 
     def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
@@ -1993,29 +2048,120 @@ def test_cmd_plan_gate_run_light_plan_runs_fewer_seats_than_heavy(tmp_path, monk
 
     monkeypatch.setattr(pgp, "run_panel", _capturing_run_panel)
     monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
 
     state_dir = _bootstrap(tmp_path)
-    tracks.create_track(state_dir, "feat-light", "p1", "t", "shipped", phase="queued")
-    tracks.create_track(state_dir, "feat-heavy", "p1", "t", "shipped", phase="queued")
+    tracks.create_track(state_dir, "feat-default", "p1", "t", "shipped", phase="queued")
+    tracks.create_track(state_dir, "feat-core", "p1", "t", "shipped", phase="queued")
+    tracks.create_track(state_dir, "feat-new", "p1", "t", "shipped", phase="queued")
 
-    light_doc = tmp_path / "light.md"
-    light_doc.write_text("## Approach\nAdd a rename button to the dashboard view.\n", encoding="utf-8")
-    heavy_doc = tmp_path / "heavy.md"
-    heavy_doc.write_text("## Approach\nTouch dispatch_cli.py and a schema migration.\n", encoding="utf-8")
-
-    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
-        track_id="feat-light", project_id="p1", state_dir=str(state_dir),
-        doc=str(light_doc), json=False, panel_seats=None,
-    ))
-    assert rc == 0
-    assert [s["label"] for s in seen_panels[0]] == list(pge.LIGHT_PANEL_LABELS)
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
 
     rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
-        track_id="feat-heavy", project_id="p1", state_dir=str(state_dir),
-        doc=str(heavy_doc), json=False, panel_seats=None,
+        track_id="feat-default", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None,
+        dispatch_paths="scripts/lib/some_utility.py",
     ))
     assert rc == 0
-    assert [s["label"] for s in seen_panels[1]] == [m["label"] for m in pgp.DEFAULT_PANEL]
+    assert [s["provider"] for s in seen_panels[0]] == ["claude", "kimi"]
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-core", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None,
+        dispatch_paths="scripts/lib/dispatch_cli.py",
+    ))
+    assert rc == 0
+    assert [s["provider"] for s in seen_panels[1]] == ["claude", "kimi", "glm-harness"]
+
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-new", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None,
+        dispatch_paths="docs/operations/foo.md", task_class="01_code_generation",
+    ))
+    assert rc == 0
+    assert [s["provider"] for s in seen_panels[2]] == [
+        "claude", "kimi", "glm-harness", "deepseek-harness", "codex",
+    ]
+
+
+def test_cmd_plan_gate_run_operator_override_wins_both_directions(tmp_path, monkeypatch):
+    """--panel-seats overrides the derived weight in BOTH directions: a minimal
+    (0-seat) plan can be forced heavier, and a coding-strict (3-seat) plan can
+    be forced lighter."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    seen_panels: list = []
+
+    def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
+        seen_panels.append(panel)
+        return _fake_pass_run_panel(doc_path, track_id=track_id, project_id=project_id,
+                                    panel=panel, data_dir=data_dir, **kw)
+
+    monkeypatch.setattr(pgp, "run_panel", _capturing_run_panel)
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-ov1", "p1", "t", "shipped", phase="queued")
+    tracks.create_track(state_dir, "feat-ov2", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nGeneric widget fix.\n", encoding="utf-8")
+
+    # HEAVIER: minimal (docs) derives 0 seats, operator forces 2.
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-ov1", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats="opus,kimi",
+        dispatch_paths="docs/operations/dispatch-rules.md",
+    ))
+    assert rc == 0
+    assert [s["provider"] for s in seen_panels[0]] == ["claude", "kimi"]
+
+    # LIGHTER: coding-strict (core) derives 3 seats, operator forces 1.
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-ov2", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats="opus",
+        dispatch_paths="scripts/lib/dispatch_cli.py",
+    ))
+    assert rc == 0
+    assert [s["provider"] for s in seen_panels[1]] == ["claude"]
+
+
+def test_cmd_plan_gate_run_minimal_variant_resolves_without_panel(tmp_path, monkeypatch):
+    """A minimal (docs) plan derives 0 seats: no panel runs, and the blocker is
+    resolved with a non-empty reason naming the derived weight/category."""
+    import argparse
+
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    run_called = {"n": 0}
+    monkeypatch.setattr(pgp, "run_panel", lambda *a, **k: run_called.__setitem__("n", run_called["n"] + 1))
+
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-docs", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nUpdate the README.\n", encoding="utf-8")
+
+    captured = {}
+
+    def _fake_resolve(state_dir, track_id, project_id, *, reason, resolver, approval_id=None):
+        captured["reason"] = reason
+        captured["resolver"] = resolver
+        return True
+
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", _fake_resolve)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+
+    args = argparse.Namespace(
+        track_id="feat-docs", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None,
+        dispatch_paths="docs/operations/dispatch-rules.md",
+    )
+    rc = planning_cli.cmd_plan_gate_run(args)
+    assert rc == 0
+    assert run_called["n"] == 0  # no panel ran
+    assert captured["resolver"] == "derived"
+    assert "minimal" in captured["reason"]
 
 
 def test_cmd_plan_gate_run_passes_seat_timeout_flag_to_run_panel(tmp_path, monkeypatch):
@@ -2080,24 +2226,25 @@ def test_cmd_plan_gate_run_no_flag_falls_back_to_env_via_run_panel(tmp_path, mon
     assert seen_timeouts == [None]
 
 
-def test_cmd_plan_gate_run_light_pass_writes_run_evidence_with_seats(tmp_path, monkeypatch):
-    """A successful LIGHT run writes a durable plan_gate_pass with resolver=run
-    carrying the seat count + scope that certified it — a light pass is a real pass."""
+def test_cmd_plan_gate_run_pass_writes_run_evidence_with_derived_weight(tmp_path, monkeypatch):
+    """A successful derived run writes a durable plan_gate_pass with resolver=run
+    carrying the seat count + derived weight (scope=governance variant) that
+    certified it — a sized-down pass is still a real pass."""
     import argparse
 
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
-    monkeypatch.setenv("VNX_PLAN_GATE_COMPLEX_ONLY", "1")
     monkeypatch.setattr(pgp, "run_panel", _fake_pass_run_panel)
     monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
 
     state_dir = _bootstrap(tmp_path)
-    tracks.create_track(state_dir, "feat-light", "p1", "t", "shipped", phase="queued")
-    doc = tmp_path / "light.md"
+    tracks.create_track(state_dir, "feat-default", "p1", "t", "shipped", phase="queued")
+    doc = tmp_path / "plan.md"
     doc.write_text("## Approach\nAdd a rename button to the dashboard view.\n", encoding="utf-8")
 
     args = argparse.Namespace(
-        track_id="feat-light", project_id="p1", state_dir=str(state_dir),
+        track_id="feat-default", project_id="p1", state_dir=str(state_dir),
         doc=str(doc), json=False, panel_seats=None, repo_root=str(tmp_path),
+        dispatch_paths="scripts/lib/some_utility.py",
     )
     rc = planning_cli.cmd_plan_gate_run(args)
     assert rc == 0
@@ -2108,10 +2255,10 @@ def test_cmd_plan_gate_run_light_pass_writes_run_evidence_with_seats(tmp_path, m
     assert len(records) == 1
     rec = records[0]
     assert rec["type"] == "plan_gate_pass"
-    assert rec["track_id"] == "feat-light"
+    assert rec["track_id"] == "feat-default"
     assert rec["resolver"] == "run"
-    assert rec["seats"] == len(pge.LIGHT_PANEL_LABELS)
-    assert rec["scope"] == "light"
+    assert rec["seats"] == 2
+    assert rec["scope"] == "default"
 
 
 def test_cmd_plan_gate_run_pass_with_failed_evidence_is_loud_not_silent(tmp_path, monkeypatch, capsys):

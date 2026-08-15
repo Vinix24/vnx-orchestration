@@ -740,6 +740,29 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
              "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
              "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
     )
+    p_prun.add_argument(
+        "--dispatch-paths",
+        dest="dispatch_paths",
+        default=None,
+        help="comma-separated repo paths the plan touches; drives the governance "
+             "weight (variant) that sizes the panel (operator ladder). Default: no "
+             "paths (task_class or the code baseline).",
+    )
+    p_prun.add_argument(
+        "--task-class",
+        dest="task_class",
+        default=None,
+        help="task class for the plan from the smart-router closed set "
+             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
+             "full panel).",
+    )
+    p_prun.add_argument(
+        "--irreversible",
+        dest="irreversible",
+        action="store_true",
+        help="declare the change irreversible (deletion/rename/big architecture "
+             "refactor); forces coding-strict (3 seats).",
+    )
 
     p_pstat = subs.add_parser(
         "status", help="show a track's plan-gate state + derived_status",

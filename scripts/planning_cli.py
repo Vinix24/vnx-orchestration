@@ -2307,7 +2307,7 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     1 = infra error (doc/track missing, panel could not run).
     """
     import plan_gate_panel
-    import plan_gate_enforcement as _pge
+    import smart_router
 
     state_dir = _resolve_state_dir(args.state_dir)
     doc = Path(args.doc)
@@ -2321,36 +2321,132 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
 
     data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
 
-    # Scope read-site (VNX_PLAN_GATE_COMPLEX_ONLY): classify the plan light/heavy
-    # from the plan doc itself (fail-closed to HEAVY on anything unjudgeable). A
-    # LIGHT plan under the flag runs the reduced panel; its PASS is still a REAL
-    # pass — it resolves the blocker AND writes a durable plan_gate_pass with
-    # resolver=run and the seat count that decided it. An unreadable doc is an
-    # infra error, never a scope decision.
+    # An unreadable doc is an infra error, never a weight decision.
     try:
-        doc_text = doc.read_text(encoding="utf-8")
+        doc.read_text(encoding="utf-8")
     except OSError as exc:
         print(f"plan doc unreadable: {doc}: {exc}", file=sys.stderr)
         return 1
-    scope = _pge.plan_gate_scope(doc_text)
+
+    # Governance-weight read-site (operator ladder, 2026-08-15): the panel size
+    # derives from the governance variant (dispatch paths + task_class +
+    # irreversibility), not a flat "every plan gets the full panel". The derived
+    # weight is computed BEFORE seat selection so the trace can always show
+    # "derived X -> chose Y, by operator/derived" — an override is never silent.
+    raw_paths = getattr(args, "dispatch_paths", None)
+    dispatch_paths = None
+    if raw_paths:
+        dispatch_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
+    gov = smart_router.derive_governance_variant(
+        dispatch_paths=dispatch_paths,
+        task_class=getattr(args, "task_class", None),
+        irreversible=bool(getattr(args, "irreversible", False)),
+    )
 
     # Resolve the panel composition from configs/plan_gate_panel.yaml (falling
-    # back to DEFAULT_PANEL when absent). An explicit --panel-seats always wins;
-    # otherwise a LIGHT-scope plan under VNX_PLAN_GATE_COMPLEX_ONLY runs the
-    # reduced 2-seat panel automatically. Both an invalid config and an unknown
-    # seat label fail LOUD here — a dropped seat reads as an abstention and
-    # turns into a REVISE via the fail-safe rule, so misconfiguration must
-    # surface before the panel runs.
+    # back to DEFAULT_PANEL when absent). An explicit --panel-seats always wins
+    # (heavier OR lighter than the derived size); otherwise the governance
+    # variant sizes the panel. Both an invalid config and an unknown seat label
+    # fail LOUD here — a dropped seat reads as an abstention and turns into a
+    # REVISE via the fail-safe rule, so misconfiguration must surface before the
+    # panel runs.
     try:
         panel = plan_gate_panel.load_panel_seats()
+        derived_labels = plan_gate_panel.seat_labels_for_governance_variant(
+            panel, gov.variant, is_new_feature=gov.is_new_feature,
+        )
         if args.panel_seats:
             requested = [s.strip() for s in args.panel_seats.split(",") if s.strip()]
             panel = plan_gate_panel.filter_panel_seats(panel, requested)
-        elif _pge.complex_only_active() and scope == _pge.LIGHT:
-            panel = plan_gate_panel.filter_panel_seats(panel, list(_pge.LIGHT_PANEL_LABELS))
+            chosen_by = "operator"
+        else:
+            panel = plan_gate_panel.filter_panel_seats(panel, derived_labels)
+            chosen_by = "derived"
     except Exception as exc:
         print(f"plan-gate run failed: {exc}", file=sys.stderr)
         return 1
+
+    # Seat-override direction (operator ladder, 2026-08-15): when the operator
+    # sizes the panel away from the derived seat count, the trace names the
+    # derived count, the chosen count, and the direction — a downgrade from
+    # coding-strict is marked STRICT-DOWNGRADE so a later sweep can find it.
+    # The same count derived vs chosen is NOT an override (a same-count relabel
+    # keeps the panel's heft, so the direction is empty and no override is
+    # claimed).
+    override_direction = ""
+    if chosen_by == "operator":
+        override_direction = plan_gate_panel.seat_override_direction(
+            gov.variant, len(derived_labels), len(panel),
+        )
+
+    gov_trace = (
+        f"weight={gov.variant} new_feature={gov.is_new_feature} "
+        f"-> {len(panel)} seat(s) by {chosen_by}"
+    )
+    if override_direction:
+        gov_trace += (
+            f"; OVERRIDES derived {len(derived_labels)} seat(s) "
+            f"({gov.variant}) - {override_direction.upper()}"
+        )
+    if override_direction:
+        print(f"plan-gate override: {gov_trace}.", file=sys.stderr)
+    else:
+        print(f"plan-gate seats: {gov_trace}.", file=sys.stderr)
+
+    # 0 seats: the derived weight requires no panel. Resolve the blocker with a
+    # reason that names the category — a plan-gate blocker is never cleared
+    # silently, and "no gate needed" is itself a recorded decision.
+    if not panel:
+        reason = (
+            f"derived weight={gov.variant} requires no panel "
+            f"(category not gated); no panel ran"
+        )
+        try:
+            resolved = _resolve_plan_blocker(
+                state_dir, args.track_id, args.project_id,
+                reason=reason, resolver="derived",
+            )
+            post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+        except Exception as exc:
+            print(
+                f"derived no-panel pass, but unblocking track {args.track_id} failed: {exc}. "
+                "Track state unchanged — investigate before promoting.",
+                file=sys.stderr,
+            )
+            return 1
+        derived = post.get("derived_status") if isinstance(post, dict) else None
+        if derived == "blocked":
+            print(
+                f"derived no-panel pass, but track {args.track_id} is STILL blocked "
+                f"(plan blocker resolved={resolved}; another blocker or hard dependency "
+                "remains). Promote stays refused — clear the remaining blocker first.",
+                file=sys.stderr,
+            )
+            return 2
+        if resolved:
+            _emit_plan_gate_pass_record(
+                repo_root=getattr(args, "repo_root", None),
+                track_id=args.track_id, project_id=args.project_id, resolver="run",
+                seats=0, scope=gov.variant, reason=gov_trace,
+            )
+        if args.json:
+            print(json.dumps({
+                "decision": "PASS",
+                "derived_weight": gov.variant,
+                "seats": 0,
+                "summary": {
+                    "pass_count": 0, "revise_count": 0, "block_count": 0,
+                    "rationale": reason,
+                },
+                "panelists": [],
+            }, indent=2))
+        else:
+            print(
+                f"PASS — plan gate cleared (derived weight={gov.variant} needs no panel). "
+                f"{_plan_blocker_oi(args.track_id)} resolved={resolved}; "
+                f"track derived_status={derived}."
+            )
+        return 0
 
     try:
         result = plan_gate_panel.run_panel(
@@ -2440,21 +2536,21 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             )
             return 2
         if resolved:
-            # A PASS that CLEARS the gate is a real pass for both scopes: write the
-            # durable, hash-chained plan_gate_pass record with resolver="run" and the
-            # seat count + scope that certified it. Before this, only `plan-gate
-            # attest` ever wrote a record, so the ledger was all-attest and the
-            # effectiveness probe read every gate as manually overridden even when
-            # the panel had actually converged (light and heavy alike).
+            # A PASS that CLEARS the gate is a real pass: write the durable,
+            # hash-chained plan_gate_pass record with resolver="run" and the seat
+            # count + derived weight (scope=governance variant) that certified it.
+            # Before this, only `plan-gate attest` ever wrote a record, so the
+            # ledger was all-attest and the effectiveness probe read every gate as
+            # manually overridden even when the panel had actually converged.
             wrote = _emit_plan_gate_pass_record(
                 repo_root=getattr(args, "repo_root", None),
                 track_id=args.track_id, project_id=args.project_id, resolver="run",
-                seats=len(panel), scope=scope,
+                seats=len(panel), scope=gov.variant, reason=gov_trace,
             )
             if not wrote:
                 print(
                     f"WARNING: plan_gate_pass evidence NOT written for track "
-                    f"{args.track_id} (resolver=run, seats={len(panel)}, scope={scope}). "
+                    f"{args.track_id} (resolver=run, seats={len(panel)}, scope={gov.variant}). "
                     "The plan blocker IS resolved, but the durable pass record is "
                     "missing - the merge gate may not recognize this pass.",
                     file=sys.stderr,
@@ -3199,6 +3295,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="per-seat deadline in seconds before a panelist times out and books a "
              "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
              "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
+    )
+    p_prun.add_argument(
+        "--dispatch-paths",
+        dest="dispatch_paths",
+        default=None,
+        help="comma-separated repo paths the plan touches; drives the governance "
+             "weight (variant) that sizes the panel (operator ladder). Default: no "
+             "paths (task_class or the code baseline).",
+    )
+    p_prun.add_argument(
+        "--task-class",
+        dest="task_class",
+        default=None,
+        help="task class for the plan from the smart-router closed set "
+             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
+             "full panel).",
+    )
+    p_prun.add_argument(
+        "--irreversible",
+        dest="irreversible",
+        action="store_true",
+        help="declare the change irreversible (deletion/rename/big architecture "
+             "refactor); forces coding-strict (3 seats).",
     )
     p_prun.set_defaults(func=cmd_plan_gate_run)
 

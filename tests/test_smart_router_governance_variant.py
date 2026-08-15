@@ -96,7 +96,7 @@ class TestResolveGate:
         )
         assert result.gate == "codex_gate"
         assert result.source == "explicit"
-        assert result.governance_variant == ""
+        assert result.governance_variant == "minimal"
 
     def test_explicit_gate_wins_even_when_router_would_be_stricter(self):
         result = resolve_gate(
@@ -140,6 +140,68 @@ class TestTraceVisibility:
         assert "direction=unchanged" in result.reason
 
 
+class TestOverrideTrace:
+    """The explicit gate is never a silent override: the trace names the derived
+    weight, the chosen weight, and the direction. A downgrade from coding-strict
+    (the heaviest variant class) is marked distinctly from an ordinary downgrade.
+    """
+
+    def test_migration_ci_gate_override_is_strict_downgrade(self):
+        result = resolve_gate(
+            explicit_gate="ci_gate",
+            dispatch_paths=["scripts/migrations/0034_drop_column.py"],
+        )
+        assert result.gate == "ci_gate"
+        assert result.source == "explicit"
+        assert result.governance_variant == "coding-strict"
+        assert result.override_direction == "strict-downgrade"
+        assert "coding-strict" in result.reason
+        assert "STRICT-DOWNGRADE" in result.reason
+
+    def test_docs_codex_gate_override_is_upgrade(self):
+        result = resolve_gate(
+            explicit_gate="codex_gate",
+            dispatch_paths=["docs/operations/dispatch-rules.md"],
+        )
+        assert result.gate == "codex_gate"
+        assert result.source == "explicit"
+        assert result.governance_variant == "minimal"
+        assert result.override_direction == "upgrade"
+        assert "minimal" in result.reason
+        assert "codex_gate" in result.reason
+        assert "UPGRADE" in result.reason
+
+    def test_override_equal_to_derived_is_not_flagged(self):
+        result = resolve_gate(
+            explicit_gate="codex_gate",
+            dispatch_paths=["scripts/lib/some_utility.py"],
+        )
+        assert result.governance_variant == "default"
+        assert result.override_direction == ""
+        assert "OVERRIDES" not in result.reason
+        assert "did not override" in result.reason
+
+    def test_no_override_derived_path_is_unchanged(self):
+        result = resolve_gate(dispatch_paths=["scripts/lib/dispatch_cli.py"])
+        assert result.source == "derived"
+        assert result.governance_variant == "coding-strict"
+        assert result.override_direction == ""
+
+    def test_strict_downgrade_distinct_from_ordinary_downgrade(self):
+        strict = resolve_gate(
+            explicit_gate="ci_gate",
+            dispatch_paths=["scripts/migrations/0034_drop_column.py"],
+        )
+        ordinary = resolve_gate(
+            explicit_gate="ci_gate",
+            dispatch_paths=["scripts/lib/some_utility.py"],
+        )
+        assert strict.override_direction == "strict-downgrade"
+        assert ordinary.override_direction == "downgrade"
+        assert "STRICT-DOWNGRADE" in strict.reason
+        assert "STRICT-DOWNGRADE" not in ordinary.reason
+
+
 class TestVocabularyGuard:
     def test_all_variant_gate_keys_are_governance_variants(self):
         unknown = set(GOVERNANCE_VARIANT_GATE) - set(GOVERNANCE_MIN_TIERS)
@@ -153,3 +215,61 @@ class TestVocabularyGuard:
     def test_baseline_gate_is_the_heaviest(self):
         assert _GATE_BASELINE == "codex_gate"
         assert _GATE_WEIGHT["codex_gate"] == max(_GATE_WEIGHT.values())
+
+
+class TestIrreversibility:
+    def test_explicit_irreversible_flag_forces_coding_strict(self):
+        result = derive_governance_variant(
+            dispatch_paths=["docs/operations/foo.md"], irreversible=True,
+        )
+        assert result.variant == "coding-strict"
+        assert result.gate == "codex_gate"
+        assert "irreversible" in result.reason
+
+    def test_schema_migration_path_is_irreversible(self):
+        result = derive_governance_variant(
+            dispatch_paths=["schemas/migrations/0034_x.sql"]
+        )
+        assert result.variant == "coding-strict"
+        assert "irreversible" in result.reason
+
+    def test_fleet_default_path_is_irreversible(self):
+        result = derive_governance_variant(dispatch_paths=["skills/foo/bar.md"])
+        assert result.variant == "coding-strict"
+
+    def test_receipt_format_path_is_irreversible(self):
+        result = derive_governance_variant(
+            dispatch_paths=["scripts/lib/ndjson_hash_chain.py"]
+        )
+        assert result.variant == "coding-strict"
+
+    def test_irreversible_path_wins_over_light_reversible_paths(self):
+        result = derive_governance_variant(
+            dispatch_paths=["docs/foo.md", "agents/t0.md"]
+        )
+        assert result.variant == "coding-strict"
+
+    def test_resolve_gate_irreversible_forces_coding_strict(self):
+        result = resolve_gate(
+            dispatch_paths=["docs/operations/foo.md"], irreversible=True,
+        )
+        assert result.gate == "codex_gate"
+        assert result.governance_variant == "coding-strict"
+
+
+class TestNewFeatureAxis:
+    def test_code_generation_task_class_is_new_feature(self):
+        result = derive_governance_variant(task_class="01_code_generation")
+        assert result.is_new_feature is True
+
+    def test_new_feature_axis_is_independent_of_path_variant(self):
+        result = derive_governance_variant(
+            dispatch_paths=["docs/operations/foo.md"],
+            task_class="01_code_generation",
+        )
+        assert result.variant == "minimal"
+        assert result.is_new_feature is True
+
+    def test_non_code_generation_is_not_new_feature(self):
+        result = derive_governance_variant(task_class="04_documentation")
+        assert result.is_new_feature is False
