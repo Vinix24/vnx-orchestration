@@ -173,6 +173,7 @@ def stage_spec_bundle(
     requires_mcp: bool = False,
     allow_headless: bool = False,
     headless_reason: Optional[str] = None,
+    post_merge_verification: bool = False,
     pr_id: Optional[str] = None,
     tags: tuple[str, ...] = (),
     data_dir: Optional[Path] = None,
@@ -286,6 +287,7 @@ def stage_spec_bundle(
         "instruction_sha256": instruction_sha256,
         "allow_headless": bool(allow_headless),
         "headless_reason": norm_reason,
+        "post_merge_verification": bool(post_merge_verification),
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)
@@ -456,6 +458,13 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--requires-mcp", action="store_true", dest="requires_mcp")
     parser.add_argument("--allow-headless", action="store_true", dest="allow_headless")
     parser.add_argument("--headless-reason", default=None, dest="headless_reason")
+    parser.add_argument(
+        "--post-merge-verification",
+        action="store_true",
+        dest="post_merge_verification",
+        help="Mark this dispatch as a post-merge verification: the door fails "
+             "closed (refuses) while the local main checkout lags origin/main.",
+    )
     parser.add_argument("--target-id-override", default=None, dest="target_id_override")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument(
@@ -507,6 +516,7 @@ def main(argv: Optional[list] = None) -> int:
         requires_mcp=args.requires_mcp,
         allow_headless=args.allow_headless,
         headless_reason=args.headless_reason,
+        post_merge_verification=args.post_merge_verification,
         target_id_override=args.target_id_override,
         dry_run=args.dry_run,
     )

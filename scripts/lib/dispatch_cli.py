@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -198,6 +199,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         instruction_sha256=(raw.get("instruction_sha256") or None),
         allow_headless=raw.get("allow_headless") is True,
         headless_reason=_sanitize_headless_reason(raw.get("headless_reason")),
+        post_merge_verification=raw.get("post_merge_verification") is True,
     )
 
 
@@ -1161,6 +1163,81 @@ def _resolve_gate_via_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Opti
     return new_vspec, f"smart-router:{resolution.reason}"
 
 
+def main_checkout_lag(project_root: Path, *, ref: str = "origin/main") -> Optional[int]:
+    """Number of commits the checkout at *project_root* is behind *ref*.
+
+    OI-1214: the door builds every dispatch from the consumer's local main
+    checkout; when that lags ``origin/main``, a post-merge verification runs the
+    OLD code and reports a false negative. This returns the count — a NUMBER, not
+    a boolean — so the door can log "3 commits behind" instead of "out of date".
+
+    ``git rev-list --count HEAD..<ref>`` counts commits reachable from *ref* but
+    not from HEAD (exactly "behind"). Returns None when the distance cannot be
+    determined (not a git repo, no ``origin`` remote, or *ref* not yet fetched),
+    so "0" always means a genuinely current checkout and "unknown" is never
+    silently read as "up to date". Never raises.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(project_root), "rev-list", "--count", f"HEAD..{ref}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    try:
+        return int(out.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _post_merge_verification_lag_verdict(lag: int) -> ConstraintVerdict:
+    """Fail-closed refusal for a post-merge-verification dispatch on a stale checkout.
+
+    The message names the CONSEQUENCE (this verification would measure the old
+    code and return a false negative) and the exact command that fixes it, rather
+    than only stating the fact that the checkout lags.
+    """
+    return ConstraintVerdict(
+        code="post-merge-verification-stale-checkout",
+        severity="blocking",
+        message=(
+            f"dispatch is a post-merge verification but the local main checkout is "
+            f"{lag} commit(s) behind origin/main — this verification would measure "
+            f"the old code and report a false negative. Bring the checkout current "
+            f"first: `git pull --ff-only` (or `git fetch origin && git merge "
+            f"--ff-only origin/main`)"
+        ),
+    )
+
+
+def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
+    """Log the local-checkout lag at every dispatch as a NUMBER, never a flag.
+
+    OI-1214: "3 commits behind" is actionable; "out of date" is not. A lag of 0
+    (current) and a lag > 0 are both logged; only an unresolvable ref logs the
+    honest "unknown" state, which callers must not read as "up to date".
+    """
+    if lag is None:
+        logger.info(
+            "[dispatch_cli] dispatch=%s: local main checkout behind origin/main: "
+            "unknown (origin/main not resolvable — not a git repo or no origin remote)",
+            spec.dispatch_id,
+        )
+    elif lag == 0:
+        logger.info(
+            "[dispatch_cli] dispatch=%s: local main checkout is 0 commits behind origin/main",
+            spec.dispatch_id,
+        )
+    else:
+        logger.warning(
+            "[dispatch_cli] dispatch=%s: local main checkout is %d commits behind origin/main",
+            spec.dispatch_id,
+            lag,
+        )
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -1436,6 +1513,27 @@ def build_runtime_snapshot(
     # door owns env reads, so compute it here and hand it to the pure compile_plan
     # via the snapshot.
     claude_api_metered = claude_auth_is_api_metered(os.environ)
+
+    # OI-1214: the door builds every dispatch from the consumer's local main
+    # checkout. Measure how far that checkout lags origin/main — a NUMBER — and
+    # fail-closed on a post-merge-verification dispatch that would run the old
+    # code. The consumer root is resolved exactly as the worktree allocator does
+    # (resolve_consumer_project_root), so the lag is measured against the same
+    # checkout the worker will actually build in. Best-effort: an unresolvable
+    # root/ref logs an unknown lag and never blocks (fail-open on unknown,
+    # fail-closed on a KNOWN lag — a door that refused on "unknown" would block
+    # every non-git consumer, which is worse than the problem it fixes).
+    checkout_lag: Optional[int] = None
+    try:
+        from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
+        checkout_lag = main_checkout_lag(resolve_consumer_project_root())
+    except Exception as exc:  # vnx-silent-except: lag is advisory except for the refusal below; resolution must never block the door
+        logger.debug("[dispatch_cli] checkout-lag resolution failed for dispatch=%s: %s", spec.dispatch_id, exc)
+    _log_checkout_lag(spec, checkout_lag)
+    if checkout_lag is not None and checkout_lag > 0 and spec.post_merge_verification:
+        constraint_verdicts = constraint_verdicts + (
+            _post_merge_verification_lag_verdict(checkout_lag),
+        )
 
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
