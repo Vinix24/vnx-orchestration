@@ -82,6 +82,6 @@ T0 review-gate workflow integration (dispatch trigger on pending-review.json), o
 - ADR-007 — Multi-tenant project_id stamping (composite keys, per-project default)
 - ADR-015 — Wave 7 cheap-lane providers (kimi K2.6 as approved cheap-lane)
 - `scripts/lib/kimi_wrapper.py` — kimi subprocess infrastructure
-- `claudedocs/CC-COMMUNITY-SYNTHESIS-2026-05-29.md` §A-14 — architecture choice record
-- `claudedocs/CC-COMMUNITY-RESEARCH-OPUS-2026-05-29.md` §A4 — Boris Cherny REM-sleep analogy
+- `claudedocs/archive/CC-COMMUNITY-SYNTHESIS-2026-05-29.md` §A-14 — architecture choice record
+- `claudedocs/archive/CC-COMMUNITY-RESEARCH-OPUS-2026-05-29.md` §A4 — Boris Cherny REM-sleep analogy
 - Memory: `governance-receipt-gap` — original dormant self-learning loop record

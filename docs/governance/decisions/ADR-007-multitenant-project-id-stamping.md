@@ -9,9 +9,9 @@
 
 VNX began as a single-tenant orchestration system: one operator, one project (`vnx-roadmap-autopilot`), one local SQLite stack under `.vnx-data/state/`. By Q1 2026 the operator was running **four** distinct VNX deployments (`vnx-dev`, `mc`, `sales-copilot`, `seocrawler-v2`) totaling ~17.6 GB of `.vnx-data/`, each with its own per-project `quality_intelligence.db` and `runtime_coordination.db`. Patterns learned in `mission-control` could not inform a dispatch in `sales-copilot`. Cross-project learning was structurally impossible.
 
-`claudedocs/2026-04-30-single-vnx-migration-plan.md` proposed Model B: separate repos, central VNX install, **central data dir namespaced by `project_id`**. Phase 0 (PR #410) added `project_id` columns to seven hot tables; Phase 4 (PR #432) imported all four projects' data into the central DBs and stamped every row with its source `project_id`.
+`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-04-30-single-vnx-migration-plan.md` proposed Model B: separate repos, central VNX install, **central data dir namespaced by `project_id`**. Phase 0 (PR #410) added `project_id` columns to seven hot tables; Phase 4 (PR #432) imported all four projects' data into the central DBs and stamped every row with its source `project_id`.
 
-The migration ran for **nine codex review rounds**. Each round surfaced new instances of the same root pattern: tables, indexes, or constraints that assumed single-tenancy. The lessons doc at `claudedocs/2026-05-09-p4-migration-architecture-lessons.md` Section 1.3 documents how `INSERT OR IGNORE` against a single-column UNIQUE constraint silently dropped re-stamped rows because the existing `DEFAULT 'vnx-dev'` rows already occupied the PK slot. Section 4.2 codifies the fix: composite uniqueness as the default.
+The migration ran for **nine codex review rounds**. Each round surfaced new instances of the same root pattern: tables, indexes, or constraints that assumed single-tenancy. The lessons doc at `claudedocs/archive/2026-05-09-p4-migration-architecture-lessons.md` Section 1.3 documents how `INSERT OR IGNORE` against a single-column UNIQUE constraint silently dropped re-stamped rows because the existing `DEFAULT 'vnx-dev'` rows already occupied the PK slot. Section 4.2 codifies the fix: composite uniqueness as the default.
 
 This ADR captures the resulting pattern as a binding architectural rule for all future central-DB tables.
 
@@ -25,13 +25,13 @@ The pattern has three concrete rules:
 
 2. **Constraint rule.** Where a table previously had `UNIQUE(natural_key)`, the central form is `UNIQUE(natural_key, project_id)` (or the inverse — order does not matter for SQLite UNIQUE semantics, but the convention places `project_id` last). Single-column UNIQUE constraints on tenant-scoped natural keys are a smell that requires per-table justification recorded in the migration file.
 
-3. **Identifier-rewrite rule.** Where two source projects can mint the same identifier (e.g., `dispatches.id=1`, `terminal_leases.id=1`), the importer prefix-rewrites with `<project_id>:<source_id>` for shared identifier columns. This is the same rule applied successfully to `pattern_usage.pattern_id` (which fixed the pre-existing single-project synthetic-id explosion as a bonus side effect, per `claudedocs/2026-04-30-single-vnx-migration-plan.md` §5.2).
+3. **Identifier-rewrite rule.** Where two source projects can mint the same identifier (e.g., `dispatches.id=1`, `terminal_leases.id=1`), the importer prefix-rewrites with `<project_id>:<source_id>` for shared identifier columns. This is the same rule applied successfully to `pattern_usage.pattern_id` (which fixed the pre-existing single-project synthetic-id explosion as a bonus side effect, per `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-04-30-single-vnx-migration-plan.md` §5.2).
 
 The structural test in `tests/test_migrate_dry_run.py` parses migration `0015_complete_project_id.sql` at CI time and asserts every multi-tenant table conforms. New migrations that introduce tenant-scoped tables MUST extend this test.
 
 ## Reasoning
 
-1. **The whole value proposition rests on this.** The single-VNX move (`claudedocs/2026-04-30-single-vnx-migration-plan.md` §1.2 "Why B over A") chose Model B specifically because column-namespacing gives strong-via-column isolation while keeping reversible per-project rollback paths. Without `project_id` stamping there is no Model B — there is only Model A (monorepo) or Model C (read-only federation). The operator rejected both. `project_id` is therefore not a tactical column, it is the identity layer of the entire central system.
+1. **The whole value proposition rests on this.** The single-VNX move (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-04-30-single-vnx-migration-plan.md` §1.2 "Why B over A") chose Model B specifically because column-namespacing gives strong-via-column isolation while keeping reversible per-project rollback paths. Without `project_id` stamping there is no Model B — there is only Model A (monorepo) or Model C (read-only federation). The operator rejected both. `project_id` is therefore not a tactical column, it is the identity layer of the entire central system.
 
 2. **It also fixes a latent single-project bug.** The `pattern_usage.pattern_id` synthetic-id explosion (codex finding §2.12, referenced in migration plan §5.2) was a single-project bug masked by single-project assumptions. Composite-key namespacing fixes it as a free side effect — every centralized table inherits stable per-project identity.
 
@@ -43,7 +43,7 @@ The structural test in `tests/test_migrate_dry_run.py` parses migration `0015_co
 
 6. **The composite UNIQUE pattern is itself a contract with the importer.** `INSERT OR IGNORE` is safe only when the UNIQUE constraint already encodes the intended dedup semantics (lessons doc T2). Without `project_id` in the UNIQUE, IGNORE collapses cross-tenant rows. With it, IGNORE preserves per-tenant uniqueness while still allowing replay-safe imports. The constraint and the conflict policy are not independent design decisions — they are paired.
 
-7. **MCP / cross-project learning depends on it.** The strategic replan (`claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M4) calls out: "MCP has no canonical multi-tenant pattern for SQLite. RLS is Postgres-only. We are state of the art." Wave 4 of that plan exposes central DBs as MCP servers; the MCP server must filter on `project_id` from the session header. If the column does not exist or is not authoritative, MCP cannot safely federate across the operator's projects.
+7. **MCP / cross-project learning depends on it.** The strategic replan (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M4) calls out: "MCP has no canonical multi-tenant pattern for SQLite. RLS is Postgres-only. We are state of the art." Wave 4 of that plan exposes central DBs as MCP servers; the MCP server must filter on `project_id` from the session header. If the column does not exist or is not authoritative, MCP cannot safely federate across the operator's projects.
 
 ## Consequences
 
@@ -68,7 +68,7 @@ The structural test in `tests/test_migrate_dry_run.py` parses migration `0015_co
 The `dispatches` table (`runtime_coordination.db`) is now brought into this ADR's
 composite-key pattern, and the supporting version-reconciliation machinery is
 implemented. This is the database-engineer-led future-state batch (PRD
-`claudedocs/PRD-future-state-reconciliation-v1.1.md`), distinct from the still-
+`claudedocs/_archive/2026-06/prd-future-state-reconciliation-v1.1.md`), distinct from the still-
 planned broader SPC/intelligence-table batch (#864).
 
 - **PR-A1 (#859) — in-place `dispatches` rebuild.** `scripts/migrate_future_system.py`
@@ -172,11 +172,11 @@ See `skills/intelligence-engineer/references/quality-intelligence-schema.md` for
 ## Cross-references
 
 - ADR-009 — Schema-first migrations via PRAGMA introspection (the implementation discipline that keeps this ADR enforceable across future migrations)
-- `claudedocs/2026-04-30-single-vnx-migration-plan.md` §3 (identity layer), §4 (schema migration), §5.2 (ID collisions)
-- `claudedocs/2026-05-09-p4-migration-architecture-lessons.md` §1.3, §2 (bug taxonomy T1/T3/T6), §4.2 (composite uniqueness as default)
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M4 (multi-tenant project_id stamping)
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-04-30-single-vnx-migration-plan.md` §3 (identity layer), §4 (schema migration), §5.2 (ID collisions)
+- `claudedocs/archive/2026-05-09-p4-migration-architecture-lessons.md` §1.3, §2 (bug taxonomy T1/T3/T6), §4.2 (composite uniqueness as default)
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M4 (multi-tenant project_id stamping)
 - PR #410 (Phase 0 column add), PR #412/#416 (verifier), PR #431/#432 (P4 data import), open items OI-1375 + OI-1376
 - `schemas/migrations/0010_add_project_id.sql`, `schemas/migrations/0015_complete_project_id.sql`, `schemas/migrations/0016_rebuild_fts5.sql`
 - `scripts/migrate_to_central_vnx.py`, `scripts/verify_central_vnx.py`, `tests/test_migrate_dry_run.py`
-- 1.0.1 future-state batch: `scripts/migrate_future_system.py` (PR-A1 #859), `scripts/lib/schema_manifest.py` (PR-A2 #861), `scripts/build_t0_state.py` (PR-B #863), `scripts/import_open_items_to_tracks.py` + `scripts/lib/tracks.py` (PR-C #862), `scripts/roadmap_manager.py` (PR-D #871), and the PRD `claudedocs/PRD-future-state-reconciliation-v1.1.md`
+- 1.0.1 future-state batch: `scripts/migrate_future_system.py` (PR-A1 #859), `scripts/lib/schema_manifest.py` (PR-A2 #861), `scripts/build_t0_state.py` (PR-B #863), `scripts/import_open_items_to_tracks.py` + `scripts/lib/tracks.py` (PR-C #862), `scripts/roadmap_manager.py` (PR-D #871), and the PRD `claudedocs/_archive/2026-06/prd-future-state-reconciliation-v1.1.md`
 - Operator runbook: `docs/MIGRATION_GUIDE.md` §6 (runtime migration, human-gated)

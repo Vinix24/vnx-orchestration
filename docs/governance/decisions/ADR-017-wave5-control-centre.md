@@ -40,7 +40,7 @@ The Control Centre is one interactive Claude Code session running `@control-cent
 - Control Centre itself is a new SPOF (mitigated by stateless design — restart loses nothing)
 
 **Risk mitigation:**
-- 12-item risk register in `claudedocs/wave5-control-centre-architecture.md` §8
+- 12-item risk register in `claudedocs/archive/wave5-control-centre-architecture.md` §8
 - Multi-tenant schema migration with rollback (PR-5.3)
 - Falsifiable tests per multi-tenancy risk
 
@@ -69,7 +69,7 @@ Hard prereq: ADR-016 (Wave 4.6 PR-4.6.6 unified events) — merged.
 
 ## See also
 
-- `claudedocs/wave5-control-centre-architecture.md` — Wave 5 design doc
+- `claudedocs/archive/wave5-control-centre-architecture.md` — Wave 5 design doc
 - ADR-005, ADR-007, ADR-010, ADR-013, ADR-016
 - ADR-015 — Wave 7 LiteLLM Path B (Control Centre dispatches to all 5 providers including LiteLLM lanes)
 - ADR-018 — Elastic worker pool (Wave 6 per-project pools; PR-6.8 extends Control Centre

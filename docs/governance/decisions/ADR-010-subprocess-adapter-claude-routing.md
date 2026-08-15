@@ -20,7 +20,7 @@ The canonical implementation is `scripts/lib/subprocess_dispatch.py`. The first 
 - Lines 13-19: Success-path call order (receipt → pattern confidence → dispatch outcome) with per-dispatch event archival in a finally block.
 - Lines 41-99: Imports from `subprocess_adapter`, `headless_context_tracker`, `worker_health_monitor`, plus internals for delivery, recovery, manifest, pattern confidence, receipt writing, skill injection, state paths, and git helpers.
 
-The strategic replan (`claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M6) calls this out as **the** licensing-critical decision: "Claude Agent SDK with OAuth Code credential = third-party-API risk (opencode/openclaw precedent). Non-negotiable. Lock this in `subprocess_adapter.py`; pin via `CLAUDE.md` rule 'No Anthropic SDK is used'; CI gate to block accidental SDK imports."
+The strategic replan (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M6) calls this out as **the** licensing-critical decision: "Claude Agent SDK with OAuth Code credential = third-party-API risk (opencode/openclaw precedent). Non-negotiable. Lock this in `subprocess_adapter.py`; pin via `CLAUDE.md` rule 'No Anthropic SDK is used'; CI gate to block accidental SDK imports."
 
 This ADR codifies the implementation as binding architecture and the SDK-ban as a CI-enforced rule.
 
@@ -89,11 +89,11 @@ Concretely:
 
 - ADR-003 (architectural direction this ADR implements)
 - ADR-005 (NDJSON ledger — downstream consumer of subprocess events)
-- Strategic replan `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M6 (OAuth-only Claude routing, never SDK), §5 A5 (LiteLLM scope)
+- Strategic replan `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 moat M6 (OAuth-only Claude routing, never SDK), §5 A5 (LiteLLM scope)
 - Operator memory `project_hybrid_interactive_headless` (tmux retained permanently)
 - Operator memory `project_ndjson_ring_buffer` (per-terminal NDJSON archival contract)
 - Operator memory `feedback_t3_input_mode_probe` (tmux-specific failure mode subprocess avoids)
-- `claudedocs/2026-04-30-single-vnx-migration-plan.md` §3.5 (identity propagation via subprocess env)
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-04-30-single-vnx-migration-plan.md` §3.5 (identity propagation via subprocess env)
 - `scripts/lib/subprocess_dispatch.py` (canonical implementation), `scripts/lib/subprocess_adapter.py` (delivery primitive)
 - Project root `CLAUDE.md` "Subprocess Adapter Feature Flag" section
 - F32 (subprocess opt-in introduction), F36 (T0 migration), W7-A PR #411 (canonical event schema)

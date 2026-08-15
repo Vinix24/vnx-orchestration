@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
-**Resolves:** Codification of M1 (NDJSON audit ledger) from `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4
+**Resolves:** Codification of M1 (NDJSON audit ledger) from `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4
 
 ## Amendments
 
@@ -20,7 +20,7 @@ VNX records every dispatch lifecycle event, receipt, gate outcome, and lease/hea
 1. **Append-only NDJSON ledger files** — `.vnx-data/state/t0_receipts.ndjson`, `.vnx-data/dispatch_register.ndjson`, `.vnx-data/events/T{n}.ndjson` (per-terminal ring buffer with archive in `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`), `.vnx-data/state/review_gates/results/*.json` (one file per gate result).
 2. **SQLite tables** — `.vnx-data/state/runtime_coordination.db` (leases, heartbeats, incident log), `.vnx-data/quality_intelligence.db` (cross-project intelligence, dispatch tracker projections), `.vnx-data/dispatch_tracker.db` (per-dispatch state).
 
-Both surfaces have grown organically. Several recent PRs have proposed shifting writes to SQLite-first for query performance (e.g. "we have the DB now, why log NDJSON?") or dropping the ledger entirely. Industry-research synthesis (`claudedocs/2026-05-09-vnx-industry-research.md` Topic 14) noted that OpenTelemetry GenAI semantic conventions + CloudEvents are the emerging structured-event standard, which raised a separate question of replacing NDJSON with an OTel-shaped wire format.
+Both surfaces have grown organically. Several recent PRs have proposed shifting writes to SQLite-first for query performance (e.g. "we have the DB now, why log NDJSON?") or dropping the ledger entirely. Industry-research synthesis (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` Topic 14) noted that OpenTelemetry GenAI semantic conventions + CloudEvents are the emerging structured-event standard, which raised a separate question of replacing NDJSON with an OTel-shaped wire format.
 
 The operator has consistently reaffirmed the NDJSON ledger as canonical. The strategic-replan §4 lists M1 (NDJSON audit ledger) as a non-negotiable VNX moat: "Managed Agents has no audit ledger; SDK has no provenance stamping; nobody else stamps git ref + dirty flag + cost per dispatch." This ADR codifies that the ledger is the primary surface and SQLite is downstream.
 
@@ -89,7 +89,7 @@ A note on the ring-buffer pattern: `.vnx-data/events/T{n}.ndjson` is per-dispatc
 - ADR-004 — VNX as alternative to Managed Agents (glass-box observability is the moat)
 - ADR-006 — Staging→promote human gate (the gate's evidence trail is the ledger)
 - ADR-023 — Receipt hash-chain (the tamper-evidence implementation behind reason #2; see Amendments)
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M1) — strategic-moat justification
+- `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M1) — strategic-moat justification
 - `CLAUDE.md` "Event Streams" section — ring-buffer + archive convention
 - Memory: `project_ndjson_ring_buffer.md` — per-terminal NDJSON is ring buffer, durable archive in `.vnx-data/events/archive/{terminal}/`
 - `.vnx-data/state/t0_receipts.ndjson`, `.vnx-data/dispatch_register.ndjson`, `.vnx-data/events/archive/` — canonical ledger surfaces
