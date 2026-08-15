@@ -220,8 +220,8 @@ class TestClassifyRoleFallback:
 class TestClassifySpecialistRoleDominance:
     """A role mapping to a non-default task class is an explicit signal and wins
     over instruction verb-guessing (OI-1143). Builder roles (mapping to the
-    default class, incl. the no-role-resolved sentinel backend-developer) keep
-    instruction-first behavior."""
+    default class) keep instruction-first behavior, as does the no-role-resolved
+    sentinel "identity_unresolved" (unmapped)."""
 
     def test_code_reviewer_role_classifies_review_instruction(self):
         # The exact OI-1143 measurement: this returned 01_code_generation because
@@ -251,7 +251,8 @@ class TestClassifySpecialistRoleDominance:
 
     def test_builder_role_still_instruction_first(self):
         # backend-developer maps to the default class → carries no discriminating
-        # signal; the instruction text keeps deciding (guards the sentinel case).
+        # signal; the instruction text keeps deciding (a real builder role, not
+        # the identity_unresolved sentinel).
         assert classify_task(
             "debug the flaky lease test", role="backend-developer",
         ) == "05_debugging"
