@@ -48,13 +48,25 @@ def emit_plan_gate_pass(
     key_path: "str | Path | None" = None,
     seats: Optional[int] = None,
     scope: Optional[str] = None,
+    governance_variant: Optional[str] = None,
+    gov_trace: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append a ``plan_gate_pass`` record for a track to the repo-committed ledger.
 
     ``seats`` carries how many panel seats decided a ``run``-resolver pass and
     ``scope`` whether it was a light or heavy run — a light pass is a REAL pass,
-    so its record must state the reduced panel size that certified it. Signed
-    when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
+    so its record must state the reduced panel size that certified it.
+
+    ``governance_variant`` and ``gov_trace`` (since 2026-08-15) carry the
+    governance decision that sized the pass under its own names: the variant is
+    the OUTCOME (which seat-ladder step fired) and the trace is the REASON (the
+    derivation: weight, new-feature flag, seat count, chosen-by, override
+    direction). They are written only when provided (not ``None``), because a
+    manual ``attest`` resolver performs no derivation and must not carry a
+    fabricated one. On the round record (``record_round``) the same pair is
+    always present with an empty-string default — there an empty value means
+    "no derivation for this round"; here absence means "no derivation at all".
+    Signed when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
     otherwise appended unsigned but hash-chained (tamper-evident). Best-effort:
     returns the appended record on success, ``None`` on any failure (never raises).
     """
@@ -76,6 +88,10 @@ def emit_plan_gate_pass(
             record["approval_id"] = approval_id
         if reason:
             record["reason"] = reason
+        if governance_variant is not None:
+            record["governance_variant"] = governance_variant
+        if gov_trace is not None:
+            record["gov_trace"] = gov_trace
         if key_path and signer_identity:
             from attestation import sign_manifest  # noqa: PLC0415
             record["signer_identity"] = signer_identity

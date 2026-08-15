@@ -1921,11 +1921,15 @@ def _emit_plan_gate_pass_record(
     reason: Optional[str] = None,
     seats: Optional[int] = None,
     scope: Optional[str] = None,
+    governance_variant: Optional[str] = None,
+    gov_trace: Optional[str] = None,
 ) -> bool:
     """Best-effort durable ``plan_gate_pass`` record (ADR-030 primitive).
 
     Shared by ``plan-gate run`` (resolver="run", with the seat count + scope that
-    certified the pass) and ``plan-gate attest`` (resolver="attest"). Resolves the
+    certified the pass, plus ``governance_variant``/``gov_trace`` — the
+    governance decision that sized it) and ``plan-gate attest`` (resolver="attest",
+    which performs no derivation and therefore passes neither). Resolves the
     repo root from ``args.repo_root`` when the CLI passes one, else ``git
     rev-parse``, else cwd. Never raises — a record failure must never break the
     plan-gate resolution it hangs off (the runtime audit trail stays authoritative).
@@ -1947,6 +1951,7 @@ def _emit_plan_gate_pass_record(
             resolver=resolver, timestamp=_now_utc(),
             approval_id=approval_id, reason=reason,
             seats=seats, scope=scope,
+            governance_variant=governance_variant, gov_trace=gov_trace,
         )
         # emit_plan_gate_pass returns the appended record on success, None on any
         # failure (it never raises), so the try/except above cannot catch a failed
@@ -2554,6 +2559,7 @@ def _run_tiebreaker_for_track(
         track_id=track_id, project_id=project_id,
         round_number=round_number,
         outcome=f"tiebreak:{result.outcome}", model=result.model,
+        governance_variant="tiebreaker", gov_trace=gov_trace,
     )
 
     if result.outcome == plan_gate_tiebreaker.STOP:
@@ -2621,6 +2627,7 @@ def _run_tiebreaker_for_track(
             f"tiebreaker {result.outcome} (model={result.model}, "
             f"round={result.round})"
         ),
+        governance_variant="tiebreaker", gov_trace=gov_trace,
     )
     if not wrote:
         stderr_lines.append(
@@ -2867,6 +2874,7 @@ def run_plan_gate_for_track(
             _emit_plan_gate_pass_record(
                 repo_root=repo_root, track_id=track_id, project_id=project_id,
                 resolver="run", seats=0, scope=variant, reason=weight["gov_trace"],
+                governance_variant=variant, gov_trace=weight["gov_trace"],
             )
         stdout_json = json.dumps({
             "decision": "PASS",
@@ -2953,6 +2961,7 @@ def run_plan_gate_for_track(
             seat_ledger_path,
             track_id=track_id, project_id=project_id,
             round_number=rounds_done + 1, outcome="panel",
+            governance_variant=variant, gov_trace=weight["gov_trace"],
         )
 
     # OI-1190: persist the durable half of the plan decision onto the track — the
@@ -3055,6 +3064,7 @@ def run_plan_gate_for_track(
                 repo_root=repo_root, track_id=track_id, project_id=project_id,
                 resolver="run", seats=len(panel), scope=variant,
                 reason=weight["gov_trace"],
+                governance_variant=variant, gov_trace=weight["gov_trace"],
             )
             if not wrote:
                 stderr_lines.append(
