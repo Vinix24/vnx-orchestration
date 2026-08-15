@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -122,6 +123,41 @@ class TiebreakerParseError(ValueError):
         self.raw = raw
 
 
+class TiebreakerNoAnswerError(Exception):
+    """The lane produced no model answer; governance synthesized the report.
+
+    Distinct from ``TiebreakerParseError``: a parse failure means the model DID
+    answer but the answer failed the strict contract. This means there was no
+    answer to parse at all — the lane timed out / errored / never authored a
+    report, so the governance layer fabricated the body (which carries
+    ``SYNTHESIZED_REPORT_MARKER``). Carries the lane ``status`` (timeout / error
+    / unknown) so the caller names the actual state instead of blaming the
+    parser. Both keep the track blocked; only the reported reason differs.
+    """
+
+    def __init__(self, status: str = "unknown", *, raw: str = "") -> None:
+        super().__init__(
+            f"tiebreaker lane delivered no answer (status={status}); "
+            "governance synthesized the report"
+        )
+        self.status = status
+        self.raw = raw
+
+
+# The synthesized body carries the lane status on a ``- Status: <status>`` line
+# (see dispatch_govern._synthesize). Extracted so the no-answer reason names the
+# actual state (timeout / error) rather than a bare "no answer".
+_SYNTH_STATUS_RE = re.compile(r"^\s*-\s*Status:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _extract_synthesized_status(report_text: str) -> str:
+    """The lane status from a synthesized report's ``- Status:`` line, else "unknown"."""
+    match = _SYNTH_STATUS_RE.search(report_text or "")
+    if match:
+        return match.group(1).strip() or "unknown"
+    return "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
@@ -154,8 +190,12 @@ def load_tiebreaker_config(
         # dispatch path (ADR-036). These defaults are only the config fallback
         # when the YAML block is absent; resolve_tiebreaker_model still
         # validates them against the registry and fails loud on drift.
-        "provider": "anthropic",
-        "model": "fable-5",
+        # deepseek_harness/deepseek-v4-pro is the same choice the shipped
+        # configs/plan_gate_panel.yaml makes (OI-1219): the claude/tmux lane
+        # repeatedly delivered-no-answer (timeout/placeholder), while
+        # deepseek-harness delivered 100% of its dispatches on 2026-08-15.
+        "provider": "deepseek_harness",
+        "model": "deepseek-v4-pro",
     }
     if not path.is_file():
         return dict(fallback)
@@ -209,18 +249,23 @@ def resolve_tiebreaker_model(
     *,
     registry_path: Optional[Path] = None,
 ) -> Tuple[str, str, str]:
-    """Resolve the tiebreaker's (provider_key, model_key, dispatch_model_arg).
+    """Resolve the tiebreaker's (provider, model_key, dispatch_model_arg).
 
     Model identity comes from the registry (``wave7_models.yaml``), never a
     Python literal on the dispatch path (ADR-036). The provider+model pair from
     the config is validated against the registry: the provider section must
-    exist and be enabled, and the model key must exist under it. An unknown
-    provider or model raises ``RegistryLookupError`` naming what was missing and
-    where it was looked for — the same fail-loud contract the static router
-    uses (``provider_registry._resolve_step``). Never a silent None.
+    exist, be enabled, and carry a ``dispatch_enum``; the model key must exist
+    under it. An unknown provider or model raises ``RegistryLookupError`` naming
+    what was missing and where it was looked for — the same fail-loud contract
+    the static router uses (``provider_registry._resolve_step``). Never a silent
+    None.
 
-    Returns ``(provider_key, model_key, cli_model_arg)``:
-      - ``provider_key`` is the registry section key (e.g. ``anthropic``).
+    Returns ``(provider, model_key, cli_model_arg)``:
+      - ``provider`` is the DISPATCH enum the lane consumes
+        (``pcfg.dispatch_enum``) — e.g. ``claude`` for the ``anthropic``
+        section, ``deepseek-harness`` for the ``deepseek_harness`` section. This
+        is what ``_make_default_dispatcher`` keys its lane split on; it is NOT
+        the registry section key (that is the config INPUT).
       - ``model_key`` is the registry model key (e.g. ``fable-5``).
       - ``cli_model_arg`` is the ``cli_model_arg`` the registry carries for that
         model (the string handed to the dispatch lane), falling back to the
@@ -248,6 +293,12 @@ def resolve_tiebreaker_model(
         raise RegistryLookupError(
             f"tiebreaker provider {provider_key!r} is disabled in the registry"
         )
+    if not pcfg.dispatch_enum:
+        raise RegistryLookupError(
+            f"tiebreaker provider {provider_key!r} has no dispatch_enum in the "
+            "registry — add one (or pick a routable provider) so the tiebreaker "
+            "knows which lane to dispatch through"
+        )
     model = pcfg.models.get(model_key)
     if model is None:
         raise RegistryLookupError(
@@ -259,7 +310,10 @@ def resolve_tiebreaker_model(
     # arg the claude/tmux lane takes, e.g. "fable-5"). Fall back to the model
     # key so a registry section without cli_model_arg still resolves.
     cli_arg = model.cli_model_arg or model_key
-    return provider_key, model_key, cli_arg
+    # Route by the DISPATCH enum (claude / deepseek-harness / ...), not the
+    # registry section key (anthropic / deepseek_harness / ...) — the lane split
+    # in _make_default_dispatcher keys off the enum, not the section key.
+    return pcfg.dispatch_enum, model_key, cli_arg
 
 
 # ---------------------------------------------------------------------------
@@ -570,9 +624,9 @@ def _default_tiebreaker_dispatcher(
     """Real dispatcher for the tiebreaker — the panel's default dispatcher.
 
     The tiebreaker routes through the SAME governed lane a panel seat uses
-    (``plan_gate_panel._make_default_dispatcher``): the model comes from the
-    registry (fable-5 -> anthropic -> the claude/tmux lane, billing on the
-    subscription), so it reuses the panel's dispatcher factory rather than
+    (``plan_gate_panel._make_default_dispatcher``): the model + lane provider
+    come from the registry via ``resolve_tiebreaker_model`` (a dispatch enum +
+    cli arg, ADR-036), so it reuses the panel's dispatcher factory rather than
     growing a second dispatch path. The only difference is the instruction
     (``build_tiebreaker_instruction`` vs ``build_plan_review_instruction``),
     which the caller passes in.
@@ -614,17 +668,23 @@ def run_tiebreaker(
     Raises ``TiebreakerParseError`` when the model's answer does not satisfy
     the strict contract (no fence, wrong outcome, a findings list, more than one
     change) — the caller treats that as a loud failure, never silently filling
-    in a decision.
+    in a decision. Raises ``TiebreakerNoAnswerError`` when the lane delivered no
+    answer at all (a governance-synthesized report: timeout / error / no report
+    file) — a distinct loud failure from a parse failure, which stays reserved
+    for an answer that exists but fails the contract.
     """
     import uuid  # noqa: PLC0415
 
     # Registry-sourced model identity (ADR-036): no literal on the dispatch path.
     # When the caller passes an explicit model_arg (a test injecting a
     # dispatcher does not need a real registry resolution), it wins; otherwise
-    # the registry resolves the configured provider+model to a cli arg.
+    # the registry resolves the configured provider+model to a (lane provider,
+    # cli arg). The lane provider is the dispatch enum, not the registry section
+    # key — that is what _make_default_dispatcher keys its lane split on.
     resolved_model = model_arg
+    dispatch_provider = "claude"  # only reachable when model_arg is injected
     if resolved_model is None:
-        _provider_key, model_key, cli_arg = resolve_tiebreaker_model(config)
+        dispatch_provider, model_key, cli_arg = resolve_tiebreaker_model(config)
         resolved_model = cli_arg
 
     resolved_timeout = pgp._seat_timeout(timeout_seconds)
@@ -641,7 +701,19 @@ def run_tiebreaker(
         last_round_findings=list(last_round_findings or []),
     )
     did = f"plan-tiebreak-{track_id}-{uuid.uuid4().hex[:8]}"
-    report_text = disp("claude", resolved_model, instruction, did)
+    report_text = disp(dispatch_provider, resolved_model, instruction, did)
+    # OI-1219: a synthesized report is by definition NOT a model answer — the
+    # lane never delivered a verdict, so the governance layer fabricated the
+    # body (SYNTHESIZED_REPORT_MARKER). Detect the marker BEFORE parse_tiebreaker
+    # (which would otherwise raise TiebreakerParseError and mislabel the cause
+    # as a parse failure). A synthesized report keeps the track blocked exactly
+    # like a parse failure, but the reason names the lane state (timeout/error),
+    # not the parser. A parse failure stays reserved for an answer that IS there
+    # but fails the strict contract.
+    if pgp.SYNTHESIZED_REPORT_MARKER in (report_text or ""):
+        raise TiebreakerNoAnswerError(
+            status=_extract_synthesized_status(report_text), raw=report_text,
+        )
     result = parse_tiebreaker(report_text)
     # Stamp the model + round the parser cannot know.
     result.model = resolved_model
