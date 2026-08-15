@@ -838,12 +838,14 @@ def _check_ledger_health(data_root: Path) -> Check:
 
 
 def _check_embedded_path_assumptions() -> Check:
-    """WARN when scripts/lib contains __file__-anchored .vnx-data/ROADMAP.yaml derivations.
+    """WARN on __file__-anchored .vnx-data/ROADMAP.yaml AND repo-root derivations.
 
-    Central-mode-path-correctness (#1023/#1024): a bare ``Path(__file__)….parent…``
-    walk that builds a ``.vnx-data``/``ROADMAP.yaml`` path resolves the KEYSTONE
-    (``~/.vnx-system/versions/<v>/.vnx-data``) instead of the project's
-    ``~/.vnx-data/<project>`` in a central install. Delegates to the AST-based
+    Central-mode-path-correctness (#1023/#1024) plus OI-1145: a bare
+    ``Path(__file__)….parent…`` walk that builds a ``.vnx-data``/``ROADMAP.yaml``
+    path, OR that resolves the REPO ROOT (``resolve_project_root(__file__)`` /
+    a ``.git``-marker finder fed ``__file__``), resolves the KEYSTONE
+    (``~/.vnx-system/versions/<v>/``) instead of the project in a central
+    install. Delegates to the AST-based
     ``scripts/check_no_file_derived_data_paths.py`` detector — which carries a
     grandfathered allowlist for already-migrated last-resort fallbacks and traces
     module-level marker constants (e.g. ``_DEFAULT_RELATIVE_PATH = Path(".vnx-data/x")``
@@ -881,16 +883,20 @@ def _check_embedded_path_assumptions() -> Check:
             name="paths:embedded-assumptions",
             status=WARN,
             detail=(
-                f"{len(violations)} __file__-anchored .vnx-data/ROADMAP.yaml path "
-                f"derivation(s) in scripts/lib — resolves the keystone, not the "
-                f"project, in a central install. Route through vnx_paths.resolve_paths() "
-                f"instead: {shown}{more}"
+                f"{len(violations)} __file__-anchored .vnx-data/ROADMAP.yaml or "
+                f"repo-root derivation(s) in scripts/lib — resolves the keystone, not "
+                f"the project, in a central install. Route data/state through "
+                f"vnx_paths.resolve_paths() and resolve the repo root CWD-first "
+                f"(OI-1145): {shown}{more}"
             ),
         )
     return Check(
         name="paths:embedded-assumptions",
         status=PASS,
-        detail="no __file__-anchored .vnx-data/ROADMAP.yaml path derivations in scripts/lib",
+        detail=(
+            "no __file__-anchored .vnx-data/ROADMAP.yaml or repo-root "
+            "derivations in scripts/lib"
+        ),
     )
 
 

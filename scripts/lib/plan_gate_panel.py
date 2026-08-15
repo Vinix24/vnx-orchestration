@@ -1189,10 +1189,17 @@ def _resolve_seat_ledger_path(data_dir: Optional[str]) -> Optional[Path]:
     ``.vnx-attest/``. A caller with no ``data_dir`` (e.g. a test injecting a
     dispatcher) gets ``None`` and skips persistence unless it passes
     ``seat_ledger_path`` explicitly (OI-888).
+
+    Resolution order is CWD-first (OI-1145): the panel runs with the governed
+    project as its working directory, so ``Path.cwd()`` is the project root. A
+    ``__file__``-first walk anchors on this file's own checkout instead — the
+    fabric keystone in a central install — and lands the seat ledger in the
+    read-only version tree, never the project. ``__file__`` remains only as the
+    fallback for callers not running inside a project checkout.
     """
     if not data_dir:
         return None
-    root = _find_repo_root(Path(__file__).resolve().parent) or _find_repo_root(Path.cwd())
+    root = _find_repo_root(Path.cwd()) or _find_repo_root(Path(__file__).resolve().parent)
     if root is None:
         return None
     return root / SEAT_LEDGER_RELPATH

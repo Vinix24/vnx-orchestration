@@ -23,6 +23,8 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 from check_no_file_derived_data_paths import (  # noqa: E402
     GRANDFATHERED,
+    GRANDFATHERED_REPO_ROOT_ANCHORS,
+    GRANDFATHERED_REPO_ROOT_FINDERS,
     GRANDFATHERED_RESOLVER_ANCHORS,
     check_source,
     scan_dir,
@@ -209,13 +211,70 @@ def test_resolver_without_file_anchor_not_flagged() -> None:
 
 
 def test_resolver_anchor_only_flags_data_resolvers() -> None:
-    # resolve_project_root resolves a REPO root (worktree/provenance semantics),
-    # not a .vnx-data dir — deliberately out of this gate's shape-2 set.
+    # OI-1145 broadened the gate: resolve_project_root now IS flagged when fed a
+    # __file__ anchor (shape 3a) — the same keystone bug one level up. The old
+    # deliberate exclusion ("resolve_project_root resolves a REPO root, not a
+    # .vnx-data dir") was reversed by the plan-gate opus-seat failure.
     src = (
         "from project_root import resolve_project_root\n"
         "p = resolve_project_root(__file__)\n"
     )
+    violations = check_source(src)
+    assert len(violations) >= 1
+    assert any("resolve_project_root(__file__)" in seg for _, seg in violations)
+
+
+def test_resolver_without_file_anchor_not_flagged_repo_root() -> None:
+    # The fix pattern for the repo-root resolver: no __file__ anchor (no args,
+    # or a runtime/env-derived argument) must not trip shape 3a.
+    src = (
+        "import os\n"
+        "from project_root import resolve_project_root\n"
+        "a = resolve_project_root()\n"
+        "b = resolve_project_root(os.environ['X'])\n"
+        "def f(repo_root):\n"
+        "    return resolve_project_root(caller_file=repo_root)\n"
+    )
     assert check_source(src) == []
+
+
+def test_repo_root_finder_fed_file_anchor_flagged() -> None:
+    # OI-1145 shape 3b: the exact plan_gate_panel construct that landed the seat
+    # ledger in the keystone — a .git-marker finder fed a __file__-anchored start.
+    src = (
+        "from pathlib import Path\n"
+        "def _find_repo_root(start):\n"
+        "    return start\n"
+        "def bad():\n"
+        "    return _find_repo_root(Path(__file__).resolve().parent)\n"
+    )
+    violations = check_source(src)
+    assert len(violations) >= 1
+    assert any("_find_repo_root(Path(__file__).resolve().parent)" in seg for _, seg in violations)
+
+
+def test_repo_root_finder_fed_cwd_not_flagged() -> None:
+    # The OI-1145 fix pattern: the finder is fed CWD (not __file__), so it must
+    # not trip shape 3b.
+    src = (
+        "from pathlib import Path\n"
+        "def _find_repo_root(start):\n"
+        "    return start\n"
+        "def ok():\n"
+        "    return _find_repo_root(Path.cwd())\n"
+    )
+    assert check_source(src) == []
+
+
+def test_repo_root_resolver_attr_form_flagged() -> None:
+    # Shape 3a attribute form (project_root.resolve_project_root) is caught too.
+    src = (
+        "import project_root\n"
+        "p = project_root.resolve_project_root(__file__)\n"
+    )
+    violations = check_source(src)
+    assert len(violations) >= 1
+    assert any("project_root.resolve_project_root(__file__)" in seg for _, seg in violations)
 
 
 def test_planted_resolver_anchor_in_lib_fails(tmp_path: Path) -> None:
@@ -327,6 +386,10 @@ def test_grandfather_keys_reference_real_files() -> None:
         assert (VNX_ROOT / rel).is_file(), f"grandfathered path missing: {rel}"
     for rel in GRANDFATHERED_RESOLVER_ANCHORS:
         assert (VNX_ROOT / rel).is_file(), f"grandfathered resolver-anchor path missing: {rel}"
+    for rel in GRANDFATHERED_REPO_ROOT_ANCHORS:
+        assert (VNX_ROOT / rel).is_file(), f"grandfathered repo-root anchor path missing: {rel}"
+    for rel in GRANDFATHERED_REPO_ROOT_FINDERS:
+        assert (VNX_ROOT / rel).is_file(), f"grandfathered repo-root finder path missing: {rel}"
 
 
 def test_grandfathered_resolver_anchors_still_present_in_tree() -> None:
@@ -349,5 +412,35 @@ def test_grandfathered_resolver_anchors_still_present_in_tree() -> None:
     }
     assert found == expected, (
         "stale or missing resolver-anchor grandfather entries:\n"
+        + "\n".join(sorted(f"  {rel}: {seg}" for rel, seg in expected - found))
+    )
+
+
+def test_grandfathered_repo_root_anchors_still_present_in_tree() -> None:
+    # OI-1145: the repo-root resolver + finder grandfather entries must still
+    # exist verbatim — a migrated site must drop its entry, not rot silently.
+    import check_no_file_derived_data_paths as gate
+
+    found = set()
+    for py in (VNX_ROOT / "scripts" / "lib").rglob("*.py"):
+        rel = py.relative_to(VNX_ROOT).as_posix()
+        allowed = (
+            GRANDFATHERED_REPO_ROOT_ANCHORS.get(rel, set())
+            | GRANDFATHERED_REPO_ROOT_FINDERS.get(rel, set())
+        )
+        if not allowed:
+            continue
+        for _, seg in gate._dedup_violations(py.read_text(encoding="utf-8")):
+            if seg in allowed:
+                found.add((rel, seg))
+    expected = {
+        (rel, seg)
+        for rel, segs in (
+            {**GRANDFATHERED_REPO_ROOT_ANCHORS, **GRANDFATHERED_REPO_ROOT_FINDERS}
+        ).items()
+        for seg in segs
+    }
+    assert found == expected, (
+        "stale or missing repo-root grandfather entries:\n"
         + "\n".join(sorted(f"  {rel}: {seg}" for rel, seg in expected - found))
     )

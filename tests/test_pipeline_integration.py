@@ -341,7 +341,8 @@ class TestSSEEndpoint(unittest.TestCase):
             mock_handler = MagicMock()
             mock_handler.wfile = FakeWfile()
 
-            # Create the events file empty, then write an event after a delay
+            # Create the events file empty, then write an event after the stream
+            # has actually started tailing.
             events_file.write_text("")
 
             import api_intelligence
@@ -352,13 +353,31 @@ class TestSSEEndpoint(unittest.TestCase):
 
             api_intelligence._sd = mock_sd_fn
 
-            # Run handle_events_stream in a thread with a very short poll,
-            # inject a line, then break connection after first keepalive
+            # OI-1181: coordinate on the stream's first poll instead of a fixed
+            # sleep. handle_events_stream reaches time.sleep() only after it has
+            # opened the events file and seeked to end, so the injector waits for
+            # that signal before appending the event — eliminating the race where
+            # a slow CI image seeks past an already-written line and the stream
+            # emits only keepalives. The injector then waits (own 5s timeout) for
+            # the first data frame before breaking the connection, so the
+            # assertion below is deterministic.
+            stream_polling = threading.Event()
+            real_sleep = api_intelligence.time.sleep
+
+            def signaling_sleep(secs):
+                stream_polling.set()
+                return real_sleep(secs)
+
             def write_event_and_break():
-                time.sleep(0.1)
+                if not stream_polling.wait(timeout=5.0):
+                    return
                 with open(events_file, "a") as fh:
                     fh.write(test_event + "\n")
-                time.sleep(0.2)
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    if any(b"data:" in c for c in written_chunks if isinstance(c, bytes)):
+                        break
+                    time.sleep(0.01)
                 # Simulate disconnect
                 mock_handler.wfile.write = lambda d: (_ for _ in ()).throw(BrokenPipeError())
 
@@ -368,7 +387,10 @@ class TestSSEEndpoint(unittest.TestCase):
             try:
                 with patch("api_intelligence._SSE_POLL_INTERVAL", 0.05):
                     with patch("api_intelligence._SSE_KEEPALIVE_INTERVAL", 0.05):
-                        handle_events_stream(mock_handler, "T1")
+                        with patch.object(
+                            api_intelligence.time, "sleep", side_effect=signaling_sleep
+                        ):
+                            handle_events_stream(mock_handler, "T1")
             finally:
                 api_intelligence._sd = original_sd_fn
                 thread.join(timeout=2.0)
