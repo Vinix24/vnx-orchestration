@@ -1525,6 +1525,71 @@ def test_provider_lane_dispatcher_does_not_set_scoped_spawn_env(tmp_path, monkey
     assert "VNX_WORKER_SCOPED" not in seen_envs[0]
 
 
+# --------------------------------------------------------------------------
+# OI-1153: the seat subprocess must inherit VNX_DATA_DIR (+ VNX_DATA_DIR_EXPLICIT=1)
+# pinned to the data dir the dispatcher resolved, or the lane re-resolves its own
+# (provider_dispatch._resolve_data_dir / tmux lane _resolve_state_dir) and the seat
+# report lands outside the dir _read_report reads back from — e.g. the legacy
+# ~/.vnx-data/unified_reports root. The base env must NOT already carry the flag so a
+# pass proves the dispatcher sets it rather than an ambient leak.
+# --------------------------------------------------------------------------
+
+def test_claude_lane_dispatcher_sets_vnx_data_dir_env(tmp_path, monkeypatch):
+    """The claude/tmux-lane subprocess env must carry VNX_DATA_DIR + EXPLICIT pinned
+    to the dispatcher's resolved base so the seat writes its report where the panel
+    reads it back, not the legacy ~/.vnx-data/unified_reports root."""
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+    seen_envs: list = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_envs.append(kwargs.get("env"))
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    import plan_gate_panel as _pgp
+    import unittest.mock as mock
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
+            dispatcher("claude", "sonnet", "panel prompt", "panel-sweep-diverge-0-abc123")
+
+    assert len(seen_envs) == 1
+    assert seen_envs[0] is not None
+    assert seen_envs[0].get("VNX_DATA_DIR") == str(tmp_path)
+    assert seen_envs[0].get("VNX_DATA_DIR_EXPLICIT") == "1"
+
+
+def test_provider_lane_dispatcher_sets_vnx_data_dir_env(tmp_path, monkeypatch):
+    """OI-1153 applies to provider lanes too: kimi/glm/deepseek route through
+    provider_dispatch, which resolves its OWN data dir — the env must pin it to the
+    same base so the report lands where _read_report reads."""
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+    seen_envs: list = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_envs.append(kwargs.get("env"))
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    import plan_gate_panel as _pgp
+    import unittest.mock as mock
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
+            dispatcher("kimi", "kimi-k3", "panel prompt", "panel-sweep-diverge-1-def456")
+
+    assert len(seen_envs) == 1
+    assert seen_envs[0] is not None
+    assert seen_envs[0].get("VNX_DATA_DIR") == str(tmp_path)
+    assert seen_envs[0].get("VNX_DATA_DIR_EXPLICIT") == "1"
+
+
 def test_claude_lane_no_report_error_surfaces_stdout_failure_reason(tmp_path):
     """The 'no report' RuntimeError must include proc.stdout, not just stderr.
 
@@ -1869,6 +1934,38 @@ def test_load_panel_seats_rejects_missing_key(tmp_path):
     ))
     with pytest.raises(ValueError, match="missing required key"):
         pgp.load_panel_seats(cfg)
+
+
+def test_load_synthesis_min_seats_reads_config_key(tmp_path):
+    """The synthesis coverage floor comes from the config key, not a Python literal:
+    a changed YAML value changes the returned floor."""
+    cfg = tmp_path / "panel.yaml"
+    cfg.write_text("version: 1\nsynthesis_min_seats: 2\nseats: []\n", encoding="utf-8")
+    assert pgp.load_synthesis_min_seats(cfg) == 2
+
+    no_key = tmp_path / "no_key.yaml"
+    no_key.write_text("version: 1\nseats: []\n", encoding="utf-8")
+    assert pgp.load_synthesis_min_seats(no_key) == pgp.DEFAULT_SYNTHESIS_MIN_SEATS
+
+    assert pgp.load_synthesis_min_seats(tmp_path / "absent.yaml") == pgp.DEFAULT_SYNTHESIS_MIN_SEATS
+
+
+def test_load_synthesis_min_seats_rejects_invalid_value(tmp_path):
+    """A present-but-invalid floor (<= 0, non-int, bool) fails loud rather than
+    silently disabling or over-tightening the refusal."""
+    for bad in ("0", "-5", "abc", "true"):
+        cfg = tmp_path / f"bad_{bad}.yaml"
+        cfg.write_text(f"version: 1\nsynthesis_min_seats: {bad}\nseats: []\n", encoding="utf-8")
+        with pytest.raises(ValueError):
+            pgp.load_synthesis_min_seats(cfg)
+
+
+def test_shipped_config_synthesis_min_seats_is_positive():
+    """The shipped config must carry a positive floor so the gate is actually armed."""
+    repo_root = Path(__file__).resolve().parent.parent
+    shipped = repo_root / "configs" / "plan_gate_panel.yaml"
+    assert shipped.is_file(), "configs/plan_gate_panel.yaml must exist"
+    assert pgp.load_synthesis_min_seats(shipped) >= 1
 
 
 def test_filter_panel_seats_filters_to_requested_labels():

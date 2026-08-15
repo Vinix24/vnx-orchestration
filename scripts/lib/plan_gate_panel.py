@@ -229,6 +229,51 @@ def load_goal_min_chars(config_path: Optional[Path] = None) -> int:
     return raw
 
 
+# Minimum number of DELIVERED seat reports the deliberation panel's synthesis
+# stage requires before it will synthesize (OI-1154). Below this floor the
+# synthesis refuses loudly rather than silently reporting over a handful of
+# seats. The value is overridable in configs/plan_gate_panel.yaml
+# (`synthesis_min_seats`), never hardcoded at the call site — a fixed literal in
+# Python would let the config drift silently (see load_synthesis_min_seats). The
+# consumer is the deliberation panel (`scripts/panel.py` wires it into
+# run_deliberation), which is why this lives beside the other plan_gate_panel.yaml
+# loaders even though the gate itself is in deliberation_panel.py.
+DEFAULT_SYNTHESIS_MIN_SEATS = 3
+
+
+def load_synthesis_min_seats(config_path: Optional[Path] = None) -> int:
+    """The synthesis coverage floor, read from ``configs/plan_gate_panel.yaml``.
+
+    Reads ``synthesis_min_seats`` from the same file and path resolution as
+    ``load_panel_seats``/``load_goal_min_chars``. Falls back to
+    ``DEFAULT_SYNTHESIS_MIN_SEATS`` when the file is absent/unreadable or the key
+    is missing (a pre-existing config never breaks the panel). A present-but-
+    invalid value (non-int, bool, or <= 0) fails LOUD: a silently-wrong floor
+    would either refuse every synthesis (<= 0 never satisfies) or never refuse
+    at all — both silent governance drifts, so misconfiguration must surface
+    here, matching ``load_goal_min_chars``.
+    """
+    path = Path(config_path) if config_path is not None else _default_panel_config_path()
+    if not path.is_file():
+        return DEFAULT_SYNTHESIS_MIN_SEATS
+    try:
+        import yaml  # noqa: PLC0415
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return DEFAULT_SYNTHESIS_MIN_SEATS
+    if not isinstance(loaded, dict):
+        return DEFAULT_SYNTHESIS_MIN_SEATS
+    raw = loaded.get("synthesis_min_seats")
+    if raw is None:
+        return DEFAULT_SYNTHESIS_MIN_SEATS
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise ValueError(
+            f"plan_gate_panel: {path} 'synthesis_min_seats' must be a positive int, "
+            f"got {raw!r}"
+        )
+    return raw
+
+
 def filter_panel_seats(
     seats: List[Dict[str, str]], labels: List[str]
 ) -> List[Dict[str, str]]:
@@ -891,6 +936,17 @@ def _make_default_dispatcher(
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
         env = dict(os.environ)
+        # OI-1153: pin the seat subprocess to the SAME data dir this dispatcher
+        # resolved (`base`), or the lane re-resolves its own. provider_dispatch /
+        # tmux_interactive_dispatch both honor the two-key VNX_DATA_DIR +
+        # VNX_DATA_DIR_EXPLICIT=1 contract (see their _resolve_data_dir/
+        # _resolve_state_dir); without it the seat's report write path can land
+        # outside the dir _read_report reads back from (e.g. the legacy
+        # ~/.vnx-data/unified_reports root), and the seat report is silently
+        # never found. This applies to BOTH lanes: the claude/tmux branch below
+        # and the provider branch.
+        env["VNX_DATA_DIR"] = str(base)
+        env["VNX_DATA_DIR_EXPLICIT"] = "1"
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _CLAUDE_PROVIDERS:

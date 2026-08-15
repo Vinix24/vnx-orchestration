@@ -128,6 +128,10 @@ class DeliberationResult:
     # silently degraded. Populated by run_deliberation right after the fan-out completes.
     present_lenses: List[str] = field(default_factory=list)
     failed_seats: List[Dict[str, str]] = field(default_factory=list)  # {provider, lens}
+    # Coverage gate (OI-1154): below the configured seat minimum the synthesis is
+    # refused, recorded here so to_report() renders it loudly, never silently.
+    synthesis_refused_reason: str = ""   # non-empty => synthesis refused (coverage floor)
+    degraded_synthesis: bool = False     # synthesis ran below the floor (--allow-degraded)
 
     @property
     def coverage(self) -> str:
@@ -146,8 +150,18 @@ class DeliberationResult:
             f"# Deliberation panel — {self.mode}",
             f"\n**Question:** {self.question}\n",
             f"**Coverage:** {self.coverage}\n",
-            "## Synthesis (cited)\n",
-            self.synthesis or "_(no synthesis)_",
+        ]
+        if self.synthesis_refused_reason:
+            lines.append(f"**Synthesis:** REFUSED — {self.synthesis_refused_reason}\n")
+        if self.degraded_synthesis:
+            lines.append(f"**Synthesis:** ran DEGRADED (--allow-degraded) — {self.coverage}\n")
+        lines.append("## Synthesis (cited)\n")
+        lines.append(
+            "_(synthesis refused — see above)_"
+            if self.synthesis_refused_reason
+            else (self.synthesis or "_(no synthesis)_")
+        )
+        lines += [
             "\n---\n## Contrarian / red-team\n",
             self.contrarian or "_(none)_",
             "\n---\n## Verification pass\n",
@@ -325,10 +339,21 @@ def run_deliberation(
     roster: Optional[List[Tuple[str, str]]] = None,
     context: str = "",
     max_workers: int = 5,
+    min_seats: Optional[int] = None,
+    allow_degraded: bool = False,
 ) -> DeliberationResult:
     """Run the 4-stage deliberation. ``dispatcher(provider, model, prompt, dispatch_id)`` runs
     one panelist and returns its report text (governed lane). ``context`` is optional extra
-    grounding (a diff, a file list, a brief) injected into every stage."""
+    grounding (a diff, a file list, a brief) injected into every stage.
+
+    ``min_seats`` (OI-1154) is the coverage floor for the SYNTHESIS stage: when fewer than
+    ``min_seats`` DELIVERED seats (the same present/total count ``DeliberationResult.coverage``
+    reports — never a second, drifting tally) produced a usable report, the synthesis is
+    REFUSED and ``result.synthesis_refused_reason`` carries the delivered/expected counts.
+    ``None`` (the default) disables the floor entirely — callers that already bound coverage
+    their own way stay unaffected. ``allow_degraded`` is the operator escape: with it True the
+    synthesis proceeds below the floor, and ``result.degraded_synthesis`` marks that choice so
+    the report renders it, never silently."""
     spec = MODES.get(mode)
     if spec is None:
         raise ValueError(f"unknown mode {mode!r}; choose one of {sorted(MODES)}")
@@ -374,6 +399,33 @@ def run_deliberation(
             ", ".join(f"{fo['provider']} ({fo['lens']})" for fo in failed_fan_out),
             result.coverage,
         )
+
+    # ── Coverage floor for the synthesis (OI-1154) ──────────────────────────
+    # Decide on the SAME present/total count `coverage` reports (OI-1150), never a
+    # second tally. Below `min_seats` delivered seats the synthesis is refused
+    # LOUDLY with both counts in the message; `allow_degraded` is the conscious
+    # operator escape, and the choice is stamped on the result so the report
+    # renders it (degraded_synthesis) instead of it vanishing.
+    present = len(result.present_lenses)
+    total = len(result.fan_out)
+    if min_seats is not None and present < min_seats:
+        if allow_degraded:
+            result.degraded_synthesis = True
+            logger.warning(
+                "panel: proceeding with DEGRADED synthesis (--allow-degraded) at "
+                "%d/%d lenses delivered (minimum %d)",
+                present, total, min_seats,
+            )
+        else:
+            result.synthesis_refused_reason = (
+                f"refusing synthesis: {present}/{total} lenses delivered (minimum {min_seats})"
+            )
+            logger.error(
+                "panel: synthesis refused — %d/%d lenses delivered (minimum %d); "
+                "re-run with --allow-degraded to proceed with degraded coverage",
+                present, total, min_seats,
+            )
+            return result
 
     digest = _digest(present_fan_out)
     coverage_note = (
