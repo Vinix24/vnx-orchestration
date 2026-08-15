@@ -508,13 +508,13 @@ jobs:
           else
             diff_range="HEAD^...HEAD"
           fi
-          changed=$(git diff --name-only "${diff_range}" \
+          mapfile -t changed < <(git diff --name-only "${diff_range}" \
             | grep -E '^(scripts|dashboard)/.*\.py$' || true)
-          if [ -z "$changed" ]; then
+          if [ "${#changed[@]}" -eq 0 ]; then
             echo "[skip] No Python files changed in scripts/ or dashboard/"
             exit 0
           fi
-          added=$(git diff --unified=0 "${diff_range}" -- $changed \
+          added=$(git diff --unified=0 "${diff_range}" -- "${changed[@]}" \
             | grep -E '^\+[^+]' | sed 's/^+//' || true)
           if [ -z "$added" ]; then
             echo "[skip] No added lines in target files"

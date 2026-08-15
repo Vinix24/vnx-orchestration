@@ -8,6 +8,8 @@
 #
 # Registered gates:
 #   adr-003-no-sdk   billing-safety: no Anthropic SDK imports anywhere in-tree
+#   workflow-validate  CI-workflow validity: .github/workflows/*.yml parse as
+#                    YAML and pass actionlint (Actions shape + expressions)
 #   wheel-install    packaging acceptance: build wheel -> fresh venv -> install
 #                    -> vnx --version / vnx doctor / VNX_HOME schema resolution
 #                    (scripts/test_wheel_install.sh)
@@ -52,6 +54,9 @@ run_gate() {
 
 # --- gate: ADR-003 no-SDK import guard (billing safety) --------------------
 run_gate "adr-003-no-sdk" python3 "$REPO_ROOT/scripts/check_adr_003_no_sdk_imports.py"
+
+# --- gate: workflow validation (YAML + GitHub Actions shape) ---------------
+run_gate "workflow-validate" python3 "$REPO_ROOT/scripts/check_workflows.py" "$REPO_ROOT"
 
 # --- gate: wheel-install packaging smoke -----------------------------------
 if [ "${SKIP_WHEEL:-0}" = "1" ]; then
