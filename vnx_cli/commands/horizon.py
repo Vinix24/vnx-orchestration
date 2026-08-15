@@ -274,12 +274,26 @@ def _cmd_plan_gate_missing_reasons(args: Any) -> int:
     return pc.cmd_plan_gate_missing_reasons(args)
 
 
+def _cmd_plan_gate_backfill_reason(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_plan_gate_backfill_reason(args)
+
+
+def _cmd_plan_gate_reblock(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_plan_gate_reblock(args)
+
+
 _PLAN_GATE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "seed": _cmd_plan_gate_seed,
     "run": _cmd_plan_gate_run,
     "status": _cmd_plan_gate_status,
     "attest": _cmd_plan_gate_attest,
     "missing-reasons": _cmd_plan_gate_missing_reasons,
+    "backfill-reason": _cmd_plan_gate_backfill_reason,
+    "reblock": _cmd_plan_gate_reblock,
 }
 
 
