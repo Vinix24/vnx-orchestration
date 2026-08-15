@@ -50,17 +50,29 @@ _rpd_paste_and_verify() {
     local message="$2"
     local log_label="$3"
 
+    # OI-1144: named buffer (pid + delivery label) instead of tmux's anonymous
+    # "most recent buffer" stack. Two simultaneous deliveries racing to
+    # load-buffer/paste-buffer otherwise cross each other's content (a TOCTOU
+    # on shared server state — same mechanism fixed in tmux_adapter OI-1136 and
+    # tmux_interactive_dispatch OI-1126). pid alone already separates concurrent
+    # processes; the sanitized label keeps the name unique across dispatches
+    # within one process and makes it greppable. The buffer is deleted after
+    # use so a long-running processor never accumulates one per delivery.
+    local buf_name="rpd_$$_${log_label//[^a-zA-Z0-9_]/_}"
+
     # finding 1a: check every tmux call's exit code. A failed load-buffer or
     # send-keys means the paste never happened (or Enter never landed) — the
     # item must stay pending, not fall through to submit-verify on a no-op.
-    if ! echo "$message" | tmux load-buffer - 2>/dev/null; then
+    if ! echo "$message" | tmux load-buffer -b "$buf_name" - 2>/dev/null; then
         log "ERROR" "Failed to load-buffer for T0 pane $t0_pane ($log_label)"
         return 1
     fi
-    if ! tmux paste-buffer -t "$t0_pane" 2>/dev/null; then
+    if ! tmux paste-buffer -b "$buf_name" -t "$t0_pane" 2>/dev/null; then
+        tmux delete-buffer -b "$buf_name" 2>/dev/null || true
         log "ERROR" "Failed to paste to T0 pane $t0_pane ($log_label)"
         return 1
     fi
+    tmux delete-buffer -b "$buf_name" 2>/dev/null || true
 
     sleep 1
     if ! tmux send-keys -t "$t0_pane" Enter 2>/dev/null; then

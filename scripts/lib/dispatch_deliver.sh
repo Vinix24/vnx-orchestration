@@ -14,18 +14,32 @@ tmux_send_best_effort() {
     return 0
 }
 
+# OI-1144: unique-per-delivery tmux buffer name. pid + sanitized dispatch_id.
+# pid alone already separates two concurrent dispatcher processes racing to
+# load+paste (the exact crossing the anonymous buffer stack allowed); the
+# dispatch_id keeps the name unique across deliveries within one process and
+# greppable in `tmux list-buffers`.
+_ddt_buffer_name() {
+    local dispatch_id="$1"
+    local sanitized="${dispatch_id//[^a-zA-Z0-9_]/_}"
+    printf 'vnx-deliver-%s-%s' "$$" "$sanitized"
+}
+
 # Large-payload tmux buffer loading via temp file to avoid silent truncation.
+# First arg is the NAMED buffer to load into (see _ddt_buffer_name); load+paste
+# must address the same named buffer or they fall back to the anonymous stack.
 tmux_load_buffer_safe() {
-    local content="$1"
+    local buffer_name="$1"
+    local content="$2"
     local payload_size=${#content}
     if [ "$payload_size" -gt "$VNX_DISPATCH_MAX_INLINE" ]; then
         mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
         local tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/payload_$$.txt"
         printf '%s' "$content" > "$tmpfile"
         log "V8 DELIVERY: Large payload (${payload_size}B > ${VNX_DISPATCH_MAX_INLINE}B), using temp file"
-        if tmux load-buffer "$tmpfile"; then rm -f "$tmpfile"; return 0; else rm -f "$tmpfile"; return 1; fi
+        if tmux load-buffer -b "$buffer_name" "$tmpfile"; then rm -f "$tmpfile"; return 0; else rm -f "$tmpfile"; return 1; fi
     else
-        printf '%s' "$content" | tmux load-buffer -
+        printf '%s' "$content" | tmux load-buffer -b "$buffer_name" -
     fi
 }
 
@@ -424,28 +438,35 @@ ${_prompt_ref}"
 # Returns 0 on success, 1 on failure.
 _DDT_FAILED_SUBSTEP=""
 _ddt_send_content() {
-    local target_pane="$1" provider="$2" skill_command="$3" complete_prompt="$4"
+    local target_pane="$1" provider="$2" skill_command="$3" complete_prompt="$4" dispatch_id="$5"
     _DDT_FAILED_SUBSTEP=""
 
+    # OI-1144: one named buffer per delivery, shared by load+paste, deleted on
+    # every exit path so the buffer stack never accumulates. Retries re-address
+    # the SAME name, so a retry can never pick up another delivery's content.
+    local buf_name
+    buf_name=$(_ddt_buffer_name "$dispatch_id")
+
     if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-        if ! tmux_retry 3 tmux_load_buffer_safe "${skill_command}${complete_prompt}"; then
-            _DDT_FAILED_SUBSTEP="load_buffer"; log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"; return 1
+        if ! tmux_retry 3 tmux_load_buffer_safe "$buf_name" "${skill_command}${complete_prompt}"; then
+            _DDT_FAILED_SUBSTEP="load_buffer"; log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"; tmux delete-buffer -b "$buf_name" 2>/dev/null || true; return 1
         fi
-        if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
-            _DDT_FAILED_SUBSTEP="paste_buffer"; log "V8 ERROR: Failed to paste prompt to terminal $target_pane"; return 1
+        if ! tmux_retry 3 tmux paste-buffer -b "$buf_name" -t "$target_pane"; then
+            _DDT_FAILED_SUBSTEP="paste_buffer"; log "V8 ERROR: Failed to paste prompt to terminal $target_pane"; tmux delete-buffer -b "$buf_name" 2>/dev/null || true; return 1
         fi
     else
         if ! tmux_retry 3 tmux_send_best_effort "$target_pane" -l "$skill_command"; then
-            _DDT_FAILED_SUBSTEP="send_skill"; log "V8 ERROR: Failed to send skill command to terminal $target_pane"; return 1
+            _DDT_FAILED_SUBSTEP="send_skill"; log "V8 ERROR: Failed to send skill command to terminal $target_pane"; tmux delete-buffer -b "$buf_name" 2>/dev/null || true; return 1
         fi
         sleep 0.5
-        if ! tmux_retry 3 tmux_load_buffer_safe "$complete_prompt"; then
-            _DDT_FAILED_SUBSTEP="load_buffer"; log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"; return 1
+        if ! tmux_retry 3 tmux_load_buffer_safe "$buf_name" "$complete_prompt"; then
+            _DDT_FAILED_SUBSTEP="load_buffer"; log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"; tmux delete-buffer -b "$buf_name" 2>/dev/null || true; return 1
         fi
-        if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
-            _DDT_FAILED_SUBSTEP="paste_buffer"; log "V8 ERROR: Failed to paste prompt to terminal $target_pane"; return 1
+        if ! tmux_retry 3 tmux paste-buffer -b "$buf_name" -t "$target_pane"; then
+            _DDT_FAILED_SUBSTEP="paste_buffer"; log "V8 ERROR: Failed to paste prompt to terminal $target_pane"; tmux delete-buffer -b "$buf_name" 2>/dev/null || true; return 1
         fi
     fi
+    tmux delete-buffer -b "$buf_name" 2>/dev/null || true
     return 0
 }
 
@@ -575,7 +596,7 @@ deliver_dispatch_to_terminal() {
 
     log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
 
-    if ! _ddt_send_content "$target_pane" "$provider" "$skill_command" "$complete_prompt"; then
+    if ! _ddt_send_content "$target_pane" "$provider" "$skill_command" "$complete_prompt" "$dispatch_id"; then
         _ddt_handle_failure "$dispatch_file" "$dispatch_id" "$terminal_id" "$provider" "$_DDT_FAILED_SUBSTEP"
         return 1
     fi
