@@ -812,6 +812,69 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     p_preblock.add_argument("--approval-id", dest="approval_id", default=None,
                             help="operator approval token (REQUIRED)")
 
+    p_pbatch = subs.add_parser(
+        "batch",
+        help="run the gate over a set of OI-PLAN-blocked tracks (resumeable; "
+             "--dry-run first shows the class + seat count WITHOUT calling a model)",
+    )
+    _common_horizon_args(p_pbatch)
+    p_pbatch.add_argument(
+        "--track", action="append", default=None, metavar="TRACK_ID",
+        help="explicit track id(s) to gate (repeatable); unknown ids fail loud. "
+             "Default: every track with an open OI-PLAN blocker.",
+    )
+    p_pbatch.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="cap the number of tracks processed; composes with --track (not "
+             "mutually exclusive).",
+    )
+    p_pbatch.add_argument(
+        "--restart", action="store_true",
+        help="re-run all selected tracks, ignoring the resume store.",
+    )
+    p_pbatch.add_argument(
+        "--dry-run", action="store_true",
+        help="show each track's gate class + seat count without calling any "
+             "model. Standard first step before a real batch.",
+    )
+    p_pbatch.add_argument(
+        "--panel-seats",
+        dest="panel_seats",
+        default="",
+        help="comma-separated seat labels to run (subset of the configured panel); "
+             "unknown labels fail loud. Defaults to the governance-derived ladder.",
+    )
+    p_pbatch.add_argument(
+        "--seat-timeout",
+        dest="seat_timeout",
+        type=int,
+        default=None,
+        help="per-seat deadline in seconds before a panelist times out and books a "
+             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+    )
+    p_pbatch.add_argument(
+        "--dispatch-paths",
+        dest="dispatch_paths",
+        default=None,
+        help="comma-separated repo paths the plan touches; drives the governance "
+             "weight (variant) that sizes the panel (operator ladder).",
+    )
+    p_pbatch.add_argument(
+        "--task-class",
+        dest="task_class",
+        default=None,
+        help="task class for the plan from the smart-router closed set "
+             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
+             "full panel).",
+    )
+    p_pbatch.add_argument(
+        "--irreversible",
+        dest="irreversible",
+        action="store_true",
+        help="declare the change irreversible (deletion/rename/big architecture "
+             "refactor); forces coding-strict (3 seats).",
+    )
+
 
 def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     horizon_parser = subparsers.add_parser(

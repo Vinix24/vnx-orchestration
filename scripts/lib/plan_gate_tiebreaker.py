@@ -581,8 +581,9 @@ def _default_tiebreaker_dispatcher(
 
 
 def run_tiebreaker(
-    doc_path: str | Path,
+    doc_path: str | Path | None = None,
     *,
+    doc_text: Optional[str] = None,
     track_id: str,
     project_id: str = "vnx-dev",
     round_number: int,
@@ -593,7 +594,15 @@ def run_tiebreaker(
     model_arg: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> TiebreakerResult:
-    """Run the single tiebreaker over ``doc_path`` and return its decision.
+    """Run the single tiebreaker over ``doc_path`` (or ``doc_text``) and return
+    its decision.
+
+    Exactly one plan source is required: ``doc_text`` when the caller already
+    holds the plan text (e.g. a track's ``goal_state`` standing in for the doc),
+    otherwise the text is read from ``doc_path``. ``doc_text`` wins when both are
+    given — the SAME contract ``plan_gate_panel.run_panel`` uses, so the batch
+    (which gates a track's goal_state directly) and the single-track command
+    (which may pass a ``--doc`` file) resolve the plan identically.
 
     The model is resolved from the registry (``resolve_tiebreaker_model``),
     never a Python literal. ``dispatcher`` is injectable; when omitted the
@@ -620,7 +629,12 @@ def run_tiebreaker(
 
     resolved_timeout = pgp._seat_timeout(timeout_seconds)
     disp = dispatcher or _default_tiebreaker_dispatcher(data_dir, resolved_timeout)
-    doc_text = Path(doc_path).read_text(encoding="utf-8")
+    if doc_text is None:
+        if doc_path is None:
+            raise ValueError(
+                "run_tiebreaker: a plan source is required — pass doc_path or doc_text"
+            )
+        doc_text = Path(doc_path).read_text(encoding="utf-8")
     instruction = build_tiebreaker_instruction(
         doc_text, track_id,
         rounds_done=max(round_number - 1, 0),

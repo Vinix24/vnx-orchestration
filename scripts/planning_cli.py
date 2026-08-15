@@ -31,10 +31,11 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sqlite3
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -2366,6 +2367,44 @@ def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass
+class PlanGateRunResult:
+    """Structured outcome of one ``run_plan_gate_for_track`` call.
+
+    The single execution path fills this once; ``cmd_plan_gate_run`` renders it
+    for the interactive single-track command and ``cmd_plan_gate_batch``
+    consumes it in a loop. ``exit_code`` is the single-track exit code (0 PASS,
+    2 REVISE/refused/still-blocked, 1 infra error); ``outcome`` is the batch
+    bucket (PASS / REVISE / REFUSED_THIN / ERROR).
+    """
+    track_id: str
+    project_id: str
+    exit_code: int
+    outcome: str
+    decision: str = ""
+    seats: int = 0
+    variant: str = ""
+    is_new_feature: bool = False
+    chosen_by: str = ""
+    override_direction: str = ""
+    gov_trace: str = ""
+    plan_source: str = ""
+    plan_source_info: dict = field(default_factory=dict)
+    ignored_goal: bool = False
+    resolved: bool = False
+    derived_status: Optional[str] = None
+    still_blocked: bool = False
+    thin_length: Optional[int] = None
+    thin_threshold: Optional[int] = None
+    error: str = ""
+    no_panel: bool = False
+    no_panel_reason: str = ""
+    result: Optional[dict] = None
+    stderr_lines: list = field(default_factory=list)
+    stdout_text: list = field(default_factory=list)
+    stdout_json: Optional[str] = None
+
+
 def _last_round_findings(seat_ledger_path, track_id: str, project_id: str) -> list:
     """The blocking findings the seats raised in the last panel round.
 
@@ -2410,20 +2449,29 @@ def pgp_seat_record_type() -> str:
     return plan_gate_panel.SEAT_RECORD_TYPE
 
 
-def _run_tiebreaker_round(
-    args: argparse.Namespace,
+def _run_tiebreaker_for_track(
     *,
-    state_dir: Path,
-    data_dir: str,
+    state_dir,
+    track_id,
+    project_id,
+    doc_path,
+    doc_text,
+    data_dir,
     seat_ledger_path,
-    tb_cfg: dict,
-    round_number: int,
-    panel,
-) -> int:
+    tb_cfg,
+    round_number,
+    seat_timeout,
+    repo_root,
+    gov_trace,
+    plan_source,
+    plan_source_info,
+    ignored_goal,
+) -> PlanGateRunResult:
     """Run the single tiebreaker round and resolve the blocker either way.
 
-    Called by ``cmd_plan_gate_run`` once the stop-rule threshold is reached.
-    The tiebreaker's outcome is binary:
+    Called by ``run_plan_gate_for_track`` — the ONE shared path both the
+    single-track command and the batch loop drive — once the stop-rule
+    threshold is reached. The tiebreaker's outcome is binary:
       START -> clear the gate (the plan is good enough to build), with a
                ``resolution_reason`` that names the tiebreaker model + round.
       STOP  -> record the last round's findings as open items (punt 9), then
@@ -2435,38 +2483,57 @@ def _run_tiebreaker_round(
     than one change) is a loud failure: exit 1, the track stays blocked, the
     operator sees the raw model output. We never silently fill in a decision.
     """
-    import plan_gate_tiebreaker  # noqa: PLC0415
+    import plan_gate_tiebreaker
+
+    stderr_lines: list = []
+    stdout_text: list = []
+    stdout_json: Optional[str] = None
+
+    def _result(**kw) -> PlanGateRunResult:
+        return PlanGateRunResult(
+            track_id=track_id, project_id=project_id, seats=0,
+            variant="tiebreaker", gov_trace=gov_trace,
+            plan_source=plan_source, plan_source_info=plan_source_info,
+            ignored_goal=ignored_goal,
+            stderr_lines=stderr_lines, stdout_text=stdout_text,
+            stdout_json=stdout_json, **kw,
+        )
 
     try:
         result = plan_gate_tiebreaker.run_tiebreaker(
-            args.doc,
-            track_id=args.track_id, project_id=args.project_id,
+            doc_path,
+            doc_text=doc_text,
+            track_id=track_id, project_id=project_id,
             round_number=round_number,
             last_round_findings=_last_round_findings(
-                seat_ledger_path, args.track_id, args.project_id,
+                seat_ledger_path, track_id, project_id,
             ),
             data_dir=data_dir,
-            timeout_seconds=getattr(args, "seat_timeout", None),
+            timeout_seconds=seat_timeout,
             config=tb_cfg,
         )
     except plan_gate_tiebreaker.TiebreakerParseError as exc:
-        print(
+        stderr_lines.append(
             f"plan-gate tiebreaker FAILED to parse the decision: {exc}. "
             "The track stays blocked. The model's answer did not satisfy the "
             "strict contract (binary START/STOP, at most one change, no "
-            f"findings list). Raw output:\n{(exc.raw or '')[:1200]}",
-            file=sys.stderr,
+            f"findings list). Raw output:\n{(exc.raw or '')[:1200]}"
         )
-        return 1
+        return _result(
+            exit_code=1, outcome="ERROR",
+            error="tiebreaker parse failure; the track stays blocked",
+        )
     except Exception as exc:
-        print(f"plan-gate tiebreaker failed: {exc}", file=sys.stderr)
-        return 1
+        stderr_lines.append(f"plan-gate tiebreaker failed: {exc}")
+        return _result(
+            exit_code=1, outcome="ERROR", error=f"plan-gate tiebreaker failed: {exc}",
+        )
 
     # Record the tiebreaker round in the seat ledger (outcome names the
     # decision so the round history is auditable alongside the seat verdicts).
     plan_gate_tiebreaker.record_round(
         seat_ledger_path,
-        track_id=args.track_id, project_id=args.project_id,
+        track_id=track_id, project_id=project_id,
         round_number=round_number,
         outcome=f"tiebreak:{result.outcome}", model=result.model,
     )
@@ -2477,16 +2544,15 @@ def _run_tiebreaker_round(
         # must not block the STOP resolution, but it IS surfaced.
         oi_state_dir = plan_gate_tiebreaker.open_items_state_dir_for(seat_ledger_path)
         recorded = plan_gate_tiebreaker.remaining_findings_to_open_items(
-            track_id=args.track_id, project_id=args.project_id,
-            findings=_last_round_findings(seat_ledger_path, args.track_id, args.project_id),
-            dispatch_id=f"plan-tiebreak-{args.track_id}-{round_number}",
+            track_id=track_id, project_id=project_id,
+            findings=_last_round_findings(seat_ledger_path, track_id, project_id),
+            dispatch_id=f"plan-tiebreak-{track_id}-{round_number}",
             state_dir=oi_state_dir,
         )
         if recorded:
-            print(
+            stderr_lines.append(
                 f"  STOP: recorded {len(recorded)} open item(s) from the last "
-                f"round's findings.",
-                file=sys.stderr,
+                f"round's findings."
             )
 
     # Both START and STOP clear the blocker, with a resolution_reason that
@@ -2499,35 +2565,39 @@ def _run_tiebreaker_round(
     )
     try:
         resolved = _resolve_plan_blocker(
-            state_dir, args.track_id, args.project_id,
+            state_dir, track_id, project_id,
             reason=reason, resolver="tiebreaker",
         )
-        post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+        post = tracks_lib.get_track(state_dir, track_id, project_id)
     except Exception as exc:
-        print(
-            f"tiebreaker {result.outcome}, but unblocking track {args.track_id} "
-            f"failed: {exc}. Track state unchanged — investigate before promoting.",
-            file=sys.stderr,
+        stderr_lines.append(
+            f"tiebreaker {result.outcome}, but unblocking track {track_id} "
+            f"failed: {exc}. Track state unchanged — investigate before promoting."
         )
-        return 1
+        return _result(
+            exit_code=1, outcome="ERROR",
+            error=f"tiebreaker {result.outcome}, but unblocking failed: {exc}",
+        )
     derived = post.get("derived_status") if isinstance(post, dict) else None
     if derived == "blocked":
-        print(
-            f"tiebreaker {result.outcome}, but track {args.track_id} is STILL "
+        stderr_lines.append(
+            f"tiebreaker {result.outcome}, but track {track_id} is STILL "
             f"blocked (plan blocker resolved={resolved}; another blocker or hard "
             "dependency remains). Promote stays refused — clear the remaining "
-            "blocker first.",
-            file=sys.stderr,
+            "blocker first."
         )
-        return 2
+        return _result(
+            exit_code=2, outcome="PASS", decision=result.outcome,
+            resolved=resolved, derived_status=derived, still_blocked=True,
+        )
 
     # Emit a durable plan_gate_pass record so the merge gate recognises this
     # resolution (resolver="run", scope names the tiebreaker, seats=0 because
     # no seats certified this round). Best-effort: surface a warning when the
     # record is not written, never a silent success.
     wrote = _emit_plan_gate_pass_record(
-        repo_root=getattr(args, "repo_root", None),
-        track_id=args.track_id, project_id=args.project_id, resolver="run",
+        repo_root=repo_root,
+        track_id=track_id, project_id=project_id, resolver="run",
         seats=0, scope=f"tiebreaker:{result.outcome}",
         reason=(
             f"tiebreaker {result.outcome} (model={result.model}, "
@@ -2535,153 +2605,67 @@ def _run_tiebreaker_round(
         ),
     )
     if not wrote:
-        print(
+        stderr_lines.append(
             f"WARNING: plan_gate_pass evidence NOT written for track "
-            f"{args.track_id} (resolver=run, tiebreaker {result.outcome}). "
+            f"{track_id} (resolver=run, tiebreaker {result.outcome}). "
             "The plan blocker IS resolved, but the durable pass record is "
-            "missing - the merge gate may not recognize this pass.",
-            file=sys.stderr,
+            "missing - the merge gate may not recognize this pass."
         )
 
     change_clause = f" required change: {result.required_change!r}." if result.required_change else ""
-    if args.json:
-        print(json.dumps({
-            "decision": "PASS" if result.outcome == plan_gate_tiebreaker.START else "STOP",
-            "tiebreaker": {
-                "outcome": result.outcome, "model": result.model,
-                "round": result.round, "required_change": result.required_change,
-                "rationale": result.rationale,
-            },
-            "resolved": resolved, "derived_status": derived,
-        }, indent=2))
-    else:
-        print(
-            f"tiebreaker {result.outcome} — plan gate cleared by {result.model} "
-            f"(round {result.round}).{_plan_blocker_oi(args.track_id)} "
-            f"resolved={resolved}; track derived_status={derived}.{change_clause}"
-        )
-    return 0
+    stdout_json = json.dumps({
+        "decision": "PASS" if result.outcome == plan_gate_tiebreaker.START else "STOP",
+        "tiebreaker": {
+            "outcome": result.outcome, "model": result.model,
+            "round": result.round, "required_change": result.required_change,
+            "rationale": result.rationale,
+        },
+        "resolved": resolved, "derived_status": derived,
+    }, indent=2)
+    stdout_text.append(
+        f"tiebreaker {result.outcome} — plan gate cleared by {result.model} "
+        f"(round {result.round}).{_plan_blocker_oi(track_id)} "
+        f"resolved={resolved}; track derived_status={derived}.{change_clause}"
+    )
+    return _result(
+        exit_code=0, outcome="PASS", decision=result.outcome,
+        resolved=resolved, derived_status=derived,
+    )
 
 
-def cmd_plan_gate_run(args: argparse.Namespace) -> int:
-    """Run the plan-first panel over a plan; on PASS, resolve the OI-PLAN blocker.
+def _derive_panel_weight(*, panel_seats, dispatch_paths, task_class, irreversible):
+    """Derive the governance variant + panel composition (operator seat ladder).
 
-    The plan text comes from ``--doc`` (a file) when given, otherwise from the
-    track's ``goal_state``. A goal under ``goal_min_chars`` meaningful characters
-    (whitespace-stripped, configured in ``configs/plan_gate_panel.yaml``) is
-    refused loud — never silently passed to a panel it cannot inform, never
-    silently dropped. ``--doc`` wins explicitly over a present goal, and the
-    output names which source the gate judged.
-
-    Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK or a too-thin goal
-    (track stays blocked), 1 = infra error (doc/track missing, panel could not run).
+    Shared by ``run_plan_gate_for_track`` (the real gate) and the batch
+    ``--dry-run`` preview so the two read the SAME ladder and can never disagree
+    about the seat count. Returns a dict (panel, variant, is_new_feature,
+    chosen_by, override_direction, gov_trace). Raises on an invalid config or an
+    unknown seat label — fail-loud, the same contract as the single-run path.
     """
     import plan_gate_panel
     import smart_router
 
-    state_dir = _resolve_state_dir(args.state_dir)
-    track = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
-    if not track:
-        print(f"track not found: {args.track_id!r} (project {args.project_id!r})", file=sys.stderr)
-        return 1
-
-    data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
-    min_goal_chars = plan_gate_panel.load_goal_min_chars()
-
-    # Resolve the plan source: --doc wins explicitly over the track's goal_state;
-    # without --doc the goal_state must be thick enough to stand in for a plan.
-    doc_arg = getattr(args, "doc", None)
-    source = "goal"
-    ignored_goal = False
-    doc_path: Optional[Path] = None
-    if doc_arg:
-        doc_path = Path(doc_arg)
-        if not doc_path.is_file():
-            print(f"plan doc not found: {doc_path}", file=sys.stderr)
-            return 1
-        # An unreadable doc is an infra error, never a weight decision.
-        try:
-            plan_text = doc_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"plan doc unreadable: {doc_path}: {exc}", file=sys.stderr)
-            return 1
-        source = "doc"
-        ignored_goal = bool((track.get("goal_state") or "").strip())
-    else:
-        try:
-            resolved = resolve_plan_source(
-                doc_text=None,
-                goal_state=track.get("goal_state"),
-                min_goal_chars=min_goal_chars,
-            )
-        except PlanRefusal as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
-        plan_text = resolved.plan_text
-
-    if source == "doc":
-        note = f"plan-gate source: doc {doc_path}"
-        if ignored_goal:
-            note += " (track goal_state ignored)"
-        print(note, file=sys.stderr)
-    else:
-        print(
-            f"plan-gate source: track goal_state "
-            f"({len(plan_text.strip())} meaningful chars)",
-            file=sys.stderr,
-        )
-
-    plan_source_info = {"source": source, "ignored_goal": ignored_goal}
-    if source == "doc":
-        plan_source_info["doc_path"] = str(doc_path)
-    else:
-        plan_source_info["goal_chars"] = len(plan_text.strip())
-
-    # Governance-weight read-site (operator ladder, 2026-08-15): the panel size
-    # derives from the governance variant (dispatch paths + task_class +
-    # irreversibility), not a flat "every plan gets the full panel". The derived
-    # weight is computed BEFORE seat selection so the trace can always show
-    # "derived X -> chose Y, by operator/derived" — an override is never silent.
-    raw_paths = getattr(args, "dispatch_paths", None)
-    dispatch_paths = None
-    if raw_paths:
-        dispatch_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
+    paths = None
+    if dispatch_paths:
+        paths = [p.strip() for p in dispatch_paths.split(",") if p.strip()]
     gov = smart_router.derive_governance_variant(
-        dispatch_paths=dispatch_paths,
-        task_class=getattr(args, "task_class", None),
-        irreversible=bool(getattr(args, "irreversible", False)),
+        dispatch_paths=paths,
+        task_class=task_class,
+        irreversible=bool(irreversible),
     )
 
-    # Resolve the panel composition from configs/plan_gate_panel.yaml (falling
-    # back to DEFAULT_PANEL when absent). An explicit --panel-seats always wins
-    # (heavier OR lighter than the derived size); otherwise the governance
-    # variant sizes the panel. Both an invalid config and an unknown seat label
-    # fail LOUD here — a dropped seat reads as an abstention and turns into a
-    # REVISE via the fail-safe rule, so misconfiguration must surface before the
-    # panel runs.
-    try:
-        panel = plan_gate_panel.load_panel_seats()
-        derived_labels = plan_gate_panel.seat_labels_for_governance_variant(
-            panel, gov.variant, is_new_feature=gov.is_new_feature,
-        )
-        if args.panel_seats:
-            requested = [s.strip() for s in args.panel_seats.split(",") if s.strip()]
-            panel = plan_gate_panel.filter_panel_seats(panel, requested)
-            chosen_by = "operator"
-        else:
-            panel = plan_gate_panel.filter_panel_seats(panel, derived_labels)
-            chosen_by = "derived"
-    except Exception as exc:
-        print(f"plan-gate run failed: {exc}", file=sys.stderr)
-        return 1
+    panel = plan_gate_panel.load_panel_seats()
+    derived_labels = plan_gate_panel.seat_labels_for_governance_variant(
+        panel, gov.variant, is_new_feature=gov.is_new_feature,
+    )
+    if panel_seats:
+        requested = [s.strip() for s in panel_seats.split(",") if s.strip()]
+        panel = plan_gate_panel.filter_panel_seats(panel, requested)
+        chosen_by = "operator"
+    else:
+        panel = plan_gate_panel.filter_panel_seats(panel, derived_labels)
+        chosen_by = "derived"
 
-    # Seat-override direction (operator ladder, 2026-08-15): when the operator
-    # sizes the panel away from the derived seat count, the trace names the
-    # derived count, the chosen count, and the direction — a downgrade from
-    # coding-strict is marked STRICT-DOWNGRADE so a later sweep can find it.
-    # The same count derived vs chosen is NOT an override (a same-count relabel
-    # keeps the panel's heft, so the direction is empty and no override is
-    # claimed).
     override_direction = ""
     if chosen_by == "operator":
         override_direction = plan_gate_panel.seat_override_direction(
@@ -2697,66 +2681,204 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             f"; OVERRIDES derived {len(derived_labels)} seat(s) "
             f"({gov.variant}) - {override_direction.upper()}"
         )
-    if override_direction:
-        print(f"plan-gate override: {gov_trace}.", file=sys.stderr)
+    return {
+        "panel": panel,
+        "variant": gov.variant,
+        "is_new_feature": gov.is_new_feature,
+        "chosen_by": chosen_by,
+        "override_direction": override_direction,
+        "gov_trace": gov_trace,
+        "seats": len(panel),
+    }
+
+
+def run_plan_gate_for_track(
+    *,
+    state_dir,
+    track_id,
+    project_id,
+    doc=None,
+    panel_seats=None,
+    seat_timeout=None,
+    dispatch_paths=None,
+    task_class=None,
+    irreversible=False,
+    repo_root=None,
+    data_dir=None,
+    min_goal_chars=None,
+) -> PlanGateRunResult:
+    """Execute the plan-first gate for ONE track and return a structured result.
+
+    This is the single implementation the interactive ``plan-gate run`` and the
+    ``plan-gate batch`` loop both call — a batch that ran its own copy would
+    drift from the single command within a week. Rendering (stderr lines, stdout
+    text, stdout json) is built here so ``cmd_plan_gate_run`` stays a thin
+    renderer and the batch reads the same result object.
+    """
+    import plan_gate_panel
+
+    state_dir = Path(state_dir)
+    stderr_lines: list = []
+    stdout_text: list = []
+    stdout_json: Optional[str] = None
+
+    def _error(message: str, *, exit_code: int = 1, outcome: str = "ERROR") -> PlanGateRunResult:
+        stderr_lines.append(message)
+        return PlanGateRunResult(
+            track_id=track_id, project_id=project_id, exit_code=exit_code,
+            outcome=outcome, error=message, stderr_lines=stderr_lines,
+        )
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if not track:
+        return _error(f"track not found: {track_id!r} (project {project_id!r})")
+
+    if min_goal_chars is None:
+        min_goal_chars = plan_gate_panel.load_goal_min_chars()
+    if data_dir is None:
+        data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
+
+    # Resolve the plan source: --doc wins explicitly over the track's goal_state;
+    # without --doc the goal_state must be thick enough to stand in for a plan.
+    source = "goal"
+    ignored_goal = False
+    doc_path: Optional[Path] = None
+    if doc:
+        doc_path = Path(doc)
+        if not doc_path.is_file():
+            return _error(f"plan doc not found: {doc_path}")
+        # An unreadable doc is an infra error, never a weight decision.
+        try:
+            plan_text = doc_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return _error(f"plan doc unreadable: {doc_path}: {exc}")
+        source = "doc"
+        ignored_goal = bool((track.get("goal_state") or "").strip())
     else:
-        print(f"plan-gate seats: {gov_trace}.", file=sys.stderr)
+        try:
+            resolved = resolve_plan_source(
+                doc_text=None,
+                goal_state=track.get("goal_state"),
+                min_goal_chars=min_goal_chars,
+            )
+        except PlanRefusal as exc:
+            stderr_lines.append(str(exc))
+            return PlanGateRunResult(
+                track_id=track_id, project_id=project_id, exit_code=2,
+                outcome="REFUSED_THIN", error=str(exc),
+                thin_length=exc.length, thin_threshold=exc.threshold,
+                stderr_lines=stderr_lines,
+            )
+        plan_text = resolved.plan_text
+
+    if source == "doc":
+        note = f"plan-gate source: doc {doc_path}"
+        if ignored_goal:
+            note += " (track goal_state ignored)"
+        stderr_lines.append(note)
+    else:
+        stderr_lines.append(
+            f"plan-gate source: track goal_state "
+            f"({len(plan_text.strip())} meaningful chars)"
+        )
+
+    plan_source_info = {"source": source, "ignored_goal": ignored_goal}
+    if source == "doc":
+        plan_source_info["doc_path"] = str(doc_path)
+    else:
+        plan_source_info["goal_chars"] = len(plan_text.strip())
+
+    try:
+        weight = _derive_panel_weight(
+            panel_seats=panel_seats,
+            dispatch_paths=dispatch_paths,
+            task_class=task_class,
+            irreversible=irreversible,
+        )
+    except Exception as exc:
+        return _error(f"plan-gate run failed: {exc}")
+
+    panel = weight["panel"]
+    variant = weight["variant"]
+
+    if weight["override_direction"]:
+        stderr_lines.append(f"plan-gate override: {weight['gov_trace']}.")
+    else:
+        stderr_lines.append(f"plan-gate seats: {weight['gov_trace']}.")
 
     # 0 seats: the derived weight requires no panel. Resolve the blocker with a
     # reason that names the category — a plan-gate blocker is never cleared
     # silently, and "no gate needed" is itself a recorded decision.
     if not panel:
         reason = (
-            f"derived weight={gov.variant} requires no panel "
+            f"derived weight={variant} requires no panel "
             f"(category not gated); no panel ran"
         )
         try:
             resolved = _resolve_plan_blocker(
-                state_dir, args.track_id, args.project_id,
+                state_dir, track_id, project_id,
                 reason=reason, resolver="derived",
             )
-            post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+            post = tracks_lib.get_track(state_dir, track_id, project_id)
         except Exception as exc:
-            print(
-                f"derived no-panel pass, but unblocking track {args.track_id} failed: {exc}. "
+            return _error(
+                f"derived no-panel pass, but unblocking track {track_id} failed: {exc}. "
                 "Track state unchanged — investigate before promoting.",
-                file=sys.stderr,
             )
-            return 1
         derived = post.get("derived_status") if isinstance(post, dict) else None
         if derived == "blocked":
-            print(
-                f"derived no-panel pass, but track {args.track_id} is STILL blocked "
+            stderr_lines.append(
+                f"derived no-panel pass, but track {track_id} is STILL blocked "
                 f"(plan blocker resolved={resolved}; another blocker or hard dependency "
-                "remains). Promote stays refused — clear the remaining blocker first.",
-                file=sys.stderr,
+                "remains). Promote stays refused — clear the remaining blocker first."
             )
-            return 2
+            return PlanGateRunResult(
+                track_id=track_id, project_id=project_id, exit_code=2,
+                outcome="PASS", decision="PASS", seats=0, variant=variant,
+                is_new_feature=weight["is_new_feature"],
+                chosen_by=weight["chosen_by"],
+                override_direction=weight["override_direction"],
+                gov_trace=weight["gov_trace"],
+                plan_source=source, plan_source_info=plan_source_info,
+                ignored_goal=ignored_goal, resolved=resolved,
+                derived_status=derived, still_blocked=True,
+                no_panel=True, no_panel_reason=reason,
+                stderr_lines=stderr_lines,
+            )
         if resolved:
             _emit_plan_gate_pass_record(
-                repo_root=getattr(args, "repo_root", None),
-                track_id=args.track_id, project_id=args.project_id, resolver="run",
-                seats=0, scope=gov.variant, reason=gov_trace,
+                repo_root=repo_root, track_id=track_id, project_id=project_id,
+                resolver="run", seats=0, scope=variant, reason=weight["gov_trace"],
             )
-        if args.json:
-            print(json.dumps({
-                "decision": "PASS",
-                "derived_weight": gov.variant,
-                "seats": 0,
-                "summary": {
-                    "pass_count": 0, "revise_count": 0, "block_count": 0,
-                    "rationale": reason,
-                },
-                "panelists": [],
-                "plan_source": plan_source_info,
-            }, indent=2))
-        else:
-            print(
-                f"PASS — plan gate cleared (derived weight={gov.variant} needs no panel). "
-                f"{_plan_blocker_oi(args.track_id)} resolved={resolved}; "
-                f"track derived_status={derived}."
-            )
-        return 0
+        stdout_json = json.dumps({
+            "decision": "PASS",
+            "derived_weight": variant,
+            "seats": 0,
+            "summary": {
+                "pass_count": 0, "revise_count": 0, "block_count": 0,
+                "rationale": reason,
+            },
+            "panelists": [],
+            "plan_source": plan_source_info,
+        }, indent=2)
+        stdout_text.append(
+            f"PASS — plan gate cleared (derived weight={variant} needs no panel). "
+            f"{_plan_blocker_oi(track_id)} resolved={resolved}; "
+            f"track derived_status={derived}."
+        )
+        return PlanGateRunResult(
+            track_id=track_id, project_id=project_id, exit_code=0,
+            outcome="PASS", decision="PASS", seats=0, variant=variant,
+            is_new_feature=weight["is_new_feature"],
+            chosen_by=weight["chosen_by"],
+            override_direction=weight["override_direction"],
+            gov_trace=weight["gov_trace"],
+            plan_source=source, plan_source_info=plan_source_info,
+            ignored_goal=ignored_goal, resolved=resolved,
+            derived_status=derived, no_panel=True, no_panel_reason=reason,
+            stderr_lines=stderr_lines, stdout_text=stdout_text,
+            stdout_json=stdout_json,
+        )
 
     # Stop-rule (operator ladder, 2026-08-15, punten 7-9). After max_rounds
     # panel rounds that do not certify a PASS, the gate stops running the full
@@ -2764,41 +2886,45 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     # lives in the seat ledger (the existing plan-gate state) — read back from
     # disk, not an in-memory counter, so a restart still sees the threshold.
     # The ijkmeting over 820 reports showed a 5-seat panel converges with the
-    # first seat in 89.4% of cases; a third full round buys ~nothing.
+    # first seat in 89.4% of cases; a third full round buys ~nothing. This is
+    # the SAME shared path the single-track command drives, so the batch
+    # inherits the stop-rule — not a second implementation.
     import plan_gate_tiebreaker
 
     seat_ledger_path = plan_gate_panel._resolve_seat_ledger_path(data_dir)
     tb_cfg = plan_gate_tiebreaker.load_tiebreaker_config()
     rounds_done = plan_gate_tiebreaker.read_round_count(
-        seat_ledger_path, args.track_id, args.project_id,
+        seat_ledger_path, track_id, project_id,
     )
     if plan_gate_tiebreaker.should_run_tiebreaker(
-        seat_ledger_path, args.track_id, args.project_id,
+        seat_ledger_path, track_id, project_id,
         max_rounds=tb_cfg["max_rounds"],
     ):
-        print(
+        stderr_lines.append(
             f"plan-gate stop-rule: {rounds_done} panel round(s) done "
             f"(threshold {tb_cfg['max_rounds']}) — running the tiebreaker "
-            f"(model={tb_cfg['model']}) instead of the full panel.",
-            file=sys.stderr,
+            f"(model={tb_cfg['model']}) instead of the full panel."
         )
-        return _run_tiebreaker_round(
-            args, state_dir=state_dir, data_dir=data_dir,
+        return _run_tiebreaker_for_track(
+            state_dir=state_dir, track_id=track_id, project_id=project_id,
+            doc_path=doc_path, doc_text=plan_text, data_dir=data_dir,
             seat_ledger_path=seat_ledger_path, tb_cfg=tb_cfg,
-            round_number=rounds_done + 1, panel=panel,
+            round_number=rounds_done + 1, seat_timeout=seat_timeout,
+            repo_root=repo_root, gov_trace=weight["gov_trace"],
+            plan_source=source, plan_source_info=plan_source_info,
+            ignored_goal=ignored_goal,
         )
 
     try:
         result = plan_gate_panel.run_panel(
             doc_path=doc_path,
             doc_text=plan_text,
-            track_id=args.track_id, project_id=args.project_id, data_dir=data_dir,
+            track_id=track_id, project_id=project_id, data_dir=data_dir,
             panel=panel,
-            timeout_seconds=getattr(args, "seat_timeout", None),
+            timeout_seconds=seat_timeout,
         )
     except Exception as exc:
-        print(f"plan-gate run failed: {exc}", file=sys.stderr)
-        return 1
+        return _error(f"plan-gate run failed: {exc}")
 
     # Record this panel round in the seat ledger so the stop-rule's counter
     # persists across restarts. Recorded for EVERY non-PASS outcome (a PASS
@@ -2807,7 +2933,7 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     if result["decision"] != "PASS":
         plan_gate_tiebreaker.record_round(
             seat_ledger_path,
-            track_id=args.track_id, project_id=args.project_id,
+            track_id=track_id, project_id=project_id,
             round_number=rounds_done + 1, outcome="panel",
         )
 
@@ -2823,39 +2949,40 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             result["decision"], result["panelists"], source="plan-gate"
         )
         tracks_lib.set_decision_ref(
-            state_dir, args.track_id, args.project_id, payload, actor="system"
+            state_dir, track_id, project_id, payload, actor="system"
         )
     except Exception as exc:  # vnx-silent-except: decision_ref persistence must never break the gate
-        print(
-            f"WARNING: could not persist decision_ref for track {args.track_id}: {exc}",
-            file=sys.stderr,
+        stderr_lines.append(
+            f"WARNING: could not persist decision_ref for track {track_id}: {exc}"
         )
 
-    if args.json:
-        out = dict(result)
-        out["plan_source"] = plan_source_info
-        print(json.dumps(out, indent=2))
-    else:
-        s = result["summary"]
-        print(
-            f"Plan gate: {result['decision']}  "
-            f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
+    # Build the verdict output (both forms) BEFORE resolving the blocker, so the
+    # verdict is rendered even when the resolution below fails or the track is
+    # still blocked.
+    out = dict(result)
+    out["plan_source"] = plan_source_info
+    stdout_json = json.dumps(out, indent=2)
+
+    s = result["summary"]
+    stdout_text.append(
+        f"Plan gate: {result['decision']}  "
+        f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
+    )
+    trunc = result.get("doc_truncation") or {}
+    if trunc.get("truncated"):
+        pct = 100.0 * trunc["kept_chars"] / trunc["original_chars"]
+        stdout_text.append(
+            f"  ** PLAN DOC TRUNCATED: gate read {trunc['kept_chars']} of "
+            f"{trunc['original_chars']} chars ({pct:.1f}%) — this verdict may be based "
+            "on an incomplete plan **"
         )
-        trunc = result.get("doc_truncation") or {}
-        if trunc.get("truncated"):
-            pct = 100.0 * trunc["kept_chars"] / trunc["original_chars"]
-            print(
-                f"  ** PLAN DOC TRUNCATED: gate read {trunc['kept_chars']} of "
-                f"{trunc['original_chars']} chars ({pct:.1f}%) — this verdict may be based "
-                "on an incomplete plan **"
-            )
-        print(f"  {s['rationale']}")
-        for p in result["panelists"]:
-            mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
-            detail = p.get("rationale") or p.get("error") or ""
-            print(f"  - {p['label']:16} {mark}  {detail}")
-            for finding in p.get("blocking_findings", []):
-                print(f"      · {finding}")
+    stdout_text.append(f"  {s['rationale']}")
+    for p in result["panelists"]:
+        mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
+        detail = p.get("rationale") or p.get("error") or ""
+        stdout_text.append(f"  - {p['label']:16} {mark}  {detail}")
+        for finding in p.get("blocking_findings", []):
+            stdout_text.append(f"      · {finding}")
 
     if result["decision"] == "PASS":
         # A PASS verdict only counts as "unblocked" if the track actually reconciled
@@ -2870,26 +2997,35 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
         )
         try:
             resolved = _resolve_plan_blocker(
-                state_dir, args.track_id, args.project_id,
+                state_dir, track_id, project_id,
                 reason=panel_reason, resolver="panel",
             )
-            post = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
+            post = tracks_lib.get_track(state_dir, track_id, project_id)
         except Exception as exc:
-            print(
-                f"PASS verdict, but unblocking track {args.track_id} failed: {exc}. "
+            return _error(
+                f"PASS verdict, but unblocking track {track_id} failed: {exc}. "
                 "Track state unchanged — investigate before promoting.",
-                file=sys.stderr,
             )
-            return 1
         derived = post.get("derived_status") if isinstance(post, dict) else None
         if derived == "blocked":
-            print(
-                f"PASS verdict, but track {args.track_id} is STILL blocked "
+            stderr_lines.append(
+                f"PASS verdict, but track {track_id} is STILL blocked "
                 f"(plan blocker resolved={resolved}; another blocker or hard dependency "
-                "remains). Promote stays refused — clear the remaining blocker first.",
-                file=sys.stderr,
+                "remains). Promote stays refused — clear the remaining blocker first."
             )
-            return 2
+            return PlanGateRunResult(
+                track_id=track_id, project_id=project_id, exit_code=2,
+                outcome="PASS", decision=result["decision"], seats=len(panel),
+                variant=variant, is_new_feature=weight["is_new_feature"],
+                chosen_by=weight["chosen_by"],
+                override_direction=weight["override_direction"],
+                gov_trace=weight["gov_trace"],
+                plan_source=source, plan_source_info=plan_source_info,
+                ignored_goal=ignored_goal, resolved=resolved,
+                derived_status=derived, still_blocked=True,
+                result=result, stderr_lines=stderr_lines,
+                stdout_text=stdout_text, stdout_json=stdout_json,
+            )
         if resolved:
             # A PASS that CLEARS the gate is a real pass: write the durable,
             # hash-chained plan_gate_pass record with resolver="run" and the seat
@@ -2898,40 +3034,112 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
             # ledger was all-attest and the effectiveness probe read every gate as
             # manually overridden even when the panel had actually converged.
             wrote = _emit_plan_gate_pass_record(
-                repo_root=getattr(args, "repo_root", None),
-                track_id=args.track_id, project_id=args.project_id, resolver="run",
-                seats=len(panel), scope=gov.variant, reason=gov_trace,
+                repo_root=repo_root, track_id=track_id, project_id=project_id,
+                resolver="run", seats=len(panel), scope=variant,
+                reason=weight["gov_trace"],
             )
             if not wrote:
-                print(
+                stderr_lines.append(
                     f"WARNING: plan_gate_pass evidence NOT written for track "
-                    f"{args.track_id} (resolver=run, seats={len(panel)}, scope={gov.variant}). "
+                    f"{track_id} (resolver=run, seats={len(panel)}, scope={variant}). "
                     "The plan blocker IS resolved, but the durable pass record is "
-                    "missing - the merge gate may not recognize this pass.",
-                    file=sys.stderr,
+                    "missing - the merge gate may not recognize this pass."
                 )
-        print(
-            f"PASS — plan gate cleared. {_plan_blocker_oi(args.track_id)} "
+        stdout_text.append(
+            f"PASS — plan gate cleared. {_plan_blocker_oi(track_id)} "
             f"resolved={resolved}; track derived_status={derived}."
         )
-        return 0
+        return PlanGateRunResult(
+            track_id=track_id, project_id=project_id, exit_code=0,
+            outcome="PASS", decision=result["decision"], seats=len(panel),
+            variant=variant, is_new_feature=weight["is_new_feature"],
+            chosen_by=weight["chosen_by"],
+            override_direction=weight["override_direction"],
+            gov_trace=weight["gov_trace"],
+            plan_source=source, plan_source_info=plan_source_info,
+            ignored_goal=ignored_goal, resolved=resolved,
+            derived_status=derived, result=result,
+            stderr_lines=stderr_lines, stdout_text=stdout_text,
+            stdout_json=stdout_json,
+        )
+
     if result["decision"] == "INFRA_FAIL":
         # 0 readable verdicts: no lane reviewed the plan, so there is no plan
         # judgment to act on. This is an infrastructure failure (exit 1, like the
         # other infra errors above) — NOT a content REVISE. "Revise the plan and
         # re-run" would send the operator to fix a plan no lane ever saw.
-        print(
+        stderr_lines.append(
             "INFRA_FAIL — plan gate could not run: no lane produced a readable "
             "verdict, so the plan was NOT reviewed. Fix the lanes (see the "
-            "per-panelist errors above) and re-run the gate. Track stays blocked.",
-            file=sys.stderr,
+            "per-panelist errors above) and re-run the gate. Track stays blocked."
         )
-        return 1
-    print(
+        return PlanGateRunResult(
+            track_id=track_id, project_id=project_id, exit_code=1,
+            outcome="ERROR", decision=result["decision"], seats=len(panel),
+            variant=variant, is_new_feature=weight["is_new_feature"],
+            chosen_by=weight["chosen_by"],
+            override_direction=weight["override_direction"],
+            gov_trace=weight["gov_trace"],
+            plan_source=source, plan_source_info=plan_source_info,
+            ignored_goal=ignored_goal, error="INFRA_FAIL: no readable verdict",
+            result=result, stderr_lines=stderr_lines,
+            stdout_text=stdout_text, stdout_json=stdout_json,
+        )
+
+    stderr_lines.append(
         f"{result['decision']} — plan gate NOT cleared; track stays blocked. "
         "Revise the plan and re-run."
     )
-    return 2
+    return PlanGateRunResult(
+        track_id=track_id, project_id=project_id, exit_code=2,
+        outcome="REVISE", decision=result["decision"], seats=len(panel),
+        variant=variant, is_new_feature=weight["is_new_feature"],
+        chosen_by=weight["chosen_by"],
+        override_direction=weight["override_direction"],
+        gov_trace=weight["gov_trace"],
+        plan_source=source, plan_source_info=plan_source_info,
+        ignored_goal=ignored_goal, result=result,
+        stderr_lines=stderr_lines, stdout_text=stdout_text,
+        stdout_json=stdout_json,
+    )
+
+
+def cmd_plan_gate_run(args: argparse.Namespace) -> int:
+    """Run the plan-first panel over a plan; on PASS, resolve the OI-PLAN blocker.
+
+    The plan text comes from ``--doc`` (a file) when given, otherwise from the
+    track's ``goal_state``. A goal under ``goal_min_chars`` meaningful characters
+    (whitespace-stripped, configured in ``configs/plan_gate_panel.yaml``) is
+    refused loud — never silently passed to a panel it cannot inform, never
+    silently dropped. ``--doc`` wins explicitly over a present goal, and the
+    output names which source the gate judged.
+
+    Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK or a too-thin goal
+    (track stays blocked), 1 = infra error (doc/track missing, panel could not run).
+
+    This is now a thin renderer over :func:`run_plan_gate_for_track` — the same
+    execution path the batch command drives, so the two can never drift.
+    """
+    result = run_plan_gate_for_track(
+        state_dir=_resolve_state_dir(args.state_dir),
+        track_id=args.track_id,
+        project_id=args.project_id,
+        doc=getattr(args, "doc", None),
+        panel_seats=getattr(args, "panel_seats", None),
+        seat_timeout=getattr(args, "seat_timeout", None),
+        dispatch_paths=getattr(args, "dispatch_paths", None),
+        task_class=getattr(args, "task_class", None),
+        irreversible=bool(getattr(args, "irreversible", False)),
+        repo_root=getattr(args, "repo_root", None),
+    )
+    for line in result.stderr_lines:
+        print(line, file=sys.stderr)
+    if getattr(args, "json", False) and result.stdout_json is not None:
+        print(result.stdout_json)
+    elif result.stdout_text:
+        for line in result.stdout_text:
+            print(line)
+    return result.exit_code
 
 
 def cmd_plan_gate_status(args: argparse.Namespace) -> int:
@@ -3388,6 +3596,372 @@ def cmd_plan_gate_reblock(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# plan-gate batch (OPSCHALING cluster, point 4): run the plan gate over a set
+# of tracks blocked on an open OI-PLAN blocker. Resumeable, interruptible,
+# dry-run first. One shared execution path (run_plan_gate_for_track) — no copy.
+# ---------------------------------------------------------------------------
+
+_BATCH_PROGRESS_FILENAME = "plan_gate_batch_progress.json"
+_BATCH_PROGRESS_VERSION = 1
+
+# Display labels for the batch tally; the internal outcome values stay stable
+# (PASS/REVISE/REFUSED_THIN/ERROR) for JSON consumers.
+_BATCH_OUTCOME_LABEL = {
+    "PASS": "PASS",
+    "REVISE": "REVISE",
+    "REFUSED_THIN": "GEWEIGERD-te-dun",
+    "ERROR": "FOUT",
+}
+
+_batch_interrupted = False
+
+
+def _batch_sigint_handler(signum, frame):
+    """SIGINT during a batch: let the running track finish, then stop.
+
+    The loop checks ``_batch_interrupted`` BETWEEN tracks, so a track already
+    mid-run is allowed to complete and write its progress; already-processed
+    tracks stay in the store untouched.
+    """
+    global _batch_interrupted
+    _batch_interrupted = True
+
+
+def list_plan_blocked_tracks(state_dir, project_id) -> list:
+    """Track ids with an OPEN OI-PLAN blocker, in stable order.
+
+    Only ``resolved_at IS NULL`` rows count — a plan blocker that was lifted is
+    not a batch candidate. Ordered by track_id so the batch order is deterministic
+    across runs (and a ``--limit N`` always takes the same first N).
+    """
+    conn = _db_conn(state_dir)
+    try:
+        if not _plan_gate_supported(conn):
+            return []
+        rows = conn.execute(
+            "SELECT track_id FROM track_open_items "
+            "WHERE project_id = ? AND oi_id LIKE ? "
+            "AND link_type = 'blocks' AND resolved_at IS NULL "
+            "ORDER BY track_id ASC",
+            (project_id, _PLAN_OI_PREFIX + "%"),
+        ).fetchall()
+        return [r["track_id"] for r in rows]
+    finally:
+        conn.close()
+
+
+def _batch_progress_path(state_dir) -> Path:
+    return Path(state_dir) / _BATCH_PROGRESS_FILENAME
+
+
+def load_batch_progress(state_dir) -> dict:
+    """Read the batch progress store: ``{track_id: record}``; {} when absent.
+
+    A corrupt/partial store (interrupted write) yields {} rather than a crash —
+    the batch just re-runs. The resume path READS THE STORE BACK instead of
+    trusting any in-memory return value (a batch that resumes from a stale copy
+    silently re-runs tracks, which is exactly the "silent skip" shape this
+    cluster is for).
+    """
+    path = _batch_progress_path(state_dir)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    tracks_map = data.get("tracks") if isinstance(data, dict) else None
+    if not isinstance(tracks_map, dict):
+        return {}
+    return {k: v for k, v in tracks_map.items() if isinstance(v, dict)}
+
+
+def _save_batch_progress(state_dir, progress: dict) -> None:
+    _atomic_write_json(
+        _batch_progress_path(state_dir),
+        {"version": _BATCH_PROGRESS_VERSION, "tracks": progress},
+    )
+
+
+def _resolve_batch_selection(state_dir, project_id, *, track_filter, limit):
+    """Ordered, validated track ids for the batch.
+
+    ``track_filter`` (from repeatable ``--track``) wins explicitly: unknown ids
+    FAIL LOUD — silently skipping a named track is forbidden. Without it, every
+    track with an open OI-PLAN blocker is selected. ``--limit`` caps the count
+    and composes with ``--track`` (the two never silently exclude each other).
+    """
+    if track_filter:
+        ids = list(dict.fromkeys(track_filter))  # dedupe, keep first-seen order
+        missing = [
+            tid for tid in ids
+            if tracks_lib.get_track(state_dir, tid, project_id) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"plan-gate batch: unknown track id(s): {', '.join(missing)}. "
+                "Confirm with `vnx horizon plan-gate status <track>` or "
+                "`vnx objective list`; the batch refuses to skip a track it "
+                "cannot find."
+            )
+    else:
+        ids = list_plan_blocked_tracks(state_dir, project_id)
+    if limit is not None:
+        ids = ids[:limit]
+    return ids
+
+
+def _dry_run_track(state_dir, track_id, project_id, *, run_kwargs, min_goal_chars):
+    """Preview ONE track's gate class + seat count WITHOUT calling any model.
+
+    Reads the SAME ladder ``run_plan_gate_for_track`` uses (via
+    ``_derive_panel_weight``) plus the goal thickness, so the preview and the
+    real run can never disagree about the seat count.
+    """
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    weight = _derive_panel_weight(
+        panel_seats=run_kwargs.get("panel_seats"),
+        dispatch_paths=run_kwargs.get("dispatch_paths"),
+        task_class=run_kwargs.get("task_class"),
+        irreversible=run_kwargs.get("irreversible", False),
+    )
+    goal = (track.get("goal_state") or "") if isinstance(track, dict) else ""
+    goal_chars = len(goal.strip())
+    thin = goal_chars < min_goal_chars
+    detail = f"class={weight['variant']} seats={weight['seats']}"
+    if thin:
+        detail += f"; thin-goal ({goal_chars} chars < {min_goal_chars})"
+    return {
+        "track_id": track_id,
+        "outcome": "DRY_RUN",
+        "seats": weight["seats"],
+        "variant": weight["variant"],
+        "decision": "",
+        "detail": detail,
+        "thin": thin,
+    }
+
+
+def _batch_detail(outcome: PlanGateRunResult) -> str:
+    """One short reason line per batch result — the outcome and why."""
+    if outcome.outcome == "REFUSED_THIN":
+        return (
+            f"goal too thin: {outcome.thin_length} meaningful chars "
+            f"(threshold {outcome.thin_threshold})"
+        )
+    if outcome.outcome == "ERROR":
+        return outcome.error
+    if outcome.outcome == "PASS":
+        if outcome.still_blocked:
+            return "gate passed but track STILL blocked by another open item"
+        if outcome.no_panel:
+            return outcome.no_panel_reason
+        if outcome.variant == "tiebreaker":
+            if outcome.decision == "STOP":
+                return "tiebreaker STOP — gate cleared; findings recorded as open items"
+            return "tiebreaker START — gate cleared"
+        return "gate passed; plan blocker resolved"
+    return f"{outcome.decision or 'not cleared'} — plan gate not cleared"
+
+
+def _execute_batch(
+    selection,
+    *,
+    state_dir,
+    project_id,
+    run_kwargs,
+    restart,
+    min_goal_chars,
+    run_one=run_plan_gate_for_track,
+    interrupt_check=None,
+):
+    """Run the gate over ``selection``, persisting progress after EACH track.
+
+    Returns {"results": [...], "tally": {...}, "skipped": [...], "interrupted": bool}.
+    ``run_one`` (injectable, default the shared ``run_plan_gate_for_track``) is
+    called per track; ``interrupt_check`` (injectable, default the SIGINT flag)
+    stops the loop between tracks.
+    """
+    if interrupt_check is None:
+        interrupt_check = lambda: _batch_interrupted
+
+    progress = {} if restart else load_batch_progress(state_dir)
+    results: list = []
+    skipped: list = []
+    interrupted = False
+
+    for track_id in selection:
+        if interrupt_check():
+            interrupted = True
+            break
+        done = progress.get(track_id)
+        if not restart and isinstance(done, dict) and done.get("project_id") == project_id:
+            skipped.append(track_id)
+            continue
+        outcome = run_one(
+            state_dir=state_dir, track_id=track_id, project_id=project_id,
+            min_goal_chars=min_goal_chars,
+            **run_kwargs,
+        )
+        rec = {
+            "track_id": track_id,
+            "outcome": outcome.outcome,
+            "seats": outcome.seats,
+            "variant": outcome.variant,
+            "decision": outcome.decision,
+            "detail": _batch_detail(outcome),
+            "thin_length": outcome.thin_length,
+            "thin_threshold": outcome.thin_threshold,
+            "still_blocked": outcome.still_blocked,
+        }
+        progress[track_id] = {
+            **rec,
+            "project_id": project_id,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_batch_progress(state_dir, progress)
+        results.append(rec)
+
+    tally = {"PASS": 0, "REVISE": 0, "REFUSED_THIN": 0, "ERROR": 0}
+    for rec in results:
+        if rec["outcome"] in tally:
+            tally[rec["outcome"]] += 1
+    return {"results": results, "tally": tally, "skipped": skipped, "interrupted": interrupted}
+
+
+def _render_batch_dry_run(selection, *, state_dir, project_id, run_kwargs, min_goal_chars, as_json):
+    previews = [
+        _dry_run_track(state_dir, tid, project_id, run_kwargs=run_kwargs, min_goal_chars=min_goal_chars)
+        for tid in selection
+    ]
+    if as_json:
+        print(json.dumps({
+            "dry_run": True,
+            "tracks": previews,
+            "total_seats": sum(p["seats"] for p in previews),
+            "refused_thin": sum(1 for p in previews if p["thin"]),
+        }, indent=2, default=str))
+        return 0
+    if not previews:
+        print("plan-gate batch --dry-run: no tracks selected.")
+        return 0
+    print("plan-gate batch --dry-run (no model will be called):")
+    for p in previews:
+        print(f"  {p['track_id']:32} {p['detail']}")
+    total_seats = sum(p["seats"] for p in previews)
+    thin = sum(1 for p in previews if p["thin"])
+    print(
+        f"Total: {len(previews)} track(s), {total_seats} seat(s) across the "
+        f"derived ladder; {thin} would be refused as thin."
+    )
+    return 0
+
+
+def _render_batch_summary(summary, *, as_json):
+    if as_json:
+        print(json.dumps({
+            "results": summary["results"],
+            "tally": summary["tally"],
+            "skipped": summary["skipped"],
+            "interrupted": summary["interrupted"],
+        }, indent=2, default=str))
+        return
+    for rec in summary["results"]:
+        label = _BATCH_OUTCOME_LABEL.get(rec["outcome"], rec["outcome"])
+        line = f"{rec['track_id']:32} {label:20} {rec.get('seats', 0)} seat(s)"
+        variant = rec.get("variant", "")
+        if variant:
+            line += f" ({variant})"
+        print(line)
+        if rec.get("detail"):
+            print(f"    {rec['detail']}")
+    if summary["skipped"]:
+        print(f"Skipped (already done): {', '.join(summary['skipped'])}")
+    parts = [
+        f"{_BATCH_OUTCOME_LABEL[outcome]}={summary['tally'].get(outcome, 0)}"
+        for outcome in ("PASS", "REVISE", "REFUSED_THIN", "ERROR")
+    ]
+    print(f"Tally: {'  '.join(parts)}  ({len(summary['results'])} processed)")
+
+
+def cmd_plan_gate_batch(args: argparse.Namespace) -> int:
+    """Run the plan-first gate over a set of OI-PLAN-blocked tracks.
+
+    Selection: all open OI-PLAN blockers by default; ``--track`` (repeatable)
+    selects an explicit set (unknown ids fail loud); ``--limit N`` caps the
+    count and composes with ``--track``. ``--dry-run`` (the standard first step)
+    shows each track's gate class + seat count WITHOUT calling any model.
+
+    Resume/interrupt: progress is written as soon as a track completes; a second
+    run skips completed tracks (read back from the store); ``--restart`` forces
+    a re-run; SIGINT lets the running track finish and stops before the next,
+    leaving processed tracks intact.
+    """
+    import plan_gate_panel
+
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+
+    try:
+        min_goal_chars = plan_gate_panel.load_goal_min_chars()
+    except ValueError as exc:
+        print(f"plan-gate batch: {exc}", file=sys.stderr)
+        return 1
+
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        print("plan-gate batch: --limit must be >= 1", file=sys.stderr)
+        return 2
+
+    try:
+        selection = _resolve_batch_selection(
+            state_dir, project_id,
+            track_filter=getattr(args, "track", None),
+            limit=limit,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    run_kwargs = {
+        "panel_seats": getattr(args, "panel_seats", None),
+        "seat_timeout": getattr(args, "seat_timeout", None),
+        "dispatch_paths": getattr(args, "dispatch_paths", None),
+        "task_class": getattr(args, "task_class", None),
+        "irreversible": bool(getattr(args, "irreversible", False)),
+        "repo_root": getattr(args, "repo_root", None),
+    }
+    dry_run = bool(getattr(args, "dry_run", False))
+    restart = bool(getattr(args, "restart", False))
+
+    if dry_run:
+        return _render_batch_dry_run(
+            selection, state_dir=state_dir, project_id=project_id,
+            run_kwargs=run_kwargs, min_goal_chars=min_goal_chars,
+            as_json=bool(getattr(args, "json", False)),
+        )
+
+    prev_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _batch_sigint_handler)
+    try:
+        summary = _execute_batch(
+            selection, state_dir=state_dir, project_id=project_id,
+            run_kwargs=run_kwargs, restart=restart, min_goal_chars=min_goal_chars,
+        )
+    finally:
+        signal.signal(signal.SIGINT, prev_handler)
+
+    _render_batch_summary(summary, as_json=bool(getattr(args, "json", False)))
+    if summary["interrupted"]:
+        print(
+            "Interrupted — processed tracks are saved; re-run to resume.",
+            file=sys.stderr,
+        )
+        return 130
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -3733,6 +4307,70 @@ def _build_parser() -> argparse.ArgumentParser:
         help="operator approval token (REQUIRED)",
     )
     p_preblock.set_defaults(func=cmd_plan_gate_reblock)
+
+    p_pbatch = pg_sub.add_parser(
+        "batch",
+        help="run the gate over a set of OI-PLAN-blocked tracks (resumeable; "
+             "--dry-run first shows the class + seat count WITHOUT calling a model)",
+    )
+    _common(p_pbatch)
+    p_pbatch.add_argument(
+        "--track", action="append", default=None, metavar="TRACK_ID",
+        help="explicit track id(s) to gate (repeatable); unknown ids fail loud. "
+             "Default: every track with an open OI-PLAN blocker.",
+    )
+    p_pbatch.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="cap the number of tracks processed; composes with --track (not "
+             "mutually exclusive).",
+    )
+    p_pbatch.add_argument(
+        "--restart", action="store_true",
+        help="re-run all selected tracks, ignoring the resume store.",
+    )
+    p_pbatch.add_argument(
+        "--dry-run", action="store_true",
+        help="show each track's gate class + seat count without calling any "
+             "model. Standard first step before a real batch.",
+    )
+    p_pbatch.add_argument(
+        "--panel-seats",
+        dest="panel_seats",
+        default="",
+        help="comma-separated seat labels to run (subset of the configured panel); "
+             "unknown labels fail loud. Defaults to the governance-derived ladder.",
+    )
+    p_pbatch.add_argument(
+        "--seat-timeout",
+        dest="seat_timeout",
+        type=int,
+        default=None,
+        help="per-seat deadline in seconds before a panelist times out and books a "
+             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+    )
+    p_pbatch.add_argument(
+        "--dispatch-paths",
+        dest="dispatch_paths",
+        default=None,
+        help="comma-separated repo paths the plan touches; drives the governance "
+             "weight (variant) that sizes the panel (operator ladder).",
+    )
+    p_pbatch.add_argument(
+        "--task-class",
+        dest="task_class",
+        default=None,
+        help="task class for the plan from the smart-router closed set "
+             "(e.g. 01_code_generation marks a NEW FEATURE, which always runs the "
+             "full panel).",
+    )
+    p_pbatch.add_argument(
+        "--irreversible",
+        dest="irreversible",
+        action="store_true",
+        help="declare the change irreversible (deletion/rename/big architecture "
+             "refactor); forces coding-strict (3 seats).",
+    )
+    p_pbatch.set_defaults(func=cmd_plan_gate_batch)
 
     return parser
 

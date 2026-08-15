@@ -445,7 +445,7 @@ def test_cmd_plan_gate_run_tiebreaker_at_threshold(tmp_path, monkeypatch):
         panel_calls["n"] += 1
         return {"decision": "PASS", "summary": {}, "panelists": [], "doc_truncation": {}}
 
-    def _fake_run_tiebreaker(doc_path, *, track_id, project_id, round_number,
+    def _fake_run_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
                              last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
         tb_calls["n"] += 1
         return pgt.TiebreakerResult(
@@ -520,7 +520,7 @@ def test_cmd_plan_gate_run_stop_creates_open_items_and_names_model(tmp_path, mon
         "rationale": "plan lacks a rollback section", "run_at": "2026-08-15T00:00:00Z",
     })
 
-    def _stop_tiebreaker(doc_path, *, track_id, project_id, round_number,
+    def _stop_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
                          last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
         return pgt.TiebreakerResult(
             outcome="STOP", model="fable-5", round=round_number,
@@ -564,7 +564,7 @@ def test_cmd_plan_gate_run_start_names_model_in_resolution_reason(tmp_path, monk
     pgt.record_round(ledger, track_id="feat-start", project_id="p1", round_number=1, outcome="panel")
     pgt.record_round(ledger, track_id="feat-start", project_id="p1", round_number=2, outcome="panel")
 
-    def _start_tiebreaker(doc_path, *, track_id, project_id, round_number,
+    def _start_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
                           last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
         return pgt.TiebreakerResult(
             outcome="START", model="fable-5", round=round_number,
@@ -598,7 +598,7 @@ def test_cmd_plan_gate_run_tiebreaker_parse_failure_stays_blocked(tmp_path, monk
     # raises TiebreakerParseError (parse_tiebreaker rejects a findings list).
     # Make run_tiebreaker raise it directly so the cmd handler's loud-failure
     # path is exercised.
-    def _raising_tiebreaker(doc_path, *, track_id, project_id, round_number,
+    def _raising_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
                             last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
         raise pgt.TiebreakerParseError(
             "tiebreaker returned a 'findings' list — a seat returns findings; "
