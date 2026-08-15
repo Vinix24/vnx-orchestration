@@ -288,6 +288,11 @@ class SynthesizedLaneReceipt:
     role: Optional[str] = None
     receipt_kind: str = "dispatch"
     event_type: str = "subprocess_completion"
+    # Default "failed" preserves the pre-PR-B0 byte-identical shape (and the
+    # honest no-evidence outcome). The caller (dispatch_govern.ensure_receipt)
+    # derives the real status from the worker's DECLARED outcome: "done" for an
+    # authored report that does not declare failure, "failed" otherwise — for a
+    # declared-failure report or when no valid report exists (OI-1202).
     status: str = "failed"
     source: str = "tmux_interactive_lane_synthesized"
     synthesized: bool = True

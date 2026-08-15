@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -173,6 +174,7 @@ def ensure_receipt(
     report_path: Optional[Path],
     contract_status: str,
     permission_enforcement: str,
+    status: Optional[str] = None,
 ) -> None:
     """Append a lane-synthesized completion receipt when the worker never emitted one.
 
@@ -207,6 +209,20 @@ def ensure_receipt(
     # caller does not compute it, in which case these three fields stay
     # omitted exactly as before this change.
     _posture = spec.permission_posture or {}
+    # OI-1202: the lane-synthesized fallback receipt is NOT always a failure.
+    # When govern found a valid worker-authored report (contract_status="authored")
+    # the dispatch demonstrably produced a complete deliverable, and stamping the
+    # only receipt in the ledger with status="failed" silently pollutes every
+    # failure-percentage count with a false failure. The caller (govern) passes an
+    # explicit `status` derived from the report's DECLARED outcome; when it does
+    # not (direct callers / the error handler), fall back to the contract-status
+    # derivation: authored -> done, anything else -> failed (no valid report = no
+    # evidence of completion). The source marker stays
+    # "tmux_interactive_lane_synthesized" and synthesized=True, so a real worker
+    # receipt that lands later still wins on readback.
+    if status is None:
+        status = "done" if contract_status == "authored" else "failed"
+
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the spec carries
     # the fields when the door threaded them; otherwise the door's env vars the
     # tmux pane inherited (the worker-authored receipt path reads the same env in
@@ -219,6 +235,7 @@ def ensure_receipt(
         lane=lane,
         failure_reason=raw.failure_reason,
         contract_status=contract_status,
+        status=status,
         permission_enforcement=permission_enforcement,
         role=_resolve_govern_role(spec),
         parent_dispatch=(
@@ -360,6 +377,42 @@ def _split_yaml_frontmatter(text: str) -> "tuple[dict, str]":
         return fm, body
     except Exception:  # noqa: BLE001
         return {}, text
+
+
+# OI-1202: terminal-failure statuses a worker report can DECLARE (bold
+# ``**Status**: value`` in the body, or a ``status`` key in YAML frontmatter).
+# Mirrors report_to_receipt_converter's ``_TERMINAL_FAILURE_STATUSES`` plus the
+# other failure-shaped literals, so a 4-heading report that declares failure
+# (e.g. worker_heartbeat's heartbeat_killed / worker_process_gone reports) is
+# never re-labeled "done" by the lane-synthesized fallback.
+_DECLARED_FAILURE_STATUSES = frozenset({
+    "failed", "failure", "heartbeat_killed", "error", "blocked", "timeout",
+    "contract_invalid",
+})
+
+# Bold-field shape the worker_heartbeat failure reports use ("**Status**: failed").
+_STATUS_BOLD_RE = re.compile(r"\*\*Status\*\*\s*:\s*([^\n]+)", re.IGNORECASE)
+
+
+def _report_declares_failure(body: str) -> bool:
+    """True when a report body explicitly declares a terminal failure status.
+
+    Source order mirrors report_to_receipt_converter.build_receipt_from_report:
+    a ``status`` key in YAML frontmatter wins, then a bold ``**Status**:``
+    field in the body prose. Only an EXPLICIT failure literal counts — an
+    absent or unknown status is not evidence of failure (OI-1202).
+    """
+    fm, body_text = _split_yaml_frontmatter(body)
+    status: Optional[str] = None
+    if isinstance(fm, dict):
+        raw = fm.get("status")
+        if raw:
+            status = str(raw).strip()
+    if not status:
+        m = _STATUS_BOLD_RE.search(body_text[:3000])
+        if m:
+            status = m.group(1).strip()
+    return bool(status) and status.lower() in _DECLARED_FAILURE_STATUSES
 
 
 def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
@@ -591,6 +644,18 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
 
     permission_enforcement = "strict" if enforce else "soft"
 
+    # OI-1202: the lane-synthesized fallback status reflects the worker's
+    # DECLARED outcome, not just the presence of a 4-heading report. A report
+    # that passes the body contract but declares failure (heartbeat_killed,
+    # worker_process_gone, or an explicit "failed" status) must stay "failed";
+    # only an authored report with no declared failure is "done". Non-authored
+    # (synthesized/violated) = no valid report = no evidence of completion.
+    receipt_status = (
+        "failed"
+        if (contract_status != "authored" or _report_declares_failure(body))
+        else "done"
+    )
+
     # -- d. Emit report with final body ---------------------------------------
     # authored: force-write with frontmatter so ALL reports are schema-uniform.
     #   The worker body is preserved; the frontmatter block is prepended.
@@ -699,6 +764,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
             report_path=None,
             contract_status=contract_status,
             permission_enforcement=permission_enforcement,
+            status=receipt_status,
         )
         return GovernedOutcome(
             report_path=None,
@@ -713,6 +779,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         report_path=report_path,
         contract_status=contract_status,
         permission_enforcement=permission_enforcement,
+        status=receipt_status,
     )
 
     return GovernedOutcome(
