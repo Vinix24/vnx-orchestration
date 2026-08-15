@@ -9,6 +9,14 @@ worker permission SSOT (``.vnx/worker_permissions.yaml`` via
 tool call. Reuses the existing matchers verbatim — no reimplementation of
 matching logic.
 
+OI-1196: the file_write_scope check additionally narrows to this dispatch's
+own declared paths, when any were declared. ``VNX_DISPATCH_PATHS`` (a JSON
+list, exported by ``TmuxInteractiveDispatch._spawn_session`` from the
+dispatch's ``--dispatch-paths``) is resolved via
+``worker_permissions.resolve_dispatch_write_scope`` and passed to
+``match_file_write_scope`` as an additional, ANDed constraint — a dispatch
+can only narrow the role's scope, never widen it.
+
 Feasibility proven by docs/investigations/spike-worker-scope-hook-feasibility.md
 (E1-E4): PreToolUse hooks fire under --dangerously-skip-permissions, worktree-
 local settings are honored via cwd-based discovery, and config live-reloads.
@@ -66,6 +74,7 @@ try:
     from worker_permissions import (  # noqa: E402
         match_bash_deny,
         match_file_write_scope,
+        resolve_dispatch_write_scope,
         resolve_worker_profile,
         worker_permission_enforcement_enabled,
     )
@@ -122,6 +131,32 @@ def _is_within_report_dir(file_path: str) -> bool:
         return False
 
 
+def _resolve_dispatch_write_scope_from_env() -> "list[str] | None":
+    """Read ``VNX_DISPATCH_PATHS`` (JSON list, exported by
+    ``TmuxInteractiveDispatch._spawn_session``) and resolve it to a
+    write-scope narrowing via :func:`resolve_dispatch_write_scope` (OI-1196).
+
+    Fails open to ``None`` (no dispatch-level narrowing) on any parse
+    failure or missing var. This is safe, not a silent hole: ``None`` only
+    removes the EXTRA per-dispatch narrowing — the role's file_write_scope
+    check in :func:`match_file_write_scope` still applies unconditionally,
+    so a malformed/missing env var can never widen a worker past its role
+    scope. It can only fail to apply a tightening the dispatch asked for.
+    """
+    if not _DEPS_AVAILABLE:
+        return None
+    raw = os.environ.get("VNX_DISPATCH_PATHS")
+    if not raw:
+        return None
+    try:
+        paths = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return None
+    return resolve_dispatch_write_scope(paths)
+
+
 def evaluate(payload: dict) -> "tuple[str, str | None]":
     """Return (decision, reason) for one PreToolUse payload. decision is 'allow' or 'block'."""
     if not _DEPS_AVAILABLE:
@@ -163,10 +198,16 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
         cwd = payload.get("cwd")
         cwd = cwd if isinstance(cwd, str) else ""
         rel_path = _relative_to_cwd(file_path, cwd)
-        if not match_file_write_scope(rel_path, profile):
+        dispatch_write_scope = _resolve_dispatch_write_scope_from_env()
+        if not match_file_write_scope(rel_path, profile, dispatch_write_scope):
+            scope_desc = (
+                "file_write_scope narrowed by this dispatch's declared paths"
+                if dispatch_write_scope is not None
+                else "file_write_scope"
+            )
             return (
                 "block",
-                f"worker-scope: write target '{rel_path}' is outside file_write_scope "
+                f"worker-scope: write target '{rel_path}' is outside {scope_desc} "
                 f"for role '{profile.role}'",
             )
         return "allow", None

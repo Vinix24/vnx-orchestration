@@ -25,6 +25,7 @@ from worker_permissions import (
     load_permissions,
     match_bash_deny,
     match_file_write_scope,
+    resolve_dispatch_write_scope,
     resolve_role_mcp_config,
     resolve_worker_profile,
     validate_dispatch_permissions,
@@ -241,6 +242,91 @@ def test_file_write_scope_backend(yaml_file: Path) -> None:
     assert match_file_write_scope("scripts/lib/foo.py", profile) is True
     assert match_file_write_scope("tests/test_bar.py", profile) is True
     assert match_file_write_scope("dashboard/token-dashboard/app.ts", profile) is True
+
+
+# ---------------------------------------------------------------------------
+# OI-1196: dispatch_paths -> file_write_scope narrowing
+# ---------------------------------------------------------------------------
+
+class TestResolveDispatchWriteScope:
+    """resolve_dispatch_write_scope: raw --dispatch-paths entries -> write globs."""
+
+    def test_none_when_no_paths_declared(self) -> None:
+        assert resolve_dispatch_write_scope(None) is None
+        assert resolve_dispatch_write_scope([]) is None
+
+    def test_bare_path_defaults_to_read_write(self) -> None:
+        assert resolve_dispatch_write_scope(["scripts/lib/foo.py"]) == [
+            "scripts/lib/foo.py"
+        ]
+
+    def test_read_access_excluded_from_write_scope(self) -> None:
+        # Declared paths, but every one is read-only -> empty list, NOT None.
+        result = resolve_dispatch_write_scope(["docs/README.md:read"])
+        assert result == []
+
+    def test_write_and_create_and_read_write_all_grant_write(self) -> None:
+        result = resolve_dispatch_write_scope(
+            [
+                "a.py:write",
+                "b.py:read_write",
+                "c.py:create",
+                "d.py:read",
+            ]
+        )
+        assert sorted(result) == ["a.py", "b.py", "c.py"]
+
+    def test_unknown_access_suffix_treated_as_part_of_path(self) -> None:
+        # "bogus" is not a legal PathAccess value, so the whole string is the
+        # path (defaults to read_write) rather than silently misparsed.
+        result = resolve_dispatch_write_scope(["weird:bogus"])
+        assert result == ["weird:bogus"]
+
+
+class TestMatchFileWriteScopeDispatchNarrowing:
+    """match_file_write_scope's dispatch_write_scope param: intersection, never union."""
+
+    def test_no_dispatch_scope_is_unchanged_behavior(self, yaml_file: Path) -> None:
+        """dispatch_write_scope=None (not declared) must match pre-OI-1196 behavior."""
+        profile = load_permissions("backend-developer", yaml_path=yaml_file)
+        assert match_file_write_scope("scripts/lib/foo.py", profile) is True
+        assert match_file_write_scope("scripts/lib/foo.py", profile, None) is True
+        assert match_file_write_scope("docs/x.md", profile) is False
+        assert match_file_write_scope("docs/x.md", profile, None) is False
+
+    def test_dispatch_scope_narrower_than_role_is_enforced(self, yaml_file: Path) -> None:
+        """A write inside role scope but outside the dispatch's declared paths is blocked."""
+        profile = load_permissions("backend-developer", yaml_path=yaml_file)
+        dispatch_scope = resolve_dispatch_write_scope(["scripts/lib/foo.py"])
+        assert match_file_write_scope("scripts/lib/foo.py", profile, dispatch_scope) is True
+        # Also within role scope (scripts/**) but not declared by this dispatch.
+        assert match_file_write_scope("scripts/lib/bar.py", profile, dispatch_scope) is False
+
+    def test_dispatch_scope_wider_than_role_never_widens(self, yaml_file: Path) -> None:
+        """OI-1196 hard rule: a dispatch can never grant write outside the role's scope."""
+        profile = load_permissions("backend-developer", yaml_path=yaml_file)
+        # docs/** is outside backend-developer's file_write_scope entirely.
+        dispatch_scope = resolve_dispatch_write_scope(["docs/README.md"])
+        assert match_file_write_scope("docs/README.md", profile, dispatch_scope) is False
+
+    def test_all_read_access_dispatch_scope_blocks_every_write(self, yaml_file: Path) -> None:
+        """Declaring only read-access paths means the dispatch does no writing at all."""
+        profile = load_permissions("backend-developer", yaml_path=yaml_file)
+        dispatch_scope = resolve_dispatch_write_scope(["scripts/lib/foo.py:read"])
+        assert dispatch_scope == []
+        assert match_file_write_scope("scripts/lib/foo.py", profile, dispatch_scope) is False
+
+    def test_composes_with_fallback_role_profile(self) -> None:
+        """The fallback (depth-limited, non-glob) role scope still ANDs correctly."""
+        profile = default_code_worker_profile()
+        dispatch_scope = resolve_dispatch_write_scope(["src/app.py"])
+        # Within the fallback depth limit AND the declared dispatch path.
+        assert match_file_write_scope("src/app.py", profile, dispatch_scope) is True
+        # Within the fallback depth limit but NOT declared by this dispatch.
+        assert match_file_write_scope("src/other.py", profile, dispatch_scope) is False
+        # Declared by the dispatch but exceeds the fallback depth limit (7 segments).
+        deep_scope = resolve_dispatch_write_scope(["a/b/c/d/e/f/out.md"])
+        assert match_file_write_scope("a/b/c/d/e/f/out.md", profile, deep_scope) is False
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ from dispatch_spec import (  # noqa: E402
     Reject,
     ValidatedSpec,
     validate,
+    write_paths,
 )
 
 # ---------------------------------------------------------------------------
@@ -356,6 +357,56 @@ class TestRule10DispatchPaths:
         result = _do_validate(spec, monkeypatch)
         assert isinstance(result, ValidatedSpec)
         assert len(result.normalized_paths) == 2
+
+    def test_access_survives_validate_into_normalized_paths(self, tmp_path, monkeypatch):
+        """access is carried through validate() unchanged — it is not silently dropped."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, dispatch_paths=(
+            DispatchPath(PurePosixPath("scripts/lib/foo.py"), PathAccess.READ),
+            DispatchPath(PurePosixPath("tests/test_foo.py"), PathAccess.CREATE),
+        ))
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+        by_path = {str(dp.path): dp.access for dp in result.normalized_paths}
+        assert by_path["scripts/lib/foo.py"] == PathAccess.READ
+        assert by_path["tests/test_foo.py"] == PathAccess.CREATE
+
+
+# ---------------------------------------------------------------------------
+# OI-1196: write_paths() — the access field's first real consumer
+# ---------------------------------------------------------------------------
+
+class TestWritePaths:
+    def test_empty_tuple_yields_empty_list(self):
+        assert write_paths(()) == []
+
+    def test_read_write_and_default_access_included(self):
+        paths = (
+            DispatchPath(PurePosixPath("a.py")),  # default is READ_WRITE
+            DispatchPath(PurePosixPath("b.py"), PathAccess.READ_WRITE),
+        )
+        assert write_paths(paths) == ["a.py", "b.py"]
+
+    def test_write_and_create_included(self):
+        paths = (
+            DispatchPath(PurePosixPath("a.py"), PathAccess.WRITE),
+            DispatchPath(PurePosixPath("b.py"), PathAccess.CREATE),
+        )
+        assert write_paths(paths) == ["a.py", "b.py"]
+
+    def test_read_access_excluded(self):
+        paths = (
+            DispatchPath(PurePosixPath("a.py"), PathAccess.READ),
+            DispatchPath(PurePosixPath("b.py"), PathAccess.WRITE),
+        )
+        assert write_paths(paths) == ["b.py"]
+
+    def test_all_read_yields_empty_list_not_everything(self):
+        """A dispatch that only declares read-access paths gets zero write paths —
+        never silently 'no restriction' (which would be the empty-list-means-
+        unrestricted convention used elsewhere for role file_write_scope)."""
+        paths = (DispatchPath(PurePosixPath("a.py"), PathAccess.READ),)
+        assert write_paths(paths) == []
 
 
 # ---------------------------------------------------------------------------

@@ -442,6 +442,102 @@ class TestUnknownRoleFallback(HookTestCase):
         self.assertEqual(res.stdout.strip(), "", res.stdout)
 
 
+class TestDispatchPathsNarrowing(HookTestCase):
+    """OI-1196: VNX_DISPATCH_PATHS narrows file_write_scope, never widens it.
+
+    ROLE (quality-engineer) file_write_scope: tests/**, scripts/check_*.
+    """
+
+    def test_write_within_dispatch_scope_and_role_scope_allowed(self):
+        target = self.wt / "tests" / "test_x.py"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            data_dir=self.data_dir,
+            extra_env={"VNX_DISPATCH_PATHS": json.dumps(["tests/test_x.py"])},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+    def test_write_within_role_scope_but_outside_dispatch_scope_blocked(self):
+        """In role scope (tests/**) but not declared by this dispatch -> blocked."""
+        target = self.wt / "tests" / "test_other.py"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            data_dir=self.data_dir,
+            extra_env={"VNX_DISPATCH_PATHS": json.dumps(["tests/test_x.py"])},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        decision = parse_block(res.stdout)
+        self.assertIn("tests/test_other.py", decision["reason"])
+        self.assertIn("narrowed by this dispatch", decision["reason"])
+
+    def test_dispatch_scope_wider_than_role_scope_never_widens(self):
+        """docs/** is outside quality-engineer's role scope entirely — declaring it
+        in dispatch_paths must NOT unlock it (OI-1196 hard rule)."""
+        target = self.wt / "docs" / "x.md"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            data_dir=self.data_dir,
+            extra_env={"VNX_DISPATCH_PATHS": json.dumps(["docs/x.md"])},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        decision = parse_block(res.stdout)
+        self.assertIn("docs/x.md", decision["reason"])
+
+    def test_read_access_dispatch_path_does_not_grant_write(self):
+        """A dispatch path declared access=read must not open up write there."""
+        target = self.wt / "tests" / "test_x.py"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            data_dir=self.data_dir,
+            extra_env={"VNX_DISPATCH_PATHS": json.dumps(["tests/test_x.py:read"])},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        decision = parse_block(res.stdout)
+        self.assertIn("tests/test_x.py", decision["reason"])
+
+    def test_no_dispatch_paths_env_var_is_unchanged_behavior(self):
+        """No VNX_DISPATCH_PATHS at all -> identical to pre-OI-1196 role-only check."""
+        target = self.wt / "tests" / "test_x.py"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+    def test_malformed_dispatch_paths_env_fails_open_to_role_scope_only(self):
+        """Malformed VNX_DISPATCH_PATHS must not crash or widen — it degrades to
+        'no extra narrowing', with the role check still fully enforced."""
+        # In-scope write still allowed (role check alone still applies).
+        target = self.wt / "tests" / "test_x.py"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            data_dir=self.data_dir,
+            extra_env={"VNX_DISPATCH_PATHS": "not json"},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+        # Out-of-role-scope write is still blocked — malformed data never widens.
+        target2 = self.wt / "docs" / "x.md"
+        res2 = run_hook(
+            make_payload("Write", {"file_path": str(target2)}, cwd=str(self.wt)),
+            enforce=True,
+            data_dir=self.data_dir,
+            extra_env={"VNX_DISPATCH_PATHS": "not json"},
+        )
+        self.assertEqual(res2.returncode, 0, res2.stderr)
+        decision = parse_block(res2.stdout)
+        self.assertIn("docs/x.md", decision["reason"])
+
+
 class TestReportPathExemption(HookTestCase):
     """Report obligation: writes to $VNX_DATA_DIR/unified_reports/ are exempt from scope."""
 
