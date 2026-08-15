@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import sys
 import textwrap
@@ -277,10 +278,60 @@ class TestResolveDispatchWriteScope:
         assert sorted(result) == ["a.py", "b.py", "c.py"]
 
     def test_unknown_access_suffix_treated_as_part_of_path(self) -> None:
-        # "bogus" is not a legal PathAccess value, so the whole string is the
-        # path (defaults to read_write) rather than silently misparsed.
-        result = resolve_dispatch_write_scope(["weird:bogus"])
-        assert result == ["weird:bogus"]
+        # "bogus" is not a legal PathAccess value, so the whole string (including
+        # the ":bogus") is the path (defaults to read_write) rather than silently
+        # misparsed. A file path also stays a file path through dir-expansion.
+        result = resolve_dispatch_write_scope(["scripts/lib/foo.py:bogus"])
+        assert result == ["scripts/lib/foo.py:bogus"]
+
+    def test_directory_path_expands_to_glob(self) -> None:
+        # A declared directory covers its contents, not just its literal name.
+        # The exact literal is kept alongside <dir>/** so an extension-less FILE
+        # that shares the name (e.g. VERSION) still matches itself exactly.
+        assert resolve_dispatch_write_scope(["tests"]) == ["tests", "tests/**"]
+        assert resolve_dispatch_write_scope(["tests/"]) == ["tests", "tests/**"]
+        assert resolve_dispatch_write_scope(["scripts/commands"]) == [
+            "scripts/commands",
+            "scripts/commands/**",
+        ]
+
+    def test_file_path_stays_exact(self) -> None:
+        # A declared file path stays a file path — no .bak / whole-dir access.
+        assert resolve_dispatch_write_scope(["scripts/lib/foo.py"]) == [
+            "scripts/lib/foo.py"
+        ]
+
+    def test_glob_path_is_untouched(self) -> None:
+        # Already a glob — returned verbatim, never double-expanded.
+        assert resolve_dispatch_write_scope(["scripts/**"]) == ["scripts/**"]
+        assert resolve_dispatch_write_scope(["scripts/*.py"]) == ["scripts/*.py"]
+
+    def test_dotfile_directory_expands(self) -> None:
+        # ".github" has no suffix (a dotfile), so it is a directory, not a file.
+        assert resolve_dispatch_write_scope([".github"]) == [".github", ".github/**"]
+
+    def test_extensionless_file_keeps_exact_literal(self) -> None:
+        # "VERSION" has no extension, so the form alone cannot tell it is a file
+        # rather than a directory. Both readings are granted: the exact literal
+        # (so the file VERSION still matches) and <path>/** (so it would cover a
+        # directory of the same name). The literal never opens neighbours:
+        # VERSION.bak is blocked; the /** branch covers VERSION/... contents.
+        scope = resolve_dispatch_write_scope(["VERSION"])
+        assert scope == ["VERSION", "VERSION/**"]
+        assert any(fnmatch.fnmatch("VERSION", s) for s in scope)
+        assert not any(fnmatch.fnmatch("VERSION.bak", s) for s in scope)
+        assert any(fnmatch.fnmatch("VERSION/CHANGELOG.md", s) for s in scope)
+
+    def test_mixed_file_and_directory_entries(self) -> None:
+        result = resolve_dispatch_write_scope(
+            ["scripts/lib/foo.py", "tests", "docs/README.md"]
+        )
+        assert result == [
+            "scripts/lib/foo.py",
+            "tests",
+            "tests/**",
+            "docs/README.md",
+        ]
 
 
 class TestMatchFileWriteScopeDispatchNarrowing:
@@ -327,6 +378,28 @@ class TestMatchFileWriteScopeDispatchNarrowing:
         # Declared by the dispatch but exceeds the fallback depth limit (7 segments).
         deep_scope = resolve_dispatch_write_scope(["a/b/c/d/e/f/out.md"])
         assert match_file_write_scope("a/b/c/d/e/f/out.md", profile, deep_scope) is False
+
+    def test_declared_directory_covers_its_contents(self, yaml_file: Path) -> None:
+        """Declaring 'tests' covers 'tests/test_iets.py' (directory matching)."""
+        profile = load_permissions("backend-developer", yaml_path=yaml_file)
+        dispatch_scope = resolve_dispatch_write_scope(["tests"])
+        assert match_file_write_scope("tests/test_iets.py", profile, dispatch_scope) is True
+        assert match_file_write_scope("tests/sub/deep.py", profile, dispatch_scope) is True
+        # In role scope but outside the declared directory -> blocked.
+        assert match_file_write_scope("scripts/lib/other.py", profile, dispatch_scope) is False
+
+    def test_declared_file_does_not_open_neighbours(self, yaml_file: Path) -> None:
+        """A declared file path never grants .bak or the whole directory."""
+        profile = load_permissions("backend-developer", yaml_path=yaml_file)
+        dispatch_scope = resolve_dispatch_write_scope(["scripts/lib/foo.py"])
+        assert match_file_write_scope("scripts/lib/foo.py", profile, dispatch_scope) is True
+        assert match_file_write_scope("scripts/lib/foo.py.bak", profile, dispatch_scope) is False
+        assert match_file_write_scope("scripts/lib/bar.py", profile, dispatch_scope) is False
+
+    def test_declared_nested_directory_covers_files(self, yaml_file: Path) -> None:
+        profile = load_permissions("backend-developer", yaml_path=yaml_file)
+        dispatch_scope = resolve_dispatch_write_scope(["scripts/commands"])
+        assert match_file_write_scope("scripts/commands/start.sh", profile, dispatch_scope) is True
 
 
 # ---------------------------------------------------------------------------

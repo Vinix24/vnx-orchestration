@@ -1,15 +1,16 @@
-"""ADR-012 worker-permission enforcement feature flag — default-ON tests (15-08).
+"""ADR-012 worker-permission enforcement feature flag — default-OFF tests (15-08).
 
 Covers both launch lanes:
   * tmux interactive lane (_default_launch_command)
   * provider/headless lane (subprocess_adapter._build_worker_scope_args)
 
 Verifies:
-  - Flag absent (default ON) and truthy → scoped spawn, no skip flag.
+  - Flag absent (default OFF, since the 15-08 flip was reverted pending a
+    remeasurement) → blanket skip; truthy → scoped spawn, no skip flag.
   - Explicit opt-outs (VNX_WORKER_ENFORCEMENT_SKIP=1, or falsy
     VNX_ENFORCE_WORKER_PERMISSIONS) → byte-for-byte blanket skip.
   - Unknown role falls back to the functional code-worker profile.
-  - Receipt marker is emitted when the flag is ON (now the default).
+  - Receipt marker is emitted only when the flag is explicitly ON.
 """
 
 from __future__ import annotations
@@ -70,17 +71,20 @@ def _extract_receipt_from_protocol(protocol: str) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestWorkerPermissionEnforcementEnabled:
-    def test_default_on(self):
+    def test_default_off(self):
         # Both VNX_WORKER_ENFORCEMENT_SKIP and VNX_ENFORCE_WORKER_PERMISSIONS
-        # unset → enforcement is the default (since 15-08).
+        # unset → enforcement is OFF (the 15-08 flip was reverted pending a
+        # remeasurement of the outside-rate with directory matching repaired).
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("VNX_ENFORCE_WORKER_PERMISSIONS", None)
             os.environ.pop("VNX_WORKER_ENFORCEMENT_SKIP", None)
-            assert worker_permission_enforcement_enabled() is True
+            assert worker_permission_enforcement_enabled() is False
 
     @pytest.mark.parametrize("truthy", ["1", "true", "True", "yes", "on"])
     def test_truthy_values(self, truthy):
+        # Explicit opt-IN while the default is OFF.
         with patch.dict(os.environ, {"VNX_ENFORCE_WORKER_PERMISSIONS": truthy}, clear=False):
+            os.environ.pop("VNX_WORKER_ENFORCEMENT_SKIP", None)
             assert worker_permission_enforcement_enabled() is True
 
     @pytest.mark.parametrize("falsy", ["0", "false", "no", "off", ""])
@@ -93,7 +97,7 @@ class TestWorkerPermissionEnforcementEnabled:
 
     @pytest.mark.parametrize("skip", ["1", "true", "True", "yes", "on"])
     def test_worker_enforcement_skip_optout(self, skip):
-        # Explicit per-dispatch opt-out takes precedence over the default-ON.
+        # Explicit per-dispatch opt-out stays a hard off regardless of default.
         with patch.dict(os.environ, {"VNX_WORKER_ENFORCEMENT_SKIP": skip}, clear=False):
             os.environ.pop("VNX_ENFORCE_WORKER_PERMISSIONS", None)
             assert worker_permission_enforcement_enabled() is False

@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Measure the blast radius of flipping worker-permission enforcement default ON.
+"""Measure worker write-boundary enforcement blast radius and compliance.
 
-Dispatch 20260815-enforce-default-on. Operator decision 2026-08-15: the
-``dispatch_paths`` write boundary (OI-1196, PR #1509) shipped behaviourally
-correct but inert — ``pretooluse_worker_scope_enforce.py::evaluate`` starts with
-``if not worker_permission_enforcement_enabled(): return "allow", None`` and
-that predicate defaulted OFF. This script measures what the flip would actually
-hit, BEFORE the default is flipped.
+Dispatch 20260815-scope-dir-matching (fix-forward on PR #1511). Two things are
+measured, both by replaying the hook's OWN matchers over real history:
+
+  1. The ROLE-scope-only outside rate — how many dispatches wrote at least one
+     file outside their own role's ``file_write_scope``, ignoring
+     ``dispatch_paths`` entirely. This is the number that matters for the
+     enforcement default: role scope is the layer that becomes hard when
+     ``worker_permission_enforcement_enabled()`` is ON. The 15-08 flip to ON
+     was reverted to OFF; this rate is the flip-back condition.
+  2. The dispatch-scope-only compliance — of the dispatches that declared
+     write-granting ``dispatch_paths``, how many wrote outside them, under BOTH
+     the pre-fix literal matcher and the repaired directory-aware matcher
+     (``resolve_dispatch_write_scope`` now expands a declared directory to its
+     contents). The delta proves the directory-matching fix.
 
 Method (honest, per-dispatch, no extrapolation):
 
@@ -25,16 +33,13 @@ Method (honest, per-dispatch, no extrapolation):
      ``resolve_dispatch_write_scope`` / ``resolve_worker_profile``), so the
      verdict is the hook's verdict, not a reimplementation.
 
-The "would break" verdict is: does any changed file fail the full enforcement
-(role ``file_write_scope`` AND the dispatch's write-granting ``dispatch_paths``)?
-That is the number the operator must see before the flip. Only the *linked*
-population is reported as measured; the unlinked remainder is a count, not a
-percentage.
-
-Exit 0 always; results go to stdout (JSON summary + human-readable detail).
+Only the *linked* population is reported as measured; the unlinked remainder is
+a count, not a percentage. Exit 0 always; results go to stdout (JSON summary +
+human-readable detail).
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import subprocess
@@ -214,6 +219,66 @@ def main() -> int:
         if declared_directory_paths(declared):
             dir_declared += 1
 
+    # ---- role-scope-only outside rate (step 3 of the fix-forward) ----
+    # Ignore dispatch_paths entirely: does any changed file fall outside the
+    # dispatch's ROLE file_write_scope? This is the number that matters most
+    # for the flip, because the role scope is the layer that becomes hard.
+    role_outside = 0
+    role_inside = 0
+    role_outside_examples: list[dict] = []
+    for did in linked:
+        spec = specs[did]
+        role = spec.get("role") or ""
+        files: set[str] = set()
+        for sha in did2shas[did]:
+            files |= changed_files(sha)
+        if not files:
+            continue
+        profile = resolve_worker_profile(role)
+        outside = [f for f in sorted(files) if not match_file_write_scope(f, profile, None)]
+        if outside:
+            role_outside += 1
+            if len(role_outside_examples) < 20:
+                role_outside_examples.append(
+                    {"dispatch_id": did, "role": role, "files": outside[:4]}
+                )
+        else:
+            role_inside += 1
+
+    # ---- dispatch-scope-only compliance: outside-declaration rate, under the
+    # literal (pre-fix) and dir-aware (post-fix) matchers. Proves the
+    # directory-matching fix: a dispatch that declared a bare directory (e.g.
+    # ``tests``) and wrote inside it was "outside-declaration" under the literal
+    # fnmatch matcher but is "inside" once the directory expands to ``tests/**``.
+    dispatch_scope_total = 0
+    outside_declaration_literal = 0
+    outside_declaration_dir_aware = 0
+    dir_fix_rescued: list[str] = []
+    for did in linked:
+        spec = specs[did]
+        declared = write_granting_paths(spec)
+        if not declared:
+            continue
+        files: set[str] = set()
+        for sha in did2shas[did]:
+            files |= changed_files(sha)
+        if not files:
+            continue
+        dispatch_scope_total += 1
+        dir_aware = resolve_dispatch_write_scope(declared)
+        literal_out = any(
+            not any(fnmatch.fnmatch(f, d) for d in declared) for f in files
+        )
+        diraware_out = any(
+            not any(fnmatch.fnmatch(f, s) for s in dir_aware) for f in files
+        )
+        if literal_out:
+            outside_declaration_literal += 1
+        if diraware_out:
+            outside_declaration_dir_aware += 1
+        if literal_out and not diraware_out:
+            dir_fix_rescued.append(did)
+
     summary = {
         "dispatch_specs_total": len(specs),
         "linked_to_commit": len(linked),
@@ -227,6 +292,12 @@ def main() -> int:
         "blocked_with_paths__dispatch_narrowing": blocked_by_dispatch_narrow,
         "blocked_with_paths__also_outside_role_scope": blocked_by_role_scope_with_paths,
         "dispatches_declaring_a_directory_path": dir_declared,
+        "role_scope_only__outside": role_outside,
+        "role_scope_only__inside": role_inside,
+        "dispatch_scope_only__declared_total": dispatch_scope_total,
+        "dispatch_scope_only__outside_literal": outside_declaration_literal,
+        "dispatch_scope_only__outside_dir_aware": outside_declaration_dir_aware,
+        "dispatch_scope_only__dir_fix_rescued": len(dir_fix_rescued),
     }
     print(json.dumps(summary, indent=2))
     print()
@@ -237,6 +308,15 @@ def main() -> int:
         for b in e["blocked"]:
             tag = "role-scope-fail" if not b["role_ok"] else "dispatch-narrow-fail"
             print(f"      {b['file']}  <{tag}>")
+    print()
+    print("== concrete examples: dispatches outside their ROLE scope (dispatch_paths ignored) ==")
+    for e in role_outside_examples:
+        files = ", ".join(e["files"])
+        print(f"  {e['dispatch_id']} [{e['role']}] -> {files}")
+    print()
+    print("== dispatches the directory-matching fix rescues (outside-declaration under literal, inside under dir-aware) ==")
+    for did in dir_fix_rescued:
+        print(f"  {did}")
     return 0
 
 
