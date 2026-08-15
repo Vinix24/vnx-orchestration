@@ -77,6 +77,16 @@
 # The fix lives in vnx_paths.sh + the subprocess env pinning, not in these files.
 # Full write-up: claudedocs/test-quarantaine-verklaring-20260815.md.
 #
+# 2026-08-15 OI-1160 de-quarantine: the two receipt-processor entries
+# (test_receipt_processor_autopr_rejected_mirror.py, test_receipt_processor_bootstrap.py)
+# are removed below. The vnx_paths.sh cross-project guard now preserves an explicit
+# VNX_STATE_DIR pin alongside VNX_DATA_DIR, so a mismatched inherited VNX_HOME no
+# longer clobbers it back to $VNX_DATA_DIR/state. Both files green solo (16/16) and
+# with their neighbours (test_init_migrate_bootstrap.py, test_mc_v4_columns.py,
+# test_vnx_paths_shell_worktree.py, test_state_root_lockstep.py,
+# test_cross_project_isolation.py, and the receipt_processor siblings). 16 test
+# functions return to Profile A.
+#
 tests/integration/test_gemini_streaming_gated.py
 tests/migrations/test_auto_apply.py
 tests/pool/test_pool_lease_e2e.py
@@ -169,8 +179,6 @@ tests/test_queue_reconciliation_certification.py
 tests/test_quickstart_validation.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_classifier.py
 tests/test_receipt_instruction_hash.py
-tests/test_receipt_processor_autopr_rejected_mirror.py  # OI-1133 group-check: 6/6 failed in PR#1458 Profile A sweep (outcome_status resolves None). Not OI-1213 (2026-08-15): VNX_HOME guard clobbers the explicit VNX_STATE_DIR pin (vnx_paths.sh:221-228) -> shell-lane DB update lands in $VNX_DATA_DIR/state; see header
-tests/test_receipt_processor_bootstrap.py  # OI-1133 group-check: 6/10 failed in PR#1458 Profile A sweep (bootstrap returns rc=1). Not OI-1213 (2026-08-15): VNX_HOME guard clobbers VNX_STATE_DIR -> PROCESSING_LOG falls back to $VNX_DATA_DIR/state -> tee fails rc=1; see header
 tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
 tests/test_receipt_v2_pr5_schema_cutover.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too

@@ -219,15 +219,23 @@ unset _VNX_HOME_GIT_ROOT
 # If inherited VNX_HOME points to a different project tree than VNX_HOME_DEFAULT
 # (computed from this script's location), reset it and all derived paths.
 if [ -n "${VNX_HOME:-}" ] && [ "$VNX_HOME" != "$VNX_HOME_DEFAULT" ]; then
-  # Preserve explicit VNX_DATA_DIR override (worktree isolation)
+  # Preserve explicit VNX_DATA_DIR + VNX_STATE_DIR overrides (worktree isolation).
+  # The guard's job is to derive an unset state dir from VNX_HOME, not to overrule
+  # an explicitly pinned one: an explicit VNX_STATE_DIR must win (OI-1160: the old
+  # unset-only path silently clobbered it back to $VNX_DATA_DIR/state, which breaks
+  # the receipt-processor shell lane under a mismatched inherited VNX_HOME).
   _vnx_saved_data_dir="${VNX_DATA_DIR:-}"
+  _vnx_saved_state_dir="${VNX_STATE_DIR:-}"
   unset VNX_HOME PROJECT_ROOT VNX_CANONICAL_ROOT VNX_INTELLIGENCE_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_HEADLESS_REPORTS_DIR VNX_DB_DIR
   if [ -n "$_vnx_saved_data_dir" ]; then
     VNX_DATA_DIR="$_vnx_saved_data_dir"
   else
     unset VNX_DATA_DIR
   fi
-  unset _vnx_saved_data_dir
+  if [ -n "$_vnx_saved_state_dir" ]; then
+    VNX_STATE_DIR="$_vnx_saved_state_dir"
+  fi
+  unset _vnx_saved_data_dir _vnx_saved_state_dir
 fi
 export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
 
