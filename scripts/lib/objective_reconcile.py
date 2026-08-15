@@ -502,7 +502,7 @@ def _parse_reopen_stamp(reason: str) -> Optional[str]:
 # ``reconcile --apply`` close path (run_reconcile step 4c + close_track_if_done),
 # but the operator-facing ``objective close`` verb did NOT call that path — it
 # peeked/reconciled with the local-only set, fell back to _load_merged_pr_numbers
-# (whose gh source is opt-in behind VNX_RECONCILE_GIT, OFF by default), and
+# (whose gh source is default-ON since OI-1155, opt out via VNX_RECONCILE_GIT=0), and
 # re-derived 'queued' for a track whose PRs merged via a bare ``gh pr merge``.
 #
 # The two helpers below are the SINGLE source of the evidence set both code
@@ -533,8 +533,9 @@ def merge_evidence_pr_numbers(
     cannot drift.
 
     Local loading reuses track_reconciler._load_merged_pr_numbers (sources
-    1-3 are local and deterministic; source 4 is the opt-in VNX_RECONCILE_GIT
-    path, OFF by default, so it does NOT double-call gh here).
+    1-3 are local and deterministic; source 4 — ``gh pr list``, default-ON
+    since OI-1155 — is cache-first so it reuses the 10-min cache the
+    reconciler already warmed and adds no per-PR ``gh pr view`` calls).
     """
     local_merged = track_reconciler._load_merged_pr_numbers(state_dir, repo_root)
     return frozenset(set(gh_confirmed_merged) | set(local_merged))
@@ -1118,15 +1119,15 @@ def run_reconcile(
     # gh sweep, so a track whose pr_ref PRs were merged via a bare ``gh pr
     # merge`` (no local pr_merged receipt) derived 'queued' there — even though
     # reconcile itself just confirmed those PRs merged via gh. Threading the
-    # evidence here lets the close path re-derive 'done' WITHOUT the
-    # VNX_RECONCILE_GIT flag (which governs whether the reconciler makes its
-    # OWN network calls; this is about evidence it ALREADY gathered).
+    # evidence here lets the close path re-derive 'done' from evidence it
+    # ALREADY gathered (source 4, default-ON since OI-1155, makes its own
+    # ``gh pr list`` call; this threading adds no per-PR ``gh pr view`` calls).
     #
     # The injected set is a UNION of the gh-confirmed MERGED PR numbers and the
     # locally-loaded set (NDJSON + ROADMAP). Local evidence stays valid; gh
-    # only ADDS what a bare ``gh pr merge`` never wrote locally. No new gh
-    # calls: only MERGED results already fetched in step 4b are extracted, so
-    # the --max-gh-calls cap still holds for the whole run.
+    # only ADDS what a bare ``gh pr merge`` never wrote locally. No new per-PR
+    # ``gh pr view`` calls: only MERGED results already fetched in step 4b are
+    # extracted, so the --max-gh-calls cap still holds for the whole run.
     # ------------------------------------------------------------------ step 4c
     gh_confirmed_merged: set = set()
     for cc in confirmed_candidates:

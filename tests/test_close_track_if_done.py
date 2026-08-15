@@ -832,18 +832,16 @@ def test_close_default_none_keeps_old_behaviour(tmp_path, monkeypatch):
 
 def test_close_with_injected_set_derives_done_and_closes(tmp_path):
     """A track whose pr_ref PRs are ABSENT from local sources but PRESENT in
-    the injected set derives 'done' and the close succeeds — without
-    VNX_RECONCILE_GIT set.
+    the injected set derives 'done' and the close succeeds.
 
     This is the core OI-1064 case: zero dispatches, no pr_merged.ndjson, no
     ROADMAP entry, no coordination event. The only merge evidence is the
     injected set (the gh numbers run_reconcile gathered). Pre-fix this track
-    derived 'queued' and could not be closed.
+    derived 'queued' and could not be closed. OI-1155: source 4 (gh) is now
+    default-ON, so the module autouse fixture opts out (VNX_RECONCILE_GIT=0);
+    the injected set short-circuits _load_merged_pr_numbers, so no live gh
+    call and no local source contribute.
     """
-    import os
-    assert "VNX_RECONCILE_GIT" not in os.environ, (
-        "this test asserts the OFF-by-default behaviour; unset VNX_RECONCILE_GIT"
-    )
     sd = _build_db(tmp_path)
     tracks_lib.create_track(
         sd, "T-injected", PROJECT_ID, title="injected", goal_state="y",

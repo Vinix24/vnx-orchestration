@@ -549,9 +549,21 @@ def test_parse_pr_numbers_handles_comma_list():
     assert track_reconciler._parse_pr_numbers("not-a-pr") == frozenset()
 
 
-def test_gh_source_off_by_default(tmp_path, monkeypatch):
-    # Without VNX_RECONCILE_GIT, source 4 must not run (no gh, deterministic).
+def test_gh_source_on_by_default(tmp_path, monkeypatch):
+    # OI-1155: source 4 is default-ON. An UNSET VNX_RECONCILE_GIT still consults
+    # gh, so a PR merged via a bare ``gh pr merge`` (no local pr_merged receipt)
+    # becomes visible to the reconciler without any manual env-var.
     monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
+    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh",
+                        lambda *a, **k: frozenset({911, 912}))
+    state = tmp_path / "state"; state.mkdir()
+    assert {911, 912} <= set(_load_merged_pr_numbers(state))
+
+
+def test_gh_source_opt_out_by_flag(tmp_path, monkeypatch):
+    # Explicit opt-out (VNX_RECONCILE_GIT=0) restores local-only determinism for
+    # offline/embedded callers: source 4 must NOT run.
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     called = {"gh": False}
     monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh",
                         lambda *a, **k: called.__setitem__("gh", True) or frozenset())

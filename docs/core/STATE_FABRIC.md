@@ -59,8 +59,9 @@ system actor) or an explicit human close (`vnx objective close --apply --approva
    `blocks` item gates the track out of `done` until resolved.
 5. **Merge.** A PR merges. The reconciler detects it from four evidence sources,
    in order: `pr_merged.ndjson` events → `t0_receipts.ndjson` → ROADMAP
-   `pr_queue` status → (opt-in `VNX_RECONCILE_GIT`) live `gh pr list --state
-   merged` (10-min cache). No local receipt is required — git reality suffices.
+   `pr_queue` status → (default-ON since OI-1155, opt out `VNX_RECONCILE_GIT=0`)
+   live `gh pr list --state merged` (10-min cache). No local receipt is
+   required — git reality suffices.
 6. **Reconcile (derived refresh).** `track_reconciler` computes `derived_status`
    independently of `phase`: blocker OI unresolved → `blocked`; unmet dependency
    → `blocked`; all dispatches terminal → `done` when any of: no `pr_ref` set,
