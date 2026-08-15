@@ -144,6 +144,38 @@ def _materialize_from_tag(root: Path, repo: str, tag: str) -> Path:
     return target_dir
 
 
+def _release_notes_hint(tag: str) -> str:
+    """Release-note fragment for a release that moved ``current`` (OI-1183).
+
+    Release notes are written by hand into ``CHANGELOG.md`` (keep-a-changelog);
+    there is no automated generator. A publish that flips ``current`` is a
+    release that moves ``current``, so it must state the pin consequence in its
+    release notes instead of letting operators assume every consumer followed.
+    Returns a paste-ready block naming the mandatory pin-update line.
+    """
+    return (
+        f"Release notes (add to CHANGELOG.md under [{tag}]):\n"
+        f"  - {tag} is now the active `current`.\n"
+        f"  - Consumers with a tracked `.vnx-version` pin are NOT moved by this "
+        f"flip and must update their pin to {tag} explicitly:\n"
+        f"      echo '{tag}' > <project>/.vnx-version\n"
+    )
+
+
+def _current_flip_warning(tag: str) -> str:
+    """Active warning emitted to stderr when a publish flips ``current``.
+
+    A project pinned via ``.vnx-version`` keeps resolving its pin after the
+    flip, so the flip alone does not move it. Silently flipping ``current``
+    would leave operators assuming every consumer is now on ``tag`` (OI-1183).
+    """
+    return (
+        f"WARNING: `current` now points at {tag}. Consumers with a tracked "
+        f"`.vnx-version` pin do not follow `current` and must update their pin "
+        f"to {tag} (echo '{tag}' > <project>/.vnx-version)."
+    )
+
+
 def vnx_release_publish(args) -> int:
     tag: "str | None" = getattr(args, "tag", None)
     dry_run: bool = getattr(args, "dry_run", False)
@@ -228,6 +260,11 @@ def vnx_release_publish(args) -> int:
                 f"[dry-run] Would flip current ({current_name}) -> {tag} "
                 "(--set-current passed)"
             )
+            print(
+                f"[dry-run] Would warn: consumers with a tracked .vnx-version "
+                f"pin must update their pin to {tag} (the pin does not follow "
+                f"`current`)"
+            )
         else:
             print("[dry-run] current NOT flipped (publish only; pass --set-current to cut over)")
         return 0
@@ -252,6 +289,8 @@ def vnx_release_publish(args) -> int:
 
     if set_current:
         _atomic_symlink_flip(root, target_dir, dry_run=False)
+        print(_release_notes_hint(tag))
+        print(_current_flip_warning(tag), file=sys.stderr)
     else:
         print("current NOT flipped (publish only; pass --set-current to cut over).")
 
