@@ -170,7 +170,6 @@ class ProviderAdapter:
             _resolve_deepseek_model,
             _resolve_moonshot_model,
             _resolve_zai_model,
-            _worker_role_env,
         )
 
         pv: "Provider" = plan.provider  # type: ignore[assignment]
@@ -189,7 +188,6 @@ class ProviderAdapter:
                     dispatch_id=plan.dispatch_id,
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
-                    extra_env=_worker_role_env(plan.role),
                     cwd=cwd,
                 )
             except BrokenPipeError as exc:
@@ -219,7 +217,6 @@ class ProviderAdapter:
                     dispatch_id=plan.dispatch_id,
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
-                    extra_env=_worker_role_env(plan.role),
                     cwd=cwd,
                 )
             except BrokenPipeError as exc:
@@ -253,7 +250,6 @@ class ProviderAdapter:
                     event_writer=event_writer,
                     sub_provider=base_sub,
                     lane=lane_key,
-                    extra_env=_worker_role_env(plan.role),
                     cwd=cwd,
                 )
             except BrokenPipeError as exc:
@@ -281,7 +277,6 @@ class ProviderAdapter:
                     dispatch_id=plan.dispatch_id,
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
-                    extra_env=_worker_role_env(plan.role),
                     cwd=cwd,
                     total_deadline=float(plan.deadline_seconds),
                 )
@@ -350,7 +345,6 @@ class ProviderAdapter:
                     dispatch_id=plan.dispatch_id,
                     terminal_id=plan.target_id,
                     event_writer=event_writer,
-                    extra_env=_worker_role_env(plan.role),
                     cwd=cwd,
                     total_deadline=float(plan.deadline_seconds),
                 )
@@ -411,7 +405,7 @@ class ProviderAdapter:
             result = spawn_local_gemma(
                 instruction=instruction,
                 model=canonical_model,
-                role=plan.role,
+                role=None,
                 deadline_seconds=300,
                 dispatch_id=plan.dispatch_id,
                 project_id="vnx-dev",
@@ -474,7 +468,6 @@ class ProviderAdapter:
             KimiModelResolutionError,
             _kimi_resolve_cli_model_arg,
             _kimi_resolve_requested_key,
-            _worker_role_env,
         )
 
         # Shared resolver (20260721-kimi-lane-hardening): args.model/plan.model >
@@ -495,7 +488,6 @@ class ProviderAdapter:
                 dispatch_id=plan.dispatch_id,
                 terminal_id=plan.target_id,
                 event_writer=event_writer,
-                extra_env=_worker_role_env(plan.role),
                 cwd=cwd,
                 # worker-provider-kimi-flip (20260723): honor the spec's staged deadline
                 # instead of spawn_kimi's own hardcoded 900s default — a caller staging a
