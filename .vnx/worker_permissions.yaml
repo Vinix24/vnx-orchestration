@@ -74,6 +74,24 @@ profiles:
       - "scripts/**"
       - "tests/**"
       - "dashboard/**"
+      # --- role-scope-parity (20260815-opsch-w2-rolescope-fix): rol-te-smal own-work.
+      # Each added rule below is backend-developer's OWN runtime work (per the
+      # ownership map in scripts/analysis/role_scope_outside_triage.py), evidenced
+      # by the 48 rol-te-smal dispatches that wrote these paths outside the old
+      # scope. Counts = outside path-occurrences in that bucket. No blanket
+      # docs/**: docs/core|governance/decisions|manifesto stay system-architect's.
+      - "vnx_cli/**"            # 51 — CLI package (runtime implementation)
+      - "bin/**"                # 5  — runtime entrypoints (bin/vnx)
+      - "hooks/**"              # 1  — runtime hooks (monitor_tripwire.sh)
+      - "configs/**"            # 3  — runtime config (plan_gate_panel/producer_freshness)
+      - "docs/applications/**"  # 3  — feature docs
+      - "docs/operations/**"    # 4  — ops docs (overlaps security's WORKER_PERMISSIONS.md)
+      - "docs/MIGRATION_GUIDE.md"  # 1  — root feature doc (literal: a docs/*.md glob would span / into docs/core, docs/governance/decisions, docs/manifesto)
+      - "VERSION"               # 5  — root build/release file
+      - "CHANGELOG.md"          # 4  — root build/release file
+      - "pyproject.toml"        # 1  — root build/release file
+      - "uv.lock"               # 1  — root build/release file
+      - "requirements.txt"      # 1  — root build/release file
 
   quality-engineer:
     # Build role — default_instruction: "commit and push a dispatch branch".
@@ -96,6 +114,15 @@ profiles:
     file_write_scope:
       - "tests/**"
       - "scripts/check_*"
+      # --- role-scope-parity (20260815-opsch-w2-rolescope-fix): rol-te-smal own-work.
+      # Test-harness / CI / review-gate infra is quality-engineer's own work per
+      # the ownership map, evidenced by 4 rol-te-smal dispatches. Counts = outside
+      # path-occurrences in that bucket.
+      - "scripts/benchmark/**"    # 5  — benchmark runners (bench-v2-smart-lanes, oi-224)
+      - "scripts/refactor_*.py"   # 2  — equivalence tooling (proof-tools-round2)
+      - "scripts/lib/gate_*.py"   # 3  — review-gate infra (gate-tests-fixforward)
+      - "scripts/commands/gate.sh" # 1 — review-gate infra
+      - "scripts/review_gate_manager.py" # 1 — review-gate infra
 
   frontend-developer:
     # Build role — default_instruction: "commit and push a dispatch branch".
@@ -165,6 +192,14 @@ profiles:
     file_write_scope:
       - "scripts/**"
       - "tests/**"
+      # --- role-scope-parity (20260815-opsch-w2-rolescope-fix): rol-te-smal own-work.
+      # Permission posture / key provisioning docs are security-engineer's own work
+      # per the ownership map, evidenced by 5 rol-te-smal dispatches. Narrow file
+      # grants only — NOT docs/** or scripts/lib/** (scripts/** above is the
+      # pre-existing remediation surface, unchanged). Counts = outside
+      # path-occurrences in that bucket.
+      - "docs/operations/WORKER_PERMISSIONS.md"  # 4  — permission docs
+      - "docs/governance/KEY_PROVISIONING.md"     # 1  — key provisioning doc
 
   # Read roles — default_instruction says "Do not modify code" (code-reviewer) or
   # carries governance_profile: light (research-analyst). They deny code-mutation
