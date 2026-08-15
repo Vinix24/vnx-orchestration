@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 from worker_permissions import (
     DEFAULT_CODE_WORKER_TOOLS,
     EMPTY_MCP_CONFIG,
+    MCP_NAMESPACE_DENY,
     PermissionProfile,
     build_claude_scope_args,
     classify_permission_posture,
@@ -372,6 +373,53 @@ class TestBuildClaudeScopeArgsMcpServers:
         )
         assert "--strict-mcp-config" not in args
         assert "--mcp-config" not in args
+
+
+class TestMcpNamespaceDeny:
+    """The mcp__ namespace is denied via --disallowedTools, not only the empty
+    --mcp-config (dispatch 20260815-mcp-namespace-leak).
+
+    The empty --mcp-config only reaches the mcpServers group; extension bridges
+    (claude-in-chrome) surface mcp__ tools without appearing in `claude mcp
+    list`. The `mcp__*` glob closes the gap for the whole namespace. Verified
+    against claude 2.1.233 (see scripts/analysis/mcp_namespace_probe.py).
+    """
+
+    def test_mcp_namespace_denied_by_default(self) -> None:
+        args = build_claude_scope_args(default_code_worker_profile())
+        denied = args[args.index("--disallowedTools") + 1].split(",")
+        assert MCP_NAMESPACE_DENY in denied
+
+    def test_mcp_namespace_deny_alongside_websearch_deny(self) -> None:
+        # The existing WebSearch/WebFetch deny must remain alongside mcp__*.
+        args = build_claude_scope_args(default_code_worker_profile())
+        denied = args[args.index("--disallowedTools") + 1].split(",")
+        assert "WebSearch" in denied
+        assert "WebFetch" in denied
+        assert MCP_NAMESPACE_DENY in denied
+
+    def test_requires_mcp_true_keeps_mcp_namespace(self) -> None:
+        # requires_mcp=True keeps the worker's MCP tools — the namespace deny
+        # must NOT be added (only WebSearch/WebFetch from the profile remain).
+        args = build_claude_scope_args(default_code_worker_profile(), requires_mcp=True)
+        denied = args[args.index("--disallowedTools") + 1].split(",")
+        assert MCP_NAMESPACE_DENY not in denied
+
+    def test_mcp_namespace_deny_combined_with_working_tree_only_git_deny(self) -> None:
+        args = build_claude_scope_args(default_code_worker_profile(), working_tree_only=True)
+        denied = args[args.index("--disallowedTools") + 1].split(",")
+        assert MCP_NAMESPACE_DENY in denied
+        assert "Bash(git commit)" in denied
+        assert "Bash(git push)" in denied
+
+    def test_deny_not_duplicated_when_profile_declares_it(self) -> None:
+        # A role that already declares mcp__* in denied_tools must not get it twice.
+        profile = PermissionProfile(
+            role="r", allowed_tools=["Read"], denied_tools=[MCP_NAMESPACE_DENY, "WebSearch"]
+        )
+        args = build_claude_scope_args(profile)
+        denied = args[args.index("--disallowedTools") + 1].split(",")
+        assert denied.count(MCP_NAMESPACE_DENY) == 1
 
 
 # ---------------------------------------------------------------------------

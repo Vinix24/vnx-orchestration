@@ -119,3 +119,7 @@ class TestImportFallbackStubScoped:
         assert "--permission-mode" in cmd_line
         assert "--allowedTools" in cmd_line
         assert cmd_line.index("--mcp-config") < cmd_line.index("--strict-mcp-config")
+        # The import-fault fallback must also deny the whole mcp__ namespace
+        # (extension bridges are out of the empty --mcp-config's reach).
+        assert "--disallowedTools" in cmd_line
+        assert "mcp__*" in cmd_line

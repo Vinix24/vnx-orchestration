@@ -76,6 +76,17 @@ FALLBACK_FILE_WRITE_SCOPE = [
 # n8n, Gmail, etc.) — the core security win of the interim capability scoping.
 EMPTY_MCP_CONFIG = json.dumps({"mcpServers": {}}, separators=(",", ":"))
 
+# Deny pattern for the entire MCP tool namespace, added to `--disallowedTools`
+# in scoped mode. The empty `--mcp-config` above only reaches the ``mcpServers``
+# group: an extension bridge (claude-in-chrome) surfaces ``mcp__…`` tools WITHOUT
+# appearing in ``claude mcp list``, so it falls outside `--mcp-config`'s reach
+# (measured 2026-08-15, dispatch 20260815-mcp-surface-probe). Every MCP tool is
+# namespaced ``mcp__<server>__<tool>`` regardless of source, so the ``mcp__*``
+# glob closes the gap for both groups. Verified against claude 2.1.233: a live
+# ``--disallowedTools mcp__*`` removes the whole namespace (see
+# scripts/analysis/mcp_namespace_probe.py).
+MCP_NAMESPACE_DENY = "mcp__*"
+
 
 def _resolve_permissions_yaml() -> Path:
     """Resolve worker_permissions.yaml with project-override-first priority.
@@ -395,9 +406,14 @@ def build_claude_scope_args(
         allowlist does not apply in that case (Open Item: reconcile the two).
       - ``--allowedTools`` / ``--disallowedTools`` — the profile's tool allow/deny
         lists (the previously-dead :func:`generate_claude_settings`, now live).
+        The whole MCP tool namespace (``mcp__*``) is denied here as well when
+        ``requires_mcp=False`` — the empty ``--mcp-config`` above only reaches
+        the ``mcpServers`` group, not extension bridges (see
+        :data:`MCP_NAMESPACE_DENY`).
 
     ``requires_mcp``: when True, the ``--mcp-config ... --strict-mcp-config`` pair
-    is omitted so the worker's normal ambient MCP config is used instead.
+    AND the ``mcp__*`` namespace deny are both omitted, so the worker's normal
+    ambient MCP config (and its MCP tools) are used instead.
     """
     settings = generate_claude_settings(profile)
     allowed = settings.get("allowedTools", [])
@@ -419,6 +435,13 @@ def build_claude_scope_args(
     if allowed:
         args += ["--allowedTools", ",".join(allowed)]
     disallowed = list(profile.denied_tools)
+    if not requires_mcp:
+        # The empty --mcp-config above only kills the mcpServers group; it does
+        # not reach extension bridges (claude-in-chrome) that surface mcp__ tools
+        # without appearing in `claude mcp list`. Deny the whole namespace
+        # explicitly via --disallowedTools so both groups are blocked.
+        if MCP_NAMESPACE_DENY not in disallowed:
+            disallowed.append(MCP_NAMESPACE_DENY)
     if working_tree_only:
         # Working-tree-only dispatches (plan-review / plan-write) must not mutate
         # git history. Deny commit/push at the tool-permission layer — the SLOT —

@@ -214,7 +214,14 @@ constraints:
       Drive) still connected from a dispatch worktree without opt-in. The
       binding enforcement lives in worker_permissions.build_claude_scope_args
       (empty --mcp-config unless requires_mcp=True), not in the door router;
-      this entry records the decision in the SSOT. VNX_WORKER_BLANKET_SKIP=1
+      this entry records the decision in the SSOT. EXTENSION-BRIDGE GAP
+      (2026-08-15, mcp-namespace-leak): the empty --mcp-config only reaches
+      the mcpServers group, not extension bridges (claude-in-chrome) that
+      surface mcp__ tools outside `claude mcp list` — measured: a scoped
+      worker still loaded four mcp__claude-in-chrome__* tool schemas via
+      ToolSearch. Closed by an explicit --disallowedTools mcp__* namespace
+      deny (worker_permissions.MCP_NAMESPACE_DENY, verified against claude
+      2.1.233), skipped under requires_mcp=True. VNX_WORKER_BLANKET_SKIP=1
       (or falsy VNX_WORKER_SCOPED) is the explicit per-dispatch opt back into
       the blanket --dangerously-skip-permissions posture.
     enforcement: code_warn

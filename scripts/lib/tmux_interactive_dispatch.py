@@ -121,8 +121,16 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
             "Bash(git:*),Bash(gh:*),Bash(python3:*),Bash(pytest:*),"
             "Bash(pip:*),Bash(rm:*),Bash(chmod:*),Bash(mkdir:*)",
         ]
+        disallowed = []
+        if not requires_mcp:
+            # Parity with worker_permissions.MCP_NAMESPACE_DENY: the empty
+            # --mcp-config above does not reach extension bridges
+            # (claude-in-chrome), so deny the whole mcp__ namespace explicitly.
+            disallowed.append("mcp__*")
         if working_tree_only:
-            args += ["--disallowedTools", "Bash(git commit),Bash(git commit:*),Bash(git push),Bash(git push:*)"]
+            disallowed += ["Bash(git commit)", "Bash(git commit:*)", "Bash(git push)", "Bash(git push:*)"]
+        if disallowed:
+            args += ["--disallowedTools", ",".join(disallowed)]
         return args
 
     def _wp_resolve_worker_profile(role):  # type: ignore[misc]

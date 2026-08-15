@@ -1,7 +1,8 @@
 # Worker Permissions
 
-> Status: current as of 2026-08-14 (scoped worker-mode is the fabric default,
-> revising the 03-08 blanket-skip ratification).
+> Status: current as of 2026-08-15 (scoped worker-mode is the fabric default,
+> with the `mcp__` tool namespace denied explicitly; revising the 03-08
+> blanket-skip ratification and the 14-08 mcp-scoped-default flip).
 > Covers the two dispatch lanes that spawn a headless/detached Claude worker:
 > the tmux-spawn lane (`tmux_interactive_dispatch.py`) and the subprocess lane
 > (`subprocess_adapter.py`). Module: `scripts/lib/worker_permissions.py`.
@@ -32,7 +33,45 @@ With no opt-out (the default), the worker launches with
 `build_claude_scope_args(...)` — `--permission-mode acceptEdits`,
 `--mcp-config '{"mcpServers":{}}' --strict-mcp-config` (unless
 `requires_mcp=True`), plus `--allowedTools`/`--disallowedTools` from the role's
-profile.
+profile. The `--disallowedTools` list also carries `mcp__*` (unless
+`requires_mcp=True`) to deny the whole MCP tool namespace — see the
+extension-bridge gap below.
+
+## The extension-bridge gap: the empty `--mcp-config` is not enough
+
+The empty `--mcp-config '{"mcpServers":{}}'` only reaches the `mcpServers`
+group. An extension bridge surfaces `mcp__` tools WITHOUT appearing in
+`claude mcp list`, so it is out of `--mcp-config`'s reach. Measured 2026-08-15
+(dispatch `20260815-mcp-surface-probe`): a scoped worker whose argv carried
+`--mcp-config '{"mcpServers":{}}' --strict-mcp-config --allowedTools ...` still
+loaded four working `mcp__claude-in-chrome__*` tool schemas via ToolSearch
+(`navigate`, `tabs_close_mcp`, `tabs_context_mcp`, `tabs_create_mcp`). The seven
+servers from `claude mcp list` (Gmail, Google Drive, Google Calendar, Notion,
+Excalidraw, Similarweb, perplexity) were correctly blocked; the extension bridge
+was not. A worker in an isolated worktree could therefore reach the web with the
+operator's logged-in Chrome session — the worktree bounds the filesystem,
+`--strict-mcp-config` bounds the `mcpServers` configuration, and neither bounds
+an extension bridge.
+
+`--allowedTools` does not close the gap either: it is an allow-list of built-in
+tools and does not restrict the `mcp__` namespace (verified: a session launched
+with `--allowedTools Read,Write,Edit,MultiEdit,Bash,Grep,Glob` still saw its
+ambient `mcp__` tool).
+
+The fix is an explicit namespace deny. `build_claude_scope_args(...)` appends
+`mcp__*` to `--disallowedTools` (constant `MCP_NAMESPACE_DENY` in
+`scripts/lib/worker_permissions.py`). Every MCP tool is namespaced
+`mcp__<server>__<tool>` regardless of whether it came from `mcpServers` or an
+extension bridge, so the `mcp__*` glob covers both. The glob form was measured,
+not assumed: `claude 2.1.233` accepts `mcp__*` (and `mcp__<server>` /
+`mcp__<server>__*`) in `--disallowedTools`, and a live session's tool surface
+drops to empty with it. Repeatable measurement:
+`scripts/analysis/mcp_namespace_probe.py` (control vs scoped run of the real CLI).
+
+As with the empty `--mcp-config`, the `mcp__*` deny is skipped when
+`requires_mcp=True`, so a dispatch that declares it needs MCP keeps its `mcp__`
+tools. The tmux-lane import-fault fallback in `tmux_interactive_dispatch.py`
+carries the same deny so an import failure never silently reopens the namespace.
 
 ## `.vnx/worker_permissions.yaml` — role profiles
 
