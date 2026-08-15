@@ -286,6 +286,12 @@ def _cmd_plan_gate_reblock(args: Any) -> int:
     return pc.cmd_plan_gate_reblock(args)
 
 
+def _cmd_plan_gate_batch(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_plan_gate_batch(args)
+
+
 _PLAN_GATE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "seed": _cmd_plan_gate_seed,
     "run": _cmd_plan_gate_run,
@@ -294,6 +300,7 @@ _PLAN_GATE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "missing-reasons": _cmd_plan_gate_missing_reasons,
     "backfill-reason": _cmd_plan_gate_backfill_reason,
     "reblock": _cmd_plan_gate_reblock,
+    "batch": _cmd_plan_gate_batch,
 }
 
 
