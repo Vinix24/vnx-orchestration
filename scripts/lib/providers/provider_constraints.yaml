@@ -122,14 +122,21 @@ constraints:
     override_allowed: false
 
   - id: deprecated-glm-models
-    rule: forbid_route
-    forbidden_route:
+    rule: require_route
+    required_route:
       provider: zai
-      model: [glm-4.5, glm-4.6, glm-5, glm-5.1]
+      model: glm-5.2
     reason: >-
-      GLM-4.5 and GLM-4.6 are retired; base GLM-5 (Feb 2026) and GLM-5.1 are
-      superseded by GLM-5.2 (released 2026-06-16). Only GLM-5.2 is allowed for
-      new dispatches. Operator directive 2026-08-03: geen oudere 5-varianten.
+      Only glm-5.2 is allowed for provider zai. This is an allowlist, not a
+      blocklist: exactly one GLM version is approved for new dispatches, and
+      every other model (including any not-yet-released version such as
+      glm-5.3) is refused until an operator decision admits it. GLM-4.5 and
+      GLM-4.6 are retired; base GLM-5 (Feb 2026) and GLM-5.1 are superseded by
+      GLM-5.2 (released 2026-06-16). Operator directive 2026-08-03: geen oudere
+      5-varianten. A blocklist of four names lets every name that was never
+      listed through; model versions are structurally open-ended, so only an
+      allowlist enforces the one-approved-version decision. Admitting a newer
+      version is a deliberate one-line operator change to this model value.
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false

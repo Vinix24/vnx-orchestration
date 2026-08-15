@@ -126,6 +126,8 @@ def _route_forbidden(
 
 def _required_route_missing(
     constraint: Mapping[str, Any],
+    provider: Optional[str],
+    sub_provider: Optional[str],
     model: Optional[str],
     terminal_id: Optional[str],
     role: Optional[str],
@@ -133,6 +135,11 @@ def _required_route_missing(
     required = constraint.get("required_route") or {}
     if not isinstance(required, Mapping):
         return False
+
+    spec_provider = required.get("provider")
+    if spec_provider:
+        if not _match_value(_effective_provider(provider, sub_provider), spec_provider):
+            return False
 
     spec_role = required.get("role")
     if spec_role:
@@ -520,7 +527,7 @@ class ConstraintEnforcer:
                         override_applied=override_applied,
                     )
             elif rule == "require_route":
-                if _required_route_missing(constraint, model, terminal_id, role):
+                if _required_route_missing(constraint, provider, sub_provider, model, terminal_id, role):
                     violation = _violation_from_constraint(
                         constraint,
                         "Required route not met",
@@ -531,7 +538,6 @@ class ConstraintEnforcer:
                 violations.append(violation)
 
         base, sub = _provider_parts(provider, sub_provider)
-        effective = _effective_provider(base, sub)
         model_norm = _norm(model)
         if _norm(base) != "kimi" and "kimi" in model_norm:
             violations.append(ConstraintViolation(
@@ -545,13 +551,6 @@ class ConstraintEnforcer:
                 code="deepseek-harness-subscription-blocked",
                 severity="blocking",
                 message="Route forbidden: litellm:deepseek requires DEEPSEEK_API_KEY; subscription redirect is blocked.",
-            ))
-
-        if _norm(effective) == "zai" and model_norm in {"glm-4.5", "glm-4.6", "glm-5", "glm-5.1"}:
-            violations.append(ConstraintViolation(
-                code="deprecated-glm-models",
-                severity="blocking",
-                message=f"Route forbidden: {model} is deprecated; use glm-5.2.",
             ))
 
         if check_registry and model:
