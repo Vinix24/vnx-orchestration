@@ -300,6 +300,35 @@ class TestNoResolvablePid(_SweepBase):
         self.assertTrue(self._dead_letter_exists("d-nopid-001"))
 
 
+class TestExcludeIds(_SweepBase):
+    def test_excluded_orphan_never_recovered(self):
+        # Excluded ids are fenced off even when their PID reads dead, and they
+        # do not consume the cap.
+        self._make_orphan("d-excl-001", worker_pid=999999)
+
+        result = crs.sweep(
+            self.data_dir,
+            state_dir=self.state_dir,
+            pid_alive=_dead_pid_predicate,
+            exclude_ids={"d-excl-001"},
+        )
+
+        self.assertEqual(result.skipped_protected, ["d-excl-001"])
+        self.assertEqual(result.recovered, [])
+        self.assertTrue(self._active_exists("d-excl-001"))
+        self.assertFalse(self._dead_letter_exists("d-excl-001"))
+        self.assertEqual(self._receipts(), [])
+
+    def test_exclude_ids_defaults_to_noop(self):
+        self._make_orphan("d-excl-002", worker_pid=999999)
+        result = crs.sweep(
+            self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
+        )
+        # No exclude_ids passed -> recovered normally.
+        self.assertEqual(result.recovered, ["d-excl-002"])
+        self.assertEqual(result.skipped_protected, [])
+
+
 class TestDiscovery(_SweepBase):
     def test_empty_active_dir(self):
         result = crs.sweep(self.data_dir, state_dir=self.state_dir)

@@ -52,24 +52,6 @@ from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa
 PROJECT_ID = "test-delivery-hold"
 
 
-@pytest.fixture(autouse=True)
-def _clear_schema_preflight_hooks():
-    """Isolate schema_migration._PREFLIGHT_HOOKS (mirrors test_objective_reconcile)."""
-    import importlib
-
-    sm = None
-    try:
-        sm = importlib.import_module("schema_migration")
-        saved = {k: list(v) for k, v in sm._PREFLIGHT_HOOKS.items()}
-        sm._PREFLIGHT_HOOKS.clear()
-    except (ImportError, AttributeError):
-        saved = None
-    yield
-    if saved is not None and sm is not None:
-        sm._PREFLIGHT_HOOKS.clear()
-        sm._PREFLIGHT_HOOKS.update(saved)
-
-
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
@@ -118,6 +100,7 @@ def _build_db(tmp_path: Path, *, with_delivery_table: bool = True) -> Path:
     migrations = [
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
+        (29, "0029_track_type_discriminator.sql"),
         (30, "0030_track_oi_resolved_at.sql"),
     ]
     if with_delivery_table:

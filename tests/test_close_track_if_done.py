@@ -86,6 +86,7 @@ def _build_db(tmp_path: Path, *, with_delivery_table: bool = True) -> Path:
     migrations = [
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
+        (29, "0029_track_type_discriminator.sql"),
         (30, "0030_track_oi_resolved_at.sql"),
     ]
     if with_delivery_table:
