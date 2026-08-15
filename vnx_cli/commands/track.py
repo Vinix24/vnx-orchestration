@@ -283,6 +283,41 @@ def _cmd_show(args) -> int:
     return 0
 
 
+def _cmd_set_goal(args) -> int:
+    """Repair a too-thin track goal (alias for `vnx objective set-goal`).
+
+    ``goal_state`` is set only at creation time (``new --goal`` / ``objective add``),
+    and ``vnx track show`` is the surface that displays it — so the track group is
+    where a track operator looks to repair a goal the plan-gate refuses. Delegates
+    to the same ``tracks_lib.set_goal`` single-writer as the objective verb; the
+    threshold comes from the plan-gate's own source so the two never drift.
+    """
+    project_id = args.project_id
+    state_dir = _resolve_state_dir(args.project_dir)
+    tracks_lib = _require_tracks_lib(state_dir)
+
+    import plan_gate_panel
+    min_goal_chars = plan_gate_panel.load_goal_min_chars()
+
+    try:
+        track = tracks_lib.set_goal(
+            state_dir, args.track_id, project_id, args.goal,
+            min_goal_chars=min_goal_chars, actor="operator",
+        )
+    except tracks_lib.GoalTooThinError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except tracks_lib.TrackNotFoundError as exc:
+        print(f"  Error: {exc}", file=sys.stderr)
+        return 2
+
+    print(
+        f"  Set goal_state on {track['track_id']} [{project_id}] "
+        f"({len(args.goal.strip())} meaningful chars)"
+    )
+    return 0
+
+
 def vnx_track(args) -> int:
     sub = getattr(args, "track_subcommand", None)
     if sub == "new":
@@ -299,6 +334,8 @@ def vnx_track(args) -> int:
         return _cmd_oi_close(args)
     elif sub == "dispatch":
         return _cmd_dispatch(args)
+    elif sub == "set-goal":
+        return _cmd_set_goal(args)
     elif sub == "list":
         return _cmd_list(args)
     elif sub == "show":
