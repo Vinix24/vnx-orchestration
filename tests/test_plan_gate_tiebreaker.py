@@ -261,20 +261,84 @@ def test_parse_tiebreaker_carries_raw_text_on_failure():
 
 
 # --------------------------------------------------------------------------
+# OI-1219 — a synthesized report is a NO-ANSWER, not a parse failure
+# --------------------------------------------------------------------------
+
+def _synthesized_report(status: str = "timeout") -> str:
+    """A governance-synthesized body exactly as dispatch_govern._synthesize
+    emits it: the marker, a Status line, and NO verdict fence."""
+    return (
+        f"# Dispatch plan-tiebreak-x\n\n"
+        f"- Lane: tmux_interactive\n"
+        f"- Status: {status}\n"
+        f"- contract_status: synthesized\n"
+        f"- {pgp.SYNTHESIZED_REPORT_MARKER}\n\n"
+        f"## Summary\n\nNo commit on branch; worker emitted status={status}. "
+        f"Body synthesized by lane.\n"
+    )
+
+
+def test_run_tiebreaker_synthesized_report_raises_no_answer_not_parse_error():
+    """A synthesized report raises TiebreakerNoAnswerError with the lane status,
+    NOT TiebreakerParseError. The lane delivered nothing to parse, so the reason
+    names the lane state, not the parser. Measured by feeding the report in and
+    reading the exception type, not by grepping for a marker string in code."""
+    def _synth_dispatcher(provider, model_arg, instruction, dispatch_id):
+        return _synthesized_report("timeout")
+
+    with pytest.raises(pgt.TiebreakerNoAnswerError) as excinfo:
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n## Approach\n",
+            track_id="trk-synth", project_id="p1", round_number=3,
+            model_arg="deepseek-v4-pro", dispatcher=_synth_dispatcher,
+        )
+    assert excinfo.value.status == "timeout"
+    assert "no answer" in str(excinfo.value)
+
+
+def test_run_tiebreaker_synthesized_error_status_is_carried():
+    """The lane status from the report's Status line is carried verbatim (error,
+    not just the timeout default)."""
+    def _synth_dispatcher(provider, model_arg, instruction, dispatch_id):
+        return _synthesized_report("error")
+
+    with pytest.raises(pgt.TiebreakerNoAnswerError) as excinfo:
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n", track_id="t", project_id="p1",
+            round_number=3, model_arg="deepseek-v4-pro", dispatcher=_synth_dispatcher,
+        )
+    assert excinfo.value.status == "error"
+
+
+def test_run_tiebreaker_real_answer_still_parse_failure():
+    """A REAL model answer (no marker) that fails the strict contract still
+    raises TiebreakerParseError. Parse failure stays reserved for an answer that
+    exists but does not satisfy the contract."""
+    def _bad_dispatcher(provider, model_arg, instruction, dispatch_id):
+        return f"prose\n```{pgt.TIEBREAKER_FENCE}\n{{\"outcome\": \"MAYBE\"}}\n```\n"
+
+    with pytest.raises(pgt.TiebreakerParseError, match="unknown outcome"):
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n", track_id="t", project_id="p1",
+            round_number=3, model_arg="deepseek-v4-pro", dispatcher=_bad_dispatcher,
+        )
+
+
+# --------------------------------------------------------------------------
 # Punt 8 — model identity from the registry (ADR-036)
 # --------------------------------------------------------------------------
 
 def test_tiebreaker_model_resolved_from_registry():
     """The model comes from the registry, not a Python literal on the dispatch
-    path. resolve_tiebreaker_model returns the registry model key + its
-    cli_model_arg (falling back to the model key when the registry entry has no
-    cli_model_arg, as the anthropic section's models do)."""
-    provider_key, model_key, cli_arg = pgt.resolve_tiebreaker_model()
-    assert provider_key == "anthropic"
-    assert model_key == "fable-5"
-    # The anthropic registry models carry no cli_model_arg -> the model key IS
-    # the cli arg the claude/tmux lane takes.
-    assert cli_arg == "fable-5"
+    path. resolve_tiebreaker_model returns the DISPATCH enum (what the lane
+    consumes, e.g. deepseek-harness) + the registry model key + its
+    cli_model_arg."""
+    provider, model_key, cli_arg = pgt.resolve_tiebreaker_model()
+    assert provider == "deepseek-harness"
+    assert model_key == "deepseek-v4-pro"
+    # The deepseek_harness registry models carry a cli_model_arg -> it is the
+    # arg the provider lane takes.
+    assert cli_arg == "deepseek-v4-pro"
 
 
 def test_tiebreaker_unknown_model_fails_loud():
@@ -290,6 +354,11 @@ def test_tiebreaker_unknown_model_fails_loud():
     bad_cfg2 = {"max_rounds": 2, "provider": "no-such-provider", "model": "fable-5"}
     with pytest.raises(RegistryLookupError, match="no-such-provider"):
         pgt.resolve_tiebreaker_model(bad_cfg2)
+
+    # The shipped provider (deepseek_harness) with an unknown model also fails loud.
+    bad_cfg3 = {"max_rounds": 2, "provider": "deepseek_harness", "model": "nonexistent-model-xyz"}
+    with pytest.raises(RegistryLookupError, match="nonexistent-model-xyz"):
+        pgt.resolve_tiebreaker_model(bad_cfg3)
 
 
 def test_no_model_literal_on_dispatch_path():
@@ -314,7 +383,8 @@ def test_no_model_literal_on_dispatch_path():
 
     src = Path(pgt.__file__).read_text(encoding="utf-8")
     tree = ast.parse(src)
-    model_names = {"fable-5", "claude-fable-5", "opus-5", "sonnet-5", "kimi-k3"}
+    model_names = {"fable-5", "claude-fable-5", "opus-5", "sonnet-5", "kimi-k3",
+                   "deepseek-v4-pro", "deepseek-v4-flash"}
     # Functions whose string literals are config/contract, not dispatch path.
     allowed_fn_names = {"load_tiebreaker_config"}
 
@@ -614,6 +684,47 @@ def test_cmd_plan_gate_run_tiebreaker_parse_failure_stays_blocked(tmp_path, monk
     assert _resolution_reason(state_dir, "feat-fail", "p1") == ""
 
 
+def test_cmd_plan_gate_run_synthesized_tiebreaker_stays_blocked_no_answer_reason(
+    tmp_path, monkeypatch, capsys,
+):
+    """A synthesized tiebreaker report (lane delivered no answer) keeps the
+    track blocked and reports the NO-ANSWER reason naming the lane status, not
+    "parse failure". Exercised end-to-end: the REAL run_tiebreaker runs against
+    an injected synthesized dispatcher, so the marker detection is measured
+    (the report is fed in and the resulting reason read out), not mocked."""
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-synth", "p1", "t", "shipped", phase="queued")
+    planning_cli._seed_plan_blocker(state_dir, "feat-synth", "p1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+    ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
+    pgt.record_round(ledger, track_id="feat-synth", project_id="p1", round_number=1, outcome="panel")
+    pgt.record_round(ledger, track_id="feat-synth", project_id="p1", round_number=2, outcome="panel")
+
+    def _synth_factory(data_dir, timeout_seconds):
+        def _disp(provider, model_arg, instruction, dispatch_id):
+            return (
+                f"- Lane: tmux_interactive\n"
+                f"- Status: timeout\n"
+                f"- contract_status: synthesized\n"
+                f"- {pgp.SYNTHESIZED_REPORT_MARKER}\n"
+                f"No commit on branch; worker emitted status=timeout.\n"
+            )
+        return _disp
+
+    monkeypatch.setattr(pgt, "_default_tiebreaker_dispatcher", _synth_factory)
+    rc = planning_cli.cmd_plan_gate_run(_gate_args(state_dir, doc, track_id="feat-synth"))
+    captured = capsys.readouterr()
+    assert rc == 1  # loud failure, track stays blocked
+    # The reason names the lane state, not the parser.
+    assert "no answer" in captured.err
+    assert "status=timeout" in captured.err
+    assert "parse failure" not in captured.err
+    # The blocker is unresolved: no resolution_reason written.
+    assert _resolution_reason(state_dir, "feat-synth", "p1") == ""
+
+
 # --------------------------------------------------------------------------
 # Config loading
 # --------------------------------------------------------------------------
@@ -621,8 +732,8 @@ def test_cmd_plan_gate_run_tiebreaker_parse_failure_stays_blocked(tmp_path, monk
 def test_load_tiebreaker_config_defaults_when_absent(tmp_path):
     cfg = pgt.load_tiebreaker_config(tmp_path / "absent.yaml")
     assert cfg["max_rounds"] == pgt.DEFAULT_MAX_ROUNDS
-    assert cfg["provider"] == "anthropic"
-    assert cfg["model"] == "fable-5"
+    assert cfg["provider"] == "deepseek_harness"
+    assert cfg["model"] == "deepseek-v4-pro"
 
 
 def test_load_tiebreaker_config_rejects_bad_max_rounds(tmp_path):
@@ -641,11 +752,12 @@ def test_load_tiebreaker_config_rejects_max_rounds_below_one(tmp_path):
 
 def test_load_tiebreaker_config_reads_real_repo_file():
     """The shipped configs/plan_gate_panel.yaml carries the tiebreaker block
-    with max_rounds=2 and the registry-named provider/model."""
+    with max_rounds=2 and the registry-named provider/model (OI-1219: the
+    deepseek-harness lane, not the claude/tmux lane)."""
     cfg = pgt.load_tiebreaker_config()
     assert cfg["max_rounds"] == 2
-    assert cfg["provider"] == "anthropic"
-    assert cfg["model"] == "fable-5"
+    assert cfg["provider"] == "deepseek_harness"
+    assert cfg["model"] == "deepseek-v4-pro"
 
 
 # --------------------------------------------------------------------------

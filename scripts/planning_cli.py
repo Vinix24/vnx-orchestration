@@ -2512,6 +2512,24 @@ def _run_tiebreaker_for_track(
             timeout_seconds=seat_timeout,
             config=tb_cfg,
         )
+    except plan_gate_tiebreaker.TiebreakerNoAnswerError as exc:
+        # OI-1219: the lane delivered no answer (a governance-synthesized
+        # report: timeout / error / no report file). This is NOT a parse
+        # failure — there was no model decision to parse. The reason names the
+        # lane status so the operator sees the cause, not the parser.
+        stderr_lines.append(
+            f"plan-gate tiebreaker: the lane delivered no answer "
+            f"(status={exc.status}); the track stays blocked. The governance "
+            f"layer synthesized the report (no worker authored one: timeout, "
+            f"error, or no report file), so there is no model decision to parse."
+        )
+        return _result(
+            exit_code=1, outcome="ERROR",
+            error=(
+                f"tiebreaker lane delivered no answer (status={exc.status}); "
+                "the track stays blocked"
+            ),
+        )
     except plan_gate_tiebreaker.TiebreakerParseError as exc:
         stderr_lines.append(
             f"plan-gate tiebreaker FAILED to parse the decision: {exc}. "
