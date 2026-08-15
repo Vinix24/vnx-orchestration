@@ -561,6 +561,13 @@
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
+      "file": "tests/test_envelope_provider_adapter_role_env.py",
+      "line": 37,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
       "file": "tests/test_envelope_ringbuffer_teardown_oi902.py",
       "line": 45,
       "mechanism": "direct-call",

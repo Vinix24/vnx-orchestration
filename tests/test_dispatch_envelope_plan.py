@@ -410,7 +410,7 @@ def test_instruction_read_from_file(tmp_path, monkeypatch):
 
     received_prompts: list = []
 
-    def fake_codex(prompt, model, dispatch_id, terminal_id, event_writer, cwd):
+    def fake_codex(prompt, model, dispatch_id, terminal_id, event_writer, cwd, extra_env=None):
         received_prompts.append(prompt)
         return _FakeSpawnResult()
 
