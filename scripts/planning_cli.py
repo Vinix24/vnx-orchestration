@@ -34,6 +34,7 @@ import os
 import sqlite3
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -2280,6 +2281,71 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# plan-gate plan-source resolution (OPSCHALING cluster, point 2): `--doc` is
+# optional; when absent the track's `goal_state` stands in for the plan. The
+# choice, the threshold check, and the refusal live here as a plain function so
+# a batch loop can call it directly, not only through the argparse handler.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PlanSource:
+    """The plan text the gate will review, plus which source supplied it."""
+    plan_text: str
+    source: str          # "doc" | "goal"
+    ignored_goal: bool = False
+
+
+class PlanRefusal(Exception):
+    """No acceptable plan text: the track's goal is too thin (or absent) and no
+    ``--doc`` was supplied.
+
+    Carries the measured length and the threshold so the caller can render a
+    refusal that names all three (length, threshold, and the remediation) —
+    never a bare exit, and never a silent pass to a panel that would burn five
+    model rounds on a plan that is not there.
+    """
+
+    def __init__(self, length: int, threshold: int) -> None:
+        self.length = length
+        self.threshold = threshold
+        super().__init__(
+            f"plan-gate refused: track goal is too thin to be a plan "
+            f"(measured {length} meaningful chars, threshold {threshold}). "
+            f"Fill in the track's goal to at least {threshold} meaningful "
+            f"characters, or pass --doc <path> with a plan document."
+        )
+
+
+def resolve_plan_source(
+    *,
+    doc_text: Optional[str],
+    goal_state: Optional[str],
+    min_goal_chars: int,
+) -> PlanSource:
+    """Resolve which plan text the gate reviews, and refuse a too-thin goal.
+
+    ``--doc`` wins explicitly: when ``doc_text`` is not None it is the plan, and
+    a non-empty ``goal_state`` is marked ``ignored_goal`` (the caller surfaces
+    that so the user never has to guess which source the gate judged). Otherwise
+    the track's ``goal_state`` is the plan, and it must carry at least
+    ``min_goal_chars`` MEANINGFUL characters — the length is measured AFTER
+    stripping whitespace, so a goal of 200 spaces is refused. A too-thin or
+    absent goal raises :class:`PlanRefusal`: a thin goal is never silently
+    passed and never silently refused.
+    """
+    if doc_text is not None:
+        return PlanSource(
+            plan_text=doc_text,
+            source="doc",
+            ignored_goal=bool((goal_state or "").strip()),
+        )
+    goal = (goal_state or "").strip()
+    if len(goal) < min_goal_chars:
+        raise PlanRefusal(length=len(goal), threshold=min_goal_chars)
+    return PlanSource(plan_text=goal, source="goal")
+
+
 def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     track = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
@@ -2301,32 +2367,78 @@ def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
 
 
 def cmd_plan_gate_run(args: argparse.Namespace) -> int:
-    """Run the plan-first panel over a plan doc; on PASS, resolve the OI-PLAN blocker.
+    """Run the plan-first panel over a plan; on PASS, resolve the OI-PLAN blocker.
 
-    Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK (track stays blocked),
-    1 = infra error (doc/track missing, panel could not run).
+    The plan text comes from ``--doc`` (a file) when given, otherwise from the
+    track's ``goal_state``. A goal under ``goal_min_chars`` meaningful characters
+    (whitespace-stripped, configured in ``configs/plan_gate_panel.yaml``) is
+    refused loud — never silently passed to a panel it cannot inform, never
+    silently dropped. ``--doc`` wins explicitly over a present goal, and the
+    output names which source the gate judged.
+
+    Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK or a too-thin goal
+    (track stays blocked), 1 = infra error (doc/track missing, panel could not run).
     """
     import plan_gate_panel
     import smart_router
 
     state_dir = _resolve_state_dir(args.state_dir)
-    doc = Path(args.doc)
-    if not doc.is_file():
-        print(f"plan doc not found: {doc}", file=sys.stderr)
-        return 1
     track = tracks_lib.get_track(state_dir, args.track_id, args.project_id)
     if not track:
         print(f"track not found: {args.track_id!r} (project {args.project_id!r})", file=sys.stderr)
         return 1
 
     data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
+    min_goal_chars = plan_gate_panel.load_goal_min_chars()
 
-    # An unreadable doc is an infra error, never a weight decision.
-    try:
-        doc.read_text(encoding="utf-8")
-    except OSError as exc:
-        print(f"plan doc unreadable: {doc}: {exc}", file=sys.stderr)
-        return 1
+    # Resolve the plan source: --doc wins explicitly over the track's goal_state;
+    # without --doc the goal_state must be thick enough to stand in for a plan.
+    doc_arg = getattr(args, "doc", None)
+    source = "goal"
+    ignored_goal = False
+    doc_path: Optional[Path] = None
+    if doc_arg:
+        doc_path = Path(doc_arg)
+        if not doc_path.is_file():
+            print(f"plan doc not found: {doc_path}", file=sys.stderr)
+            return 1
+        # An unreadable doc is an infra error, never a weight decision.
+        try:
+            plan_text = doc_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"plan doc unreadable: {doc_path}: {exc}", file=sys.stderr)
+            return 1
+        source = "doc"
+        ignored_goal = bool((track.get("goal_state") or "").strip())
+    else:
+        try:
+            resolved = resolve_plan_source(
+                doc_text=None,
+                goal_state=track.get("goal_state"),
+                min_goal_chars=min_goal_chars,
+            )
+        except PlanRefusal as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        plan_text = resolved.plan_text
+
+    if source == "doc":
+        note = f"plan-gate source: doc {doc_path}"
+        if ignored_goal:
+            note += " (track goal_state ignored)"
+        print(note, file=sys.stderr)
+    else:
+        print(
+            f"plan-gate source: track goal_state "
+            f"({len(plan_text.strip())} meaningful chars)",
+            file=sys.stderr,
+        )
+
+    plan_source_info = {"source": source, "ignored_goal": ignored_goal}
+    if source == "doc":
+        plan_source_info["doc_path"] = str(doc_path)
+    else:
+        plan_source_info["goal_chars"] = len(plan_text.strip())
 
     # Governance-weight read-site (operator ladder, 2026-08-15): the panel size
     # derives from the governance variant (dispatch paths + task_class +
@@ -2439,6 +2551,7 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
                     "rationale": reason,
                 },
                 "panelists": [],
+                "plan_source": plan_source_info,
             }, indent=2))
         else:
             print(
@@ -2450,7 +2563,9 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
 
     try:
         result = plan_gate_panel.run_panel(
-            doc, track_id=args.track_id, project_id=args.project_id, data_dir=data_dir,
+            doc_path=doc_path,
+            doc_text=plan_text,
+            track_id=args.track_id, project_id=args.project_id, data_dir=data_dir,
             panel=panel,
             timeout_seconds=getattr(args, "seat_timeout", None),
         )
@@ -2479,7 +2594,9 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
         )
 
     if args.json:
-        print(json.dumps(result, indent=2))
+        out = dict(result)
+        out["plan_source"] = plan_source_info
+        print(json.dumps(out, indent=2))
     else:
         s = result["summary"]
         print(
@@ -3279,7 +3396,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(p_prun)
     p_prun.add_argument("track_id")
-    p_prun.add_argument("--doc", required=True, help="path to the plan doc under review")
+    p_prun.add_argument(
+        "--doc", default=None,
+        help="path to the plan doc under review. Optional: when omitted, the "
+             "track's goal_state is the plan (it must carry at least "
+             "goal_min_chars meaningful characters from configs/plan_gate_panel.yaml).",
+    )
     p_prun.add_argument(
         "--panel-seats",
         dest="panel_seats",

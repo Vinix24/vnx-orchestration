@@ -53,8 +53,14 @@ the plan passes.
 Two ways to resolve the `OI-PLAN` blocker (both call `_resolve_plan_blocker`, which
 stamps `resolved_at` and reconciles):
 
-- **`vnx horizon plan-gate run <track> --doc <plan-doc>`** — runs the plan-first panel
-  over a plan document; on PASS the blocker resolves. The intended default path.
+- **`vnx horizon plan-gate run <track>`** — runs the plan-first panel over the plan
+  text; on PASS the blocker resolves. `--doc <plan-doc>` names a plan document and is
+  the intended default when one exists; without it the track's `goal_state` is the
+  plan. A `goal_state` under `goal_min_chars` meaningful characters
+  (whitespace-stripped, `configs/plan_gate_panel.yaml`) is refused loud (exit 2) naming
+  the measured length, the threshold, and the remediation (fill the goal or pass
+  `--doc`). When both are present, `--doc` wins explicitly and the output names the
+  ignored goal.
 - **`vnx horizon plan-gate attest <track> --reason R --approval-id T`** — the operator
   escape-hatch: attest the gate as passed without re-running the panel. Human-gated
   (reason + approval-id both required); the deviation is recorded, never silent.
