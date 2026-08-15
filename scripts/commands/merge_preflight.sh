@@ -36,6 +36,7 @@ Checks performed:
   2. Open items (blockers and warnings from open_items_manager)
   3. PR queue status (incomplete PRs associated with this worktree)
   4. Active processes (VNX orchestration still running in worktree)
+  5. VNX CI run for the exact HEAD SHA (fail-closed: no successful run = NO-GO)
 HELP
         return 0
         ;;
@@ -268,6 +269,38 @@ print('|'.join(holds))
     unmerged_reports="$(find "$wt_data/unified_reports" -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ')"
     if [ "$unmerged_reports" -gt 0 ]; then
       details="${details}\n  INFO: $unmerged_reports report(s) in worktree unified_reports/"
+    fi
+  fi
+
+  # ── Check 6: VNX CI run for HEAD SHA (OI-1216) ─────────────────────────
+  # Fail-closed: er moet een VNX CI-workflow-run met conclusion=success bestaan
+  # voor de exacte head-SHA. Nul runs is een NO-GO, geen stilzwijgende GO, en
+  # ook in_progress is een NO-GO. Logica leeft in het testbare python-hulpbestand
+  # merge_preflight_ci_check.py; hier alleen de aanroep en de verdict-wiring.
+  local ci_check="$VNX_HOME/scripts/lib/merge_preflight_ci_check.py"
+  if [ ! -f "$ci_check" ] || ! command -v python3 &>/dev/null; then
+    verdict="NO-GO"
+    blockers=$((blockers + 1))
+    details="${details}\n  BLOCKER: VNX CI-check niet uitvoerbaar (python3/helper ontbreekt): deze merge is niet toetsbaar"
+  else
+    local ci_json
+    ci_json="$(python3 "$ci_check" --project-root "$wt_dir" --json 2>/dev/null)" || true
+    local ci_verdict
+    local ci_msg
+    if [ -n "$ci_json" ]; then
+      ci_verdict="$(printf '%s' "$ci_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("verdict",""))' 2>/dev/null)"
+      ci_msg="$(printf '%s' "$ci_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("message",""))' 2>/dev/null)"
+    fi
+    if [ "$ci_verdict" = "GO" ]; then
+      details="${details}\n  INFO: ${ci_msg:-VNX CI geslaagd}"
+    elif [ "$ci_verdict" = "NO-GO" ]; then
+      verdict="NO-GO"
+      blockers=$((blockers + 1))
+      details="${details}\n  BLOCKER: ${ci_msg:-VNX CI-check gaf NO-GO: deze merge is niet toetsbaar}"
+    else
+      verdict="NO-GO"
+      blockers=$((blockers + 1))
+      details="${details}\n  BLOCKER: VNX CI-check gaf geen leesbaar antwoord: deze merge is niet toetsbaar"
     fi
   fi
 
