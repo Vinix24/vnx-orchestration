@@ -351,6 +351,124 @@ def test_run_tiebreaker_real_answer_still_parse_failure():
 
 
 # --------------------------------------------------------------------------
+# Punt 17 — the "geen antwoord" branch: all three silent-lane forms
+# --------------------------------------------------------------------------
+#
+# The tiebreaker has two failure branches: a REAL answer that fails the strict
+# contract (TiebreakerParseError), and NO answer at all (TiebreakerNoAnswerError).
+# The second branch had only ever been proven for the synthesized-report form
+# (which the probe hit by luck); the empty-completion and dropped-process forms
+# were never driven. These tests drive all three forms and assert each reads as
+# a DISTINCT no-answer, never as a decision and never as a parse failure.
+
+def test_run_tiebreaker_empty_completion_is_no_answer_not_parse_error():
+    """An EMPTY completion (zero tokens) is a NO-ANSWER, not a parse failure.
+
+    ``parse_tiebreaker("")`` raises ``TiebreakerParseError("empty tiebreaker
+    report")``, which conflates "the model said nothing" with "the model said
+    something malformed". ``run_tiebreaker`` must intercept the empty completion
+    BEFORE the parser and raise ``TiebreakerNoAnswerError`` instead.
+    """
+    def _empty_dispatcher(provider, model_arg, instruction, dispatch_id):
+        return ""
+
+    with pytest.raises(pgt.TiebreakerNoAnswerError) as excinfo:
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n## Approach\n",
+            track_id="trk-empty", project_id="p1", round_number=3,
+            model_arg="deepseek-v4-pro", dispatcher=_empty_dispatcher,
+        )
+    assert excinfo.value.status == "empty"
+
+
+def test_run_tiebreaker_whitespace_completion_is_no_answer():
+    """Whitespace-only output (a lane that emitted nothing but blanks) is also a
+    no-answer, not a parse failure."""
+    def _ws_dispatcher(provider, model_arg, instruction, dispatch_id):
+        return "   \n\t\n"
+
+    with pytest.raises(pgt.TiebreakerNoAnswerError) as excinfo:
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n", track_id="t", project_id="p1",
+            round_number=3, model_arg="deepseek-v4-pro", dispatcher=_ws_dispatcher,
+        )
+    assert excinfo.value.status == "empty"
+
+
+def test_run_tiebreaker_process_drop_no_output_is_no_answer_not_generic():
+    """A lane that drops without output surfaces as a RAISED dispatcher (the real
+    dispatcher raises ``RuntimeError`` when ``_read_report`` finds no report
+    file). That must read as NO-ANSWER (status "no-output"), not as a generic
+    exception leaking out of ``run_tiebreaker``."""
+    def _drop_dispatcher(provider, model_arg, instruction, dispatch_id):
+        raise RuntimeError("no report for plan-tiebreak-x (rc=1): ...")
+
+    with pytest.raises(pgt.TiebreakerNoAnswerError) as excinfo:
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n", track_id="t", project_id="p1",
+            round_number=3, model_arg="deepseek-v4-pro", dispatcher=_drop_dispatcher,
+        )
+    assert excinfo.value.status == "no-output"
+
+
+def test_run_tiebreaker_lane_subprocess_timeout_is_no_answer_timeout_status():
+    """A hung lane subprocess (``subprocess.TimeoutExpired``) reads as no-answer
+    with status "timeout", distinct from the drop-without-output form."""
+    import subprocess
+
+    def _hang_dispatcher(provider, model_arg, instruction, dispatch_id):
+        raise subprocess.TimeoutExpired(cmd=["claude"], timeout=900)
+
+    with pytest.raises(pgt.TiebreakerNoAnswerError) as excinfo:
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n", track_id="t", project_id="p1",
+            round_number=3, model_arg="deepseek-v4-pro", dispatcher=_hang_dispatcher,
+        )
+    assert excinfo.value.status == "timeout"
+
+
+def test_empty_answer_is_never_a_decision():
+    """An empty completion must never come back as a START/STOP decision: the
+    call RAISES, so there is no ``TiebreakerResult`` and no outcome to misread
+    as a PASS (START) or REVISE (STOP)."""
+    def _empty_dispatcher(provider, model_arg, instruction, dispatch_id):
+        return ""
+
+    with pytest.raises(pgt.TiebreakerNoAnswerError):
+        pgt.run_tiebreaker(
+            doc_text="## Problem\n", track_id="t", project_id="p1",
+            round_number=3, model_arg="deepseek-v4-pro", dispatcher=_empty_dispatcher,
+        )
+
+
+def test_no_answer_is_distinct_from_parse_failure_for_all_three_forms():
+    """Each silent-lane form raises ``TiebreakerNoAnswerError`` and NONE raises
+    ``TiebreakerParseError``: a no-answer is a lane failure, a parse failure is a
+    contract failure, and the two must never be conflated."""
+    def _empty(provider, model_arg, instruction, dispatch_id):
+        return ""
+
+    def _drop(provider, model_arg, instruction, dispatch_id):
+        raise RuntimeError("no report")
+
+    def _synth_timeout(provider, model_arg, instruction, dispatch_id):
+        return _synthesized_report("timeout")
+
+    for dispatcher, expected_status in [
+        (_empty, "empty"),
+        (_drop, "no-output"),
+        (_synth_timeout, "timeout"),
+    ]:
+        with pytest.raises(pgt.TiebreakerNoAnswerError) as excinfo:
+            pgt.run_tiebreaker(
+                doc_text="## Problem\n", track_id="t", project_id="p1",
+                round_number=3, model_arg="deepseek-v4-pro", dispatcher=dispatcher,
+            )
+        assert excinfo.value.status == expected_status
+        assert not isinstance(excinfo.value, pgt.TiebreakerParseError)
+
+
+# --------------------------------------------------------------------------
 # Punt 8 — model identity from the registry (ADR-036)
 # --------------------------------------------------------------------------
 
@@ -749,6 +867,39 @@ def test_cmd_plan_gate_run_synthesized_tiebreaker_stays_blocked_no_answer_reason
     assert "parse failure" not in captured.err
     # The blocker is unresolved: no resolution_reason written.
     assert _resolution_reason(state_dir, "feat-synth", "p1") == ""
+
+
+def test_cmd_plan_gate_run_empty_completion_stays_blocked_not_pass_or_revise(
+    tmp_path, monkeypatch, capsys,
+):
+    """An empty completion keeps the track blocked with the NO-ANSWER reason —
+    NOT a PASS (exit 0) and NOT a REVISE (exit 2). End-to-end: the REAL
+    run_tiebreaker runs against an injected empty dispatcher, so the
+    empty-completion detection is measured, not mocked."""
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-empty", "p1", "t", "shipped", phase="queued")
+    planning_cli._seed_plan_blocker(state_dir, "feat-empty", "p1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+    ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
+    pgt.record_round(ledger, track_id="feat-empty", project_id="p1", round_number=1, outcome="panel")
+    pgt.record_round(ledger, track_id="feat-empty", project_id="p1", round_number=2, outcome="panel")
+
+    def _empty_factory(data_dir, timeout_seconds):
+        def _disp(provider, model_arg, instruction, dispatch_id):
+            return ""
+        return _disp
+
+    monkeypatch.setattr(pgt, "_default_tiebreaker_dispatcher", _empty_factory)
+    rc = planning_cli.cmd_plan_gate_run(_gate_args(state_dir, doc, track_id="feat-empty"))
+    captured = capsys.readouterr()
+    assert rc == 1  # loud failure — not PASS (0), not REVISE (2)
+    assert "no answer" in captured.err
+    assert "status=empty" in captured.err
+    assert "parse failure" not in captured.err
+    # The blocker is unresolved: no resolution_reason written.
+    assert _resolution_reason(state_dir, "feat-empty", "p1") == ""
 
 
 # --------------------------------------------------------------------------
