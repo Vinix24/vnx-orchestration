@@ -130,9 +130,18 @@ class TiebreakerNoAnswerError(Exception):
     answer but the answer failed the strict contract. This means there was no
     answer to parse at all — the lane timed out / errored / never authored a
     report, so the governance layer fabricated the body (which carries
-    ``SYNTHESIZED_REPORT_MARKER``). Carries the lane ``status`` (timeout / error
-    / unknown) so the caller names the actual state instead of blaming the
-    parser. Both keep the track blocked; only the reported reason differs.
+    ``SYNTHESIZED_REPORT_MARKER``). Carries the lane ``status`` so the caller
+    names the actual state instead of blaming the parser:
+
+      - ``timeout``    — a synthesized report whose Status line names a timeout,
+        or a hung lane subprocess (``subprocess.TimeoutExpired``);
+      - ``error``      — a synthesized report whose Status line names an error;
+      - ``empty``      — an empty completion (zero tokens / whitespace-only);
+      - ``no-output``  — the lane dropped without authoring a report file (the
+        dispatcher raised instead of returning text);
+      - ``unknown``    — a synthesized report with no readable Status line.
+
+    Both keep the track blocked; only the reported reason differs.
     """
 
     def __init__(self, status: str = "unknown", *, raw: str = "") -> None:
@@ -156,6 +165,24 @@ def _extract_synthesized_status(report_text: str) -> str:
     if match:
         return match.group(1).strip() or "unknown"
     return "unknown"
+
+
+def _raised_lane_status(exc: BaseException) -> str:
+    """The no-answer status for a dispatcher that RAISED instead of returning a report.
+
+    The real dispatcher (``_make_default_dispatcher``) raises when the lane never
+    delivered a report: a hung lane subprocess surfaces as
+    ``subprocess.TimeoutExpired`` (a timeout); anything else (e.g. ``RuntimeError``
+    "no report for ..." when ``_read_report`` found no report file) means the lane
+    dropped without authoring a report at all. Both are the "proces dat wegvalt
+    zonder uitvoer" no-answer form — the reason names the lane state, never the
+    parser and never a decision.
+    """
+    import subprocess  # noqa: PLC0415
+
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "timeout"
+    return "no-output"
 
 
 # ---------------------------------------------------------------------------
@@ -690,9 +717,12 @@ def run_tiebreaker(
     the strict contract (no fence, wrong outcome, a findings list, more than one
     change) — the caller treats that as a loud failure, never silently filling
     in a decision. Raises ``TiebreakerNoAnswerError`` when the lane delivered no
-    answer at all (a governance-synthesized report: timeout / error / no report
-    file) — a distinct loud failure from a parse failure, which stays reserved
-    for an answer that exists but fails the contract.
+    answer at all — a governance-synthesized report (timeout / error), an EMPTY
+    completion (zero tokens), or a raised lane that dropped without authoring a
+    report file — a distinct loud failure from a parse failure, which stays
+    reserved for an answer that exists but fails the contract. A no-answer is
+    NEVER a decision: there is no ``TiebreakerResult``, so it can never read as
+    START/STOP (and hence never as a PASS or REVISE).
     """
     import uuid  # noqa: PLC0415
 
@@ -722,7 +752,19 @@ def run_tiebreaker(
         last_round_findings=list(last_round_findings or []),
     )
     did = f"plan-tiebreak-{track_id}-{uuid.uuid4().hex[:8]}"
-    report_text = disp(dispatch_provider, resolved_model, instruction, did)
+    try:
+        report_text = disp(dispatch_provider, resolved_model, instruction, did)
+    except Exception as exc:  # vnx-silent-except: a raised lane is a NO-ANSWER, not a crash
+        # Punt 17 — "proces dat wegvalt zonder uitvoer": the lane dropped without
+        # authoring a report (the real dispatcher raises RuntimeError when
+        # _read_report finds no report file, or TimeoutExpired when the lane
+        # subprocess hangs). There is nothing to parse, so this must read as a
+        # NO-ANSWER (lane state), never as a parse failure and never as a
+        # decision. The status names the lane state so the caller reports the
+        # cause, not the parser.
+        raise TiebreakerNoAnswerError(
+            status=_raised_lane_status(exc), raw=str(exc),
+        ) from exc
     # OI-1219: a synthesized report is by definition NOT a model answer — the
     # lane never delivered a verdict, so the governance layer fabricated the
     # body (SYNTHESIZED_REPORT_MARKER). Detect the marker BEFORE parse_tiebreaker
@@ -735,6 +777,13 @@ def run_tiebreaker(
         raise TiebreakerNoAnswerError(
             status=_extract_synthesized_status(report_text), raw=report_text,
         )
+    # Punt 17 — an EMPTY completion (zero tokens) is a NO-ANSWER, not a parse
+    # failure. parse_tiebreaker("") would raise TiebreakerParseError("empty
+    # tiebreaker report"), which conflates "the model said nothing" with "the
+    # model said something malformed". Intercept the empty completion BEFORE the
+    # parser so the two distinct failures read distinctly.
+    if not (report_text or "").strip():
+        raise TiebreakerNoAnswerError(status="empty", raw=report_text or "")
     result = parse_tiebreaker(report_text)
     # Stamp the model + round the parser cannot know.
     result.model = resolved_model
