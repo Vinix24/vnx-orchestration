@@ -122,6 +122,9 @@ def test_scan_markdown_hidden_dir_citation() -> None:
         ("examples/example_headless_research.md", False),
         ("investigations/20260801-oi-triage.md", False),
         ("governance/decisions/ADR-035.md", False),
+        # Historical proposals/design notes citing a dead architecture — frozen.
+        ("internal/plans/VNX_STATE_SIMPLIFICATION_PROPOSAL.md", False),
+        ("internal/intelligence/INTELLIGENCE_INJECTION_V1.1.md", False),
     ],
 )
 def test_is_live_doc(rel: str, expected: bool) -> None:
@@ -156,7 +159,7 @@ def test_check_docs_planted_drift_fails(tmp_path: Path) -> None:
     docs.mkdir()
     (docs / "living.md").write_text("see `x.py:999`\n", encoding="utf-8")
     (tmp_path / "x.py").write_text("a\n", encoding="utf-8")
-    violations = check.check_docs(docs, tmp_path, ["x.py"])
+    violations = check.check_docs(docs, tmp_path, ["x.py", "docs/living.md"])
     assert any("out of bounds" in v for v in violations)
 
 
@@ -164,6 +167,17 @@ def test_check_docs_skips_frozen_dirs(tmp_path: Path) -> None:
     docs = tmp_path / "docs"
     (docs / "investigations").mkdir(parents=True)
     (docs / "investigations" / "frozen.md").write_text("see `x.py:999`\n", encoding="utf-8")
+    (tmp_path / "x.py").write_text("a\n", encoding="utf-8")
+    # The frozen dir is tracked, but still skipped: is_live_doc carves it out.
+    assert check.check_docs(docs, tmp_path, ["x.py", "docs/investigations/frozen.md"]) == []
+
+
+def test_check_docs_skips_untracked_docs(tmp_path: Path) -> None:
+    # A gitignored local-only doc (absent from the tracked list) must not be
+    # scanned: it never ships, and its citations describe a local architecture.
+    docs = tmp_path / "docs"
+    (docs / "internal").mkdir(parents=True)
+    (docs / "internal" / "local-only.md").write_text("see `x.py:999`\n", encoding="utf-8")
     (tmp_path / "x.py").write_text("a\n", encoding="utf-8")
     assert check.check_docs(docs, tmp_path, ["x.py"]) == []
 
