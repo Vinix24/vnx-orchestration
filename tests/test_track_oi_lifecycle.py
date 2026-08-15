@@ -31,6 +31,8 @@ import schema_migration
 import tracks as tracks_lib
 import track_reconciler
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
+
 PROJECT_ID = "test-proj"
 
 
@@ -77,9 +79,24 @@ def _build_db_v29(tmp_path: Path) -> Path:
     """)
     conn.commit()
 
+    # 0022 rebuilds the dispatches table (state CHECK + operator_approved_at),
+    # and 0024 rebuilds the track tables. Apply them first, then add the
+    # columns the canonical schema manifest declares (output_ref, output_kind)
+    # so they survive the rebuild. Mirrors the canonical ordering in
+    # test_track_reconciler.py / test_planning_cli.py / test_horizon_parity.py.
     for version, filename in [
         (22, "0022_track_layer.sql"),
         (24, "0024_tracks_tenant_scoping.sql"),
+    ]:
+        sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, version, sql)
+        conn.commit()
+
+    ensure_dispatches_columns(conn)
+    conn.execute("PRAGMA user_version = 26")
+    conn.commit()
+
+    for version, filename in [
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
         (29, "0029_track_type_discriminator.sql"),
