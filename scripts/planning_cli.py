@@ -1207,9 +1207,9 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     # OI-1071: gather the same gh-confirmed merge evidence run_reconcile builds
     # and thread it into every derivation step below, so a track whose PRs
     # merged via a bare ``gh pr merge`` (no local pr_merged receipt) derives
-    # 'done' via the verb WITHOUT VNX_RECONCILE_GIT. Without this, the dry-run
-    # peek / --apply reconcile / close_track_if_done all fall back to the
-    # local-only set and re-derive 'queued', refusing the close. The helper
+    # 'done' via the verb. Without this, the dry-run peek / --apply reconcile /
+    # close_track_if_done all fall back to the locally-loaded set and re-derive
+    # 'queued', refusing the close. The helper
     # bounds live gh calls by --max-gh-calls and reuses the per-PR cache, and
     # degrades honestly (consulted_gh=False) when gh is unreachable.
     max_gh_calls = int(getattr(args, "max_gh_calls", 50))
@@ -1254,8 +1254,8 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     # derived_status was computed from local sources ONLY. A 'not terminal'
     # refusal on that basis must not read as "this track is not done" — the
     # real cause may be "could not reach GitHub". Surface it so the operator
-    # knows to re-run when gh is back (or set VNX_RECONCILE_GIT for the local
-    # gh source). consulted_gh is False both when gh was unreachable AND when
+    # knows to re-run when gh is back. consulted_gh is False both when gh was
+    # unreachable AND when
     # the track has no pr_ref to verify; only flag the former.
     gh_unavailable = (
         not close_evidence["consulted_gh"]

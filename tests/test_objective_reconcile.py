@@ -1453,8 +1453,8 @@ def test_objective_close_dry_run_threads_repo_root_into_evidence(tmp_path, monke
 # OI-1071 — the standalone ``objective close`` verb must use the same merge
 # evidence ``reconcile`` does. Before this fix, the verb peeked/reconciled
 # with the local-only set, fell back to _load_merged_pr_numbers (whose gh source
-# is opt-in behind VNX_RECONCILE_GIT, OFF by default), and re-derived 'queued'
-# for a track whose PRs merged via a bare ``gh pr merge``. The tests below pin
+# is default-ON since OI-1155, opt out via VNX_RECONCILE_GIT=0), and re-derived
+# 'queued' for a track whose PRs merged via a bare ``gh pr merge``. The tests below pin
 # the shared helper + the verb's evidence threading + honest gh degradation.
 # ---------------------------------------------------------------------------
 
@@ -1507,7 +1507,10 @@ def test_close_verb_threads_nonempty_merged_set_into_close_track_if_done(tmp_pat
 
 def test_close_verb_derives_done_from_gh_only_without_vnx_reconcile_git(tmp_path, monkeypatch):
     """OI-1071: a track whose pr_ref PRs are merged but ABSENT from local
-    sources closes via the verb, WITHOUT VNX_RECONCILE_GIT set."""
+    sources closes via the verb's gh gathering (gh pr view), with
+    VNX_RECONCILE_GIT unset. OI-1155: source 4 (gh pr list) is default-ON, so
+    an unset flag runs it; the shared subprocess.run mock returns empty for
+    ``gh pr list``, keeping the verb's per-PR evidence the sole authority."""
     monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-1071b", phase="queued", pr_ref="#771")
@@ -1832,8 +1835,10 @@ class TestRunProvenanceSweepCommitFailureIsLoud:
 # ---------------------------------------------------------------------------
 
 def test_oi1064_reconcile_closes_track_without_vnx_reconcile_git(tmp_path, monkeypatch):
-    """run_reconcile derives 'done' and closes a bare-gh-merge track WITHOUT
-    VNX_RECONCILE_GIT set.
+    """run_reconcile derives 'done' and closes a bare-gh-merge track with
+    VNX_RECONCILE_GIT unset (source 4 default-ON; the shared subprocess.run
+    mock returns empty for ``gh pr list`` so the threaded gh pr-view evidence
+    stays the sole authority).
 
     Reproduces the background-job-liveness defect in miniature: phase=queued,
     pr_ref with multiple PRs, all verified MERGED via gh, delivery complete,

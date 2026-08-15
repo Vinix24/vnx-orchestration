@@ -338,6 +338,9 @@ def test_roadmap_legacy_fallback_when_no_git(tmp_path, monkeypatch):
 
 def test_load_merged_pr_numbers_never_crashes_on_missing_roadmap(tmp_path, monkeypatch):
     # Source-3 is best-effort: a non-existent state dir / roadmap must not raise.
+    # OI-1155: opt out of source-4 (default-ON gh) so the assertion stays
+    # deterministic and does not reach a live ``gh pr list``.
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     monkeypatch.setattr(track_reconciler, "_git_toplevel", lambda p: None)
     result = track_reconciler._load_merged_pr_numbers(tmp_path / "nowhere" / "state")
     assert result == frozenset()

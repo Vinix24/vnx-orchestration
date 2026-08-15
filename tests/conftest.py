@@ -192,6 +192,22 @@ def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     pin_vnx_data_dir(monkeypatch, isolated)
 
 
+@pytest.fixture(autouse=True)
+def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OI-1155: pin track_reconciler source 4 (``gh pr list``) OFF for the suite.
+
+    source 4 is default-ON in production (_load_merged_pr_numbers), which would
+    make every reconciler test shell out to a live, network ``gh pr list`` from
+    the repo-root CWD and pollute local-only assertions with real merged PR
+    numbers. Pinning VNX_RECONCILE_GIT=0 keeps the suite deterministic and
+    offline-safe. Tests that pin the default-ON behaviour
+    (tests/test_track_reconciler_prref_evidence.py: test_gh_source_on_by_default
+    / test_gh_source_opt_out_by_flag) monkeypatch-delenv / setenv this flag
+    per-test — the last write wins within the same function scope.
+    """
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+
+
 # ---------------------------------------------------------------------------
 # DB / registry fixtures  (shared with test_burnin_certification)
 # ---------------------------------------------------------------------------

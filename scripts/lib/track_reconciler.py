@@ -204,11 +204,17 @@ def _delivery_hold(
     }
 
 
-def _load_merged_prs_from_gh(state_path: Path, ttl_seconds: int = 600) -> FrozenSet[int]:
-    """Opt-in git-grounded merged-PR source. Cache-first (``pr_merged_cache.json``,
-    TTL ~10 min) so the SessionStart hot path rarely shells out; network call is
-    silent-on-failure so the caller's never-raises / offline-safe contract holds.
-    Only consulted when ``VNX_RECONCILE_GIT`` is set."""
+def _load_merged_prs_from_gh(
+    state_path: Path, ttl_seconds: int = 600, cwd: "str | None" = None
+) -> FrozenSet[int]:
+    """Git-grounded merged-PR source (source 4, default-ON since OI-1155).
+
+    Cache-first (``pr_merged_cache.json``, TTL ~10 min) so the SessionStart hot
+    path rarely shells out; network call is silent-on-failure so the caller's
+    never-raises / offline-safe contract holds. ``cwd`` threads the project repo
+    root into ``gh pr list`` so a central install whose process CWD is not the
+    project dir still resolves the right repository.
+    """
     cache = state_path / "pr_merged_cache.json"
     now = time.time()
     try:
@@ -220,7 +226,7 @@ def _load_merged_prs_from_gh(state_path: Path, ttl_seconds: int = 600) -> Frozen
     try:
         result = subprocess.run(
             ["gh", "pr", "list", "--state", "merged", "--limit", "500", "--json", "number"],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=30, check=False, cwd=cwd,
         )
         if result.returncode != 0:
             return frozenset()
@@ -279,14 +285,18 @@ def _load_merged_pr_numbers(
       2. {state_dir}/t0_receipts.ndjson           — receipt log
       3. {repo_root|cwd-git-root|state.parent.parent}/ROADMAP.yaml — feature list
          pr_queue[*].status=merged entries cover recent PRs not yet in NDJSON files
-      4. git/GitHub via ``gh`` (OPT-IN, ``VNX_RECONCILE_GIT`` set) — cache-first
-         (10-min TTL), silent-on-failure. Closes the gap where a PR merged via raw
-         ``gh pr merge`` emits no local ``pr_merged`` receipt, so a merged track
-         would otherwise stay ``queued`` forever (the git-reality drift).
+      4. git/GitHub via ``gh`` (DEFAULT-ON since OI-1155; opt out with
+         ``VNX_RECONCILE_GIT=0``) — cache-first (10-min TTL), silent-on-failure.
+         Closes the gap where a PR merged via raw ``gh pr merge`` emits no local
+         ``pr_merged`` receipt, so a merged track would otherwise stay ``queued``
+         forever (the git-reality drift). Measured 2026-08-15: sources 1-3 all
+         yield zero ``pr_merged`` signals on the vnx-dev store while ``gh``
+         reports 500 merged PRs — sources 1-3 are dead in practice, so source 4
+         must run by default to be the single live authority.
 
     Returns frozenset[int]. Offline-safe and never raises: sources 1-3 are local
-    and deterministic; source 4 is opt-in and degrades to today's behaviour when
-    ``gh`` is absent/offline.
+    and deterministic; source 4 degrades to today's local-only behaviour when
+    ``gh`` is absent/offline (silent-on-failure).
     """
     merged: set = set()
     state_path = Path(state_dir)
@@ -339,11 +349,18 @@ def _load_merged_pr_numbers(
     except Exception:
         log.debug("_load_merged_pr_numbers: ROADMAP.yaml parse error (non-fatal)", exc_info=True)
 
-    # Source 4 (opt-in, network): git/GitHub merge state via gh, cache-first.
-    # Gated behind VNX_RECONCILE_GIT so the default offline hot path is unchanged.
+    # Source 4 (network, DEFAULT-ON since OI-1155): git/GitHub merge state via gh,
+    # cache-first + silent-on-failure. This is the ONLY source that sees a PR
+    # merged via a bare ``gh pr merge`` (no local pr_merged receipt is written),
+    # so it must run by default or such merged tracks never derive 'done'.
+    # Explicit opt-out for offline / deterministic callers: VNX_RECONCILE_GIT=0
+    # (also 'false'/'no'/'off').
     _git_flag = os.environ.get("VNX_RECONCILE_GIT", "").strip().lower()
-    if _git_flag not in ("", "0", "false", "no", "off"):
-        merged |= _load_merged_prs_from_gh(state_path)
+    if _git_flag not in ("0", "false", "no", "off"):
+        gh_cwd = Path(repo_root) if repo_root is not None else _git_toplevel(Path.cwd())
+        merged |= _load_merged_prs_from_gh(
+            state_path, cwd=str(gh_cwd) if gh_cwd is not None else None
+        )
 
     return frozenset(merged)
 
@@ -544,10 +561,10 @@ def reconcile_track(
           established merge state by other means (e.g. run_reconcile's live
           ``gh pr view`` sweep) MUST pass the UNION of its gh-confirmed numbers
           and the locally-loaded set here. Otherwise reconcile_track falls back
-          to _load_merged_pr_numbers, whose gh source (source 4) is opt-in
-          behind VNX_RECONCILE_GIT and OFF by default — so a track the caller
-          just confirmed merged via gh would re-derive as 'queued' from the
-          weaker local sources, and no close path could close it. The caller
+          to _load_merged_pr_numbers, whose gh source (source 4) is default-ON
+          since OI-1155 (opt out with VNX_RECONCILE_GIT=0) — so a track the
+          caller just confirmed merged via gh would re-derive as 'queued' from
+          the weaker local sources, and no close path could close it. The caller
           performs the union (gh evidence is additive: it never replaces local
           NDJSON/ROADMAP evidence, only adds what a bare ``gh pr merge`` never
           wrote locally).
@@ -629,10 +646,10 @@ def peek_derived_status(
     reconcile_track (track_id, project_id, derived_status, declared_phase, drifted).
 
     _merged_pr_numbers: optional pre-established merged-PR set (OI-1071). When
-    provided, used in place of the local-only set so a dry-run close that has
-    ALREADY gathered gh-confirmed merge evidence derives 'done' WITHOUT
-    VNX_RECONCILE_GIT. Same contract as reconcile_track._merged_pr_numbers.
-    When None, loads the local sources itself (the pre-OI-1071 behaviour).
+    provided, used in place of the locally-loaded set so a dry-run close that
+    has ALREADY gathered gh-confirmed merge evidence derives 'done' without a
+    second gh round-trip. Same contract as reconcile_track._merged_pr_numbers.
+    When None, loads the sources itself (the pre-OI-1071 behaviour).
 
     Raises RuntimeError if the derived_status column is absent (migration 0028).
     """
