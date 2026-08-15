@@ -112,6 +112,22 @@ These recur — observed, not hypothetical. A dispatch that "did nothing" or "bi
 | DeepSeek (bare) | `provider_dispatch.py --provider litellm:deepseek` | Chat-only, NO tools. Baseline only. |
 | local gemma | `provider_dispatch.py --provider local-gemma` | Free, local; mechanical / cutoff-resilient checks. |
 
+**Report contract (applies to every lane in this table).** A dispatch is invisible to governance without a receipt, and there is no receipt without a report. Every lane worker must write a unified report carrying the four mandatory headings: `## Summary` (≥50 chars), `## Changes`, `## Verification`, `## Open Items`, plus its `Dispatch-ID` and a real `Model`/`Provider` identity pair. Full contract in §9 and `scripts/lib/report_body_contract.py`.
+
+The fail-closed model check makes this stricter than the four headings: a dispatch-lane report without a real `Model` value is REFUSED at receipt-write time (`scripts/lib/append_receipt_internals/validation.py::_validate_model_present`), even when the report otherwise passes the contract. A report that "looks complete" can still never land a receipt.
+
+Whether a provider emits the four headings on its own, or needs them named in the instruction, was measured against the most recent unified reports in `$VNX_DATA_DIR/unified_reports/` (1500 most-recent, not assumed):
+
+| Provider (lane) | Delivers the 4 headings natively? | Measured (reports with all four) |
+|---|---|---|
+| claude (tmux + headless, subscription) | Yes | 262/262 |
+| codex | No (needs an instruction-foot) | 24/260 |
+| deepseek-harness | No (needs an instruction-foot) | 69/231 |
+| glm-harness | No (needs an instruction-foot) | 10/168 |
+| kimi | No (needs an instruction-foot) | 7/139 |
+
+For the harness/provider lanes (codex, kimi, glm, deepseek), always append the four headings to the instruction. A deepseek worker does not emit `## Summary` / `## Changes` / `## Verification` / `## Open Items` on its own, and without them there is no receipt (OI-1180). The claude lane delivers them without prompting.
+
 ## 9. Manager-block contract
 
 Every dispatch: `[[TARGET:A|B|C]]` … `[[DONE]]`, headers `Role/Track/Terminal/PR-ID/Priority/Cognition/Dispatch-ID/Parent-Dispatch/Reason`, `Workflow` + `Context`, explicit success criteria. A headless-gate dispatch must name the expected report path + receipt/result linkage. Report contract (every worker): `## Summary` (≥50 chars) / `## Changes` / `## Verification` / `## Open Items`, with the `Dispatch-ID`. Validate roles: `python3 scripts/validate_skill.py --list`.

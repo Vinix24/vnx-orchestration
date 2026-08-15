@@ -270,6 +270,65 @@ def test_publish_set_current_flips_atomically(
     )
 
 
+# ---------------------------------------------------------------------------
+# OI-1183: a publish that moves `current` must name the pin-update consequence
+# ---------------------------------------------------------------------------
+
+def test_publish_set_current_emits_release_notes_hint(
+    tmp_path, central_root, stub_install_central
+):
+    """A `current`-moving publish emits a paste-ready release-notes block that
+    states the pin-update consequence for consumers on a tracked pin."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.3.1")
+    out, rc = _capture(_publish_args(repo=str(repo), set_current=True))
+
+    assert rc == 0
+    assert "Release notes (add to CHANGELOG.md under [v1.3.1])" in out
+    assert ".vnx-version" in out
+    assert "must update their pin to v1.3.1" in out
+
+
+def test_publish_set_current_warns_pinned_consumers(
+    tmp_path, central_root, stub_install_central, capsys
+):
+    """The active warning lands on stderr when `current` is flipped, naming the
+    pin that must be updated instead of silently assuming every consumer moved."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.3.1")
+    rc = vnx_release_publish(_publish_args(repo=str(repo), set_current=True))
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "WARNING: `current` now points at v1.3.1" in captured.err
+    assert ".vnx-version" in captured.err
+    assert "do not follow `current`" in captured.err
+
+
+def test_publish_without_set_current_does_not_warn(
+    tmp_path, central_root, stub_install_central, capsys
+):
+    """Publish-without-cutover does not move `current`, so it must not emit the
+    pin-update warning (that would be noise about a flip that never happened)."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.3.1")
+    rc = vnx_release_publish(_publish_args(repo=str(repo), set_current=False))
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "WARNING: `current` now points" not in captured.err
+
+
+def test_dry_run_set_current_previews_pin_warning(
+    tmp_path, central_root, stub_install_central
+):
+    """Dry-run surfaces the pin-update consequence before the flip is committed."""
+    repo = _git_repo_with_tag(tmp_path / "origin", "v1.3.1")
+    out, rc = _capture(_publish_args(repo=str(repo), dry_run=True, set_current=True))
+
+    assert rc == 0
+    assert "Would warn" in out
+    assert ".vnx-version" in out
+    assert not (central_root / "current").exists()
+
+
 def test_publish_second_run_refused_after_first_publish(
     tmp_path, central_root, stub_install_central, capsys
 ):

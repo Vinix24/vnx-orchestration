@@ -895,6 +895,46 @@ def check_dream_cycle(paths: Dict[str, str]) -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# Check: t0_state.json freshness + SessionStart refresh hook (OI-1058)
+# ---------------------------------------------------------------------------
+
+def check_t0_state_freshness(paths: Dict[str, str]) -> List[CheckResult]:
+    """Warn when the t0_state projection is stale while sessions continued, or
+    when the SessionStart hook that rebuilds it is missing.
+
+    OI-1058: a project with no SessionStart hook leaves its ``t0_state.json``
+    frozen (mission-control's has sat still since 24 June). A role that reads
+    that state then plans against months-old open items without anything
+    complaining. The two trigger conditions live in
+    ``scripts/lib/t0_state_health.assess_t0_state_health`` — this function only
+    renders its findings into the doctor result model. Absent ``t0_state.json``
+    means the projection was never set up here, so there is nothing to warn on.
+    """
+    state_dir = Path(paths["VNX_STATE_DIR"])
+    project_root = Path(paths["PROJECT_ROOT"])
+    try:
+        from t0_state_health import assess_t0_state_health
+    except ImportError:
+        return [CheckResult("t0_state", WARN, "t0_state_health module not importable; skipped")]
+
+    assessment = assess_t0_state_health(state_dir, project_root)
+    if not assessment["exists"]:
+        return []
+
+    results = [
+        CheckResult("t0_state", WARN, finding["message"], finding["remediation"])
+        for finding in assessment["findings"]
+    ]
+    if results:
+        return results
+
+    return [CheckResult(
+        "t0_state", PASS,
+        f"t0_state.json is fresh ({assessment['age_human']}) and the refresh hook is wired",
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Runtime checks (delegates to vnx_doctor_runtime.py)
 # ---------------------------------------------------------------------------
 
@@ -957,6 +997,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_contamination(paths))
     results.extend(check_state_root_location(paths))
     results.extend(check_dream_cycle(paths))
+    results.extend(check_t0_state_freshness(paths))
 
     if package_check:
         vnx_home = Path(paths["VNX_HOME"])
