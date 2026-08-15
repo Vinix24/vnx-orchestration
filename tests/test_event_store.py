@@ -282,80 +282,162 @@ class TestLastEvent:
 
 
 # ---------------------------------------------------------------------------
-# OI-1095: size warning fires once per threshold crossing, not per write
+# Size-based rotation: the live stream is archived + truncated at the threshold
+# (replaces the old log-only "operator intervention recommended" warning)
 # ---------------------------------------------------------------------------
 
 
-class TestSizeWarning:
-    def test_warning_fires_once_per_crossing(self, store, tmp_events_dir, caplog):
-        """OI-1095: the oversize warning must fire ONCE when the threshold is
-        crossed, not on every subsequent write. The flag file doubles as the
-        "already warned" guard and is removed on clear()."""
-        import logging
-        from event_store import _OVERSIZE_FLAG_SUFFIX
+def _ndjson_lines(path: Path):
+    if not path.exists():
+        return []
+    return [line for line in path.read_text().strip().split("\n") if line]
 
-        caplog.set_level(logging.WARNING, logger="event_store")
 
-        # Write a single event that is itself above the 10MB threshold.
-        # We patch _SIZE_WARNING_BYTES to a small value so we don't need 10MB.
-        import event_store as es_mod
-
-        original_threshold = es_mod._SIZE_WARNING_BYTES
-        try:
-            es_mod._SIZE_WARNING_BYTES = 50  # tiny threshold — every write crosses it
-            # First write -> should warn
-            store.append("T1", {"type": "text", "data": {"text": "first"}})
-            # Second write -> should NOT warn (flag file exists)
-            store.append("T1", {"type": "text", "data": {"text": "second"}})
-            # Third write -> still no warning
-            store.append("T1", {"type": "text", "data": {"text": "third"}})
-        finally:
-            es_mod._SIZE_WARNING_BYTES = original_threshold
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        oversize_warnings = [
-            r for r in warnings if "operator intervention recommended" in r.message
-        ]
-        assert len(oversize_warnings) == 1, (
-            f"warning must fire exactly once per crossing, got {len(oversize_warnings)}: "
-            f"{[r.message for r in oversize_warnings]}"
+class TestSizeRotation:
+    def test_no_rotation_below_threshold(self, tmp_events_dir):
+        store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=10_000_000)
+        for i in range(3):
+            store.append("T1", {"type": "text", "data": {"i": i}}, dispatch_id="d-rot-below")
+        assert store.event_count("T1") == 3
+        assert not (tmp_events_dir / "archive" / "T1").exists(), (
+            "below threshold there must be no archive and no rotation"
         )
 
-        # Flag file must exist.
-        flag_path = (tmp_events_dir / "T1.ndjson").with_suffix(_OVERSIZE_FLAG_SUFFIX)
-        assert flag_path.exists()
+    def test_rotation_above_threshold(self, tmp_events_dir):
+        store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=500)
+        payload = "x" * 200
+        for i in range(20):
+            store.append(
+                "T1",
+                {"type": "text", "data": {"i": i, "padding": payload}},
+                dispatch_id="d-rot-above",
+            )
+        # Live file is bounded well under the ~4KB written; rotation fired.
+        live = tmp_events_dir / "T1.ndjson"
+        assert live.stat().st_size <= 500 + 1000
+        archives = list((tmp_events_dir / "archive" / "T1").glob("size-rotation-*.ndjson"))
+        assert len(archives) >= 1, "rotation must archive the oversize stream"
 
-        # After clear, the flag is removed — next dispatch gets a fresh warning.
-        store.clear("T1")
-        assert not flag_path.exists()
+    def test_rotated_archive_contains_old_content(self, tmp_events_dir):
+        store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=500)
+        payload = "y" * 300
+        for i in range(20):
+            store.append(
+                "T1",
+                {"type": "text", "data": {"i": i, "padding": payload}},
+                dispatch_id="d-rot-content",
+            )
+        archived_lines = []
+        for arc in (tmp_events_dir / "archive" / "T1").glob("size-rotation-*.ndjson"):
+            archived_lines.extend(_ndjson_lines(arc))
+        assert archived_lines, "the rotated file must contain the pre-rotation events"
+        for line in archived_lines:
+            event = json.loads(line)
+            assert event["dispatch_id"] == "d-rot-content"
+            assert event["type"] == "text"
+        # No event is lost: archive + live == everything written.
+        live_lines = _ndjson_lines(tmp_events_dir / "T1.ndjson")
+        assert len(archived_lines) + len(live_lines) == 20
 
-    def test_warning_fires_again_after_clear(self, store, tmp_events_dir, caplog):
-        """After clear() removes the flag file, the warning must fire again on
-        the NEXT dispatch's threshold crossing — the warn-once guard resets."""
+    def test_live_file_empty_and_writable_after_rotation(self, tmp_events_dir):
+        # First event is big enough to cross the threshold and trigger rotation.
+        # The follow-up event is small enough to stay below it.
+        store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=300)
+        store.append(
+            "T1",
+            {"type": "text", "data": {"padding": "z" * 400}},
+            dispatch_id="d-rot-writable",
+        )
+        assert store.event_count("T1") == 0, "live file must be empty after rotation"
+        store.append("T1", {"type": "result", "data": {}}, dispatch_id="d-rot-writable")
+        events = list(store.tail("T1"))
+        assert len(events) == 1
+        assert events[0]["sequence"] == 1
+        assert events[0]["type"] == "result"
+
+    def test_concurrent_writer_loses_nothing(self, tmp_events_dir):
+        store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=2000)
+        n_threads = 4
+        n_events = 40
+        payload = "p" * 120  # ~150B/event -> ~24KB total, many rotations
+        errors = []
+
+        def writer(tid):
+            try:
+                for i in range(n_events):
+                    store.append(
+                        "T1",
+                        {"type": "text", "data": {"t": tid, "i": i, "padding": payload}},
+                        dispatch_id="d-rot-concurrent",
+                    )
+            except Exception as exc:  # vnx-silent-except: collect and assert, don't let a thread die silently
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(t,)) for t in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"thread errors: {errors}"
+
+        total = len(_ndjson_lines(tmp_events_dir / "T1.ndjson"))
+        archive_dir = tmp_events_dir / "archive" / "T1"
+        if archive_dir.exists():
+            for arc in archive_dir.glob("*.ndjson"):
+                total += len(_ndjson_lines(arc))
+        assert total == n_threads * n_events, (
+            f"a concurrent writer lost events: expected {n_threads * n_events}, got {total}"
+        )
+
+    def test_rotation_failure_logs_error_and_does_not_block(self, tmp_events_dir, caplog):
         import logging
-        import event_store as es_mod
 
-        caplog.set_level(logging.WARNING, logger="event_store")
-        original_threshold = es_mod._SIZE_WARNING_BYTES
-        try:
-            es_mod._SIZE_WARNING_BYTES = 50
-            # First dispatch cycle
-            store.append("T1", {"type": "text", "data": {"text": "d1"}})
-            store.append("T1", {"type": "text", "data": {"text": "d1b"}})
-            store.clear("T1")
+        store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=100)
+        # Make the archive dir un-creatable: archive/T1 is a regular file.
+        archive_dir = tmp_events_dir / "archive"
+        archive_dir.mkdir()
+        (archive_dir / "T1").write_text("not a directory")
 
-            caplog.clear()
+        caplog.set_level(logging.ERROR, logger="event_store")
 
-            # Second dispatch cycle — fresh warning expected
-            store.append("T1", {"type": "text", "data": {"text": "d2"}})
-            store.append("T1", {"type": "text", "data": {"text": "d2b"}})
-        finally:
-            es_mod._SIZE_WARNING_BYTES = original_threshold
+        payload = "f" * 200
+        for i in range(5):
+            store.append(
+                "T1",
+                {"type": "text", "data": {"i": i, "padding": payload}},
+                dispatch_id="d-rot-fail",
+            )
 
-        oversize_warnings = [
+        # The dispatch must keep going: append does not raise, live file intact.
+        assert store.event_count("T1") == 5
+        errors = [
             r for r in caplog.records
-            if r.levelno == logging.WARNING and "operator intervention recommended" in r.message
+            if r.levelno == logging.ERROR and "size rotation failed" in r.message
         ]
-        assert len(oversize_warnings) == 1, (
-            "after clear, next dispatch cycle must get a fresh warning"
-        )
+        assert len(errors) >= 1, "a failed rotation must log a visible ERROR"
+        assert store.oversize_flags() != [], "a failed rotation must write the oversize flag"
+
+
+class TestSizeRotationConfig:
+    def test_default_threshold_is_10mb(self, tmp_events_dir):
+        store = EventStore(events_dir=tmp_events_dir)
+        assert store._rotation_threshold() == 10 * 1024 * 1024
+
+    def test_env_var_overrides_default(self, tmp_events_dir, monkeypatch):
+        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "1234")
+        store = EventStore(events_dir=tmp_events_dir)
+        assert store._rotation_threshold() == 1234
+
+    def test_ctor_arg_overrides_env(self, tmp_events_dir, monkeypatch):
+        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "1234")
+        store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=99)
+        assert store._rotation_threshold() == 99
+
+    def test_invalid_env_falls_back_to_default(self, tmp_events_dir, monkeypatch, caplog):
+        import logging
+
+        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "not-a-number")
+        caplog.set_level(logging.WARNING, logger="event_store")
+        store = EventStore(events_dir=tmp_events_dir)
+        assert store._rotation_threshold() == 10 * 1024 * 1024
