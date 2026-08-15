@@ -723,7 +723,12 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     )
     _common_horizon_args(p_prun)
     p_prun.add_argument("track_id")
-    p_prun.add_argument("--doc", required=True, help="path to the plan doc under review")
+    p_prun.add_argument(
+        "--doc", default=None,
+        help="path to the plan doc under review. Optional: when omitted, the "
+             "track's goal_state is the plan (it must carry at least "
+             "goal_min_chars meaningful characters from configs/plan_gate_panel.yaml).",
+    )
     p_prun.add_argument(
         "--panel-seats",
         dest="panel_seats",

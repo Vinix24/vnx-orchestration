@@ -70,6 +70,13 @@ except Exception:  # vnx-silent-except: keep the panel importable without govern
 # as a well-formed seat.
 _SEAT_KEYS: tuple[str, ...] = ("label", "provider", "model_arg")
 
+# Minimum meaningful characters (whitespace-stripped) a track's goal_state must
+# carry to stand in for the plan when `plan-gate run` is invoked WITHOUT --doc.
+# The value is overridable in configs/plan_gate_panel.yaml (`goal_min_chars`),
+# never hardcoded at the call site — a fixed literal here would let the config
+# drift silently (see load_goal_min_chars).
+DEFAULT_GOAL_MIN_CHARS = 200
+
 # Per-seat verdict ledger (OI-888): one append-only, hash-chained record per
 # panelist per run, under the repo's .vnx-attest/ dir next to the plan_gate_pass
 # evidence ledger. Read by the plan-gate effectiveness probe.
@@ -188,6 +195,38 @@ def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]
         )
     valid_providers = _valid_provider_strings()
     return [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
+
+
+def load_goal_min_chars(config_path: Optional[Path] = None) -> int:
+    """The minimum goal length for ``plan-gate run`` invoked WITHOUT ``--doc``.
+
+    Reads ``goal_min_chars`` from ``configs/plan_gate_panel.yaml`` (the same file
+    and path resolution as ``load_panel_seats``). Falls back to
+    ``DEFAULT_GOAL_MIN_CHARS`` when the file is absent/unreadable or the key is
+    missing (a pre-existing config never breaks the gate). A present-but-invalid
+    value (non-int, bool, or <= 0) fails LOUD: a silently-wrong threshold would
+    either let a thin goal through to a panel it cannot inform or refuse every
+    goal — both silent governance drifts, so misconfiguration must surface here.
+    """
+    path = Path(config_path) if config_path is not None else _default_panel_config_path()
+    if not path.is_file():
+        return DEFAULT_GOAL_MIN_CHARS
+    try:
+        import yaml  # noqa: PLC0415
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return DEFAULT_GOAL_MIN_CHARS
+    if not isinstance(loaded, dict):
+        return DEFAULT_GOAL_MIN_CHARS
+    raw = loaded.get("goal_min_chars")
+    if raw is None:
+        return DEFAULT_GOAL_MIN_CHARS
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise ValueError(
+            f"plan_gate_panel: {path} 'goal_min_chars' must be a positive int, "
+            f"got {raw!r}"
+        )
+    return raw
 
 
 def filter_panel_seats(
@@ -1162,8 +1201,9 @@ def _emit_seat_records(
 
 
 def run_panel(
-    doc_path: str | Path,
+    doc_path: str | Path | None = None,
     *,
+    doc_text: Optional[str] = None,
     track_id: str,
     project_id: str = "vnx-dev",
     panel: Optional[List[Dict[str, str]]] = None,
@@ -1172,13 +1212,16 @@ def run_panel(
     timeout_seconds: Optional[int] = None,
     seat_ledger_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Run the plan-first panel over ``doc_path`` and return the verdict.
+    """Run the plan-first panel over ``doc_path`` (or ``doc_text``) and return the verdict.
 
-    ``dispatcher`` is injectable; when omitted the governed provider_dispatch
-    dispatcher is used. Returns a dict with the overall ``decision``
-    (PASS|REVISE|BLOCK, or INFRA_FAIL when no lane produced a readable verdict —
-    an infrastructure failure, not a plan judgment), the rule ``summary``, and
-    per-panelist detail.
+    Exactly one plan source is required: ``doc_text`` when the caller already
+    holds the plan text (e.g. a track's ``goal_state`` standing in for the doc),
+    otherwise the text is read from ``doc_path``. ``doc_text`` wins when both are
+    given. ``dispatcher`` is injectable; when omitted the governed
+    provider_dispatch dispatcher is used. Returns a dict with the overall
+    ``decision`` (PASS|REVISE|BLOCK, or INFRA_FAIL when no lane produced a
+    readable verdict — an infrastructure failure, not a plan judgment), the rule
+    ``summary``, and per-panelist detail.
 
     ``timeout_seconds`` (OI-1068): the per-seat deadline a panelist has before its
     lane times out and the seat books a fabricated abstention. ``None`` (the
@@ -1190,7 +1233,10 @@ def run_panel(
     panel = panel or DEFAULT_PANEL
     resolved_timeout = _seat_timeout(timeout_seconds)
     dispatcher = dispatcher or _make_default_dispatcher(data_dir, resolved_timeout)
-    doc_text = Path(doc_path).read_text(encoding="utf-8")
+    if doc_text is None:
+        if doc_path is None:
+            raise ValueError("run_panel: a plan source is required — pass doc_path or doc_text")
+        doc_text = Path(doc_path).read_text(encoding="utf-8")
     doc_truncation = _doc_truncation_info(doc_text)
     instruction = build_plan_review_instruction(doc_text, track_id)
 
