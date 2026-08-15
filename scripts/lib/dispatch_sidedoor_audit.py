@@ -70,6 +70,27 @@ _RAW_CLAUDE_PATTERNS = [
     re.compile(r"""["']binary["']\s*:\s*["']claude["']"""),
 ]
 
+# OI-1220: an argparse `help=` value is DOCUMENTATION, not a spawn. A `claude -p` mention
+# inside help prose (e.g. the `--allow-headless` flag's "opt into the claude_headless lane
+# (claude -p)" text) must not trip the scan, while a real argv list or subprocess call
+# elsewhere still must. This is finer than the G5-8 "never line-suppress a quoted string"
+# rule: a `help=` string is a documentation binding (argparse renders it, nothing executes
+# it), whereas `subprocess.run("claude -p", shell=True)` is an executable string and stays
+# matched because it is not bound to `help=`. Two shapes are blanked: a bare literal
+# (`help="..."` / `help='...'` / triple-quoted) and a parenthesized group of adjacent
+# literals (`help=("..." "...")`, possibly multi-line). The group arm tolerates one level
+# of nested parens so prose like `("... (claude -p). ...")` is blanked whole instead of
+# stopping at the first `)`.
+_HELP_LITERAL_RE = re.compile(
+    r"""\bhelp\s*=\s*
+        (?:
+            \( (?P<group> [^()]* (?: \( [^()]* \) [^()]* )* ) \)
+            | (?P<q>["']{1,3}) (?P<lit> .*? ) (?P=q)
+        )
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
 # Audited NON-delivery raw-claude callers: haiku/deepseek classifiers, weekly digest, headless
 # T0 orchestration, conversation analysis, benchmark/replay harnesses. A scanned file outside
 # this set that spawns `claude -p` is a NEW receipt-bypass side door and fails the gate until
@@ -172,6 +193,19 @@ def _code_lines(text: str):
         yield line
 
 
+def _blank_help_literals(text: str) -> str:
+    """Return `text` with `help=`-bound string literals blanked (newlines preserved).
+
+    Applied by the raw-claude scan so a flag's help prose is not read as the invocation of
+    the primitive it documents (OI-1220).
+    """
+
+    def _blank(match: "re.Match[str]") -> str:
+        return "\n".join(" " * len(line) for line in match.group(0).split("\n"))
+
+    return _HELP_LITERAL_RE.sub(_blank, text)
+
+
 def scan_delivery_callers(root: Path | None = None) -> Set[str]:
     """Return repo-relative paths of files that invoke a lane script as a delivery path."""
     root = root or _repo_root()
@@ -230,7 +264,10 @@ def scan_raw_claude_spawns(root: Path | None = None) -> Set[str]:
             # only MENTION the primitive (a "claude -p" keyword literal, help text) still match — they
             # are AUDITED in KNOWN_RAW_CLAUDE_CALLERS, not line-suppressed: suppressing a quoted
             # "claude -p" would also hide a real `subprocess.run("claude -p", shell=True)` (codex G5-8).
-            code_text = "\n".join(_code_lines(text))
+            # The one exception is a `help=`-bound string (argparse documentation): it is blanked by
+            # `_blank_help_literals`, because a help string is never executed, whereas an executable
+            # string spawn is never bound to `help=` (OI-1220).
+            code_text = _blank_help_literals("\n".join(_code_lines(text)))
             if any(p.search(code_text) for p in _RAW_CLAUDE_PATTERNS):
                 callers.add(rel)
     return callers
