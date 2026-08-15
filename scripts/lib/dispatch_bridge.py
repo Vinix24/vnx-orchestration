@@ -294,6 +294,75 @@ def stage_spec_bundle(
     return spec_file
 
 
+def stage_escalation_bundle(
+    *,
+    rejected_dispatch_id: str,
+    tier_from: str,
+    instruction_text: str,
+    dispatch_id: str,
+    role: str,
+    target_slot: str,
+    project_id: Optional[str] = None,
+    gate: str = "",
+    dispatch_paths: tuple[dict, ...] = (),
+    deadline_seconds: int = 3600,
+    base_ref: str = "origin/main",
+    task_class: Optional[str] = None,
+    env: Optional[dict] = None,
+    state_dir: Optional[Path] = None,
+    now: Optional[float] = None,
+    data_dir: Optional[Path] = None,
+) -> Path:
+    """Stage a QUALITY-escalation followup bundle (OI-1221, wired OI-1229).
+
+    This is the CALLER that was missing: ``escalate_tier``/``next_tier`` already
+    computed the climb (tier_to = tier_from + 1, parent_dispatch = the rejected
+    attempt) but no call site ever fired a followup, so ``tier_from``/``tier_to``
+    stayed empty on 0 of 761 filled specs. Here the climb is resolved
+    deterministically from the cost ladder, the target rung's route is resolved
+    through ``resolve_tier_route`` (so the followup actually runs on the
+    escalated model, not re-classified back to the same cheap tier), and the
+    three chain-link fields are written into the staged ``dispatch-spec.json`` —
+    the same bytes the door carries onto the receipt.
+
+    This STAGES ONLY; it never fires the dispatch (no automatic re-dispatch
+    loop). The operator promotes the returned bundle through the single-entry
+    door, so escalation stays human-in-the-loop.
+    """
+    from providers.smart_router.tier_routing import (  # noqa: PLC0415
+        escalate_tier,
+        resolve_tier_route,
+    )
+
+    escalation = escalate_tier(tier_from, parent_dispatch=rejected_dispatch_id)
+    if escalation.tier_to is None:
+        raise ValueError(
+            f"cannot escalate: {tier_from!r} is already the top rung of the "
+            "cost ladder (no rung above it)"
+        )
+    route = resolve_tier_route(
+        escalation.tier_to, env=env, state_dir=state_dir, now=now,
+    )
+    return stage_spec_bundle(
+        instruction_text=instruction_text,
+        dispatch_id=dispatch_id,
+        role=role,
+        target_slot=target_slot,
+        project_id=project_id,
+        provider=route.provider,
+        model=route.model,
+        gate=gate,
+        dispatch_paths=dispatch_paths,
+        deadline_seconds=deadline_seconds,
+        base_ref=base_ref,
+        data_dir=data_dir,
+        parent_dispatch=escalation.parent_dispatch,
+        task_class=task_class,
+        tier_from=escalation.tier_from,
+        tier_to=escalation.tier_to,
+    )
+
+
 def bridge_dispatch(*, dry_run: bool = False, **stage_kwargs) -> int:
     """Stage a spec bundle, then drive it through the ONLY door (run_dispatch).
 
