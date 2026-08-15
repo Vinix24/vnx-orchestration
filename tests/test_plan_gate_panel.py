@@ -674,6 +674,7 @@ def _bootstrap(tmp_path: Path) -> Path:
         (24, "0024_tracks_tenant_scoping.sql"),
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
+        (29, "0029_track_type_discriminator.sql"),
         (30, "0030_track_oi_resolved_at.sql"),
         (33, "0033_track_decision_ref.sql"),
     ]:

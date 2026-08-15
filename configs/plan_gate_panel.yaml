@@ -53,6 +53,11 @@ tiebreaker:
   max_rounds: 2
   provider: anthropic
   model: fable-5
+# Minimum meaningful characters (whitespace-stripped) a track's goal_state must
+# carry to stand in for the plan when `plan-gate run` is invoked WITHOUT --doc.
+# The length is measured AFTER stripping whitespace, so a goal of 200 spaces is
+# still refused. Read by scripts/lib/plan_gate_panel.py::load_goal_min_chars.
+goal_min_chars: 200
 
 seats:
   - label: opus

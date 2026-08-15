@@ -55,7 +55,7 @@ Nested under `vnx horizon plan-gate <verb>`:
 | Verb | Purpose |
 |---|---|
 | `seed` | Seed the `OI-PLAN-<track>` blocker so the track is born plan-gated. |
-| `run` | Run the plan-first panel over a plan doc; on PASS the blocker resolves. |
+| `run` | Run the plan-first panel over the plan text; on PASS the blocker resolves. The plan text comes from `--doc <path>` when given, otherwise from the track's `goal_state`. A `goal_state` under `goal_min_chars` meaningful characters (whitespace-stripped, `configs/plan_gate_panel.yaml`) is refused loud; `--doc` wins explicitly over a present goal, and the output names which source the gate judged. |
 | `status` | Show a track's plan-gate state + `derived_status`. |
 | `attest` | Operator escape-hatch: attest the gate as passed without re-running the panel; requires `--reason` and `--approval-id`. |
 | `missing-reasons` | Read-only audit: list resolved plan-gate blockers that carry no `resolution_reason`. |
