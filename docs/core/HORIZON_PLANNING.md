@@ -54,9 +54,52 @@ Nested under `vnx horizon plan-gate <verb>`:
 
 | Verb | Purpose |
 |---|---|
-| `seed` | Seed the plan-gate open-item for a track. |
-| `run` | Run the plan-first panel for a track. |
-| `status` | Show a track's plan-gate state. |
+| `seed` | Seed the `OI-PLAN-<track>` blocker so the track is born plan-gated. |
+| `run` | Run the plan-first panel over a plan doc; on PASS the blocker resolves. |
+| `status` | Show a track's plan-gate state + `derived_status`. |
+| `attest` | Operator escape-hatch: attest the gate as passed without re-running the panel; requires `--reason` and `--approval-id`. |
+| `missing-reasons` | Read-only audit: list resolved plan-gate blockers that carry no `resolution_reason`. |
+| `backfill-reason` | Record the missing `resolution_reason` on an already-resolved row; refuses an unresolved row and refuses to overwrite an existing reason. |
+| `reblock` | Put back a wrongly-lifted blocker (track is blocked again); the reversal stays visible in `resolution_reason`. |
+
+## Plan-gate weight — the seat ladder (since #1507)
+
+The plan-gate does not run the full panel on every plan. The panel SIZE derives
+from a governance variant, which is a deterministic function of which paths the
+work touches, not a model judgment about how risky the plan "feels". Two
+functions define the ladder, both recomputable from the code:
+
+- **`scripts/lib/smart_router.py::derive_governance_variant`** classifies each
+  dispatch path into `core` / `code` / `business` / `docs`, and the STRICTEST
+  category across all touched paths wins (`_CATEGORY_RANK`). Irreversibility
+  forces the heaviest class no matter what the paths say: a schema migration
+  (`scripts/migrations/`, `schemas/migrations/`), a fleet default
+  (`.claude/terminals/`, `.claude/skills/`, `agents/`, `skills/`), the
+  append-only receipt/ledger format, or an explicit `irreversible` flag on the
+  spec all resolve to `coding-strict`. A new feature
+  (`task_class == 01_code_generation`) is an INDEPENDENT axis: it is carried as
+  `is_new_feature` and always gets the full panel, regardless of the
+  path-derived variant.
+- **`scripts/lib/plan_gate_panel.py::GOVERNANCE_VARIANT_SEAT_LABELS`** maps the
+  variant to an ordered seat prefix of `configs/plan_gate_panel.yaml`:
+
+  | variant | derived from | seats |
+  |---|---|---|
+  | `minimal` | docs content, reversible | 0 (no panel runs) |
+  | `business-light` / `light` | non-code deliverables | 1 (`opus`) |
+  | `default` | code | 2 (`opus`, `kimi`) |
+  | `coding-strict` | core paths / irreversible | 3 (`opus`, `kimi`, `glm-5.2-harness`) |
+  | new feature | `task_class 01_code_generation` | full panel (5 seats), regardless of variant |
+
+The derived weight, the chosen weight, and the direction of an operator override
+all land in the trace, so an override is never silent. On the review-gate axis
+(`smart_router.resolve_gate`) the result is a `GateWeightResolution` carrying
+`governance_variant` (derived), `gate` (chosen), and `override_direction`
+(`""` | `upgrade` | `downgrade` | `strict-downgrade`). The plan-gate panel
+mirrors this on the seat-count axis (`plan_gate_panel.seat_override_direction`).
+`strict-downgrade` is the one separately-marked move: lightening a
+`coding-strict` derivation, chosen exactly at irreversible work. It is marked,
+not blocked, so a later sweep can find the most dangerous override.
 
 ## Tenant-safe resolution (critical)
 
@@ -98,9 +141,20 @@ top-level alias — it is reached only through `vnx horizon plan-gate`.
 Objectives added through `vnx horizon add` live in the tracks database in the
 central per-project store (ADR-026), not in a checked-in roadmap file. A track
 enters `queued` and is plan-gated: it stays blocked until the plan-first panel
-passes, or the operator manually accepts it. There is no automatic round-cap
-escape in the panel — a self-accept is a manual operator action: unlink the
-plan-gate open-item (`tracks.unlink_open_item`) and reconcile. Merged-PR
+passes, or the operator accepts it manually. There is no automatic round-cap
+escape in the panel — a self-accept is a manual operator action with an
+approval token:
+
+    vnx horizon plan-gate attest <track_id> --reason "..." --approval-id ...
+
+`attest` clears the `OI-PLAN-<track>` blocker through `_resolve_plan_blocker`,
+which (since #1502) requires a non-empty `resolution_reason` and fails closed
+otherwise. The reason is required because a gate lift without one is
+indistinguishable from a mistake: the pre-fix write path dropped the reason on
+87 of 109 lifted blockers (measured 2026-08-15 with
+`vnx horizon plan-gate missing-reasons`; the count falls as `backfill-reason`
+runs). Do NOT clear the blocker by hand via `tracks.unlink_open_item`. That
+raw path writes the row directly and bypasses the reason requirement. Merged-PR
 evidence closes tracks through `reconcile`, so declared status is grounded in
 git reality rather than a hand-edited list.
 

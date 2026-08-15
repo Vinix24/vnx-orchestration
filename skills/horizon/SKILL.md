@@ -7,9 +7,10 @@ description: >
   into now/next/later horizons, break a feature into deliverables, set the routing FLOOR, or
   run the plan-gate on a feature. The tracks DB (`vnx horizon`, alias `vnx objective`) is the
   source of truth; the repo ROADMAP.yaml is a generic example, not the SSOT. Plans and gates
-  only: never dispatches, never closes open-items. The heavy multi-model plan-gate panel runs
-  only on an explicit plan-gate step. (Renamed from `pm` 2026-07-05 — `/pm`/`@pm` still resolve
-  via the backward-compat alias in `.claude/skills/pm/SKILL.md`.)
+  only: never dispatches, never closes open-items. The plan-gate panel is proportional (0-5
+  seats, by governance weight) and runs only on an explicit plan-gate step. (Renamed from
+  `pm` 2026-07-05 — `/pm`/`@pm` still resolve via the backward-compat alias in
+  `.claude/skills/pm/SKILL.md`.)
 user-invocable: true
 allowed-tools: [Read, Grep, Glob, Bash]
 ---
@@ -45,8 +46,9 @@ trust the silent `vnx-dev` default in a multi-project context).
    launch) — do NOT `vnx horizon sync` against it; sync would seed example data into the live
    store. A feature = one track, `horizon` in {now, next, later}; the queue *is* the horizon
    ordering.
-2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the 5-family panel,
-   revise until pass. No deliverable promotes until this passes.
+2. **Plan-first GATE (hard, see below)** — produce the plan doc, run the plan panel (size
+   derived from the governance weight), revise until pass. No deliverable promotes until
+   this passes.
 3. **Deliverables** — `vnx horizon deliverable add --objective <track> --output-kind
    {pr,doc,...} --title "..."` (alias: `vnx deliverable add`) per planned output. Each lands
    `proposed`. The human gate `vnx horizon deliverable promote` is the only path to `ready` —
@@ -59,19 +61,24 @@ trust the silent `vnx-dev` default in a multi-project context).
 5. **Drift watch** — `vnx horizon drift` (alias: `vnx objective drift`, advisory) is your live
    "is this actually done" signal before closeout.
 
-## The plan-first gate (always multi-model)
+## The plan-first gate (proportional panel)
 
 Every feature is preceded by an architect/plan phase. The PLAN (not the code) is reviewed by
-a diverse-family panel BEFORE any implementation.
+a diverse-family panel BEFORE any implementation, sized to the plan's governance weight.
 
 - **Plan doc** (linked from the track, output_kind `doc`): `## Problem`, `## Approach`,
   `## Deliverables` (each tagged task_class + complexity), `## Risks`, `## Model-routing plan`
   (the FLOOR per deliverable, not a hand-picked lane), `## Open questions`.
-- **Panel = the full 5-family DEFAULT_PANEL: opus + kimi + glm-harness + deepseek-harness +
-  codex** (`scripts/lib/plan_gate_panel.py`, #991; gemini omitted until a CLI exists — five
-  families -> real disagreement). A flaked/undispatched lane ABSTAINS (non-scoring, #910);
+- **Panel size is derived, not flat.** The governance weight (`derive_governance_variant` in
+  `scripts/lib/smart_router.py`) maps the touched paths to a variant; the variant sizes the
+  panel via `GOVERNANCE_VARIANT_SEAT_LABELS` in `scripts/lib/plan_gate_panel.py`: 0 seats
+  (docs, reversible) up to 3 (core / irreversible); a new feature
+  (`task_class 01_code_generation`) gets the full 5 seats regardless of paths. The exact
+  ladder lives in `docs/core/HORIZON_PLANNING.md`; do not copy it here (a second copy drifts
+  the moment the ladder changes). A flaked/undispatched lane ABSTAINS (non-scoring, #910);
   liveness-quorum = min(2, panel size), so one flake never forces REVISE. Operational
-  preconditions: the glm litellm proxy on :4141, `DEEPSEEK_API_KEY`, kimi + codex CLIs.
+  preconditions for the heavier seats: the glm litellm proxy on :4141, `DEEPSEEK_API_KEY`,
+  kimi + codex CLIs.
 - **Run it**: `vnx horizon plan-gate run <track> --doc <plan.md> --project-id <pid>`. The
   panel runs on the **governed worker path**, and each panelist routes by its lane (the
   single-entry dispatch door decides this; until PR-12 wires/flips that door, the engine calls
@@ -95,6 +102,22 @@ a diverse-family panel BEFORE any implementation.
   to the track. While it is open the reconciler shows `derived_status: blocked` and
   `vnx horizon deliverable promote` refuses. The panel-pass closes it. A worker that never
   loaded this skill still cannot promote — the CLI rejects it.
+
+### When a heavy panel is worth it
+
+Panel size tracks ambiguity, not risk or size. The 2026-08-15 measurement
+(`scripts/analysis/plan_gate_panel_effectiveness.py`, repeatable) over 104 complete rounds:
+
+- the full panel agreed with the first seat alone in 89.4% of rounds;
+- seat 2 changed the decision in 11.7% of rounds, seat 3 in 5.1%, seat 4 and seat 5 each in
+  1.7%.
+
+When the facts determine the answer, one model with good context beats five that vote.
+Reserve the full panel for genuinely ambiguous plans: open judgment calls, competing
+architectural readings, novel blast radius. For a plan whose answer follows from the facts,
+a heavy panel burns five model calls to reproduce the first seat's verdict. The seat ladder
+encodes this in the default weight; override UP only when the plan is ambiguous, not merely
+large or risky.
 
 ## Routing FLOOR, not overrides (model selection)
 
