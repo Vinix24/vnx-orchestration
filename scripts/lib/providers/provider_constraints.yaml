@@ -163,7 +163,7 @@ constraints:
       DeepSeek endpoint, ANTHROPIC_API_KEY set to own DeepSeek key,
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (+ DISABLE_TELEMETRY +
       DISABLE_AUTOUPDATER + DISABLE_ERROR_REPORTING), and MCP disabled
-      (--strict-mcp-config --mcp-config '{"mcpServers":{}}'). Measured on
+      (--mcp-config '{"mcpServers":{}}' --strict-mcp-config). Measured on
       claude v2.1.150 (2026-05-26): 0 calls to api.anthropic.com, all
       inference routes to the DeepSeek endpoint. BLOCKED only when routing
       through the production OAuth subscription without an own API key —
@@ -196,6 +196,27 @@ constraints:
       headings. VNX_OVERRIDE_CLAUDE_HEADLESS=1 still marks an explicit
       per-dispatch opt-in for audit visibility even though the route no
       longer blocks.
+    enforcement: code_warn
+    audit_severity: warn
+    override_allowed: true
+
+  - id: worker-no-ambient-mcp
+    rule: forbid_route
+    forbidden_route:
+      via: ambient_mcp
+    reason: >-
+      Scoped worker-mode is the fabric default since 2026-08-14
+      (mcp-scoped-default): a detached worker must not inherit the operator's
+      ambient MCP servers unless the dispatch explicitly declares
+      requires_mcp: true. Worktree isolation bounds the FILESYSTEM, not the
+      NETWORK, and an MCP server talks to a service outside the checkout —
+      measured 2026-08-14: six ambient MCP servers (incl. Gmail and Google
+      Drive) still connected from a dispatch worktree without opt-in. The
+      binding enforcement lives in worker_permissions.build_claude_scope_args
+      (empty --mcp-config unless requires_mcp=True), not in the door router;
+      this entry records the decision in the SSOT. VNX_WORKER_BLANKET_SKIP=1
+      (or falsy VNX_WORKER_SCOPED) is the explicit per-dispatch opt back into
+      the blanket --dangerously-skip-permissions posture.
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true
