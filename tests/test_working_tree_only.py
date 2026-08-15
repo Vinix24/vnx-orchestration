@@ -8,9 +8,10 @@ Two layers:
     which is the default since the 14-08 flip (the blanket opt-out carries no
     allow/deny lists at all).
   - the SCOPING PRECONDITION (fail-closed): TmuxInteractiveDispatch.dispatch
-    rejects a working_tree_only dispatch on any opt-out path (attached, or the
-    explicit blanket opt-out VNX_WORKER_BLANKET_SKIP=1 / falsy
-    VNX_WORKER_SCOPED) where the deny would not bind.
+    rejects a working_tree_only dispatch on any full opt-out path (attached, or
+    BOTH the scoped opt-out — VNX_WORKER_BLANKET_SKIP=1 / falsy VNX_WORKER_SCOPED
+    — and the ADR-012 enforcement opt-out — VNX_WORKER_ENFORCEMENT_SKIP=1 /
+    falsy VNX_ENFORCE_WORKER_PERMISSIONS) where the deny would not bind.
 """
 
 from __future__ import annotations
@@ -95,10 +96,15 @@ class TestScopingPrecondition:
         assert "working_tree_only" in (result.failure_reason or "")
 
     def test_unscoped_env_working_tree_only_is_rejected(self, tmp_path, monkeypatch):
-        # Detached but VNX_WORKER_SCOPED=0 (explicit opt-out) -> blanket
+        # Detached but BOTH defaults opted out (VNX_WORKER_SCOPED=0 and
+        # VNX_ENFORCE_WORKER_PERMISSIONS=0) -> blanket
         # --dangerously-skip-permissions, no scope args -> the deny would not
-        # bind -> reject.
+        # bind -> reject. One opt-out alone is not enough since 15-08: the other
+        # predicate still defaults ON and forces the scoped spawn.
+        monkeypatch.delenv("VNX_WORKER_BLANKET_SKIP", raising=False)
+        monkeypatch.delenv("VNX_WORKER_ENFORCEMENT_SKIP", raising=False)
         monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
+        monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", "0")
         lane = _lane(tmp_path)
         result = lane.dispatch(
             "noop", "wt-unscoped", working_tree_only=True, skip_permissions=True,
@@ -122,10 +128,14 @@ class TestScopingPrecondition:
         assert "working_tree_only requires" not in (result.failure_reason or "")
 
     def test_blanket_skip_opt_out_working_tree_only_is_rejected(self, tmp_path, monkeypatch):
-        # Detached but explicitly opted back into blanket skip -> no scope args
-        # -> the deny would not bind -> reject.
+        # Detached but explicitly opted back into blanket skip AND enforcement
+        # skip -> no scope args -> the deny would not bind -> reject. Since 15-08
+        # VNX_WORKER_BLANKET_SKIP=1 alone no longer suffices: enforcement still
+        # defaults ON and forces the scoped spawn.
         monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+        monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
         monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
+        monkeypatch.setenv("VNX_WORKER_ENFORCEMENT_SKIP", "1")
         lane = _lane(tmp_path)
         result = lane.dispatch(
             "noop", "wt-blanket-optout", working_tree_only=True, skip_permissions=True,

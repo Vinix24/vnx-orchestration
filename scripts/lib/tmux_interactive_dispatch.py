@@ -56,7 +56,10 @@ WORK_START_NO_PROGRESS = "no_progress"
 # old blanket --dangerously-skip-permissions default rested on the worktree
 # argument — worktree isolation bounds the FILESYSTEM, not the NETWORK, and an
 # MCP server talks to a service outside the checkout. Blanket skip is now the
-# explicit opt-out (VNX_WORKER_BLANKET_SKIP=1, or VNX_WORKER_SCOPED=0/false/no/off).
+# explicit opt-out, and it takes BOTH opt-outs because both predicates default
+# ON (scoped since 14-08, ADR-012 enforcement since 15-08):
+# VNX_WORKER_BLANKET_SKIP=1 (or falsy VNX_WORKER_SCOPED) AND
+# VNX_WORKER_ENFORCEMENT_SKIP=1 (or falsy VNX_ENFORCE_WORKER_PERMISSIONS).
 #
 # OI-1099: the decision predicates worker_scoped_enabled /
 # worker_permission_enforcement_enabled resolve in ONE place — the canonical
@@ -78,16 +81,19 @@ try:
 except Exception:  # pragma: no cover - sibling import is available in-tree
     EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
     _WP_AVAILABLE = False
-    # Import-fault fallback (OI-1099 + 14-08 flip): fail CLOSED into the scoped
-    # posture — never silently re-open the wider blanket-skip blast radius. These
-    # inline predicates return the new defaults (scoped ON, ADR-012 enforcement
-    # OFF) so the normal code path below still assembles a scoped spawn; only the
-    # canonical worker_permissions module owns the real, env-driven decision.
+    # Import-fault fallback (OI-1099 + 14-08/15-08 flips): fail CLOSED into the
+    # scoped posture — never silently re-open the wider blanket-skip blast radius.
+    # These inline predicates return the current fleet defaults (scoped ON,
+    # ADR-012 enforcement ON since 15-08) so the normal code path below still
+    # assembles a scoped, enforcing spawn on an import fault; only the canonical
+    # worker_permissions module owns the real, env-driven decision. "Fail-closed"
+    # now means enforcement ON: an import fault must not silently drop the
+    # fine-grained file-write boundary, so this stub mirrors the 15-08 flip.
     def worker_scoped_enabled():  # type: ignore[misc]
         return True
 
     def worker_permission_enforcement_enabled():  # type: ignore[misc]
-        return False
+        return True
 
     def classify_permission_posture(argv, role=None):  # type: ignore[misc]
         # OI-864 fallback: classify from the actual argv tokens, never by
@@ -357,7 +363,10 @@ def _default_launch_command(
         # posture (role allow-list + empty ambient MCP) since the 14-08 flip —
         # worktree isolation bounds the filesystem, not the network, and an MCP
         # server talks to a service outside the checkout. The else branch is the
-        # explicit opt-out (VNX_WORKER_BLANKET_SKIP=1 or VNX_WORKER_SCOPED=0).
+        # explicit opt-out, which requires BOTH predicates off since enforcement
+        # also defaulted ON on 15-08: VNX_WORKER_BLANKET_SKIP=1 / falsy
+        # VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / falsy
+        # VNX_ENFORCE_WORKER_PERMISSIONS.
         if worker_scoped_enabled() or worker_permission_enforcement_enabled():
             profile = _wp_resolve_worker_profile(role)
             scope_args = _wp_build_claude_scope_args(
@@ -382,7 +391,7 @@ def _sanitize_session_name(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default OFF)
+# Worker-scope PreToolUse enforcement hook wiring (spike E1/E2; default ON since 15-08)
 # ---------------------------------------------------------------------------
 
 # Command anchors the hook at the FABRIC install root, never the worktree or
@@ -446,9 +455,9 @@ def _write_worker_scope_hook_settings(worktree_root: Path) -> Path:
     the git-tracked ``.claude/settings.json``, so the worktree's git status stays
     clean and the worker can never accidentally commit the registration.
 
-    The hook itself is gated on ``VNX_ENFORCE_WORKER_PERMISSIONS`` (default OFF),
-    so registering it unconditionally is a guaranteed no-op until the fleet-wide
-    flip happens as a separate human-gated decision.
+    The hook itself is gated on ``VNX_ENFORCE_WORKER_PERMISSIONS`` (default ON
+    since 15-08), so registering it unconditionally binds on every scoped spawn
+    unless the dispatch explicitly opts out.
 
     Idempotent: an identical hook command is never registered twice. Existing
     unrelated keys and hook entries in the file are preserved.
@@ -2505,11 +2514,13 @@ class TmuxInteractiveDispatch:
 
         # D2.2 scoping precondition (fail-closed): a working-tree-only dispatch's
         # commit/push deny only binds in the scoped detached spawn (the path where
-        # _wp_build_claude_scope_args is invoked). Scoped is the default since the
-        # 14-08 flip, so only an EXPLICIT opt-out (VNX_WORKER_BLANKET_SKIP=1 or
-        # VNX_WORKER_SCOPED=0/false/no/off) — or an attached session — leaves the
-        # worker unscoped; reject those so an unscoped working-tree-only worker can
-        # never silently reach git commit/push.
+        # _wp_build_claude_scope_args is invoked). Both the scoped posture and the
+        # ADR-012 enforcement default ON (14-08 and 15-08 respectively), and either
+        # predicate alone forces the scoped spawn that carries the deny — so only
+        # opting out of BOTH (VNX_WORKER_BLANKET_SKIP=1 / falsy VNX_WORKER_SCOPED
+        # AND VNX_WORKER_ENFORCEMENT_SKIP=1 / falsy VNX_ENFORCE_WORKER_PERMISSIONS)
+        # — or an attached session — leaves the worker unscoped; reject those so an
+        # unscoped working-tree-only worker can never silently reach git commit/push.
         if working_tree_only and not (
             skip_permissions
             and (worker_scoped_enabled() or worker_permission_enforcement_enabled())
@@ -2519,9 +2530,11 @@ class TmuxInteractiveDispatch:
                 dispatch_id=dispatch_id,
                 failure_reason=(
                     "working_tree_only requires a scoped detached spawn "
-                    "(scoped is the default; refusing the explicit opt-out path — "
-                    "VNX_WORKER_BLANKET_SKIP=1 or VNX_WORKER_SCOPED=0/false/no/off "
-                    "— where the commit/push deny would not bind)"
+                    "(both the scoped posture and ADR-012 enforcement default ON; "
+                    "refusing the full opt-out path — VNX_WORKER_BLANKET_SKIP=1 / "
+                    "falsy VNX_WORKER_SCOPED AND VNX_WORKER_ENFORCEMENT_SKIP=1 / "
+                    "falsy VNX_ENFORCE_WORKER_PERMISSIONS — where the commit/push "
+                    "deny would not bind)"
                 ),
             )
 
@@ -2610,12 +2623,12 @@ class TmuxInteractiveDispatch:
                 )
 
             if worktree_handle is not None:
-                # Worker-scope PreToolUse enforcement hook (gated ON by
-                # VNX_ENFORCE_WORKER_PERMISSIONS, default OFF; spike E1/E2):
-                # register the hook in the fresh worktree BEFORE the tmux session
-                # spawns so cwd-based settings discovery has it from the first
-                # tool call. Best-effort: the hook is fail-open anyway, so a
-                # failed write must never abort the dispatch.
+                # Worker-scope PreToolUse enforcement hook (gated by
+                # VNX_ENFORCE_WORKER_PERMISSIONS, default ON since 15-08;
+                # spike E1/E2): register the hook in the fresh worktree BEFORE
+                # the tmux session spawns so cwd-based settings discovery has it
+                # from the first tool call. Best-effort: the hook is fail-open
+                # anyway, so a failed write must never abort the dispatch.
                 try:
                     _write_worker_scope_hook_settings(Path(cwd))
                     # OI-804 (ADR-005 audit gap): a successful state mutation —

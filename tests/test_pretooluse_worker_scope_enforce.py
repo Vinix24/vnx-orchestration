@@ -5,8 +5,14 @@ Dispatch 20260724-worker-scope-enforce-hook. Covers the required 5-case matrix:
   (a) a bash_deny command is blocked
   (b) an out-of-scope file write is blocked
   (c) an in-scope write + an allowed command pass
-  (d) flag OFF (unset or != "1") => guaranteed no-op for all of the above
+  (d) explicit opt-out (VNX_WORKER_ENFORCEMENT_SKIP=1 or a falsy
+      VNX_ENFORCE_WORKER_PERMISSIONS) => guaranteed no-op for all of the above
   (e) a block emits the worker_scope_block audit receipt
+
+Since 15-08 enforcement is OFF by default (the flip was reverted pending a
+remeasurement with directory matching repaired): an unset flag means a pure
+no-op, and a truthy VNX_ENFORCE_WORKER_PERMISSIONS opts back in. Both postures
+are covered by TestDefaultEnforcement.
 
 Plus unit coverage of evaluate() semantics (role resolution, path relativizing,
 malformed payloads) and the JSON/exit-code hook contract (exit 0 always,
@@ -23,6 +29,7 @@ import os
 import subprocess
 import sys
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,21 +63,31 @@ def make_payload(
 def run_hook(
     payload: str,
     *,
-    enforce: bool,
+    enforce: "bool | None" = True,
     role: "str | None" = ROLE,
     data_dir: "Path | None" = None,
     extra_env: "dict | None" = None,
 ) -> subprocess.CompletedProcess:
-    """Run the .sh launcher end-to-end with a controlled environment."""
+    """Run the .sh launcher end-to-end with a controlled environment.
+
+    ``enforce`` tri-state:
+      True  -> set VNX_ENFORCE_WORKER_PERMISSIONS=1 (explicit opt-IN)
+      None  -> leave the flag unset (the 15-08 DEFAULT posture, which is OFF —
+               a pure no-op)
+      False -> leave the flag unset too; the explicit opt-OUT posture is
+               expressed via extra_env (VNX_WORKER_ENFORCEMENT_SKIP=1 or a
+               falsy VNX_ENFORCE_WORKER_PERMISSIONS), never by "unset".
+    """
     env = dict(os.environ)
-    # Deterministic baseline: the gate flag must never leak in from the shell.
+    # Deterministic baseline: the gate flags must never leak in from the shell.
     env.pop("VNX_ENFORCE_WORKER_PERMISSIONS", None)
+    env.pop("VNX_WORKER_ENFORCEMENT_SKIP", None)
     env.pop("VNX_WORKER_ROLE", None)
     # Prevent repo-level env vars from steering YAML resolution to the main
     # repo instead of the worktree-local .vnx/worker_permissions.yaml.
     for _steer in ("PROJECT_ROOT", "VNX_PROJECT_ROOT", "VNX_HOME"):
         env.pop(_steer, None)
-    if enforce:
+    if enforce is True:
         env["VNX_ENFORCE_WORKER_PERMISSIONS"] = "1"
     if role is not None:
         env["VNX_WORKER_ROLE"] = role
@@ -160,8 +177,9 @@ class TestEnforcementMatrix(HookTestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(res.stdout.strip(), "", res.stdout)
 
-    def test_d_flag_off_is_noop(self):
-        """Flag unset AND explicitly '0': every case above passes through untouched."""
+    def test_d_explicit_optout_is_noop(self):
+        """Explicit opt-outs (VNX_WORKER_ENFORCEMENT_SKIP=1 or a falsy
+        VNX_ENFORCE_WORKER_PERMISSIONS) make every case pass untouched."""
         payloads = [
             make_payload("Bash", {"command": "git push origin main"}),
             make_payload(
@@ -171,10 +189,10 @@ class TestEnforcementMatrix(HookTestCase):
             ),
             make_payload("Bash", {"command": "pytest -q"}),
         ]
-        for flag_value in (None, "0"):
-            extra = (
-                {} if flag_value is None else {"VNX_ENFORCE_WORKER_PERMISSIONS": flag_value}
-            )
+        for extra in (
+            {"VNX_WORKER_ENFORCEMENT_SKIP": "1"},
+            {"VNX_ENFORCE_WORKER_PERMISSIONS": "0"},
+        ):
             for payload in payloads:
                 res = run_hook(
                     payload,
@@ -186,9 +204,9 @@ class TestEnforcementMatrix(HookTestCase):
                 self.assertEqual(
                     res.stdout.strip(),
                     "",
-                    f"flag OFF ({flag_value!r}) must be a no-op, got stdout: {res.stdout!r}",
+                    f"opt-out ({extra!r}) must be a no-op, got stdout: {res.stdout!r}",
                 )
-        # No audit events may be emitted when the flag is off.
+        # No audit events may be emitted when enforcement is opted out.
         self.assertFalse((self.data_dir / "events").exists())
 
     def test_e_block_emits_audit_receipt(self):
@@ -309,6 +327,79 @@ class TestEvaluateUnit(HookTestCase):
         # Relative paths and empty inputs pass through untouched.
         self.assertEqual(hook._relative_to_cwd("scripts/a.py", "/wt"), "scripts/a.py")
         self.assertEqual(hook._relative_to_cwd("/wt/a.py", ""), "/wt/a.py")
+
+
+class TestDefaultEnforcement(HookTestCase):
+    """15-08 flip REVERTED: enforcement is OFF by default — no env flag means a
+    pure no-op. A truthy VNX_ENFORCE_WORKER_PERMISSIONS opts back in and
+    re-activates the boundary. These call hook.evaluate() directly (no
+    subprocess) and assert on the returned decision.
+    """
+
+    @contextmanager
+    def _env(self, **overrides):
+        env = {
+            "VNX_WORKER_ROLE": ROLE,
+            # Prevent repo-level env vars from steering YAML resolution.
+            "PROJECT_ROOT": "",
+            "VNX_PROJECT_ROOT": "",
+            "VNX_HOME": "",
+        }
+        env.update(overrides)
+        with patch.dict(os.environ, env, clear=False):
+            if "VNX_ENFORCE_WORKER_PERMISSIONS" not in overrides:
+                os.environ.pop("VNX_ENFORCE_WORKER_PERMISSIONS", None)
+            if "VNX_WORKER_ENFORCEMENT_SKIP" not in overrides:
+                os.environ.pop("VNX_WORKER_ENFORCEMENT_SKIP", None)
+            yield
+
+    def test_default_off_allows_write_outside_dispatch_paths(self):
+        # Unset flag → enforcement OFF → the hook is a no-op, even for a write
+        # that WOULD be blocked under enforcement (in role scope tests/** but
+        # outside the dispatch's declared tests/test_x.py).
+        payload = json.loads(
+            make_payload("Write", {"file_path": "/wt/tests/test_other.py"}, cwd="/wt")
+        )
+        with self._env(VNX_DISPATCH_PATHS=json.dumps(["tests/test_x.py"])):
+            self.assertEqual(hook.evaluate(payload), ("allow", None))
+
+    def test_explicit_optin_blocks_write_outside_dispatch_paths(self):
+        payload = json.loads(
+            make_payload("Write", {"file_path": "/wt/tests/test_other.py"}, cwd="/wt")
+        )
+        with self._env(
+            VNX_DISPATCH_PATHS=json.dumps(["tests/test_x.py"]),
+            VNX_ENFORCE_WORKER_PERMISSIONS="1",
+        ):
+            decision, reason = hook.evaluate(payload)
+        self.assertEqual(decision, "block")
+        self.assertIn("tests/test_other.py", reason)
+
+    def test_explicit_optin_allows_write_within_dispatch_paths(self):
+        payload = json.loads(
+            make_payload("Write", {"file_path": "/wt/tests/test_x.py"}, cwd="/wt")
+        )
+        with self._env(
+            VNX_DISPATCH_PATHS=json.dumps(["tests/test_x.py"]),
+            VNX_ENFORCE_WORKER_PERMISSIONS="1",
+        ):
+            self.assertEqual(hook.evaluate(payload), ("allow", None))
+
+    def test_report_write_allowed_default_and_optin(self):
+        target = self.data_dir / "unified_reports" / "dispatch-X.md"
+        payload = json.loads(make_payload("Write", {"file_path": str(target)}, cwd="/wt"))
+        # Allowed under the default-OFF no-op AND under an explicit opt-in.
+        with self._env(
+            VNX_DATA_DIR=str(self.data_dir),
+            VNX_DATA_DIR_EXPLICIT="1",
+        ):
+            self.assertEqual(hook.evaluate(payload), ("allow", None))
+        with self._env(
+            VNX_DATA_DIR=str(self.data_dir),
+            VNX_DATA_DIR_EXPLICIT="1",
+            VNX_ENFORCE_WORKER_PERMISSIONS="1",
+        ):
+            self.assertEqual(hook.evaluate(payload), ("allow", None))
 
 
 class TestHookContract(HookTestCase):

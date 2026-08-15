@@ -302,16 +302,37 @@ def worker_scoped_enabled() -> bool:
 def worker_permission_enforcement_enabled() -> bool:
     """Whether ADR-012 worker-permission ENFORCEMENT is active (default OFF).
 
-    Distinct from the scoped-spawn default owned by :func:`worker_scoped_enabled`
-    (default ON since 14-08): that flag decides the spawn-time posture (scoped
-    allow-list vs blanket skip), while this flag gates the ADR-012 hook-layer
-    enforcement — role-derived ``--allowedTools`` / ``--disallowedTools`` /
-    ``--permission-mode`` through the PreToolUse hook, plus the ``enforced``
-    receipt marker. It stays default OFF independent of the scoped-spawn flip,
-    so the two can be toggled separately.
+    The 15-08 flip to ON was reverted to OFF: the measured blast radius under
+    the flipped default was not yet trustworthy. The first measurement counted
+    42 of 56 measurable dispatches writing outside their declared
+    ``dispatch_paths`` — but 17 of those were matcher artifacts, not real
+    violations: the dispatches declared a bare DIRECTORY (``tests``, ``scripts``)
+    and wrote files inside it, which the then-literal fnmatch matcher failed to
+    match (``fnmatch('tests/test_x.py', 'tests')`` is False). Until that
+    directory-matching gap is repaired (``resolve_dispatch_write_scope`` now
+    expands a declared directory to ``<dir>/**``) and the outside-rate is
+    REMEASURED — split into real violations vs matcher artifacts, for both the
+    dispatch scope and the role scope — the flip is a bet, not a decision. The
+    flip itself is a one-character change with evidence underneath it once that
+    remeasurement exists.
 
-    Truthy values: ``1``, ``true``, ``yes``, ``on``.
+    Opt-outs (kept because they become necessary the moment the flip lands):
+      - ``VNX_WORKER_ENFORCEMENT_SKIP=1`` — explicit per-dispatch opt out of the
+        hook-layer enforcement, same shape as ``VNX_WORKER_BLANKET_SKIP``.
+      - ``VNX_ENFORCE_WORKER_PERMISSIONS`` falsy (``0`` / ``false`` / ``no`` /
+        ``off``) — the legacy switch, kept for backward compat, also disables
+        enforcement.
+
+    Truthy values (opt IN while the default is OFF): ``1``, ``true``, ``yes``,
+    ``on``.
     """
+    if os.environ.get("VNX_WORKER_ENFORCEMENT_SKIP", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
     return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
         "1",
         "true",
@@ -657,6 +678,54 @@ def _parse_dispatch_path_entry(raw: str) -> "tuple[str, PathAccess]":
     return raw, PathAccess.READ_WRITE
 
 
+_GLOB_METACHARS = ("*", "?", "[")
+
+
+def _dispatch_path_to_write_globs(path: str) -> "list[str]":
+    """Translate one declared dispatch path into write-granting fnmatch globs.
+
+    ``match_file_write_scope`` treats every dispatch-path entry as an fnmatch
+    glob, so a literal directory path never matches a file inside it
+    (``fnmatch('tests/test_x.py', 'tests')`` is False) — a dispatch declaring
+    ``tests`` could not write any file there. This helper repairs that by
+    rewriting a path that names a DIRECTORY so it covers its contents (the same
+    ``<dir>/**`` form the role scopes already use, e.g. ``scripts/**``). A path
+    that names a FILE stays an exact glob, so a file path never opens up its
+    neighbours: ``scripts/lib/foo.py`` must not grant ``scripts/lib/foo.py.bak``
+    or the whole directory.
+
+    The directory-vs-file decision is made on PATH FORM, never on disk: a
+    dispatch that creates a NEW file or directory is normal, so the target may
+    not exist yet and ``os.path.isdir`` cannot be trusted (a not-yet-created
+    directory would be misread as a file and the fix would silently not apply).
+    The deterministic rule, in order:
+
+      1. A path carrying a glob metacharacter (``*``, ``?``, ``[``) is already
+         a glob — returned verbatim.
+      2. Otherwise a path whose final component has a file extension
+         (``Path(path).suffix`` non-empty — a non-leading dot, so ``foo.py``
+         counts as a file but the dotfile directory ``.github`` does not)
+         names a file — returned verbatim (trailing slashes stripped).
+      3. Anything else (``tests``, ``tests/``, ``scripts/commands``) has no
+         extension, and the path form alone cannot distinguish a directory
+         (``tests``) from an extension-less file (``VERSION``). Both readings
+         are granted: the exact path AND its subtree (``<path>`` plus
+         ``<path>/**``). That never widens beyond "the path and its subtree" —
+         it only avoids falsely blocking an extension-less file that shares the
+         name of a declared directory-like path.
+    """
+    if any(c in path for c in _GLOB_METACHARS):
+        return [path]
+    stripped = path.rstrip("/")
+    if not stripped:
+        # Degenerate empty/root path: leave verbatim. Rewriting to ``/**``
+        # would match absolute paths and widen scope — fail closed instead.
+        return [path]
+    if Path(stripped).suffix:
+        return [stripped]
+    return [stripped, f"{stripped}/**"]
+
+
 def resolve_dispatch_write_scope(dispatch_paths: "list[str] | None") -> "list[str] | None":
     """Resolve raw ``dispatch_paths`` entries into write-granting scope globs.
 
@@ -670,6 +739,10 @@ def resolve_dispatch_write_scope(dispatch_paths: "list[str] | None") -> "list[st
     in this dispatch is in write scope. This mirrors the fabric's existing
     "absent field is not the same as zero" convention — see
     :func:`match_file_write_scope` for how the two are distinguished.
+
+    Each write-granting entry is translated through
+    :func:`_dispatch_path_to_write_globs`, so a declared directory covers its
+    contents rather than matching only its own literal name.
     """
     if not dispatch_paths:
         return None
@@ -677,7 +750,7 @@ def resolve_dispatch_write_scope(dispatch_paths: "list[str] | None") -> "list[st
     for raw in dispatch_paths:
         path, access = _parse_dispatch_path_entry(raw)
         if access in WRITE_GRANTING_ACCESS:
-            out.append(path)
+            out.extend(_dispatch_path_to_write_globs(path))
     return out
 
 
