@@ -50,6 +50,12 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+# Route every tmux subcommand through the runtime adapter's canonical runner.
+# The DirectCouplingFreeze (tests/test_runtime_adapter_certification.py) pins
+# direct ``subprocess``→tmux coupling to the adapter files; this module must
+# delegate to ``tmux_adapter._run_tmux`` rather than run ``tmux`` itself.
+from tmux_adapter import _run_tmux as _adapter_run_tmux  # noqa: E402
+
 # The three object kinds share one dispatch-id alphabet. Both regexes pin the
 # name to the exact dispatch-id charset so a stray ``vnx-...`` / ``dispatch-...``
 # name that is not a VNX dispatch id is never mistaken for one.
@@ -129,7 +135,7 @@ def _run_tmux(args: list[str], timeout: int = 10) -> tuple[int, str, str]:
     if shutil.which("tmux") is None:
         return (127, "", "tmux not found")
     try:
-        r = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=timeout)
+        r = _adapter_run_tmux(*args, timeout=timeout)
         return (r.returncode, r.stdout, r.stderr)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         return (1, "", str(exc))
