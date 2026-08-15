@@ -345,7 +345,7 @@ def test_horizon_help_lists_full_surface(monkeypatch, capsys):
     for verb in (
         "add", "list", "show", "sync", "drift", "reconcile",
         "reconcile-review", "reconcile-streak", "close", "reopen",
-        "link-pr", "set-lane-hint",
+        "link-pr", "set-lane-hint", "set-goal",
         "deliverable", "plan-gate",
     ):
         assert verb in out, f"missing verb in `vnx horizon --help`: {verb}"
@@ -357,7 +357,7 @@ def test_objective_and_deliverable_alias_help(monkeypatch, capsys):
     for verb in (
         "add", "list", "show", "sync", "drift", "reconcile",
         "reconcile-review", "reconcile-streak", "close", "reopen",
-        "link-pr", "set-lane-hint",
+        "link-pr", "set-lane-hint", "set-goal",
     ):
         assert verb in out
     # objective is the OBJECTIVE-domain alias only — deliverable/plan-gate stay

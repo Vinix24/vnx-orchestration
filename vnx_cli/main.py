@@ -441,7 +441,7 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
 def _register_track_subparser(subparsers: argparse.Action) -> None:
     track_parser = subparsers.add_parser(
         "track",
-        help="manage feature-tracks (new/activate/park/unpark/done/oi-close/dispatch/list/show)",
+        help="manage feature-tracks (new/activate/park/unpark/done/oi-close/dispatch/set-goal/list/show)",
     )
     track_parser.add_argument(
         "--project-dir",
@@ -523,6 +523,15 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
     toic_parser.add_argument("--reason", required=True, metavar="REASON",
                              help="resolution reason (required; recorded in audit trail)")
     toic_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    tsg_parser = track_subs.add_parser(
+        "set-goal", help="set a track's goal_state (repair a too-thin goal)")
+    tsg_parser.add_argument("track_id", metavar="TRACK_ID")
+    tsg_parser.add_argument("goal", metavar="GOAL",
+                            help="what 'done' looks like (>= goal_min_chars meaningful chars)")
+    tsg_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                            help="project_id for this track (required; ADR-007)")
+    tsg_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
 
 _HORIZON_CHOICES = ("now", "next", "later")
@@ -704,6 +713,18 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     p_lane_hint.add_argument(
         "lane_hint", choices=_LANE_HINT_CHOICES, metavar="LANE_HINT",
         help="descriptive dispatch-routing hint (governed|direct|unset)",
+    )
+
+    p_set_goal = subs.add_parser(
+        "set-goal",
+        help="repair a too-thin track goal (validated against the "
+             "goal_min_chars threshold)",
+    )
+    _common_horizon_args(p_set_goal)
+    p_set_goal.add_argument("track_id", metavar="TRACK_ID")
+    p_set_goal.add_argument(
+        "goal", metavar="GOAL",
+        help="what 'done' looks like (>= goal_min_chars meaningful chars)",
     )
 
 

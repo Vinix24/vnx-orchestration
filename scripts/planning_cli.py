@@ -2043,6 +2043,47 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_objective_set_goal(args: argparse.Namespace) -> int:
+    """Set a track's ``goal_state``, validated against the plan-gate threshold.
+
+    The only operator-facing repair for a too-thin goal after creation: the
+    plan-first gate refuses a goal under ``goal_min_chars`` meaningful characters,
+    and before this verb no command could raise it without an operator-attest
+    (which books the track as done) or a forbidden direct DB write. Reads the
+    threshold from the plan-gate's own source (``plan_gate_panel.load_goal_min_chars``)
+    so the two never drift apart. Writes via ``tracks_lib.set_goal``, the
+    single-writer; never touches ``phase`` or ``derived_status``.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    import plan_gate_panel  # noqa: PLC0415
+    min_goal_chars = plan_gate_panel.load_goal_min_chars()
+
+    try:
+        track = tracks_lib.set_goal(
+            state_dir, track_id, project_id, args.goal,
+            min_goal_chars=min_goal_chars, actor="operator",
+        )
+    except tracks_lib.GoalTooThinError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except tracks_lib.TrackNotFoundError as exc:
+        print(
+            f"objective set-goal: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(
+        f"Set goal_state on {track_id} [{project_id}] "
+        f"({len(args.goal.strip())} meaningful chars)"
+    )
+    return 0
+
+
 def cmd_deliverable_add(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -4155,6 +4196,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
     )
     p_add.set_defaults(func=cmd_objective_add)
+
+    p_set_goal = obj_sub.add_parser(
+        "set-goal",
+        help="repair a too-thin track goal: set goal_state on an existing track "
+             "(validated against the plan-gate's goal_min_chars threshold)",
+    )
+    _common(p_set_goal)
+    p_set_goal.add_argument("track_id")
+    p_set_goal.add_argument(
+        "goal",
+        help="what 'done' looks like for this track (>= goal_min_chars meaningful chars)",
+    )
+    p_set_goal.set_defaults(func=cmd_objective_set_goal)
 
     p_lane_hint = obj_sub.add_parser(
         "set-lane-hint",
