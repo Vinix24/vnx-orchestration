@@ -120,12 +120,11 @@ This means a cheap-and-strong model beats an expensive-and-stronger one, but a c
 
 ### 3.3 How cost gets labeled per lane
 
-Cost accounting is lane-dependent, not model-dependent, and is decided by the dispatch door's D2 rule (`dispatch_plan.py`), independent of the router's own `cost_usd_per_call` estimates:
+Cost accounting is decided by the dispatch door's D2 rule (`dispatch_plan.py`), independent of the router's own `cost_usd_per_call` estimates. For the `claude` lane the label is **auth-derived**, not lane-derived (OI-1156): the door computes `claude_auth_is_api_metered(env)` — the presence of an own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` (key-auth / redirect) is what makes the label `api_metered`. Without either, both the tmux and headless lanes bill as `subscription`.
 
 | Lane | `billing` label | Why |
 |---|---|---|
-| `claude` (tmux subscription) | `subscription` | OAuth subscription seat, not metered per call |
-| `claude` headless (`allow_headless=true`) | `api_metered` | Explicit opt-in to API-key billing |
+| `claude` (tmux or headless) | auth-derived | `api_metered` with an own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`; `subscription` otherwise |
 | `kimi` | `subscription` | CLI OAuth lane (`kimi-via-cli-only`), flat — never metered per call |
 | `local-gemma` | `local` | On-device inference, zero API cost |
 | everything else (`glm-harness`, `deepseek-harness`, `litellm:*`, `codex`, `gemini`) | `provider_metered` | Real per-token API billing |
