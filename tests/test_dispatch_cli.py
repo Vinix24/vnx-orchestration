@@ -1401,6 +1401,61 @@ def test_build_runtime_snapshot_default_semantics_fills_pin_when_model_absent(tm
     )
 
 
+# ---------------------------------------------------------------------------
+# OI-1156: build_runtime_snapshot derives claude_api_metered from the AUTH env
+# (own ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL => metered; absent => subscription)
+# ---------------------------------------------------------------------------
+
+def _snapshot_claude_api_metered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Build a claude-lane snapshot against the REAL SSOT and return
+    snapshot.claude_api_metered — the signal compile_plan turns into the billing
+    label. Only the auth env is manipulated; everything else runs as production."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Auth-derived billing probe\n\nRoute one claude task.\n",
+        provider="claude",
+        target_slot="T0",
+    )
+    spec = load_spec(spec_file)
+    vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
+    assert not isinstance(vspec, Reject)
+    snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
+    return snapshot.claude_api_metered
+
+
+def test_snapshot_claude_api_metered_false_without_own_key(tmp_path, monkeypatch):
+    """No own key / base-url => the claude auth identity is the subscription, so
+    compile_plan labels the dispatch 'subscription' — NOT the lane's former
+    'api_metered' assumption. Both directions of the OI-1156 fix are pinned here
+    and in the symmetric metered tests below."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    assert _snapshot_claude_api_metered(tmp_path, monkeypatch) is False
+
+
+def test_snapshot_claude_api_metered_true_with_own_base_url(tmp_path, monkeypatch):
+    """An own base-url redirect (deepseek-harness / custom-endpoint identity) is
+    metered — the label flips to 'api_metered' regardless of the lane."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert _snapshot_claude_api_metered(tmp_path, monkeypatch) is True
+
+
+def test_snapshot_claude_api_metered_true_with_own_key(tmp_path, monkeypatch):
+    """An own API key is the canonical metered identity."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-own-key")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    assert _snapshot_claude_api_metered(tmp_path, monkeypatch) is True
+
+
+def test_snapshot_claude_api_metered_false_with_blank_key(tmp_path, monkeypatch):
+    """A present-but-blank key is NOT a metered identity (the predicate strips
+    before testing) — a stray empty env var must not flip the label."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    assert _snapshot_claude_api_metered(tmp_path, monkeypatch) is False
+
+
 def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatch, capsys):
     """dispatch-agent-lane-coercion (20260713-LANECOERCE), defense-in-depth: a REAL staged spec
     with provider=claude, model=kimi, target_slot=T1 must be REJECTED by build_runtime_snapshot's
@@ -1654,7 +1709,9 @@ def test_headless_optin_routes_to_subprocess_adapter(mock_headless, mock_snapsho
 
     plan_arg = mock_headless.call_args[0][0]
     assert plan_arg.lane == "claude_headless"
-    assert plan_arg.billing == "api_metered"
+    # OI-1156: billing follows auth identity, not lane — the mocked snapshot
+    # carries no own key, so headless is "subscription", not "api_metered".
+    assert plan_arg.billing == "subscription"
     assert plan_arg.adapter == "claude_subprocess"
 
 
@@ -2590,6 +2647,13 @@ def test_worker_claude_override_routes_build_worker_to_claude_tmux(tmp_path, mon
         "VNX_OVERRIDE_WORKER_CLAUDE_REASON",
         "kimi failed 2x on this chain-critical task (C1 escalation)",
     )
+    # OI-1156: the door's build_runtime_snapshot now derives the claude billing
+    # label from the ambient auth env. Scrub ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+    # so the assertion below is deterministic regardless of the operator shell
+    # (a harness worker may carry ANTHROPIC_BASE_URL=deepseek and would otherwise
+    # flip the label to api_metered).
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
     with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)

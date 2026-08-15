@@ -42,6 +42,7 @@ from dispatch_plan import (  # noqa: E402
     ExecutionPlan,
     ModelPin,
     RuntimeSnapshot,
+    claude_auth_is_api_metered,
     compile_plan,
 )
 from dispatch_internal import (  # noqa: E402
@@ -1430,6 +1431,12 @@ def build_runtime_snapshot(
         except Exception:  # noqa: BLE001 — tier reverse-map is best-effort
             chain_tier_to = None
 
+    # OI-1156: auth-derived billing signal — the claude lane's billing label must
+    # follow the AUTH identity (own key / redirect = metered), not the lane. The
+    # door owns env reads, so compute it here and hand it to the pure compile_plan
+    # via the snapshot.
+    claude_api_metered = claude_auth_is_api_metered(os.environ)
+
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
         staging_promoted=staging_promoted,
@@ -1442,6 +1449,7 @@ def build_runtime_snapshot(
         tier_from=chain_tier_from,
         tier_to=chain_tier_to,
         worker_claude_override_reason=worker_claude_override_reason,
+        claude_api_metered=claude_api_metered,
     )
 
 

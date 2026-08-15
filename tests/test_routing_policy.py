@@ -315,7 +315,15 @@ def test_load_lane_safety_reads_production_yaml() -> None:
     """lane_safety is actually loaded from the production routing_policy.yaml."""
     lane_safety = load_lane_safety(_POLICY_PATH)
     assert "headless_block" in lane_safety
-    assert "force_headless" in lane_safety
+
+
+def test_force_headless_removed_from_lane_safety() -> None:
+    """OI-1174: force_headless was dead config — never read by any runtime gating
+    decision, only asserted-present by a test. Removed so a half-wired flag can't be
+    mistaken for a live guard. This test pins the ABSENCE: headless is reached only
+    via the explicit allow_headless=true DispatchSpec opt-in."""
+    lane_safety = load_lane_safety(_POLICY_PATH)
+    assert "force_headless" not in lane_safety
 
 
 def test_load_lane_safety_missing_block_returns_empty(tmp_path: Path) -> None:
