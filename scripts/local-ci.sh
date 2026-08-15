@@ -10,6 +10,10 @@
 #   adr-003-no-sdk   billing-safety: no Anthropic SDK imports anywhere in-tree
 #   workflow-validate  CI-workflow validity: .github/workflows/*.yml parse as
 #                    YAML and pass actionlint (Actions shape + expressions)
+#   test-exclusion-reason  CI-exclusion hygiene: every entry in
+#                    scripts/ci/test_exclusions.txt carries a reason, resolves
+#                    to a real file, and is not duplicated (nothing excluded
+#                    silently)
 #   wheel-install    packaging acceptance: build wheel -> fresh venv -> install
 #                    -> vnx --version / vnx doctor / VNX_HOME schema resolution
 #                    (scripts/test_wheel_install.sh)
@@ -57,6 +61,9 @@ run_gate "adr-003-no-sdk" python3 "$REPO_ROOT/scripts/check_adr_003_no_sdk_impor
 
 # --- gate: workflow validation (YAML + GitHub Actions shape) ---------------
 run_gate "workflow-validate" python3 "$REPO_ROOT/scripts/check_workflows.py" "$REPO_ROOT"
+
+# --- gate: CI-exclusion hygiene (every entry has a reason) -----------------
+run_gate "test-exclusion-reason" python3 "$REPO_ROOT/scripts/ci/check_test_exclusions.py" "$REPO_ROOT"
 
 # --- gate: wheel-install packaging smoke -----------------------------------
 if [ "${SKIP_WHEEL:-0}" = "1" ]; then
