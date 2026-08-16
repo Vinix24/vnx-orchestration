@@ -800,14 +800,13 @@ def test_confidence_legacy_event_field(ar):
     assert captured[0]["outcome"] == "success"
 
 
-def test_confidence_task_complete_empty_status_yields_success(ar):
-    """task_complete with empty status ('' in SUCCESS_STATUSES) → outcome='success'."""
+def test_confidence_task_complete_empty_status_skips(ar):
+    """task_complete with empty status → no outcome signal ('' no longer success)."""
     captured = []
     receipt = _make_receipt("task_complete", dispatch_id="CONF-011", terminal="T1")
     # no status field → str(receipt.get("status", "")).lower() == ""
     _run_confidence_update(ar, receipt, captured)
-    assert len(captured) == 1
-    assert captured[0]["outcome"] == "success"
+    assert len(captured) == 0
 
 
 # ── Tests: CQS timing — open_items_created set AFTER enrichment ───────────────

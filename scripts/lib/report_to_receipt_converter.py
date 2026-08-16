@@ -46,6 +46,10 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
+# Canonical receipt status vocabulary (single generated source). The converter
+# no longer carries its own hand-copied terminal-status sets; it resolves every
+# declared status through resolve_status_category() below.
+from event_outcome_semantics import UnknownStatusError, resolve_status_category
 
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent  # scripts/ — append_receipt.py lives here
@@ -587,18 +591,16 @@ def _resolve_report_provider_model(
     return provider, model
 
 
-# Terminal success statuses that trigger fail-closed validation (OI-1035 et al.).
-# Any report claiming one of these statuses must pass all three fail-closed
-# checks before a success receipt is written.  Reports with other statuses
-# (e.g. "unknown", absent) keep the pre-existing contract-invalid semantics.
-_TERMINAL_SUCCESS_STATUSES = frozenset({"success", "done", "complete", "completed"})
-
-# Terminal failure statuses (OI-1130).  A report that DECLARES itself failed
-# (e.g. the heartbeat-kill report from worker_heartbeat.
-# build_heartbeat_failure_report, which stamps ``Status: failed`` +
-# ``Failure-Reason: heartbeat_killed``) must produce a task_failed receipt —
-# never a task_complete that downstream tooling reads as a normal completion.
-_TERMINAL_FAILURE_STATUSES = frozenset({"failed", "failure", "heartbeat_killed"})
+# Terminal-status classification is no longer a hand-copied pair of frozensets.
+# build_receipt_from_report() resolves every declared status through
+# event_outcome_semantics.resolve_status_category() — the single generated
+# vocabulary — so the converter cannot drift from the canonical outcome sets.
+#
+#   "success"       -> fail-closed validation (OI-1035 et al.) must all pass
+#   "failure"       -> task_failed receipt (OI-1130), never a task_complete
+#   "ignorable"     -> no outcome signal, keeps pre-existing contract semantics
+#   "no_signal"     -> empty/absent status, keeps pre-existing contract semantics
+#   anything else   -> refused as task_failed with failure_reason="unknown_status"
 
 
 def _check_branch_on_origin(dispatch_id: str) -> bool:
@@ -883,7 +885,33 @@ def build_receipt_from_report(
     # "contract_invalid" bucket (which received 96 hits in 7 days and is
     # invisible to any alarm).
     status_raw = (merged.get("status") or "").strip().lower()
-    is_terminal_success = status_raw in _TERMINAL_SUCCESS_STATUSES
+    try:
+        status_category = resolve_status_category(status_raw)
+    except UnknownStatusError:
+        # Fail-closed on the vocabulary itself: a status literal outside the
+        # canonical list is refused as a failure, never adopted as a quiet
+        # no-signal receipt. A new literal must enter the canonical vocabulary
+        # first; an unknown one is evidence of a typo or an unvetted emitter.
+        logger.warning(
+            "report_to_receipt_converter: unknown status dispatch=%s status=%r: refusing",
+            dispatch_id, status_raw,
+        )
+        receipt_out: Dict[str, Any] = {
+            **base,
+            "event_type": "task_failed",
+            "status": "failed",
+            "failure_reason": "unknown_status",
+            "unknown_status": status_raw,
+        }
+        if ambiguous_report:
+            receipt_out["ambiguous_report_path"] = True
+            receipt_out["report_path_candidates"] = [
+                {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
+                for c in resolved.candidates_found
+            ] if resolved is not None else []
+        return receipt_out
+
+    is_terminal_success = status_category == "success"
 
     if is_terminal_success:
         fail_closed_violations = _run_fail_closed_checks(
@@ -916,7 +944,7 @@ def build_receipt_from_report(
     # success, detectable only by reading the Summary prose.  Declared failure
     # outranks contract violations: an explicit failure signal must never
     # degrade into the low-visibility contract_invalid bucket.
-    if status_raw in _TERMINAL_FAILURE_STATUSES:
+    if status_category == "failure":
         receipt_out: Dict[str, Any] = {
             **base,
             "event_type": "task_failed",

@@ -50,6 +50,12 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
 # Single canonical sentinel — imported from dispatch_identity (dispatch-20260804-190000).
 from dispatch_identity import _IDENTITY_UNRESOLVED
 
+# Canonical receipt status vocabulary (single generated source). The govern
+# step derives its declared-failure set from it instead of hand-copying the
+# literals, so it cannot drift from report_to_receipt_converter's terminal
+# classification.
+from event_outcome_semantics import FAILURE_STATUSES
+
 # The plan-gate's own role — a worker report ending in a ```vnx-plan-verdict``` fence.
 _PLAN_REVIEWER_ROLE = "plan-reviewer"
 
@@ -381,14 +387,13 @@ def _split_yaml_frontmatter(text: str) -> "tuple[dict, str]":
 
 # OI-1202: terminal-failure statuses a worker report can DECLARE (bold
 # ``**Status**: value`` in the body, or a ``status`` key in YAML frontmatter).
-# Mirrors report_to_receipt_converter's ``_TERMINAL_FAILURE_STATUSES`` plus the
-# other failure-shaped literals, so a 4-heading report that declares failure
-# (e.g. worker_heartbeat's heartbeat_killed / worker_process_gone reports) is
-# never re-labeled "done" by the lane-synthesized fallback.
-_DECLARED_FAILURE_STATUSES = frozenset({
-    "failed", "failure", "heartbeat_killed", "error", "blocked", "timeout",
-    "contract_invalid",
-})
+# Derived from the canonical FAILURE_STATUSES (event_outcome_semantics) plus
+# "timeout" — the one literal dispatch_govern treats as failure-shaped that the
+# canonical completion vocabulary deliberately keeps as ignorable. A 4-heading
+# report that declares any of these (e.g. worker_heartbeat's heartbeat_killed /
+# worker_process_gone reports) is never re-labeled "done" by the
+# lane-synthesized fallback.
+_DECLARED_FAILURE_STATUSES = FAILURE_STATUSES | frozenset({"timeout"})
 
 # Bold-field shape the worker_heartbeat failure reports use ("**Status**: failed").
 _STATUS_BOLD_RE = re.compile(r"\*\*Status\*\*\s*:\s*([^\n]+)", re.IGNORECASE)
