@@ -44,9 +44,11 @@ top-level alias `vnx deliverable <verb>`:
 
 | Verb | Purpose |
 |---|---|
-| `add` | Add a deliverable to a track. |
-| `list` | List a track's deliverables. |
+| `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`). |
+| `list` | List a track's deliverables, incl. `task_class`/`routing_floor` (explicit "not set" when absent). |
 | `promote` | Promote a deliverable (proposed → ready; human gate). |
+| `close` | afboeken (done): close a ready deliverable → completed (operator-attested PR evidence). |
+| `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`). |
 
 ### Plan-gate verbs
 

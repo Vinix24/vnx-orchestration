@@ -738,6 +738,17 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
     p_dadd.add_argument("--output-kind", required=True, choices=_OUTPUT_KIND_CHOICES,
                         metavar="KIND", dest="output_kind")
     p_dadd.add_argument("--title", required=True)
+    p_dadd.add_argument(
+        "--task-class", dest="task_class", default=None, metavar="CLASS",
+        help="optional task class from the smart-router closed set "
+             "(01_code_generation .. 07_translation) — the same rubric axis "
+             "the plan-gate reads. Unknown values are refused.",
+    )
+    p_dadd.add_argument(
+        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
+        help="optional model-routing quality floor for this deliverable "
+             "(free text, e.g. a model name) — the plan-gate's rubric axis 5.",
+    )
 
     p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
     _common_horizon_args(p_dlist)
@@ -761,6 +772,26 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
              "attestation of what delivered the work; VNX does not verify the "
              "merge state at close time.",
+    )
+
+    p_dset = subs.add_parser(
+        "set",
+        help="tag an EXISTING deliverable with task_class/routing_floor "
+             "(the rubric fields the plan-gate reads)",
+    )
+    _common_horizon_args(p_dset)
+    p_dset.add_argument("dispatch_id")
+    p_dset.add_argument(
+        "--task-class", dest="task_class", default=None, metavar="CLASS",
+        help="task class from the smart-router closed set (01_code_generation "
+             ".. 07_translation). Unknown values are refused. At least one of "
+             "--task-class/--routing-floor is required.",
+    )
+    p_dset.add_argument(
+        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
+        help="model-routing quality floor for this deliverable (free text, "
+             "e.g. a model name). At least one of --task-class/--routing-floor "
+             "is required.",
     )
 
 

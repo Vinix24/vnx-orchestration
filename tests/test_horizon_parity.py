@@ -327,6 +327,7 @@ _DELIVERABLE_ARGV = {
     "list": [],
     "promote": ["dlv-fake-id"],
     "close": ["dlv-fake-id", "--evidence", "123"],
+    "set": ["dlv-fake-id", "--task-class", "01_code_generation"],
 }
 _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],
