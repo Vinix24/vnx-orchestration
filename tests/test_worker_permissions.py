@@ -582,6 +582,142 @@ class TestMcpNamespaceDeny:
 
 
 # ---------------------------------------------------------------------------
+# 20260816-p4-bash-pattern-loss — bash_allow_patterns reach --allowedTools
+# ---------------------------------------------------------------------------
+
+class TestBashAllowPatternTranslation:
+    """bash_allow_patterns must reach --allowedTools as Bash(<prefix>:*) entries.
+
+    Regression for dispatch 20260816-p4-bash-pattern-loss: the translation only
+    survived single-token patterns, so multi-token ones (``git add*``,
+    ``git push origin*``, ``python3 -m pytest*``) silently dropped out of the
+    spawn argv for quality-engineer / frontend-developer / system-architect /
+    security-engineer. The fix maps ``<prefix>*`` → ``Bash(<prefix>:*)`` for any
+    token count, and logs (never silently drops) a pattern it cannot express.
+    """
+
+    @pytest.mark.parametrize(
+        "pattern,expected",
+        [
+            ("git*", "Bash(git:*)"),
+            ("pytest*", "Bash(pytest:*)"),
+            ("npm*", "Bash(npm:*)"),
+            ("git add*", "Bash(git add:*)"),
+            ("git commit*", "Bash(git commit:*)"),
+            ("git push origin*", "Bash(git push origin:*)"),
+            ("pip install*", "Bash(pip install:*)"),
+            ("bash -n*", "Bash(bash -n:*)"),
+            ("python3 -c*", "Bash(python3 -c:*)"),
+            ("python3 -m pytest*", "Bash(python3 -m pytest:*)"),
+            ("python3 -m py_compile*", "Bash(python3 -m py_compile:*)"),
+        ],
+    )
+    def test_pattern_translates_to_prefix_tool(self, pattern: str, expected: str) -> None:
+        profile = PermissionProfile(
+            role="r", allowed_tools=["Read"], bash_allow_patterns=[pattern]
+        )
+        args = build_claude_scope_args(profile)
+        allowed = args[args.index("--allowedTools") + 1].split(",")
+        assert expected in allowed
+
+    @pytest.mark.skipif(
+        not REPO_PERMISSIONS_YAML.exists(),
+        reason="repo .vnx/worker_permissions.yaml not present in this checkout",
+    )
+    def test_multi_token_patterns_survive_in_all_four_affected_roles(self) -> None:
+        """The four roles from the defect report keep their multi-token intent."""
+        expectations = {
+            "quality-engineer": [
+                "Bash(git add:*)",
+                "Bash(git commit:*)",
+                "Bash(git push origin:*)",
+                "Bash(python3 -m pytest:*)",
+                "Bash(python3 -m py_compile:*)",
+            ],
+            "frontend-developer": [
+                "Bash(npm:*)",
+                "Bash(npx:*)",
+                "Bash(node:*)",
+                "Bash(git add:*)",
+                "Bash(git commit:*)",
+                "Bash(git push origin:*)",
+            ],
+            "system-architect": [
+                "Bash(git add:*)",
+                "Bash(git commit:*)",
+                "Bash(git push origin:*)",
+                "Bash(python3 -c:*)",
+                "Bash(python3 -m py_compile:*)",
+                "Bash(bash -n:*)",
+            ],
+            "security-engineer": [
+                "Bash(git add:*)",
+                "Bash(git commit:*)",
+                "Bash(git push origin:*)",
+                "Bash(python3 -c:*)",
+                "Bash(python3 -m py_compile:*)",
+                "Bash(bash -n:*)",
+                "Bash(grep:*)",
+            ],
+        }
+        for role, expected in expectations.items():
+            profile = load_permissions(role, REPO_PERMISSIONS_YAML)
+            args = build_claude_scope_args(profile)
+            allowed = args[args.index("--allowedTools") + 1].split(",")
+            missing = [entry for entry in expected if entry not in allowed]
+            assert not missing, (
+                f"role '{role}' lost translated patterns {missing} in --allowedTools: "
+                f"{allowed}"
+            )
+
+    def test_untranslatable_pattern_is_logged_not_silent(self, caplog) -> None:
+        """A pattern that cannot become a Bash(<prefix>:*) entry must be logged
+        with the role and pattern — never silently dropped."""
+        import logging
+
+        profile = PermissionProfile(
+            role="r",
+            allowed_tools=["Read"],
+            bash_allow_patterns=["git*log", "foo[bar]*"],
+        )
+        with caplog.at_level(logging.WARNING, logger="worker_permissions"):
+            args = build_claude_scope_args(profile)
+        allowed = args[args.index("--allowedTools") + 1].split(",")
+        assert allowed == ["Read"], (
+            "untranslatable patterns must not leak a bogus Bash(...) entry"
+        )
+        messages = [rec.getMessage() for rec in caplog.records]
+        assert any("git*log" in m and "'r'" in m for m in messages), (
+            "dropped pattern 'git*log' must be logged with the role"
+        )
+        assert any("foo[bar]*" in m for m in messages), (
+            "dropped pattern 'foo[bar]*' must be logged"
+        )
+
+    def test_bare_star_pattern_refuses_to_widen(self) -> None:
+        """A bare ``*`` would mean 'allow every command' — refuse to widen."""
+        profile = PermissionProfile(
+            role="r", allowed_tools=["Read"], bash_allow_patterns=["*"]
+        )
+        args = build_claude_scope_args(profile)
+        allowed = args[args.index("--allowedTools") + 1].split(",")
+        assert allowed == ["Read"]
+
+    def test_no_duplicate_entries_when_allowed_tools_already_carry_prefix(self) -> None:
+        """backend-developer already lists Bash(git:*) in allowed_tools AND
+        carries ``git*`` in bash_allow_patterns — no duplicate entry."""
+        profile = PermissionProfile(
+            role="r",
+            allowed_tools=["Read", "Bash(git:*)"],
+            bash_allow_patterns=["git*", "git add*"],
+        )
+        args = build_claude_scope_args(profile)
+        allowed = args[args.index("--allowedTools") + 1].split(",")
+        assert allowed.count("Bash(git:*)") == 1
+        assert "Bash(git add:*)" in allowed
+
+
+# ---------------------------------------------------------------------------
 # classify_permission_posture (OI-864)
 # ---------------------------------------------------------------------------
 
