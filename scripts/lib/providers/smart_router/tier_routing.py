@@ -75,20 +75,58 @@ _TIER_MAP = load_tier_map()
 _TIER_LADDER = load_tier_ladder()
 
 
+# The escalation decision table (dispatch 20260816-p6-escalate-tier-ds): the
+# closed set of failure classes and the action each maps to. A class the table
+# does not know fails loudly — never a silent fallback to "climb".
+#   model_error      -> climb one tier
+#   credit_exhausted -> climb one tier AND notify the operator
+#   auth_rejected    -> no climb (a higher tier has the same auth problem)
+#   timeout          -> retry the same tier first, then climb
+#   empty_completion -> retry the same tier first, then climb
+#   unknown          -> no climb, report the unknown class loudly
+_ESCALATION_TABLE = {
+    "model_error": "climb",
+    "credit_exhausted": "climb",
+    "auth_rejected": "no_climb",
+    "timeout": "retry_same_tier",
+    "empty_completion": "retry_same_tier",
+    "unknown": "no_climb",
+}
+
+# Failure classes that must ALSO reach the operator, independent of whether a
+# climb is possible (credit_exhausted is actionable even at the top rung).
+_NOTIFY_OPERATOR_CLASSES = frozenset({"credit_exhausted"})
+
+
 @dataclass(frozen=True)
 class TierEscalation:
-    """Quality-escalation signal for a REJECTED result (OI-1221).
+    """Quality-escalation decision for a REJECTED result (OI-1221, extended
+    dispatch 20260816-p6-escalate-tier-ds).
 
-    This is the vertical counterpart to the availability fallback above: a
-    rejected result fires a followup dispatch one tier UP the cost ladder
-    (``tier_to = tier_from + 1``), linked back to the rejected attempt via
-    ``parent_dispatch``. ``tier_to`` is None when the ladder is already topped
-    (no rung above ``tier_from``) — a caller must then stop climbing, not wrap.
+    The decision is driven by ``failure_class`` (from ``classify_failure``, the
+    real reason the attempt failed), never a bare "it failed" boolean. ``action``
+    is one of:
+
+      * ``"climb"`` — fire a followup one tier UP the cost ladder (``tier_to`` is
+        the rung above ``tier_from``). ``tier_to`` is None only when the ladder
+        is already topped; a caller must then stop climbing, not wrap.
+      * ``"retry_same_tier"`` — fire a followup on the SAME tier
+        (``tier_to`` == ``tier_from``); timeout/empty_completion retry once
+        before climbing.
+      * ``"no_climb"`` — do not fire any followup (auth_rejected, unknown).
+
+    ``notify_operator`` is True when the failure class demands an operator
+    notification (credit_exhausted). ``unknown_class`` is True when the class is
+    ``unknown`` — the caller must report it loudly, never absorb it.
     """
 
     tier_from: str
     tier_to: Optional[str]
     parent_dispatch: str
+    failure_class: str
+    action: str
+    notify_operator: bool = False
+    unknown_class: bool = False
 
 
 def next_tier(tier: str) -> Optional[str]:
@@ -107,19 +145,47 @@ def next_tier(tier: str) -> Optional[str]:
     return names[idx + 1] if idx + 1 < len(names) else None
 
 
-def escalate_tier(tier_from: str, parent_dispatch: str) -> TierEscalation:
-    """Build the quality-escalation signal for a rejected result.
+def escalate_tier(
+    tier_from: str,
+    parent_dispatch: str,
+    *,
+    failure_class: str,
+    retried: bool = False,
+) -> TierEscalation:
+    """Decide the escalation for a rejected result from its failure class.
 
-    Deterministic: ``tier_to`` is exactly one rung above ``tier_from`` on the
-    cost ladder, and ``parent_dispatch`` names the rejected attempt so the
-    followup is traceable in the audit trail. This is quality escalation, NOT
-    availability fallback — it never walks the tier's ``fallback`` chain and it
-    never stays on the same tier.
+    The decision table lives in code (``_ESCALATION_TABLE``), not a docstring:
+    a class the table does not know raises ValueError — the caller must extend
+    the table explicitly, never silently fall back to a climb. ``retried``
+    encodes "this attempt is already a same-tier retry": timeout/empty_completion
+    retry the same tier once, then climb on the next rejection. Quality
+    escalation never walks the tier's ``fallback`` chain (availability fallback
+    does that, on the same tier) — a climb moves exactly one rung up.
     """
+    if failure_class not in _ESCALATION_TABLE:
+        raise ValueError(
+            f"unrecognized failure_class {failure_class!r}; escalation table "
+            f"knows {sorted(_ESCALATION_TABLE)} — refusing to guess a climb"
+        )
+    action = _ESCALATION_TABLE[failure_class]
+    if action == "retry_same_tier" and retried:
+        action = "climb"
+
+    if action == "climb":
+        tier_to = next_tier(tier_from)
+    elif action == "retry_same_tier":
+        tier_to = tier_from
+    else:  # no_climb
+        tier_to = None
+
     return TierEscalation(
         tier_from=tier_from,
-        tier_to=next_tier(tier_from),
+        tier_to=tier_to,
         parent_dispatch=parent_dispatch,
+        failure_class=failure_class,
+        action=action,
+        notify_operator=(failure_class in _NOTIFY_OPERATOR_CLASSES),
+        unknown_class=(failure_class == "unknown"),
     )
 
 

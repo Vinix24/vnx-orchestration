@@ -304,6 +304,7 @@ def stage_escalation_bundle(
     *,
     rejected_dispatch_id: str,
     tier_from: str,
+    failure_class: str,
     instruction_text: str,
     dispatch_id: str,
     role: str,
@@ -318,18 +319,24 @@ def stage_escalation_bundle(
     state_dir: Optional[Path] = None,
     now: Optional[float] = None,
     data_dir: Optional[Path] = None,
+    retried: bool = False,
 ) -> Path:
     """Stage a QUALITY-escalation followup bundle (OI-1221, wired OI-1229).
 
     This is the CALLER that was missing: ``escalate_tier``/``next_tier`` already
     computed the climb (tier_to = tier_from + 1, parent_dispatch = the rejected
     attempt) but no call site ever fired a followup, so ``tier_from``/``tier_to``
-    stayed empty on 0 of 761 filled specs. Here the climb is resolved
-    deterministically from the cost ladder, the target rung's route is resolved
-    through ``resolve_tier_route`` (so the followup actually runs on the
-    escalated model, not re-classified back to the same cheap tier), and the
-    three chain-link fields are written into the staged ``dispatch-spec.json`` —
-    the same bytes the door carries onto the receipt.
+    stayed empty on 0 of 761 filled specs. Here the climb is resolved from the
+    cost ladder by ``failure_class`` (dispatch 20260816-p6-escalate-tier-ds), the
+    target rung's route is resolved through ``resolve_tier_route`` (so the
+    followup actually runs on the escalated model, not re-classified back to the
+    same cheap tier), and the three chain-link fields are written into the staged
+    ``dispatch-spec.json`` — the same bytes the door carries onto the receipt.
+
+    A failure class the table does not climb (``auth_rejected``, ``unknown``)
+    raises ValueError here — the caller must report it, never stage a silent
+    no-op. ``retried`` is passed through to ``escalate_tier`` so a
+    timeout/empty_completion that has already been retried once climbs instead.
 
     This STAGES ONLY; it never fires the dispatch (no automatic re-dispatch
     loop). The operator promotes the returned bundle through the single-entry
@@ -340,11 +347,34 @@ def stage_escalation_bundle(
         resolve_tier_route,
     )
 
-    escalation = escalate_tier(tier_from, parent_dispatch=rejected_dispatch_id)
+    escalation = escalate_tier(
+        tier_from,
+        parent_dispatch=rejected_dispatch_id,
+        failure_class=failure_class,
+        retried=retried,
+    )
+    if escalation.action == "no_climb":
+        if escalation.unknown_class:
+            raise ValueError(
+                f"refusing to stage escalation: failure_class={failure_class!r} is "
+                "UNKNOWN — the table does not know this class, and it must be "
+                "reported to the operator loudly, never silently absorbed"
+            )
+        raise ValueError(
+            f"refusing to stage escalation: failure_class={failure_class!r} does "
+            "not climb (auth_rejected — a higher tier has the same auth problem)"
+        )
     if escalation.tier_to is None:
         raise ValueError(
             f"cannot escalate: {tier_from!r} is already the top rung of the "
             "cost ladder (no rung above it)"
+        )
+    if escalation.notify_operator:
+        print(
+            f"[dispatch_bridge] OPERATOR NOTICE: failure_class={failure_class!r} "
+            f"on {tier_from!r}; escalation to {escalation.tier_to!r} staged — "
+            "notify the operator (e.g. credit_exhausted)",
+            file=sys.stderr,
         )
     route = resolve_tier_route(
         escalation.tier_to, env=env, state_dir=state_dir, now=now,

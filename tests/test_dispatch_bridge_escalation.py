@@ -44,6 +44,7 @@ def _stage_escalation(tmp_path, **over):
     base = dict(
         rejected_dispatch_id=_REJECTED_ID,
         tier_from="tier-low",
+        failure_class="model_error",
         instruction_text="escalate: the cheap attempt was rejected",
         dispatch_id=_FOLLOWUP_ID,
         role="dev",
@@ -93,6 +94,32 @@ def test_escalation_at_top_rung_refuses_to_stage(tmp_path, monkeypatch):
     _force_kimi(monkeypatch, present=True)
     with pytest.raises(ValueError, match="top rung"):
         _stage_escalation(tmp_path, tier_from="fable-5")
+
+
+def test_escalation_auth_rejected_refuses_to_stage(tmp_path, monkeypatch):
+    """auth_rejected must not climb: a higher tier has the same auth problem, so
+    staging a followup would just burn the more expensive model the same way."""
+    _force_kimi(monkeypatch, present=True)
+    with pytest.raises(ValueError, match="does not climb"):
+        _stage_escalation(tmp_path, failure_class="auth_rejected")
+
+
+def test_escalation_unknown_class_refuses_to_stage(tmp_path, monkeypatch):
+    """unknown must not climb, and the refusal names the unknown class loudly."""
+    _force_kimi(monkeypatch, present=True)
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        _stage_escalation(tmp_path, failure_class="unknown")
+
+
+def test_escalation_timeout_retries_same_tier(tmp_path, monkeypatch):
+    """timeout retries on the SAME tier: the staged spec's tier_to == tier_from
+    (the ladder does not climb), and the followup still resolves a real route."""
+    _force_kimi(monkeypatch, present=True)
+    spec_file = _stage_escalation(tmp_path, failure_class="timeout")
+    payload = _read_payload(spec_file)
+    assert payload["tier_from"] == "tier-low"
+    assert payload["tier_to"] == "tier-low"
+    assert payload["provider"]  # a real route, not an empty staged spec
 
 
 # ---------------------------------------------------------------------------
