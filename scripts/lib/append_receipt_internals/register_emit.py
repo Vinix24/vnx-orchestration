@@ -19,6 +19,7 @@ def _emit_dispatch_register(receipt: dict) -> bool:
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from dispatch_register import append_event
+        from event_outcome_semantics import classify_event_outcome, COMPLETION_EVENT_TYPES
 
         event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
         status = str(receipt.get("status", "")).lower()
@@ -34,35 +35,35 @@ def _emit_dispatch_register(receipt: dict) -> bool:
         except (ValueError, TypeError):
             pr_number = None
 
-        SUCCESS_STATUSES = {"success", "completed", "complete", "ok", ""}
-        # Keep in sync with payload._update_confidence_from_receipt FAILURE_STATUSES
-        # and receipt_classifier._FAILURE_STATUSES.  contract_invalid = report-body-contract
-        # failure -> semantically a failure; the register should record it as such.
-        FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "contract_invalid"}
+        # OI-1148: event_type + status -> governed outcome is decided in ONE
+        # place (event_outcome_semantics.classify_event_outcome), not
+        # re-derived here. This also fixes two drifted behaviours this module
+        # used to own independently: "done" (the actual success literal the
+        # tmux-interactive lane's completion receipt uses) was missing from
+        # this module's own SUCCESS_STATUSES, silently dropping every such
+        # receipt from the register instead of recording dispatch_completed;
+        # and task_timeout was unconditionally mapped to dispatch_failed even
+        # when status="no_confirmation" (a pending/blocked state per
+        # rp_state.sh, not a terminal failure).
+        OUTCOME_EVENT_TYPES = COMPLETION_EVENT_TYPES | {
+            "task_failed", "task_timeout", "report_contract_invalid",
+        }
 
         register_event = None
-        if event_type in ("task_complete", "task_completed", "subprocess_completion"):
-            if status in FAILURE_STATUSES:
+        if event_type in OUTCOME_EVENT_TYPES:
+            outcome = classify_event_outcome(event_type, status)
+            if outcome == "failure":
                 register_event = "dispatch_failed"
-            elif status in SUCCESS_STATUSES:
+            elif outcome == "success":
                 register_event = "dispatch_completed"
             else:
                 return False
-        elif event_type == "task_failed":
-            register_event = "dispatch_failed"
-        elif event_type == "task_timeout":
-            register_event = "dispatch_failed"
         elif event_type in ("task_started", "task_start", "dispatch_start"):
             register_event = "dispatch_started"
         elif event_type == "review_gate_request":
             if gate != "codex_gate":
                 return False
             register_event = "gate_requested"
-        elif event_type in ("report_contract_invalid",):
-            # report_contract_invalid = report-body-contract failure (ADR-035 §9):
-            # the worker's report didn't satisfy the contract.  Semantically a
-            # dispatch failure — the worker didn't deliver a governable report.
-            register_event = "dispatch_failed"
         else:
             return False
 

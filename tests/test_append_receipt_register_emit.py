@@ -283,6 +283,54 @@ def test_report_contract_invalid_emits_dispatch_failed(ar):
     assert captured[0]["event"] == "dispatch_failed"
 
 
+# ── OI-1148: "done" (the real subprocess_completion/task_complete success ──
+# ── literal) must register as dispatch_completed, not fall through unclassified.
+
+def test_subprocess_completion_done_emits_dispatch_completed(ar):
+    """Pre-fix: register_emit's own SUCCESS_STATUSES omitted "done" (the
+    literal the tmux-interactive lane's real completion receipt uses per
+    receipt_schema.SynthesizedLaneReceipt / dispatch_govern.py), so this
+    receipt fell to the else-branch and returned False — silently dropped
+    from the register instead of recording dispatch_completed."""
+    captured = []
+    receipt = _make_receipt("subprocess_completion", status="done")
+    result = _run_emit(ar, receipt, captured)
+    assert result is True
+    assert captured[0]["event"] == "dispatch_completed"
+
+
+def test_task_complete_done_emits_dispatch_completed(ar):
+    captured = []
+    receipt = _make_receipt("task_complete", status="done")
+    result = _run_emit(ar, receipt, captured)
+    assert result is True
+    assert captured[0]["event"] == "dispatch_completed"
+
+
+# ── OI-1148: task_timeout + no_confirmation is a pending/blocked state, ────
+# ── not a governed failure (rp_state.sh maps it to "blocked", never failed).
+
+def test_task_timeout_no_confirmation_does_not_emit_dispatch_failed(ar):
+    """Pre-fix: register_emit.py mapped EVERY task_timeout to dispatch_failed
+    unconditionally, regardless of status — over-counting a pending,
+    awaiting-confirmation dispatch as a governed failure."""
+    captured = []
+    receipt = _make_receipt("task_timeout", status="no_confirmation")
+    result = _run_emit(ar, receipt, captured)
+    assert result is False
+    assert len(captured) == 0
+
+
+def test_task_timeout_without_no_confirmation_still_emits_dispatch_failed(ar):
+    """Regression guard: a REAL timeout (any status other than
+    no_confirmation) must still register as dispatch_failed."""
+    captured = []
+    receipt = _make_receipt("task_timeout", status="timeout")
+    result = _run_emit(ar, receipt, captured)
+    assert result is True
+    assert captured[0]["event"] == "dispatch_failed"
+
+
 # ── Test 19: skip_enrichment=True still fires emit (OI-1105 regression) ───────
 
 def test_skip_enrichment_true_still_emits_dispatch_register(tmp_path, ar):
