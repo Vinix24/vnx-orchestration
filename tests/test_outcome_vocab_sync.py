@@ -16,9 +16,11 @@ This file contains:
   B) A cross-module consistency test that imports all four FAILURE sets and verifies
      they are identical, so any future divergence fails CI structurally.
   B2) Cross-module SUCCESS_STATUSES structural tests (drain/digest/payload).
-      Documented payload-specific additions: "" (empty string as success for
-      the confidence-scoring path — drain carries it too; digest omits it, which
-      is an existing documented difference between the two consumers).
+      The canonical success set (payload imports it from event_outcome_semantics)
+      is {success, completed, complete, ok, done}. Empty status ("") was removed
+      from canonical success — absence is not a success claim. drain still
+      carries "" as a documented read-side classifier tolerance this
+      consolidation leaves untouched; digest omits it.
   C) Semantic checks: the `failures_direct` branch in receipt_classifier is
      tested to fire immediately for a `contract_invalid` receipt and to
      queue for batch for a success receipt.
@@ -358,17 +360,19 @@ def _get_payload_success_statuses() -> FrozenSet[str]:
 
 # Documented structural differences in SUCCESS_STATUSES across modules:
 #
-#   digest omits "":
-#     weekly_digest classifies receipts that passed event-type gating; an empty
-#     status string is not meaningful in that context so the digest excludes it.
-#     drain and payload include "" (drain: upstream classifier; payload: empty
-#     status on a task_complete receipt treated conservatively as success).
+#   empty status ("") is NOT canonical success:
+#     event_outcome_semantics dropped "" from SUCCESS_STATUSES — absence is not
+#     a success claim (resolve_status_category returns "no_signal"). drain still
+#     carries "" as a pre-existing read-side classifier tolerance this
+#     consolidation leaves untouched (check_active_drain is a read-side
+#     consumer, not the write path the consolidation governs). digest omits ""
+#     because an empty status is not meaningful after event-type gating.
 #
 # The canonical core that ALL three must carry:
 _SUCCESS_CORE = frozenset({"success", "completed", "complete", "ok", "done"})
 
-# payload-specific addition documented above (drain also has it):
-_PAYLOAD_SUCCESS_OWN_ADDITIONS: FrozenSet[str] = frozenset({""})
+# drain-known extra vs canonical (documented acceptable difference):
+_DRAIN_SUCCESS_KNOWN_EXTRA: FrozenSet[str] = frozenset({""})
 # digest-known omissions vs drain (documented acceptable gap):
 _DIGEST_SUCCESS_KNOWN_OMISSIONS: FrozenSet[str] = frozenset({""})
 
@@ -376,20 +380,33 @@ _DIGEST_SUCCESS_KNOWN_OMISSIONS: FrozenSet[str] = frozenset({""})
 class TestSuccessVocabCrossModuleSync:
     """Structural drift tests between SUCCESS_STATUSES sets in drain / digest / payload.
 
-    The canonical reference is check_active_drain.SUCCESS_STATUSES.
-    - payload must contain all drain entries (drain also has "" so payload matches drain).
-    - digest may omit "" (documented acceptable difference).
+    The canonical reference is payload.SUCCESS_STATUSES (imported from
+    event_outcome_semantics, the single generated source). It is exactly the
+    core {success, completed, complete, ok, done}.
+    - drain may carry "" as a documented extra (read-side classifier tolerance).
+    - digest omits "" (documented acceptable difference).
     - All three must contain the common core.
     """
 
-    def test_payload_success_set_matches_drain(self):
-        """After adding 'done', payload.SUCCESS_STATUSES must equal drain.SUCCESS_STATUSES."""
-        drain = _get_drain_success_statuses()
+    def test_payload_success_set_is_the_canonical_core(self):
+        """payload.SUCCESS_STATUSES is exactly the canonical core (no "")."""
         payload = _get_payload_success_statuses()
-        assert payload == drain, (
-            f"payload.SUCCESS_STATUSES diverged from check_active_drain.SUCCESS_STATUSES.\n"
-            f"  drain only  : {drain - payload}\n"
-            f"  payload only: {payload - drain}"
+        assert payload == _SUCCESS_CORE, (
+            f"payload.SUCCESS_STATUSES must be exactly the canonical success core.\n"
+            f"  expected: {sorted(_SUCCESS_CORE)}\n"
+            f"  actual  : {sorted(payload)}"
+        )
+
+    def test_drain_success_carries_only_empty_as_extra(self):
+        """drain may differ from canonical only by the documented "" extra."""
+        drain = _get_drain_success_statuses()
+        assert drain - _SUCCESS_CORE == _DRAIN_SUCCESS_KNOWN_EXTRA, (
+            f"check_active_drain.SUCCESS_STATUSES has an undocumented extra vs canonical core:\n"
+            f"  drain only: {sorted(drain - _SUCCESS_CORE)}"
+        )
+        assert _SUCCESS_CORE - drain == frozenset(), (
+            f"check_active_drain.SUCCESS_STATUSES is missing canonical core entries: "
+            f"{sorted(_SUCCESS_CORE - drain)}"
         )
 
     def test_payload_success_contains_done(self):

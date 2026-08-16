@@ -37,17 +37,70 @@ from typing import Optional
 # The union of every status literal seen across the write paths that emit
 # these event_types: ReceiptV2 (event_type forced to "task_complete",
 # governance_emit.py), SynthesizedLaneReceipt (event_type
-# "subprocess_completion", dispatch_govern.ensure_receipt — status "done" for
+# "subprocess_completion", dispatch_govern.ensure_receipt, status "done" for
 # an authored non-failing report, "failed" otherwise), and the legacy
 # report_to_receipt_converter / codex-variant emit sites ("failure" is a
 # distinct literal from "failed", not a typo — different call sites use each).
 #
+# _STATUS_VOCABULARY is the single generated source. FAILURE_STATUSES,
+# SUCCESS_STATUSES, and IGNORABLE_STATUSES below are DERIVED from it (never
+# hand-copied), and the write-side converter resolves a report's declared
+# status against it via resolve_status_category(). A new status literal is
+# added here exactly once, with its category; there is no second list to keep
+# in sync, and scripts/check_status_vocab_drift.py fails CI on any module that
+# hard-codes its own copy.
+#
+# The five historical differences vs the converter's old hand-copied sets are
+# resolved here per value:
+#   - "ok"               -> success (a report declaring ok is a success claim)
+#   - "" (empty)         -> REMOVED from success: absence is not a success
+#                           claim (resolve_status_category returns "no_signal")
+#   - "blocked"          -> failure (a blocked completion is a governed failure)
+#   - "contract_invalid" -> failure (already canonical; the converter missed it)
+#   - "heartbeat_killed" -> failure (the converter's defensive literal; a
+#                           heartbeat-kill report is failure-shaped by design)
+#
 # "timeout" is deliberately NOT a failure status here: a completion-family
 # receipt carrying literal status="timeout" is a separate, pre-existing
 # carve-out (kept as-is by this consolidation, not part of the OI-1148 fix).
+# It is still listed as ignorable so the write-side refuses nothing the
+# read-side already tolerated.
 # ---------------------------------------------------------------------------
-FAILURE_STATUSES = frozenset({"failed", "failure", "error", "blocked", "contract_invalid"})
-SUCCESS_STATUSES = frozenset({"success", "completed", "complete", "ok", "done", ""})
+_STATUS_VOCABULARY = {
+    # governed failure literals
+    "failed": "failure",
+    "failure": "failure",
+    "error": "failure",
+    "blocked": "failure",
+    "contract_invalid": "failure",
+    "heartbeat_killed": "failure",
+    # governed success literals
+    "success": "success",
+    "completed": "success",
+    "complete": "success",
+    "ok": "success",
+    "done": "success",
+    # explicitly ignorable literals (pending/neutral, no outcome signal)
+    "timeout": "ignorable",
+    "no_confirmation": "ignorable",
+    "unknown": "ignorable",
+    "in_progress": "ignorable",
+    "guard_error": "ignorable",
+    "no_ready_pr": "ignorable",
+    "not_configured": "ignorable",
+    "not_executable": "ignorable",
+    "requested": "ignorable",
+}
+
+FAILURE_STATUSES = frozenset(
+    status for status, category in _STATUS_VOCABULARY.items() if category == "failure"
+)
+SUCCESS_STATUSES = frozenset(
+    status for status, category in _STATUS_VOCABULARY.items() if category == "success"
+)
+IGNORABLE_STATUSES = frozenset(
+    status for status, category in _STATUS_VOCABULARY.items() if category == "ignorable"
+)
 
 # event_types whose own status field uses the FAILURE_STATUSES/SUCCESS_STATUSES
 # vocab above to signal outcome.
@@ -100,10 +153,50 @@ def is_governed_failure(event_type: Optional[str], status: Optional[str]) -> boo
     return classify_event_outcome(event_type, status) == "failure"
 
 
+class UnknownStatusError(ValueError):
+    """A report declared a status literal outside the canonical vocabulary.
+
+    Raised by resolve_status_category() so the write-side converter refuses a
+    report instead of silently treating an unknown literal as a non-terminal
+    status (which would let a typo or a new, unvetted literal slip through as
+    a quiet success/no-signal receipt).
+    """
+
+
+def resolve_status_category(status: Optional[str]) -> str:
+    """Resolve a normalized status literal to its canonical category (strict).
+
+    The write-side (report_to_receipt_converter) uses this to refuse a report
+    whose declared status is not in the canonical vocabulary. The read-side
+    (classify_event_outcome) stays tolerant by design; only the write path is
+    fail-closed, because the write path is where a new literal enters the
+    ledger.
+
+    Returns one of:
+      "failure"   -- the status is a governed failure literal.
+      "success"   -- the status is a governed success literal.
+      "ignorable" -- the status is in the vocabulary but carries no outcome
+                     signal (pending/neutral literals the ledger tolerates).
+      "no_signal" -- the status is empty/absent (NOT a success claim).
+
+    Raises UnknownStatusError for any other literal.
+    """
+    st = (status or "").strip().lower()
+    if not st:
+        return "no_signal"
+    category = _STATUS_VOCABULARY.get(st)
+    if category is None:
+        raise UnknownStatusError(f"unknown status literal: {status!r}")
+    return category
+
+
 __all__ = [
     "FAILURE_STATUSES",
     "SUCCESS_STATUSES",
+    "IGNORABLE_STATUSES",
     "COMPLETION_EVENT_TYPES",
+    "UnknownStatusError",
     "classify_event_outcome",
     "is_governed_failure",
+    "resolve_status_category",
 ]

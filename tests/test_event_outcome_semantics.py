@@ -14,14 +14,19 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
 from event_outcome_semantics import (  # noqa: E402
     COMPLETION_EVENT_TYPES,
     FAILURE_STATUSES,
+    IGNORABLE_STATUSES,
     SUCCESS_STATUSES,
+    UnknownStatusError,
     classify_event_outcome,
     is_governed_failure,
+    resolve_status_category,
 )
 
 
@@ -180,3 +185,70 @@ def test_done_is_in_success_statuses():
 def test_failure_and_failed_are_distinct_entries_in_failure_statuses():
     assert "failed" in FAILURE_STATUSES
     assert "failure" in FAILURE_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Single generated vocabulary — the five historical differences, resolved
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_killed_is_a_failure_literal():
+    assert "heartbeat_killed" in FAILURE_STATUSES
+    assert classify_event_outcome("task_complete", "heartbeat_killed") == "failure"
+
+
+def test_empty_status_is_no_longer_success():
+    assert "" not in SUCCESS_STATUSES
+    assert classify_event_outcome("task_complete", "") is None
+
+
+def test_ignorable_statuses_carry_no_outcome_signal():
+    for status in IGNORABLE_STATUSES:
+        assert classify_event_outcome("task_complete", status) is None, status
+
+
+# ---------------------------------------------------------------------------
+# resolve_status_category — the strict write-side resolver
+# ---------------------------------------------------------------------------
+
+def test_resolve_status_category_maps_success_literals():
+    for status in SUCCESS_STATUSES:
+        assert resolve_status_category(status) == "success", status
+
+
+def test_resolve_status_category_maps_failure_literals():
+    for status in FAILURE_STATUSES:
+        assert resolve_status_category(status) == "failure", status
+
+
+def test_resolve_status_category_maps_ignorable_literals():
+    for status in IGNORABLE_STATUSES:
+        assert resolve_status_category(status) == "ignorable", status
+
+
+def test_resolve_status_category_empty_is_no_signal():
+    assert resolve_status_category("") == "no_signal"
+    assert resolve_status_category(None) == "no_signal"
+    assert resolve_status_category("   ") == "no_signal"
+
+
+def test_resolve_status_category_unknown_raises():
+    with pytest.raises(UnknownStatusError):
+        resolve_status_category("bogus")
+    with pytest.raises(UnknownStatusError):
+        resolve_status_category("successful")  # near-miss, not a literal
+
+
+def test_resolve_status_category_is_case_insensitive():
+    assert resolve_status_category("FAILED") == "failure"
+    assert resolve_status_category(" Done ") == "success"
+
+
+def test_vocabulary_sets_are_disjoint_and_complete():
+    assert not (FAILURE_STATUSES & SUCCESS_STATUSES)
+    assert not (FAILURE_STATUSES & IGNORABLE_STATUSES)
+    assert not (SUCCESS_STATUSES & IGNORABLE_STATUSES)
+    # every vocabulary key lands in exactly one derived set
+    from event_outcome_semantics import _STATUS_VOCABULARY
+    assert set(_STATUS_VOCABULARY) == (
+        FAILURE_STATUSES | SUCCESS_STATUSES | IGNORABLE_STATUSES
+    )

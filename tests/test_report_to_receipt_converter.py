@@ -271,6 +271,74 @@ class TestBuildReceiptFromReport:
         assert receipt["status"] == "failed"
 
 
+class TestStatusVocabularyFailClosed:
+    """The converter resolves declared status against the single canonical
+    vocabulary (event_outcome_semantics), so it cannot drift from the outcome
+    sets. Unknown status refuses; ignorable status passes through; and the
+    converter's classification agrees with the canonical resolver for every
+    vocabulary literal.
+    """
+
+    def _receipt_for_status(self, tmp_path: Path, status: str) -> dict:
+        p = tmp_path / f"20260816-vocab-{status or 'empty'}.md"
+        _write_frontmatter_report(p, "20260816-vocab", status=status)
+        return build_receipt_from_report(p, p.read_text(encoding="utf-8"))
+
+    def test_unknown_status_refuses_as_task_failed(self, tmp_path):
+        receipt = self._receipt_for_status(tmp_path, "bogus")
+        assert receipt is not None
+        assert receipt["event_type"] == "task_failed"
+        assert receipt["status"] == "failed"
+        assert receipt["failure_reason"] == "unknown_status"
+        assert receipt["unknown_status"] == "bogus"
+
+    def test_ignorable_status_passes_through(self, tmp_path):
+        receipt = self._receipt_for_status(tmp_path, "in_progress")
+        assert receipt is not None
+        assert receipt["event_type"] == "task_complete"
+        assert receipt["status"] == "in_progress"
+
+    def test_classification_agrees_with_canonical(self, tmp_path, monkeypatch):
+        import report_to_receipt_converter as rtc
+        from event_outcome_semantics import (
+            FAILURE_STATUSES,
+            IGNORABLE_STATUSES,
+            SUCCESS_STATUSES,
+            resolve_status_category,
+        )
+        monkeypatch.setattr(rtc, "_check_branch_on_origin", lambda _did: True)
+
+        for status in sorted(FAILURE_STATUSES):
+            receipt = self._receipt_for_status(tmp_path, status)
+            assert receipt["event_type"] == "task_failed", (status, receipt)
+            assert receipt["status"] == "failed", (status, receipt)
+            assert resolve_status_category(status) == "failure"
+
+        for status in sorted(SUCCESS_STATUSES):
+            receipt = self._receipt_for_status(tmp_path, status)
+            assert receipt["event_type"] == "task_complete", (status, receipt)
+            assert receipt["status"] == status, (status, receipt)
+            assert resolve_status_category(status) == "success"
+
+        for status in sorted(IGNORABLE_STATUSES):
+            receipt = self._receipt_for_status(tmp_path, status)
+            assert receipt["event_type"] == "task_complete", (status, receipt)
+            assert receipt["status"] == status, (status, receipt)
+            assert resolve_status_category(status) == "ignorable"
+
+    def test_empty_status_is_no_signal_not_success(self, tmp_path):
+        # An empty status passes through as a no-signal task_complete (write-side
+        # behavior unchanged) but resolves to "no_signal", never "success", so
+        # the read side no longer books absence as a success.
+        from event_outcome_semantics import resolve_status_category
+
+        receipt = self._receipt_for_status(tmp_path, "")
+        assert receipt is not None
+        assert receipt["event_type"] == "task_complete"
+        assert receipt["status"] == ""
+        assert resolve_status_category("") == "no_signal"
+
+
 # ---------------------------------------------------------------------------
 # Part 3: convert_report_to_receipt() — single-file conversion
 # ---------------------------------------------------------------------------

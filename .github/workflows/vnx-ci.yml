@@ -243,6 +243,24 @@ jobs:
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 
+      - name: Status vocabulary drift guard
+        run: |
+          set -euo pipefail
+          # Fail CI if any module hard-codes its own copy of the completion-
+          # outcome status vocabulary (FAILURE_STATUSES | SUCCESS_STATUSES).
+          # event_outcome_semantics._STATUS_VOCABULARY is the single source; a
+          # second collection drawn entirely from it is a drifting copy. See
+          # dispatch/20260816-p9-ledger-vocab-ds.
+          python3 "$GITHUB_WORKSPACE/scripts/check_status_vocab_drift.py"
+
+      - name: Run status vocabulary drift guard unit tests
+        run: |
+          set -euo pipefail
+          pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_status_vocab_drift.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_pytest_safe
+
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-latest
