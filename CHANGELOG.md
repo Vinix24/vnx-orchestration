@@ -4,6 +4,31 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`vnx deliverable set` tags an existing deliverable's `task_class`/
+  `routing_floor` (#1562, OI-1560-p2)** — the write-side half of what #1560
+  shipped read-only: `vnx deliverable add` gains optional
+  `--task-class`/`--routing-floor`, and a new `vnx deliverable set
+  <dispatch_id>` verb patches those same two fields onto a deliverable that
+  already exists. `task_class` is validated against the smart-router closed
+  set (`01_code_generation` .. `07_translation`); `routing_floor` is free
+  text. `vnx deliverable list` now surfaces both fields. See
+  `docs/core/HORIZON_PLANNING.md`.
+
+### Fixed
+
+- **Plan-gate reads deliverables, not just the goal field (#1560, OI-1148)**
+  — without `--doc`, the plan text reviewed by the plan-gate panel is now
+  composed from the track's `goal_state` PLUS its deliverables, so rubric
+  axes 3 (deliverables/task_class) and 5 (routing FLOOR) have something to
+  judge. A track with zero deliverables and no `--doc` is now refused loud
+  (`REFUSED_NO_DELIVERABLES`, distinct from the existing `REFUSED_THIN`)
+  before it burns a panel round it cannot pass — including a track whose
+  goal is otherwise thick enough. See `docs/core/HORIZON_PLANNING.md`.
+
 ## [1.4.7] — 2026-08-12
 
 Patch release (10 commits since v1.4.6). Four of the ten fixes are for behavior

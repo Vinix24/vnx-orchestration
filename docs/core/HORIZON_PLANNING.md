@@ -57,12 +57,62 @@ Nested under `vnx horizon plan-gate <verb>`:
 | Verb | Purpose |
 |---|---|
 | `seed` | Seed the `OI-PLAN-<track>` blocker so the track is born plan-gated. |
-| `run` | Run the plan-first panel over the plan text; on PASS the blocker resolves. The plan text comes from `--doc <path>` when given, otherwise from the track's `goal_state`. A `goal_state` under `goal_min_chars` meaningful characters (whitespace-stripped, `configs/plan_gate_panel.yaml`) is refused loud; `--doc` wins explicitly over a present goal, and the output names which source the gate judged. |
+| `run` | Run the plan-first panel over the plan text; on PASS the blocker resolves. The plan text comes from `--doc <path>` when given, otherwise from the track's `goal_state` plus its deliverables (see below). A `goal_state` under `goal_min_chars` meaningful characters (whitespace-stripped, `configs/plan_gate_panel.yaml`), or a track with zero deliverables, is refused loud; `--doc` wins explicitly over goal+deliverables, and the output names which source the gate judged. |
 | `status` | Show a track's plan-gate state + `derived_status`. |
 | `attest` | Operator escape-hatch: attest the gate as passed without re-running the panel; requires `--reason` and `--approval-id`. |
 | `missing-reasons` | Read-only audit: list resolved plan-gate blockers that carry no `resolution_reason`. |
 | `backfill-reason` | Record the missing `resolution_reason` on an already-resolved row; refuses an unresolved row and refuses to overwrite an existing reason. |
 | `reblock` | Put back a wrongly-lifted blocker (track is blocked again); the reversal stays visible in `resolution_reason`. |
+
+## Deliverable metadata: task_class and routing_floor (since #1560/#1562)
+
+`task_class` and `routing_floor` are two optional fields on a deliverable that
+exist for one reason: the plan-gate rubric reads them. `_format_deliverable_for_plan`
+renders every deliverable into the plan text the panel reviews, and rubric
+axis 3 (deliverables — scoped, tagged with a `task_class`) and axis 5 (a
+routing FLOOR per deliverable) judge exactly these two fields. A deliverable
+that carries neither is not an error — the field renders as an explicit
+`(missing — not set on this deliverable)` line rather than being silently
+dropped, so the panel can tell "not set" from "not shown".
+
+Two commands write them, both validating `--task-class` against the same
+closed set and leaving `--routing-floor` as free text (no canonical
+vocabulary for it exists anywhere in the repo):
+
+- **`vnx deliverable add --objective <track_id> --output-kind <kind> --title
+  "..." [--task-class CLASS] [--routing-floor FLOOR]`** — sets them at
+  creation time. Both flags are optional here.
+- **`vnx deliverable set <dispatch_id> [--task-class CLASS] [--routing-floor
+  FLOOR]`** — tags an EXISTING deliverable. At least one of the two flags is
+  required (a bare `set` with neither refuses: "nothing to set"). This is a
+  PATCH, not a replace: passing `--task-class` alone leaves an existing
+  `routing_floor` (or its absence) untouched, and `title`/other metadata
+  survive unmodified. It exists because `add` always mints a fresh
+  `dispatch_id`, so it cannot be reused to tag a deliverable that already
+  exists.
+
+Both write into the deliverable's existing `metadata_json` blob — no schema
+change, no new column, no new ADR-007 uniqueness constraint. `vnx deliverable
+list` surfaces both fields, explicitly marked "not set" when absent, same as
+the plan text does.
+
+`task_class` is validated against the smart-router closed set
+(`scripts/lib/smart_router.py::TASK_CLASSES`); an unknown value is refused
+with the valid list in the error, both for `add` and for `set`:
+
+- `01_code_generation`
+- `02_code_review`
+- `03_refactoring`
+- `04_documentation`
+- `05_debugging`
+- `06_design`
+- `07_translation`
+
+Example:
+
+```
+vnx deliverable set dlv-abc123 --task-class 01_code_generation --routing-floor sonnet
+```
 
 ## Plan-gate weight — the seat ladder (since #1507)
 
@@ -102,6 +152,44 @@ mirrors this on the seat-count axis (`plan_gate_panel.seat_override_direction`).
 `strict-downgrade` is the one separately-marked move: lightening a
 `coding-strict` derivation, chosen exactly at irreversible work. It is marked,
 not blocked, so a later sweep can find the most dangerous override.
+
+## Plan source without --doc: goal_state plus deliverables, two refusal kinds (since #1560)
+
+When `plan-gate run`/`plan-gate seed`'s panel is not fed `--doc <path>`, the
+plan text it reviews is composed from the track's `goal_state` PLUS a
+rendered block for each of the track's deliverables (id, output_kind, title,
+status, `task_class`, `routing_floor` — see the section above). This exists
+because rubric axes 3 and 5 judge deliverables directly: before this fix,
+only the goal text reached the panel, and those two axes were structurally
+unanswerable regardless of how many deliverables the track actually had
+(measured: a 24-seat batch scored 22 revise / 2 block / 0 pass, with a
+4-deliverable track refused twice on "no deliverables"). `--doc` still wins
+explicitly over this composition — passing it skips the deliverables read
+entirely, and a non-empty `goal_state` is marked `ignored_goal` in the trace.
+
+`resolve_plan_source` (`scripts/planning_cli.py`) refuses loud — raising
+`PlanRefusal`, tagged by `.kind` — before a panel round is ever burned on a
+plan it structurally cannot judge. There are two distinct refusal kinds, and
+an operator hitting either needs a different fix:
+
+| `PlanRefusal.kind` | Trigger | What the operator does |
+|---|---|---|
+| `thin_goal` | `goal_state` has fewer than `goal_min_chars` MEANINGFUL characters (whitespace-stripped; default 200, `configs/plan_gate_panel.yaml`) | Fill in the track's goal to at least the threshold, or pass `--doc <path>` with a plan document. |
+| `no_deliverables` | `goal_state` clears the length floor, but the track has zero deliverables | `vnx deliverable add --objective <track_id> --output-kind <kind> --title "..."`, or pass `--doc <path>` with a plan document. |
+
+The non-intuitive half: **a thick goal with zero deliverables still
+refuses.** `goal_min_chars` is only an emptiness floor on the goal field
+alone (a goal of 200 spaces is refused too, since the length is measured
+after stripping whitespace) — it is not a plannability test. The deliverable
+check is independent and unconditional: any track with no `--doc` must have
+at least one deliverable, no matter how long or detailed its `goal_state` is.
+
+Both refusals surface identically at the CLI (exit code 2, track stays
+blocked) and are distinguished in the batch tally
+(`cmd_plan_gate_batch`/`configs`) as separate outcome buckets:
+`REFUSED_THIN` (`GEWEIGERD-te-dun`) and `REFUSED_NO_DELIVERABLES`
+(`GEWEIGERD-geen-deliverables`), so a batch run's summary never conflates
+"the goal needs more text" with "the track needs a deliverable".
 
 ## Tenant-safe resolution (critical)
 
