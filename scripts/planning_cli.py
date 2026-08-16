@@ -63,6 +63,7 @@ import tracks as tracks_lib  # noqa: E402
 import seed_tracks_from_roadmap as seeder  # noqa: E402
 import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
+import plan_gate_enforcement  # noqa: E402
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -240,6 +241,21 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
         tracks = [t for t in tracks if t["phase"] != "done"]
         hidden_done = before - len(tracks)
 
+    # Plan-gate review split (derived, never stored). The open OI-PLAN blocker
+    # set is read ONCE; each track's disposition is classified from that set
+    # plus its durable decision_ref (OI-1190) — no second truth, no per-track
+    # read. "blocked" alone hid unread (never reviewed) and refused (reviewed
+    # and rejected) under one name; this surfaces the difference while the
+    # total stays derivable from the ~blocked badge.
+    plan_blocked_ids = set(list_plan_blocked_tracks(state_dir, project_id))
+    review_by_track = {
+        t["track_id"]: plan_gate_enforcement.classify_review_state(
+            open_plan_blocker=t["track_id"] in plan_blocked_ids,
+            decision_ref=t.get("decision_ref"),
+        )
+        for t in tracks
+    }
+
     if args.json:
         out = [
             {
@@ -251,6 +267,7 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
                 "priority": t.get("priority"),
                 "pr_ref": t.get("pr_ref"),
                 "next_up": bool(t.get("next_up")),
+                "plan_gate_review": review_by_track[t["track_id"]],
                 "depends_on": _dependencies_for(state_dir, t["track_id"], project_id),
             }
             for t in tracks
@@ -284,13 +301,24 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
             marker = "*" if t.get("next_up") else " "
             dep_str = f"  deps: {', '.join(deps)}" if deps else ""
             pr_str = f"  pr: {t['pr_ref']}" if t.get("pr_ref") else ""
-            derived = t.get("derived_status")
-            drift_badge = f" ~{derived}" if derived and derived != t["phase"] else ""
+            review = review_by_track[t["track_id"]]
+            if review in (plan_gate_enforcement.UNREAD, plan_gate_enforcement.REFUSED):
+                drift_badge = f" ~blocked:{review}"
+            else:
+                derived = t.get("derived_status")
+                drift_badge = f" ~{derived}" if derived and derived != t["phase"] else ""
             print(
                 f" {marker} {t['track_id']:<28} [{t['phase']:<7}]{drift_badge} "
                 f"{t.get('priority') or '-':<3} {t['title']}{pr_str}{dep_str}"
             )
         print()
+    unread = sum(1 for t in tracks if review_by_track[t["track_id"]] == plan_gate_enforcement.UNREAD)
+    refused = sum(1 for t in tracks if review_by_track[t["track_id"]] == plan_gate_enforcement.REFUSED)
+    if unread or refused:
+        print(
+            f"plan-gate review: {unread + refused} blocked on the plan gate "
+            f"({unread} unread, {refused} refused)\n"
+        )
     if hidden_done:
         print(f"({hidden_done} done hidden — --all or --phase done to show)\n")
     return 0
@@ -307,6 +335,18 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     deps = _dependencies_for(state_dir, args.track_id, project_id)
     open_items = tracks_lib.get_linked_open_items(state_dir, args.track_id, project_id)
 
+    # Plan-gate review disposition, derived from facts already loaded: the open
+    # OI-PLAN blocker (from the unresolved open-items read) + the durable
+    # decision_ref. No second store, no extra read.
+    open_plan_blocker = any(
+        oi.get("oi_id") == _plan_blocker_oi(args.track_id) and oi.get("link_type") == "blocks"
+        for oi in open_items
+    )
+    review = plan_gate_enforcement.classify_review_state(
+        open_plan_blocker=open_plan_blocker,
+        decision_ref=track.get("decision_ref"),
+    )
+
     conn = _db_conn(state_dir)
     try:
         pr_delivery = _load_pr_delivery(conn, project_id, args.track_id)
@@ -319,6 +359,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
         out["depends_on"] = deps
         out["open_items"] = open_items
         out["lane_hint"] = _lane_hint_of(track)
+        out["plan_gate_review"] = review
         out["pr_delivery"] = delivery_entries
         print(json.dumps(out, indent=2, default=str))
         return 0
@@ -333,6 +374,7 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
     print(f"  pr_ref   : {track.get('pr_ref') or '-'}")
     print(f"  delivery : {_format_pr_delivery(delivery_entries)}")
     print(f"  decision_ref: {_format_decision_ref(track.get('decision_ref'))}")
+    print(f"  plan-gate: {review}")
     print(f"  goal     : {track.get('goal_state') or '-'}")
     print(f"  depends  : {', '.join(deps) if deps else '(none)'}")
     if open_items:

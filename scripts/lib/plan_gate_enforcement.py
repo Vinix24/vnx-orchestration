@@ -24,6 +24,7 @@ gate-shaped result, but both share this one truth.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -324,5 +325,113 @@ def _plan_gate_state_decision(db_path: "str | Path", track_id: str, project_id: 
                 (track_id, oi),
             ).fetchone()
         return UNRESOLVED if row is not None else PASSED
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Plan-gate review disposition — the "blocked" refinement
+# ---------------------------------------------------------------------------
+#
+# A single ``blocked`` state hides two facts under one name: a track the
+# plan-first gate has NEVER reviewed (queue depth) and a track the gate reviewed
+# and REFUSED (a finding with a reason). Both have an open ``OI-PLAN-<track>``
+# blocker; the difference is whether a plan-gate decision is on record. That
+# difference is DERIVED from the durable decision record — ``tracks.decision_ref``
+# (OI-1190), written by ``plan_gate_panel.build_decision_ref`` for every panel
+# outcome — never stored as a second flag, so the disposition can never drift
+# out of sync with the gate records.
+
+UNREAD = "unread"        # OI-PLAN blocker open; no refusal on record (never reviewed)
+REFUSED = "refused"      # OI-PLAN blocker open; the recorded decision was REVISE/BLOCK
+CLEARED = "cleared"      # no open OI-PLAN blocker (passed/attested/derived, or never seeded)
+
+# Panel decisions that are a refusal WITH a reason on record. INFRA_FAIL is
+# deliberately NOT a refusal: no lane produced a readable verdict, so the plan
+# was never actually reviewed and still reads UNREAD. Pre-panel refusals
+# (too-thin goal, zero deliverables) write no decision_ref at all and therefore
+# also read UNREAD — correct, because no panel looked at the plan.
+_REFUSAL_DECISIONS = frozenset({"revise", "block"})
+
+
+def _decision_ref_is_refusal(decision_ref: "str | None") -> bool:
+    """True when a track's ``decision_ref`` records a refused (REVISE/BLOCK) decision.
+
+    ``decision_ref`` is the JSON payload ``plan_gate_panel.build_decision_ref``
+    writes onto the track for every panel outcome. An empty or unparseable value
+    is not a refusal — fail-safe to "not refused" so a corrupt record can never
+    mint a finding the panel did not record.
+    """
+    if not decision_ref:
+        return False
+    try:
+        payload = json.loads(decision_ref)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("decision", "")).strip().lower() in _REFUSAL_DECISIONS
+
+
+def classify_review_state(
+    *,
+    open_plan_blocker: bool,
+    decision_ref: "str | None",
+) -> str:
+    """Map the two plan-gate facts to a review disposition (pure, no DB).
+
+    ``open_plan_blocker`` is whether the track has an OPEN OI-PLAN blocker;
+    ``decision_ref`` is the track's durable plan-gate decision record (``None``
+    on a store predating migration 0033, or when the gate never ran). This
+    mapping is the whole derivation — nothing is stored, so the disposition can
+    never diverge from the records it reads.
+    """
+    if not open_plan_blocker:
+        return CLEARED
+    if _decision_ref_is_refusal(decision_ref):
+        return REFUSED
+    return UNREAD
+
+
+def plan_gate_review_state(db_path: "str | Path", track_id: str, project_id: str) -> str:
+    """Return ``UNREAD`` / ``REFUSED`` / ``CLEARED`` / ``UNSUPPORTED`` for a track.
+
+    Read-only (``mode=ro``) over the same DB ``plan_gate_state`` reads: the open
+    OI-PLAN blocker comes from ``track_open_items`` and the recorded decision
+    from ``tracks.decision_ref`` (the OI-1190 durable pointer). ``UNSUPPORTED``
+    when the schema cannot determine whether the blocker is open — the same
+    predicate ``_plan_gate_state_decision`` uses. A store with the blocker
+    columns but no ``decision_ref`` column (pre-0033) reads every open blocker
+    as ``UNREAD``: that store has no decision record to derive a refusal from.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0)
+    try:
+        if not (_has_table(conn, "track_open_items") and _has_col(conn, "track_open_items", "resolved_at")):
+            return UNSUPPORTED
+        oi = plan_blocker_oi(track_id)
+        if _has_col(conn, "track_open_items", "project_id"):
+            open_blocker = conn.execute(
+                "SELECT 1 FROM track_open_items "
+                "WHERE track_id=? AND project_id=? AND oi_id=? "
+                "AND link_type='blocks' AND resolved_at IS NULL LIMIT 1",
+                (track_id, project_id, oi),
+            ).fetchone() is not None
+        else:  # pre-0024 DB: no tenant column
+            open_blocker = conn.execute(
+                "SELECT 1 FROM track_open_items "
+                "WHERE track_id=? AND oi_id=? AND link_type='blocks' "
+                "AND resolved_at IS NULL LIMIT 1",
+                (track_id, oi),
+            ).fetchone() is not None
+        decision_ref = None
+        if _has_col(conn, "tracks", "decision_ref"):
+            row = conn.execute(
+                "SELECT decision_ref FROM tracks WHERE track_id=? AND project_id=?",
+                (track_id, project_id),
+            ).fetchone()
+            decision_ref = row[0] if row else None
+        return classify_review_state(
+            open_plan_blocker=open_blocker, decision_ref=decision_ref,
+        )
     finally:
         conn.close()

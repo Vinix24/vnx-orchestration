@@ -5,6 +5,7 @@ dispatch door (_check_track_link_verdict). Merge-gate wiring is tested separatel
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -26,24 +27,27 @@ def _make_db(
     tracks: "dict[str, str]",
     plan_blockers: "dict[str, bool] | None" = None,
     with_open_items: bool = True,
+    decision_refs: "dict[str, str] | None" = None,
 ) -> Path:
     """Build a runtime_coordination.db with `tracks` and (optionally) `track_open_items`.
 
     tracks: {track_id: phase}. plan_blockers: {track_id: resolved?} — seeds an
     OI-PLAN-<track> 'blocks' row; resolved=True stamps resolved_at, False leaves it NULL.
     with_open_items=False omits the table entirely (schema-unsupported case).
+    decision_refs: {track_id: json-str} — populates tracks.decision_ref (migration 0033).
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     db_path = state_dir / "runtime_coordination.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "CREATE TABLE tracks (track_id TEXT PRIMARY KEY, phase TEXT NOT NULL, "
-        "project_id TEXT NOT NULL DEFAULT 'vnx-dev', derived_status TEXT)"
+        "project_id TEXT NOT NULL DEFAULT 'vnx-dev', derived_status TEXT, decision_ref TEXT)"
     )
     for tid, phase in tracks.items():
         conn.execute(
-            "INSERT INTO tracks (track_id, phase, project_id) VALUES (?, ?, 'vnx-dev')",
-            (tid, phase),
+            "INSERT INTO tracks (track_id, phase, project_id, decision_ref) "
+            "VALUES (?, ?, 'vnx-dev', ?)",
+            (tid, phase, (decision_refs or {}).get(tid)),
         )
     if with_open_items:
         conn.execute(
@@ -319,3 +323,114 @@ class TestEnforceModeFailureLogs:
         assert not any(
             "config read failed" in r.message for r in caplog.records
         ), "a NOT-SET enforce flag must stay silent"
+
+
+# ------------------------------------------------------------------ review disposition
+def _decision_ref(decision: str) -> str:
+    """A minimal decision_ref payload as plan_gate_panel.build_decision_ref writes."""
+    return json.dumps({
+        "decision": decision,
+        "reports": [{"seat": "opus"}],
+        "rejected_alternatives": [],
+        "set_at": "2026-08-16T00:00:00Z",
+    })
+
+
+class TestClassifyReviewState:
+    """The review disposition is a pure mapping of two facts: whether the OI-PLAN
+    blocker is open, and whether a refusal (REVISE/BLOCK) is on record. Nothing is
+    stored, so each test pins exactly those two inputs."""
+
+    def test_unread_when_open_blocker_and_no_decision(self):
+        assert pge.classify_review_state(open_plan_blocker=True, decision_ref=None) == pge.UNREAD
+
+    def test_unread_when_open_blocker_and_empty_decision(self):
+        assert pge.classify_review_state(open_plan_blocker=True, decision_ref="") == pge.UNREAD
+
+    def test_refused_when_open_blocker_and_revise(self):
+        assert pge.classify_review_state(
+            open_plan_blocker=True, decision_ref=_decision_ref("REVISE")) == pge.REFUSED
+
+    def test_refused_when_open_blocker_and_block(self):
+        assert pge.classify_review_state(
+            open_plan_blocker=True, decision_ref=_decision_ref("BLOCK")) == pge.REFUSED
+
+    def test_unread_when_open_blocker_and_infra_fail(self):
+        # INFRA_FAIL wrote no readable verdict: the plan was never actually reviewed.
+        assert pge.classify_review_state(
+            open_plan_blocker=True, decision_ref=_decision_ref("INFRA_FAIL")) == pge.UNREAD
+
+    def test_cleared_when_no_open_blocker(self):
+        assert pge.classify_review_state(
+            open_plan_blocker=False, decision_ref=_decision_ref("REVISE")) == pge.CLEARED
+
+    def test_cleared_when_gated_pass(self):
+        # gated PASS lifts the blocker -> neither unread nor refused.
+        assert pge.classify_review_state(
+            open_plan_blocker=False, decision_ref=_decision_ref("PASS")) == pge.CLEARED
+
+    def test_unread_when_open_blocker_and_unparseable_decision(self):
+        assert pge.classify_review_state(
+            open_plan_blocker=True, decision_ref="not json") == pge.UNREAD
+
+    def test_refused_is_case_and_whitespace_insensitive(self):
+        assert pge.classify_review_state(
+            open_plan_blocker=True, decision_ref=_decision_ref(" revise ")) == pge.REFUSED
+
+
+class TestPlanGateReviewState:
+    """The DB-level reader joins the open OI-PLAN blocker with tracks.decision_ref."""
+
+    def test_unread_when_open_blocker_and_no_decision_ref(self, tmp_path):
+        db = _make_db(tmp_path, tracks={"t": "active"}, plan_blockers={"t": False})
+        assert pge.plan_gate_review_state(db, "t", "vnx-dev") == pge.UNREAD
+
+    def test_refused_when_open_blocker_and_revise_on_record(self, tmp_path):
+        db = _make_db(tmp_path, tracks={"t": "active"}, plan_blockers={"t": False},
+                      decision_refs={"t": _decision_ref("REVISE")})
+        assert pge.plan_gate_review_state(db, "t", "vnx-dev") == pge.REFUSED
+
+    def test_cleared_when_blocker_resolved(self, tmp_path):
+        db = _make_db(tmp_path, tracks={"t": "active"}, plan_blockers={"t": True},
+                      decision_refs={"t": _decision_ref("REVISE")})
+        assert pge.plan_gate_review_state(db, "t", "vnx-dev") == pge.CLEARED
+
+    def test_cleared_when_no_blocker(self, tmp_path):
+        db = _make_db(tmp_path, tracks={"t": "active"}, plan_blockers={})
+        assert pge.plan_gate_review_state(db, "t", "vnx-dev") == pge.CLEARED
+
+    def test_cleared_when_gated_pass(self, tmp_path):
+        db = _make_db(tmp_path, tracks={"t": "active"},
+                      decision_refs={"t": _decision_ref("PASS")})
+        assert pge.plan_gate_review_state(db, "t", "vnx-dev") == pge.CLEARED
+
+    def test_unsupported_when_no_open_items_table(self, tmp_path):
+        db = _make_db(tmp_path, tracks={"t": "active"}, with_open_items=False)
+        assert pge.plan_gate_review_state(db, "t", "vnx-dev") == pge.UNSUPPORTED
+
+    def test_unread_when_no_decision_ref_column(self, tmp_path):
+        """Pre-0033 store: open blocker, no decision_ref column -> UNREAD (there is
+        no record to derive a refusal from), never a crash."""
+        state_dir = tmp_path / "pre0033"
+        state_dir.mkdir()
+        conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        conn.execute(
+            "CREATE TABLE tracks (track_id TEXT PRIMARY KEY, phase TEXT NOT NULL, "
+            "project_id TEXT NOT NULL DEFAULT 'vnx-dev')"
+        )
+        conn.execute("INSERT INTO tracks (track_id, phase) VALUES ('t', 'active')")
+        conn.execute(
+            "CREATE TABLE track_open_items (track_id TEXT NOT NULL, "
+            "project_id TEXT NOT NULL DEFAULT 'vnx-dev', oi_id TEXT NOT NULL, "
+            "link_type TEXT NOT NULL, link_source TEXT, resolved_at TEXT, "
+            "PRIMARY KEY (track_id, project_id, oi_id, link_type))"
+        )
+        conn.execute(
+            "INSERT INTO track_open_items (track_id, oi_id, link_type, resolved_at) "
+            "VALUES ('t', ?, 'blocks', NULL)",
+            (pge.plan_blocker_oi("t"),),
+        )
+        conn.commit()
+        conn.close()
+        assert pge.plan_gate_review_state(
+            state_dir / "runtime_coordination.db", "t", "vnx-dev") == pge.UNREAD
