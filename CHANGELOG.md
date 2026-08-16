@@ -6,7 +6,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [1.5.0] — 2026-08-16
 
-Minor release (83 PRs since v1.4.7). The user-visible shape: the plan-gate
+Minor release (84 PRs since v1.4.7). The user-visible shape: the plan-gate
 now judges a track on its goal AND its deliverables and refuses a
 deliverable-less track loud, new CLI verbs manage deliverables and track
 goals directly, the provider cost ladder is an ordered tier list with
@@ -66,6 +66,15 @@ resolving to a silent default.
   cleared and the gate's `decision_ref` lands on the track; post-merge
   verification is refused on a stale local checkout; panel seats receive
   `VNX_DATA_DIR` and a thin synthesis is refused.
+- **Plan-gate panel role registered (#1571)** — the claude/tmux-lane
+  plan-gate panel seats were spawned with `--role plan-reviewer`, but
+  that role was in no register: not in `worker_permissions.yaml`, and no
+  `agents/plan-reviewer/CLAUDE.md` existed. Since the fail-closed role
+  resolution in #1563, the lane refused every claude seat in 0.06
+  seconds without a report. A two-seat panel was left with one seat,
+  below the liveness quorum of `min(2, panelgrootte)`, so every
+  plan-gate fell over on liveness rather than on the plan's content. The
+  role is now registered with a read-only profile.
 - **Dispatch lanes: role, isolation, and failure truth (#1522, #1537,
   #1488, #1529, #1569, #1568, #1558, #1543)** — `VNX_WORKER_ROLE` is
   threaded into the provider-lane spawn environment; `base_ref` is
