@@ -1797,6 +1797,111 @@ def _persist_route_decision(
 # run_dispatch — the single door
 # ---------------------------------------------------------------------------
 
+def _maybe_stage_escalation(plan, result, *, vspec, state_dir, data_dir) -> None:
+    """On a provider-lane failure, classify it and — when the escalation table
+    says climb — stage a human-promoted escalation followup.
+
+    This is the production CALLER of ``stage_escalation_bundle`` (OI-1221's
+    missing call site, wired dispatch 20260816-p6-escalate-tier-ds): the
+    followup spec's ``tier_from``/``tier_to``/``parent_dispatch`` finally land on
+    a real spec, so the receipt carries the chain-link. It STAGES ONLY — the
+    operator promotes the bundle through the door; nothing is auto-fired.
+
+    Never raises and never changes the failed dispatch's exit code: a failure
+    class that must not climb (auth_rejected, unknown) or a staging error is
+    reported loudly and the door returns the original failure unchanged.
+    """
+    spec = vspec.spec
+
+    # The tier the failed attempt ran on (reverse-mapped from its model, or the
+    # explicit escalation rung). Without it the attempt cannot be placed on the
+    # cost ladder, so there is nothing to escalate from.
+    tier_ran_on = plan.tier_to or plan.tier_from
+    if not tier_ran_on:
+        print(
+            "[dispatch_cli] no escalation: failed attempt has no cost tier "
+            f"(tier_to={plan.tier_to!r}, tier_from={plan.tier_from!r})",
+            file=sys.stderr,
+        )
+        return
+
+    from failure_classification import classify_failure_safe  # noqa: PLC0415
+
+    classification = classify_failure_safe(
+        status=result.status,
+        error=result.error,
+        completion_text=result.completion_text,
+        timed_out=(result.status == "timeout"),
+        provider=getattr(plan.provider, "value", str(plan.provider)),
+        returncode=result.returncode,
+        dispatch_id=plan.dispatch_id,
+    )
+    failure_class = classification["failure_class"]
+    failure_reason = classification["failure_reason"]
+
+    if failure_class is None:
+        print(
+            "[dispatch_cli] no escalation: classify_failure returned no class "
+            f"(status={result.status!r}); cannot decide a climb",
+            file=sys.stderr,
+        )
+        return
+
+    # A same-tier retry already carries tier_from == tier_to; a second rejection
+    # must then climb rather than retry forever on the same rung.
+    retried = bool(plan.tier_from and plan.tier_to and plan.tier_from == plan.tier_to)
+
+    from dispatch_bridge import stage_escalation_bundle  # noqa: PLC0415
+    from headless_dispatch_writer import generate_dispatch_id  # noqa: PLC0415
+
+    followup_id = generate_dispatch_id("escalate", spec.target_slot)
+    instruction_text = (
+        f"Escalation followup for rejected dispatch {plan.dispatch_id}\n"
+        f"failure_class={failure_class}: {failure_reason}\n\n"
+        f"{vspec.instruction_text}"
+    )
+    try:
+        stage_escalation_bundle(
+            rejected_dispatch_id=plan.dispatch_id,
+            tier_from=tier_ran_on,
+            failure_class=failure_class,
+            retried=retried,
+            instruction_text=instruction_text,
+            dispatch_id=followup_id,
+            role=spec.role,
+            target_slot=spec.target_slot,
+            project_id=spec.project_id,
+            gate=spec.gate,
+            dispatch_paths=tuple(
+                {
+                    "path": str(dp.path),
+                    "access": dp.access.value,
+                    "materialize_at_cwd": dp.materialize_at_cwd,
+                }
+                for dp in vspec.normalized_paths
+            ),
+            deadline_seconds=spec.deadline_seconds,
+            base_ref=spec.base_ref,
+            task_class=plan.task_class,
+            env=dict(os.environ),
+            state_dir=state_dir,
+            data_dir=data_dir,
+        )
+    except ValueError as exc:
+        # A decision outcome that refuses to stage: unknown class, auth_rejected,
+        # or an already-topped ladder. Reported loud, never a silent no-op.
+        print(f"[dispatch_cli] no escalation: {exc}", file=sys.stderr)
+        return
+    except Exception as exc:  # vnx-silent-except: escalation staging is best-effort; a staging error must not change the failed dispatch's exit code
+        print(f"[dispatch_cli] escalation staging failed: {exc}", file=sys.stderr)
+        return
+    print(
+        f"[dispatch_cli] escalation followup staged: {followup_id} "
+        f"({failure_class}: {tier_ran_on} -> promote through the door)",
+        file=sys.stderr,
+    )
+
+
 def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
@@ -2065,6 +2170,12 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                         f"[dispatch_cli] provider lane {result.status}: "
                         f"{result.error or '(no error captured)'}",
                         file=sys.stderr,
+                    )
+                    # The escalation ladder: classify the failure and stage a
+                    # human-promoted followup when the table says climb (OI-1221,
+                    # wired dispatch 20260816-p6-escalate-tier-ds).
+                    _maybe_stage_escalation(
+                        plan, result, vspec=vspec, state_dir=state_dir, data_dir=data_dir
                     )
                 return result.returncode
             elif plan.lane == "claude_tmux_subscription":

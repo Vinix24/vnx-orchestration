@@ -193,34 +193,34 @@ def test_load_tier_ladder_fails_on_non_monotonic_cost(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_escalate_rejected_result_climbs_one_tier():
-    esc = escalate_tier(TIER_LOW, "20260815-rejected-attempt")
+    esc = escalate_tier(TIER_LOW, "20260815-rejected-attempt", failure_class="model_error")
     assert esc.tier_from == TIER_LOW
     assert esc.tier_to == "kimi-k3"
     assert esc.parent_dispatch == "20260815-rejected-attempt"
 
 
 def test_escalate_from_zero_to_low():
-    assert escalate_tier(TIER_ZERO, "d-zero").tier_to == TIER_LOW
+    assert escalate_tier(TIER_ZERO, "d-zero", failure_class="model_error").tier_to == TIER_LOW
 
 
 def test_escalate_from_mid_to_high():
-    assert escalate_tier(TIER_MID, "d-mid").tier_to == TIER_HIGH
+    assert escalate_tier(TIER_MID, "d-mid", failure_class="model_error").tier_to == TIER_HIGH
 
 
 def test_escalate_at_top_returns_none():
-    assert escalate_tier("fable-5", "d-top").tier_to is None
+    assert escalate_tier("fable-5", "d-top", failure_class="model_error").tier_to is None
 
 
 def test_escalate_unknown_tier_returns_none():
-    assert escalate_tier("tier-unknown", "d-unknown").tier_to is None
+    assert escalate_tier("tier-unknown", "d-unknown", failure_class="model_error").tier_to is None
 
 
 def test_escalate_model_named_rungs_climb_in_cost_order():
     """The three escalation-only rungs slot into the climb at their cost position."""
-    assert escalate_tier("kimi-k3", "d1").tier_to == "gpt-5.5"
-    assert escalate_tier("gpt-5.5", "d2").tier_to == TIER_MID
-    assert escalate_tier(TIER_HIGH, "d3").tier_to == "fable-5"
-    assert escalate_tier("fable-5", "d4").tier_to is None
+    assert escalate_tier("kimi-k3", "d1", failure_class="model_error").tier_to == "gpt-5.5"
+    assert escalate_tier("gpt-5.5", "d2", failure_class="model_error").tier_to == TIER_MID
+    assert escalate_tier(TIER_HIGH, "d3", failure_class="model_error").tier_to == "fable-5"
+    assert escalate_tier("fable-5", "d4", failure_class="model_error").tier_to is None
 
 
 def test_next_tier_matches_escalate_tier():
@@ -231,6 +231,71 @@ def test_next_tier_matches_escalate_tier():
     assert next_tier(TIER_MID) == TIER_HIGH
     assert next_tier(TIER_HIGH) == "fable-5"
     assert next_tier("fable-5") is None
+
+
+# ---------------------------------------------------------------------------
+# Escalation decision table (dispatch 20260816-p6-escalate-tier-ds)
+# ---------------------------------------------------------------------------
+
+def test_model_error_climbs_one_tier():
+    """model_error -> climb one tier."""
+    esc = escalate_tier(TIER_LOW, "d-model", failure_class="model_error")
+    assert esc.action == "climb"
+    assert esc.tier_to == "kimi-k3"
+    assert esc.notify_operator is False
+    assert esc.unknown_class is False
+
+
+def test_credit_exhausted_climbs_and_notifies_operator():
+    """credit_exhausted -> climb one tier AND notify operator."""
+    esc = escalate_tier(TIER_LOW, "d-credit", failure_class="credit_exhausted")
+    assert esc.action == "climb"
+    assert esc.tier_to == "kimi-k3"
+    assert esc.notify_operator is True
+
+
+def test_auth_rejected_does_not_climb():
+    """auth_rejected -> no climb (a higher tier has the same auth problem)."""
+    esc = escalate_tier(TIER_LOW, "d-auth", failure_class="auth_rejected")
+    assert esc.action == "no_climb"
+    assert esc.tier_to is None
+    assert esc.notify_operator is False
+
+
+def test_timeout_retries_same_tier_then_climbs():
+    """timeout -> retry the same tier first, then climb on the next rejection."""
+    retry = escalate_tier(TIER_LOW, "d-timeout", failure_class="timeout")
+    assert retry.action == "retry_same_tier"
+    assert retry.tier_to == TIER_LOW  # same rung, not up
+
+    climbed = escalate_tier(TIER_LOW, "d-timeout", failure_class="timeout", retried=True)
+    assert climbed.action == "climb"
+    assert climbed.tier_to == "kimi-k3"
+
+
+def test_empty_completion_retries_same_tier_then_climbs():
+    """empty_completion -> retry the same tier first, then climb."""
+    retry = escalate_tier(TIER_LOW, "d-empty", failure_class="empty_completion")
+    assert retry.action == "retry_same_tier"
+    assert retry.tier_to == TIER_LOW
+
+    climbed = escalate_tier(TIER_LOW, "d-empty", failure_class="empty_completion", retried=True)
+    assert climbed.action == "climb"
+    assert climbed.tier_to == "kimi-k3"
+
+
+def test_unknown_class_does_not_climb_and_reports_loud():
+    """unknown -> no climb, and the caller is told the class is unknown."""
+    esc = escalate_tier(TIER_LOW, "d-unknown", failure_class="unknown")
+    assert esc.action == "no_climb"
+    assert esc.tier_to is None
+    assert esc.unknown_class is True
+
+
+def test_unrecognized_class_fails_loud():
+    """A class the table does not know raises — never a silent fallback to climb."""
+    with pytest.raises(ValueError, match="unrecognized failure_class"):
+        escalate_tier(TIER_LOW, "d-bogus", failure_class="something_else")
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +316,7 @@ def test_quality_escalation_climbs_where_fallback_stays(monkeypatch):
     route = resolve_tier_route(TIER_LOW, env={})
     assert route.tier == TIER_LOW
 
-    esc = escalate_tier(TIER_LOW, "d-rejected")
+    esc = escalate_tier(TIER_LOW, "d-rejected", failure_class="model_error")
     assert esc.tier_from == TIER_LOW
     assert esc.tier_to == "kimi-k3"
     assert esc.parent_dispatch == "d-rejected"
