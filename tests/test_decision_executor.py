@@ -129,6 +129,16 @@ class TestExecuteDispatchWritesPending:
 
         monkeypatch.setattr(headless_dispatch_writer, "_dispatch_dir", lambda: dispatches_dir)
         monkeypatch.setattr(headless_dispatch_writer, "_skills_dir", lambda: skills_dir)
+        # No git repo in tmp_path: stub the fail-closed worktree resolution so
+        # the writer can run without creating a real worktree.
+        monkeypatch.setattr(
+            headless_dispatch_writer,
+            "_resolve_dispatch_worktree",
+            lambda dispatch_id, **kw: (
+                tmp_path / "worktree" / dispatch_id,
+                f"dispatch/{dispatch_id}",
+            ),
+        )
 
         reset_cycle_counter()
 
@@ -191,6 +201,15 @@ class TestMaxDispatchesEnforced:
 
         monkeypatch.setattr(headless_dispatch_writer, "_dispatch_dir", lambda: dispatches_dir)
         monkeypatch.setattr(headless_dispatch_writer, "_skills_dir", lambda: skills_dir)
+        # No git repo in tmp_path: stub the fail-closed worktree resolution.
+        monkeypatch.setattr(
+            headless_dispatch_writer,
+            "_resolve_dispatch_worktree",
+            lambda dispatch_id, **kw: (
+                tmp_path / "worktree" / dispatch_id,
+                f"dispatch/{dispatch_id}",
+            ),
+        )
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()

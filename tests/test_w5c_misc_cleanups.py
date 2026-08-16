@@ -295,13 +295,23 @@ class TestHeadlessDispatchWriterDocumented:
             f"Module docstring must document consumers; got: {doc[:200]!r}"
         )
 
-    def test_write_dispatch_returns_path(self, tmp_path):
+    def test_write_dispatch_returns_path(self, tmp_path, monkeypatch):
         """write_dispatch creates pending/<id>/dispatch.json and returns its path."""
         import headless_dispatch_writer as hdw
 
         dispatch_id = hdw.generate_dispatch_id("test-w5c", "B")
         import os
         os.environ["VNX_DISPATCH_DIR"] = str(tmp_path / "dispatches")
+        # The writer resolves a per-dispatch worktree before writing; stub that
+        # resolution so this unit test never touches a real git worktree.
+        monkeypatch.setattr(
+            hdw,
+            "_resolve_dispatch_worktree",
+            lambda dispatch_id, **kw: (
+                tmp_path / "worktree" / dispatch_id,
+                f"dispatch/{dispatch_id}",
+            ),
+        )
 
         path = hdw.write_dispatch(
             dispatch_id=dispatch_id,

@@ -15,6 +15,9 @@ Design invariants:
   - Role validation checks .claude/skills/<role>/ directory existence.
   - dispatch.json is written atomically to pending/<dispatch_id>/dispatch.json.
   - created_at is always a UTC ISO-8601 timestamp.
+  - The per-dispatch worktree is resolved via dispatch_worktree_isolation
+    BEFORE writing: the worker branches inside that worktree, never the main
+    checkout, and the resolution is fail-closed (no main-checkout fallback).
 """
 
 from __future__ import annotations
@@ -114,6 +117,18 @@ class DispatchValidationError(ValueError):
     """Raised when dispatch parameters fail validation."""
 
 
+class DispatchWorktreeError(RuntimeError):
+    """Raised when the dispatch worktree cannot be resolved (fail-closed).
+
+    The headless worker must operate inside the per-dispatch worktree the door
+    created, never the main checkout.  When that worktree cannot be resolved —
+    unresolvable project root, unresolvable base_ref, occupancy conflict, or
+    identity mismatch — the writer refuses outright.  There is no fallback to
+    the main checkout; a silent fallback is the exact defect this exists to
+    remove.
+    """
+
+
 # ---------------------------------------------------------------------------
 # generate_dispatch_id
 # ---------------------------------------------------------------------------
@@ -132,6 +147,47 @@ def generate_dispatch_id(prefix: str, track: str) -> str:
     date_part = now.strftime("%Y%m%d")
     time_part = now.strftime("%H%M%S")
     return f"{date_part}-{time_part}-{prefix}-{track}"
+
+
+# ---------------------------------------------------------------------------
+# dispatch worktree resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_dispatch_worktree(
+    dispatch_id: str,
+    *,
+    project_root: Optional[Path] = None,
+) -> "tuple[Path, str]":
+    """Resolve/create the per-dispatch worktree and return ``(path, branch)``.
+
+    Uses the single canonical mechanism — ``dispatch_worktree_isolation`` —
+    already shared by the tmux and provider lanes, so the headless writer does
+    not build a second worktree mechanism beside it.  ``create_dispatch_worktree``
+    creates or re-enters the worktree at
+    ``<project_root>/.vnx-data/worktrees/dispatch-<safe_id>`` on branch
+    ``dispatch/<safe_id>`` and acquires the OI-1232 occupancy lock; the identity
+    is then verified so a wrong-identity hand-out fails loud instead of running
+    on the wrong tree.
+
+    Fail-closed: any failure raises :class:`DispatchWorktreeError`.  The writer
+    refuses and does NOT fall back to the main checkout.
+    """
+    from dispatch_worktree_isolation import (  # noqa: PLC0415
+        _sanitize_dispatch_id,
+        create_dispatch_worktree,
+        resolve_consumer_project_root,
+        verify_worktree_identity,
+    )
+    root = Path(project_root) if project_root is not None else resolve_consumer_project_root()
+    try:
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=root)
+        claim = verify_worktree_identity(dispatch_id, wt_path, project_root=root)
+    except Exception as exc:
+        raise DispatchWorktreeError(
+            f"cannot resolve the dispatch worktree for {dispatch_id!r}: {exc}"
+        ) from exc
+    branch = claim.get("branch") or f"dispatch/{_sanitize_dispatch_id(dispatch_id)}"
+    return Path(wt_path), branch
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +225,8 @@ def write_dispatch(
         parent_dispatch: Optional parent dispatch ID for chaining.
         feature:         Optional feature tag (e.g. F42).
         branch:          Optional git branch the worker should operate on.
+                         Defaults to the dispatch worktree's branch
+                         (``dispatch/<safe_id>``) when not provided.
         context_files:   Optional list of file paths to include as context.
 
     Returns:
@@ -176,6 +234,9 @@ def write_dispatch(
 
     Raises:
         DispatchValidationError: If terminal, track, or role validation fails.
+        DispatchWorktreeError:   If the dispatch worktree cannot be resolved;
+                                 the dispatch is refused (no main-checkout
+                                 fallback).
     """
     # --- validate terminal ---
     if terminal not in VALID_TERMINALS:
@@ -203,6 +264,12 @@ def write_dispatch(
         # Skills dir not found — skip role validation rather than hard-fail
         pass
 
+    # --- resolve/create the dispatch worktree (fail-closed) ---
+    # The worker must operate inside this worktree, not the main checkout.
+    # A failure here refuses the dispatch outright — no fallback to the main
+    # checkout, which is the exact behavior this exists to remove.
+    worktree_path, resolved_branch = _resolve_dispatch_worktree(dispatch_id)
+
     # --- resolve dispatch directory ---
     dispatch_base = _dispatch_dir()
     pending_dir = dispatch_base / "pending" / dispatch_id
@@ -221,7 +288,8 @@ def write_dispatch(
         "pr_id": pr_id,
         "parent_dispatch": parent_dispatch,
         "feature": feature,
-        "branch": branch,
+        "branch": branch or resolved_branch,
+        "worktree_path": str(worktree_path),
         "instruction": instruction,
         "context_files": context_files or [],
         "created_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
