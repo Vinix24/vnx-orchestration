@@ -14,11 +14,26 @@ auth_rejected    — HTTP 401/403 from the provider endpoint (proxy, API, etc.)
 empty_completion — call succeeded (HTTP 200) but the model returned zero text
 timeout          — call exceeded its deadline
 model_error      — the model/provider itself returned an error (5xx, rate-limit, etc.)
+credit_exhausted — provider/gateway balance or credits ran out (HTTP 402 and
+                    variants); dispatch 20260816-p9p10-failure-reason-root
 unknown          — everything else; should be rare after OI-866
+
+dispatch 20260816-p9p10-failure-reason-root: the glm-harness and
+deepseek-harness lanes route through the `claude` CLI, so a provider-side API
+error (e.g. "API Error: 402 Insufficient Balance") arrives as ordinary
+assistant TEXT in ``completion_text`` — the spawn never populates ``error``
+for that case. classify_failure previously only pattern-matched ``error``,
+so any failure with a real, readable completion and no separate ``error``
+fell through to the contentless ``"(no error captured)"`` fallback even
+though the reason was sitting right there on disk. classify_failure now also
+scans ``completion_text`` (only when ``error`` is empty — a caller-supplied
+``error`` stays authoritative) and, failing a specific pattern match, surfaces
+a bounded snippet of the completion itself instead of just its length.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
 
 
@@ -27,8 +42,50 @@ FAILURE_CLASSES = frozenset({
     "empty_completion",
     "timeout",
     "model_error",
+    "credit_exhausted",
     "unknown",
 })
+
+# Credit/balance exhaustion — matched on phrases actually observed in the
+# ledger (measured 2026-08-16, dispatch 20260816-p9p10-failure-reason-root):
+# deepseek-harness prints a direct "API Error: 402 Insufficient Balance";
+# glm-harness's OpenRouter gateway wraps the same signal inside a 500
+# "litellm.acompletion" envelope ("...requires more credits...",
+# "openrouter_credits" in the error metadata). Provider error text is not a
+# stable contract — a future variant that does not match one of these phrases
+# falls through to `unknown` below and must be added here explicitly once
+# observed, never silently absorbed back into a contentless placeholder.
+CREDIT_EXHAUSTED_KEYWORDS = (
+    "insufficient balance",
+    "insufficient_balance",
+    "insufficient credits",
+    "requires more credits",
+    "add more credits",
+    "openrouter_credits",
+)
+
+# Provider gateways (observed: glm-harness's litellm/OpenRouter proxy) can wrap
+# the real one-line reason inside a multi-KB nested JSON blob carrying dozens
+# of duplicated retry attempts. Prefer the first quoted "message" field (the
+# provider's own sentence) when present.
+_JSON_MESSAGE_RE = re.compile(r'"message"\s*:\s*"([^"]*)"')
+_MAX_DETAIL_LEN = 300
+
+
+def _extract_detail(text: Optional[str], max_len: int = _MAX_DETAIL_LEN) -> str:
+    """Pull a bounded, human-readable detail out of raw error/completion text.
+
+    Falls back to a truncated, whitespace-collapsed prefix of the raw text
+    when no JSON "message" field is present, so a receipt's failure_reason
+    never carries a multi-KB blob.
+    """
+    text = text or ""
+    match = _JSON_MESSAGE_RE.search(text)
+    detail = match.group(1) if match else text
+    detail = " ".join(detail.split())
+    if len(detail) > max_len:
+        detail = detail[:max_len].rstrip() + "…"
+    return detail or "(empty)"
 
 
 def classify_failure(
@@ -79,6 +136,23 @@ def classify_failure(
 
     error_lower = (error or "").lower()
 
+    # A caller-supplied `error` stays authoritative and completion_text is
+    # never consulted for it. Only when `error` is empty does the provider's
+    # failure text live solely in the completion (see module docstring) —
+    # scan that instead so it is never silently discarded.
+    signal_text = error_lower if error else completion.lower()
+
+    # ── credit / balance exhaustion ────────────────────────────────────────
+    # Checked before model_keywords so glm-harness's outer "500" wrapper never
+    # hides the real, actionable 402-credits cause nested inside it.
+    if any(kw in signal_text for kw in CREDIT_EXHAUSTED_KEYWORDS):
+        source = _error_source(provider, sub_provider)
+        detail = _extract_detail(error if error else completion)
+        return {
+            "failure_class": "credit_exhausted",
+            "failure_reason": f"{source}: credit/balance exhausted — {detail}",
+        }
+
     # ── auth rejection ───────────────────────────────────────────────────
     auth_keywords = (
         "authentication", "auth",
@@ -87,11 +161,12 @@ def classify_failure(
         "unauthorized", "forbidden",
         "401", "403",
     )
-    if any(kw in error_lower for kw in auth_keywords):
+    if any(kw in signal_text for kw in auth_keywords):
         source = _error_source(provider, sub_provider)
+        detail = error if error else _extract_detail(completion)
         return {
             "failure_class": "auth_rejected",
-            "failure_reason": f"{source}: {error}",
+            "failure_reason": f"{source}: {detail}",
         }
 
     # ── model / provider error ──────────────────────────────────────────
@@ -102,18 +177,66 @@ def classify_failure(
         "500", "502", "503", "504",
         "bad gateway", "service unavailable",
     )
-    if any(kw in error_lower for kw in model_keywords):
-        return {"failure_class": "model_error", "failure_reason": error}
+    if any(kw in signal_text for kw in model_keywords):
+        detail = error if error else _extract_detail(completion)
+        return {"failure_class": "model_error", "failure_reason": detail}
 
     # ── error present but no keyword match ───────────────────────────────
     if error:
         return {"failure_class": "unknown", "failure_reason": error}
 
-    # ── status is failure with no error at all ───────────────────────────
+    # ── error absent but completion is non-empty (guaranteed by the
+    # empty_completion guard above) — surface the completion itself instead
+    # of a contentless "(no error captured)" placeholder; the provider's own
+    # words are on disk, even if they match no known pattern above.
     return {
         "failure_class": "unknown",
-        "failure_reason": f"provider={provider} returncode={returncode} completion_len={len(completion)} (no error captured)",
+        "failure_reason": f"provider={provider} returncode={returncode}: {_extract_detail(completion)}",
     }
+
+
+def classify_failure_safe(
+    *,
+    status: str,
+    error: Optional[str] = None,
+    completion_text: Optional[str] = None,
+    timed_out: bool = False,
+    provider: str = "",
+    sub_provider: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    returncode: Optional[int] = None,
+    dispatch_id: str = "",
+) -> Dict[str, Optional[str]]:
+    """classify_failure(), guaranteed to never raise and never leave a
+    non-success receipt with a completely empty failure_reason.
+
+    Both receipt-emit call sites (envelope_govern._govern,
+    provider_dispatch._emit_governance) previously wrapped classify_failure()
+    in their own best-effort try/except and, on an exception, left
+    failure_reason/failure_class at their None default — the exact
+    "completely empty field" gap dispatch 20260816-p9p10-failure-reason-root
+    measured on the ledger (100 receipts, all pre-OI-866; none since). Routing
+    both call sites through this single safety net means a future
+    classify_failure regression can no longer reintroduce that gap silently.
+    """
+    if status == "success":
+        return {"failure_class": None, "failure_reason": None}
+    try:
+        return classify_failure(
+            status=status,
+            error=error,
+            completion_text=completion_text,
+            timed_out=timed_out,
+            provider=provider,
+            sub_provider=sub_provider,
+            duration_seconds=duration_seconds,
+            returncode=returncode,
+        )
+    except Exception as exc:  # noqa: BLE001 — this IS the safety net; must never raise
+        return {
+            "failure_class": "unknown",
+            "failure_reason": f"failure classification raised {exc!r} (dispatch={dispatch_id})",
+        }
 
 
 def _build_reason(
