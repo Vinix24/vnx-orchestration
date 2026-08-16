@@ -8,7 +8,11 @@ version: 1
 # the role-selection table in .claude/terminals/T0/role-orchestrator.md. A profile
 # exists for every role T0 actually dispatches (backend-developer, code-reviewer,
 # frontend-developer, quality-engineer, research-analyst, security-engineer,
-# system-architect). Legacy names (test-engineer, architect) are NOT carried here:
+# system-architect). plan-reviewer is NOT T0-dispatched: it is the plan-gate
+# panel's seat role (scripts/lib/plan_gate_panel.py passes --role plan-reviewer
+# to its claude/tmux seats) and is registered here because resolve_worker_profile
+# refuses fail-closed (OI-1069 pt.5, #1563) on a role absent from every register.
+# Legacy names (test-engineer, architect) are NOT carried here:
 # they were old labels for quality-engineer / system-architect and nobody dispatches
 # them. database-engineer / intelligence-engineer are not dispatched either and were
 # dropped for the same reason.
@@ -201,11 +205,11 @@ profiles:
       - "docs/operations/WORKER_PERMISSIONS.md"  # 4  — permission docs
       - "docs/governance/KEY_PROVISIONING.md"     # 1  — key provisioning doc
 
-  # Read roles — default_instruction says "Do not modify code" (code-reviewer) or
-  # carries governance_profile: light (research-analyst). They deny code-mutation
-  # tools and git history mutation, and are NOT dispatched with the push-mandatory
-  # footer. file_write_scope is restricted to the report drop so they can still
-  # deliver their findings report.
+  # Read roles — default_instruction says "Do not modify code" (code-reviewer,
+  # plan-reviewer) or carries governance_profile: light (research-analyst). They
+  # deny code-mutation tools and git history mutation, and are NOT dispatched
+  # with the push-mandatory footer. file_write_scope is restricted to the report
+  # drop so they can still deliver their findings report.
   code-reviewer:
     allowed_tools: [Read, Write, Grep, Glob, Bash]
     denied_tools: [Edit, MultiEdit, WebSearch, WebFetch]
@@ -233,6 +237,32 @@ profiles:
       - "git diff*"
       - "git show*"
       - "python3 -c*"
+      - "bash -n*"
+      - "grep*"
+    bash_deny_patterns:
+      - "git add*"
+      - "git commit*"
+      - "git push*"
+      - "rm*"
+    file_write_scope:
+      - ".vnx-data/unified_reports/**"
+
+  plan-reviewer:
+    # Read role — plan-gate panel seat (OI-1238). The panel's claude/tmux seats
+    # run with --role plan-reviewer --working-tree-only: read a plan doc, ground
+    # the review against the real repo (git log/diff/show, grep), write ONE
+    # verdict report to the unified-reports drop. Never modifies code, never
+    # dispatched with the push-mandatory footer. The role is deliberately
+    # distinct from code-reviewer so govern() and the phantom-guard evaluate the
+    # dispatch as a plan review, not a code review.
+    allowed_tools: [Read, Write, Grep, Glob, Bash]
+    denied_tools: [Edit, MultiEdit, WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "git log*"
+      - "git diff*"
+      - "git show*"
+      - "python3 -c*"
+      - "python3 -m py_compile*"
       - "bash -n*"
       - "grep*"
     bash_deny_patterns:
