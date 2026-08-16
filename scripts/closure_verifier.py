@@ -30,6 +30,7 @@ from gate_status import (
     has_complete_evidence as gate_has_complete_evidence,
     is_pass as gate_is_pass,
     is_terminal as gate_is_terminal,
+    is_test_run_record as _is_test_run_record,
 )
 from dispatch_spec import Gate
 
@@ -65,22 +66,6 @@ _KNOWN_GATES = frozenset(
     g.value for g in Gate
     if g.value not in _GATES_NOT_IMPLEMENTED_BY_CLOSURE
 )
-
-
-def _is_test_run_record(data: Dict[str, Any]) -> bool:
-    """True when a gate result/request is an offline test run, not production evidence.
-
-    Offline gate runs (e.g. ``kimi_gate --diff-file`` with a synthetic pr_id)
-    are marked ``test_run: true`` by the writer. Such records must never
-    satisfy closure for a real PR. Boolean and string forms are both recognised
-    so a non-normalising writer cannot slip a truthy marker past the check.
-    """
-    value = data.get("test_run")
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes")
-    return False
 
 
 def _run(cmd: Sequence[str], *, cwd: Optional[Path] = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
@@ -268,6 +253,7 @@ def _find_gate_result(
     results_dir: Path,
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Search for a gate result file matching the PR and gate name.
 
@@ -275,6 +261,9 @@ def _find_gate_result(
     field are rejected as stale evidence from a prior feature.
     ADR-007: if ``project_id`` is provided, results with a missing or
     mismatched ``project_id`` field are rejected.
+    OI-1307: if ``head_sha`` is provided, results whose ``commit_sha`` does not
+    match are rejected with the SAME strictness as the CI gate — a result
+    produced against a different commit is stale evidence for the merge.
     If a result carries a ``report_path``, that file must exist on disk or the
     result is treated as stale and skipped.
     """
@@ -301,6 +290,11 @@ def _find_gate_result(
         # A branch-less result is stale evidence from a prior feature.
         if branch:
             if (data.get("branch") or "") != branch:
+                return False
+        # OI-1307: head sha must be present and match when caller supplies one —
+        # same strictness as branch (a result without commit_sha is stale).
+        if head_sha:
+            if (data.get("commit_sha") or "") != head_sha:
                 return False
         return True
 
@@ -333,12 +327,13 @@ def check_review_gate_for_merge(
     *,
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
 ) -> Dict[str, Any]:
     """GO/NO-GO merge verdict: a passing, fully-evidenced gate result exists.
 
     The merge door's second fail-closed check (next to the CI check in
     ``pr_merge._run_ci_gate``). Reuses ``_find_gate_result`` (pr_id/branch/
-    project_id matching + offline test_run rejection), ``gate_is_terminal``,
+    project_id/head-sha matching + offline test_run rejection), ``gate_is_terminal``,
     ``gate_has_complete_evidence``, ``gate_is_pass`` and
     ``_count_report_blocking_indicators`` — the SAME evidence the closure
     verifier already checks, never a second, weaker copy of the invariants.
@@ -356,7 +351,9 @@ def check_review_gate_for_merge(
     The override escape hatch lives in the caller (``pr_merge._run_review_gate``),
     mirroring how the CI gate keeps its override in ``check_ci_run_for_head``.
     """
-    result = _find_gate_result(gate, pr_id, results_dir, branch=branch, project_id=project_id)
+    result = _find_gate_result(
+        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
+    )
     if result is None:
         return {
             "verdict": "NO-GO",

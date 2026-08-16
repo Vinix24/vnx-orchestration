@@ -181,7 +181,7 @@ def _valid_spec(instruction_file: Path, **overrides) -> DispatchSpec:
         instruction_file=instruction_file,
         role="backend-developer",
         target_slot="T1",
-        gate="human-promoted",
+        gate="codex_gate",
         dispatch_paths=(DispatchPath(Path("scripts/lib/foo.py"), PathAccess.READ_WRITE),),
     )
     defaults.update(overrides)

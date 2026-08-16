@@ -124,10 +124,10 @@ def test_stage_normalizes_planning_sentinel_case_and_whitespace_insensitive(tmp_
     assert payload["gate"] == ""
 
 
-@pytest.mark.parametrize("sentinel", sorted(dispatch_bridge._LEGACY_PHASE_SENTINELS))
+@pytest.mark.parametrize("sentinel", sorted(dispatch_bridge.LEGACY_GATE_SENTINELS))
 def test_stage_normalizes_every_legacy_phase_sentinel_to_empty_gate(tmp_path, sentinel):
-    # Every member of _LEGACY_PHASE_SENTINELS is a lifecycle PHASE name leaking into
-    # the gate field (see dispatch_bridge._LEGACY_PHASE_SENTINELS docstring for the
+    # Every member of LEGACY_GATE_SENTINELS is a lifecycle PHASE name leaking into
+    # the gate field (see dispatch_bridge.LEGACY_GATE_SENTINELS docstring for the
     # producer of each), not a real review gate. "implementation" is
     # pr_queue_manager.py's `pr.get('gate', 'implementation')` default (lines
     # 870/997/1638) — same class of defect as "planning", different word.
@@ -135,7 +135,7 @@ def test_stage_normalizes_every_legacy_phase_sentinel_to_empty_gate(tmp_path, se
     assert payload["gate"] == ""
 
 
-@pytest.mark.parametrize("sentinel", sorted(dispatch_bridge._LEGACY_PHASE_SENTINELS))
+@pytest.mark.parametrize("sentinel", sorted(dispatch_bridge.LEGACY_GATE_SENTINELS))
 def test_stage_normalizes_every_legacy_phase_sentinel_case_and_whitespace_insensitive(tmp_path, sentinel):
     payload = json.loads(_stage(tmp_path, gate=f"  {sentinel.upper()}  ").read_text(encoding="utf-8"))
     assert payload["gate"] == ""

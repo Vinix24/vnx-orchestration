@@ -80,7 +80,7 @@ def _make_vspec(role: str, *, tmp_path: Path) -> ValidatedSpec:
         instruction_file=ifile,
         role=role,
         target_slot="T1",
-        gate="human-promoted",
+        gate="codex_gate",
         dispatch_paths=(),
         provider=Provider.CLAUDE,
         model=None,

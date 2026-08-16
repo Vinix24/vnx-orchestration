@@ -128,6 +128,38 @@ def write_skip_rationale(
 # ---------------------------------------------------------------------------
 
 
+def stamp_request_identity(
+    result_payload: Dict[str, Any],
+    request_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Stamp ``branch`` + ``commit_sha`` from the request onto a result record.
+
+    OI-1307 (dispatch-20260816-fix1588-poort-b): the merge door's closure check
+    matches a review-gate result on BOTH branch (ADR-005) and head sha. Before
+    this, no writer stamped either field, so a result never carried the branch
+    or commit it was produced against and a branch/sha-scoped merge check could
+    only ever reject it as stale. Every writer that books a result from a
+    request payload must call this so the evidence is joinable.
+
+    An empty branch is LOUD, not silent: a result without a branch can never
+    match a branch-scoped merge check, so the writer must surface that it
+    produced evidence that is unjoinable rather than quietly emitting a
+    branch-less record.
+    """
+    branch = (request_payload.get("branch") or "").strip()
+    if not branch:
+        logger.warning(
+            "gate_recorder.stamp_request_identity: request payload for gate=%r "
+            "pr_id=%r carries no branch — the result record will not match any "
+            "branch-scoped merge check (OI-1307)",
+            request_payload.get("gate"),
+            request_payload.get("pr_id"),
+        )
+    result_payload["branch"] = branch
+    result_payload["commit_sha"] = (request_payload.get("commit_sha") or "").strip()
+    return result_payload
+
+
 def record_terminal_result(
     *,
     gate: str,
@@ -204,6 +236,7 @@ def record_not_executable(
         "residual_risk": "Gate evidence not available. Compensating evidence required.",
         "recorded_at": now,
     }
+    stamp_request_identity(result_payload, request_payload)
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
@@ -272,6 +305,7 @@ def record_failure(
         "residual_risk": f"Gate {reason}. Re-run required.",
         "recorded_at": now,
     }
+    stamp_request_identity(failure_payload, request_payload)
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:

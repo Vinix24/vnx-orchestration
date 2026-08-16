@@ -69,7 +69,7 @@ def _make_headless_spec(
         instruction_file=_fake_instruction_file(tmp_path),
         role="backend-developer",
         target_slot=target_slot,
-        gate="human-promoted",
+        gate="codex_gate",
         dispatch_paths=(),
         base_ref=base_ref,
         provider=Provider.CLAUDE,

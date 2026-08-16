@@ -126,6 +126,74 @@ class TestCheckReviewGateForMerge:
 
 
 # ---------------------------------------------------------------------------
+# B5: the real writer (gate_artifacts) + the real merge check — no fabricated data
+# ---------------------------------------------------------------------------
+
+
+class TestRealWriterThroughRealMergeCheck:
+    """A result produced by the REAL writer (gate_artifacts.materialize_artifacts)
+    — which stamps branch + commit_sha from the request — must satisfy the REAL
+    check_review_gate_for_merge. This pins B1 (writer stamps identity) and B3
+    (merge check matches head sha), not a hand-built fixture dict."""
+
+    def _materialize(self, tmp_path, **payload_overrides):
+        from gate_artifacts import materialize_artifacts
+
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        reports_dir = tmp_path / "reports"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        requests_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        report_path = reports_dir / "gemini_review-report.md"
+        request_payload = {
+            "gate": "gemini_review",
+            "pr_id": "PR-42",
+            "pr_number": 42,
+            "branch": "feature/x",
+            "commit_sha": "abc123def4567890",
+            "dispatch_id": "d-real-writer-1",
+            "report_path": str(report_path),
+        }
+        request_payload.update(payload_overrides)
+        materialize_artifacts(
+            gate="gemini_review",
+            pr_number=42,
+            pr_id="PR-42",
+            stdout="Review complete.\nFindings: none.\nApproved.",
+            request_payload=request_payload,
+            duration_seconds=1.0,
+            requests_dir=requests_dir,
+            results_dir=results_dir,
+            reports_dir=reports_dir,
+        )
+        return results_dir
+
+    def test_real_writer_result_passes_real_merge_check(self, tmp_path):
+        results_dir = self._materialize(tmp_path)
+
+        gate = closure_verifier.check_review_gate_for_merge(
+            "PR-42", "gemini_review", results_dir,
+            branch="feature/x",
+            head_sha="abc123def4567890",
+        )
+
+        assert gate["verdict"] == "GO"
+
+    def test_real_writer_result_with_wrong_head_sha_is_no_go(self, tmp_path):
+        results_dir = self._materialize(tmp_path)
+
+        gate = closure_verifier.check_review_gate_for_merge(
+            "PR-42", "gemini_review", results_dir,
+            branch="feature/x",
+            head_sha="9999999999999999",
+        )
+
+        assert gate["verdict"] == "NO-GO"
+        assert "review-gate resultaat" in gate["message"]
+
+
+# ---------------------------------------------------------------------------
 # pr_id normalization + obligation lookup — the join key of the merge gate
 # ---------------------------------------------------------------------------
 
@@ -203,10 +271,11 @@ class TestRunReviewGate:
         monkeypatch.setattr(pr_merge, "_resolve_declared_gate", lambda pr_number, state_dir=None: "codex_gate")
         seen = {}
 
-        def fake_check(pr_id, gate, results_dir, *, branch=None, project_id=None):
+        def fake_check(pr_id, gate, results_dir, *, branch=None, project_id=None, head_sha=None):
             seen["pr_id"] = pr_id
             seen["gate"] = gate
             seen["branch"] = branch
+            seen["head_sha"] = head_sha
             return {
                 "verdict": "GO",
                 "message": f"{gate} resultaat aanwezig en passing voor {pr_id}",
@@ -220,7 +289,12 @@ class TestRunReviewGate:
         gate, _ = pr_merge._run_review_gate(5)
 
         assert gate["verdict"] == "GO"
-        assert seen == {"pr_id": "5", "gate": "codex_gate", "branch": "feature/x"}
+        assert seen == {
+            "pr_id": "5",
+            "gate": "codex_gate",
+            "branch": "feature/x",
+            "head_sha": "",  # mocked PR data carries no headRefOid
+        }
 
     def test_override_empty_reason_refused(self, monkeypatch):
         monkeypatch.setattr(

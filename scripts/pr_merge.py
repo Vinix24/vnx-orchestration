@@ -250,6 +250,7 @@ def _run_review_gate(
             "gate": None,
         }, pr_data
     branch = pr_data.get("headRefName") or ""
+    head_sha = pr_data.get("headRefOid") or ""
 
     # ── Escape hatch (same resolution + semantics as the CI gate) ─────────
     reason = _resolve_override_reason(override_reason)
@@ -297,6 +298,7 @@ def _run_review_gate(
         gate_name,
         results_dir,
         branch=branch,
+        head_sha=head_sha,
     )
     return gate, pr_data
 

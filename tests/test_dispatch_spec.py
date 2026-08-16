@@ -47,7 +47,7 @@ def _valid_spec(instruction_file: Path, **overrides) -> DispatchSpec:
         instruction_file=instruction_file,
         role="backend-developer",
         target_slot="T1",
-        gate="human-promoted",
+        gate="codex_gate",
         dispatch_paths=(DispatchPath(PurePosixPath("scripts/lib/foo.py")),),
     )
     defaults.update(overrides)
@@ -644,3 +644,51 @@ class TestRule15WorkRef:
         result = _do_validate(spec, monkeypatch)
         assert isinstance(result, Reject)
         assert result.code == "bad-work-ref"
+
+
+# ---------------------------------------------------------------------------
+# Rule 16 — review gate must be a known Gate enum member (fix-1588 advisory)
+# ---------------------------------------------------------------------------
+
+class TestRule16GateName:
+    def test_empty_gate_passes(self, tmp_path, monkeypatch):
+        """An empty gate means "no gate assigned" (the router derives one later)."""
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, gate="")
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    @pytest.mark.parametrize("valid_gate", [
+        "gemini_review",
+        "codex_gate",
+        "claude_github_optional",
+        "ci_gate",
+        "wiring_gate",
+    ])
+    def test_accepts_known_gate(self, tmp_path, monkeypatch, valid_gate):
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, gate=valid_gate)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    @pytest.mark.parametrize("sentinel_gate", [
+        "planning",         # dispatch_create.sh legacy no-gate marker
+        "implementation",   # pr_queue_manager.py legacy no-gate marker
+    ])
+    def test_accepts_legacy_sentinel_gate(self, tmp_path, monkeypatch, sentinel_gate):
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, gate=sentinel_gate)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, ValidatedSpec)
+
+    @pytest.mark.parametrize("bad_gate", [
+        "codex_gat",        # typo of codex_gate
+        "kimi_gate",        # real script but NOT a governed review gate (free-form, OI-1093)
+        "human-promoted",   # legacy test placeholder, never an enum member
+    ])
+    def test_rejects_unknown_gate(self, tmp_path, monkeypatch, bad_gate):
+        ifile = _write_instruction(tmp_path)
+        spec = _valid_spec(ifile, gate=bad_gate)
+        result = _do_validate(spec, monkeypatch)
+        assert isinstance(result, Reject)
+        assert result.code == "bad-gate"

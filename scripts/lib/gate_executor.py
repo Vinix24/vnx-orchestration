@@ -313,6 +313,7 @@ class GateExecutorMixin:
             "duration_seconds": duration,
             "recorded_at": now,
         }
+        _rec.stamp_request_identity(result_payload, request_payload)
 
         rf = _rec.result_file_path(
             self.results_dir, gate, pr_number=pr_number, pr_id=pr_id,

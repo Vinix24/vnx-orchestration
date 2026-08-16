@@ -56,7 +56,7 @@ def _make_vspec(*, requires_mcp: bool | None = None, tmp_path: Path) -> Validate
         instruction_file=ifile,
         role="backend-developer",
         target_slot="T1",
-        gate="human-promoted",
+        gate="codex_gate",
         dispatch_paths=(),
         provider=Provider.CLAUDE,
         **kwargs,

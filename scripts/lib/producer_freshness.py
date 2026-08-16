@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ndjson_io import fsync_fileno, iter_ndjson
+from gate_status import canonical_status, is_test_run_record
 
 _LOG = logging.getLogger(__name__)
 
@@ -255,14 +256,46 @@ def scan_gate_obligations(spec: Dict[str, Any], *, now: float) -> Dict[str, Opti
     return out
 
 
+# Statuses that book "the gate did not produce a reviewed outcome". A record in
+# one of these states must not keep the results directory "fresh": it says the
+# gate never ran / errored, not that a review happened (OI-1307/B4).
+_NON_REVIEW_STATUSES = frozenset({"not_executable", "unavailable", "failed"})
+
+
+def _is_genuine_review_outcome(path: Path) -> bool:
+    """True when a gate result file carries a genuine reviewed outcome.
+
+    OI-1307/B4: the newest-file freshness scan must not be kept alive by an
+    offline test-run record (``test_run: true``) or by a record that books "the
+    gate did not run / errored" (``not_executable`` / ``unavailable`` /
+    ``failed``). Those are absence-of-review records, not evidence that a review
+    happened for a merged PR — they were exactly what kept the directory looking
+    fresh during the 2026-08-12..16 incident.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if is_test_run_record(data):
+        return False
+    return canonical_status(data) not in _NON_REVIEW_STATUSES
+
+
 def scan_newest(spec: Dict[str, Any], *, now: float) -> Dict[str, Optional[float]]:
-    """Single aggregate key: the newest file mtime under ``path``/``glob``.
+    """Single aggregate key: the newest GENUINE reviewed-outcome file mtime.
 
     The "N PRs merged since the last gate result" control is not a per-key
     producer; it is one aggregate key whose freshness is the newest result
     across the whole directory. A results directory that stops growing reads
     as stale — exactly the 2026-08-12..16 incident where merges kept flowing
     while no gate result landed for four days.
+
+    Freshness counts only genuine reviewed outcomes (see
+    :func:`_is_genuine_review_outcome`): an offline test run or a
+    not_executable/unavailable/failed record never makes the directory fresh,
+    so those records can no longer mask a real review gap.
 
     An empty directory returns {} so an ``expected_keys`` entry reads as an
     asserted absence ("never wrote"), never a silently-observed value.
@@ -276,6 +309,8 @@ def scan_newest(spec: Dict[str, Any], *, now: float) -> Dict[str, Optional[float
     newest: Optional[float] = None
     for entry in root.glob(pattern):
         if not entry.is_file():
+            continue
+        if not _is_genuine_review_outcome(entry):
             continue
         try:
             ts: Optional[float] = entry.stat().st_mtime
@@ -303,8 +338,8 @@ _SCANNERS: Dict[str, Callable[..., Dict[str, Optional[float]]]] = {
 
 
 def count_demand_events(spec: Dict[str, Any], *, since_ts: Optional[float], now: float) -> Optional[int]:
-    """Count demand-source events newer than ``since_ts`` (or the last cadence
-    window when ``since_ts`` is None — a producer that never wrote).
+    """Count demand-source events newer than ``since_ts`` (or ALL events since
+    the register began when ``since_ts`` is None — a producer that never wrote).
 
     Returns None when no demand source is configured or it is unreadable —
     demand evidence is corroborating, never load-bearing.
@@ -323,7 +358,11 @@ def count_demand_events(spec: Dict[str, Any], *, since_ts: Optional[float], now:
     event_field = demand.get("event_field")
     event_value = demand.get("event_value")
     if since_ts is None:
-        since_ts = now - float(spec.get("cadence_seconds", 86400))
+        # A producer that never wrote has no "last seen" boundary — count every
+        # demand event since the register began, not just the trailing cadence
+        # window. The old ``now - cadence`` undercounted: a producer silent for
+        # three windows reported only the last window's demand (OI-1307/adv.2).
+        since_ts = 0.0
     count = 0
     try:
         for record in iter_ndjson(path):

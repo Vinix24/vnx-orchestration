@@ -152,3 +152,20 @@ def has_producer_identity(result: Dict[str, Any]) -> bool:
     """
     dispatch_id = result.get("dispatch_id")
     return isinstance(dispatch_id, str) and bool(dispatch_id.strip())
+
+
+def is_test_run_record(result: Dict[str, Any]) -> bool:
+    """True when a gate result/request is an offline test run, not production evidence.
+
+    Offline gate runs (e.g. ``kimi_gate --diff-file`` with a synthetic pr_id)
+    are marked ``test_run: true`` by the writer. Such records must never count
+    as real evidence — neither for closure nor for producer freshness. Boolean
+    and string forms are both recognised so a non-normalising writer cannot
+    slip a truthy marker past the check.
+    """
+    value = result.get("test_run")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes")
+    return False

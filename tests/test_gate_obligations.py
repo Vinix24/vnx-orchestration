@@ -69,6 +69,7 @@ def _make_bundle(
     dispatch_id: str,
     gate: str,
     dispatch_paths: list[str] | None = None,
+    role: str = "backend-developer",
 ):
     """A promoted-style staged bundle (spec + instruction inside the bundle dir)."""
     data_dir = tmp_path / "vnx-data"
@@ -82,7 +83,7 @@ def _make_bundle(
         "dispatch_id": dispatch_id,
         "staging_id": staging_id,
         "instruction_file": str(instruction),
-        "role": "backend-developer",
+        "role": role,
         "target_slot": "T0",
         "gate": gate,
         "dispatch_paths": [{"path": p} for p in (dispatch_paths or [])],
@@ -491,14 +492,16 @@ def test_writing_spec_without_gate_is_refused_when_router_fails(tmp_path, monkey
 
 
 def test_read_only_spec_without_gate_records_no_gate_obligation(tmp_path, monkeypatch):
-    """A read-only dispatch with an empty gate (router failed) still runs and
-    records an explicit, countable no-gate obligation — never a silent absence."""
+    """A genuinely read-only dispatch (Edit-denied role) with an empty gate
+    (router failed) still runs and records an explicit, countable no-gate
+    obligation — never a silent absence."""
     data_dir, spec_file = _make_bundle(
         tmp_path,
         staging_id="20260816-staging-ro-nogate",
         dispatch_id="20260816-ro-no-gate",
         gate="",
         dispatch_paths=[],
+        role="code-reviewer",
     )
     _make_state_dir(tmp_path)
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
@@ -513,3 +516,32 @@ def test_read_only_spec_without_gate_records_no_gate_obligation(tmp_path, monkey
     assert record["gate"] == NO_GATE_KEY
     assert record["status"] == STATUS_NOT_EXECUTABLE
     assert record["no_gate"] is True
+
+
+def test_build_role_without_gate_is_refused_even_with_empty_paths(tmp_path, monkeypatch, capsys):
+    """A build role (Edit allowed) dispatched with NO dispatch_paths and no
+    declared gate is still WRITING: empty dispatch_paths mean "no narrowing"
+    (full write scope), not "read-only". The door must refuse it loudly rather
+    than treat it as a no-gate read-only dispatch (the 2026-08-16 leak)."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260816-staging-build-nogate",
+        dispatch_id="20260816-build-no-gate",
+        gate="",
+        dispatch_paths=[],
+        role="backend-developer",
+    )
+    _make_state_dir(tmp_path)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _make_router_broken(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    assert "gate-required" in capsys.readouterr().err
+    assert mock_execute.call_count == 0, "a refused dispatch must never reach execution"
+    assert not obligation_path(data_dir / "state", "20260816-build-no-gate").exists(), (
+        "a refused writing dispatch must not leave a gate obligation — it never ran"
+    )

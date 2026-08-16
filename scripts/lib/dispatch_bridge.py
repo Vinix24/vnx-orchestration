@@ -47,6 +47,7 @@ from dispatch_spec import (  # noqa: E402
     DEADLINE_SECONDS_MAX,
     DEADLINE_SECONDS_MIN,
     Gate,
+    LEGACY_GATE_SENTINELS,
     Provider,
 )
 
@@ -99,20 +100,9 @@ def _canonical_provider(raw: Optional[str]) -> Provider:
 
 
 # Legacy lifecycle PHASE names that leak into the gate field — not review gates.
-# Each is produced by exactly one layer and consumed by none:
-#   - "planning"       — dispatch_create.sh:365-367 (V8's _pdp_extract_dispatch_metadata)
-#                         stamps this whenever no gate was specified ("V8: No gate
-#                         specified, defaulting to 'planning'").
-#   - "implementation" — pr_queue_manager.py:870/997/1638 uses this as the default
-#                         `pr.get('gate', 'implementation')` / literal assignment when
-#                         no gate was recorded on a PR.
-# No gate runner (gate_runner.py, gate_recorder.py, gate_request_handler.py,
-# review_gate_manager.py, codex_final_gate.py) has ever matched on either string —
-# they are no-gate markers, not real gates, so neither belongs in the closed Gate
-# enum: adding them would legitimise gates that no runner implements.
-_LEGACY_PHASE_SENTINELS = frozenset({"planning", "implementation"})
-
-
+# The sentinel set itself lives in dispatch_spec.LEGACY_GATE_SENTINELS (next to
+# the closed ``Gate`` enum) so the two validation paths — this bridge and the
+# door's dispatch_spec.validate() Rule 16 — can never drift apart (OI-845).
 def _canonical_gate(raw: Optional[str]) -> str:
     """Validate a gate name against the closed ``Gate`` enum (OI-845).
 
@@ -123,12 +113,12 @@ def _canonical_gate(raw: Optional[str]) -> str:
     an unenforceable gate into the spec (a dispatch staged with ``gate="codex"``
     previously wrote that string through unchecked and the gate simply never ran).
 
-    Members of ``_LEGACY_PHASE_SENTINELS`` are special-cased to the same
+    Members of ``LEGACY_GATE_SENTINELS`` are special-cased to the same
     empty-gate sentinel — see that constant's docstring for why they normalise
     instead of raising or joining the closed ``Gate`` enum.
     """
     key = (raw or "").strip()
-    if not key or key.lower() in _LEGACY_PHASE_SENTINELS:
+    if not key or key.lower() in LEGACY_GATE_SENTINELS:
         return ""
     try:
         return Gate(key).value

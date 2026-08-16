@@ -55,6 +55,7 @@ from dispatch_internal import (  # noqa: E402
 )
 from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
 from dispatch_serialization import force_release, serialize_lane  # noqa: E402
+from worker_permissions import role_grants_write  # noqa: E402
 
 
 class _InvariantViolation(Exception):
@@ -926,13 +927,19 @@ def _spec_is_writing(spec: DispatchSpec) -> bool:
 
     A dispatch is "writing" (review-gate required) when it grants write access
     on any dispatch_path (WRITE/READ_WRITE/CREATE — see
-    ``dispatch_spec.write_paths``) OR declares a ``pr_id`` (it will produce a
-    PR). A read-only analysis dispatch (READ-only paths, no pr_id) is not
-    writing and may legitimately run without a gate.
+    ``dispatch_spec.write_paths``), OR declares a ``pr_id`` (it will produce a
+    PR), OR the worker role itself may write (Edit allowed). The third arm
+    closes the empty-dispatch_paths leak: ``resolve_dispatch_write_scope``
+    treats an empty dispatch_paths as "no narrowing" (full write scope), so a
+    build role dispatched with no declared paths is still writing. Only a
+    genuinely read-only role (Edit denied, READ-only/no paths, no pr_id) runs
+    without a gate.
     """
     if spec.pr_id:
         return True
-    return bool(write_paths(spec.dispatch_paths))
+    if write_paths(spec.dispatch_paths):
+        return True
+    return role_grants_write(spec.role)
 
 
 def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:

@@ -31,6 +31,13 @@ def _touch(path: Path, age_seconds: float) -> None:
     os.utime(path, (ts, ts))
 
 
+def _write_result(path: Path, age_seconds: float, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    ts = NOW - age_seconds
+    os.utime(path, (ts, ts))
+
+
 def _make_review_gates(state_dir: Path) -> None:
     # The 2026-07-31 incident shape: codex_gate requests silent ~6 days,
     # results silent ~3 days; kimi_gate results fresh.
@@ -586,6 +593,42 @@ def test_scan_newest_empty_dir_returns_empty(tmp_path: Path) -> None:
 
     spec = {"path": str(results_dir), "glob": "*.json", "key": "results"}
     assert pf.scan_newest(spec, now=NOW) == {}
+
+
+def test_scan_newest_ignores_non_review_records(tmp_path: Path) -> None:
+    """OI-1307/B4: a FRESH not_executable/unavailable/failed/test_run record must
+    not keep the results directory "fresh". Only a genuine reviewed outcome
+    (a terminal pass verdict) counts, so the newest genuine outcome wins."""
+    results_dir = tmp_path / "results"
+    _write_result(
+        results_dir / "pr-1-codex_gate.json", 3 * DAY,
+        {"gate": "codex_gate", "status": "completed"},
+    )
+    # Fresh junk: each newer than the genuine result, none a real review.
+    _write_result(
+        results_dir / "pr-2-codex_gate.json", 0.5 * DAY,
+        {"gate": "codex_gate", "status": "failed"},
+    )
+    _write_result(
+        results_dir / "pr-3-codex_gate.json", 0.4 * DAY,
+        {"gate": "codex_gate", "status": "not_executable"},
+    )
+    _write_result(
+        results_dir / "pr-4-codex_gate.json", 0.3 * DAY,
+        {"gate": "codex_gate", "status": "unavailable"},
+    )
+    _write_result(
+        results_dir / "pr-5-codex_gate.json", 0.2 * DAY,
+        {"gate": "codex_gate", "status": "completed", "test_run": True},
+    )
+
+    spec = {"path": str(results_dir), "glob": "*.json", "key": "results"}
+    seen = pf.scan_newest(spec, now=NOW)
+
+    assert set(seen) == {"results"}
+    # The only genuine outcome is the 3-day-old completed record; the four
+    # fresher non-review records must not count.
+    assert NOW - seen["results"] >= 2.9 * DAY
 
 
 def test_count_demand_events_filters_by_event_value(tmp_path: Path) -> None:
