@@ -109,8 +109,10 @@ def test_objective_list_renders(seeded_state, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "feat-a" in out
-    assert "feat-b" in out
     assert "feat-c" in out
+    # feat-b is done -> hidden by default (actionable-by-default view).
+    assert "feat-b" not in out
+    assert "(1 done hidden" in out
     # Grouped by horizon bands.
     assert "NOW" in out
     assert "LATER" in out
@@ -124,11 +126,23 @@ def test_objective_list_json(seeded_state, capsys):
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
     by_id = {d["track_id"]: d for d in data}
+    # feat-b is done -> hidden by default; --all reveals it (see below).
+    assert set(by_id) == {"feat-a", "feat-c"}
+    assert by_id["feat-a"]["phase"] == "queued"  # planned -> queued
+    assert by_id["feat-c"]["horizon"] == "later"
+
+
+def test_objective_list_json_all_includes_done(seeded_state, capsys):
+    rc = planning_cli.main([
+        "objective", "list", "--project-id", "vnx-dev",
+        "--state-dir", str(seeded_state), "--json", "--all",
+    ])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    by_id = {d["track_id"]: d for d in data}
     assert set(by_id) == {"feat-a", "feat-b", "feat-c"}
     # feat-b depends on feat-a.
     assert by_id["feat-b"]["depends_on"] == ["feat-a"]
-    assert by_id["feat-a"]["phase"] == "queued"  # planned -> queued
-    assert by_id["feat-c"]["horizon"] == "later"
 
 
 def test_objective_list_horizon_filter(seeded_state, capsys):
@@ -338,3 +352,157 @@ def test_objective_show_no_table_gracefully_shows_unmarked(seeded_state, capsys)
     assert rc == 0
     out = capsys.readouterr().out
     assert "#888 unmarked" in out
+
+
+# ---------------------------------------------------------------------------
+# objective list/show — plan-gate review disposition (unread vs refused)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def review_seeded_state(seeded_state: Path) -> Path:
+    """seeded_state + migrations 28/30/33 so the OI-PLAN blocker (resolved_at)
+    and the durable decision_ref both exist, and the disposition can be derived."""
+    conn = sqlite3.connect(str(seeded_state / "runtime_coordination.db"))
+    for ver, fname in (
+        (28, "0028_tracks_derived_status.sql"),
+        (29, "0029_track_type_discriminator.sql"),
+        (30, "0030_track_oi_resolved_at.sql"),
+        (33, "0033_track_decision_ref.sql"),
+    ):
+        schema_migration.apply_script_if_below(
+            conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
+        )
+        conn.commit()
+    conn.close()
+    return seeded_state
+
+
+def _plan_blocker_oi(track_id: str) -> str:
+    return f"OI-PLAN-{track_id}"
+
+
+def _link_plan_blocker(state_dir: Path, track_id: str) -> None:
+    tracks_lib.link_open_item(
+        state_dir, track_id, "vnx-dev", _plan_blocker_oi(track_id), "blocks", "manual",
+    )
+
+
+def _set_refused(state_dir: Path, track_id: str) -> None:
+    tracks_lib.set_decision_ref(
+        state_dir, track_id, "vnx-dev",
+        json.dumps({
+            "decision": "REVISE",
+            "reports": [{"seat": "opus"}],
+            "rejected_alternatives": [{"alternative": "thin goal", "reason": "no plan"}],
+            "set_at": "2026-08-16T00:00:00Z",
+        }),
+    )
+
+
+class TestObjectiveListReviewSplit:
+    def test_json_reports_unread_and_refused(self, review_seeded_state, capsys):
+        _link_plan_blocker(review_seeded_state, "feat-a")       # never gated -> unread
+        _link_plan_blocker(review_seeded_state, "feat-c")       # gated REVISE -> refused
+        _set_refused(review_seeded_state, "feat-c")
+        rc = planning_cli.main([
+            "objective", "list", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state), "--json",
+        ])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        by_id = {d["track_id"]: d for d in data}
+        assert by_id["feat-a"]["plan_gate_review"] == "unread"
+        assert by_id["feat-c"]["plan_gate_review"] == "refused"
+
+    def test_text_shows_badges_and_total_equals_sum(self, review_seeded_state, capsys):
+        _link_plan_blocker(review_seeded_state, "feat-a")
+        _link_plan_blocker(review_seeded_state, "feat-c")
+        _set_refused(review_seeded_state, "feat-c")
+        rc = planning_cli.main([
+            "objective", "list", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "~blocked:unread" in out
+        assert "~blocked:refused" in out
+        # total (2) == unread (1) + refused (1), both numbers apart.
+        assert "2 blocked on the plan gate (1 unread, 1 refused)" in out
+
+    def test_cleared_tracks_get_no_badge_and_no_summary(self, review_seeded_state, capsys):
+        rc = planning_cli.main([
+            "objective", "list", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "~blocked:" not in out
+        assert "plan-gate review:" not in out
+
+
+class TestObjectiveShowReviewSplit:
+    def test_show_reports_unread(self, review_seeded_state, capsys):
+        _link_plan_blocker(review_seeded_state, "feat-a")
+        rc = planning_cli.main([
+            "objective", "show", "feat-a", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state),
+        ])
+        assert rc == 0
+        assert "plan-gate: unread" in capsys.readouterr().out
+
+    def test_show_reports_refused_with_reason(self, review_seeded_state, capsys):
+        _link_plan_blocker(review_seeded_state, "feat-c")
+        _set_refused(review_seeded_state, "feat-c")
+        rc = planning_cli.main([
+            "objective", "show", "feat-c", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state),
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "plan-gate: refused" in out
+        assert "REVISE" in out  # the reason surfaces via decision_ref
+
+    def test_show_json_reports_review(self, review_seeded_state, capsys):
+        _link_plan_blocker(review_seeded_state, "feat-a")
+        rc = planning_cli.main([
+            "objective", "show", "feat-a", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state), "--json",
+        ])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["plan_gate_review"] == "unread"
+
+    def test_show_reports_cleared_when_no_blocker(self, review_seeded_state, capsys):
+        rc = planning_cli.main([
+            "objective", "show", "feat-a", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state),
+        ])
+        assert rc == 0
+        assert "plan-gate: cleared" in capsys.readouterr().out
+
+
+class TestReviewStateTransition:
+    """A track crossing unread -> refused -> cleared, each leg shown via `show`."""
+
+    def test_track_transitions_unread_refused_cleared(self, review_seeded_state, capsys):
+        _link_plan_blocker(review_seeded_state, "feat-a")
+
+        assert planning_cli.main([
+            "objective", "show", "feat-a", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state)]) == 0
+        assert "plan-gate: unread" in capsys.readouterr().out
+
+        _set_refused(review_seeded_state, "feat-a")
+        assert planning_cli.main([
+            "objective", "show", "feat-a", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state)]) == 0
+        assert "plan-gate: refused" in capsys.readouterr().out
+
+        tracks_lib.unlink_open_item(
+            review_seeded_state, "feat-a", "vnx-dev",
+            _plan_blocker_oi("feat-a"), "blocks", reason="plan gate passed",
+        )
+        assert planning_cli.main([
+            "objective", "show", "feat-a", "--project-id", "vnx-dev",
+            "--state-dir", str(review_seeded_state)]) == 0
+        assert "plan-gate: cleared" in capsys.readouterr().out
