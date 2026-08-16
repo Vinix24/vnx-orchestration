@@ -416,6 +416,7 @@ def run_envelope_plan(
     *,
     state_dir: Path,
     data_dir: Path,
+    role: Optional[str] = None,
 ) -> EnvelopeResult:
     """Execute a validated ExecutionPlan for the provider lane.
 
@@ -476,7 +477,9 @@ def run_envelope_plan(
         provider=plan.provider.value,
         model=plan.model,
         instruction=instruction,
-        role=plan.role,  # F2 (codex): carry the role so the phantom-guard review-exemption applies
+        role=role,  # mirror run_envelope_headless_plan: thread the spec role so the worker
+        # resolves it (not the code-worker fallback); still feeds the F2 codex
+        # phantom-guard review-exemption.
         pr_id=plan.pr_id,
         state_dir=state_dir,
         data_dir=data_dir,
@@ -587,7 +590,7 @@ def run_envelope_plan(
     _phantom_diff: Optional[str] = None
     try:
         start = datetime.now(timezone.utc)
-        result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path)
+        result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path, role=role)
         end = datetime.now(timezone.utc)
         # F1 (codex): capture the worker's diff BEFORE the teardown below —
         # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id>

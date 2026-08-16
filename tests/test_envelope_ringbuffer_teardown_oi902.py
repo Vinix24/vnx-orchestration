@@ -234,7 +234,7 @@ class TestEnvelopePlanEndTeardown:
         permit = issue_permit(plan)
         _fake_consumer_root = events_dir.parent / "consumer-root"
 
-        def fake_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
+        def fake_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None, role=None):
             # The SubprocessAdapter writes events internally for the harness lane.
             _write_events(events_dir, plan_arg.target_id, plan_arg.dispatch_id, n=15)
             return _AdapterResult(returncode=0, completion_text="done", status="success")

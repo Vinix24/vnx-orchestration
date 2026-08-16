@@ -317,6 +317,11 @@ def test_provider_routes_to_envelope(mock_envelope, mock_snapshot, tmp_path):
     assert plan_arg.lane == "provider"
     assert plan_arg.provider == Provider.CODEX
 
+    # OI-1231/OI-1244: the door threads the spec's role into run_envelope_plan
+    # (mirroring _execute_claude / _execute_claude_headless) so the provider lane
+    # resolves it on the spawn side instead of the code-worker fallback.
+    assert kwargs["role"] == "backend-developer"
+
     # Permit must be valid (issued by issue_permit for this plan)
     from dispatch_internal import require_permit
     # Should not raise — a valid permit for the correct plan

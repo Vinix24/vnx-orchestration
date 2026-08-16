@@ -160,6 +160,7 @@ class ProviderAdapter:
         *,
         event_writer: Optional[Callable] = None,
         cwd: Optional[Path] = None,
+        role: Optional[str] = None,
     ) -> _AdapterResult:
         from dispatch_spec import Provider  # noqa: PLC0415
         from provider_dispatch import (  # noqa: PLC0415
@@ -181,7 +182,14 @@ class ProviderAdapter:
         # each spawn's extra_env. Without it, every provider-lane worker resolves to
         # the restrictive code-worker fallback in pretooluse_worker_scope_enforce.py
         # even when the spec carried a genuine role.
-        role_env = _worker_role_env(plan.role)
+        # OI-1231/OI-1244: the same role must ALSO reach the spawn-side scope-args
+        # builder (subprocess_adapter._build_worker_scope_args ->
+        # resolve_worker_profile) via spawn_claude(role=...) for the harness lanes
+        # (deepseek/glm). The explicit ``role`` param (threaded from
+        # run_envelope_plan) wins; plan.role stays the backward-compatible source
+        # when the caller did not pass one.
+        effective_role = role if role is not None else plan.role
+        role_env = _worker_role_env(effective_role)
 
         # ---- codex ----
         if pv == Provider.CODEX:
@@ -209,7 +217,9 @@ class ProviderAdapter:
 
         # ---- kimi ----
         if pv == Provider.KIMI:
-            return self._run_kimi(plan, instruction, event_writer=event_writer, cwd=cwd)
+            return self._run_kimi(
+                plan, instruction, event_writer=event_writer, cwd=cwd, role=effective_role
+            )
 
         # ---- gemini ----
         if pv == Provider.GEMINI:
@@ -291,6 +301,7 @@ class ProviderAdapter:
                     event_writer=event_writer,
                     extra_env=role_env,
                     cwd=cwd,
+                    role=effective_role,
                     total_deadline=float(plan.deadline_seconds),
                 )
             except BrokenPipeError as exc:
@@ -360,6 +371,7 @@ class ProviderAdapter:
                     event_writer=event_writer,
                     extra_env=role_env,
                     cwd=cwd,
+                    role=effective_role,
                     total_deadline=float(plan.deadline_seconds),
                 )
             except BrokenPipeError as exc:
@@ -419,7 +431,7 @@ class ProviderAdapter:
             result = spawn_local_gemma(
                 instruction=instruction,
                 model=canonical_model,
-                role=plan.role,
+                role=effective_role,
                 deadline_seconds=300,
                 dispatch_id=plan.dispatch_id,
                 project_id="vnx-dev",
@@ -471,6 +483,7 @@ class ProviderAdapter:
         *,
         event_writer: Optional[Callable] = None,
         cwd: Optional[Path] = None,
+        role: Optional[str] = None,
     ) -> _AdapterResult:
         """Kimi spawn branch, extracted from run() (OI-709 function-size gate).
 
@@ -503,7 +516,7 @@ class ProviderAdapter:
                 dispatch_id=plan.dispatch_id,
                 terminal_id=plan.target_id,
                 event_writer=event_writer,
-                extra_env=_worker_role_env(plan.role),
+                extra_env=_worker_role_env(role),
                 cwd=cwd,
                 # worker-provider-kimi-flip (20260723): honor the spec's staged deadline
                 # instead of spawn_kimi's own hardcoded 900s default — a caller staging a

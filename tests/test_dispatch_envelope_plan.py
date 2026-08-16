@@ -741,7 +741,7 @@ class TestEnvelopeWorktreeIsolation:
 
         adapter_calls: list = []
 
-        def fake_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
+        def fake_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None, role=None):
             adapter_calls.append({"cwd": cwd})
             return _fake_adapter_success()
 
@@ -776,7 +776,7 @@ class TestEnvelopeWorktreeIsolation:
         state_dir.mkdir()
         data_dir.mkdir()
 
-        def bad_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
+        def bad_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None, role=None):
             raise RuntimeError("spawn exploded")
 
         _fake_consumer_root = tmp_path / "consumer-root"
@@ -809,7 +809,7 @@ class TestEnvelopeWorktreeIsolation:
         def bad_create(dispatch_id, project_root=None):
             raise RuntimeError("no disk space")
 
-        def spy_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None):
+        def spy_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None, role=None):
             adapter_calls.append({"cwd": cwd})
             return _fake_adapter_success()
 
