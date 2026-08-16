@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from gemini_prompt_renderer import GeminiReviewReceipt
 from claude_github_receipt import ClaudeGitHubReviewReceipt
+from gate_recorder import get_pr_head_sha, stamp_request_identity
 
 
 class GateResultParserMixin:
@@ -150,6 +151,18 @@ class GateResultParserMixin:
             effective_contract_hash=effective_contract_hash,
             effective_report_path=effective_report_path,
             required_reruns=required_reruns,
+        )
+        # A4: stamp branch + commit_sha through the shared writer so a
+        # CLI-recorded result carries the same PR-head identity every other
+        # writer does — from GitHub, never the local checkout HEAD (B6).
+        stamp_request_identity(
+            payload,
+            {
+                "gate": gate,
+                "pr_id": pr_id or str(pr_number),
+                "branch": branch,
+                "commit_sha": get_pr_head_sha(pr_number),
+            },
         )
         self._validate_and_persist_result(payload, status, gate, pr_number)
         self._emit_result_receipt(

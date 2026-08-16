@@ -17,23 +17,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-def _get_pr_head_sha(pr_number: Optional[int]) -> str:
-    """Fetch the HEAD commit SHA for a PR via gh CLI. Returns empty string on failure."""
-    if pr_number is None:
-        return ""
-    try:
-        proc = subprocess.run(
-            ["gh", "pr", "view", str(pr_number), "--json", "headRefOid"],
-            capture_output=True, text=True, timeout=10, check=False,
-        )
-        if proc.returncode == 0:
-            data = json.loads(proc.stdout)
-            return data.get("headRefOid", "")
-    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
-        pass
-    return ""
-
-
 def _format_ci_gate_report(
     *,
     pr_number: Optional[int],
@@ -246,7 +229,7 @@ class GateExecutorMixin:
         if request_contract_hash:
             contract_hash = request_contract_hash
         else:
-            head_sha = _get_pr_head_sha(pr_number)
+            head_sha = _rec.get_pr_head_sha(pr_number)
             hash_input = json.dumps(
                 {"gate_name": gate, "head_sha": head_sha, "pr_number": pr_number},
                 sort_keys=True,

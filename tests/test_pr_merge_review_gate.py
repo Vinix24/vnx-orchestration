@@ -15,6 +15,7 @@ before ``merge_pr`` runs. These tests cover the two layers:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -131,31 +132,58 @@ class TestCheckReviewGateForMerge:
 
 
 class TestRealWriterThroughRealMergeCheck:
-    """A result produced by the REAL writer (gate_artifacts.materialize_artifacts)
-    — which stamps branch + commit_sha from the request — must satisfy the REAL
-    check_review_gate_for_merge. This pins B1 (writer stamps identity) and B3
-    (merge check matches head sha), not a hand-built fixture dict."""
+    """B7: a result produced by the REAL writer chain must satisfy the REAL
+    merge check — with no fabricated identity. The request handler resolves the
+    PR head sha from GitHub (``gh pr view --json headRefOid``), then
+    ``gate_artifacts.materialize_artifacts`` stamps branch + commit_sha from
+    that request. The gh call is faked once at the subprocess boundary so the
+    PR has a known headRefOid. If the writer resolved the sha from the local
+    checkout HEAD instead, the first test must go RED: the merge check compares
+    against headRefOid, so a local-HEAD sha can never match."""
 
-    def _materialize(self, tmp_path, **payload_overrides):
+    KNOWN_HEAD_OID = "e4f3c2b1a09876543210fedcba09876543210"
+
+    def _fake_gh_pr_view_head(self, monkeypatch):
+        import gate_recorder
+
+        real_run = gate_recorder.subprocess.run
+
+        def fake_run(argv, **kwargs):
+            if (
+                len(argv) >= 5
+                and argv[:3] == ["gh", "pr", "view"]
+                and argv[3] == "42"
+                and "--json" in argv
+                and "headRefOid" in argv
+            ):
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=json.dumps({"headRefOid": self.KNOWN_HEAD_OID})
+                )
+            return real_run(argv, **kwargs)
+
+        monkeypatch.setattr(gate_recorder.subprocess, "run", fake_run)
+
+    def _materialize_via_real_writer(self, tmp_path, monkeypatch):
+        import review_gate_manager as rgm
         from gate_artifacts import materialize_artifacts
+
+        self._fake_gh_pr_view_head(monkeypatch)
+
+        # The production writer: _request_gemini resolves the sha via
+        # get_pr_head_sha (gh pr view headRefOid), not git rev-parse HEAD.
+        manager = rgm.ReviewGateManager()
+        monkeypatch.setattr(manager, "_gemini_available", lambda: True)
+        request_payload = manager._request_gemini(
+            42, "feature/x", "low", ["scripts/foo.py"], "per_pr", "d-real-writer-1",
+        )
 
         results_dir = tmp_path / "results"
         requests_dir = tmp_path / "requests"
         reports_dir = tmp_path / "reports"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        requests_dir.mkdir(parents=True, exist_ok=True)
-        reports_dir.mkdir(parents=True, exist_ok=True)
-        report_path = reports_dir / "gemini_review-report.md"
-        request_payload = {
-            "gate": "gemini_review",
-            "pr_id": "PR-42",
-            "pr_number": 42,
-            "branch": "feature/x",
-            "commit_sha": "abc123def4567890",
-            "dispatch_id": "d-real-writer-1",
-            "report_path": str(report_path),
-        }
-        request_payload.update(payload_overrides)
+        for d in (results_dir, requests_dir, reports_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        request_payload["report_path"] = str(reports_dir / "gemini_review-report.md")
+
         materialize_artifacts(
             gate="gemini_review",
             pr_number=42,
@@ -167,26 +195,29 @@ class TestRealWriterThroughRealMergeCheck:
             results_dir=results_dir,
             reports_dir=reports_dir,
         )
-        return results_dir
+        return request_payload, results_dir
 
-    def test_real_writer_result_passes_real_merge_check(self, tmp_path):
-        results_dir = self._materialize(tmp_path)
+    def test_real_writer_result_passes_real_merge_check(self, tmp_path, monkeypatch):
+        request_payload, results_dir = self._materialize_via_real_writer(tmp_path, monkeypatch)
+
+        # The writer must have resolved the sha from GitHub, not the local HEAD.
+        assert request_payload["commit_sha"] == self.KNOWN_HEAD_OID
 
         gate = closure_verifier.check_review_gate_for_merge(
             "PR-42", "gemini_review", results_dir,
             branch="feature/x",
-            head_sha="abc123def4567890",
+            head_sha=self.KNOWN_HEAD_OID,
         )
 
         assert gate["verdict"] == "GO"
 
-    def test_real_writer_result_with_wrong_head_sha_is_no_go(self, tmp_path):
-        results_dir = self._materialize(tmp_path)
+    def test_real_writer_result_with_wrong_head_sha_is_no_go(self, tmp_path, monkeypatch):
+        _, results_dir = self._materialize_via_real_writer(tmp_path, monkeypatch)
 
         gate = closure_verifier.check_review_gate_for_merge(
             "PR-42", "gemini_review", results_dir,
             branch="feature/x",
-            head_sha="9999999999999999",
+            head_sha="9999999999999999999999999999999999999999",
         )
 
         assert gate["verdict"] == "NO-GO"

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -124,6 +125,50 @@ def write_skip_rationale(
 
 
 # ---------------------------------------------------------------------------
+# GitHub PR identity
+# ---------------------------------------------------------------------------
+
+
+def _gh_pr_view_field(pr_number: Optional[int], field: str) -> str:
+    """Fetch one ``gh pr view --json <field>`` value. Returns "" on any failure."""
+    if not pr_number or shutil.which("gh") is None:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--json", field],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return ""
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return ""
+    value = data.get(field) if isinstance(data, dict) else None
+    return str(value or "").strip()
+
+
+def get_pr_head_sha(pr_number: Optional[int]) -> str:
+    """Return the PR head commit sha via ``gh pr view --json headRefOid``.
+
+    The PR head sha lives on GitHub, not in the local checkout. A request
+    handler running under launchd resolves ``git rev-parse HEAD`` against the
+    process cwd (the main checkout), which is not the PR head, so a merge check
+    comparing a result's commit_sha to the PR's headRefOid would reject every
+    gated merge. This is the single source of truth for the PR head identity;
+    callers must not fall back to the local HEAD (OI-1307 / B6).
+    """
+    return _gh_pr_view_field(pr_number, "headRefOid")
+
+
+def get_pr_head_branch(pr_number: Optional[int]) -> str:
+    """Return the PR head branch name via ``gh pr view --json headRefName``."""
+    return _gh_pr_view_field(pr_number, "headRefName")
+
+
+# ---------------------------------------------------------------------------
 # Result records
 # ---------------------------------------------------------------------------
 
@@ -144,7 +189,8 @@ def stamp_request_identity(
     An empty branch is LOUD, not silent: a result without a branch can never
     match a branch-scoped merge check, so the writer must surface that it
     produced evidence that is unjoinable rather than quietly emitting a
-    branch-less record.
+    branch-less record. An empty commit_sha is equally loud (B6/A3): a result
+    without a head sha can never match a head-sha-scoped merge check.
     """
     branch = (request_payload.get("branch") or "").strip()
     if not branch:
@@ -155,8 +201,17 @@ def stamp_request_identity(
             request_payload.get("gate"),
             request_payload.get("pr_id"),
         )
+    commit_sha = (request_payload.get("commit_sha") or "").strip()
+    if not commit_sha:
+        logger.warning(
+            "gate_recorder.stamp_request_identity: request payload for gate=%r "
+            "pr_id=%r carries no commit_sha — the result record will not match any "
+            "head-sha-scoped merge check (OI-1307)",
+            request_payload.get("gate"),
+            request_payload.get("pr_id"),
+        )
     result_payload["branch"] = branch
-    result_payload["commit_sha"] = (request_payload.get("commit_sha") or "").strip()
+    result_payload["commit_sha"] = commit_sha
     return result_payload
 
 

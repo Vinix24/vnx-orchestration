@@ -172,15 +172,22 @@ class TestCommitShaInPayloads:
         payload = json.loads(req_file.read_text())
         assert "commit_sha" in payload, "claude_github_optional payload must contain commit_sha"
 
-    def test_commit_sha_matches_git_rev_parse_head(self, manager_env, monkeypatch):
-        """commit_sha in payload must equal `git rev-parse HEAD` at request time."""
-        monkeypatch.chdir(str(VNX_ROOT))
+    def test_commit_sha_comes_from_github_pr_head_not_local_head(self, manager_env, monkeypatch):
+        """commit_sha must come from the PR head on GitHub (``gh pr view headRefOid``),
+        never from the local checkout HEAD (``git rev-parse HEAD``)."""
+        monkeypatch.chdir(manager_env["project_root"])
         monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
         manager = _make_manager()
 
-        expected_sha = self._get_real_sha()
-        if not expected_sha:
-            pytest.skip("git not available in test environment")
+        fake_head_oid = "e" * 40
+
+        # OI-1307/B6: the request handler resolves the PR head through
+        # get_pr_head_sha (gh pr view headRefOid). Patch the consumer binding so
+        # the payload must carry THAT value — not the local HEAD. If the handler
+        # were reverted to ``git rev-parse HEAD`` this test goes RED on both
+        # asserts below.
+        import gate_request_handler
+        monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda pr_number: fake_head_oid)
 
         with patch("governance_receipts.emit_governance_receipt"):
             manager.request_reviews(
@@ -193,13 +200,18 @@ class TestCommitShaInPayloads:
                 dispatch_id="test-sha-match",
             )
 
-        results_dir = manager_env["state_dir"] / "review_gates" / "requests"
-        # Manager resolves paths from VNX_ROOT so look in actual VNX requests dir
-        import scripts.lib.gate_request_handler as grh
-        sha_from_helper = grh._get_head_commit_sha()
-        assert sha_from_helper == expected_sha, (
-            f"_get_head_commit_sha() should return {expected_sha!r}, got {sha_from_helper!r}"
+        req_file = manager_env["requests_dir"] / "pr-5-gemini_review.json"
+        assert req_file.exists()
+        payload = json.loads(req_file.read_text())
+        assert payload["commit_sha"] == fake_head_oid, (
+            f"commit_sha must come from the GitHub PR head, got {payload['commit_sha']!r}"
         )
+
+        local_head = self._get_real_sha()
+        if local_head:
+            assert payload["commit_sha"] != local_head, (
+                "commit_sha must not resolve to the local checkout HEAD"
+            )
 
     def test_gemini_contract_payload_includes_commit_sha(self, manager_env, monkeypatch):
         """_build_gemini_contract_payload must embed commit_sha."""
