@@ -4,10 +4,39 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
-## [Unreleased]
+## [1.5.0] — 2026-08-16
+
+Minor release (83 PRs since v1.4.7). The user-visible shape: the plan-gate
+now judges a track on its goal AND its deliverables and refuses a
+deliverable-less track loud, new CLI verbs manage deliverables and track
+goals directly, the provider cost ladder is an ordered tier list with
+quality escalation, and worker permissions and roles fail loud instead of
+resolving to a silent default.
 
 ### Added
 
+- **`vnx deliverable close` and `vnx objective set-goal` (#1553, #1547)** —
+  `vnx deliverable close` settles (afboekt) a ready deliverable from the
+  CLI instead of hand-editing the tracks DB. `vnx objective set-goal` (and its track
+  alias) repairs a goal the plan-gate refused as too thin, so a blocked
+  track can be unblocked without SQL.
+- **Provider cost ladder as ordered tiers with quality escalation (#1540,
+  #1544)** — the ladder is no longer a flat list: tiers are ordered, a
+  delivery that fails quality escalates to a higher tier, and the
+  escalation is wired into the spec receipt.
+- **Smart-router tier machinery (#1494, #1500, #1495, #1484, #1486, #1530,
+  #1513, #1531)** — registry-driven tier map with a walked fallback chain
+  and per-class cooldown; per-tier AUTO-staging with a deterministic
+  canary and nulmeting; review-gate weight derived from
+  `governance_variant`; the tier-mid/high enum gap closed; kimi, glm and
+  deepseek registered as Tier-1 adapters; zai constraint allowlists
+  enforced by registry key with a glm-5.2 allowlist (not blocklist);
+  auth-derived claude billing with headless passthrough via the pip CLI.
+- **Plan-gate panel operations (#1520, #1507, #1504, #1505, #1526)** — a
+  stop-rule plus tiebreaker for the panel; panel size derived from the
+  governance variant (zwaarte); panel effectiveness measured against the
+  first seat (ijkmeting); `backfill-reason` and `reblock` disposition
+  verbs; and a batch command over OI-PLAN-blocked tracks.
 - **`vnx deliverable set` tags an existing deliverable's `task_class`/
   `routing_floor` (#1562, OI-1560-p2)** — the write-side half of what #1560
   shipped read-only: `vnx deliverable add` gains optional
@@ -28,6 +57,64 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   (`REFUSED_NO_DELIVERABLES`, distinct from the existing `REFUSED_THIN`)
   before it burns a panel round it cannot pass — including a track whose
   goal is otherwise thick enough. See `docs/core/HORIZON_PLANNING.md`.
+- **Plan-gate bookkeeping and correctness (#1518, #1538, #1542, #1532,
+  #1502, #1493, #1539, #1527)** — `goal_state` is accepted as the plan
+  with a loud refusal of thin goals; `governance_variant` and `gov_trace`
+  are persisted into plan-gate records; empty or dropped tiebreaker lanes
+  are treated as no-answer rather than a parse failure, with deepseek
+  routing; `resolution_reason` is persisted when a plan blocker is
+  cleared and the gate's `decision_ref` lands on the track; post-merge
+  verification is refused on a stale local checkout; panel seats receive
+  `VNX_DATA_DIR` and a thin synthesis is refused.
+- **Dispatch lanes: role, isolation, and failure truth (#1522, #1537,
+  #1488, #1529, #1569, #1568, #1558, #1543)** — `VNX_WORKER_ROLE` is
+  threaded into the provider-lane spawn environment; `base_ref` is
+  honored through provider-lane worktree isolation; tmux buffers are
+  named per delivery and main-checkout permissions carry into the
+  worktree; a worktree-occupancy lock, an unpushed-commit warning, and a
+  fabric-version freeze protect concurrent lanes; `classify_failure`
+  reads `completion_text` instead of discarding the failure reason; the
+  unbound `model` name on the worker-gone/heartbeat paths is bound; an
+  oversize event-store stream now rotates at threshold instead of warning
+  forever.
+- **Permissions and roles fail loud (#1557, #1534, #1563, #1523, #1503,
+  #1511, #1509, #1506, #1545)** — multi-token `bash_allow_patterns` are
+  translated into `--allowedTools`; canonical role names get
+  `identity_unresolved` as the no-role-resolved sentinel; a role that is
+  in no register refuses loud instead of silently defaulting; the
+  role-scope gap for backend/quality/security is closed; scoped
+  worker-mode is the fabric default; the worker write-boundary is
+  enforced by default; `dispatch_paths` is enforced as a real
+  file-write scope, not decoration; the `mcp__` namespace is denied to
+  close the extension-bridge leak; generated AGENTS.md/GEMINI.md mirrors
+  are ignored in terminals/T0.
+- **Governance and receipts (#1559, #1554, #1555, #1552, #1491, #1497,
+  #1489, #1490, #1515)** — event_type+status governed-outcome semantics
+  are pinned; a synthesized receipt's status is derived from the declared
+  outcome; the reconciler now sees a bare `gh pr merge` (default-ON gh
+  merge source); the phantom-guard weighs the pushed branch diff on a
+  fix-forward and warns on dispatch-file overlap; receipts no longer
+  default `model` to "unknown" — an undeterminable model fails loud,
+  prose model values are rejected, and the kimi-for-coding alias
+  resolves; work fate is decoupled from receipt fate with a loud failure
+  on a read-only version store; gate infrastructure failures are booked
+  as unavailable and non-run gates never roll up as PASS; push-verified
+  delivery is enforced for PR dispatches.
+- **CI and doctor (#1536, #1535, #1514, #1546, #1549, #1524, #1551,
+  #1533)** — workflow files are validated with actionlint in
+  `local-ci.sh`; the merge-preflight VNX CI-run check is fail-closed;
+  Profile A is scoped to touched paths and fails closed; every reasonless
+  test exclusion gets a measured disposition; `vnx doctor` gains
+  t0_state freshness and a current-flip pin warning; `pre-merge-gate
+  --pr` gates the resolved PR head rather than the working copy; the docs
+  line-ref guard is scoped to tracked docs; argparse `help=` prose is no
+  longer flagged as a raw claude spawn.
+- **Paths and store (#1550, #1556, #1501)** — an explicit `VNX_STATE_DIR`
+  pin survives the VNX_HOME cross-project guard; an orphan-dispatch
+  teardown sweep runs under an unconditional guard; migration `apply_0033`
+  is idempotent against a version downgrade.
+
+Plus 19 smaller fixes in docs, skills, and tests.
 
 ## [1.4.7] — 2026-08-12
 
