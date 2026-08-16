@@ -48,6 +48,7 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from dispatch_identity import validate_receipt_kind  # noqa: E402
+from ledger_schema_version import CURRENT_SCHEMA_VERSION  # noqa: E402
 
 
 def _utc_now_iso() -> str:
@@ -60,7 +61,10 @@ def _utc_now_iso() -> str:
 # status; always ``task_complete``), not caller data. ``ReceiptV2.__post_init__``
 # forces these constants so a future emit site cannot bypass them by stamping a
 # non-v2 receipt or a different event_type.
-RECEIPT_V2_SCHEMA_VERSION = 2
+# Sourced from ledger_schema_version.CURRENT_SCHEMA_VERSION so the receipt
+# shape's stamp and the reader's migration ladder share ONE version constant
+# (bump there, not here — see ledger_schema_version.py).
+RECEIPT_V2_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 RECEIPT_V2_EVENT_TYPE = "task_complete"
 
 

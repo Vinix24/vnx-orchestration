@@ -30,6 +30,11 @@ from .idempotency import (
 from .receipt_finalize import classify_receipt_v2_warnings, commit_receipt_v2_fields
 from .validation import _validate_receipt
 
+# Sibling scripts/lib module (scripts/lib is on sys.path whenever this package
+# is imported, since append_receipt_internals lives there). Single source of
+# truth for the monotonic receipt-schema stamp — see ledger_schema_version.py.
+from ledger_schema_version import CURRENT_SCHEMA_VERSION
+
 import logging
 log = logging.getLogger(__name__)
 
@@ -442,7 +447,7 @@ def append_receipt_payload(
     # (report_parser.py output, governance_receipts.py, state_mutation.py,
     # raw worker-authored JSON via the append_receipt.py CLI) funnels
     # through — never touched separately from the shape change.
-    receipt.setdefault("schema_version", 2)
+    receipt.setdefault("schema_version", CURRENT_SCHEMA_VERSION)
 
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
