@@ -100,6 +100,7 @@ def emit_dispatch_receipt(
     deadline_seconds: Optional[int] = None,
     failure_reason: Optional[str] = None,
     failure_class: Optional[str] = None,
+    delivery_state: Optional[str] = None,
     role_applied: Optional[bool] = None,
     role_tier: Optional[str] = None,
     role_not_applied_reason: Optional[str] = None,
@@ -195,6 +196,13 @@ def emit_dispatch_receipt(
     reason instead of a silent "(no error captured)" log line. Conditionally
     stamped (omitted on success).
 
+    ``delivery_state``: dispatch 20260816-p10b-provider-observability — one of
+    ``session_ready`` | ``submit_failed`` | ``deliver_failed`` |
+    ``delivery_refused``, making delivery and reporting separately observable
+    on the receipt (mirrors the tmux lane's sentinels). Conditionally stamped
+    (None omits) so lanes that do not yet compute it keep a byte-identical
+    receipt shape.
+
     ``permission_posture`` / ``permission_profile`` / ``permission_allow_
     pattern_count``: OI-864 — the ACTUAL spawn-time permission posture
     (``"blanket-skip"`` | ``"scoped-allowlist"`` | ``"attached-interactive"``),
@@ -289,6 +297,7 @@ def emit_dispatch_receipt(
         deadline_seconds=deadline_seconds,
         failure_reason=failure_reason,
         failure_class=failure_class,
+        delivery_state=delivery_state,
         role_applied=role_applied,
         role_tier=role_tier,
         role_not_applied_reason=role_not_applied_reason,

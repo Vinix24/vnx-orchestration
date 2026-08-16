@@ -131,6 +131,14 @@ class ReceiptV2:
     # timeout, model_error, unknown). failure_reason is the human-readable detail.
     failure_reason: Optional[str] = None
     failure_class: Optional[str] = None
+    # dispatch 20260816-p10b-provider-observability: delivery-state field.
+    # Orthogonal to failure_class — one of the closed set
+    # session_ready | submit_failed | deliver_failed | delivery_refused,
+    # mirroring the tmux lane's deliver_failed/submit_failed/session_ready
+    # sentinels plus a provider-lane-only delivery_refused for pre-flight
+    # refusals. Conditionally stamped (None omits) so lanes that do not yet
+    # compute it keep a byte-identical receipt shape.
+    delivery_state: Optional[str] = None
     # Deterministic role-applied control (dispatch-20260801-w10): stamped by the
     # provider/envelope GOVERN paths after the deterministic check that the
     # resolved role source's content actually reached the assembled final prompt.
@@ -236,6 +244,8 @@ class ReceiptV2:
             receipt["failure_reason"] = self.failure_reason
         if self.failure_class is not None:
             receipt["failure_class"] = self.failure_class
+        if self.delivery_state is not None:
+            receipt["delivery_state"] = self.delivery_state
         if self.role_applied is not None:
             receipt["role_applied"] = self.role_applied
         if self.role_tier is not None:

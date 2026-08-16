@@ -8,6 +8,14 @@ completion, a model error, and a timeout all produce the same silent receipt.
 This module gives every failure path a structured classification so an operator
 can tell them apart without tailing log files.
 
+Taxonomy ownership (dispatch 20260816-p10b-provider-observability): THIS module
+owns the receipt-facing failure taxonomy — the ``failure_class`` /
+``failure_reason`` pair stamped on a dispatch receipt. ``failure_classifier.py``
+carries a DIFFERENT, non-overlapping taxonomy (delivery-code → retryable
+mapping for the tmux lane's release_on_delivery_failure) and references this
+module as the owner of the receipt-facing concern; it must not re-derive or
+duplicate these categories.
+
 Categories
 ----------
 auth_rejected    — HTTP 401/403 from the provider endpoint (proxy, API, etc.)
