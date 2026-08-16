@@ -220,17 +220,33 @@ def _stub_gate_identity_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     a real gh failure) so the suite stays deterministic and offline, mirroring
     ``_reconcile_git_off`` for ``gh pr list``.
 
-    This touches only ``gate_recorder.subprocess.run`` — the sole place
-    ``gate_recorder`` shells out — and only for the standalone identity fields.
-    The combined ``--json headRefOid,headRefName`` shape used by ``pr_merge``
-    is NOT intercepted. Tests that need a real ``headRefOid`` override
+    ``gate_recorder.py`` does a bare ``import subprocess``, so
+    ``gate_recorder.subprocess`` IS the global ``subprocess`` module: this patch
+    replaces ``subprocess.run`` process-wide for the duration of the test, not a
+    gate_recorder-scoped attribute. Every ``subprocess.run`` call in the process
+    runs through ``fake_run``; anything whose argv is not the standalone
+    identity shape (``gh pr view <n> --json headRefOid|headRefName``) is
+    forwarded unchanged to the real ``subprocess.run`` — that forwarding is what
+    keeps the suite correct today, not the patch being narrow. The combined
+    ``--json headRefOid,headRefName`` shape used by ``pr_merge`` is NOT
+    intercepted. Tests that need a real ``headRefOid`` override
     ``gate_recorder.subprocess.run`` themselves
     (tests/test_pr_merge_review_gate.py::TestRealWriterThroughRealMergeCheck);
     their function-scoped patch wins over this autouse stub.
     """
     import subprocess as _subprocess
 
-    import gate_recorder
+    try:
+        import gate_recorder
+    except (ImportError, ModuleNotFoundError):
+        # Standalone CI steps (e.g. "Run out-of-repo symlink guard unit tests")
+        # put only scripts/lib + the repo root on sys.path; gate_recorder →
+        # governance_receipts → append_receipt (scripts/append_receipt.py) is
+        # not importable there. This is a network-off stub, not a governance
+        # control: when gate_recorder can't load, the tests in that step never
+        # touch gate_recorder code, so there is nothing to stub. No-op rather
+        # than failing the test on the fixture's own import.
+        return
 
     real_run = gate_recorder.subprocess.run
 
