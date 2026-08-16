@@ -1,12 +1,30 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-08-16T06:34:57.551469+00:00
+**Last updated**: 2026-08-16T12:11:57.731578+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #1576 — feat(planning): split blocked review state into unread vs refused (#1576) (2026-08-16)
+- #1575 — feat(merge-gate): gate the blessed merge wrapper on VNX CI conclusion (OI-1216) (#1575) (2026-08-16)
+- #1574 — feat(dispatch): escalation ladder climbs from failure_class (#1574) (2026-08-16)
+- #1573 — docs(changelog): add #1571 to 1.5.0 and correct PR count 83 -> 84 (#1573) (2026-08-16)
+- #1572 — chore(release): bump VERSION 1.4.7 -> 1.5.0 + thematic changelog (83 PRs) (#1572) (2026-08-16)
+- #1571 — feat(plan-gate): register plan-reviewer role in agents/ and worker_permissions.yaml (#1571) (2026-08-16)
+- #1570 — docs(investigations): pin OI-1133 quarantine causes (init/migrate env-leak, t0-log inode reuse) (#1571) (#1570) (2026-08-16)
+- #1569 — fix(worktree): occupancy lock, unpushed-commit warning, fabric-version freeze (OI-1232, OI-1149, OI-1061) (#1569) (2026-08-16)
+- #1568 — fix(dispatch): read completion_text in classify_failure instead of discarding it (#1568) (2026-08-16)
+- #1567 — docs(horizon): derive deliverables for 12 plan-gate-blocked tracks (OI-1560-p3) (#1567) (2026-08-16)
+- #1566 — docs(horizon): document deliverable set/task_class and the no_deliverables plan-gate refusal (#1566) (2026-08-16)
+- #1564 — docs(governance): pin OI-1118's 19-vs-3792 unknown-receipt scale gap (#1564) (2026-08-16)
+- #1563 — [SALVAGED-UNVOUCHED] dispatch(20260816-p5-technical-writer-role): auto-created by VNX tmux-spawn lane (#1563) (2026-08-16)
+- #1562 — feat(horizon): add deliverable task_class/routing_floor door (OI-1560-p2) (#1562) (2026-08-16)
+- #1559 — fix(governance): pin event_type+status governed-outcome semantics (OI-1148) (#1559) (2026-08-16)
+- #1560 — fix(planning): plan-gate reads deliverables, not just the goal field (#1560) (2026-08-16)
+- #1558 — fix(dispatch): bind unbound `model` name on worker_process_gone/heartbeat failure paths (OI-1237) (#1558) (2026-08-16)
+- #1557 — fix(permissions): translate multi-token bash_allow_patterns into --allowedTools (#1557) (2026-08-16)
 - #1556 — fix(governance): orphan teardown sweep + unconditional 0030/0029 guard (OI-1192, OI-1213) (#1556) (2026-08-16)
 - #1555 — feat(reconcile): default-ON gh merge source so reconciler sees bare gh pr merge (OI-1155) (#1555) (2026-08-15)
 - #1554 — fix(governance): derive synthesized receipt status from declared outcome (#1554) (2026-08-15)
@@ -223,15 +241,6 @@ _Last 14 days — sourced from git merge commits._
 - #1337 — fix(ci): full history for profile-a checkout so check_pr_size resolves pinned SHAs (OI-838) (#1337) (2026-08-02)
 - #1333 — fix(tests): fail-closed guard tegen schrijfacties naar de echte centrale store onder pytest (#1333) (2026-08-02)
 - #1310 — fix(ci,tests): gate F39 replay behind marker, run full suite in CI (OI-908, OI-906) (#1310) (2026-08-02)
-- #1332 — fix(gate): temporary FILE_SIZE_ALLOWLIST entry for dispatch_cli (OI-937) (#1332) (2026-08-02)
-- #1331 — test(track-reconciler): toets plan-gate hint op betekenis i.p.v. dode commandovorm (OI-934) (#1331) (2026-08-02)
-- #1330 — chore(release): bump VERSION 1.4.1 -> 1.4.2 + changelog entry (#1330) (2026-08-02)
-- #1329 — refactor(scripts): close_track_if_done verhuist naar track_reconciler_closure.py (#1329) (2026-08-02)
-- #1328 — refactor(scripts): _compute_derived_status verhuist naar track_reconciler_status.py (#1328) (2026-08-02)
-- #1327 — fix(tests): align _archive_dispatch_events mock with tuple signature (OI-933) (#1327) (2026-08-02)
-- #1325 — feat(scripts): refactor-bewijstools landen met eigen tests (fase 0) (#1325) (2026-08-02)
-- #1313 — fix(governance): wire role context into provider prompts + deterministic role_applied check (#1313) (2026-08-02)
-- #1324 — docs(triage): land T9 meet-rapport OI-561..655 (uit #1306) (#1324) (2026-08-02)
 
 ## Active features
 
