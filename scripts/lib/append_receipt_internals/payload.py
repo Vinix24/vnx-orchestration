@@ -542,18 +542,24 @@ def append_receipt_payload(
 
 
 def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
-    """Wire dispatch outcome into pattern confidence scores (best-effort)."""
+    """Wire dispatch outcome into pattern confidence scores (best-effort).
+
+    OI-1148: the event_type + status -> outcome vocabulary used to be
+    hand-copied here (drifting from register_emit.py's independent copy —
+    e.g. this set already had "done", register_emit.py's didn't). Both now
+    read event_outcome_semantics, the single canonical source.
+
+    Scope is intentionally narrower than the canonical COMPLETION_EVENT_TYPES:
+    this function has never classified "subprocess_completion" receipts (only
+    "task_complete"/"task_completed"), and "timeout" is intentionally excluded
+    from the failure vocabulary here — task_timeout events never reach this
+    function's outcome branch at all (pre-existing behaviour, kept
+    deliberately; confidence scoring treats a timeout as "no outcome signal",
+    not as a failure).
+    """
     try:
-        SUCCESS_STATUSES = {"success", "completed", "complete", "ok", "", "done"}
-        # Keep in sync with check_active_drain.FAILURE_STATUSES,
-        # weekly_digest._FAILURE_STATUSES, and receipt_classifier._FAILURE_STATUSES
-        # (gate-F2). contract_invalid = report-body-contract failure → semantically
-        # a failure; confidence scoring should treat it as such.
-        # "" is a payload-own addition (empty status string counts as success here).
-        # "timeout" is intentionally excluded: task_timeout events reach the else-return
-        # branch in _update_confidence_from_receipt and never arrive at this
-        # FAILURE_STATUSES status-match (pre-existing behaviour, kept deliberately).
-        FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "contract_invalid"}
+        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        from event_outcome_semantics import FAILURE_STATUSES, SUCCESS_STATUSES
 
         event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
         status = str(receipt.get("status", "")).lower()

@@ -32,6 +32,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from event_outcome_semantics import classify_event_outcome
 from result_contract import Result, result_ok
 
 
@@ -73,8 +74,20 @@ def extract_from_receipts(
 ) -> List[Dict[str, str]]:
     """Extract reusable signals from receipt NDJSON lines.
 
-    Parses task_complete events, extracting failure reasons and success
-    patterns within the recency window.
+    Parses outcome-bearing completion events (task_complete, task_completed,
+    subprocess_completion — see event_outcome_semantics.COMPLETION_EVENT_TYPES),
+    extracting failure reasons and success patterns within the recency window.
+
+    OI-1148: this used to hard-check ``event_type == "task_complete" and
+    status == "failed"`` — the literal ``"failed"`` alone. Real receipts use
+    ``"failure"`` as a distinct literal at some emit sites (never ``"failed"``
+    for task_complete in the production ledger) and ``subprocess_completion``
+    receipts (the tmux-interactive lane's default) use ``"done"``/``"failed"``
+    as their status vocabulary — none of which the old literal check ever
+    matched, so this function silently produced zero failure_outcome signals
+    for the dominant completion event_type. Classification now goes through
+    ``event_outcome_semantics.classify_event_outcome``, the same canonical
+    table register_emit.py and payload.py use.
     """
     now = cutoff or datetime.now(timezone.utc)
     window_start = now - timedelta(days=RECENCY_WINDOW_DAYS)
@@ -109,13 +122,14 @@ def extract_from_receipts(
 
         event_type = event.get("event_type", "")
         status = event.get("status", "")
+        outcome = classify_event_outcome(event_type, status)
 
-        if event_type == "task_complete" and status == "failed":
+        if outcome == "failure":
             reason = _truncate(str(event.get("failure_reason") or event.get("reason") or ""))
             if reason and len(reason) >= MIN_CONTENT_LENGTH:
                 signals.append({"type": "failure_outcome", "content": reason})
 
-        elif event_type == "task_complete" and status == "success":
+        elif outcome == "success":
             summary = _truncate(str(event.get("summary") or ""))
             if summary and len(summary) >= MIN_CONTENT_LENGTH:
                 signals.append({"type": "success_pattern", "content": summary})

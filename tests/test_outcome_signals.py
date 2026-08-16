@@ -85,6 +85,55 @@ class TestReceiptExtraction:
         signals = extract_from_receipts(lines, cutoff=NOW)
         assert len(signals) == 1
 
+    def test_task_complete_failure_literal_produces_failure_signal(self) -> None:
+        """OI-1148: the old code matched only the exact literal status=="failed".
+        Real task_complete failure receipts use "failure" (a distinct literal,
+        not a typo of "failed" — see receipt_verdict.HARD_FAILURE_STATUSES'
+        own comment); the old code produced zero signals for these."""
+        lines = [_receipt("task_complete", "failure", failure_reason="Contract violation detected here")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+        assert signals[0]["type"] == "failure_outcome"
+
+    def test_task_complete_done_produces_success_signal(self) -> None:
+        """OI-1148: the old code matched only the exact literal status=="success".
+        "done" is also a recognized success literal for completion events."""
+        lines = [_receipt("task_complete", "done", summary="Implemented the requested feature fully")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+        assert signals[0]["type"] == "success_pattern"
+
+    def test_subprocess_completion_failed_produces_failure_signal(self) -> None:
+        """OI-1148: the old code only recognized event_type=="task_complete",
+        so subprocess_completion (the tmux-interactive lane's default
+        completion event) never produced a failure_outcome signal at all,
+        regardless of status."""
+        lines = [_receipt("subprocess_completion", "failed", failure_reason="Worktree reap during dispatch")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+        assert signals[0]["type"] == "failure_outcome"
+
+    def test_subprocess_completion_done_produces_success_signal(self) -> None:
+        """OI-1148: subprocess_completion's real success literal is "done"
+        (see receipt_schema.SynthesizedLaneReceipt), not "success"."""
+        lines = [_receipt("subprocess_completion", "done", summary="Feature shipped and verified working")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+        assert signals[0]["type"] == "success_pattern"
+
+    def test_task_timeout_no_confirmation_produces_no_signal(self) -> None:
+        """A pending/awaiting-confirmation timeout must never be mined as a
+        failure_outcome signal — it hasn't failed, it's blocked."""
+        lines = [_receipt("task_timeout", "no_confirmation", failure_reason="awaiting operator confirmation")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 0
+
+    def test_task_failed_produces_failure_signal_regardless_of_status(self) -> None:
+        lines = [_receipt("task_failed", "", failure_reason="Provider connection refused during dispatch")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+        assert signals[0]["type"] == "failure_outcome"
+
     def test_short_content_filtered(self) -> None:
         lines = [_receipt("task_complete", "failed", failure_reason="short")]
         signals = extract_from_receipts(lines, cutoff=NOW)

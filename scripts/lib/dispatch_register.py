@@ -59,8 +59,16 @@ VALID_EVENTS = {
     "dispatch_created",         # written to pending/
     "dispatch_promoted",        # moved pending/ → active/
     "dispatch_started",         # worker began
-    "dispatch_completed",       # successful task_complete
-    "dispatch_failed",          # task_failed OR task_complete with status=failed OR task_timeout
+    "dispatch_completed",       # governed success — see event_outcome_semantics.classify_event_outcome
+    "dispatch_failed",          # governed failure — see event_outcome_semantics.classify_event_outcome
+    # (OI-1148: the event_type + status -> outcome mapping used to be
+    # paraphrased here as "task_failed OR task_complete with status=failed OR
+    # task_timeout" — inaccurate (e.g. it omitted subprocess_completion, and
+    # didn't reflect that task_timeout+status="no_confirmation" is a pending
+    # state, not a failure) and, being a comment, could drift silently from
+    # the actual classifier in append_receipt_internals/register_emit.py.
+    # The one place that now decides this is
+    # scripts/lib/event_outcome_semantics.py::classify_event_outcome.)
     "gate_requested",           # review_gate_request
     "gate_passed",              # gate completed with no blocking findings
     "gate_failed",              # gate completed with blocking findings
