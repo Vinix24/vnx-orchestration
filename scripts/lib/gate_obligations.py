@@ -58,6 +58,11 @@ STATUS_PENDING = "pending"
 STATUS_FULFILLED = "fulfilled"
 STATUS_NOT_EXECUTABLE = "not_executable"
 STATUS_FAILED = "failed"
+# "unresolvable" is NOT terminal: the runner keeps retrying resolution while
+# the environment may be fixed. It is distinct from "pending" (a genuine wait
+# for a not-yet-opened PR) so a misconfigured obligation never reads as "not
+# yet" forever (OI-1253 fix-forward).
+STATUS_UNRESOLVABLE = "unresolvable"
 
 TERMINAL_STATUSES = frozenset({STATUS_FULFILLED, STATUS_NOT_EXECUTABLE, STATUS_FAILED})
 
@@ -216,6 +221,7 @@ __all__ = [
     "STATUS_FULFILLED",
     "STATUS_NOT_EXECUTABLE",
     "STATUS_FAILED",
+    "STATUS_UNRESOLVABLE",
     "TERMINAL_STATUSES",
     "obligations_dir",
     "obligation_path",

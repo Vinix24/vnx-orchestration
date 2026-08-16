@@ -42,6 +42,7 @@ from gate_obligations import (
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
+    STATUS_UNRESOLVABLE,
     obligation_path,
     pr_number_from_pr_id,
     register_obligation,
@@ -135,7 +136,8 @@ class _FakeManager:
 def _patch_manager(monkeypatch, manager: "_FakeManager") -> None:
     """Hermetic patch: no git, no gh, no real gate — only the fake manager."""
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr: None)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -321,21 +323,69 @@ def test_runner_gate_failure_is_loud_and_registered(tmp_path, monkeypatch):
     assert "gate_skip_rationale" in audit.read_text(encoding="utf-8")
 
 
-def test_runner_leaves_pending_when_pr_unresolvable(tmp_path, monkeypatch):
+def test_runner_leaves_pending_when_no_pr_yet(tmp_path, monkeypatch):
+    """Repo resolves and gh works, but no PR exists yet — a genuine WAIT, not a
+    fault. The obligation stays pending (OI-1253 fix-forward: this must not be
+    confused with the `unresolvable` env-wrong state)."""
     state_dir = _make_state_dir(tmp_path)
     register_obligation(
         state_dir, dispatch_id="20260731-oi876-no-pr", gate="codex_gate",
         project_id="vnx-dev",
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
 
     summary = runner.run(state_dir)
 
     assert summary["pending_after"] == 1
+    assert summary["unresolvable_after"] == 0
     record = _read_obligation(state_dir, "20260731-oi876-no-pr")
     assert record["status"] == STATUS_PENDING
     assert record["attempts"] == 1
+
+
+def test_runner_marks_unresolvable_when_repo_unattributable(tmp_path, monkeypatch):
+    """Env wrong (no attributable GitHub owner/repo) is a FAULT, recorded in the
+    distinct `unresolvable` status — never left as `pending`, which would read
+    as "not yet" forever (OI-1253 fix-forward)."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260816-s1fix-no-repo", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: None)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 1
+    assert summary["unresolvable_after"] == 1
+    record = _read_obligation(state_dir, "20260816-s1fix-no-repo")
+    assert record["status"] == STATUS_UNRESOLVABLE
+    assert record["reason"] == "unresolvable_repo"
+    assert record["reason_detail"], "an unresolvable obligation must carry an actionable reason"
+
+
+def test_runner_escalates_unresolvable_to_not_executable_after_threshold(tmp_path, monkeypatch):
+    """An obligation that stays unresolvable past the bounded term escalates to
+    the loud terminal not_executable — it can never wait silently forever."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="20260816-s1fix-escalate", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    update_obligation(path, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS - 1)
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: None)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0, "escalated obligation is terminal, not still open"
+    record = _read_obligation(state_dir, "20260816-s1fix-escalate")
+    assert record["status"] == STATUS_NOT_EXECUTABLE
+    assert record["reason"] == "unresolvable_timeout"
+    assert "VNX_PROJECT_ID" in record["reason_detail"]
 
 
 def test_runner_never_refires_terminal_obligations(tmp_path, monkeypatch):

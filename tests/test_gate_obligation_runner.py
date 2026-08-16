@@ -11,6 +11,7 @@ message instead of writing to a fabricated or unattributable store.
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -59,3 +60,143 @@ class TestDefaultStateDirGuard:
         rc = runner.main(["--state-dir", str(missing)])
         assert rc == 20
         assert "state dir not found" in capsys.readouterr().err
+
+
+class TestOwnerRepoFromRemoteUrl:
+    """``_owner_repo_from_remote_url`` accepts GitHub https/ssh forms and refuses
+    anything else, including a local-filesystem origin (OI-1253)."""
+
+    def test_https_url(self):
+        assert (
+            runner._owner_repo_from_remote_url(
+                "https://github.com/Vinix24/vnx-orchestration.git"
+            )
+            == "Vinix24/vnx-orchestration"
+        )
+
+    def test_ssh_url(self):
+        assert (
+            runner._owner_repo_from_remote_url(
+                "git@github.com:Vinix24/vnx-orchestration.git"
+            )
+            == "Vinix24/vnx-orchestration"
+        )
+
+    def test_no_trailing_git(self):
+        assert (
+            runner._owner_repo_from_remote_url(
+                "https://github.com/Vinix24/vnx-orchestration"
+            )
+            == "Vinix24/vnx-orchestration"
+        )
+
+    def test_local_filesystem_origin_refused(self):
+        assert (
+            runner._owner_repo_from_remote_url(
+                "/var/folders/ab/cd/T/vnx-checkout"
+            )
+            is None
+        )
+
+    def test_non_github_host_refused(self):
+        assert runner._owner_repo_from_remote_url("https://gitlab.com/foo/bar.git") is None
+
+
+class TestGhJsonRepoScoping:
+    """``gh`` must be told the repo explicitly, never infer it from the cwd."""
+
+    def test_injects_repo_flag_when_owner_repo_given(self, monkeypatch):
+        monkeypatch.setattr(runner.shutil, "which", lambda name: "/opt/homebrew/bin/gh")
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout='{"number": 1}')
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        result = runner._gh_json(["pr", "list"], owner_repo="Vinix24/vnx-orchestration")
+        assert result == {"number": 1}
+        assert captured["cmd"] == [
+            "gh", "--repo", "Vinix24/vnx-orchestration", "pr", "list",
+        ]
+
+    def test_omits_repo_flag_when_none(self, monkeypatch):
+        monkeypatch.setattr(runner.shutil, "which", lambda name: "/opt/homebrew/bin/gh")
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return types.SimpleNamespace(returncode=0, stdout='{"number": 1}')
+
+        monkeypatch.setattr(runner.subprocess, "run", fake_run)
+        runner._gh_json(["pr", "list"], owner_repo=None)
+        assert captured["cmd"] == ["gh", "pr", "list"]
+
+    def test_pr_from_github_requests_the_right_repo(self, monkeypatch):
+        captured = {}
+
+        def fake_gh_json(args, *, owner_repo=None):
+            captured["args"] = args
+            captured["owner_repo"] = owner_repo
+            return [{"number": 42}]
+
+        monkeypatch.setattr(runner, "_gh_json", fake_gh_json)
+        number = runner._pr_from_github("20260816-foo", "Vinix24/vnx-orchestration")
+        assert number == 42
+        assert captured["owner_repo"] == "Vinix24/vnx-orchestration"
+        assert "dispatch/20260816-foo" in captured["args"]
+
+
+class TestResolveGithubOwnerRepo:
+    """Repo identity must come from the project registry / checkout, not cwd."""
+
+    def test_resolves_from_registry_checkout_first(self, monkeypatch, tmp_path):
+        checkout = tmp_path / "vnx-orchestration"
+        checkout.mkdir()
+        monkeypatch.setattr(
+            vnx_paths, "project_id_from_state_dir", lambda state_dir: "vnx-dev",
+        )
+        monkeypatch.setattr(runner, "_project_checkout_path", lambda pid: checkout)
+
+        def fake_origin(root):
+            return "https://github.com/Vinix24/vnx-orchestration.git"
+
+        monkeypatch.setattr(runner, "_git_remote_origin", fake_origin)
+        assert (
+            runner._resolve_github_owner_repo(tmp_path / "state")
+            == "Vinix24/vnx-orchestration"
+        )
+
+    def test_cwd_fallback_returns_none_for_local_origin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            vnx_paths, "project_id_from_state_dir", lambda state_dir: "",
+        )
+        monkeypatch.setattr(runner, "_project_checkout_path", lambda pid: None)
+        # A release-time temp checkout is a local-filesystem origin, never a
+        # GitHub identity: the fallback must NOT fabricate an owner/repo from it.
+        monkeypatch.setattr(
+            runner, "_git_remote_origin", lambda root: "/var/folders/ab/cd/T/checkout",
+        )
+        assert runner._resolve_github_owner_repo(tmp_path / "state") is None
+
+    def test_returns_none_when_no_remote_at_all(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            vnx_paths, "project_id_from_state_dir", lambda state_dir: "",
+        )
+        monkeypatch.setattr(runner, "_project_checkout_path", lambda pid: None)
+        monkeypatch.setattr(runner, "_git_remote_origin", lambda root: None)
+        assert runner._resolve_github_owner_repo(tmp_path / "state") is None
+
+
+class TestPlistHasNoHardcodedProject:
+    """The launchd template must pin NO project or store path (OI-1253)."""
+
+    PLIST = ROOT / "scripts" / "launchd" / "com.vnx.gate-obligation-runner.plist"
+
+    def test_template_has_no_hardcoded_project_or_store(self):
+        content = self.PLIST.read_text(encoding="utf-8")
+        assert "--state-dir" not in content
+        assert "vnx-dev" not in content
+        assert "~/.vnx-data" not in content
+        assert "VNX_PROJECT_ID" in content
+        assert "${VNX_PROJECT_ID}" in content
