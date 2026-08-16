@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import FrozenSet, Set
+from typing import FrozenSet, Optional, Set
 from unittest import mock
 
 import pytest
@@ -105,11 +105,72 @@ def _get_classifier_failure_statuses() -> FrozenSet[str]:
     return frozenset(rc._FAILURE_STATUSES)
 
 
-def _get_payload_failure_statuses() -> FrozenSet[str]:
-    """Extract FAILURE_STATUSES from _update_confidence_from_receipt in payload.
+def _resolve_canonical_vocab(name: str) -> FrozenSet[str]:
+    """Resolve NAME (e.g. 'FAILURE_STATUSES') off the canonical event_outcome_semantics module."""
+    import event_outcome_semantics
 
-    The set is defined locally inside the function body, so we parse it from
-    source via AST to avoid executing the function (which requires an active DB).
+    return frozenset(getattr(event_outcome_semantics, name))
+
+
+def _extract_payload_vocab(
+    var_name: str,
+    func_name: str = "_update_confidence_from_receipt",
+    source: Optional[str] = None,
+) -> FrozenSet[str]:
+    """Extract var_name (FAILURE_STATUSES/SUCCESS_STATUSES) from func_name in payload.py.
+
+    OI-1148 made payload.py an IMPORTER of the canonical vocab rather than a
+    hand-copied literal, so the extractor must recognize both forms a
+    consumer's function body may contain (parsed from source via AST rather
+    than executed, to avoid needing an active DB):
+
+      1. A local literal assignment (`NAME = frozenset({...})` / `NAME = {...}`).
+         Extracted structurally and returned as-is -- this is what lets the
+         sync guard keep catching a hand-copied vocabulary that has drifted
+         from the canonical module (see
+         TestPayloadCanonicalImportRecognition.test_diverging_local_copy_still_fails_common_core_check
+         for a regression proof this still fires).
+      2. `from event_outcome_semantics import NAME` -- resolved by reading the
+         LIVE attribute off the canonical module, so the sync assertion keeps
+         comparing against the real source of truth instead of raising
+         "not found" on an import shape it doesn't recognize.
+
+    If both forms are somehow present, the one that lexically appears LAST
+    wins -- mirroring Python's own name-binding semantics (whichever runs
+    last is what the function actually uses at runtime).
+    """
+    import ast
+
+    if source is None:
+        payload_file = LIB_DIR / "append_receipt_internals" / "payload.py"
+        source = payload_file.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    candidates: list = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+            for stmt in ast.walk(node):
+                if isinstance(stmt, ast.Assign):
+                    for target in stmt.targets:
+                        if isinstance(target, ast.Name) and target.id == var_name:
+                            candidates.append((stmt.lineno, _extract_frozenset_or_set_literal(stmt.value)))
+                elif isinstance(stmt, ast.ImportFrom) and stmt.module == "event_outcome_semantics":
+                    for alias in stmt.names:
+                        local_name = alias.asname or alias.name
+                        if local_name == var_name:
+                            candidates.append((stmt.lineno, _resolve_canonical_vocab(alias.name)))
+    if not candidates:
+        raise AssertionError(
+            f"{var_name} not found in payload.{func_name} "
+            "(neither a local literal assignment nor a "
+            "`from event_outcome_semantics import ...`)"
+        )
+    candidates.sort(key=lambda pair: pair[0])
+    return candidates[-1][1]
+
+
+def _get_payload_failure_statuses() -> FrozenSet[str]:
+    """Extract FAILURE_STATUSES used by payload._update_confidence_from_receipt.
 
     Intentional semantic gap vs. the other three sets:
       - payload excludes 'timeout' because task_timeout is handled by the
@@ -122,19 +183,7 @@ def _get_payload_failure_statuses() -> FrozenSet[str]:
     (i.e. drain ∩ classifier ∩ digest ∩ payload) rather than demanding
     strict equality across all four sets.
     """
-    import ast
-
-    payload_file = LIB_DIR / "append_receipt_internals" / "payload.py"
-    src = payload_file.read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_update_confidence_from_receipt":
-            for stmt in ast.walk(node):
-                if isinstance(stmt, ast.Assign):
-                    for target in stmt.targets:
-                        if isinstance(target, ast.Name) and target.id == "FAILURE_STATUSES":
-                            return _extract_frozenset_or_set_literal(stmt.value)
-    raise AssertionError("FAILURE_STATUSES not found in payload._update_confidence_from_receipt")
+    return _extract_payload_vocab("FAILURE_STATUSES")
 
 
 # ---------------------------------------------------------------------------
@@ -299,20 +348,12 @@ def _get_digest_success_statuses() -> FrozenSet[str]:
 
 
 def _get_payload_success_statuses() -> FrozenSet[str]:
-    """Extract SUCCESS_STATUSES from payload._update_confidence_from_receipt via AST."""
-    import ast
+    """Extract SUCCESS_STATUSES used by payload._update_confidence_from_receipt.
 
-    payload_file = LIB_DIR / "append_receipt_internals" / "payload.py"
-    src = payload_file.read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_update_confidence_from_receipt":
-            for stmt in ast.walk(node):
-                if isinstance(stmt, ast.Assign):
-                    for target in stmt.targets:
-                        if isinstance(target, ast.Name) and target.id == "SUCCESS_STATUSES":
-                            return _extract_frozenset_or_set_literal(stmt.value)
-    raise AssertionError("SUCCESS_STATUSES not found in payload._update_confidence_from_receipt")
+    See _extract_payload_vocab for the two recognized forms (local literal or
+    `from event_outcome_semantics import ...`).
+    """
+    return _extract_payload_vocab("SUCCESS_STATUSES")
 
 
 # Documented structural differences in SUCCESS_STATUSES across modules:
@@ -384,6 +425,72 @@ class TestSuccessVocabCrossModuleSync:
             f"weekly_digest._SUCCESS_STATUSES has unexpected missing entries vs drain: {sorted(unexpected)}.\n"
             "If intentional, add to _DIGEST_SUCCESS_KNOWN_OMISSIONS with a comment."
         )
+
+
+# ---------------------------------------------------------------------------
+# B3) Regression coverage for the payload extractor's canonical-import form.
+#
+# OI-1148 turned payload.py from a hand-copied-literal consumer into an
+# IMPORTER of event_outcome_semantics. _extract_payload_vocab (above) learned
+# to resolve that import shape against the live canonical module. These tests
+# pin both halves of that behaviour so a future edit to the extractor can't
+# silently regress either one:
+#   - it must actually resolve the import (not just stop raising "not found"),
+#   - it must still catch a hand-copied literal that has drifted, because
+#     that drift-detection is the entire reason this guard exists.
+# ---------------------------------------------------------------------------
+
+class TestPayloadCanonicalImportRecognition:
+    def test_extractor_resolves_canonical_import_to_live_value(self):
+        """payload.py's `from event_outcome_semantics import FAILURE_STATUSES`
+        must resolve to the actual canonical value, not merely stop raising.
+        """
+        failure = _get_payload_failure_statuses()
+        success = _get_payload_success_statuses()
+        assert failure == _resolve_canonical_vocab("FAILURE_STATUSES")
+        assert success == _resolve_canonical_vocab("SUCCESS_STATUSES")
+
+    def test_diverging_local_copy_still_fails_common_core_check(self):
+        """Regression proof for the guard's actual purpose: if a future edit
+        reintroduces a hand-copied local literal in payload.py that drops a
+        required core status, the sync guard must still fail.
+
+        We synthesize a payload.py body carrying a diverging LOCAL literal
+        (rather than the canonical import) and feed it through the same
+        extractor the real tests use, then reproduce the common-core
+        assertion from TestVocabCrossModuleSync.test_common_core_present_in_all_four
+        inline. If the extractor ever regressed to silently preferring/ignoring
+        a local override, this would go green when it must stay red.
+        """
+        diverging_source = '''
+def _update_confidence_from_receipt(receipt):
+    FAILURE_STATUSES = frozenset({"failed", "error"})  # missing "contract_invalid", "blocked", "failure"
+    status = str(receipt.get("status", "")).lower()
+    if status in FAILURE_STATUSES:
+        pass
+'''
+        extracted = _extract_payload_vocab("FAILURE_STATUSES", source=diverging_source)
+        assert extracted == frozenset({"failed", "error"})
+        assert extracted != _resolve_canonical_vocab("FAILURE_STATUSES")
+
+        core = frozenset({"failed", "failure", "error", "blocked", "contract_invalid"})
+        with pytest.raises(AssertionError):
+            missing = core - extracted
+            assert not missing, (
+                f"payload: missing core failure statuses (gate-F2): {sorted(missing)}"
+            )
+
+    def test_extractor_raises_when_neither_form_present(self):
+        """If a function carries neither a local literal nor the canonical
+        import, the extractor must fail loudly (not silently return an empty
+        set, which would make every drift check vacuously pass).
+        """
+        empty_source = '''
+def _update_confidence_from_receipt(receipt):
+    return None
+'''
+        with pytest.raises(AssertionError):
+            _extract_payload_vocab("FAILURE_STATUSES", source=empty_source)
 
 
 # ---------------------------------------------------------------------------
