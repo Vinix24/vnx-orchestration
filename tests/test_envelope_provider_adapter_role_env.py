@@ -179,3 +179,56 @@ def test_local_gemma_absent_role_is_none():
 
     mock_spawn.assert_called_once()
     assert mock_spawn.call_args.kwargs["role"] is None
+
+
+# ---------------------------------------------------------------------------
+# OI-1231/OI-1244: the spawn-side role channel (the part this dispatch adds).
+#
+# The OI-1215 fix above threads VNX_WORKER_ROLE (the worker-side env channel the
+# pretooluse hook reads). But the SPAWN-SIDE scope-args builder
+# (subprocess_adapter._build_worker_scope_args -> resolve_worker_profile) is what
+# actually logs ``resolve_worker_profile: role is None`` in the door output — and
+# it reads the ``role`` param of ``spawn_claude``, not VNX_WORKER_ROLE. The harness
+# spawns (deepseek/glm) forward their **kwargs to spawn_claude, so the adapter must
+# pass ``role=`` through them for the role to reach resolve_worker_profile at all.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider_key,spawn_path,model", [
+    ("deepseek-harness", "provider_spawns.deepseek_harness_spawn.spawn_deepseek_harness", "deepseek-v4-pro"),
+    ("glm-harness", "provider_spawns.glm_harness_spawn.spawn_glm_harness", "glm-5.2"),
+])
+def test_harness_spawn_receives_role_kwarg(provider_key, spawn_path, model):
+    """The harness spawns receive role= so spawn_claude can hand it to
+    resolve_worker_profile (spawn-side), not just the VNX_WORKER_ROLE env overlay."""
+    provider = Provider({
+        "deepseek-harness": "deepseek-harness",
+        "glm-harness": "glm-harness",
+    }[provider_key])
+    plan = _plan(provider, model=model)
+
+    with patch(spawn_path, return_value=_OkSpawnResult()) as mock_spawn:
+        ProviderAdapter().run(plan, "implement the change")
+
+    mock_spawn.assert_called_once()
+    assert mock_spawn.call_args.kwargs.get("role") == "research-analyst", (
+        f"{spawn_path} was not handed role=research-analyst: "
+        f"got {mock_spawn.call_args.kwargs.get('role')!r}"
+    )
+
+
+def test_explicit_role_wins_over_plan_role_for_harness():
+    """ProviderAdapter.run(role=...) must override plan.role on BOTH channels:
+    the spawn-side role= kwarg and the worker-side VNX_WORKER_ROLE env overlay."""
+    plan = _plan(Provider.DEEPSEEK_HARNESS, role="research-analyst")
+
+    with patch(
+        "provider_spawns.deepseek_harness_spawn.spawn_deepseek_harness",
+        return_value=_OkSpawnResult(),
+    ) as mock_spawn:
+        ProviderAdapter().run(plan, "implement the change", role="backend-developer")
+
+    mock_spawn.assert_called_once()
+    kwargs = mock_spawn.call_args.kwargs
+    assert kwargs.get("role") == "backend-developer"
+    assert kwargs.get("extra_env") == {"VNX_WORKER_ROLE": "backend-developer"}

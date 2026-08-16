@@ -2162,7 +2162,10 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
 
         with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
             if plan.lane == "provider":
-                result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+                result = run_envelope_plan(
+                    plan, permit, state_dir=state_dir, data_dir=data_dir,
+                    role=vspec.spec.role,
+                )
                 if result.status != "success":
                     # Fail-loud: the door must never swallow a provider-lane failure into a
                     # bare exit code — the caller (bin/vnx dispatch) prints nothing else.
