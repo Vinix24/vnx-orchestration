@@ -30,6 +30,12 @@ RESULTS_DIR = BENCHMARK_DIR / "results"
 CLAUDEDOCS_DIR = REPO_ROOT / "claudedocs"
 ROUTING_OUTPUT = REPO_ROOT / "scripts" / "lib" / "providers" / "routing_recommendations.yaml"
 
+# scripts/lib is importable in the test suite via tests/conftest.py; add it here
+# so the CLI path can validate model ids against the constraint SSOT as well.
+_LIB_DIR = REPO_ROOT / "scripts" / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
 
 def load_results(results_dir: Path) -> List[Dict]:
     records = []
@@ -201,6 +207,44 @@ def render_markdown_report(records: List[Dict], summary: Dict, pareto: List[Dict
     return "\n".join(lines)
 
 
+def validate_routing_models(routing: Dict) -> None:
+    """Fail loud when the generated recommendations name a constraint-blocked model.
+
+    The results dir keeps legacy benchmark records (e.g. glm-5-1 field-test
+    JSONs); passing their model_ids straight through would regenerate a
+    routing_recommendations.yaml that recommends models the dispatch door
+    refuses (deprecated-glm-models admits only glm-5.2 — OI-1255). The router
+    already rejects such a file at load (BlockedRecommendationError); this
+    guard surfaces the same drift at GENERATION time, with the offending
+    model ids named, instead of letting the file be written first.
+    """
+    from smart_router import parse_route_model_id  # noqa: PLC0415
+    from providers.constraint_enforcer import (  # noqa: PLC0415
+        blocking_model_violations as _blocking_model_violations,
+    )
+
+    blocked: List[str] = []
+    for task_id, entries in (routing.get("routing_by_task") or {}).items():
+        for entry in entries:
+            model_id = str((entry or {}).get("model_id") or "")
+            if not model_id:
+                continue
+            provider, model = parse_route_model_id(model_id)
+            violations = _blocking_model_violations(provider=provider, model=model)
+            if violations:
+                codes = ", ".join(sorted({v.code for v in violations}))
+                blocked.append(f"{model_id!r} (task {task_id!r}, constraint(s): {codes})")
+    if blocked:
+        raise ValueError(
+            "analyze_results: refusing to write routing_recommendations.yaml — "
+            "benchmark results contain constraint-blocked model(s): "
+            + "; ".join(blocked)
+            + ". Remove/refresh those result files or admit the model in "
+            "provider_constraints.yaml; writing the file would recommend a model "
+            "the dispatch door refuses (OI-1255)."
+        )
+
+
 def _atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -227,6 +271,7 @@ def main() -> int:
     summary = build_task_summary(records)
     pareto = build_pareto_frontier(records)
     routing = build_routing_recommendations(summary)
+    validate_routing_models(routing)
     report_md = render_markdown_report(records, summary, pareto)
 
     report_path = output_dir / "benchmark-model-comparison.md"

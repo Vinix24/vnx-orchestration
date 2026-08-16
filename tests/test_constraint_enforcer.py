@@ -30,6 +30,7 @@ from providers.constraint_enforcer import (
     ConstraintEnforcer,
     ConstraintViolationError,
     HardConstraintViolation,
+    blocking_model_violations,
     check_constraints,
 )
 
@@ -641,3 +642,52 @@ class TestRegistryKeyNormalization:
         )
         blocking = [v for v in violations if v.severity == "blocking"]
         assert not blocking, f"unexpected blocking violations: {blocking}"
+
+
+# ---------------------------------------------------------------------------
+# blocking_model_violations — config-load-time view (OI-1255)
+#
+# smart_router and the benchmark export generators use this helper to fail loud
+# when a model list names a model the dispatch door refuses. It isolates the
+# model-identity axis of the constraint SSOT: blocking, non-overridable
+# constraints keyed on `model` (currently exactly deprecated-glm-models).
+# ---------------------------------------------------------------------------
+
+class TestBlockingModelViolations:
+
+    @pytest.mark.parametrize("blocked", ["glm-5", "glm-5.1", "glm-4.5", "glm-4.6", "glm-5.3"])
+    def test_deprecated_glm_variants_flagged(self, blocked):
+        violations = blocking_model_violations(provider="litellm:zai", model=blocked, env={})
+        assert [v.code for v in violations] == ["deprecated-glm-models"]
+        assert all(v.severity == "blocking" for v in violations)
+
+    def test_glm_5_2_not_flagged(self):
+        assert blocking_model_violations(provider="litellm:zai", model="glm-5.2", env={}) == []
+
+    def test_glm_harness_alias_routes_to_zai_identity(self):
+        """The zai allowlist covers every provider string routing to zai (OI-1217)."""
+        violations = blocking_model_violations(provider="glm-harness", model="glm-5", env={})
+        assert [v.code for v in violations] == ["deprecated-glm-models"]
+
+    def test_env_keyed_deepseek_block_is_not_model_policy(self):
+        """deepseek-harness-subscription-blocked depends on DEEPSEEK_API_KEY being
+        absent — runtime-route policy, not model identity. It must NOT flag a
+        config-file model list even with an empty env."""
+        assert blocking_model_violations(
+            provider="litellm", sub_provider="deepseek", model="deepseek-v4-flash", env={},
+        ) == []
+
+    def test_non_glm_models_not_flagged(self):
+        for provider, model in (
+            ("claude", "sonnet"),
+            ("kimi", "kimi-k2-7-code"),
+            ("litellm", "codex-gpt-5-5"),
+        ):
+            assert blocking_model_violations(provider=provider, model=model, env={}) == []
+
+    def test_override_env_cannot_denylist_model_policy(self, monkeypatch):
+        """deprecated-glm-models has override_allowed: false — an env flag must
+        not whitewash a blocked model at config-load time either."""
+        monkeypatch.setenv("VNX_OVERRIDE_DEPRECATED_GLM_MODELS", "1")
+        violations = blocking_model_violations(provider="zai", model="glm-5")
+        assert [v.code for v in violations] == ["deprecated-glm-models"]

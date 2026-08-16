@@ -309,6 +309,53 @@ def test_analyze_results_writes_yaml_recommendations(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# validate_routing_models — OI-1255 generation-time guard
+#
+# The results dir keeps legacy records (glm-5-1 field tests). Passing those
+# model_ids straight into routing_recommendations.yaml would regenerate the
+# exact drift this dispatch removed: the router recommending a model the
+# dispatch door refuses. The guard must fail loud BEFORE the file is written.
+# ---------------------------------------------------------------------------
+
+def test_validate_routing_models_allows_current_models():
+    """Current registry models (incl. the one allowed GLM) pass the guard."""
+    routing = {"routing_by_task": {"01_alpha": [
+        {"model_id": "claude-sonnet-5"},
+        {"model_id": "deepseek-v4-pro"},
+        {"model_id": "glm-5.2"},
+        {"model_id": "kimi-k2-7-code"},
+    ]}}
+    analyze_results.validate_routing_models(routing)  # must not raise
+
+
+@pytest.mark.parametrize("blocked", ["glm-5", "glm-5.1", "glm-5-1", "glm-4.5", "glm-4.6"])
+def test_validate_routing_models_blocks_deprecated_glm(blocked):
+    routing = {"routing_by_task": {"01_alpha": [{"model_id": blocked}]}}
+    with pytest.raises(ValueError, match="deprecated-glm-models"):
+        analyze_results.validate_routing_models(routing)
+
+
+def test_analyze_results_main_refuses_to_write_blocked_routing(tmp_path: Path, monkeypatch):
+    """End-to-end: main() fails loud and writes NO routing file when the
+    aggregated results carry a deprecated GLM model (the legacy glm-5-1
+    field-test records in scripts/benchmark/results are the live case)."""
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    record = _make_result_record("glm-5-1", "01_alpha", 0.001, 8)
+    (results_dir / "glm-5-1__01_alpha.json").write_text(json.dumps(record))
+    routing_out = tmp_path / "routing.yaml"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["analyze_results.py", "--results-dir", str(results_dir),
+         "--output-dir", str(tmp_path / "claudedocs")],
+    )
+    with patch.object(analyze_results, "ROUTING_OUTPUT", routing_out):
+        with pytest.raises(ValueError, match="constraint-blocked"):
+            analyze_results.main()
+    assert not routing_out.exists()
+
+
+# ---------------------------------------------------------------------------
 # test_pareto_frontier
 # ---------------------------------------------------------------------------
 

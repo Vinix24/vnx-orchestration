@@ -5,6 +5,17 @@
 # current (claude-sonnet-5, claude-opus-4-8, glm-5-2) on 2026-07-22 per operator mandate,
 # WITHOUT a re-benchmark. Every remapped entry carries an inline "# remapped ..." comment.
 # Treat all scores here as a snapshot pending refresh — see track bench-v2-model-refresh.
+#
+# 2026-08-16 (dispatch 20260816-staart-s2-glm5-registry, OI-1255):
+# - Removed all five `glm-5` (base, Feb 2026) candidate entries: deprecated-glm-models in
+#   provider_constraints.yaml (operator directive 2026-08-03) blocks every GLM except glm-5.2,
+#   so these recommendations named a model the dispatch door refuses.
+# - Renamed `glm-5-2` (benchmark-lane dash spelling) to the canonical registry key `glm-5.2`
+#   (wave7_models.yaml). The dash spelling fails the deprecated-glm-models exact-alias match
+#   and was silently filtered out of every decide() result alongside the genuinely blocked glm-5.
+# - smart_router now validates every candidate against the blocking model-identity constraints
+#   at load and raises BlockedRecommendationError on a blocked entry. A regeneration that
+#   reintroduces a blocked model (analyze_results.py over legacy results) fails loud there.
 routing_by_task:
   01_code_generation:
     candidates:
@@ -56,7 +67,7 @@ routing_by_task:
       avg_duration_seconds: 160.6
       launch_success_rate: 0.61
       n: 33
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: claude-harness
       composite_score: 8.15
       quality_tier: 3
@@ -64,14 +75,6 @@ routing_by_task:
       avg_duration_seconds: 197.3
       launch_success_rate: 1.0
       n: 3
-    - model_id: glm-5
-      runner: flat-runner
-      composite_score: 6.75
-      quality_tier: 2
-      cost_usd_per_call: 0.0578
-      avg_duration_seconds: 106.8
-      launch_success_rate: 0.65
-      n: 28
     - model_id: kimi-k2-7-code
       runner: kimi-cli
       composite_score: 6.5
@@ -80,7 +83,7 @@ routing_by_task:
       avg_duration_seconds: 161.9
       launch_success_rate: 0.77
       n: 46
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: flat-runner
       composite_score: 5.92
       quality_tier: 2
@@ -88,7 +91,7 @@ routing_by_task:
       avg_duration_seconds: 281.3
       launch_success_rate: 0.61
       n: 30
-    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
+    - model_id: glm-5.2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 4.83
       quality_tier: 1
@@ -114,7 +117,7 @@ routing_by_task:
       n: 25
   02_code_review:
     candidates:
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: claude-harness
       composite_score: 8.7
       quality_tier: 3
@@ -178,7 +181,7 @@ routing_by_task:
       avg_duration_seconds: 303.7
       launch_success_rate: 1.0
       n: 6
-    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
+    - model_id: glm-5.2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 7.82
       quality_tier: 3
@@ -186,15 +189,7 @@ routing_by_task:
       avg_duration_seconds: 247.8
       launch_success_rate: 1.0
       n: 6
-    - model_id: glm-5
-      runner: flat-runner
-      composite_score: 7.67
-      quality_tier: 3
-      cost_usd_per_call: 0.4682
-      avg_duration_seconds: 138.8
-      launch_success_rate: 1.0
-      n: 6
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: flat-runner
       composite_score: 5.9
       quality_tier: 2
@@ -285,15 +280,7 @@ routing_by_task:
       avg_duration_seconds: 97.2
       launch_success_rate: 0.88
       n: 15
-    - model_id: glm-5
-      runner: flat-runner
-      composite_score: 5.67
-      quality_tier: 2
-      cost_usd_per_call: 0.0067
-      avg_duration_seconds: 25.7
-      launch_success_rate: 0.94
-      n: 17
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: flat-runner
       composite_score: 5.62
       quality_tier: 2
@@ -301,7 +288,7 @@ routing_by_task:
       avg_duration_seconds: 68.1
       launch_success_rate: 1.0
       n: 18
-    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
+    - model_id: glm-5.2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 5.26
       quality_tier: 2
@@ -317,7 +304,7 @@ routing_by_task:
       avg_duration_seconds: 73.1
       launch_success_rate: 1.0
       n: 13
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: claude-harness
       composite_score: 4.63
       quality_tier: 1
@@ -375,7 +362,7 @@ routing_by_task:
       avg_duration_seconds: 76.7
       launch_success_rate: 0.42
       n: 11
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: claude-harness
       composite_score: 8.86
       quality_tier: 3
@@ -383,15 +370,7 @@ routing_by_task:
       avg_duration_seconds: 161.5
       launch_success_rate: 0.75
       n: 3
-    - model_id: glm-5
-      runner: flat-runner
-      composite_score: 8.28
-      quality_tier: 3
-      cost_usd_per_call: 0.0156
-      avg_duration_seconds: 99.9
-      launch_success_rate: 0.65
-      n: 11
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: flat-runner
       composite_score: 7.61
       quality_tier: 3
@@ -399,7 +378,7 @@ routing_by_task:
       avg_duration_seconds: 149.3
       launch_success_rate: 0.43
       n: 9
-    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
+    - model_id: glm-5.2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 6.76
       quality_tier: 2
@@ -434,7 +413,7 @@ routing_by_task:
     min_quality_tier: 2
   06_design:
     candidates:
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: claude-harness
       composite_score: 8.9
       quality_tier: 3
@@ -498,15 +477,7 @@ routing_by_task:
       avg_duration_seconds: 500.9
       launch_success_rate: 1.0
       n: 2
-    - model_id: glm-5
-      runner: flat-runner
-      composite_score: 8.59
-      quality_tier: 3
-      cost_usd_per_call: null
-      avg_duration_seconds: 645.6
-      launch_success_rate: 1.0
-      n: 2
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: flat-runner
       composite_score: 5.87
       quality_tier: 2
@@ -514,7 +485,7 @@ routing_by_task:
       avg_duration_seconds: 203.8
       launch_success_rate: 1.0
       n: 2
-    - model_id: glm-5-2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
+    - model_id: glm-5.2  # remapped 2026-07-22 from glm-5-1 (inherited score, not re-benchmarked)
       runner: flat-runner
       composite_score: 4.05
       quality_tier: 1
@@ -574,7 +545,7 @@ routing_by_task:
       avg_duration_seconds: 250.0
       launch_success_rate: 1.0
       n: 0
-    - model_id: glm-5-2
+    - model_id: glm-5.2
       runner: claude-harness
       composite_score: 7.5
       quality_tier: 3

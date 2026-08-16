@@ -236,6 +236,52 @@ def classify_task(
 # Composite score at or below which a model is considered incapable for the task class.
 _INCAPABLE_SCORE_FLOOR = 1.0
 
+
+class BlockedRecommendationError(ValueError):
+    """A routing_recommendations.yaml candidate names a model the constraints block.
+
+    Raised at load time (fail loud, OI-1255): a recommendations file is a COPY
+    of model identity that can decay (glm-5 was recommended in five places
+    while provider_constraints.yaml `deprecated-glm-models` blocked it). A
+    silent filter would hide the next case exactly the way that one was hidden,
+    so the router refuses the file instead.
+    """
+
+
+def _validate_candidates_not_blocked(
+    task_class: str,
+    candidates: List[RouteCandidate],
+    *,
+    env: Optional[Dict] = None,
+    source: Optional[Path] = None,
+) -> None:
+    """Fail loud when a candidate model violates a blocking model-identity constraint.
+
+    Every entry parsed from the recommendations file is checked against the
+    constraint SSOT (provider_constraints.yaml) via
+    providers.constraint_enforcer.blocking_model_violations — the same
+    allowlist the dispatch door enforces (e.g. deprecated-glm-models admits
+    only glm-5.2 for zai). Runtime-route constraints (via/role/env-keyed) are
+    deliberately NOT checked here: they are decide()'s per-dispatch filter,
+    not a verdict on the model itself.
+    """
+    from providers.constraint_enforcer import (  # noqa: PLC0415
+        blocking_model_violations as _blocking_model_violations,
+    )
+
+    for candidate in candidates:
+        provider, model = parse_route_model_id(candidate.model_id)
+        violations = _blocking_model_violations(provider=provider, model=model, env=env)
+        if violations:
+            codes = ", ".join(sorted({v.code for v in violations}))
+            raise BlockedRecommendationError(
+                f"routing_recommendations candidate {candidate.model_id!r} in task class "
+                f"{task_class!r} is blocked by constraint(s) [{codes}] "
+                f"(source: {source or _RECOMMENDATIONS_PATH}): {violations[0].message} "
+                f"Remove the entry or admit the model in provider_constraints.yaml — "
+                f"the router fails loud instead of silently dropping the candidate (OI-1255)."
+            )
+
 # Operator-chosen capability threshold (2026-06-28): a model scoring at/above this clears the
 # "capable enough" bar and competes on COST; models below it are ranked by capability instead, so a
 # cheap-but-weak model can never beat a much stronger one. On the 0-10 composite scale, 7.0 = solidly
@@ -328,6 +374,11 @@ def _load_recommendations(
     models below the threshold are ranked by capability descending. When costs are all None (no
     wave7 data), every above-bar candidate ties on cost and the order collapses to score-descending
     — identical to the pre-cost-aware behaviour.
+
+    Every parsed candidate is validated against the blocking model-identity
+    constraints (provider_constraints.yaml) and the load raises
+    BlockedRecommendationError on the first blocked model — a recommendations
+    file carrying a deprecated model is a hard error, never a silent skip.
     """
     from cost_loader import enrich_candidates as _enrich  # noqa: PLC0415
 
@@ -377,6 +428,10 @@ def _load_recommendations(
                 cost_tier=cost_tier,
                 quality_tier=qt,
             ))
+        # OI-1255: reject the whole file loudly when any entry names a model
+        # the constraint SSOT blocks — BEFORE enrichment/sorting, so a blocked
+        # model can never reach a caller even as a filtered-out tail entry.
+        _validate_candidates_not_blocked(task_class, candidates, source=yaml_path)
         _enrich(candidates)
         if min_qt is not None:
             candidates = [c for c in candidates if (c.quality_tier or 0) >= min_qt]
