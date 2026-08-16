@@ -5,6 +5,13 @@ VNX Failure Classifier — Structured failure classification for delivery failur
 Classifies delivery failure reasons into actionable categories so T0 can
 deterministically decide whether to retry, reroute, or escalate.
 
+Taxonomy ownership (dispatch 20260816-p10b-provider-observability): this module
+carries the DELIVERY-code taxonomy (delivery-code → retryable mapping), distinct
+from the receipt-facing failure taxonomy owned by ``failure_classification.py``
+(the ``failure_class`` / ``failure_reason`` pair stamped on a dispatch receipt).
+Do NOT add receipt-facing failure classes here, and do NOT re-derive
+``failure_classification`` categories here — reference that module instead.
+
 Classification taxonomy:
   - invalid_skill:           Skill not found or misconfigured (non-retryable)
   - stale_lease:             Lease generation mismatch / expired (retryable)

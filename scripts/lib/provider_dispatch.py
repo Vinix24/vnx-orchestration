@@ -37,6 +37,27 @@ from dispatch_identity import (  # single canonical sentinel (dispatch-20260804-
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
+# Delivery-state taxonomy (dispatch 20260816-p10b-provider-observability).
+# Mirrors the tmux lane's delivery sentinels so the PROVIDER lane's delivery
+# and reporting are separately observable in the receipt ledger (not just on
+# stdout). Four distinguishable states, each a named string stamped on the
+# receipt's ``delivery_state`` field:
+#   session_ready    — delivered AND reported (status=success)
+#   submit_failed    — delivered but nothing reported (status=failure/timeout:
+#                      the worker was launched but produced no report)
+#   deliver_failed   — never delivered (spawn boundary failed: returncode
+#                      126/127 = binary missing / cannot execute)
+#   delivery_refused — refused for delivery (pre-flight gate: constraint
+#                      violation, missing key, model-resolution failure,
+#                      claude-not-a-provider reject, delegation reject)
+# The failure REASON on the receipt stays in failure_reason/failure_class via
+# failure_classification.py (the single receipt-facing failure taxonomy) —
+# delivery_state is orthogonal to it, never a third taxonomy.
+_DELIVERY_STATE_SESSION_READY = "session_ready"
+_DELIVERY_STATE_SUBMIT_FAILED = "submit_failed"
+_DELIVERY_STATE_DELIVER_FAILED = "deliver_failed"
+_DELIVERY_STATE_DELIVERY_REFUSED = "delivery_refused"
+
 # ADR-012 worker-permission enforcement flag (default OFF). Imported defensively
 # so provider_dispatch remains importable even if worker_permissions is missing.
 #
@@ -659,6 +680,29 @@ def _event_store_safety_net(event_store: Any, args: argparse.Namespace) -> None:
         )
 
 
+def _derive_delivery_state(status: str, result: Any) -> str:
+    """Map a spawn outcome to one of the four provider-lane delivery states.
+
+    success → session_ready (delivered and reported). blocked → delivery_refused
+    (refused before delivery). failure/timeout → deliver_failed when the spawn
+    boundary itself failed (returncode 126/127 = binary missing / cannot
+    execute), otherwise submit_failed (delivered but nothing reported).
+
+    "Delivered" is NOT derived from whether the process lives — it is derived
+    from the spawn boundary: a returned result with any returncode other than
+    126/127 means the worker was launched, so a non-success outcome is a submit
+    failure, not a delivery failure.
+    """
+    if status == "success":
+        return _DELIVERY_STATE_SESSION_READY
+    if status == "blocked":
+        return _DELIVERY_STATE_DELIVERY_REFUSED
+    returncode = getattr(result, "returncode", None)
+    if returncode in (126, 127):
+        return _DELIVERY_STATE_DELIVER_FAILED
+    return _DELIVERY_STATE_SUBMIT_FAILED
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -834,6 +878,12 @@ def _emit_governance(
         )
         _toolcall_signals = {}
 
+    # Delivery-state (dispatch 20260816-p10b-provider-observability): derive
+    # the four-way delivery/reporting state from status + spawn returncode so
+    # the receipt distinguishes "never delivered" from "delivered but nothing
+    # reported" without consulting the door log.
+    _delivery_state = _derive_delivery_state(status, result)
+
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
             # OI-866: classify failure so the receipt carries a distinguishable
@@ -960,6 +1010,7 @@ def _emit_governance(
                 deadline_seconds=getattr(args, "deadline_seconds", None),
                 failure_reason=_fail_reason,
                 failure_class=_fail_class,
+                delivery_state=_delivery_state,
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
@@ -1144,23 +1195,50 @@ def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "
     return None
 
 
-def _emit_constraint_failure_receipt(
+def _emit_refusal_receipt(
     args: argparse.Namespace,
     provider: str,
     model: str,
     failure_reason: str,
+    *,
+    delivery_state: str = _DELIVERY_STATE_DELIVERY_REFUSED,
+    status: str = "blocked",
 ) -> None:
-    """Record fail-closed pre-flight failures before any provider spawn."""
+    """Record a pre-flight refusal (or delivery-boundary failure) to the ledger.
+
+    Every provider-lane refusal and delivery-boundary failure must land in
+    t0_receipts.ndjson — not just stdout — so the four delivery states are
+    distinguishable by reading storage alone (dispatch
+    20260816-p10b-provider-observability). Covers the fail-closed gates that
+    never reach a spawn result: constraint violation, missing API key,
+    model-resolution failure, claude-not-a-provider reject, and delegation
+    reject (all delivery_refused), plus the main-level uncaught spawn exception
+    (deliver_failed, status=failure).
+
+    failure_class is derived via failure_classification.classify_failure_safe —
+    the single receipt-facing failure taxonomy — never a third taxonomy.
+    """
+    from failure_classification import classify_failure_safe  # noqa: PLC0415
+
     state_dir = _resolve_state_dir()
     receipt_path = state_dir / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    _classification = classify_failure_safe(
+        status=status,
+        error=failure_reason,
+        provider=provider,
+        dispatch_id=args.dispatch_id,
+    )
     receipt = {
         "dispatch_id": args.dispatch_id,
         "terminal_id": args.terminal_id,
         "provider": provider,
         "model": model,
-        "status": "failure",
+        "status": status,
+        "delivery_state": delivery_state,
+        "failure_class": _classification.get("failure_class") or "unknown",
         "completion_pct": 0,
         "risk": 0.0,
         "duration_seconds": 0.0,
@@ -2057,6 +2135,13 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             f"litellm:{base_sub} requires {required_key} env var",
             file=sys.stderr,
         )
+        try:
+            _emit_refusal_receipt(
+                args, args.provider, getattr(args, "model", None) or base_sub or "litellm",
+                f"litellm:{base_sub} requires {required_key} env var (missing)",
+            )
+        except Exception as _ref_exc:
+            logger.error("_dispatch_litellm: refusal receipt failed dispatch=%s: %s", args.dispatch_id, _ref_exc)
         return _EX_USAGE
 
     env_model = os.environ.get("VNX_LITELLM_MODEL", "")
@@ -2217,6 +2302,13 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     except KimiModelResolutionError as _model_exc:
         logger.error("_dispatch_kimi: model resolution failed for %r: %s", explicit_model, _model_exc)
         print(f"_dispatch_kimi: model resolution failed: {_model_exc}", file=sys.stderr)
+        try:
+            _emit_refusal_receipt(
+                args, "kimi", explicit_model or "kimi",
+                f"kimi model resolution failed: {_model_exc}",
+            )
+        except Exception as _ref_exc:
+            logger.error("_dispatch_kimi: refusal receipt failed dispatch=%s: %s", args.dispatch_id, _ref_exc)
         return 1
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
@@ -2699,7 +2791,13 @@ def main(argv: list[str] | None = None) -> int:
             raise
         model = _constraint_model_for_provider(args, provider)
         failure_reason = f"constraint violation: {exc}"
-        _emit_constraint_failure_receipt(args, provider, model, failure_reason)
+        try:
+            _emit_refusal_receipt(args, provider, model, failure_reason)
+        except Exception as _ref_exc:
+            logger.error(
+                "provider_dispatch: refusal receipt failed for constraint violation dispatch=%s: %s",
+                args.dispatch_id, _ref_exc,
+            )
         print(f"provider_dispatch: constraint violation - {exc}", file=sys.stderr)
         return 1
 
@@ -2718,6 +2816,16 @@ def main(argv: list[str] | None = None) -> int:
                 ".vnx-attest/allowed_signers trust anchor found.",
                 file=sys.stderr,
             )
+            try:
+                _emit_refusal_receipt(
+                    args, provider, getattr(args, "model", None) or "unknown",
+                    "VNX_SIGNED_DELEGATION=1 but no .vnx-attest/allowed_signers trust anchor found",
+                )
+            except Exception as _ref_exc:
+                logger.error(
+                    "provider_dispatch: refusal receipt failed for delegation reject dispatch=%s: %s",
+                    args.dispatch_id, _ref_exc,
+                )
             return 1
         _ctx = _dm.DispatchContext(
             project_id=_resolve_data_dir().name,
@@ -2737,6 +2845,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"[provider_dispatch] REJECT: signed-delegation gate failed: {_reason}",
                 file=sys.stderr,
             )
+            try:
+                _emit_refusal_receipt(
+                    args, provider, getattr(args, "model", None) or "unknown",
+                    f"signed-delegation gate failed: {_reason}",
+                )
+            except Exception as _ref_exc:
+                logger.error(
+                    "provider_dispatch: refusal receipt failed for delegation reject dispatch=%s: %s",
+                    args.dispatch_id, _ref_exc,
+                )
             return 1
         if _recorded_mandate:
             args.mandate_id = _recorded_mandate
@@ -2745,65 +2863,99 @@ def main(argv: list[str] | None = None) -> int:
                 args.dispatch_id, _recorded_mandate,
             )
 
-    if provider == "claude":
-        # Benchmark exemption: the measurement harness is exempt from the single-entry
-        # door (it dispatches lanes directly; PR-12 plan). When the operator has
-        # explicitly authorized `claude -p` for the benchmark (VNX_BENCH_CLAUDE_HEADLESS=1)
-        # AND we are in benchmark seed-materialize mode, route claude through the governed
-        # materialized-cell `claude -p` path instead of rejecting to the door.
-        if (
-            os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1"
-            and os.environ.get("VNX_BENCH_CLAUDE_HEADLESS") == "1"
-        ):
-            return _dispatch_claude(args)
-        # PR-5: claude is not a provider-lane provider. The single-entry door owns
-        # all Claude routing. Silent headless auto-selection via provider_dispatch is
-        # removed — use DispatchSpec with allow_headless=true through the door instead.
-        print(
-            "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
-            "Claude dispatches route via the single-entry dispatch door. "
-            "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
-            "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
-            "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
-            file=sys.stderr,
+    try:
+        if provider == "claude":
+            # Benchmark exemption: the measurement harness is exempt from the single-entry
+            # door (it dispatches lanes directly; PR-12 plan). When the operator has
+            # explicitly authorized `claude -p` for the benchmark (VNX_BENCH_CLAUDE_HEADLESS=1)
+            # AND we are in benchmark seed-materialize mode, route claude through the governed
+            # materialized-cell `claude -p` path instead of rejecting to the door.
+            if (
+                os.environ.get("VNX_BENCH_SEED_MATERIALIZE") == "1"
+                and os.environ.get("VNX_BENCH_CLAUDE_HEADLESS") == "1"
+            ):
+                return _dispatch_claude(args)
+            # PR-5: claude is not a provider-lane provider. The single-entry door owns
+            # all Claude routing. Silent headless auto-selection via provider_dispatch is
+            # removed — use DispatchSpec with allow_headless=true through the door instead.
+            print(
+                "[provider_dispatch] REJECT: 'claude' is not a provider-lane provider. "
+                "Claude dispatches route via the single-entry dispatch door. "
+                "Use 'vnx dispatch <pending-id>' (VNX_SINGLE_ENTRY_DISPATCH=1) or "
+                "'python3 scripts/lib/dispatch_cli.py --spec-file <path>'. "
+                "For headless/api-billed runs set allow_headless=true in the DispatchSpec.",
+                file=sys.stderr,
+            )
+            try:
+                _emit_refusal_receipt(
+                    args, "claude", getattr(args, "model", None) or "claude",
+                    "claude is not a provider-lane provider (route via the single-entry dispatch door)",
+                )
+            except Exception as _ref_exc:
+                logger.error(
+                    "provider_dispatch: refusal receipt failed for claude reject dispatch=%s: %s",
+                    args.dispatch_id, _ref_exc,
+                )
+            return _EX_USAGE
+
+        if provider == "codex":
+            _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"
+            _envelope_lanes = [
+                lane.strip()
+                for lane in (os.environ.get("VNX_UNIFIED_ENVELOPE_LANES") or "").split(",")
+                if lane.strip()
+            ]
+            if _envelope_on and "codex" in _envelope_lanes:
+                return _dispatch_codex_via_envelope(args)
+            return _dispatch_codex(args)
+
+        if provider == "gemini":
+            return _dispatch_gemini(args)
+
+        if provider == "kimi":
+            return _dispatch_kimi(args)
+
+        if provider == "deepseek-harness":
+            return _dispatch_deepseek_harness(args)
+
+        if provider == "glm-harness":
+            return _dispatch_glm_harness(args)
+
+        if provider == "local-gemma":
+            return _dispatch_local_gemma(args)
+
+        if provider.startswith("litellm:") or provider == "litellm":
+            return _dispatch_litellm(args)
+
+        # Unknown literal — argparse-style error (exit code 2).
+        parser.error(
+            f"Unknown provider '{provider}'. "
+            "Accepted values: claude, codex, gemini, kimi, litellm:<model>."
         )
-        return _EX_USAGE
-
-    if provider == "codex":
-        _envelope_on = os.environ.get("VNX_UNIFIED_ENVELOPE") == "1"
-        _envelope_lanes = [
-            lane.strip()
-            for lane in (os.environ.get("VNX_UNIFIED_ENVELOPE_LANES") or "").split(",")
-            if lane.strip()
-        ]
-        if _envelope_on and "codex" in _envelope_lanes:
-            return _dispatch_codex_via_envelope(args)
-        return _dispatch_codex(args)
-
-    if provider == "gemini":
-        return _dispatch_gemini(args)
-
-    if provider == "kimi":
-        return _dispatch_kimi(args)
-
-    if provider == "deepseek-harness":
-        return _dispatch_deepseek_harness(args)
-
-    if provider == "glm-harness":
-        return _dispatch_glm_harness(args)
-
-    if provider == "local-gemma":
-        return _dispatch_local_gemma(args)
-
-    if provider.startswith("litellm:") or provider == "litellm":
-        return _dispatch_litellm(args)
-
-    # Unknown literal — argparse-style error (exit code 2).
-    parser.error(
-        f"Unknown provider '{provider}'. "
-        "Accepted values: claude, codex, gemini, kimi, litellm:<model>."
-    )
-    return 2  # unreachable; parser.error() exits
+        return 2  # unreachable; parser.error() exits
+    except Exception as _spawn_exc:
+        # An uncaught spawn exception means the worker was never delivered a
+        # result — record it as deliver_failed (not delivered) so the receipt
+        # ledger distinguishes it from submit_failed (delivered, no report)
+        # without consulting the door log (dispatch
+        # 20260816-p10b-provider-observability).
+        logger.exception(
+            "provider_dispatch: uncaught spawn exception dispatch=%s provider=%s",
+            args.dispatch_id, provider,
+        )
+        try:
+            _emit_refusal_receipt(
+                args, provider, getattr(args, "model", None) or "unknown",
+                f"uncaught spawn exception: {_spawn_exc!r}",
+                delivery_state=_DELIVERY_STATE_DELIVER_FAILED,
+                status="failure",
+            )
+        except Exception as _ref_exc:
+            logger.error(
+                "provider_dispatch: refusal receipt failed for uncaught exception dispatch=%s: %s",
+                args.dispatch_id, _ref_exc,
+            )
+        return 1
 
 
 if __name__ == "__main__":
