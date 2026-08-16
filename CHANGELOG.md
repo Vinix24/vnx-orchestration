@@ -97,7 +97,7 @@ resolving to a silent default.
   plan-gate fell over on liveness rather than on the plan's content. The
   role is now registered with a read-only profile.
 - **Dispatch lanes: role, isolation, and failure truth (#1522, #1537,
-  #1488, #1529, #1569, #1568, #1558, #1543)** — `VNX_WORKER_ROLE` is
+  #1488, #1529, #1569, #1568, #1558, #1543, #1579, #1581)** — `VNX_WORKER_ROLE` is
   threaded into the provider-lane spawn environment; `base_ref` is
   honored through provider-lane worktree isolation; tmux buffers are
   named per delivery and main-checkout permissions carry into the
@@ -106,7 +106,13 @@ resolving to a silent default.
   reads `completion_text` instead of discarding the failure reason; the
   unbound `model` name on the worker-gone/heartbeat paths is bound; an
   oversize event-store stream now rotates at threshold instead of warning
-  forever.
+  forever; provider-lane delivery and reporting are separately observable
+  through a `delivery_state` receipt field, and a dispatch that dies on a
+  quota- or auth-failure leaves a post-hoc readable marker without the
+  door log (the tmux lane already had this); the dispatch spec's role
+  reaches the provider-lane spawn instead of arriving as `None` and
+  silently resolving every worker to the restrictive code-worker
+  fallback.
 - **Permissions and roles fail loud (#1557, #1534, #1563, #1523, #1503,
   #1511, #1509, #1506, #1545)** — multi-token `bash_allow_patterns` are
   translated into `--allowedTools`; canonical role names get
@@ -119,7 +125,7 @@ resolving to a silent default.
   close the extension-bridge leak; generated AGENTS.md/GEMINI.md mirrors
   are ignored in terminals/T0.
 - **Governance and receipts (#1559, #1554, #1555, #1552, #1491, #1497,
-  #1489, #1490, #1515)** — event_type+status governed-outcome semantics
+  #1489, #1490, #1515, #1577, #1582)** — event_type+status governed-outcome semantics
   are pinned; a synthesized receipt's status is derived from the declared
   outcome; the reconciler now sees a bare `gh pr merge` (default-ON gh
   merge source); the phantom-guard weighs the pushed branch diff on a
@@ -129,7 +135,13 @@ resolving to a silent default.
   resolves; work fate is decoupled from receipt fate with a loud failure
   on a read-only version store; gate infrastructure failures are booked
   as unavailable and non-run gates never roll up as PASS; push-verified
-  delivery is enforced for PR dispatches.
+  delivery is enforced for PR dispatches; the ledger's `schema_version`
+  reader is direction-aware — a schema newer than the reader refuses
+  loud, an older one converts in memory and is written back only on
+  continuation, and the append-only history is never rewritten; the
+  ledger's status vocabulary now comes from one generated source instead
+  of two hand-written copies that disagreed on five values, with a CI
+  check that fails a second hardcoded copy.
 - **CI and doctor (#1536, #1535, #1514, #1546, #1549, #1524, #1551,
   #1533)** — workflow files are validated with actionlint in
   `local-ci.sh`; the merge-preflight VNX CI-run check is fail-closed;
