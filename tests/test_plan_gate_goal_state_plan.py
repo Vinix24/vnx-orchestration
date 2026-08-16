@@ -40,6 +40,8 @@ import tracks  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
+
 
 def _bootstrap(tmp_path: Path) -> Path:
     """A pre-migrated store (tracks + plan-gate schema), same as
@@ -65,9 +67,20 @@ def _bootstrap(tmp_path: Path) -> Path:
         "to_state TEXT, actor TEXT, reason TEXT, metadata_json TEXT, occurred_at TEXT, project_id TEXT)"
     )
     conn.commit()
+    # Migration 0022 REBUILDS the dispatches table, so output_ref/output_kind
+    # (needed by the 0027 deliverables view — the plan-gate now queries it via
+    # `_fetch_deliverable_records`, not just tracks) must be added AFTER it
+    # runs — same ordering as test_plan_gate_batch.py::_bootstrap.
     for version, filename in [
         (22, "0022_track_layer.sql"),
         (24, "0024_tracks_tenant_scoping.sql"),
+    ]:
+        sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, version, sql)
+        conn.commit()
+    ensure_dispatches_columns(conn)
+    conn.commit()
+    for version, filename in [
         (27, "0027_planning_horizon_and_deliverable_view.sql"),
         (28, "0028_tracks_derived_status.sql"),
         (29, "0029_track_type_discriminator.sql"),
@@ -120,11 +133,26 @@ def _run(state_dir: Path, track_id: str, *, doc=None, goal_state="", captured=No
 _THICK_GOAL = "Ship a coherent plan for the widget. " * 10  # 390 chars
 
 
+def _add_deliverable(state_dir: Path, track_id: str, title: str = "Ship it") -> None:
+    """Plan-gate now REQUIRES at least one deliverable on the goal_state path
+    (see test_plan_gate_deliverables_source.py) — this seeds the minimum a
+    track needs to gate without --doc."""
+    rc = planning_cli.main([
+        "deliverable", "add",
+        "--objective", track_id, "--output-kind", "pr",
+        "--title", title, "--project-id", "p1",
+        "--state-dir", str(state_dir),
+    ])
+    assert rc == 0, f"failed to seed a deliverable for {track_id!r}"
+
+
 def test_run_without_doc_uses_goal_state_and_names_source(tmp_path, monkeypatch, capsys):
-    """A track with a thick goal gates without --doc, and the output names the
-    source. Asserts the plan text actually handed to run_panel is the goal."""
+    """A track with a thick goal AND a deliverable gates without --doc, and the
+    output names the source. Asserts the plan text actually handed to
+    run_panel contains both the goal and the deliverable."""
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-goal", "p1", "t", _THICK_GOAL, phase="queued")
+    _add_deliverable(state_dir, "feat-goal", title="Ship the widget")
     captured: list = []
     _stub_panel(monkeypatch, tmp_path, captured)
 
@@ -134,7 +162,8 @@ def test_run_without_doc_uses_goal_state_and_names_source(tmp_path, monkeypatch,
     assert rc == 0
     assert len(captured) == 1
     assert captured[0]["doc_path"] is None
-    assert captured[0]["doc_text"] == _THICK_GOAL.strip()
+    assert _THICK_GOAL.strip() in captured[0]["doc_text"]
+    assert "Ship the widget" in captured[0]["doc_text"]
     assert "plan-gate source: track goal_state" in err
 
 
@@ -223,6 +252,10 @@ def test_threshold_comes_from_config_not_hardcoded(tmp_path, monkeypatch, capsys
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-ok", "p1", "t", "g" * 90, phase="queued")
     tracks.create_track(state_dir, "feat-short", "p1", "t", "g" * 30, phase="queued")
+    # feat-ok must clear the deliverables gate too so this stays a pure
+    # threshold-vs-config test; feat-short is refused on goal length first, so
+    # it needs none.
+    _add_deliverable(state_dir, "feat-ok")
     captured: list = []
     _stub_panel(monkeypatch, tmp_path, captured)
     # Override the config path _stub_panel just set to absent.yaml: the threshold

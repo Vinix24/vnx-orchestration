@@ -2157,10 +2157,26 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_deliverable_list(args: argparse.Namespace) -> int:
-    state_dir = _resolve_state_dir(args.state_dir)
-    project_id = args.project_id
+def _fetch_deliverable_records(
+    state_dir, project_id: str, objective: Optional[str] = None, *, include_metadata: bool = False,
+) -> list[dict]:
+    """The single read path over the deliverable plane — the view rollup when
+    migration 0027 has been applied, the raw-dispatches fallback otherwise.
 
+    ``cmd_deliverable_list`` (``vnx deliverable list``) and the plan-gate's
+    goal+deliverables plan source (``resolve_plan_source`` via
+    ``run_plan_gate_for_track``) both call this instead of each carrying their
+    own query — one read path, so the two can never see a different shape of
+    "what deliverables does this track have" for the same DB.
+
+    ``include_metadata=False`` (the ``vnx deliverable list`` default) returns
+    exactly the fields that command already rendered before this function was
+    extracted — no behavior change. ``include_metadata=True`` additionally
+    parses each deliverable's ``metadata_json`` into ``title`` (always) and
+    ``metadata`` (the full parsed dict, so a caller can read fields like
+    ``task_class``/``routing_floor`` that are not modeled as their own view
+    columns yet).
+    """
     conn = _db_conn(state_dir)
     try:
         has_view = any(
@@ -2168,22 +2184,31 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")
         )
         if has_view:
-            if args.objective:
+            base_cols = (
+                "deliverable_ref, output_kind, track, dispatch_count, "
+                "derived_status, last_activity"
+            )
+            meta_col = (
+                ", (SELECT d2.metadata_json FROM dispatches d2 "
+                "WHERE d2.project_id = deliverables.project_id "
+                "AND d2.output_ref = deliverables.deliverable_ref "
+                "ORDER BY d2.updated_at DESC LIMIT 1) AS metadata_json"
+                if include_metadata else ""
+            )
+            if objective:
                 rows = conn.execute(
-                    """
-                    SELECT deliverable_ref, output_kind, track, dispatch_count,
-                           derived_status, last_activity
+                    f"""
+                    SELECT {base_cols}{meta_col}
                     FROM deliverables
                     WHERE project_id = ? AND track = ?
                     ORDER BY last_activity DESC
                     """,
-                    (project_id, args.objective),
+                    (project_id, objective),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
-                    SELECT deliverable_ref, output_kind, track, dispatch_count,
-                           derived_status, last_activity
+                    f"""
+                    SELECT {base_cols}{meta_col}
                     FROM deliverables
                     WHERE project_id = ?
                     ORDER BY track, last_activity DESC
@@ -2191,12 +2216,17 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
                     (project_id,),
                 ).fetchall()
             records = [dict(r) for r in rows]
+            if include_metadata:
+                for r in records:
+                    meta = json.loads(r.pop("metadata_json", None) or "{}")
+                    r["title"] = meta.get("title", "")
+                    r["metadata"] = meta
         else:
             # Fallback: read raw dispatches when view hasn't been applied yet
-            filter_clause = "AND track = ?" if args.objective else ""
+            filter_clause = "AND track = ?" if objective else ""
             params: list[Any] = [project_id]
-            if args.objective:
-                params.append(args.objective)
+            if objective:
+                params.append(objective)
             raw = conn.execute(
                 f"""
                 SELECT dispatch_id, state, track, output_kind, output_ref, metadata_json, updated_at
@@ -2209,7 +2239,7 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
             records = []
             for r in raw:
                 meta = json.loads(r["metadata_json"] or "{}")
-                records.append({
+                rec = {
                     "deliverable_ref": r["output_ref"] or r["dispatch_id"],
                     "output_kind": r["output_kind"] or "-",
                     "track": r["track"] or "-",
@@ -2217,9 +2247,19 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
                     "derived_status": r["state"],
                     "last_activity": r["updated_at"],
                     "title": meta.get("title", ""),
-                })
+                }
+                if include_metadata:
+                    rec["metadata"] = meta
+                records.append(rec)
     finally:
         conn.close()
+    return records
+
+
+def cmd_deliverable_list(args: argparse.Namespace) -> int:
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    records = _fetch_deliverable_records(state_dir, project_id, args.objective)
 
     if args.json:
         print(json.dumps(records, indent=2, default=str))
@@ -2470,9 +2510,12 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------------------
 # plan-gate plan-source resolution (OPSCHALING cluster, point 2): `--doc` is
-# optional; when absent the track's `goal_state` stands in for the plan. The
-# choice, the threshold check, and the refusal live here as a plain function so
-# a batch loop can call it directly, not only through the argparse handler.
+# optional; when absent the plan is composed from the track's `goal_state` AND
+# its deliverables (rubric axes 3/5 judge deliverables — a bare goal cannot
+# answer them). The choice, the threshold check, and the refusals live here as
+# a plain function so a batch loop can call it directly, not only through the
+# argparse handler. No DB access in this function: the caller fetches
+# `deliverables` (same as it already fetches `goal_state`) and passes them in.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -2484,23 +2527,56 @@ class PlanSource:
 
 
 class PlanRefusal(Exception):
-    """No acceptable plan text: the track's goal is too thin (or absent) and no
-    ``--doc`` was supplied.
+    """No acceptable plan text, and no ``--doc`` was supplied to substitute one.
 
-    Carries the measured length and the threshold so the caller can render a
-    refusal that names all three (length, threshold, and the remediation) —
-    never a bare exit, and never a silent pass to a panel that would burn five
-    model rounds on a plan that is not there.
+    Two distinct causes, kept as ONE exception type (single ``except`` at the
+    call site) but tagged by ``kind`` so the caller renders — and the batch
+    tallies — a reason that actually names what is missing, never a generic
+    refusal that blurs "goal too short" with "goal is fine but nothing is
+    scoped to review":
+
+    - ``kind="thin_goal"``: the track's goal is too thin (or absent) to stand
+      in for a plan at all. Carries ``length``/``threshold``.
+    - ``kind="no_deliverables"``: the goal clears the length floor, but the
+      track has zero deliverables — rubric axes 3 (deliverables) and 5
+      (routing FLOOR per deliverable) would be structurally unanswerable, so a
+      panel round is refused before it burns seats on a plan it cannot judge
+      on those axes.
+
+    Construct via the ``thin_goal``/``no_deliverables`` factories, never the
+    bare constructor — that keeps ``kind`` and the message text from being
+    able to disagree.
     """
 
-    def __init__(self, length: int, threshold: int) -> None:
+    def __init__(
+        self, message: str, *, kind: str, length: Optional[int] = None, threshold: Optional[int] = None,
+    ) -> None:
+        self.kind = kind
         self.length = length
         self.threshold = threshold
-        super().__init__(
+        super().__init__(message)
+
+    @classmethod
+    def thin_goal(cls, length: int, threshold: int) -> "PlanRefusal":
+        return cls(
             f"plan-gate refused: track goal is too thin to be a plan "
             f"(measured {length} meaningful chars, threshold {threshold}). "
             f"Fill in the track's goal to at least {threshold} meaningful "
-            f"characters, or pass --doc <path> with a plan document."
+            f"characters, or pass --doc <path> with a plan document.",
+            kind="thin_goal", length=length, threshold=threshold,
+        )
+
+    @classmethod
+    def no_deliverables(cls, track_id: str) -> "PlanRefusal":
+        return cls(
+            f"plan-gate refused: track {track_id!r} has zero deliverables and no "
+            "--doc was supplied. The rubric judges deliverables directly "
+            "(scoped/shippable, task_class tag, a routing FLOOR per "
+            "deliverable) — a goal alone gives the panel nothing to review on "
+            "those axes, so the panel would revise every time. Add one with "
+            f"`vnx deliverable add --objective {track_id} --output-kind <kind> "
+            "--title \"...\"`, or pass --doc <path> with a plan document.",
+            kind="no_deliverables",
         )
 
 
@@ -2508,18 +2584,28 @@ def resolve_plan_source(
     *,
     doc_text: Optional[str],
     goal_state: Optional[str],
+    deliverables: Optional[list[dict]],
     min_goal_chars: int,
+    track_id: str,
 ) -> PlanSource:
-    """Resolve which plan text the gate reviews, and refuse a too-thin goal.
+    """Resolve which plan text the gate reviews, and refuse loud when it cannot.
 
     ``--doc`` wins explicitly: when ``doc_text`` is not None it is the plan, and
     a non-empty ``goal_state`` is marked ``ignored_goal`` (the caller surfaces
-    that so the user never has to guess which source the gate judged). Otherwise
-    the track's ``goal_state`` is the plan, and it must carry at least
-    ``min_goal_chars`` MEANINGFUL characters — the length is measured AFTER
-    stripping whitespace, so a goal of 200 spaces is refused. A too-thin or
-    absent goal raises :class:`PlanRefusal`: a thin goal is never silently
-    passed and never silently refused.
+    that so the user never has to guess which source the gate judged) — the
+    track's deliverables are not consulted in this branch at all.
+
+    Otherwise the plan is composed from the track's ``goal_state`` AND its
+    ``deliverables``. The goal must carry at least ``min_goal_chars``
+    MEANINGFUL characters — the length is measured AFTER stripping whitespace,
+    so a goal of 200 spaces is refused — this floor guards against an empty
+    goal field, nothing more; it is not a plannability test on its own. The
+    track must ALSO have at least one deliverable: the rubric judges
+    deliverables directly (axes 3 and 5), and a thick goal with zero
+    deliverables cannot answer either one. Either gap raises
+    :class:`PlanRefusal` (thin goal, or zero deliverables — see its
+    docstring): never silently passed to a panel that cannot judge it, and
+    never a silent refusal without a reason.
     """
     if doc_text is not None:
         return PlanSource(
@@ -2529,8 +2615,58 @@ def resolve_plan_source(
         )
     goal = (goal_state or "").strip()
     if len(goal) < min_goal_chars:
-        raise PlanRefusal(length=len(goal), threshold=min_goal_chars)
-    return PlanSource(plan_text=goal, source="goal")
+        raise PlanRefusal.thin_goal(len(goal), min_goal_chars)
+    deliverables = deliverables or []
+    if not deliverables:
+        raise PlanRefusal.no_deliverables(track_id)
+    plan_text = _compose_goal_and_deliverables_plan(goal, deliverables)
+    return PlanSource(plan_text=plan_text, source="goal")
+
+
+def _format_deliverable_field(meta: dict, key: str) -> str:
+    """Render one metadata field for the plan text: the value when present, an
+    explicit "(missing...)" marker when it is not — a panelist must be able to
+    tell "this deliverable has no task_class" from "this line was omitted",
+    since only the first is a real gap the rubric should flag."""
+    value = meta.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return f"{key}: (missing — not set on this deliverable)"
+    return f"{key}: {value}"
+
+
+def _format_deliverable_for_plan(deliverable: dict) -> str:
+    """Render one deliverable record as a rubric-readable block: id,
+    output_kind, title, status always; task_class and routing_floor from the
+    deliverable's metadata when present, explicitly marked missing when not
+    (see ``_format_deliverable_field``) — the rubric (axes 3/5) needs to see
+    the difference, not have it silently disappear."""
+    meta = deliverable.get("metadata") or {}
+    title = deliverable.get("title") or "(missing — not set on this deliverable)"
+    lines = [
+        f"- id: {deliverable.get('deliverable_ref', '-')}",
+        f"  output_kind: {deliverable.get('output_kind', '-')}",
+        f"  title: {title}",
+        f"  status: {deliverable.get('derived_status', '-')}",
+        f"  {_format_deliverable_field(meta, 'task_class')}",
+        f"  {_format_deliverable_field(meta, 'routing_floor')}",
+    ]
+    return "\n".join(lines)
+
+
+def _compose_goal_and_deliverables_plan(goal: str, deliverables: list[dict]) -> str:
+    """Compose the plan text handed to the panel from the track's goal_state
+    AND its deliverables, so rubric axes 3 (deliverables, scoped/task_class)
+    and 5 (routing FLOOR per deliverable) have something to judge — before
+    this, only the goal text reached the panel and those axes were
+    structurally unanswerable regardless of how many deliverables existed.
+    """
+    blocks = "\n".join(_format_deliverable_for_plan(d) for d in deliverables)
+    return (
+        f"{goal}\n\n"
+        f"----- DELIVERABLES ({len(deliverables)}) -----\n"
+        f"{blocks}\n"
+        "----- END DELIVERABLES -----\n"
+    )
 
 
 def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
@@ -2561,7 +2697,7 @@ class PlanGateRunResult:
     for the interactive single-track command and ``cmd_plan_gate_batch``
     consumes it in a loop. ``exit_code`` is the single-track exit code (0 PASS,
     2 REVISE/refused/still-blocked, 1 infra error); ``outcome`` is the batch
-    bucket (PASS / REVISE / REFUSED_THIN / ERROR).
+    bucket (PASS / REVISE / REFUSED_THIN / REFUSED_NO_DELIVERABLES / ERROR).
     """
     track_id: str
     project_id: str
@@ -2945,10 +3081,14 @@ def run_plan_gate_for_track(
         data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
 
     # Resolve the plan source: --doc wins explicitly over the track's goal_state;
-    # without --doc the goal_state must be thick enough to stand in for a plan.
+    # without --doc the plan is the goal_state PLUS the track's deliverables (the
+    # deliverables are fetched here, not inside resolve_plan_source, which stays
+    # a plain DB-free function — same contract as goal_state coming in already
+    # read from `track`).
     source = "goal"
     ignored_goal = False
     doc_path: Optional[Path] = None
+    deliverables: list = []
     if doc:
         doc_path = Path(doc)
         if not doc_path.is_file():
@@ -2961,17 +3101,23 @@ def run_plan_gate_for_track(
         source = "doc"
         ignored_goal = bool((track.get("goal_state") or "").strip())
     else:
+        deliverables = _fetch_deliverable_records(
+            state_dir, project_id, track_id, include_metadata=True,
+        )
         try:
             resolved = resolve_plan_source(
                 doc_text=None,
                 goal_state=track.get("goal_state"),
+                deliverables=deliverables,
                 min_goal_chars=min_goal_chars,
+                track_id=track_id,
             )
         except PlanRefusal as exc:
             stderr_lines.append(str(exc))
+            outcome = "REFUSED_NO_DELIVERABLES" if exc.kind == "no_deliverables" else "REFUSED_THIN"
             return PlanGateRunResult(
                 track_id=track_id, project_id=project_id, exit_code=2,
-                outcome="REFUSED_THIN", error=str(exc),
+                outcome=outcome, error=str(exc),
                 thin_length=exc.length, thin_threshold=exc.threshold,
                 stderr_lines=stderr_lines,
             )
@@ -2984,15 +3130,16 @@ def run_plan_gate_for_track(
         stderr_lines.append(note)
     else:
         stderr_lines.append(
-            f"plan-gate source: track goal_state "
-            f"({len(plan_text.strip())} meaningful chars)"
+            f"plan-gate source: track goal_state + {len(deliverables)} deliverable(s) "
+            f"({len(plan_text.strip())} chars total)"
         )
 
     plan_source_info = {"source": source, "ignored_goal": ignored_goal}
     if source == "doc":
         plan_source_info["doc_path"] = str(doc_path)
     else:
-        plan_source_info["goal_chars"] = len(plan_text.strip())
+        plan_source_info["goal_chars"] = len((track.get("goal_state") or "").strip())
+        plan_source_info["deliverable_count"] = len(deliverables)
 
     try:
         weight = _derive_panel_weight(
@@ -3317,14 +3464,18 @@ def cmd_plan_gate_run(args: argparse.Namespace) -> int:
     """Run the plan-first panel over a plan; on PASS, resolve the OI-PLAN blocker.
 
     The plan text comes from ``--doc`` (a file) when given, otherwise from the
-    track's ``goal_state``. A goal under ``goal_min_chars`` meaningful characters
-    (whitespace-stripped, configured in ``configs/plan_gate_panel.yaml``) is
-    refused loud — never silently passed to a panel it cannot inform, never
-    silently dropped. ``--doc`` wins explicitly over a present goal, and the
-    output names which source the gate judged.
+    track's ``goal_state`` PLUS its deliverables — the rubric judges
+    deliverables directly (scope/task_class, routing FLOOR), so those two axes
+    need the deliverables in the reviewed text, not just the goal. A goal under
+    ``goal_min_chars`` meaningful characters (whitespace-stripped, configured in
+    ``configs/plan_gate_panel.yaml``) is refused loud, and so is a track with
+    zero deliverables — never silently passed to a panel it cannot inform,
+    never silently dropped. ``--doc`` wins explicitly over goal+deliverables,
+    and the output names which source the gate judged.
 
-    Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK or a too-thin goal
-    (track stays blocked), 1 = infra error (doc/track missing, panel could not run).
+    Exit codes: 0 = PASS (track unblocked), 2 = REVISE/BLOCK, a too-thin goal,
+    or zero deliverables (track stays blocked), 1 = infra error (doc/track
+    missing, panel could not run).
 
     This is now a thin renderer over :func:`run_plan_gate_for_track` — the same
     execution path the batch command drives, so the two can never drift.
@@ -3815,11 +3966,12 @@ _BATCH_PROGRESS_FILENAME = "plan_gate_batch_progress.json"
 _BATCH_PROGRESS_VERSION = 1
 
 # Display labels for the batch tally; the internal outcome values stay stable
-# (PASS/REVISE/REFUSED_THIN/ERROR) for JSON consumers.
+# (PASS/REVISE/REFUSED_THIN/REFUSED_NO_DELIVERABLES/ERROR) for JSON consumers.
 _BATCH_OUTCOME_LABEL = {
     "PASS": "PASS",
     "REVISE": "REVISE",
     "REFUSED_THIN": "GEWEIGERD-te-dun",
+    "REFUSED_NO_DELIVERABLES": "GEWEIGERD-geen-deliverables",
     "ERROR": "FOUT",
 }
 
@@ -3959,6 +4111,8 @@ def _batch_detail(outcome: PlanGateRunResult) -> str:
             f"goal too thin: {outcome.thin_length} meaningful chars "
             f"(threshold {outcome.thin_threshold})"
         )
+    if outcome.outcome == "REFUSED_NO_DELIVERABLES":
+        return outcome.error
     if outcome.outcome == "ERROR":
         return outcome.error
     if outcome.outcome == "PASS":
@@ -4032,7 +4186,7 @@ def _execute_batch(
         _save_batch_progress(state_dir, progress)
         results.append(rec)
 
-    tally = {"PASS": 0, "REVISE": 0, "REFUSED_THIN": 0, "ERROR": 0}
+    tally = {"PASS": 0, "REVISE": 0, "REFUSED_THIN": 0, "REFUSED_NO_DELIVERABLES": 0, "ERROR": 0}
     for rec in results:
         if rec["outcome"] in tally:
             tally[rec["outcome"]] += 1
@@ -4089,7 +4243,7 @@ def _render_batch_summary(summary, *, as_json):
         print(f"Skipped (already done): {', '.join(summary['skipped'])}")
     parts = [
         f"{_BATCH_OUTCOME_LABEL[outcome]}={summary['tally'].get(outcome, 0)}"
-        for outcome in ("PASS", "REVISE", "REFUSED_THIN", "ERROR")
+        for outcome in ("PASS", "REVISE", "REFUSED_THIN", "REFUSED_NO_DELIVERABLES", "ERROR")
     ]
     print(f"Tally: {'  '.join(parts)}  ({len(summary['results'])} processed)")
 

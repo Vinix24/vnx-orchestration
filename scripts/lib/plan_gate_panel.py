@@ -71,7 +71,11 @@ except Exception:  # vnx-silent-except: keep the panel importable without govern
 _SEAT_KEYS: tuple[str, ...] = ("label", "provider", "model_arg")
 
 # Minimum meaningful characters (whitespace-stripped) a track's goal_state must
-# carry to stand in for the plan when `plan-gate run` is invoked WITHOUT --doc.
+# carry when `plan-gate run` is invoked WITHOUT --doc. This is an emptiness
+# floor on the goal field ALONE, not a plannability test: the goal is combined
+# with the track's deliverables (see planning_cli.resolve_plan_source) to form
+# the reviewed plan text, and a track with zero deliverables is refused
+# separately for that reason regardless of how thick the goal is.
 # The value is overridable in configs/plan_gate_panel.yaml (`goal_min_chars`),
 # never hardcoded at the call site — a fixed literal here would let the config
 # drift silently (see load_goal_min_chars).
