@@ -18,7 +18,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -296,29 +296,246 @@ def _headless_isolation_guard(plan: "ExecutionPlan") -> "Optional[str]":
     return _HEADLESS_ISOLATION_WARNING
 
 
-def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
-    """Verify the selected lane's endpoint is reachable (OI-867).
+@dataclasses.dataclass(frozen=True)
+class ReachabilityVerdict:
+    """Result of the pre-spawn lane reachability check (OI-1248).
 
-    Never fails the dry-run — always returns None.  Prints a [WARN] with
-    concrete evidence when the endpoint is unreachable or auth-rejected
-    so an operator can spot a dead route before approving the dispatch.
+    ``block=True`` means the door must REFUSE to fire: the selected lane is a
+    KNOWN-rejected fact — a recent auth/quota receipt for the same provider
+    already sits in the ledger — not a transient guess. ``block=False`` means
+    proceed; any transient endpoint wobble is printed as a WARN, never a
+    refusal. ``reason`` carries the human-readable refusal when blocking.
+    """
 
-    Checks performed:
-    - litellm-proxy lanes: HTTP GET http://127.0.0.1:4141/v1/models with
-      short timeout.  Carries Authorization: Bearer $LITELLM_API_KEY when that
-      env is set (OI-893) so an auth-gated proxy is probed the way the lane
-      actually talks to it.  401/403 → hard warning (auth broken).  Connection
-      refused/timeout → soft warning (proxy may be down).
-    - deepseek-harness: HTTP GET to api.deepseek.com/v1/models with
-      Authorization: Bearer $DEEPSEEK_API_KEY (OI-893).
-    - Other lanes: skipped (no cheap endpoint check available; claude-tmux
-      has no network endpoint, codex/kimi have ephemeral auth).
+    block: bool
+    reason: str = ""
+
+
+_LANE_REJECTION_WINDOW_ENV = "VNX_LANE_REJECTION_WINDOW_MINUTES"
+_DEFAULT_REJECTION_WINDOW_MINUTES = 15
+# Quota/auth-shaped failure classes. These do NOT self-heal inside a short
+# window (a 403 "usage limit" or a 402 "insufficient balance" persists until
+# the operator acts), so a recent one is a hard "known rejected" fact.
+# Transient classes (empty_completion, timeout, model_error, unknown) never
+# block — they can pass on the next attempt.
+_BLOCKING_FAILURE_CLASSES = frozenset({"auth_rejected", "credit_exhausted"})
+_RECEIPTS_FILENAME = "t0_receipts.ndjson"
+_LEDGER_TAIL_BYTES = 2 * 1024 * 1024   # read at most the last 2 MB of the ledger
+_LEDGER_TAIL_LINES = 200               # keep at most this many recent lines
+
+
+def _rejection_window_minutes() -> int:
+    """The rejection window, in minutes, from VNX_LANE_REJECTION_WINDOW_MINUTES.
+
+    A malformed override is a config error, not a reason to silently widen the
+    window — fall back to the default and say so.
+    """
+    raw = (os.environ.get(_LANE_REJECTION_WINDOW_ENV) or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            print(
+                f"[dispatch_cli] [WARN] {_LANE_REJECTION_WINDOW_ENV}={raw!r} is "
+                f"not an integer; using {_DEFAULT_REJECTION_WINDOW_MINUTES} "
+                f"minutes",
+                file=sys.stderr,
+            )
+    return _DEFAULT_REJECTION_WINDOW_MINUTES
+
+
+def _read_ledger_tail(path: Path) -> "list[str]":
+    """Read the last _LEDGER_TAIL_LINES non-empty lines of the append-only ledger.
+
+    Bounded tail read (same shape as cost_tracker._read_last_lines): seek to
+    end, read at most the last _LEDGER_TAIL_BYTES, drop a possibly-partial first
+    line. Never reads the whole file — the production ledger is ~160 MB / 27k
+    lines. An unreadable file is the ABSENCE of a known rejection, not an error.
+    """
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            end = f.tell()
+            if end == 0:
+                return []
+            read_bytes = min(end, _LEDGER_TAIL_BYTES)
+            f.seek(end - read_bytes)
+            raw = f.read(read_bytes).decode("utf-8", errors="replace")
+        lines = raw.splitlines()
+        if end > read_bytes:
+            lines = lines[1:]
+        return [ln for ln in lines[-_LEDGER_TAIL_LINES:] if ln.strip()]
+    except OSError:
+        return []
+
+
+def _recent_blocking_rejection(provider_val: str, state_dir: Path) -> "Optional[dict]":
+    """Most recent receipt marking THIS provider known-rejected, or None.
+
+    Scans the ledger tail for a dispatch receipt whose ``failure_class`` is
+    quota/auth-shaped and whose ``provider`` matches, within the rejection
+    window. Matching is exact on the provider string — the ledger's ``provider``
+    field is the same value plan.provider.value carries (measured on the
+    2026-08-16 ledger: kimi, deepseek-harness, glm-harness, codex,
+    litellm:deepseek). A missing/empty/corrupt file or an out-of-window hit is
+    the ABSENCE of a known rejection.
+    """
+    receipts_path = state_dir / _RECEIPTS_FILENAME
+    if not receipts_path.exists():
+        return None
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=_rejection_window_minutes())
+    for line in _read_ledger_tail(receipts_path):
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("receipt_kind") != "dispatch":
+            continue
+        if str(r.get("provider") or "").lower() != provider_val.lower():
+            continue
+        if r.get("failure_class") not in _BLOCKING_FAILURE_CLASSES:
+            continue
+        ts_raw = r.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).rstrip("Z")).replace(tzinfo=timezone.utc)
+        except (ValueError, AttributeError):
+            continue
+        if ts < cutoff:
+            continue
+        return r
+    return None
+
+
+# Phrases that name a quota/auth cause directly, most-specific first. The
+# provider's raw error often arrives wrapped in a JSON-parse error, so the human
+# sentence must be dug out of the failure_reason, not read verbatim.
+_REFUSAL_PHRASES = (
+    "reached your usage limit",
+    "usage limit",
+    "insufficient balance",
+    "insufficient credits",
+    "requires more credits",
+    "add more credits",
+    "openrouter_credits",
+    "rate limit",
+    "token expired",
+    "invalid token",
+    "access denied",
+)
+
+
+def _readable_refusal_reason(failure_reason: str) -> str:
+    """Extract the human quota/auth sentence from a failed receipt's
+    failure_reason, so the refusal names the cause instead of the JSON-parse
+    noise that wrapped it (OI-1248).
+
+    The kimi 403 arrived as ``msg='Expecting value: line 1 column 1 (char 0)'
+    raw='Error code: 403 - {... "message": "You've reached your usage
+    limit..."}`` — the real reason sits inside ``raw``. Unescape the embedded
+    repr, collapse whitespace, then surface the first quota/auth phrase with a
+    bounded window of context. Falls back to a bounded prefix when no phrase
+    matches.
+    """
+    text = (failure_reason or "").replace("\\'", "'").replace('\\"', '"').replace("\\\\", "\\")
+    collapsed = " ".join(text.split())
+    low = collapsed.lower()
+    for phrase in _REFUSAL_PHRASES:
+        idx = low.find(phrase)
+        if idx != -1:
+            start = max(0, idx - 48)
+            return collapsed[start:start + 200].strip(" .'\"")
+    return collapsed[:200]
+
+
+def _format_known_rejection(provider_val: str, receipt: dict) -> str:
+    """Build the door-level refusal reason for a known-rejected lane.
+
+    The operator reads the QUOTA/AUTH reason up front (the readable sentence
+    extracted from failure_reason), not the JSON-parse noise that buried it.
+    """
+    fc = receipt.get("failure_class")
+    ts = receipt.get("timestamp") or "?"
+    src = receipt.get("dispatch_id") or "?"
+    readable = _readable_refusal_reason(receipt.get("failure_reason") or "")
+    return (
+        f"lane={provider_val!r} is a KNOWN-rejected fact: a receipt recorded "
+        f"{fc} at {ts} (dispatch {src}) for the same provider within the "
+        f"{_rejection_window_minutes()}-minute rejection window. Reason: "
+        f"{readable}. Refusing to fire — re-route the dispatch or fix the lane "
+        f"(kimi: `kimi login`; deepseek/glm: check API key/credits) and re-fire "
+        f"once it is healthy."
+    )
+
+
+def _not_checkable_note(
+    lane: str, provider_val: str, state_dir: Optional[Path]
+) -> str:
+    """Explicit, readable "not checkable" note for lanes with no live probe.
+
+    Never silence: a lane without a cheap endpoint probe still says WHY. When
+    the door supplied the ledger (state_dir), the note also says the ledger
+    holds no recent rejection for it — it does not, or the ledger branch above
+    would already have returned block=True.
+    """
+    if lane in ("claude_tmux_subscription", "claude_headless"):
+        return (
+            f"[dispatch_cli] [reachability] lane={lane} — no cheap endpoint "
+            f"check available (claude runs on the operator's subscription via "
+            f"tmux/headless; it has no network endpoint the door can probe, and "
+            f"its auth state is the operator's keychain, not an env key)."
+        )
+    return (
+        f"[dispatch_cli] [reachability] lane={lane} provider={provider_val} — "
+        f"NOT CHECKABLE via a live probe: this lane has no cheap /v1/models "
+        f"endpoint (kimi is CLI-OAuth, codex/gemini are CLI-ephemeral, "
+        f"glm-harness routes through a local proxy the door does not own). No "
+        f"cheap pre-check exists for its token state; the ledger fact above is "
+        f"its deterministic signal, and it shows no recent auth/quota rejection "
+        f"for {provider_val}."
+    )
+
+
+def _check_reachability(
+    plan: "ExecutionPlan", spec: "DispatchSpec", *, state_dir: Optional[Path] = None
+) -> "ReachabilityVerdict":
+    """Verify the selected lane before work is handed out (OI-867, OI-1248).
+
+    Runs on BOTH the dry-run and the real fire path, right after compile_plan
+    and BEFORE the door commits to firing. Two signal sources, in order:
+
+    1. The ledger fact (provider lanes only): a recent receipt with
+       ``failure_class in {auth_rejected, credit_exhausted}`` for THIS provider
+       is a KNOWN rejection — the exact class the 2026-08-16 kimi stampede died
+       on (nine dispatches, one quota 403, eight minutes). A lane that is a
+       known-rejected fact returns ``block=True`` so the door refuses to fire:
+       the second dispatch that would die on the same error never gets a worker.
+
+    2. A live endpoint probe (litellm:* / deepseek-harness): unchanged and still
+       advisory — a connection hiccup is a WARN, never a refusal.
+
+    Lanes with neither signal (kimi/codex/gemini/glm-harness/local-gemma and the
+    claude lanes) print an explicit "NOT CHECKABLE" note naming WHY no cheap
+    pre-check exists, never a silent skip. Never raises: an absent/corrupt
+    ledger or a probe failure degrades to the advisory WARN path, never a crash.
     """
     import urllib.request
     import urllib.error
 
     provider_val = plan.provider.value
     lane = plan.lane
+
+    # ── 1. Ledger fact — the deterministic "known rejected" signal ──────────
+    # Every provider lane gets this, including the ones with no endpoint probe
+    # (kimi/codex/gemini/glm-harness): a recent auth/quota receipt for the SAME
+    # provider is a fact, not a guess. Checked first so a known-dead lane is
+    # refused before any probe or spawn work is spent on it.
+    if lane == "provider" and state_dir is not None:
+        receipt = _recent_blocking_rejection(provider_val, state_dir)
+        if receipt is not None:
+            return ReachabilityVerdict(
+                block=True,
+                reason=_format_known_rejection(provider_val, receipt),
+            )
 
     # ── litellm proxy lanes (litellm:deepseek, litellm:zai, litellm:moonshot) ──
     if lane == "provider" and (
@@ -405,7 +622,7 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
                 f"likely fail.",
                 file=sys.stderr,
             )
-        return
+        return ReachabilityVerdict(block=False)
 
     # ── deepseek-harness lane ──
     if lane == "provider" and provider_val in (
@@ -452,15 +669,11 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
                 f"{ds_url} ({exc}).",
                 file=sys.stderr,
             )
-        return
+        return ReachabilityVerdict(block=False)
 
-    # ── Claude tmux lane, codex, kimi, gemini — no cheap endpoint check ──
-    print(
-        f"[dispatch_cli] [reachability] lane={lane} — no cheap endpoint "
-        f"check available (lanes that don't go through a stable HTTP proxy "
-        f"are verified at spawn time).",
-        file=sys.stderr,
-    )
+    # ── Every other lane — explicit "not checkable", never silence ─────────
+    print(_not_checkable_note(lane, provider_val, state_dir), file=sys.stderr)
+    return ReachabilityVerdict(block=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2058,6 +2271,21 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                 warnings=plan.warnings + (headless_isolation_warning,),
             )
 
+        # OI-1248: lane reachability is established HERE — right after the plan
+        # is final and BEFORE the door commits to firing (permit, dispatch row,
+        # spawn). A lane that is a KNOWN-rejected fact (a recent auth/quota
+        # receipt for the same provider in the ledger) refuses to fire on BOTH
+        # the dry-run and the real path, so the second dispatch that would die
+        # on the same lane error never gets a worker. The old call sat at the
+        # tail of the dry-run branch: it ran only when --dry-run was passed,
+        # only after _print_plan, and never on a real fire — the 2026-08-16
+        # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
+        # blind because a real fire never checked reachability at all.
+        reachability = _check_reachability(plan, vspec.spec, state_dir=state_dir)
+        if reachability.block:
+            _emit_reject(Reject("lane-known-rejected", reachability.reason))
+            return 1
+
         # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth
         # model ranks the deterministic anchors into a sidecar BEFORE the permit
         # is issued. It reads vspec.instruction_text in-memory and writes a
@@ -2150,14 +2378,6 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
 
         if dry_run:
             _print_plan(plan, fp)
-            # OI-867: reachability check — verify the lane endpoint is
-            # responsive BEFORE the dispatch is approved.  Never fail-closed
-            # on a transient network hiccup; auth-rejection is a hard
-            # warning.  Provider lane availability is cheap to check (one
-            # HTTP call) and catches the exact class of silent failure that
-            # the 20260730-phantom-branch-fallback dispatch hit (litellm
-            # proxy 401 → 43ms dispatch death with no error trace).
-            _check_reachability(plan, vspec.spec)
             return 0
 
         with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):

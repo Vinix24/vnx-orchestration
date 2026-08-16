@@ -329,6 +329,84 @@ def test_provider_routes_to_envelope(mock_envelope, mock_snapshot, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# OI-1248: known-rejected lane refuses at the door, before spawn
+# ---------------------------------------------------------------------------
+
+def _seed_kimi_rejection(state_dir: Path) -> None:
+    """Write a recent auth_rejected kimi receipt into the resolved ledger."""
+    from datetime import datetime, timedelta, timezone
+
+    ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with (state_dir / "t0_receipts.ndjson").open("w", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "receipt_kind": "dispatch",
+                    "dispatch_id": "20260816-p2-blocked-split",
+                    "provider": "kimi",
+                    "failure_class": "auth_rejected",
+                    "failure_reason": (
+                        "kimi-cli: [quota_or_auth] provider=kimi reason=quota_or_auth "
+                        "msg='Expecting value: line 1 column 1 (char 0)' "
+                        "raw='Error code: 403 - {'error': {'message': \"You've "
+                        "reached your usage limit for this billing cycle.\"}}'"
+                    ),
+                    "timestamp": ts,
+                }
+            )
+            + "\n"
+        )
+
+
+@patch("dispatch_cli.build_runtime_snapshot")
+def test_dry_run_rejects_known_rejected_lane(mock_snapshot, tmp_path, monkeypatch, capsys):
+    """A kimi dry-run whose provider has a recent auth_rejected receipt in the
+    ledger is REJECTED (lane-known-rejected) with the quota reason on the
+    surface — the same outcome the 2026-08-16 stampede would have produced had
+    the door read the ledger before firing."""
+    mock_snapshot.return_value = _clean_snapshot()
+
+    data_dir = tmp_path / "vnx-data"
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _seed_kimi_rejection(data_dir / "state")
+
+    spec_file = _make_spec_file(tmp_path, provider="kimi", target_slot="T1")
+    rc = run_dispatch(spec_file, dry_run=True)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "lane-known-rejected" in err
+    assert "usage limit" in err
+
+
+@patch("dispatch_cli.build_runtime_snapshot")
+@patch("dispatch_cli.run_envelope_plan")
+def test_run_dispatch_rejects_known_rejected_lane_before_spawn(
+    mock_envelope, mock_snapshot, tmp_path, monkeypatch, capsys
+):
+    """A real (non-dry-run) kimi fire whose provider is a known-rejected fact
+    returns 1 and NEVER reaches run_envelope_plan — the second dispatch that
+    would die on the same lane error is refused before a worker spawns."""
+    mock_snapshot.return_value = _clean_snapshot()
+
+    data_dir = tmp_path / "vnx-data"
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _seed_kimi_rejection(data_dir / "state")
+
+    spec_file = _make_spec_file(tmp_path, provider="kimi", target_slot="T1")
+    rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    mock_envelope.assert_not_called()
+    err = capsys.readouterr().err
+    assert "lane-known-rejected" in err
+    assert "usage limit" in err
+
+
+# ---------------------------------------------------------------------------
 # test_claude_routes_to_tmux_with_permit
 # ---------------------------------------------------------------------------
 
