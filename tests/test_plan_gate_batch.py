@@ -107,7 +107,22 @@ def _pass_result(track_id: str, project_id: str, panel: list) -> dict:
 
 
 def _make_track(state_dir: Path, track_id: str, goal: str) -> None:
+    """Create a track AND seed it with one deliverable.
+
+    Plan-gate now requires at least one deliverable on the goal_state path
+    (see test_plan_gate_deliverables_source.py) — every track in this file
+    that is meant to reach the panel needs one. Tracks meant to be refused for
+    a too-thin goal are unaffected: the thin-goal check fires before the
+    deliverables check, so the extra deliverable is a harmless no-op there.
+    """
     tracks.create_track(state_dir, track_id, "p1", "t", goal, phase="queued")
+    rc = planning_cli.main([
+        "deliverable", "add",
+        "--objective", track_id, "--output-kind", "pr",
+        "--title", f"Ship {track_id}", "--project-id", "p1",
+        "--state-dir", str(state_dir),
+    ])
+    assert rc == 0, f"failed to seed a deliverable for {track_id!r}"
 
 
 def _seed_blocker(state_dir: Path, track_id: str) -> None:
@@ -220,7 +235,9 @@ def test_thin_goal_is_an_outcome_and_batch_continues(tmp_path, monkeypatch):
 
     assert summary["interrupted"] is False
     assert summary["skipped"] == []
-    assert summary["tally"] == {"PASS": 1, "REVISE": 0, "REFUSED_THIN": 1, "ERROR": 0}
+    assert summary["tally"] == {
+        "PASS": 1, "REVISE": 0, "REFUSED_THIN": 1, "REFUSED_NO_DELIVERABLES": 0, "ERROR": 0,
+    }
 
     by_track = {r["track_id"]: r for r in summary["results"]}
     assert by_track["thin"]["outcome"] == "REFUSED_THIN"
@@ -231,7 +248,8 @@ def test_thin_goal_is_an_outcome_and_batch_continues(tmp_path, monkeypatch):
     # Only the thick goal reached the panel — the thin one was refused first.
     assert len(captured) == 1
     assert captured[0]["doc_path"] is None
-    assert captured[0]["doc_text"] == _THICK_GOAL.strip()
+    assert _THICK_GOAL.strip() in captured[0]["doc_text"]
+    assert "Ship thick" in captured[0]["doc_text"]  # the seeded deliverable's title
 
 
 def test_resume_skips_completed_and_reads_store_back(tmp_path, monkeypatch):
