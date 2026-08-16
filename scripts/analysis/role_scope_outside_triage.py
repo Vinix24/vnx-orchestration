@@ -77,15 +77,19 @@ for _d in (_ANALYSIS_DIR, _LIB_DIR):
 logging.getLogger("worker_permissions").setLevel(logging.CRITICAL)
 
 # Reuse the measure script's source-reading helpers (single source of truth) and
-# the hook's own matchers — never a reimplementation of either.
+# the hook's own matchers — never a reimplementation of either. _historical_profile
+# (not resolve_worker_profile directly) replays what a dispatch's role actually
+# resolved to at spawn time, including legacy role strings (e.g. technical-writer)
+# that predate OI-1069 pt.5's refusal and would otherwise raise UnknownRoleError
+# here.
 from worker_scope_enforcement_measure import (  # noqa: E402
+    _historical_profile as resolve_worker_profile,
     changed_files,
     link_dispatch_to_commits,
     load_specs,
 )
 from worker_permissions import (  # noqa: E402
     match_file_write_scope,
-    resolve_worker_profile,
 )
 
 BUCKET_TOO_NARROW = "rol-te-smal"

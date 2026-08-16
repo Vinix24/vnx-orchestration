@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 # scoped (never skip-permissions).
 try:
     from worker_permissions import (
+        UnknownRoleError,
         build_claude_scope_args,
         resolve_worker_profile,
         worker_permission_enforcement_enabled,
@@ -64,6 +65,11 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
     resolve_worker_profile = None
     worker_scoped_enabled = None
     worker_permission_enforcement_enabled = None
+
+    class UnknownRoleError(Exception):  # pragma: no cover - placeholder, unreachable:
+        # resolve_worker_profile is None above, so _build_worker_scope_args never
+        # calls it and this class is never actually raised in this branch.
+        pass
 
 _LEGACY_SKIP_FLAG = "--dangerously-skip-permissions"
 # Inline fallback used only if worker_permissions cannot be imported — still
@@ -108,6 +114,13 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
     if resolve_worker_profile is not None and build_claude_scope_args is not None:
         try:
             return build_claude_scope_args(resolve_worker_profile(role), requires_mcp=requires_mcp)
+        except UnknownRoleError:
+            # A role absent from every register (OI-1069 pt.5) must refuse the
+            # dispatch, not degrade into a fallback scope — re-raise so
+            # deliver() converts it into a proper DeliveryResult(success=False)
+            # before any subprocess spawns, instead of the generic handler
+            # below silently continuing with _FALLBACK_SCOPE_ARGS.
+            raise
         except Exception as exc:  # noqa: BLE001 — never fall back to skip-permissions
             logger.warning(
                 "subprocess_adapter: scope-arg build failed (%s); using inline default",
@@ -295,9 +308,12 @@ class SubprocessAdapter:
         None preserves byte-identical argv for the existing claude lane.
 
         role: if provided (or present in the stored config), selects the
-        permission profile whose tool allow-list scopes the spawn. Falls back to
-        the default code-worker profile so an unknown role still gets a functional
-        but MCP-isolated worker (see _build_worker_scope_args).
+        permission profile whose tool allow-list scopes the spawn. A role with
+        no worker_permissions.yaml profile but a real agents/<role>/ entry still
+        gets a functional, MCP-isolated fallback worker (see
+        _build_worker_scope_args). A role absent from EVERY register instead
+        refuses the delivery (success=False, failure_reason starting
+        "unknown_role: ") before any subprocess spawns (OI-1069 pt.5).
         """
         config = self._configs.get(terminal_id, {})
         effective_instruction = instruction or config.get("instruction", dispatch_id)
@@ -322,7 +338,19 @@ class SubprocessAdapter:
         # ("Error: Input must be provided ... when using --print" -> exit 1). Placing
         # the instruction before the scope args keeps it as the -p prompt positional.
         cmd.append(effective_instruction)
-        cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
+        try:
+            cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
+        except UnknownRoleError as exc:
+            # Refuse before any subprocess spawns (OI-1069 pt.5) — no cmd has
+            # been Popen'd yet, so this is a clean pre-flight rejection.
+            return DeliveryResult(
+                success=False,
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                pane_id=None,
+                path_used="none",
+                failure_reason=f"unknown_role: {exc}",
+            )
 
         # Resolve stderr logfile path.  Writing stderr to an append-mode file
         # rather than subprocess.PIPE prevents pipe-buffer-deadlock when the

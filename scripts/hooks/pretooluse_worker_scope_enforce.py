@@ -77,6 +77,8 @@ if str(_SCRIPTS_LIB) not in sys.path:
 
 try:
     from worker_permissions import (  # noqa: E402
+        UnknownRoleError,
+        default_code_worker_profile,
         match_bash_deny,
         match_file_write_scope,
         resolve_dispatch_write_scope,
@@ -175,7 +177,17 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
         return "allow", None
 
     role = os.environ.get("VNX_WORKER_ROLE") or None
-    profile = resolve_worker_profile(role)
+    try:
+        profile = resolve_worker_profile(role)
+    except UnknownRoleError:
+        # This hook enforces tool calls for an ALREADY-RUNNING worker — there
+        # is no "refuse the dispatch" available at this point, only allow/block
+        # for one tool call. A role absent from every register (OI-1069 pt.5)
+        # still gets the restrictive code-worker fallback here, exactly as
+        # before that change; letting the exception reach main()'s fail-open
+        # catch would silently DROP enforcement for this call (implicit
+        # allow), the opposite of what an unknown role should get.
+        profile = default_code_worker_profile()
 
     if tool_name == "Bash":
         command = tool_input.get("command")

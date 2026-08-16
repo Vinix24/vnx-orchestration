@@ -61,10 +61,28 @@ _LIB = REPO_ROOT / "scripts" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 from worker_permissions import (  # noqa: E402
+    UnknownRoleError,
+    default_code_worker_profile,
     match_file_write_scope,
     resolve_dispatch_write_scope,
     resolve_worker_profile,
 )
+
+
+def _historical_profile(role: str):
+    """resolve_worker_profile(), but for REPLAYING history rather than gating a
+    live spawn. Real dispatches in this measurement's population may carry a
+    role absent from every register (e.g. legacy 'technical-writer'/
+    'test-engineer' strings, OI-1069 pt.5) — those dispatches ran to completion
+    under the old silent code-worker fallback, since the refusal this
+    measurement's own resolve_worker_profile now performs did not exist yet at
+    the time. Replaying history uses the same fallback the dispatch actually
+    got, not the new refusal (which only applies going forward, at spawn time).
+    """
+    try:
+        return resolve_worker_profile(role)
+    except UnknownRoleError:
+        return default_code_worker_profile()
 
 
 def _git(*args: str) -> str:
@@ -165,7 +183,7 @@ def main() -> int:
             no_changed_files += 1
             continue
 
-        profile = resolve_worker_profile(role)
+        profile = _historical_profile(role)
         # ``resolve_dispatch_write_scope`` parses raw CLI path strings; the spec
         # stores typed DispatchPath dicts, so pass the already-write-granting
         # plain ``path`` strings (each parses as READ_WRITE, the default).
@@ -234,7 +252,7 @@ def main() -> int:
             files |= changed_files(sha)
         if not files:
             continue
-        profile = resolve_worker_profile(role)
+        profile = _historical_profile(role)
         outside = [f for f in sorted(files) if not match_file_write_scope(f, profile, None)]
         if outside:
             role_outside += 1

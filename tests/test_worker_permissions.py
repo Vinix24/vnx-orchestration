@@ -18,6 +18,7 @@ from worker_permissions import (
     EMPTY_MCP_CONFIG,
     MCP_NAMESPACE_DENY,
     PermissionProfile,
+    UnknownRoleError,
     build_claude_scope_args,
     classify_permission_posture,
     default_code_worker_profile,
@@ -902,37 +903,38 @@ class TestCanonicalRolesHaveProfiles:
 
 
 # ---------------------------------------------------------------------------
-# OI-1100 — unknown role gets the EXPLICIT fallback, not a silent permissive
-# default. The fallback is restrictive (DEFAULT_CODE_WORKER_TOOLS, no MCP,
-# WebSearch/WebFetch denied) AND marked is_fallback=True AND logged.
+# OI-1100 — a role that EXISTS (agents/ registry) but has no usable
+# worker_permissions.yaml profile gets the EXPLICIT fallback, not a silent
+# permissive default. The fallback is restrictive (DEFAULT_CODE_WORKER_TOOLS,
+# no MCP, WebSearch/WebFetch denied) AND marked is_fallback=True AND logged.
+#
+# OI-1069 pt.5 — a role that appears in NO register at all (not a
+# worker_permissions.yaml key, not an agents/<role>/ entry) is a DIFFERENT
+# failure: it refuses loudly (UnknownRoleError) instead of silently taking
+# that same fallback. "totally-unknown-role-xyz" below is genuinely absent
+# from both registers, so it now raises; "blog-writer" is a real agents/
+# entry with no worker_permissions.yaml profile, so it still falls back.
 # ---------------------------------------------------------------------------
 
-class TestUnknownRoleExplicitFallback:
-    def test_unknown_role_is_marked_fallback(self, yaml_file: Path) -> None:
-        profile = resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
-        assert profile.is_fallback is True, (
-            "unknown role must resolve to the fallback marked is_fallback=True "
-            "(OI-1100), not a silent permissive default"
-        )
-        assert profile.role == "code-worker"
-
-    def test_unknown_role_fallback_is_restrictive(self, yaml_file: Path) -> None:
-        """The fallback carries the code-worker toolset (no MCP, WebSearch/WebFetch
-        denied) — restrictive vs blanket-skip, never silently permissive."""
-        profile = resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
-        assert set(profile.allowed_tools) == set(DEFAULT_CODE_WORKER_TOOLS)
-        assert "WebSearch" in profile.denied_tools
-        assert "WebFetch" in profile.denied_tools
-        assert profile.mcp_servers == []
-
-    def test_unknown_role_logs_warning(self, yaml_file: Path, caplog) -> None:
-        import logging
-        with caplog.at_level(logging.WARNING, logger="worker_permissions"):
+class TestUnknownRoleRefusesLoudly:
+    def test_unknown_role_raises(self, yaml_file: Path) -> None:
+        """Red on pre-fix code: this used to resolve to the silent fallback."""
+        with pytest.raises(UnknownRoleError):
             resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
+
+    def test_unknown_role_error_names_the_role(self, yaml_file: Path) -> None:
+        with pytest.raises(UnknownRoleError, match="totally-unknown-role-xyz"):
+            resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
+
+    def test_unknown_role_logs_before_raising(self, yaml_file: Path, caplog) -> None:
+        import logging
+        with caplog.at_level(logging.ERROR, logger="worker_permissions"):
+            with pytest.raises(UnknownRoleError):
+                resolve_worker_profile("totally-unknown-role-xyz", yaml_file)
         assert any(
-            "code-worker fallback" in rec.getMessage()
+            "does not exist in any register" in rec.getMessage()
             for rec in caplog.records
-        ), "unknown role must log an explicit warning naming the fallback (OI-1100)"
+        ), "an unknown role must log loudly before refusing"
 
     def test_none_role_is_marked_fallback(self) -> None:
         profile = resolve_worker_profile(None)
@@ -941,4 +943,36 @@ class TestUnknownRoleExplicitFallback:
     def test_known_role_not_marked_fallback(self, yaml_file: Path) -> None:
         profile = resolve_worker_profile("backend-developer", yaml_file)
         assert profile.is_fallback is False
+
+
+class TestRoleKnownElsewhereStillFallsBack:
+    """The distinction OI-1069 pt.5 makes: a role that exists in the agents/
+    registry but has no worker_permissions.yaml profile is NOT an unknown
+    role — it keeps the OI-1100 explicit fallback, unchanged."""
+
+    def test_agents_registry_role_without_yaml_profile_is_marked_fallback(
+        self, yaml_file: Path
+    ) -> None:
+        # blog-writer is a real agents/<role>/ entry (agents/blog-writer/) with
+        # no profile in the yaml_file fixture (which only carries
+        # backend-developer / test-engineer / frontend-developer).
+        profile = resolve_worker_profile("blog-writer", yaml_file)
+        assert profile.is_fallback is True
+        assert profile.role == "code-worker"
+
+    def test_agents_registry_role_fallback_is_restrictive(self, yaml_file: Path) -> None:
+        profile = resolve_worker_profile("blog-writer", yaml_file)
+        assert set(profile.allowed_tools) == set(DEFAULT_CODE_WORKER_TOOLS)
+        assert "WebSearch" in profile.denied_tools
+        assert "WebFetch" in profile.denied_tools
+        assert profile.mcp_servers == []
+
+    def test_agents_registry_role_logs_warning_not_error(self, yaml_file: Path, caplog) -> None:
+        import logging
+        with caplog.at_level(logging.WARNING, logger="worker_permissions"):
+            resolve_worker_profile("blog-writer", yaml_file)
+        assert any(
+            "code-worker fallback" in rec.getMessage()
+            for rec in caplog.records
+        ), "a role known elsewhere must still log the explicit-fallback warning (OI-1100)"
 
