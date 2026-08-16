@@ -42,6 +42,7 @@ from worker_permissions import (
     DEFAULT_CODE_WORKER_TOOLS,
     EMPTY_MCP_CONFIG,
     PermissionProfile,
+    UnknownRoleError,
     build_claude_scope_args,
     default_code_worker_profile,
     generate_claude_settings,
@@ -152,9 +153,43 @@ class TestBuildClaudeScopeArgs:
 # ---------------------------------------------------------------------------
 
 class TestResolveWorkerProfile:
-    def test_unknown_role_falls_back_to_code_worker(self):
-        profile = resolve_worker_profile("does-not-exist")
+    def test_unknown_role_raises_when_absent_from_every_register(self):
+        """OI-1069 pt.5: a role that is a key in NEITHER worker_permissions.yaml
+        NOR the agents/ registry must refuse loudly, not silently hand out the
+        restrictive code-worker fallback. Red on pre-fix code: 'does-not-exist'
+        used to resolve to a fallback profile instead of raising."""
+        with pytest.raises(UnknownRoleError):
+            resolve_worker_profile("does-not-exist")
+
+    def test_role_known_in_agents_registry_still_falls_back(self, tmp_path):
+        """The distinction this PR makes: a role that DOES exist somewhere (the
+        agents/ registry) but has no worker_permissions.yaml profile yet is NOT
+        the same as an unknown role — it still resolves to the restrictive
+        code-worker fallback (is_fallback=True), unchanged from before."""
+        agents_dir = tmp_path / "agents"
+        (agents_dir / "blog-writer").mkdir(parents=True)
+        (agents_dir / "blog-writer" / "CLAUDE.md").write_text("# blog-writer\n")
+        yaml_file = tmp_path / "worker_permissions.yaml"
+        yaml_file.write_text("version: 1\nprofiles: {}\n")
+
+        profile = resolve_worker_profile(
+            "blog-writer", yaml_path=yaml_file, agents_dir=agents_dir
+        )
+        assert profile.is_fallback is True
         assert set(profile.allowed_tools) == set(DEFAULT_CODE_WORKER_TOOLS)
+
+    def test_unresolvable_agents_registry_fails_open_to_fallback(self, tmp_path):
+        """If the agents/ registry itself can't be found (e.g. a consumer
+        install with no local agents/), resolve_worker_profile cannot tell an
+        unknown role from a real one it just can't see — it fails open into
+        the fallback rather than refusing every non-canonical role."""
+        yaml_file = tmp_path / "worker_permissions.yaml"
+        yaml_file.write_text("version: 1\nprofiles: {}\n")
+
+        profile = resolve_worker_profile(
+            "some-role", yaml_path=yaml_file, agents_dir=tmp_path / "no-such-dir"
+        )
+        assert profile.is_fallback is True
 
     def test_none_role_falls_back_to_code_worker(self):
         profile = resolve_worker_profile(None)
@@ -233,6 +268,25 @@ class TestDeliverSpawnArgv:
         cmd = mock_popen.call_args[0][0]
         assert SKIP_FLAG not in cmd
         assert "--strict-mcp-config" in cmd
+
+    def test_unknown_role_refuses_before_any_subprocess_spawns(self, tmp_path, monkeypatch):
+        """OI-1069 pt.5: a role absent from every register must refuse the
+        delivery, not degrade into a fallback scope. Verifies the refusal
+        actually reaches SubprocessAdapter.deliver() (not just
+        resolve_worker_profile in isolation) and that it happens BEFORE
+        subprocess.Popen is ever called."""
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
+        adapter = SubprocessAdapter()
+        with patch("subprocess.Popen") as mock_popen:
+            result = adapter.deliver(
+                "T1", "dispatch-cap-unknown-role", instruction="do work",
+                role="technical-writer",
+            )
+        assert result.success is False
+        assert result.failure_reason is not None
+        assert "unknown_role" in result.failure_reason
+        mock_popen.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +469,14 @@ class TestMcpServersAllowlistAdapterWiring:
             "    denied_tools: []\n"
             "    mcp_servers: [notion]\n"
         )
+        # A role that exists in the agents/ registry but has no
+        # worker_permissions.yaml profile — falls back to the code-worker
+        # default (is_fallback=True), which is the case test 2 below needs.
+        # Self-contained under VNX_PROJECT_ROOT so it never depends on the
+        # real repo's agents/ contents.
+        agents_dir = tmp_path / "agents" / "known-role-without-profile"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "CLAUDE.md").write_text("# known-role-without-profile\n")
         global_config = tmp_path / "global.claude.json"
         global_config.write_text(json.dumps({
             "mcpServers": {
@@ -445,13 +507,15 @@ class TestMcpServersAllowlistAdapterWiring:
         assert "gmail" not in mcp_config["mcpServers"]
 
     def test_role_without_mcp_servers_still_gets_empty_config(self, project_with_mcp_role):
-        # A role with no mcp_servers key (falls back to default code-worker
-        # profile, which declares none) keeps the pre-existing zero-MCP posture.
+        # A role that exists (agents/ registry) but has no worker_permissions.yaml
+        # profile falls back to the default code-worker profile (which declares
+        # no mcp_servers), keeping the pre-existing zero-MCP posture.
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
             adapter.deliver(
-                "T1", "dispatch-mcp-role-2", instruction="do work", role="unknown-role"
+                "T1", "dispatch-mcp-role-2", instruction="do work",
+                role="known-role-without-profile",
             )
         cmd = mock_popen.call_args[0][0]
         idx = cmd.index("--mcp-config")

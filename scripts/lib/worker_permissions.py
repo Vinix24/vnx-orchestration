@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from dispatch_identity import _IDENTITY_UNRESOLVED
 from dispatch_spec import PathAccess, WRITE_GRANTING_PATH_ACCESS
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,90 @@ def _resolve_permissions_yaml() -> Path:
 
 
 _PERMISSIONS_YAML_PATH = _resolve_permissions_yaml()
+
+
+def _resolve_agents_dir() -> Optional[Path]:
+    """Resolve the agents/ registry directory, mirroring _resolve_permissions_yaml's
+    project-override-first priority (same env vars, same sibling-parents[2] shape).
+
+    Returns None when no agents/ directory is discoverable at all — e.g. a
+    pip-installed consumer repo that ships no local agents/ (CLAUDE.md's
+    "pip-installed consumer repo (no bin/)" case). Distinct from an existing-
+    but-empty directory: callers treat None as "cannot verify against this
+    register", not "verified empty".
+    """
+    for env_var in ("VNX_PROJECT_ROOT", "PROJECT_ROOT"):
+        proj = os.environ.get(env_var)
+        if proj:
+            candidate = Path(proj) / "agents"
+            if candidate.is_dir():
+                return candidate
+
+    sibling = Path(__file__).resolve().parents[2] / "agents"
+    if sibling.is_dir():
+        return sibling
+
+    vnx_home = os.environ.get("VNX_HOME")
+    if vnx_home:
+        candidate = Path(vnx_home) / "agents"
+        if candidate.is_dir():
+            return candidate
+
+    return None
+
+
+def _agents_registry_roles(agents_dir: Optional[Path] = None) -> Optional[frozenset]:
+    """Role names present in the agents/ registry (OI-921's role SSOT).
+
+    A role is valid when ``<agents_dir>/<role>/CLAUDE.md`` exists — deliberately
+    mirrors ``dispatch_cli._discover_valid_roles`` exactly rather than importing
+    it: dispatch_cli.py sits at the CLI/door layer and pulls in the router and
+    provider-registry import graph, while worker_permissions.py is a
+    foundational module every spawn lane (tmux, subprocess) imports and must
+    stay light and acyclic.
+
+    Returns None when the registry itself is undiscoverable (see
+    :func:`_resolve_agents_dir`) — ``resolve_worker_profile`` treats that as
+    "cannot verify against this register" and falls back rather than refusing,
+    since the defect this guards against is a role name provably absent from a
+    register that DOES exist, not a register this install never shipped.
+    """
+    if agents_dir is None:
+        agents_dir = _resolve_agents_dir()
+    if agents_dir is None:
+        return None
+    try:
+        return frozenset(
+            entry.name
+            for entry in agents_dir.iterdir()
+            if entry.is_dir() and (entry / "CLAUDE.md").is_file()
+        )
+    except OSError:
+        return None
+
+
+class UnknownRoleError(ValueError):
+    """Raised by :func:`resolve_worker_profile` when *role* appears in NO register.
+
+    OI-1069 pt.5: a role name that is neither a key in worker_permissions.yaml's
+    ``profiles`` map NOR an ``agents/<role>/`` entry is not the same failure as
+    a role that exists with an empty/absent ``allowed_tools`` — the latter is a
+    real, dispatched role whose permission profile has not been written yet,
+    and it still resolves to the restrictive code-worker fallback
+    (``is_fallback=True``, unchanged). A role absent from every register is
+    never a deliberate choice; it is a typo, a stale/legacy name, or a role
+    that was never wired up (e.g. ``technical-writer``, referenced only in old
+    task-classification tables — see docs/_archive/core/30_FPC_EXECUTION_CONTRACTS.md
+    — and never added to agents/ or worker_permissions.yaml). Refuse loudly
+    instead of silently handing out a tool scope nobody chose.
+
+    Deliberately NOT the ``_IDENTITY_UNRESOLVED`` sentinel from
+    dispatch_identity.py: that sentinel means "no role was set at all" (role is
+    None/empty), a structurally different situation from "a role string WAS
+    given, but it does not exist anywhere". Reusing it here would collapse two
+    distinct failure modes into one, which is exactly the ambiguity OI-981
+    built that sentinel to avoid.
+    """
 
 
 @dataclass
@@ -369,30 +454,77 @@ def default_code_worker_profile() -> PermissionProfile:
 def resolve_worker_profile(
     role: Optional[str],
     yaml_path: Path | None = None,
+    agents_dir: Path | None = None,
 ) -> PermissionProfile:
     """Resolve a PermissionProfile for *role*, falling back to the code-worker default.
 
-    A missing/unknown role — or a role whose profile declares no allowed_tools —
-    yields :func:`default_code_worker_profile` so capability scoping never strips a
+    A missing role, or a role whose profile declares no allowed_tools BUT which
+    exists somewhere in the agents/ registry, yields
+    :func:`default_code_worker_profile` so capability scoping never strips a
     headless worker of the tools it needs to write code and commit.
 
-    OI-1100: the fallback is now EXPLICIT and logged, not silent. An unknown role
-    name (or a role with an empty profile) emits a WARNING naming the role and the
-    fallback it received, and the returned profile carries ``is_fallback=True``.
-    The fallback is restrictive vs blanket-skip (no MCP, WebSearch/WebFetch denied,
-    acceptEdits); the change is visibility, so an unknown role can no longer hide
-    inside a permissive-looking default. ``load_permissions`` already logs its own
-    warning for a missing profile; this second warning records the resolve-time
-    decision (fallback taken) which load_permissions alone cannot convey.
-    The fallback profile carries a depth-limited file_write_scope
-    (FALLBACK_FILE_WRITE_SCOPE) — genuine restriction on the write dimension, not
-    an empty allow-all.  The report obligation is exempted at the hook layer so a
-    worker can always write its completion report.
+    OI-1100: that fallback is EXPLICIT and logged, not silent. A WARNING names
+    the role and the fallback it received, and the returned profile carries
+    ``is_fallback=True``. The fallback is restrictive vs blanket-skip (no MCP,
+    WebSearch/WebFetch denied, acceptEdits); the change is visibility, so a role
+    with no usable profile can no longer hide inside a permissive-looking
+    default. ``load_permissions`` already logs its own warning for a missing
+    profile; this second warning records the resolve-time decision (fallback
+    taken) which load_permissions alone cannot convey. The fallback profile
+    carries a depth-limited file_write_scope (FALLBACK_FILE_WRITE_SCOPE) —
+    genuine restriction on the write dimension, not an empty allow-all. The
+    report obligation is exempted at the hook layer so a worker can always
+    write its completion report.
+
+    OI-1069 pt.5: that fallback is no longer what a role gets when it appears
+    in NO register at all. ``role`` present but with an empty/absent profile is
+    "a real role, permission profile not written yet" — falls back as above.
+    ``role`` absent from BOTH worker_permissions.yaml's ``profiles`` AND the
+    agents/ registry is a different failure (typo, stale/legacy name, a role
+    that was never wired up) and raises :class:`UnknownRoleError` instead of
+    silently handing out a tool scope nobody chose. When the agents/ registry
+    itself is undiscoverable (see :func:`_agents_registry_roles`), this check
+    is skipped and the role falls back as before — an install that never
+    shipped agents/ cannot tell a real role from an unknown one, so it must not
+    start refusing every non-canonical role.
+
+    ``_IDENTITY_UNRESOLVED`` (dispatch_identity.py's ``"identity_unresolved"``
+    sentinel) is a THIRD case, distinct from both of the above: it means "no
+    role was resolved for this dispatch", semantically the same as ``role``
+    being ``None`` — never a role string someone actually typed. Refusing it
+    like an unknown role would treat "nothing resolved" as if it were a typo,
+    which is wrong on its face and would turn a currently-inert value (today it
+    only flows through the receipt plane, see ``dispatch_govern.py``'s
+    ``_resolve_govern_role``) into a live footgun the day a caller starts
+    passing it into scope-arg resolution. It is handled first, ahead of the
+    truthy-``role`` branch, and falls back exactly like ``None``.
     """
-    if role:
+    if role == _IDENTITY_UNRESOLVED:
+        logger.warning(
+            "resolve_worker_profile: role is the %r sentinel (no role was "
+            "resolved for this dispatch — structurally the same as role=None, "
+            "never a typo) — resolving to the restrictive code-worker "
+            "fallback (is_fallback=True).",
+            _IDENTITY_UNRESOLVED,
+        )
+    elif role:
         profile = load_permissions(role, yaml_path)
         if profile.allowed_tools:
             return profile
+        agents_roles = _agents_registry_roles(agents_dir)
+        if agents_roles is not None and role not in agents_roles:
+            message = (
+                f"resolve_worker_profile: role {role!r} does not exist in any "
+                "register — not a key in worker_permissions.yaml's profiles, "
+                f"and no agents/{role}/CLAUDE.md. This is NOT the same as a "
+                "role with an empty profile (that still falls back to the "
+                "restrictive code-worker default); a role absent from every "
+                "register refuses instead. If this is meant to be a real "
+                f"dispatch role, add agents/{role}/CLAUDE.md and a profile in "
+                "worker_permissions.yaml."
+            )
+            logger.error(message)
+            raise UnknownRoleError(message)
         logger.warning(
             "resolve_worker_profile: role '%s' has no usable profile "
             "(absent or empty allowed_tools) — resolving to the restrictive "
@@ -659,7 +791,16 @@ def classify_permission_posture(argv: "list[str]", role: Optional[str] = None) -
             idx = argv.index("--allowedTools")
             if idx + 1 < len(argv):
                 allow_count = len([p for p in argv[idx + 1].split(",") if p.strip()])
-        profile = resolve_worker_profile(role)
+        # This classifies argv that ALREADY exists (a real spawn already
+        # happened, or a benchmark is describing what it WOULD build) — there
+        # is nothing left to refuse here, so a role absent from every register
+        # (UnknownRoleError, OI-1069 pt.5) still classifies via the code-worker
+        # fallback rather than crashing receipt/observability callers that
+        # describe historical or synthetic argv.
+        try:
+            profile = resolve_worker_profile(role)
+        except UnknownRoleError:
+            profile = default_code_worker_profile()
         return {
             "permission_posture": "scoped-allowlist",
             "permission_profile": profile.role,
