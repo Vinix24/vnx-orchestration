@@ -1230,6 +1230,104 @@ class TestAwaitingPermission(_LaneTestCase):
             "a genuinely stalled worker must be heartbeat-killed (failure report)",
         )
 
+    def test_heartbeat_failure_report_carries_model_oi1237(self):
+        """OI-1237: the heartbeat-kill failure report (tmux_interactive_dispatch.py
+        ~2510) referenced an unbound `model` name — on the OLD code this raised a
+        NameError that was swallowed by the surrounding except-block, so the report
+        was silently never written (see test_heartbeat_kills_genuinely_stalled_worker,
+        which was RED before this fix). Pin that `model` is now threaded through and
+        lands verbatim in the written report body."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content="some stale log line\nthat is not a prompt",
+        )
+        lane = self._make_lane(fake)
+        report_path = (
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        if report_path.exists():
+            report_path.unlink()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.05"}
+        ):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+                model="glm-5.2",
+            )
+        self.assertIsNone(result)
+        self.assertTrue(report_path.exists())
+        from report_to_receipt_converter import _extract_body_fields
+        fields = _extract_body_fields(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            fields.get("model"), "glm-5.2",
+            "the model passed to _wait_for_receipt must reach the failure report "
+            "verbatim — before the fix `model` was an unbound name here",
+        )
+
+    def test_heartbeat_write_failure_logged_loud_not_swallowed_oi1237(self):
+        """OI-1237 second defect: a failure while writing the heartbeat-kill report
+        must be LOUD (ERROR, with the dispatch-id) — not a quietly-swallowed
+        exception a human has no reason to go looking for. Before this fix the
+        unbound `model` NameError was caught by the same except-block and only
+        ever surfaced as a WARNING, which is how the report went missing
+        unnoticed in the first place."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            ready_content="some stale log line\nthat is not a prompt",
+        )
+        lane = self._make_lane(fake)
+        report_path = (
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        if report_path.exists():
+            report_path.unlink()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.05"}
+        ), patch.object(
+            Path, "write_text", side_effect=OSError("disk full (simulated)")
+        ), self.assertLogs("tmux_interactive_dispatch", level="ERROR") as logs:
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=0.3,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+                model="sonnet",
+            )
+        self.assertIsNone(result, "a write failure must not crash the poll loop")
+        self.assertFalse(report_path.exists(), "the report genuinely was not written")
+        self.assertTrue(
+            any(
+                "ERROR" in rec and self.DISPATCH_ID in rec and "NOT written" in rec
+                for rec in logs.output
+            ),
+            f"the write failure must be logged loudly with the dispatch-id, got: {logs.output}",
+        )
+
 
 # ---------------------------------------------------------------------------
 # OI-1130 follow-up: deterministic worker liveness (thinking vs dead)
@@ -1484,6 +1582,100 @@ class TestOI1130DeterministicLiveness(_LaneTestCase):
         self.assertGreater(
             fake.has_session_calls, 0,
             "the liveness probe must still run on a healthy worker (no regression in coverage)",
+        )
+
+    def test_worker_process_gone_report_carries_model_oi1237(self):
+        """OI-1237: the worker_process_gone failure report (tmux_interactive_dispatch.py
+        ~2429) referenced an unbound `model` name — on the OLD code this raised a
+        NameError that was swallowed by the surrounding except-block, so the report
+        was silently never written (see
+        test_silent_and_dead_fails_within_one_poll_worker_process_gone, which was
+        RED before this fix). Pin that `model` is now threaded through and lands
+        verbatim in the written report body."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = _LivenessFakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            has_session_ok=False,  # session gone -> deterministically dead
+        )
+        lane = self._make_lane(fake)
+        self._clear_report()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "1800"}
+        ):
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=5.0,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+                model="glm-5.2",
+            )
+        self.assertIsNone(result)
+        report_path = self._report_path()
+        self.assertTrue(report_path.exists())
+        from report_to_receipt_converter import _extract_body_fields
+        fields = _extract_body_fields(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            fields.get("model"), "glm-5.2",
+            "the model passed to _wait_for_receipt must reach the failure report "
+            "verbatim — before the fix `model` was an unbound name here",
+        )
+
+    def test_worker_process_gone_write_failure_logged_loud_not_swallowed_oi1237(self):
+        """OI-1237 second defect: a failure while writing the worker_process_gone
+        report must be LOUD (ERROR, with the dispatch-id) — not a quietly-swallowed
+        exception a human has no reason to go looking for. Before this fix the
+        unbound `model` NameError was caught by the same except-block and only
+        ever surfaced as a WARNING, which is how the report went missing
+        unnoticed in the first place."""
+        raw_log = self.state_dir / "raw.log"
+        raw_log.write_text("worker started\n", encoding="utf-8")
+        fake = _LivenessFakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+            has_session_ok=False,  # session gone -> deterministically dead
+        )
+        lane = self._make_lane(fake)
+        self._clear_report()
+        with patch.dict(
+            os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "1800"}
+        ), patch.object(
+            Path, "write_text", side_effect=OSError("disk full (simulated)")
+        ), self.assertLogs("tmux_interactive_dispatch", level="ERROR") as logs:
+            result = lane._wait_for_receipt(
+                self.DISPATCH_ID,
+                deadline_seconds=5.0,
+                poll_interval=0.02,
+                completion_statuses=DEFAULT_COMPLETION_STATUSES,
+                baseline_count=0,
+                baseline_pending_ids=frozenset(),
+                baseline_backstop=True,
+                pane_id="%1",
+                label="T1",
+                raw_log_path=raw_log,
+                session=f"sess-{self.DISPATCH_ID}",
+                model="sonnet",
+            )
+        self.assertIsNone(result, "a write failure must not crash the poll loop")
+        self.assertFalse(
+            self._report_path().exists(), "the report genuinely was not written"
+        )
+        self.assertTrue(
+            any(
+                "ERROR" in rec and self.DISPATCH_ID in rec and "NOT written" in rec
+                for rec in logs.output
+            ),
+            f"the write failure must be logged loudly with the dispatch-id, got: {logs.output}",
         )
 
 
