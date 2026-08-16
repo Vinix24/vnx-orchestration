@@ -219,3 +219,56 @@ class TestDreamMigrationV20:
         conn.close()
 
         assert row is not None, "existing dream_cycles row must survive re-migration"
+
+
+class TestNightlyDigestsV30:
+    """V30: nightly_digests gains deep_attempts + deep_failures (OI-1258)."""
+
+    def test_bootstrap_adds_deep_attempts_and_deep_failures(self, tmp_path):
+        """A fresh bootstrap carries both new digest columns."""
+        db_path = tmp_path / "quality_intelligence.db"
+        _bootstrap(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nightly_digests)").fetchall()}
+        conn.close()
+
+        assert "deep_attempts" in cols
+        assert "deep_failures" in cols
+
+    def test_v30_adds_columns_to_existing_digest_table(self, tmp_path):
+        """_migrate_v30 backfills the columns on a pre-v30 digest table."""
+        db_path = tmp_path / "upgrade.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE nightly_digests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                digest_date DATE NOT NULL UNIQUE,
+                sessions_analyzed INTEGER DEFAULT 0,
+                deep_analyzed INTEGER DEFAULT 0,
+                new_suggestions INTEGER DEFAULT 0,
+                total_tokens_used INTEGER DEFAULT 0,
+                digest_markdown TEXT NOT NULL,
+                digest_path TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute(
+            "INSERT INTO nightly_digests (digest_date, digest_markdown) "
+            "VALUES ('2026-06-15', '# old digest')"
+        )
+        conn.commit()
+
+        quality_db_init._migrate_v30(conn)
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nightly_digests)").fetchall()}
+        assert "deep_attempts" in cols
+        assert "deep_failures" in cols
+
+        # Existing rows survive with the DEFAULT backfill of 0.
+        row = conn.execute(
+            "SELECT deep_attempts, deep_failures FROM nightly_digests "
+            "WHERE digest_date = '2026-06-15'"
+        ).fetchone()
+        assert row == (0, 0)
+        conn.close()

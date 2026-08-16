@@ -11,6 +11,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -115,6 +116,8 @@ def _create_schema(conn: sqlite3.Connection):
             digest_date DATE NOT NULL UNIQUE,
             sessions_analyzed INTEGER DEFAULT 0,
             deep_analyzed INTEGER DEFAULT 0,
+            deep_attempts INTEGER DEFAULT 0,
+            deep_failures INTEGER DEFAULT 0,
             new_suggestions INTEGER DEFAULT 0,
             total_tokens_used INTEGER DEFAULT 0,
             digest_markdown TEXT NOT NULL,
@@ -382,6 +385,124 @@ class TestDeepAnalyzer:
         metrics = SessionMetrics(total_output_tokens=5000, tool_calls_total=20)
         flags = SessionFlags()
         assert analyzer.should_deep_analyze(metrics, flags) is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a: _try_claude_max outcome classification (OI-1258)
+# ---------------------------------------------------------------------------
+
+class TestClaudeOutcome:
+    """``_try_claude_max`` must return a distinct outcome per failure mode.
+
+    The old ``Optional[str]`` return collapsed four different situations —
+    missing CLI, crashed CLI, successful-but-empty, and successful-with-result —
+    into a single ``None``. Each test below asserts a different
+    ``ClaudeOutcome.status`` so a caller can tell them apart without parsing logs.
+    """
+
+    @staticmethod
+    def _run_outcome(side_effect=None, returncode=0, stdout="", stderr=""):
+        import conversation_analyzer.deep_analyzer as da_module
+
+        if side_effect is not None:
+            patcher = patch.object(da_module.subprocess, "run", side_effect=side_effect)
+        else:
+            fake = SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+            patcher = patch.object(da_module.subprocess, "run", return_value=fake)
+        with patcher:
+            return DeepAnalyzer._try_claude_max("test prompt")
+
+    def test_missing_cli_returns_missing_cli_outcome(self):
+        outcome = self._run_outcome(side_effect=FileNotFoundError())
+        assert outcome.status == "missing_cli"
+        assert outcome.text is None
+
+    def test_nonzero_rc_returns_cli_failed_with_rc_and_stderr(self):
+        outcome = self._run_outcome(returncode=2, stderr="boom: something broke")
+        assert outcome.status == "cli_failed"
+        assert outcome.returncode == 2
+        assert "boom" in outcome.stderr
+
+    def test_success_empty_output_returns_empty_outcome(self):
+        outcome = self._run_outcome(returncode=0, stdout="")
+        assert outcome.status == "empty"
+        assert outcome.text == ""
+
+    def test_success_with_result_returns_ok_outcome(self):
+        outcome = self._run_outcome(returncode=0, stdout='{"result": "hello world"}')
+        assert outcome.status == "ok"
+        assert outcome.text == "hello world"
+
+    def test_raw_stdout_without_json_returns_ok_outcome(self):
+        outcome = self._run_outcome(returncode=0, stdout="plain text answer")
+        assert outcome.status == "ok"
+        assert outcome.text == "plain text answer"
+
+    def test_timeout_returns_timeout_outcome(self):
+        import conversation_analyzer.deep_analyzer as da_module
+        outcome = self._run_outcome(
+            side_effect=da_module.subprocess.TimeoutExpired(cmd=["claude"], timeout=90)
+        )
+        assert outcome.status == "timeout"
+
+    def test_unexpected_exception_returns_error_outcome(self):
+        outcome = self._run_outcome(side_effect=RuntimeError("disk full"))
+        assert outcome.status == "error"
+        assert "disk full" in outcome.stderr
+
+
+class TestDeepAnalyzerCounter:
+    """``deep_attempts``/``deep_failures`` track invoked-vs-failed deep analysis."""
+
+    @staticmethod
+    def _analyze_with_claude(outcome):
+        import conversation_analyzer.deep_analyzer as da_module
+
+        analyzer = DeepAnalyzer()
+        metrics = SessionMetrics(session_id="counter-test", total_output_tokens=5000,
+                                  tool_calls_total=20)
+        flags = SessionFlags()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"user","message":{"role":"user","content":"test"}}\n')
+            f.flush()
+            jsonl_path = Path(f.name)
+
+        try:
+            with patch.object(DeepAnalyzer, '_build_session_summary',
+                              return_value='test summary'), \
+                 patch.object(DeepAnalyzer, '_try_claude_max', return_value=outcome), \
+                 patch.object(da_module, 'LLM_STRATEGY', 'claude-only'):
+                return analyzer, analyzer.analyze_session(jsonl_path, metrics, flags)
+        finally:
+            os.unlink(jsonl_path)
+
+    def test_failed_attempt_counts_attempt_and_failure(self):
+        from conversation_analyzer.deep_analyzer import ClaudeOutcome
+        analyzer, result = self._analyze_with_claude(ClaudeOutcome("missing_cli"))
+        assert result is None
+        assert analyzer.deep_attempts == 1
+        assert analyzer.deep_failures == 1
+
+    def test_successful_attempt_counts_attempt_no_failure(self):
+        from conversation_analyzer.deep_analyzer import ClaudeOutcome
+        analyzer, result = self._analyze_with_claude(
+            ClaudeOutcome("ok", text='{"suggestions":[]}')
+        )
+        assert result is not None
+        assert analyzer.deep_attempts == 1
+        assert analyzer.deep_failures == 0
+
+    def test_parseable_but_empty_result_counts_failure(self):
+        # LLM answered but returned no parseable JSON — an attempt that
+        # produced nothing usable, distinct from a hard CLI failure.
+        from conversation_analyzer.deep_analyzer import ClaudeOutcome
+        analyzer, result = self._analyze_with_claude(
+            ClaudeOutcome("ok", text="no json here")
+        )
+        assert result is None
+        assert analyzer.deep_attempts == 1
+        assert analyzer.deep_failures == 1
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +785,8 @@ class TestDigestGenerator:
         analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
         analyzer.conn = conn
 
-        stats = RunStats(sessions_analyzed=5, sessions_deep=1, total_tokens=10000)
+        stats = RunStats(sessions_analyzed=5, sessions_deep=1, deep_attempts=4,
+                         deep_failures=3, total_tokens=10000)
         md = "# Test Digest"
 
         with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
@@ -677,6 +799,9 @@ class TestDigestGenerator:
         row = cur.fetchone()
         assert row is not None
         assert row["sessions_analyzed"] == 5
+        assert row["deep_analyzed"] == 1
+        assert row["deep_attempts"] == 4
+        assert row["deep_failures"] == 3
         assert row["digest_markdown"] == "# Test Digest"
         conn.close()
         os.unlink(digest_path)
@@ -1504,6 +1629,20 @@ class TestFailClosedExitCode:
         assert fail_closed_exit_code(RunStats(errors=0, sessions_analyzed=3)) == 0
         # Defensive: None stats (no run executed) -> zero.
         assert fail_closed_exit_code(None) == 0
+
+    def test_fail_closed_deep_analysis_all_failed(self):
+        """Every deep attempt failed -> non-zero (the OI-1258 case)."""
+        from conversation_analyzer import fail_closed_exit_code, RunStats
+        # 20 attempts, 20 failures -> the silent deep_analyzed=0 night.
+        assert fail_closed_exit_code(RunStats(deep_attempts=20, deep_failures=20)) == 1
+        # Partial deep failure stays green (some sessions did produce a result).
+        assert fail_closed_exit_code(RunStats(deep_attempts=20, deep_failures=5)) == 0
+        # No attempts -> zero (nothing was tried; not a failure).
+        assert fail_closed_exit_code(RunStats(deep_attempts=0, deep_failures=0)) == 0
+        # Deep failure does not need errors/sessions to be zero to fail closed.
+        assert fail_closed_exit_code(
+            RunStats(errors=0, sessions_analyzed=50, deep_attempts=20, deep_failures=20)
+        ) == 1
 
     def test_main_returns_nonzero_when_all_sessions_fail(self):
         """``conversation_analyzer.py`` exits non-zero when every session failed."""

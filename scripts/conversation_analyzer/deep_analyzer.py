@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +23,31 @@ from provider_spawns.deepseek_harness_spawn import (
 )
 
 
+@dataclass(frozen=True)
+class ClaudeOutcome:
+    """Result of one ``claude`` CLI invocation, with the failure mode explicit.
+
+    ``status`` is one of:
+      - ``ok``          — CLI succeeded (rc 0) and produced usable text
+      - ``empty``       — CLI succeeded (rc 0) but produced no usable text
+      - ``missing_cli`` — claude binary absent from PATH (FileNotFoundError)
+      - ``cli_failed``  — claude exited non-zero (``returncode`` + ``stderr``)
+      - ``timeout``     — claude exceeded the 90s deadline
+      - ``error``       — any other unexpected exception
+
+    ``text`` carries the assistant output for ``ok`` (and the raw stdout for
+    ``empty``, kept for diagnostics). A caller can tell all six apart without
+    parsing logs — the gap the old ``Optional[str]`` return left open, where a
+    missing CLI, a crashed CLI, and a successful-but-empty run all collapsed to
+    ``None`` (OI-1258).
+    """
+
+    status: str
+    text: Optional[str] = None
+    returncode: Optional[int] = None
+    stderr: str = ""
+
+
 class DeepAnalyzer:
     """LLM-based deep analysis of flagged sessions."""
 
@@ -36,6 +62,17 @@ class DeepAnalyzer:
     # Claude-auto guard: set by the runner before processing sessions to
     # inform the billing guard of the backlog size.
     _session_backlog: int = 0
+
+    def __init__(self) -> None:
+        # OI-1258: per-run attempt accounting, distinct from the success-only
+        # ``sessions_deep`` counter. ``deep_attempts`` counts sessions where an
+        # LLM was actually invoked; ``deep_failures`` counts those that produced
+        # no usable result. Together they make a ``deep_analyzed=0`` digest
+        # interpretable: 0 attempts ("nothing was tried") vs N attempts with N
+        # failures ("everything failed"). Strategy-agnostic on purpose — the
+        # digest counter spans claude, deepseek-harness, and ollama paths.
+        self.deep_attempts = 0
+        self.deep_failures = 0
 
     SYSTEM_PROMPT = """You are a VNX orchestration system analyst. Analyze this Claude Code session summary and extract actionable improvement suggestions.
 
@@ -82,21 +119,30 @@ Respond with valid JSON:
         prompt = f"{self.SYSTEM_PROMPT}\n\n## Session Summary\n\n{summary}"
 
         result_text = None
+        # ``attempted`` records whether an LLM was actually invoked this
+        # session. It stays False for the billing-guard skip (no LLM called),
+        # so a deliberate skip never counts as a failed attempt.
+        attempted = False
 
         # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
         # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
         # unset — never falls back to the OAuth subscription (constraint
         # deepseek-harness-subscription-blocked).
         if LLM_STRATEGY == "deepseek-harness":
+            attempted = True
             result_text = self._try_deepseek_harness(prompt)
         # Billing guard: in "auto" mode, refuse the claude path when the
         # session backlog exceeds the threshold. "claude-only" bypasses
         # the guard — the operator explicitly opted in to metered spend.
         elif LLM_STRATEGY == "claude-only":
-            result_text = self._try_claude_max(prompt)
+            attempted = True
+            outcome = self._try_claude_max(prompt)
+            result_text = outcome.text if outcome.status == "ok" else None
         elif LLM_STRATEGY == "auto":
             if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
-                result_text = self._try_claude_max(prompt)
+                attempted = True
+                outcome = self._try_claude_max(prompt)
+                result_text = outcome.text if outcome.status == "ok" else None
             else:
                 if self._session_backlog > 0:
                     log("WARNING",
@@ -106,13 +152,24 @@ Respond with valid JSON:
                         f"Use VNX_ANALYZER_LLM=claude-only to override.")
 
         if result_text is None and LLM_STRATEGY in ("auto", "ollama-only"):
+            attempted = True
             result_text = self._try_ollama(prompt)
 
+        if attempted:
+            self.deep_attempts += 1
+
         if result_text is None:
+            if attempted:
+                self.deep_failures += 1
             log("WARNING", "No LLM available for deep analysis")
             return None
 
-        return self._parse_response(result_text)
+        parsed = self._parse_response(result_text)
+        if parsed is None:
+            # The LLM answered but nothing parseable came back — an attempt
+            # that produced no usable result, distinct from a hard failure.
+            self.deep_failures += 1
+        return parsed
 
     @classmethod
     def set_session_backlog(cls, count: int):
@@ -214,7 +271,7 @@ Respond with valid JSON:
         return "\n".join(lines)
 
     @staticmethod
-    def _try_claude_max(prompt: str) -> Optional[str]:
+    def _try_claude_max(prompt: str) -> ClaudeOutcome:
         try:
             result = subprocess.run(
                 ["claude", "-p", "--output-format", "json", "--max-turns", "1"],
@@ -223,23 +280,37 @@ Respond with valid JSON:
                 text=True,
                 timeout=90,
             )
-            if result.returncode != 0:
-                log("WARNING", f"Claude CLI failed: {result.stderr[:200]}")
-                return None
-            try:
-                output = json.loads(result.stdout)
-                return output.get("result", result.stdout)
-            except json.JSONDecodeError:
-                return result.stdout
         except FileNotFoundError:
-            log("INFO", "Claude CLI not found")
-            return None
+            # The binary is absent from PATH — a launchd job inherits no shell
+            # profile, so this is a distinct failure from a binary that runs
+            # and then errors out (OI-1258).
+            log("ERROR", "Claude CLI not found on PATH")
+            return ClaudeOutcome("missing_cli")
         except subprocess.TimeoutExpired:
-            log("WARNING", "Claude CLI timed out")
-            return None
+            log("ERROR", "Claude CLI timed out after 90s")
+            return ClaudeOutcome("timeout")
         except Exception as e:
-            log("WARNING", f"Claude CLI error: {e}")
-            return None
+            log("ERROR", f"Claude CLI error: {e}")
+            return ClaudeOutcome("error", stderr=str(e))
+
+        if result.returncode != 0:
+            snippet = (result.stderr or "").strip()[:200]
+            log("ERROR",
+                f"Claude CLI failed (rc={result.returncode}): {snippet}")
+            return ClaudeOutcome("cli_failed",
+                                 returncode=result.returncode, stderr=snippet)
+
+        try:
+            output = json.loads(result.stdout)
+            text = output.get("result", result.stdout)
+        except json.JSONDecodeError:
+            text = result.stdout
+
+        if not (text or "").strip():
+            log("ERROR", "Claude CLI succeeded (rc=0) but produced no usable text")
+            return ClaudeOutcome("empty", text=result.stdout)
+
+        return ClaudeOutcome("ok", text=text)
 
     @staticmethod
     def _try_deepseek_harness(prompt: str) -> Optional[str]:

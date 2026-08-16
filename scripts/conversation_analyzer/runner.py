@@ -275,11 +275,13 @@ class ConversationAnalyzer:
         cur.execute("""
             INSERT OR REPLACE INTO nightly_digests (
                 digest_date, sessions_analyzed, deep_analyzed,
+                deep_attempts, deep_failures,
                 new_suggestions, total_tokens_used,
                 digest_markdown, digest_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run_date, stats.sessions_analyzed, stats.sessions_deep,
+            stats.deep_attempts, stats.deep_failures,
             len(stats.suggestions), stats.total_tokens,
             markdown, str(digest_path),
         ))
@@ -312,6 +314,12 @@ class ConversationAnalyzer:
             log("ANALYZE", f"[{i}/{len(sessions)}] {jsonl_path.parent.name}/{jsonl_path.name}")
             deep_remaining = self._process_one_session(
                 jsonl_path, dry_run, deep_remaining, stats, session_rows)
+
+        # OI-1258: copy the analyzer's per-run attempt accounting into the run
+        # stats so the digest, DB row, and fail-closed exit code all see the
+        # attempts/failures alongside the success-only ``sessions_deep``.
+        stats.deep_attempts = self.deep.deep_attempts
+        stats.deep_failures = self.deep.deep_failures
 
         if not dry_run:
             self._finalize_run(stats, session_rows, run_date)
@@ -360,6 +368,8 @@ class ConversationAnalyzer:
         print(f"{'=' * 70}{Colors.RESET}\n")
         print(f"Sessions Analyzed: {stats.sessions_analyzed}")
         print(f"Deep Analyzed:     {stats.sessions_deep}")
+        print(f"Deep Attempts:     {stats.deep_attempts}")
+        print(f"Deep Failures:     {stats.deep_failures}")
         print(f"Suggestions:       {len(stats.suggestions)}")
         print(f"Total Tokens:      {stats.total_tokens:,}")
         print(f"Errors:            {stats.errors}")

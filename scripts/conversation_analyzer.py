@@ -72,15 +72,21 @@ def main():
         # exit code, so a night where the whole pipeline failed still reported
         # launchd status 0 — the silent-failure pattern this chain exists to catch.
         if fail_closed_exit_code(stats):
-            log("ERROR", f"All sessions failed ({stats.errors} errors, 0 analyzed); returning non-zero exit")
+            if stats.deep_attempts > 0 and stats.deep_failures >= stats.deep_attempts:
+                run_error = (f"deep analysis failed on all {stats.deep_attempts} attempts")
+            else:
+                run_error = f"all sessions failed ({stats.errors} errors, 0 analyzed)"
+            log("ERROR", f"{run_error}; returning non-zero exit")
             run_status = "fail"
-            run_error = f"all sessions failed ({stats.errors} errors, 0 analyzed)"
             rc = 1
     finally:
         analyzer.close()
         try:
             from health_beacon import HealthBeacon
             details = {"max_sessions": args.max_sessions, "dry_run": args.dry_run}
+            if stats is not None:
+                details["deep_attempts"] = stats.deep_attempts
+                details["deep_failures"] = stats.deep_failures
             if run_error:
                 details["error"] = run_error
             HealthBeacon(
