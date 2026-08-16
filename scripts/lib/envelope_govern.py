@@ -361,12 +361,16 @@ def _govern(
 
                 # OI-866: classify failure so the receipt carries a distinguishable
                 # failure_reason + failure_class instead of a silent
-                # "(no error captured)" log line.
+                # "(no error captured)" log line. classify_failure_safe (dispatch
+                # 20260816-p9p10-failure-reason-root) never raises and never
+                # returns an empty failure_reason for a non-success status —
+                # a classify_failure regression can no longer land a receipt
+                # with the field silently unset.
                 _classification: Dict[str, Optional[str]] = {"failure_class": None, "failure_reason": None}
                 if adapter_result.status != "success":
                     try:
-                        from failure_classification import classify_failure  # noqa: PLC0415
-                        _classification = classify_failure(
+                        from failure_classification import classify_failure_safe  # noqa: PLC0415
+                        _classification = classify_failure_safe(
                             status=adapter_result.status,
                             error=adapter_result.error,
                             completion_text=adapter_result.completion_text,
@@ -374,13 +378,24 @@ def _govern(
                             provider=spec.provider,
                             duration_seconds=duration,
                             returncode=adapter_result.returncode,
+                            dispatch_id=spec.dispatch_id,
                         )
-                    except Exception:  # noqa: BLE001 — classification is best-effort
+                    except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
+                        # module itself failing to import is the one thing
+                        # classify_failure_safe cannot guard against from
+                        # inside itself; keep the same never-empty guarantee.
                         logger.debug(
-                            "envelope._govern: failure classification failed dispatch=%s (non-fatal)",
+                            "envelope._govern: failure_classification unavailable dispatch=%s (non-fatal)",
                             spec.dispatch_id,
                             exc_info=True,
                         )
+                        _classification = {
+                            "failure_class": "unknown",
+                            "failure_reason": (
+                                f"failure_classification unavailable: {_classify_exc!r} "
+                                f"(dispatch={spec.dispatch_id})"
+                            ),
+                        }
 
                 receipt_path = emit_dispatch_receipt(
                     dispatch_id=spec.dispatch_id,

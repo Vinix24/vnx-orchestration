@@ -129,7 +129,10 @@ class TestClassifyFailure:
         assert result["failure_class"] == "model_error"
 
     def test_unknown_when_no_error_provided(self):
-        """A failure with no error at all produces unknown classification."""
+        """A failure with no `error` but a non-empty, unrecognized completion
+        surfaces the completion's own content — dispatch 20260816-p9p10-
+        failure-reason-root: the old contentless '(no error captured)'
+        placeholder discarded exactly this text even though it was on disk."""
         from failure_classification import classify_failure
 
         result = classify_failure(
@@ -142,7 +145,8 @@ class TestClassifyFailure:
         )
         assert result["failure_class"] == "unknown"
         assert result["failure_reason"] is not None
-        assert "no error captured" in result["failure_reason"]
+        assert "some text" in result["failure_reason"]
+        assert "no error captured" not in result["failure_reason"]
 
     def test_success_returns_none_fields(self):
         """A success status returns None for both fields."""
@@ -157,6 +161,185 @@ class TestClassifyFailure:
         )
         assert result["failure_class"] is None
         assert result["failure_reason"] is None
+
+
+# ===========================================================================
+# Dispatch 20260816-p9p10-failure-reason-root: the provider-lane completion
+# carries the failure reason, not `error` — classify_failure must read it.
+#
+# Ledger measurement (2026-08-16, t0_receipts.ndjson, glm-harness +
+# deepseek-harness, no head/sampling — full ledger walk):
+#   glm-harness      : 85 failures — 7 named, 13 "(no error captured)", 65 empty
+#   deepseek-harness : 47 failures — 0 named, 12 "(no error captured)", 35 empty
+# All 100 empty-failure_reason receipts predate the OI-866 commit
+# (c0979272, 2026-07-31) that first added the field to ReceiptV2 — the last
+# empty one is timestamped 2026-07-29T18:35:42Z, none since. That gap is
+# closed by construction (the field did not exist yet); classify_failure_safe
+# below adds a defensive backstop so a *future* classify_failure regression
+# cannot silently reopen it. The remaining 25 "(no error captured)" receipts
+# are the live bug this dispatch fixes: `error` was empty but `completion_text`
+# held the provider's own words (deepseek: "API Error: 402 Insufficient
+# Balance"; glm: a 500-wrapped OpenRouter 402 credits error; glm: "API Error:
+# Content block not found") and classify_failure never looked at it.
+# ===========================================================================
+
+
+class TestCompletionTextCarriesFailureReason:
+    """OI-866 follow-up: classify_failure must read completion_text when
+    `error` is empty, instead of collapsing a readable provider error into
+    '(no error captured)'."""
+
+    def test_deepseek_402_insufficient_balance_in_completion(self):
+        """deepseek-harness's direct '402 Insufficient Balance' text lands in
+        completion_text with error=None (observed dispatch
+        20260816-p1-gate-reads-deliverables, completion_len=35)."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=None,
+            completion_text="API Error: 402 Insufficient Balance",
+            timed_out=False,
+            provider="deepseek-harness",
+            returncode=1,
+        )
+        assert result["failure_class"] == "credit_exhausted"
+        assert "Insufficient Balance" in result["failure_reason"]
+        assert "deepseek-api" in result["failure_reason"]
+        assert "no error captured" not in result["failure_reason"]
+
+    def test_glm_500_wrapped_openrouter_402_credits_in_completion(self):
+        """glm-harness's litellm/OpenRouter proxy wraps the real 402-credits
+        cause inside a 500 'litellm.acompletion' envelope with a multi-KB
+        nested JSON blob (observed dispatch 20260815-horizon-flag-parity-glm,
+        completion_len=7626). The receipt must name the 402 credits cause —
+        not the outer 500 — and must not carry the multi-KB blob verbatim."""
+        from failure_classification import classify_failure
+
+        raw = (
+            'API Error: 500 Error calling litellm.acompletion for non-Anthropic '
+            'model: litellm.APIError: APIError: OpenrouterException - '
+            '{"error":{"message":"This request requires more credits, or fewer '
+            'max_tokens. You requested up to 32000 tokens, but can only afford '
+            '8734. To increase, visit https://openrouter.ai/settings/credits and '
+            'add more credits","code":402,"metadata":{"limit_source":'
+            '"openrouter_credits"' + (",\"padding\":\"x\"" * 200) + "}}}"
+        )
+        result = classify_failure(
+            status="failure",
+            error=None,
+            completion_text=raw,
+            timed_out=False,
+            provider="glm-harness",
+            returncode=1,
+        )
+        assert result["failure_class"] == "credit_exhausted"
+        assert "requires more credits" in result["failure_reason"]
+        assert "openrouter/z-ai" in result["failure_reason"]
+        assert "no error captured" not in result["failure_reason"]
+        # bounded — the raw blob is > 2KB, the reason must not be
+        assert len(result["failure_reason"]) < 500
+
+    def test_glm_unrecognized_api_error_in_completion_still_named(self):
+        """A glm-harness completion that names a real API error but matches no
+        specific pattern (observed: 'API Error: Content block not found',
+        completion_len=34) must still surface that text, not a bare length."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=None,
+            completion_text="API Error: Content block not found",
+            timed_out=False,
+            provider="glm-harness",
+            returncode=1,
+        )
+        assert result["failure_class"] == "unknown"
+        assert "Content block not found" in result["failure_reason"]
+        assert "no error captured" not in result["failure_reason"]
+
+    def test_error_field_stays_authoritative_over_completion_text(self):
+        """When `error` IS set, completion_text must never override it — a
+        completion that happens to mention credits must not hijack a
+        classification that `error` already pins to something else."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error="HTTP 401 Unauthorized",
+            completion_text="This request requires more credits",
+            timed_out=False,
+            provider="deepseek-harness",
+            returncode=1,
+        )
+        assert result["failure_class"] == "auth_rejected"
+
+    def test_proxy_unreachable_reason_unchanged(self):
+        """The glm-harness proxy-unreachable message (7x in the ledger) is one
+        of the already-working named reasons this dispatch must not touch —
+        `error` carries it directly, completion_text is irrelevant."""
+        from failure_classification import classify_failure
+
+        msg = "glm-harness proxy unreachable at http://localhost:4141 (start the litellm proxy first)"
+        result = classify_failure(
+            status="failure",
+            error=msg,
+            completion_text="",
+            timed_out=False,
+            provider="glm-harness",
+            returncode=1,
+        )
+        assert result["failure_class"] == "unknown"
+        assert result["failure_reason"] == msg
+
+
+class TestClassifyFailureSafe:
+    """classify_failure_safe must never raise and must never leave a
+    non-success receipt with a completely empty failure_reason — the 100-
+    receipt gap dispatch 20260816-p9p10-failure-reason-root measured (all
+    pre-OI-866; closed by construction, but nothing previously stopped a
+    classify_failure regression from reopening it)."""
+
+    def test_success_passthrough(self):
+        from failure_classification import classify_failure_safe
+
+        result = classify_failure_safe(status="success", provider="claude")
+        assert result == {"failure_class": None, "failure_reason": None}
+
+    def test_delegates_to_classify_failure_on_the_happy_path(self):
+        from failure_classification import classify_failure_safe
+
+        result = classify_failure_safe(
+            status="failure",
+            error="HTTP 401 Unauthorized",
+            completion_text="",
+            provider="deepseek-harness",
+            returncode=1,
+        )
+        assert result["failure_class"] == "auth_rejected"
+
+    def test_never_empty_when_classify_failure_raises(self, monkeypatch):
+        """If classify_failure itself throws, the receipt must still get a
+        countable, non-empty failure_reason instead of None."""
+        import failure_classification
+
+        def _boom(**kwargs):
+            raise RuntimeError("synthetic classify_failure blowup")
+
+        monkeypatch.setattr(failure_classification, "classify_failure", _boom)
+
+        result = failure_classification.classify_failure_safe(
+            status="failure",
+            error=None,
+            completion_text="whatever",
+            provider="deepseek-harness",
+            returncode=1,
+            dispatch_id="test-dispatch-safe-001",
+        )
+        assert result["failure_class"] == "unknown"
+        assert result["failure_reason"]
+        assert result["failure_reason"].strip() != ""
+        assert "test-dispatch-safe-001" in result["failure_reason"]
 
 
 # ===========================================================================
