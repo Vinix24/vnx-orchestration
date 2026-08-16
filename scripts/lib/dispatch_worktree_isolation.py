@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -85,6 +86,25 @@ class WorktreeIdentityMissing(WorktreeClaimError):
     Identity cannot be verified, so a worker must not operate in it.  A missing
     claim means the worktree predates the stamping mechanism or was created by
     a lane that does not stamp — either way it is not provably this dispatch's.
+    """
+
+
+class WorktreeOccupied(WorktreeClaimError):
+    """A SIBLING live process already holds the occupancy lock for this worktree.
+
+    OI-1232 (2026-08-15): three dispatches collided in ONE worktree and a
+    sibling's operation reset another's branch pointer, wiping committed files
+    from disk.  The identity-claim system above already refuses two DIFFERENT
+    dispatch ids racing for one slot (``WorktreeIdentityConflict``).  The gap
+    it leaves open is the SAME dispatch id claimed twice by two live
+    processes at once: ``create_dispatch_worktree``'s idempotent re-entry
+    ("same id → hand back the existing path") cannot tell a legitimate
+    sequential retry (the earlier call already finished) apart from a second
+    live process claiming the same worktree WHILE the first is still running
+    — both get the same path with no signal, and whichever runs a
+    destructive git operation first (e.g. a "clean start" reset on a
+    presumed-dead retry) can wipe the other's work.  See ``_acquire_occupancy``
+    for how the lock is held and released.
     """
 
 
@@ -185,6 +205,8 @@ def _write_claim_atomic(
     base_ref: str = "",
     branch: str = "",
     main_head_sha: str = "",
+    fabric_version: str = "",
+    unpushed_local_commits: "dict | None" = None,
 ) -> dict:
     """Claim *worktree_path* for *dispatch_id* with an O_EXCL write.
 
@@ -201,6 +223,14 @@ def _write_claim_atomic(
     *main_head_sha* is the main checkout's HEAD captured before worktree
     creation (OI-975): compared against the current HEAD at teardown to detect
     unexpected checkout jumps during a dispatch.
+
+    *fabric_version* freezes the ``~/.vnx-system/current`` symlink target at
+    creation time (OI-1149/OI-1061): compared against the live marker at
+    teardown to detect a ``vnx update`` that ran mid-dispatch.
+
+    *unpushed_local_commits* records local-vs-``origin/main`` divergence
+    detected at creation time (OI-1149/OI-1061), or None when there was
+    nothing to warn about — see ``_check_unpushed_local_commits``.
     """
     safe_id = _sanitize_dispatch_id(dispatch_id)
     path = _claim_path(safe_id, project_root)
@@ -214,6 +244,8 @@ def _write_claim_atomic(
         "base_ref": base_ref,
         "branch": branch,
         "main_head_sha": main_head_sha,
+        "fabric_version": fabric_version,
+        "unpushed_local_commits": unpushed_local_commits,
     }
     try:
         with open(path, "x", encoding="utf-8") as fh:
@@ -466,6 +498,161 @@ def _worktree_lock(root: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+# ---------------------------------------------------------------------------
+# Occupancy lock (OI-1232) — held for the dispatch's FULL create -> ... ->
+# remove lifetime, not just the brief git-porcelain window _worktree_lock
+# covers above.  Scoped per safe-id, one lock file per worktree slot, kept
+# under the same canonical claim registry as the identity claims.
+#
+# Held via an flock on an OPEN file description, so a crashed holder's lock
+# is released by the KERNEL the instant its process exits — no manual
+# cleanup, no stale-lock timeout logic, and a lock nobody ever heals is
+# impossible by construction (the task's own warning: "een lock die niet
+# vrijgegeven wordt bij een crash is erger dan geen lock").
+#
+# Same-PROCESS re-entry (the idempotent-retry contract already exercised by
+# test_dispatch_worktree_identity_race.py::test_same_dispatch_second_create_is_idempotent)
+# is preserved by the _OCCUPANCY_LOCKS short-circuit below: POSIX advisory
+# locks are per-OPEN-FILE-DESCRIPTION, not per-process, so a second open() +
+# flock() from the very same process that already holds the lock would
+# itself be treated as a conflicting request and must never be attempted.
+# ---------------------------------------------------------------------------
+
+_OCCUPANCY_LOCKS: "dict[str, object]" = {}
+
+
+def _occupancy_lock_path(safe_id: str, project_root: Path) -> Path:
+    return _claim_dir(project_root) / f"{safe_id}.occupancy"
+
+
+def _acquire_occupancy(dispatch_id: str, wt_path: Path, project_root: Path) -> None:
+    """Claim exclusive occupancy of *wt_path* for the calling process.
+
+    No-op when this SAME process already holds it (idempotent re-entry).
+    Raises WorktreeOccupied when a DIFFERENT live process holds it — the
+    OI-1232 shape: a sibling dispatch must never be handed a worktree another
+    dispatch is still actively using.
+    """
+    key = str(Path(wt_path).resolve())
+    if key in _OCCUPANCY_LOCKS:
+        return
+    safe_id = _sanitize_dispatch_id(dispatch_id)
+    lock_path = _occupancy_lock_path(safe_id, project_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        raise WorktreeOccupied(
+            f"worktree for dispatch {dispatch_id!r} ({wt_path}) is already "
+            f"occupied by another live process; refusing to hand out the same "
+            f"worktree to a second concurrent claim (OI-1232) — a sibling "
+            f"dispatch must never mutate a branch that another dispatch is "
+            f"still using"
+        ) from None
+    _OCCUPANCY_LOCKS[key] = fh
+
+
+def _release_occupancy(wt_path: Path) -> None:
+    """Release this process's occupancy lock on *wt_path*.  Idempotent, never raises.
+
+    A no-op when this process never held it — e.g. teardown running in a
+    different process than the one that created the worktree.  That is safe:
+    if the creator process is still alive it keeps its own hold; if it is
+    dead the kernel already released the lock when it exited.
+    """
+    key = str(Path(wt_path).resolve())
+    fh = _OCCUPANCY_LOCKS.pop(key, None)
+    if fh is None:
+        return
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    except OSError as exc:
+        log.debug("dispatch_worktree_isolation: occupancy unlock failed for %s: %s", wt_path, exc)
+    finally:
+        fh.close()
+
+
+def _resolve_fabric_version_marker() -> str:
+    """Return the fabric version the ``~/.vnx-system/current`` symlink names.
+
+    Empty string when there is no central install (a from-source dev
+    checkout, or the marker is unreadable) — callers must treat that as "not
+    applicable", never as evidence of a version change.
+    """
+    marker = _CENTRAL_INSTALL_ROOT / "current"
+    try:
+        target = marker.resolve(strict=True)
+    except OSError:
+        return ""
+    return target.name
+
+
+def _check_unpushed_local_commits(
+    root: Path, resolved_base_ref: str, base_sha: str
+) -> "dict | None":
+    """Warn loudly when the local tracking branch is ahead of *base_sha*.
+
+    OI-1149/OI-1061: the worktree always branches from *resolved_base_ref*
+    (``origin/main`` by default), silently ignoring commits the operator has
+    made locally but not yet pushed — the worker then builds on a base the
+    operator does not see in their own checkout.  This never blocks (a
+    best-effort git probe must not gate a dispatch on its own failure), but a
+    real divergence must be LOUD: printed to stderr (the dispatch's own
+    output) and returned so the caller can stamp it on the claim — the one
+    place that survives into the receipt.
+
+    Returns None when there is nothing to warn about (no local branch of
+    that name, local matches the remote, or local has DIVERGED rather than
+    simply being ahead — a divergence is a rebase/merge situation this probe
+    must not guess about).
+    """
+    if not resolved_base_ref.startswith("origin/"):
+        return None
+    local_branch = resolved_base_ref[len("origin/") :]
+    local_sha_result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "-q", local_branch],
+        capture_output=True, text=True,
+    )
+    if local_sha_result.returncode != 0:
+        return None
+    local_sha = local_sha_result.stdout.strip()
+    if not local_sha or local_sha == base_sha:
+        return None
+    is_ancestor = subprocess.run(
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", base_sha, local_sha],
+        capture_output=True, text=True,
+    )
+    if is_ancestor.returncode != 0:
+        return None
+    ahead_result = subprocess.run(
+        ["git", "-C", str(root), "rev-list", "--count", f"{base_sha}..{local_sha}"],
+        capture_output=True, text=True,
+    )
+    if ahead_result.returncode != 0:
+        return None
+    try:
+        ahead_count = int(ahead_result.stdout.strip())
+    except ValueError:
+        return None
+    if ahead_count <= 0:
+        return None
+    warning = (
+        f"WARN: worktree branches from {resolved_base_ref!r} (base {base_sha[:8]}) "
+        f"but local {local_branch!r} is {ahead_count} commit(s) ahead "
+        f"({local_sha[:8]}) — those unpushed commits are NOT in this worktree "
+        f"(OI-1149/OI-1061)"
+    )
+    print(warning, file=sys.stderr)
+    log.warning("create_dispatch_worktree: %s", warning)
+    return {
+        "local_branch": local_branch,
+        "local_sha": local_sha,
+        "ahead_count": ahead_count,
+    }
+
+
 def create_dispatch_worktree(
     dispatch_id: str,
     *,
@@ -497,131 +684,171 @@ def create_dispatch_worktree(
     loud error here — it would put a worker's changes on the wrong tree with
     no signal until a human reviews an empty or conflicting diff.
 
+    OI-1232: once this dispatch id is confirmed to own the slot (either as
+    the fresh creator, or via same-id idempotent re-entry) it claims an
+    OCCUPANCY lock for the resolved worktree path (see ``_acquire_occupancy``)
+    that is held for the dispatch's full lifetime, released only by
+    ``remove_dispatch_worktree``. A sibling process that already holds it
+    gets ``WorktreeOccupied`` instead of the silent shared-worktree hand-out
+    this function used to give a same-id double-fire while the original was
+    still running.
+
     Returns the resolved worktree Path.
     Raises RuntimeError when the base ref is unresolvable or worktree creation fails.
+    Raises WorktreeOccupied when a sibling live process already occupies this slot.
     """
     root = _resolve_project_root(project_root)
     wt_path = _dispatch_worktree_dir(root, dispatch_id)
     safe_id = _sanitize_dispatch_id(dispatch_id)
     branch_name = f"dispatch/{safe_id}"
 
-    # VNX_BENCH_WORKTREE_BASE_REF: see precedence note in the docstring above.
-    # The benchmark sets this to the bench checkout's HEAD so worktrees carry the bench
-    # branch's committed task seeds (e.g. the t4_02 SWE-bench seed) without merging WIP
-    # benchmark tasks to main. Default (unset) keeps origin/main — production unchanged.
-    bench_override = os.environ.get("VNX_BENCH_WORKTREE_BASE_REF", "").strip()
-    resolved_base_ref = (base_ref or "").strip() or bench_override or "origin/main"
-    is_remote = resolved_base_ref.startswith("origin/")
-
-    wt_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if is_remote:
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin", resolved_base_ref[len("origin/"):]],
-                cwd=str(root),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            log.warning(
-                "create_dispatch_worktree: git fetch %s failed (continuing): %s",
-                resolved_base_ref, (exc.stderr or "").strip(),
-            )
-
-    # Resolve base_sha BEFORE adding the worktree — needed for teardown
-    # classification (L3 provider-lane reap).  Mirrors tmux_worktree.allocate().
     try:
-        sha_result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", resolved_base_ref],
-            check=True, capture_output=True, text=True,
-        )
-        base_sha = sha_result.stdout.strip()
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            f"create_dispatch_worktree: cannot resolve base_ref {resolved_base_ref!r} "
-            f"for dispatch {dispatch_id!r}: {(exc.stderr or '').strip()}"
-        ) from exc
+        # VNX_BENCH_WORKTREE_BASE_REF: see precedence note in the docstring above.
+        # The benchmark sets this to the bench checkout's HEAD so worktrees carry the bench
+        # branch's committed task seeds (e.g. the t4_02 SWE-bench seed) without merging WIP
+        # benchmark tasks to main. Default (unset) keeps origin/main — production unchanged.
+        bench_override = os.environ.get("VNX_BENCH_WORKTREE_BASE_REF", "").strip()
+        resolved_base_ref = (base_ref or "").strip() or bench_override or "origin/main"
+        is_remote = resolved_base_ref.startswith("origin/")
 
-    # OI-975: capture the main checkout HEAD BEFORE worktree creation so
-    # teardown can detect unexpected checkout jumps during the dispatch.
-    # Best-effort — a failed capture logs a warning and the field defaults
-    # to "" in the claim, which skips the comparison at teardown.
-    _main_head_sha = ""
-    try:
-        _main_head_result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            check=True, capture_output=True, text=True,
-        )
-        _main_head_sha = _main_head_result.stdout.strip()
-    except subprocess.CalledProcessError:
-        log.warning(
-            "create_dispatch_worktree: cannot resolve HEAD for %s; "
-            "HEAD-jump detection skipped (OI-975)",
-            dispatch_id,
-        )
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with _worktree_lock(root):
-        # OI-861 identity check BEFORE creating: if this worktree already exists
-        # and is claimed by a DIFFERENT dispatch id, refuse immediately.  A
-        # same-id re-entry (double-fire/retry) is idempotent and returns the
-        # existing, correctly-stamped worktree.
-        existing = _read_claim(dispatch_id, root)
-        if existing is not None:
-            _claim_belongs_to_or_raise(dispatch_id, existing, wt_path)
-            log.info(
-                "dispatch worktree already exists (claimed by %s): %s",
-                dispatch_id, wt_path,
-            )
-            return wt_path.resolve()
+        if is_remote:
+            try:
+                subprocess.run(
+                    ["git", "fetch", "origin", resolved_base_ref[len("origin/"):]],
+                    cwd=str(root),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                log.warning(
+                    "create_dispatch_worktree: git fetch %s failed (continuing): %s",
+                    resolved_base_ref, (exc.stderr or "").strip(),
+                )
 
+        # Resolve base_sha BEFORE adding the worktree — needed for teardown
+        # classification (L3 provider-lane reap).  Mirrors tmux_worktree.allocate().
         try:
-            subprocess.run(
-                [
-                    "git", "worktree", "add",
-                    str(wt_path),
-                    "-b", branch_name,
-                    resolved_base_ref,
-                ],
-                cwd=str(root),
-                check=True,
-                capture_output=True,
-                text=True,
+            sha_result = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", resolved_base_ref],
+                check=True, capture_output=True, text=True,
             )
+            base_sha = sha_result.stdout.strip()
         except subprocess.CalledProcessError as exc:
-            # A concurrent dispatch collided on this slot between our identity
-            # check and the git add.  Re-read the claim: a different stamped id
-            # is the OI-861 crossing — fail loud with the identity error.
-            raced = _read_claim(dispatch_id, root)
-            if raced is not None:
-                _claim_belongs_to_or_raise(dispatch_id, raced, wt_path)
             raise RuntimeError(
-                f"create_dispatch_worktree failed for {dispatch_id!r} "
-                f"(base_ref={resolved_base_ref!r}): {(exc.stderr or '').strip()}"
+                f"create_dispatch_worktree: cannot resolve base_ref {resolved_base_ref!r} "
+                f"for dispatch {dispatch_id!r}: {(exc.stderr or '').strip()}"
             ) from exc
 
-        # Claim the freshly-created worktree atomically (O_EXCL).  From here on
-        # the worktree's identity is bound to dispatch_id and no other dispatch
-        # may reuse it.  The claim carries base_sha + base_ref + branch so
-        # teardown (L3 provider-lane reap) can construct a WorktreeHandle for
-        # classification without re-deriving values that may have shifted.
-        # main_head_sha is the OI-975 pre-dispatch HEAD snapshot.
+        # OI-975: capture the main checkout HEAD BEFORE worktree creation so
+        # teardown can detect unexpected checkout jumps during the dispatch.
+        # Best-effort — a failed capture logs a warning and the field defaults
+        # to "" in the claim, which skips the comparison at teardown.
+        _main_head_sha = ""
         try:
-            _write_claim_atomic(
-                dispatch_id,
-                worktree_path=wt_path,
-                project_root=root,
-                base_sha=base_sha,
-                base_ref=resolved_base_ref,
-                branch=branch_name,
-                main_head_sha=_main_head_sha,
+            _main_head_result = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
             )
-        except WorktreeClaimError:
-            raced = _read_claim(dispatch_id, root)
-            if raced is not None:
-                _claim_belongs_to_or_raise(dispatch_id, raced, wt_path)
-            raise
+            _main_head_sha = _main_head_result.stdout.strip()
+        except subprocess.CalledProcessError:
+            log.warning(
+                "create_dispatch_worktree: cannot resolve HEAD for %s; "
+                "HEAD-jump detection skipped (OI-975)",
+                dispatch_id,
+            )
+
+        # OI-1149/OI-1061: warn loudly when local main is ahead of what this
+        # worktree is about to branch from, and freeze the fabric version so
+        # teardown can detect a mid-dispatch `vnx update`.
+        _unpushed = _check_unpushed_local_commits(root, resolved_base_ref, base_sha)
+        _fabric_version = _resolve_fabric_version_marker()
+
+        with _worktree_lock(root):
+            # OI-861 identity check BEFORE creating: if this worktree already exists
+            # and is claimed by a DIFFERENT dispatch id, refuse immediately.  A
+            # same-id re-entry (double-fire/retry) is idempotent and returns the
+            # existing, correctly-stamped worktree.
+            existing = _read_claim(dispatch_id, root)
+            if existing is not None:
+                _claim_belongs_to_or_raise(dispatch_id, existing, wt_path)
+                # OI-1232: the claim says this IS the same dispatch id, but a
+                # matching claim alone cannot tell "the earlier call already
+                # finished" apart from "a sibling process is still actively
+                # using it right now".  Occupancy is the signal that closes
+                # that gap — a live holder makes this raise WorktreeOccupied
+                # instead of silently handing out a worktree two processes
+                # then mutate at once.
+                _acquire_occupancy(dispatch_id, wt_path, root)
+                log.info(
+                    "dispatch worktree already exists (claimed by %s): %s",
+                    dispatch_id, wt_path,
+                )
+                return wt_path.resolve()
+
+            try:
+                subprocess.run(
+                    [
+                        "git", "worktree", "add",
+                        str(wt_path),
+                        "-b", branch_name,
+                        resolved_base_ref,
+                    ],
+                    cwd=str(root),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                # A concurrent dispatch collided on this slot between our identity
+                # check and the git add.  Re-read the claim: a different stamped id
+                # is the OI-861 crossing — fail loud with the identity error.
+                raced = _read_claim(dispatch_id, root)
+                if raced is not None:
+                    _claim_belongs_to_or_raise(dispatch_id, raced, wt_path)
+                raise RuntimeError(
+                    f"create_dispatch_worktree failed for {dispatch_id!r} "
+                    f"(base_ref={resolved_base_ref!r}): {(exc.stderr or '').strip()}"
+                ) from exc
+
+            # Claim the freshly-created worktree atomically (O_EXCL).  From here on
+            # the worktree's identity is bound to dispatch_id and no other dispatch
+            # may reuse it.  The claim carries base_sha + base_ref + branch so
+            # teardown (L3 provider-lane reap) can construct a WorktreeHandle for
+            # classification without re-deriving values that may have shifted.
+            # main_head_sha is the OI-975 pre-dispatch HEAD snapshot; fabric_version
+            # and unpushed_local_commits are the OI-1149/OI-1061 freeze + warning.
+            try:
+                _write_claim_atomic(
+                    dispatch_id,
+                    worktree_path=wt_path,
+                    project_root=root,
+                    base_sha=base_sha,
+                    base_ref=resolved_base_ref,
+                    branch=branch_name,
+                    main_head_sha=_main_head_sha,
+                    fabric_version=_fabric_version,
+                    unpushed_local_commits=_unpushed,
+                )
+            except WorktreeClaimError:
+                raced = _read_claim(dispatch_id, root)
+                if raced is not None:
+                    _claim_belongs_to_or_raise(dispatch_id, raced, wt_path)
+                raise
+
+            # We just won the O_EXCL claim write — nobody else can hold
+            # occupancy on this brand-new slot yet, so this always succeeds.
+            # From here on this process is the one a sibling's occupancy
+            # check above will find.
+            _acquire_occupancy(dispatch_id, wt_path, root)
+    except Exception:
+        # Creation never completed — this process must not keep holding the
+        # slot occupied.  A future retry (this process or another) needs a
+        # clean shot at the lock, not a phantom "still occupied".
+        _release_occupancy(wt_path)
+        raise
 
     log.info("dispatch worktree created: %s (branch %s)", wt_path, branch_name)
     return wt_path.resolve()
@@ -648,10 +875,16 @@ def remove_dispatch_worktree(
     (``worktree_state``, ``branch_kept_local``, ``branch_kept_remote``,
     ``preserved_path``) as the tmux lane's ``interactive_teardown_worktree``.
 
+    OI-1232: releases this process's occupancy lock (see ``_acquire_occupancy``)
+    unconditionally, before anything else — the calling process is done with
+    the worktree the moment teardown starts, regardless of what classification
+    or reap decide to do with it.
+
     Called on both success and failure paths.  Best-effort — never raises.
     """
     root = _resolve_project_root(project_root)
     wt_path = _dispatch_worktree_dir(root, dispatch_id)
+    _release_occupancy(wt_path)
 
     if not wt_path.exists():
         _clear_claim(dispatch_id, root)
@@ -696,6 +929,23 @@ def remove_dispatch_worktree(
                 "HEAD-jump check skipped",
                 dispatch_id,
             )
+
+    # ── OI-1149/OI-1061: detect fabric-version drift during the dispatch ───
+    # The worktree's fabric version was frozen at creation time (the
+    # ~/.vnx-system/current symlink target).  If it differs now, a `vnx
+    # update` (or equivalent) ran WHILE this dispatch was in flight — the
+    # fabric the worker actually ran under moved out from under it mid-run.
+    # Best-effort, never raises: an unreadable marker on either side degrades
+    # to "no comparison", never a false drift.
+    _claim_fabric_version = (claim or {}).get("fabric_version", "")
+    _current_fabric_version = _resolve_fabric_version_marker()
+    if _claim_fabric_version and _current_fabric_version and _current_fabric_version != _claim_fabric_version:
+        log.warning(
+            "OI-1149/OI-1061 FABRIC VERSION DRIFT: dispatch %s was created "
+            "against fabric %r but the fabric is now %r — the shared install "
+            "moved (e.g. `vnx update`) while this dispatch was in flight",
+            dispatch_id, _claim_fabric_version, _current_fabric_version,
+        )
 
     # ── L3: classify before removing ──────────────────────────────────────
     # Build a WorktreeHandle from the claim so we can call the single
@@ -796,6 +1046,11 @@ def remove_dispatch_worktree(
                         "preserved_path": str(reap_result.preserved_path)
                         if reap_result.preserved_path
                         else None,
+                        "fabric_version_at_create": _claim_fabric_version or None,
+                        "fabric_version_at_teardown": _current_fabric_version or None,
+                        "unpushed_local_commits_at_create": (claim or {}).get(
+                            "unpushed_local_commits"
+                        ),
                     },
                 },
             )
