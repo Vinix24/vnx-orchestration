@@ -163,6 +163,7 @@ class TestMainGateWiring:
         """A GO gate proceeds to merge_pr and prints the basis of the verdict."""
         merge_called = []
         monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (_go_gate(), None))
+        monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (_go_gate(), None))
         monkeypatch.setattr(
             pr_merge, "merge_pr",
             lambda **k: merge_called.append(1) or self._ok_result(),
@@ -184,6 +185,7 @@ class TestMainGateWiring:
                 None,
             ),
         )
+        monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (_go_gate(), None))
         monkeypatch.setattr(pr_merge, "merge_pr", lambda **k: self._ok_result())
 
         rc = pr_merge.main(["--pr", "5", "--dry-run"])

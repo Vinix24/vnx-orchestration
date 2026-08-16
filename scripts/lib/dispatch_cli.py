@@ -37,6 +37,7 @@ from dispatch_spec import (  # noqa: E402
     Reject,
     ValidatedSpec,
     validate,
+    write_paths,
 )
 from dispatch_plan import (  # noqa: E402
     ConstraintVerdict,
@@ -920,6 +921,20 @@ def _persist_dispatch_row(
         logger.debug("[dispatch_cli] dispatch row persist skipped: %s", exc)
 
 
+def _spec_is_writing(spec: DispatchSpec) -> bool:
+    """True when the dispatch writes files or produces a PR.
+
+    A dispatch is "writing" (review-gate required) when it grants write access
+    on any dispatch_path (WRITE/READ_WRITE/CREATE — see
+    ``dispatch_spec.write_paths``) OR declares a ``pr_id`` (it will produce a
+    PR). A read-only analysis dispatch (READ-only paths, no pr_id) is not
+    writing and may legitimately run without a gate.
+    """
+    if spec.pr_id:
+        return True
+    return bool(write_paths(spec.dispatch_paths))
+
+
 def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
     """Best-effort: register the review-gate obligation for a door-accepted dispatch.
 
@@ -932,20 +947,44 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
     freshness monitor asserts per gate key: declaration without evidence
     becomes visible instead of silent.
 
+    dispatch-20260816-gate-never-skippable: the old silent ``return`` on an
+    empty gate is gone. A read-only dispatch may carry no gate, but "no gate"
+    is now written as an explicit, countable no-gate obligation
+    (``gate_obligations.register_no_gate_obligation``) instead of leaving zero
+    trace. A writing dispatch with an empty gate never reaches here — the door
+    refuses it earlier (see the gate-required reject in ``run_dispatch``).
+
     Never raises: bookkeeping must never block the door (same contract as
     ``_persist_dispatch_row``).
     """
     gate = (spec.gate or "").strip()
-    if not gate:
-        return
     try:
-        from gate_obligations import pr_number_from_pr_id, register_obligation
+        from gate_obligations import (
+            pr_number_from_pr_id,
+            register_no_gate_obligation,
+            register_obligation,
+        )
+        if not gate:
+            register_no_gate_obligation(
+                state_dir,
+                dispatch_id=spec.dispatch_id,
+                project_id=spec.project_id,
+                pr_number=pr_number_from_pr_id(spec.pr_id),
+                pr_id=spec.pr_id,
+                reason="no_gate_declared",
+                reason_detail=(
+                    "read-only dispatch (no write-scope dispatch_paths, no pr_id) "
+                    "— no review gate required"
+                ),
+            )
+            return
         register_obligation(
             state_dir,
             dispatch_id=spec.dispatch_id,
             gate=gate,
             project_id=spec.project_id,
             pr_number=pr_number_from_pr_id(spec.pr_id),
+            pr_id=spec.pr_id,
         )
     except Exception as exc:  # noqa: BLE001 — door bookkeeping must never raise
         logger.debug("[dispatch_cli] gate obligation register skipped: %s", exc)
@@ -2027,6 +2066,23 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         door_route_reason = (
             f"{door_route_reason};{gate_reason}" if door_route_reason else gate_reason
         )
+
+    # dispatch-20260816-gate-never-skippable: a writing dispatch with an empty
+    # gate after router derivation is a governance decision that was never
+    # made, not a valid "no gate". The gate can only still be empty here when
+    # the router raised (fail-open path in _resolve_gate_via_router) or the
+    # spec is read-only. Refuse the writing case loudly; a read-only dispatch
+    # with no gate proceeds (no write, no PR) and records a countable no-gate
+    # obligation via _register_gate_obligation.
+    if not (vspec.spec.gate or "").strip() and _spec_is_writing(vspec.spec):
+        _emit_reject(Reject(
+            "gate-required",
+            "writing dispatch has no review gate: the spec carries no gate and "
+            "smart-router derivation produced nothing (fail-open). Declare an "
+            "explicit gate on the spec or fix the router; refusing to run "
+            "unreviewed.",
+        ))
+        return 1
 
     # P1-#1: wrap everything after validate in try/except — door never panics
     try:

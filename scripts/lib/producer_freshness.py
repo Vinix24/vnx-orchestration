@@ -255,10 +255,45 @@ def scan_gate_obligations(spec: Dict[str, Any], *, now: float) -> Dict[str, Opti
     return out
 
 
+def scan_newest(spec: Dict[str, Any], *, now: float) -> Dict[str, Optional[float]]:
+    """Single aggregate key: the newest file mtime under ``path``/``glob``.
+
+    The "N PRs merged since the last gate result" control is not a per-key
+    producer; it is one aggregate key whose freshness is the newest result
+    across the whole directory. A results directory that stops growing reads
+    as stale — exactly the 2026-08-12..16 incident where merges kept flowing
+    while no gate result landed for four days.
+
+    An empty directory returns {} so an ``expected_keys`` entry reads as an
+    asserted absence ("never wrote"), never a silently-observed value.
+    """
+    root = Path(spec["path"])
+    out: Dict[str, Optional[float]] = {}
+    if not root.is_dir():
+        return out
+    pattern = spec.get("glob") or "*"
+    key = spec.get("key", "latest")
+    newest: Optional[float] = None
+    for entry in root.glob(pattern):
+        if not entry.is_file():
+            continue
+        try:
+            ts: Optional[float] = entry.stat().st_mtime
+        except OSError as exc:
+            _LOG.warning("producer_freshness: stat failed for %s: %s", entry, exc)
+            ts = None
+        if ts is not None and (newest is None or ts > newest):
+            newest = ts
+    if newest is not None:
+        out[key] = newest
+    return out
+
+
 _SCANNERS: Dict[str, Callable[..., Dict[str, Optional[float]]]] = {
     "directory": scan_directory,
     "sqlite": scan_sqlite,
     "gate_obligations": scan_gate_obligations,
+    "newest": scan_newest,
 }
 
 
@@ -282,12 +317,19 @@ def count_demand_events(spec: Dict[str, Any], *, since_ts: Optional[float], now:
         return None
     path = Path(demand["path"])
     ts_field = demand.get("timestamp_field", "timestamp")
+    # Optional event-type filter: only count demand events of a specific kind
+    # (e.g. event == "pr_merged"), so the evidence answers "merged PRs since the
+    # last gate result", not "anything happened in dispatch_register".
+    event_field = demand.get("event_field")
+    event_value = demand.get("event_value")
     if since_ts is None:
         since_ts = now - float(spec.get("cadence_seconds", 86400))
     count = 0
     try:
         for record in iter_ndjson(path):
             if not isinstance(record, dict):
+                continue
+            if event_field is not None and record.get(event_field) != event_value:
                 continue
             ts = _parse_ts(record.get(ts_field))
             if ts is not None and ts > since_ts:
@@ -528,6 +570,7 @@ __all__ = [
     "scan_directory",
     "scan_sqlite",
     "scan_gate_obligations",
+    "scan_newest",
     "count_demand_events",
     "evaluate_producer",
     "run_sweep",

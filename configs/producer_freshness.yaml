@@ -67,6 +67,28 @@ producers:
       timestamp_field: timestamp
       label: dispatch_register events
 
+  # --- PRs merged since the last gate result (2026-08-12..16 incident) -----
+  # One aggregate key = the newest review-gate result across the whole
+  # results dir. When merges keep flowing while no result lands, the key goes
+  # stale and the demand evidence counts the pr_merged events since that
+  # newest result — "N merged PRs, zero new gate results" is the finding. An
+  # empty results dir reads as asserted absence via expected_keys.
+  - name: review_gate_results_freshness
+    type: newest
+    path: "{state_dir}/review_gates/results"
+    glob: "*.json"
+    key: results
+    cadence_seconds: 86400
+    expected_keys:
+      - results
+    demand:
+      type: ndjson_events
+      path: "{state_dir}/dispatch_register.ndjson"
+      timestamp_field: timestamp
+      event_field: event
+      event_value: pr_merged
+      label: merged PRs
+
   # --- Dispatch producers in runtime_coordination.db -----------------------
   # Key = producer prefix of dispatch_id (text before the first '-').
   # expected_keys makes a producer that writes NOTHING visible: an absent

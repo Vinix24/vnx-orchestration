@@ -12,6 +12,13 @@ A run on an older head does not count, zero runs is a refusal, and any
 unverifiable state is a refusal — never a silent pass. ``--override-reason``
 skips the check visibly with a mandatory reason.
 
+Review gate (20260816-gate-never-skippable): a second fail-closed check runs
+after the CI gate — a passing, fully-evidenced review-gate result must exist
+for this PR (see ``_run_review_gate`` ->
+``closure_verifier.check_review_gate_for_merge``). A missing result, an empty
+``contract_hash``/``report_path``, or a verdict contradicting its report is a
+refusal. The same ``--override-reason`` valve applies with a mandatory reason.
+
 Usage:
     python3 scripts/pr_merge.py --pr 123
     python3 scripts/pr_merge.py --pr 123 --dispatch-id 20260526-gov2-something
@@ -59,7 +66,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
-from merge_preflight_ci_check import check_ci_run_for_head
+from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -151,6 +158,145 @@ def _run_ci_gate(
         branch=branch,
         head_sha=head_sha,
         override_reason=override_reason,
+    )
+    return gate, pr_data
+
+
+def _norm_pr_id(pr_id: str) -> str:
+    """Normalize an internal PR id for obligation matching.
+
+    "PR-879", "pr879" and "879" all normalize to "879"; "PR-HYG-1" to "HYG-1".
+    The door stores the raw spec pr_id on the obligation; the merge gate joins
+    that against the GitHub PR number, which may differ in case, hyphen and the
+    "PR" prefix, so comparison goes through this normalization.
+    """
+    s = (pr_id or "").strip().upper()
+    if s.startswith("PR-"):
+        return s[3:]
+    # Bare "PR<digits>" (e.g. "pr879") — strip the prefix only when it is
+    # followed by a digit, so alphanumeric labels like "PR-HYG-1" (handled
+    # above) and words that merely start with "PR" are never mangled.
+    if s.startswith("PR") and len(s) > 2 and s[2].isdigit():
+        return s[2:]
+    return s
+
+
+def _resolve_declared_gate(pr_number: int, *, state_dir: Path) -> str:
+    """Resolve a PR's declared review gate from its door obligation.
+
+    The obligation the dispatch door writes (``scripts/lib/gate_obligations.py``)
+    carries the declared gate. The merge-time join key is the GitHub PR number:
+    the runner stamps ``pr_number`` on the obligation it fulfils, and a numeric
+    pr_id ("PR-1584" / "1584" / "pr1584") normalizes to the same number.
+    Returns the gate name, or "" when no obligation declares one — the merge
+    gate treats "" as a refusal, never a pass.
+    """
+    try:
+        from gate_obligations import NO_GATE_KEY, iter_obligations
+
+        num = str(pr_number)
+        num_forms = {_norm_pr_id(num), _norm_pr_id(f"PR-{num}")}
+        matches = []
+        for _path, record in iter_obligations(state_dir):
+            rec_num = record.get("pr_number")
+            matched = rec_num is not None and str(rec_num) == num
+            if not matched:
+                matched = _norm_pr_id(str(record.get("pr_id") or "")) in num_forms
+            if not matched:
+                continue
+            gate = (record.get("gate") or "").strip()
+            if gate and gate != NO_GATE_KEY:
+                matches.append(gate)
+        if matches:
+            return matches[-1]
+    except (ValueError, OSError) as exc:
+        log.warning("review-gate obligation lookup failed: %s", exc)
+    return ""
+
+
+def _run_review_gate(
+    pr_number: int,
+    *,
+    override_reason: Optional[str] = None,
+) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Fail-closed review-gate check: a passing, evidenced review-gate result
+    must exist for this PR before merge.
+
+    Resolves the PR branch via ``gh pr view``, resolves the declared gate from
+    the door's obligation record (joined on the GitHub PR number), then
+    delegates result validation to
+    ``closure_verifier.check_review_gate_for_merge`` — the SAME truth the
+    closure verifier uses. Returns ``(gate, pr_data)``; the caller merges only
+    when ``gate["verdict"] == "GO"``.
+
+    The result key is the bare PR number string (``str(pr_number)``): the
+    governed obligation runner records gate results under that key regardless
+    of any PR-N label the spec declared. A failed PR query, a missing
+    obligation, or a missing/contradictory result is a NO-GO — an unverifiable
+    state is a refusal, never a silent pass. ``override_reason`` is the escape
+    hatch with the same semantics as the CI gate: non-empty skips the check
+    visibly, empty is refused.
+    """
+    pr_data = _query_pr(pr_number)
+    if pr_data is None:
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"PR-data kon niet worden opgevraagd voor #{pr_number}: "
+                "review-gate-check niet toetsbaar"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": None,
+        }, pr_data
+    branch = pr_data.get("headRefName") or ""
+
+    # ── Escape hatch (same resolution + semantics as the CI gate) ─────────
+    reason = _resolve_override_reason(override_reason)
+    if reason is not None:
+        if not reason:
+            return {
+                "verdict": "NO-GO",
+                "message": (
+                    "override zonder reden geweigerd: een override vereist een "
+                    "niet-lege reden (geen stille bypass)"
+                ),
+                "overridden": True,
+                "override_reason": reason,
+                "gate": None,
+            }, pr_data
+        return {
+            "verdict": "GO",
+            "message": f"OVERRIDE: review-gate-check overgeslagen voor merge ({reason})",
+            "overridden": True,
+            "override_reason": reason,
+            "gate": None,
+        }, pr_data
+
+    # ── Declared gate from the door's obligation ──────────────────────────
+    paths = ensure_env()
+    state_dir = Path(paths["VNX_STATE_DIR"])
+    gate_name = _resolve_declared_gate(pr_number, state_dir=state_dir)
+    if not gate_name:
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"geen review-gate-verplichting gevonden voor PR #{pr_number}: "
+                "weiger merge zonder gate-verdict"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": None,
+        }, pr_data
+
+    from closure_verifier import check_review_gate_for_merge
+
+    results_dir = state_dir / "review_gates" / "results"
+    gate = check_review_gate_for_merge(
+        str(pr_number),
+        gate_name,
+        results_dir,
+        branch=branch,
     )
     return gate, pr_data
 
@@ -361,6 +507,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"OVERRIDE: {gate['message']}")
     else:
         print(f"CI gate: {gate['message']}")
+
+    # ── Review gate: a passing, evidenced review-gate result must exist ────
+    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason)
+    if review_gate["verdict"] != "GO":
+        if args.json:
+            print(json.dumps({
+                "success": False,
+                "pr_number": args.pr,
+                "error": review_gate["message"],
+                "review_gate": review_gate,
+            }, indent=2))
+        else:
+            print(f"NO-GO: {review_gate['message']}", file=sys.stderr)
+        return EXIT_ERROR
+    if review_gate.get("overridden"):
+        print(f"OVERRIDE: {review_gate['message']}")
+    else:
+        print(f"Review gate: {review_gate['message']}")
 
     result = merge_pr(
         pr_number=args.pr,

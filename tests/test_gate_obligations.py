@@ -39,6 +39,7 @@ import gate_obligation_runner as runner
 import producer_freshness
 from dispatch_cli import run_dispatch
 from gate_obligations import (
+    NO_GATE_KEY,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
@@ -442,3 +443,73 @@ def test_real_config_loads_with_obligations_producer():
     by_name = {p["name"]: p for p in registry}
     assert "review_gate_obligations" in by_name
     assert by_name["review_gate_obligations"]["type"] == "gate_obligations"
+
+
+# ---------------------------------------------------------------------------
+# 4. dispatch-20260816-gate-never-skippable: an empty gate is never silent
+# ---------------------------------------------------------------------------
+
+
+def _make_router_broken(monkeypatch) -> None:
+    import smart_router
+
+    def _boom(**kwargs):
+        raise RuntimeError("smart-router derivation exploded")
+
+    monkeypatch.setattr(smart_router, "resolve_gate", _boom)
+
+
+def test_writing_spec_without_gate_is_refused_when_router_fails(tmp_path, monkeypatch, capsys):
+    """A writing dispatch whose gate is still empty after derivation is refused.
+
+    The router fills every silent spec from its governance variant, so an empty
+    gate after ``_resolve_gate_via_router`` can only mean the derivation failed
+    (fail-open). The door must refuse that for a writing dispatch — the empty
+    gate is a governance decision that was never made, not a valid "no gate".
+    """
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260816-staging-write-nogate",
+        dispatch_id="20260816-write-no-gate",
+        gate="",
+        dispatch_paths=["scripts/lib/dispatch_cli.py"],
+    )
+    _make_state_dir(tmp_path)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _make_router_broken(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    assert "gate-required" in capsys.readouterr().err
+    assert mock_execute.call_count == 0, "a refused dispatch must never reach execution"
+    assert not obligation_path(data_dir / "state", "20260816-write-no-gate").exists(), (
+        "a refused writing dispatch must not leave a gate obligation — it never ran"
+    )
+
+
+def test_read_only_spec_without_gate_records_no_gate_obligation(tmp_path, monkeypatch):
+    """A read-only dispatch with an empty gate (router failed) still runs and
+    records an explicit, countable no-gate obligation — never a silent absence."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260816-staging-ro-nogate",
+        dispatch_id="20260816-ro-no-gate",
+        gate="",
+        dispatch_paths=[],
+    )
+    _make_state_dir(tmp_path)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _make_router_broken(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    record = _read_obligation(data_dir / "state", "20260816-ro-no-gate")
+    assert record["gate"] == NO_GATE_KEY
+    assert record["status"] == STATUS_NOT_EXECUTABLE
+    assert record["no_gate"] is True
