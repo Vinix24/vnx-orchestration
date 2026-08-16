@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from dispatch_identity import _IDENTITY_UNRESOLVED
 from dispatch_spec import PathAccess, WRITE_GRANTING_PATH_ACCESS
 
 logger = logging.getLogger(__name__)
@@ -486,8 +487,27 @@ def resolve_worker_profile(
     is skipped and the role falls back as before — an install that never
     shipped agents/ cannot tell a real role from an unknown one, so it must not
     start refusing every non-canonical role.
+
+    ``_IDENTITY_UNRESOLVED`` (dispatch_identity.py's ``"identity_unresolved"``
+    sentinel) is a THIRD case, distinct from both of the above: it means "no
+    role was resolved for this dispatch", semantically the same as ``role``
+    being ``None`` — never a role string someone actually typed. Refusing it
+    like an unknown role would treat "nothing resolved" as if it were a typo,
+    which is wrong on its face and would turn a currently-inert value (today it
+    only flows through the receipt plane, see ``dispatch_govern.py``'s
+    ``_resolve_govern_role``) into a live footgun the day a caller starts
+    passing it into scope-arg resolution. It is handled first, ahead of the
+    truthy-``role`` branch, and falls back exactly like ``None``.
     """
-    if role:
+    if role == _IDENTITY_UNRESOLVED:
+        logger.warning(
+            "resolve_worker_profile: role is the %r sentinel (no role was "
+            "resolved for this dispatch — structurally the same as role=None, "
+            "never a typo) — resolving to the restrictive code-worker "
+            "fallback (is_fallback=True).",
+            _IDENTITY_UNRESOLVED,
+        )
+    elif role:
         profile = load_permissions(role, yaml_path)
         if profile.allowed_tools:
             return profile

@@ -13,6 +13,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
+from dispatch_identity import _IDENTITY_UNRESOLVED
 from worker_permissions import (
     DEFAULT_CODE_WORKER_TOOLS,
     EMPTY_MCP_CONFIG,
@@ -966,6 +967,33 @@ class TestRoleKnownElsewhereStillFallsBack:
         assert "WebSearch" in profile.denied_tools
         assert "WebFetch" in profile.denied_tools
         assert profile.mcp_servers == []
+
+
+# ---------------------------------------------------------------------------
+# dispatch_identity's _IDENTITY_UNRESOLVED sentinel ("no role was resolved
+# for this dispatch") is a THIRD case, distinct from both classes above: it
+# must fall back exactly like role=None, never raise UnknownRoleError like a
+# genuinely-unknown role string. Reusing the "unknown" refusal for "nothing
+# resolved" would treat an absence as if it were a typo — the sentinel is
+# not a role name anyone typed. See worker_permissions.resolve_worker_profile.
+# ---------------------------------------------------------------------------
+
+class TestIdentityUnresolvedSentinelFallsBack:
+    def test_sentinel_does_not_raise(self, yaml_file: Path) -> None:
+        # Red on pre-fix code: this used to raise UnknownRoleError.
+        resolve_worker_profile(_IDENTITY_UNRESOLVED, yaml_file)
+
+    def test_sentinel_is_marked_fallback(self, yaml_file: Path) -> None:
+        profile = resolve_worker_profile(_IDENTITY_UNRESOLVED, yaml_file)
+        assert profile.is_fallback is True
+        assert profile.role == "code-worker"
+
+    def test_sentinel_matches_none_role_profile(self, yaml_file: Path) -> None:
+        sentinel_profile = resolve_worker_profile(_IDENTITY_UNRESOLVED, yaml_file)
+        none_profile = resolve_worker_profile(None, yaml_file)
+        assert sentinel_profile.is_fallback == none_profile.is_fallback
+        assert set(sentinel_profile.allowed_tools) == set(none_profile.allowed_tools)
+        assert set(sentinel_profile.denied_tools) == set(none_profile.denied_tools)
 
     def test_agents_registry_role_logs_warning_not_error(self, yaml_file: Path, caplog) -> None:
         import logging

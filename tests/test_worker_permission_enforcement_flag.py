@@ -9,7 +9,11 @@ Verifies:
     remeasurement) → blanket skip; truthy → scoped spawn, no skip flag.
   - Explicit opt-outs (VNX_WORKER_ENFORCEMENT_SKIP=1, or falsy
     VNX_ENFORCE_WORKER_PERMISSIONS) → byte-for-byte blanket skip.
-  - Unknown role falls back to the functional code-worker profile.
+  - A role absent from EVERY register (not in worker_permissions.yaml's
+    profiles, no agents/<role>/) refuses via UnknownRoleError (OI-1069 pt.5).
+  - A role present in the agents/ registry but with no worker_permissions.yaml
+    profile still falls back to the functional code-worker profile
+    (is_fallback=True) — that is the OI-1100 fallback, unchanged.
   - Receipt marker is emitted only when the flag is explicitly ON.
 """
 
@@ -31,6 +35,7 @@ sys.path.insert(0, str(SCRIPTS_LIB))
 
 from tmux_interactive_dispatch import _default_launch_command
 from worker_permissions import (
+    UnknownRoleError,
     build_claude_scope_args,
     default_code_worker_profile,
     worker_permission_enforcement_enabled,
@@ -135,9 +140,21 @@ class TestProviderLaneScopeArgs:
         assert "--strict-mcp-config" not in args
         assert "--mcp-config" not in args
 
-    def test_flag_on_unknown_role_falls_back_to_code_worker(self):
+    def test_flag_on_unknown_role_refuses_with_unknown_role_error(self):
+        # A role absent from EVERY register (not a worker_permissions.yaml
+        # profile key, not an agents/<role>/ entry) is not a fallback case
+        # (OI-1069 pt.5) — it must refuse, not silently hand out a tool scope
+        # nobody chose. Red on pre-fix code: this used to fall back.
         with _set_enforcement(True):
-            args = _build_worker_scope_args("nonexistent-role-xyz")
+            with pytest.raises(UnknownRoleError):
+                _build_worker_scope_args("nonexistent-role-xyz")
+
+    def test_flag_on_role_known_elsewhere_without_yaml_profile_falls_back(self):
+        # blog-writer is a real agents/blog-writer/ entry with no profile in
+        # .vnx/worker_permissions.yaml — that is NOT the same failure as a role
+        # absent from every register; it keeps the OI-1100 explicit fallback.
+        with _set_enforcement(True):
+            args = _build_worker_scope_args("blog-writer")
 
         assert "--dangerously-skip-permissions" not in args
         assert "--permission-mode" in args
@@ -168,9 +185,20 @@ class TestTmuxLaneLaunchCommand:
         assert "--allowedTools" in cmd
         assert "WebSearch" in cmd  # denied_tools from backend-developer profile
 
-    def test_flag_on_unknown_role_falls_back_to_code_worker(self):
+    def test_flag_on_unknown_role_refuses_with_unknown_role_error(self):
+        # Same OI-1069 pt.5 distinction as the provider lane: a role absent
+        # from every register refuses instead of falling back. Red on
+        # pre-fix code: this used to fall back to the code-worker profile.
         with _set_enforcement(True):
-            cmd = _default_launch_command("sonnet", skip_permissions=True, role="unknown-role")
+            with pytest.raises(UnknownRoleError):
+                _default_launch_command("sonnet", skip_permissions=True, role="unknown-role")
+
+    def test_flag_on_role_known_elsewhere_without_yaml_profile_falls_back(self):
+        # linkedin-writer is a real agents/linkedin-writer/ entry with no
+        # profile in .vnx/worker_permissions.yaml — keeps the OI-1100
+        # explicit fallback rather than refusing.
+        with _set_enforcement(True):
+            cmd = _default_launch_command("sonnet", skip_permissions=True, role="linkedin-writer")
 
         assert "--dangerously-skip-permissions" not in cmd
         assert "--permission-mode" in cmd
