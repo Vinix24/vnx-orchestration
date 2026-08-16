@@ -14,6 +14,13 @@ Every unverifiable state (``gh`` missing, ``gh`` not authenticated, ``gh run
 list`` failing or unparseable, HEAD/branch unresolvable) is a NO-GO with its
 own message. A missing tool never passes as "no red found".
 
+Escape hatch (OI-1216 merge-gate): an operator may override the gate by
+supplying a non-empty reason via ``override_reason`` /
+``--override-reason`` / ``VNX_MERGE_OVERRIDE_REASON``. The reason IS the
+override: an empty/whitespace reason is a refusal, never a silent bypass, and
+every overridden verdict carries ``overridden=True`` plus the reason so it is
+visible in the output rather than hidden.
+
 This is the merge-preflight counterpart to ``pre_merge_gate.check_ci_workflow``
 (OI-931), which enforces the same invariant at gate time. The two share the
 same ``gh run list`` invocation shape and the same workflow-name resolution
@@ -37,6 +44,11 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
 CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
 
+# Escape-hatch env var. The value is the required reason: a non-empty value
+# overrides the gate (visibly), an empty value is a refusal, an unset variable
+# means no override is attempted.
+OVERRIDE_ENV_VAR = "VNX_MERGE_OVERRIDE_REASON"
+
 # How many recent runs to pull per branch. Matching is by exact head SHA, so a
 # head older than the limit on a busy branch would read as "not run". The same
 # limit is used by pre_merge_gate.check_ci_workflow.
@@ -59,6 +71,23 @@ def _resolve_workflow_name(workflow_name: Optional[str]) -> str:
     if env_name:
         return env_name
     return DEFAULT_CI_WORKFLOW_NAME
+
+
+def _resolve_override_reason(override_reason: Optional[str]) -> Optional[str]:
+    """Resolve the escape-hatch reason: explicit arg > env var > None.
+
+    Returns the stripped reason string, or one of two sentinels that the caller
+    must distinguish:
+      - ``None``  -> no override attempted; run the normal fail-closed check.
+      - ``""``    -> override attempted WITHOUT a reason; refuse (fail closed).
+      - non-empty -> override granted, with this reason (visible in the verdict).
+    """
+    if override_reason is not None:
+        return override_reason.strip()
+    env_reason = os.environ.get(OVERRIDE_ENV_VAR)
+    if env_reason is not None:
+        return env_reason.strip()
+    return None
 
 
 def _capture(argv: List[str], *, timeout: int, cwd: Optional[str] = None) -> Tuple[Optional[subprocess.CompletedProcess], Optional[str]]:
@@ -93,9 +122,26 @@ def _no_go(message: str, **extra: Any) -> Dict[str, Any]:
         "ran_on_sha": False,
         "head_sha": None,
         "ci_run_id": None,
+        "overridden": False,
+        "override_reason": None,
     }
     base.update(extra)
     return base
+
+
+def _overridden_go(reason: str, head_sha: Optional[str], workflow_name: str) -> Dict[str, Any]:
+    """GO verdict for an explicit operator override. Always visible, never silent."""
+    return {
+        "verdict": "GO",
+        "message": f"OVERRIDE: VNX CI-check overgeslagen voor merge ({reason})",
+        "ci_conclusion": None,
+        "ran_on_sha": False,
+        "head_sha": head_sha,
+        "ci_run_id": None,
+        "workflow_name": workflow_name,
+        "overridden": True,
+        "override_reason": reason,
+    }
 
 
 def check_ci_run_for_head(
@@ -105,13 +151,31 @@ def check_ci_run_for_head(
     head_sha: Optional[str] = None,
     gh_bin: str = "gh",
     workflow_name: Optional[str] = None,
+    override_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fail-closed check: a VNX CI run with conclusion=success must exist for head_sha.
 
     Returns {"verdict": "GO"|"NO-GO", "message": str, ...}. ``project_root`` is
     the directory whose HEAD is being merged (the worktree under preflight).
+
+    ``override_reason`` is the escape hatch: a non-empty value skips the check
+    with a visible GO (``overridden=True``), an empty/whitespace value is a
+    refusal, and None (or an unset env var) runs the normal check.
     """
     resolved_workflow = _resolve_workflow_name(workflow_name)
+
+    # ── Escape hatch ──────────────────────────────────────────────────────
+    reason = _resolve_override_reason(override_reason)
+    if reason is not None:
+        if not reason:
+            return _no_go(
+                "override zonder reden geweigerd: een override vereist een niet-lege reden "
+                "(geen stille bypass)",
+                workflow_name=resolved_workflow,
+                overridden=True,
+                override_reason=reason,
+            )
+        return _overridden_go(reason, head_sha, resolved_workflow)
 
     # ── gh availability ────────────────────────────────────────────────────
     if shutil.which(gh_bin) is None:
@@ -221,6 +285,8 @@ def check_ci_run_for_head(
                 "head_sha": head_sha,
                 "ci_run_id": run_id,
                 "workflow_name": resolved_workflow,
+                "overridden": False,
+                "override_reason": None,
             }
         if status in ("in_progress", "queued"):
             return _no_go(
@@ -271,6 +337,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--head-sha", help="Exact HEAD SHA (defaults to git rev-parse HEAD)")
     parser.add_argument("--workflow", help="CI workflow name (default: VNX_CI_WORKFLOW_NAME or 'VNX CI')")
     parser.add_argument("--gh-bin", default="gh", help="Path/name of the gh binary")
+    parser.add_argument(
+        "--override-reason",
+        default=None,
+        help="Escape hatch: skip the check with this required reason (empty is refused). "
+             "Also read from VNX_MERGE_OVERRIDE_REASON.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     args = parser.parse_args(argv)
 
@@ -280,6 +352,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         head_sha=args.head_sha,
         gh_bin=args.gh_bin,
         workflow_name=args.workflow,
+        override_reason=args.override_reason,
     )
 
     if args.json:

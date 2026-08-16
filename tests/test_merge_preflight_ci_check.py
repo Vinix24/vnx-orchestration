@@ -28,6 +28,7 @@ from merge_preflight_ci_check import (
     check_ci_run_for_head,
     DEFAULT_CI_WORKFLOW_NAME,
     CI_WORKFLOW_NAME_ENV_VAR,
+    OVERRIDE_ENV_VAR,
 )
 
 
@@ -236,7 +237,95 @@ class TestCheckCIRunForHead:
         assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
 
 
+class TestOverrideEscapeHatch:
+    """The escape hatch: override with a required, visible reason.
+
+    The reason IS the override. A non-empty reason skips the check with a
+    visible GO; an empty/whitespace reason (or empty env value) is a refusal,
+    never a silent bypass. Overrides short-circuit before any gh/git call.
+    """
+
+    def test_override_with_reason_is_go_and_visible(self, tmp_path):
+        """Non-empty reason -> GO, flagged overridden, reason in the message."""
+        reason = "hotfix: VNX CI flaked, run re-verified manually"
+        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path, override_reason=reason)
+        assert result["verdict"] == "GO"
+        assert result["overridden"] is True
+        assert result["override_reason"] == reason
+        assert "OVERRIDE" in result["message"]
+        assert "hotfix" in result["message"]
+        mock_run.assert_not_called()
+
+    def test_override_without_reason_is_refused(self, tmp_path):
+        """Empty reason -> NO-GO: the escape hatch requires a reason."""
+        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path, override_reason="")
+        assert result["verdict"] == "NO-GO"
+        assert "reden" in result["message"]
+        assert "niet toetsbaar" not in result["message"]
+        mock_run.assert_not_called()
+
+    def test_override_whitespace_reason_is_refused(self, tmp_path):
+        """Whitespace-only reason is treated as no reason -> NO-GO."""
+        result = check_ci_run_for_head(tmp_path, override_reason="   ")
+        assert result["verdict"] == "NO-GO"
+        assert "reden" in result["message"]
+
+    def test_override_env_var_with_reason(self, tmp_path, monkeypatch):
+        """VNX_MERGE_OVERRIDE_REASON with a reason -> visible GO override."""
+        monkeypatch.setenv(OVERRIDE_ENV_VAR, "operator-approved: manual verify")
+        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "GO"
+        assert result["overridden"] is True
+        assert "operator-approved" in result["message"]
+        mock_run.assert_not_called()
+
+    def test_override_env_var_empty_is_refused(self, tmp_path, monkeypatch):
+        """An empty env value is an override attempt without a reason -> NO-GO."""
+        monkeypatch.setenv(OVERRIDE_ENV_VAR, "")
+        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "NO-GO"
+        assert "reden" in result["message"]
+        mock_run.assert_not_called()
+
+
 class TestCLI:
+    def test_cli_override_reason_flag_go(self, tmp_path, capsys):
+        """--override-reason with a reason exits 0 and reports overridden."""
+        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            rc = mpci.main([
+                "--project-root", str(tmp_path), "--json",
+                "--override-reason", "manual verify after flake",
+            ])
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["verdict"] == "GO"
+        assert out["overridden"] is True
+        assert "manual verify" in out["message"]
+        mock_run.assert_not_called()
+
+    def test_cli_override_reason_empty_refused(self, tmp_path, capsys):
+        """--override-reason with an empty value exits 1 and refuses."""
+        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            rc = mpci.main([
+                "--project-root", str(tmp_path), "--json",
+                "--override-reason", "",
+            ])
+        assert rc == 1
+        out = json.loads(capsys.readouterr().out)
+        assert out["verdict"] == "NO-GO"
+        assert "reden" in out["message"]
+        mock_run.assert_not_called()
+
     def test_cli_json_go_exits_zero(self, tmp_path, capsys):
         sha = "m" * 40
         mocks = _subprocess_mocks(sha) + [_gh_run_output("success", sha)]

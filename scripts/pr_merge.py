@@ -5,6 +5,13 @@ T0 calls this instead of raw ``gh pr merge`` so every merge is captured in the
 audit trail (t0_receipts.ndjson + dispatch_register.ndjson).  Without this,
 FPY/rework-rate/history have no linkage between merged PRs and receipts.
 
+Merge gate (OI-1216): before merging, the CLI runs a fail-closed check that the
+VNX CI workflow has a run with ``conclusion=success`` for exactly the PR head
+SHA (see ``_run_ci_gate`` -> ``merge_preflight_ci_check.check_ci_run_for_head``).
+A run on an older head does not count, zero runs is a refusal, and any
+unverifiable state is a refusal — never a silent pass. ``--override-reason``
+skips the check visibly with a mandatory reason.
+
 Usage:
     python3 scripts/pr_merge.py --pr 123
     python3 scripts/pr_merge.py --pr 123 --dispatch-id 20260526-gov2-something
@@ -12,6 +19,7 @@ Usage:
     python3 scripts/pr_merge.py --pr 123 --rebase
     python3 scripts/pr_merge.py --pr 123 --merge
     python3 scripts/pr_merge.py --pr 123 --dry-run         # no merge, no write
+    python3 scripts/pr_merge.py --pr 123 --override-reason 'gate flaked, re-verified'
 
 Receipt written to t0_receipts.ndjson:
     event_type  : "pr_merged"
@@ -51,6 +59,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
+from merge_preflight_ci_check import check_ci_run_for_head
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -99,7 +108,7 @@ def _query_pr(pr_number: int) -> Optional[Dict[str, Any]]:
     """Return PR metadata from GitHub, or None on failure."""
     result = _gh([
         "pr", "view", str(pr_number),
-        "--json", "number,title,state,headRefName,baseRefName,mergedAt,mergeCommit",
+        "--json", "number,title,state,headRefName,baseRefName,headRefOid,mergedAt,mergeCommit",
     ])
     if result.returncode != 0:
         return None
@@ -107,6 +116,43 @@ def _query_pr(pr_number: int) -> Optional[Dict[str, Any]]:
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
+
+
+def _run_ci_gate(
+    pr_number: int,
+    *,
+    override_reason: Optional[str] = None,
+) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Fail-closed merge gate: VNX CI must have conclusion=success for the PR head.
+
+    Resolves the PR head (sha + branch) via ``gh pr view`` and delegates the
+    workflow-conclusion check to
+    ``merge_preflight_ci_check.check_ci_run_for_head``. Returns ``(gate,
+    pr_data)``; the caller merges only when ``gate["verdict"] == "GO"``.
+
+    A failed/empty PR query (no head sha or branch) is a NO-GO — the GitHub API
+    not answering is a refusal with a message, never a silent pass.
+    """
+    pr_data = _query_pr(pr_number)
+    head_sha = (pr_data or {}).get("headRefOid") or ""
+    branch = (pr_data or {}).get("headRefName") or ""
+    if not head_sha or not branch:
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"PR-head (sha/branch) kon niet worden bepaald voor #{pr_number}: "
+                "deze merge is niet toetsbaar"
+            ),
+            "overridden": False,
+            "override_reason": None,
+        }, pr_data
+    gate = check_ci_run_for_head(
+        SCRIPT_DIR.parent,
+        branch=branch,
+        head_sha=head_sha,
+        override_reason=override_reason,
+    )
+    return gate, pr_data
 
 
 def _do_merge(pr_number: int, method: str) -> tuple[bool, str]:
@@ -288,10 +334,33 @@ def main(argv: Optional[list[str]] = None) -> int:
     merge_group.add_argument("--rebase", dest="merge_method", action="store_const", const="rebase")
     merge_group.add_argument("--merge", dest="merge_method", action="store_const", const="merge")
     parser.add_argument("--dry-run", action="store_true", help="Skip merge and receipt write")
+    parser.add_argument(
+        "--override-reason", default=None,
+        help="Escape hatch: skip the CI gate with this required reason (empty is refused). "
+             "Also read from VNX_MERGE_OVERRIDE_REASON.",
+    )
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args(argv)
 
     method = args.merge_method or "squash"
+
+    # ── Merge gate: VNX CI conclusion=success for the exact PR head ──────
+    gate, _ = _run_ci_gate(args.pr, override_reason=args.override_reason)
+    if gate["verdict"] != "GO":
+        if args.json:
+            print(json.dumps({
+                "success": False,
+                "pr_number": args.pr,
+                "error": gate["message"],
+                "ci_gate": gate,
+            }, indent=2))
+        else:
+            print(f"NO-GO: {gate['message']}", file=sys.stderr)
+        return EXIT_ERROR
+    if gate.get("overridden"):
+        print(f"OVERRIDE: {gate['message']}")
+    else:
+        print(f"CI gate: {gate['message']}")
 
     result = merge_pr(
         pr_number=args.pr,
