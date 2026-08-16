@@ -6,7 +6,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [1.5.0] — 2026-08-16
 
-Minor release (84 PRs since v1.4.7). The user-visible shape: the plan-gate
+Minor release since v1.4.7. The user-visible shape: the plan-gate
 now judges a track on its goal AND its deliverables and refuses a
 deliverable-less track loud, new CLI verbs manage deliverables and track
 goals directly, the provider cost ladder is an ordered tier list with
@@ -46,6 +46,27 @@ resolving to a silent default.
   set (`01_code_generation` .. `07_translation`); `routing_floor` is free
   text. `vnx deliverable list` now surfaces both fields. See
   `docs/core/HORIZON_PLANNING.md`.
+- **Escalation ladder climbs from failure_class (#1574)** — the smart-router
+  escalation ladder no longer climbs on a bare boolean: `model_error` and
+  `credit_exhausted` climb one tier (the latter also notifies the operator),
+  `auth_rejected` does not climb (a higher tier has the same auth problem),
+  and `timeout`/`empty_completion` retry the same tier once before climbing.
+  `stage_escalation_bundle` gains its first production caller in the
+  provider-lane failure branch, so `tier_from`/`tier_to`/`parent_dispatch`
+  land on the staged follow-up spec and reach the receipt.
+- **Blessed merge wrapper gated on VNX CI conclusion (#1575)** — `pr_merge.py`
+  refuses a merge unless a VNX CI run with `conclusion=success` exists for
+  the exact PR head SHA. A run on an older head does not count, zero runs is
+  a refusal, and any unverifiable state is a refusal rather than a silent
+  pass. `--override-reason` (or `VNX_MERGE_OVERRIDE_REASON`) is the single
+  visible escape hatch, and an empty reason is refused.
+- **Blocked review state split into unread vs refused (#1576)** — the single
+  `blocked` state hid two facts under one name: tracks the plan-gate never
+  reviewed (queue depth) and tracks it reviewed and refused. The disposition
+  is now derived from the open OI-PLAN blocker plus the durable
+  `tracks.decision_ref`, so it cannot drift from the gate records.
+  `vnx objective list` badges them `~blocked:unread` / `~blocked:refused`
+  and `vnx objective show` adds a `plan-gate:` disposition line.
 
 ### Fixed
 
@@ -123,7 +144,7 @@ resolving to a silent default.
   teardown sweep runs under an unconditional guard; migration `apply_0033`
   is idempotent against a version downgrade.
 
-Plus 19 smaller fixes in docs, skills, and tests.
+Plus smaller fixes in docs, skills, and tests.
 
 ## [1.4.7] — 2026-08-12
 
