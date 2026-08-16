@@ -2252,6 +2252,7 @@ class TmuxInteractiveDispatch:
         label: "str | None" = None,
         raw_log_path: "Path | None" = None,
         session: str = "",
+        model: str = "",
     ) -> "dict | None":
         """Poll signals 1–3 until a NEW completion appears beyond the baseline.
 
@@ -2280,6 +2281,10 @@ class TmuxInteractiveDispatch:
           below; when either is missing the probe reports "unknown" every poll
           and every decision falls open to the pre-OI-1130 heartbeat-only
           behavior.
+
+        *model*: threaded through to the ``worker_process_gone`` and
+          heartbeat-kill failure reports (OI-1237) so those terminal reports
+          carry the actual model instead of an unbound name.
 
         OI-1130 deterministic liveness (see ``_check_worker_liveness``): each
         poll, independent of heartbeat silence, the worker's tmux session/pane
@@ -2433,10 +2438,10 @@ class TmuxInteractiveDispatch:
                             "written to %s",
                             _report_path,
                         )
-                    except Exception as _pg_write_exc:
-                        logger.warning(
+                    except Exception as _pg_write_exc:  # noqa: BLE001 — a failed report write must never crash the poll loop, but it must be LOUD (OI-1237): this is the audit trail's only record of the kill
+                        logger.error(
                             "interactive: worker_process_gone failure report "
-                            "write failed for %s: %s",
+                            "NOT written for dispatch=%s — audit trail gap: %s",
                             dispatch_id,
                             _pg_write_exc,
                         )
@@ -2515,10 +2520,10 @@ class TmuxInteractiveDispatch:
                                 "interactive: heartbeat failure report written to %s",
                                 _report_path,
                             )
-                        except Exception as _hb_write_exc:
-                            logger.warning(
-                                "interactive: heartbeat failure report write "
-                                "failed for %s: %s",
+                        except Exception as _hb_write_exc:  # noqa: BLE001 — a failed report write must never crash the poll loop, but it must be LOUD (OI-1237): this is the audit trail's only record of the kill
+                            logger.error(
+                                "interactive: heartbeat failure report NOT "
+                                "written for dispatch=%s — audit trail gap: %s",
                                 dispatch_id,
                                 _hb_write_exc,
                             )
@@ -3424,6 +3429,7 @@ class TmuxInteractiveDispatch:
                 label=label,
                 raw_log_path=_raw_log[0],
                 session=session,
+                model=model,
             )
 
             if receipt is None:
