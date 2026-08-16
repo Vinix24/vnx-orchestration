@@ -246,11 +246,18 @@ def _cmd_deliverable_close(args: Any) -> int:
     return pc.cmd_deliverable_close(args)
 
 
+def _cmd_deliverable_set(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_deliverable_set(args)
+
+
 _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_deliverable_add,
     "list": _cmd_deliverable_list,
     "promote": _cmd_deliverable_promote,
     "close": _cmd_deliverable_close,
+    "set": _cmd_deliverable_set,
 }
 
 

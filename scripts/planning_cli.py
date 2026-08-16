@@ -7,14 +7,22 @@ Delegated from `bin/vnx`:
   vnx objective sync [--apply] [--roadmap PATH] [--json]
   vnx objective drift [--json]
   vnx deliverable add --objective <track_id> --output-kind <kind> --title "..."
+                       [--task-class <class>] [--routing-floor <floor>]
   vnx deliverable list [--objective <track_id>] [--json]
   vnx deliverable promote <dispatch_id>
   vnx deliverable close <dispatch_id> --evidence <pr>
+  vnx deliverable set <dispatch_id> [--task-class <class>] [--routing-floor <floor>]
 
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
 `vnx deliverable promote` is the human gate (proposed -> ready).
 `vnx deliverable close` closes the loop (ready -> completed) on an
 operator-attested delivering PR.
+`vnx deliverable set` tags an EXISTING deliverable with task_class/routing_floor
+metadata (rubric axes 3/5 the plan-gate reads via `_format_deliverable_for_plan`)
+without recreating it. `task_class` is validated against smart_router's closed
+set (01_code_generation .. 07_translation); `routing_floor` is free text (no
+canonical vocabulary exists for it — see `plan_gate_panel.py`'s "quality
+FLOOR" framing).
 `vnx promote` (top-level) is the PR-queue command — NOT the same.
 
 Planning turn-on (auto-seed + advisory drift):
@@ -2089,12 +2097,55 @@ def cmd_objective_set_goal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_valid_task_classes() -> frozenset[str]:
+    """The canonical task_class vocabulary for the Horizon planning layer:
+    smart_router's own closed set (01_code_generation .. 07_translation) —
+    the SAME vocabulary `vnx horizon plan-gate run --task-class` already
+    documents (HORIZON_PLANNING.md: ``task_class == 01_code_generation``
+    marks a new feature). Not the separate FP-C execution-routing vocabulary
+    in `execution_target_registry.VALID_TASK_CLASSES`
+    (coding_interactive/research_structured/...) — that one classifies
+    dispatch TARGETS at execution time, a different axis from the
+    deliverable-planning tag this validates.
+
+    Lazy import (matches ``_derive_panel_weight``'s convention): keeps
+    ``_build_parser()`` free of engine-module imports at argparse-build time.
+    """
+    import smart_router  # noqa: PLC0415
+
+    return frozenset(smart_router.TASK_CLASSES.keys())
+
+
+def _validate_task_class(task_class: Optional[str]) -> None:
+    """Raise ValueError with an actionable message on an unknown task_class.
+
+    A falsy value (None or empty string) is not validated — nothing to check
+    when the field is simply absent, which is the normal case pre-#1560.
+    """
+    if not task_class:
+        return
+    valid = _load_valid_task_classes()
+    if task_class not in valid:
+        raise ValueError(
+            f"unknown task_class {task_class!r}. Must be one of the "
+            f"smart-router closed set: {sorted(valid)}"
+        )
+
+
 def cmd_deliverable_add(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
     track_id = args.objective
     output_kind = args.output_kind
     title = args.title
+    task_class = getattr(args, "task_class", None)
+    routing_floor = getattr(args, "routing_floor", None)
+
+    try:
+        _validate_task_class(task_class)
+    except ValueError as exc:
+        print(f"deliverable add: {exc}. No change made.", file=sys.stderr)
+        return 2
 
     track = tracks_lib.get_track(state_dir, track_id, project_id)
     if track is None:
@@ -2107,7 +2158,12 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
 
     dispatch_id = f"dlv-{uuid.uuid4().hex[:12]}"
     output_ref = f"{output_kind}:{dispatch_id}"
-    metadata = json.dumps({"title": title, "deliverable": True})
+    metadata_dict: dict[str, Any] = {"title": title, "deliverable": True}
+    if task_class:
+        metadata_dict["task_class"] = task_class
+    if routing_floor:
+        metadata_dict["routing_floor"] = routing_floor
+    metadata = json.dumps(metadata_dict)
     now = _now_utc()
 
     conn = _db_conn(state_dir)
@@ -2148,12 +2204,14 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
         conn.close()
 
     print(f"Deliverable created: {dispatch_id}")
-    print(f"  objective  : {track_id}")
-    print(f"  output_kind: {output_kind}")
-    print(f"  output_ref : {output_ref}")
-    print(f"  state      : proposed")
-    print(f"  title      : {title}")
-    print(f"  next       : vnx deliverable promote {dispatch_id}")
+    print(f"  objective    : {track_id}")
+    print(f"  output_kind  : {output_kind}")
+    print(f"  output_ref   : {output_ref}")
+    print("  state        : proposed")
+    print(f"  title        : {title}")
+    print(f"  task_class   : {task_class or '(not set)'}")
+    print(f"  routing_floor: {routing_floor or '(not set)'}")
+    print(f"  next         : vnx deliverable promote {dispatch_id}")
     return 0
 
 
@@ -2257,9 +2315,24 @@ def _fetch_deliverable_records(
 
 
 def cmd_deliverable_list(args: argparse.Namespace) -> int:
+    """List deliverables, one section per track.
+
+    Fetches WITH metadata (``include_metadata=True``) and surfaces
+    ``task_class``/``routing_floor`` explicitly — the same two fields the
+    plan-gate reads via ``_format_deliverable_for_plan`` (rubric axes 3/5) —
+    so an operator can see, before the gate ever runs, exactly what the
+    panelists will see: a real value, or an explicit "not set" rather than
+    the field silently disappearing from the listing.
+    """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
-    records = _fetch_deliverable_records(state_dir, project_id, args.objective)
+    records = _fetch_deliverable_records(
+        state_dir, project_id, args.objective, include_metadata=True,
+    )
+    for r in records:
+        meta = r.get("metadata") or {}
+        r["task_class"] = meta.get("task_class")
+        r["routing_floor"] = meta.get("routing_floor")
 
     if args.json:
         print(json.dumps(records, indent=2, default=str))
@@ -2282,7 +2355,10 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
         status = r.get("derived_status") or "-"
         kind = r.get("output_kind") or "-"
         count = r.get("dispatch_count", 1)
+        meta = r.get("metadata") or {}
         print(f"    {ref:<36} {kind:<6} {status:<12} ({count} dispatch(es))")
+        print(f"        {_format_deliverable_field(meta, 'task_class')}")
+        print(f"        {_format_deliverable_field(meta, 'routing_floor')}")
     print()
     return 0
 
@@ -2505,6 +2581,111 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
     else:
         print(f"\nvnx deliverable close — {dispatch_id} (project '{project_id}')\n")
         print(f"  ready -> completed (operator attestation: PR {pr_ref})\n")
+    return 0
+
+
+def cmd_deliverable_set(args: argparse.Namespace) -> int:
+    """Set task_class and/or routing_floor metadata on an EXISTING deliverable.
+
+    The write-side half of what PR #1560 shipped read-only:
+    `_format_deliverable_for_plan` has rendered task_class/routing_floor from
+    deliverable metadata since that PR, `deliverable add` can now set them at
+    creation time (this same dispatch), but nothing could set them on a
+    deliverable that already exists — the exact "state the gate demands with
+    no door to reach it" pattern `objective set-goal` and `deliverable close`
+    were each built to close, a third instance of it.
+
+    A dedicated verb rather than an idempotent `add` upsert: `add` always
+    mints a fresh `dispatch_id` (a new row), so reusing it for an in-place
+    update would either silently create a duplicate deliverable or need a
+    fragile lookup-by-title heuristic. `set` looks up the existing row by
+    `dispatch_id` instead — the same identifier `promote`/`close` already key
+    on — and patches only the metadata JSON blob. No schema change: this is
+    the same `metadata_json` column `add` already writes to (ADR-007 does not
+    apply — no new table, no new column, no project_id-scoped uniqueness to
+    add).
+
+    Only the given field(s) are touched: passing `--task-class` alone leaves
+    an existing `routing_floor` (or its absence) untouched, and vice versa.
+    `title` and any other existing metadata keys survive unmodified — this is
+    a patch, not a replace.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    dispatch_id = args.dispatch_id
+    task_class = getattr(args, "task_class", None)
+    routing_floor = getattr(args, "routing_floor", None)
+
+    if not task_class and not routing_floor:
+        print(
+            "deliverable set: nothing to set — pass --task-class and/or "
+            "--routing-floor. No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        _validate_task_class(task_class)
+    except ValueError as exc:
+        print(f"deliverable set: {exc}. No change made.", file=sys.stderr)
+        return 2
+
+    conn = _db_conn(state_dir)
+    try:
+        row = conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, project_id),
+        ).fetchone()
+
+        if row is None:
+            print(
+                f"deliverable set: deliverable not found: {dispatch_id!r} "
+                f"(project {project_id!r}). No change made.",
+                file=sys.stderr,
+            )
+            return 1
+
+        meta = json.loads(row["metadata_json"] or "{}")
+        if task_class:
+            meta["task_class"] = task_class
+        if routing_floor:
+            meta["routing_floor"] = routing_floor
+        new_metadata_json = json.dumps(meta)
+
+        now = _now_utc()
+        conn.execute(
+            """
+            UPDATE dispatches
+            SET metadata_json = ?, updated_at = ?
+            WHERE dispatch_id = ? AND project_id = ?
+            """,
+            (new_metadata_json, now, dispatch_id, project_id),
+        )
+        _append_coordination_event(
+            conn,
+            event_type="deliverable_metadata_set",
+            dispatch_id=dispatch_id,
+            from_state=row["state"],
+            to_state=row["state"],
+            actor="operator",
+            reason="deliverable set: task_class/routing_floor",
+            project_id=project_id,
+            metadata={
+                k: v
+                for k, v in {"task_class": task_class, "routing_floor": routing_floor}.items()
+                if v
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    parts = []
+    if task_class:
+        parts.append(f"task_class={task_class}")
+    if routing_floor:
+        parts.append(f"routing_floor={routing_floor}")
+    print(f"Set {', '.join(parts)} on {dispatch_id} (project {project_id!r})")
     return 0
 
 
@@ -4548,6 +4729,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_dadd.add_argument("--output-kind", required=True, choices=_VALID_OUTPUT_KINDS,
                         metavar="KIND", dest="output_kind")
     p_dadd.add_argument("--title", required=True)
+    p_dadd.add_argument(
+        "--task-class", dest="task_class", default=None, metavar="CLASS",
+        help="optional task class from the smart-router closed set "
+             "(01_code_generation .. 07_translation) — the same rubric axis "
+             "the plan-gate reads. Unknown values are refused.",
+    )
+    p_dadd.add_argument(
+        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
+        help="optional model-routing quality floor for this deliverable "
+             "(free text, e.g. a model name) — the plan-gate's rubric axis 5.",
+    )
     p_dadd.set_defaults(func=cmd_deliverable_add)
 
     p_dlist = dlv_sub.add_parser("list", help="list deliverables grouped by objective")
@@ -4577,6 +4769,27 @@ def _build_parser() -> argparse.ArgumentParser:
              "merge state at close time.",
     )
     p_dclose.set_defaults(func=cmd_deliverable_close)
+
+    p_dset = dlv_sub.add_parser(
+        "set",
+        help="tag an EXISTING deliverable with task_class/routing_floor "
+             "(the rubric fields the plan-gate reads)",
+    )
+    _common(p_dset)
+    p_dset.add_argument("dispatch_id")
+    p_dset.add_argument(
+        "--task-class", dest="task_class", default=None, metavar="CLASS",
+        help="task class from the smart-router closed set (01_code_generation "
+             ".. 07_translation). Unknown values are refused. At least one of "
+             "--task-class/--routing-floor is required.",
+    )
+    p_dset.add_argument(
+        "--routing-floor", dest="routing_floor", default=None, metavar="FLOOR",
+        help="model-routing quality floor for this deliverable (free text, "
+             "e.g. a model name). At least one of --task-class/--routing-floor "
+             "is required.",
+    )
+    p_dset.set_defaults(func=cmd_deliverable_set)
 
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)
