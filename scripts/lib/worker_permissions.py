@@ -409,6 +409,58 @@ def resolve_worker_profile(
     return default_code_worker_profile()
 
 
+def _bash_allow_pattern_to_tool(pattern: str) -> Optional[str]:
+    """Translate one ``bash_allow_pattern`` into a ``Bash(<prefix>:*)`` allowedTool.
+
+    The yaml patterns are shell-globs whose intent is "allow ``<prefix> …``"
+    (``git add*`` means allow ``git add <anything>``). Claude Code's
+    ``--allowedTools`` expresses exactly that as ``Bash(<prefix>:*)`` — the ``:*``
+    globs the argument tail, the same form the working-tree-only deny already
+    uses (``Bash(git commit:*)``). A pattern that is a literal prefix followed by
+    a single trailing ``*`` maps losslessly for any token count: ``git*`` →
+    ``Bash(git:*)``, ``git add*`` → ``Bash(git add:*)``, ``git push origin*`` →
+    ``Bash(git push origin:*)``.
+
+    Returns ``None`` when the pattern cannot be expressed as a prefix glob: a
+    mid-pattern ``*`` (``git*log``), a ``?``/``[`` metacharacter, or a bare ``*``
+    (which would mean "allow every command" — refuse to widen). The caller logs
+    the drop loudly rather than silently losing the pattern.
+    """
+    pat = (pattern or "").strip()
+    if not pat.endswith("*"):
+        return None
+    prefix = pat[:-1].rstrip()
+    if not prefix:
+        return None
+    if any(c in prefix for c in ("*", "?", "[")):
+        return None
+    return f"Bash({prefix}:*)"
+
+
+def _bash_allow_tool_entries(profile: PermissionProfile) -> list[str]:
+    """Translate ``profile.bash_allow_patterns`` into ``Bash(<prefix>:*)`` tools.
+
+    Every translatable pattern becomes one entry. A pattern that cannot be
+    expressed as a prefix glob is logged (role + pattern) and skipped — a
+    permission profile silently losing half its rules is worse than one that
+    refuses loudly (20260816-p4-bash-pattern-loss).
+    """
+    tools: list[str] = []
+    for pattern in profile.bash_allow_patterns:
+        tool = _bash_allow_pattern_to_tool(pattern)
+        if tool is None:
+            logger.warning(
+                "worker_permissions: role '%s' bash_allow_pattern %r cannot be "
+                "translated to a Bash(<prefix>:*) allowedTool — dropping it from "
+                "--allowedTools (pattern will not be enforced)",
+                profile.role,
+                pattern,
+            )
+            continue
+        tools.append(tool)
+    return tools
+
+
 def build_claude_scope_args(
     profile: PermissionProfile,
     *,
@@ -437,6 +489,11 @@ def build_claude_scope_args(
         allowlist does not apply in that case (Open Item: reconcile the two).
       - ``--allowedTools`` / ``--disallowedTools`` — the profile's tool allow/deny
         lists (the previously-dead :func:`generate_claude_settings`, now live).
+        ``profile.bash_allow_patterns`` are translated into ``Bash(<prefix>:*)``
+        entries here as well (``git add*`` → ``Bash(git add:*)``), so a
+        multi-token pattern keeps its intent in the argv instead of being
+        silently dropped (20260816-p4-bash-pattern-loss). A pattern that cannot
+        be expressed as a prefix glob is logged (role + pattern) and skipped.
         The whole MCP tool namespace (``mcp__*``) is denied here as well when
         ``requires_mcp=False`` — the empty ``--mcp-config`` above only reaches
         the ``mcpServers`` group, not extension bridges (see
@@ -447,7 +504,10 @@ def build_claude_scope_args(
     ambient MCP config (and its MCP tools) are used instead.
     """
     settings = generate_claude_settings(profile)
-    allowed = settings.get("allowedTools", [])
+    allowed = list(settings.get("allowedTools", []))
+    for tool in _bash_allow_tool_entries(profile):
+        if tool not in allowed:
+            allowed.append(tool)
     args: list[str] = ["--permission-mode", permission_mode]
     if not requires_mcp:
         if profile.mcp_servers:
