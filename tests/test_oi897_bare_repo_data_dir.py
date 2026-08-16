@@ -32,6 +32,7 @@ for p in (LIB, ROOT):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+import project_root  # noqa: E402
 import vnx_paths  # noqa: E402
 
 
@@ -163,3 +164,74 @@ class TestBareRepoHorizonList:
         result = _run_horizon_list(bare_repo, central_home)
         assert "VNXDataDirMismatchWarning" not in result.stderr
         assert "does not belong to project" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Unit: local-filesystem origins are not project identities (OI-1253)
+# ---------------------------------------------------------------------------
+
+def _repo_with_origin(tmp_path: Path, origin: str, name: str = "repo") -> Path:
+    """A git repo whose ``origin`` remote is set to ``origin`` (no clone needed —
+    ``git remote add`` does not validate local paths)."""
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", origin], cwd=repo, check=True)
+    return repo
+
+
+class TestGitRemoteOriginRefusal:
+    """A central install's git origin is not a project identity.
+
+    The release route clones the install from a temp checkout dir
+    (``vnx release publish`` passes it as ``--source``), so the install's
+    ``origin`` is a dangling path like ``/var/folders/.../checkout``. Its
+    basename must never become a project_id — otherwise every script running
+    from the install resolves to the fabricated store ``~/.vnx-data/checkout``.
+    """
+
+    def test_temp_dir_origin_yields_no_project_id(self, tmp_path):
+        temp_origin = tmp_path / "vnx-release-nnksecu" / "checkout"
+        repo = _repo_with_origin(tmp_path, str(temp_origin), name="temp-repo")
+        assert vnx_paths._project_id_from_git_remote(repo) is None
+
+    def test_nonexistent_path_origin_yields_no_project_id(self, tmp_path):
+        gone = tmp_path / "gone" / "checkout"
+        repo = _repo_with_origin(tmp_path, str(gone), name="gone-repo")
+        assert vnx_paths._project_id_from_git_remote(repo) is None
+
+    def test_ssh_project_remote_still_resolves(self, tmp_path):
+        repo = _repo_with_origin(
+            tmp_path, "git@github.com:Vinix24/vnx-dev.git", name="ssh-repo",
+        )
+        assert vnx_paths._project_id_from_git_remote(repo) == "vnx-dev"
+
+    def test_https_project_remote_still_resolves(self, tmp_path):
+        repo = _repo_with_origin(
+            tmp_path, "https://github.com/Vinix24/seocrawler-v2.git", name="https-repo",
+        )
+        assert vnx_paths._project_id_from_git_remote(repo) == "seocrawler-v2"
+
+    def test_file_url_origin_yields_no_project_id(self, tmp_path):
+        repo = _repo_with_origin(
+            tmp_path, f"file://{tmp_path}/source/checkout", name="fileurl-repo",
+        )
+        assert vnx_paths._project_id_from_git_remote(repo) is None
+
+    def test_resolve_project_id_refuses_local_path_origin(self, tmp_path, monkeypatch):
+        """project_root.resolve_project_id (the data_dir_guard fallback) must
+        refuse the same local-path origin, not derive ``checkout``."""
+        temp_origin = tmp_path / "vnx-release-nnksecu" / "checkout"
+        repo = _repo_with_origin(tmp_path, str(temp_origin), name="pid-temp-repo")
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.chdir(repo)
+        with pytest.raises(RuntimeError):
+            project_root.resolve_project_id()
+
+    def test_resolve_project_id_ssh_remote_still_resolves(self, tmp_path, monkeypatch):
+        repo = _repo_with_origin(
+            tmp_path, "git@github.com:Vinix24/vnx-dev.git", name="pid-ssh-repo",
+        )
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.chdir(repo)
+        assert project_root.resolve_project_id() == "vnx-dev"

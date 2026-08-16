@@ -378,10 +378,29 @@ def run(state_dir: Path, *, write: bool = True) -> Dict[str, Any]:
     }
 
 
-def _default_state_dir() -> Path:
-    from vnx_paths import ensure_env  # noqa: PLC0415
+class UnresolvableProjectError(RuntimeError):
+    """The runner cannot attribute its store to a project (no ``--state-dir``
+    and no resolvable project_id). Loud on purpose: proceeding would write
+    obligations to a fabricated or project-local store (OI-1253)."""
 
-    return Path(ensure_env()["VNX_STATE_DIR"])
+
+def _default_state_dir() -> Path:
+    import vnx_paths  # noqa: PLC0415
+
+    paths = vnx_paths.ensure_env()
+    project_root = Path(paths["PROJECT_ROOT"])
+    project_id = vnx_paths._resolve_state_project_id(project_root)
+    if project_id is None:
+        raise UnresolvableProjectError(
+            f"cannot resolve a project_id for project root {project_root}: "
+            "the store is unattributable, so obligations cannot be written "
+            "safely. A central install's git origin is not a project identity "
+            "(it may point at a release-time temp checkout). Pass --state-dir "
+            "(~/.vnx-data/<project_id>/state), or set VNX_PROJECT_ID / write a "
+            ".vnx-project-id marker for the project whose obligations this "
+            "runner fulfils."
+        )
+    return Path(paths["VNX_STATE_DIR"])
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -403,7 +422,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         format="%(name)s: %(levelname)s: %(message)s",
     )
 
-    state_dir = args.state_dir or _default_state_dir()
+    try:
+        state_dir = args.state_dir or _default_state_dir()
+    except UnresolvableProjectError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
     if not Path(state_dir).is_dir():
         print(f"ERROR: state dir not found: {state_dir}", file=sys.stderr)
         return 20

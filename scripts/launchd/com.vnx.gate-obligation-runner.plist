@@ -18,12 +18,18 @@
     the producer-freshness monitor's launchd harvest; obligations pending
     longer than a day are flagged per gate key by the same monitor's
     review_gate_obligations producer.
+
+    Store is pinned explicitly via --state-dir (OI-1253): the central install's
+    git origin is a release-time temp checkout (e.g. /var/folders/.../checkout),
+    which must never drive store resolution. This runner fulfils the VNX
+    orchestration engine's own review-gate obligations, whose canonical store is
+    ~/.vnx-data/vnx-dev/state — so it is named explicitly rather than derived.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/gate_obligation_runner.py</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/gate_obligation_runner.py --state-dir "$HOME/.vnx-data/vnx-dev/state"</string>
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
