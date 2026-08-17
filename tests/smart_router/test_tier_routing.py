@@ -256,6 +256,41 @@ def test_auth_failure_keeps_lane_out_past_waiting(tmp_path, monkeypatch):
     assert route.provider == "kimi"
 
 
+def test_terminal_lane_cooldown_never_returned_silently(tmp_path, monkeypatch):
+    """OI-1330: codex is the tier-low terminal vangnet — but ``record_lane_failure``
+    now has a real production caller that writes to the codex lane too (a
+    codex quota failure is daily practice, see provider_dispatch._emit_governance).
+    When EVERY step of the chain, including the terminal, is unavailable there
+    is nowhere left to walk to, so the terminal must still be returned (the
+    door must never receive None) — but never SILENTLY: the accumulated
+    skipped-reason must be attached, not dropped, so a receipt/report built
+    from ``route.reason`` shows the chosen lane was known-dead at decision
+    time instead of reading as a clean, available route."""
+    from providers.smart_router.availability import record_lane_failure
+
+    _force_kimi(monkeypatch, present=False)
+    state_dir = tmp_path / "state"
+    now = 7_000_000.0
+    record_lane_failure(
+        "deepseek-harness", "quota exhausted", state_dir=state_dir, now=now,
+    )
+    record_lane_failure(
+        "codex", "403 auth", state_dir=state_dir, now=now,
+    )
+
+    route = resolve_tier_route(
+        TIER_LOW, env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir, now=now,
+    )
+    assert route.provider == "codex"
+    assert route.reason is not None, (
+        "an unavailable terminal must never be returned with reason=None — "
+        "that is the silent routing this test guards against"
+    )
+    assert "codex unavailable" in route.reason
+    assert "deepseek-harness unavailable" in route.reason
+    assert "kimi unavailable" in route.reason
+
+
 # ---------------------------------------------------------------------------
 # route_dispatch wiring
 # ---------------------------------------------------------------------------

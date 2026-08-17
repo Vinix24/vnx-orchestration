@@ -26,7 +26,6 @@ Architecture:
 
 from __future__ import annotations
 
-import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -63,8 +62,6 @@ from workflow_incident_handler import (
     record_incident,
     select_recovery_action,
 )
-
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

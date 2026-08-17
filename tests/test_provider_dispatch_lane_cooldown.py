@@ -74,24 +74,54 @@ class TestKimi403WritesRealLaneCooldown:
     """The concrete measured incident: kimi returns an HTTP 403 (quota/auth),
     which ``kimi_spawn.normalize_kimi_event`` turns into an error event whose
     text carries ``http_status=403`` — never a clean top-level 403, and never
-    a ``KimiSpawnResult.error`` string invented by this test file; this is the
-    literal format ``_finalize_kimi_result`` produces when ``errors_captured``
-    is non-empty (see kimi_spawn.py ``_consume_kimi_stream``/``normalize_kimi_event``)."""
+    a ``KimiSpawnResult.error`` string invented by this test file. ``_kimi_403_result``
+    below does not hand-type that string (an earlier version of this fixture did,
+    and swapped the ``msg``/``raw`` fields relative to what production actually
+    emits — a claim that was never checked against the real code). It instead
+    drives ``provider_spawns.kimi_spawn.spawn_kimi`` for real, the same way
+    ``tests/test_kimi_spawn.py::TestNonJsonAnd403Handling._run_with_raw_bytes``
+    does: only ``_start_kimi_subprocess`` is mocked (to hand the drainer a raw
+    403 JSON body on a pipe), so ``normalize_kimi_event``, ``_consume_kimi_stream``,
+    and ``_finalize_kimi_result`` all run for real and produce whatever string
+    production produces today — this fixture cannot drift from production
+    because it does not restate production's logic, it calls it."""
 
     def _kimi_403_result(self):
-        from provider_spawns.kimi_spawn import KimiSpawnResult
+        import io
+        import os
+        import threading
 
-        return KimiSpawnResult(
-            returncode=1,
-            completion_text="",
-            events_written=2,
-            session_id=None,
-            timed_out=False,
-            error=(
-                "[quota_or_auth] provider=kimi reason=quota_or_auth "
-                "msg='forbidden' raw='{\"status\": 403, \"message\": \"forbidden\"}'"
-            ),
-        )
+        from unittest.mock import MagicMock
+
+        from provider_spawns.kimi_spawn import spawn_kimi
+
+        raw = b'{"status": 403, "message": "forbidden"}\n'
+        read_fd, write_fd = os.pipe()
+
+        def _writer():
+            try:
+                os.write(write_fd, raw)
+            finally:
+                os.close(write_fd)
+
+        writer_thread = threading.Thread(target=_writer, daemon=True)
+        writer_thread.start()
+
+        fake_proc = MagicMock()
+        fake_proc.returncode = 1
+        fake_proc.poll.return_value = 1
+        fake_proc.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        fake_proc.stderr = io.BytesIO(b"")
+        fake_proc.wait = MagicMock(return_value=1)
+        fake_proc.kill = MagicMock()
+
+        try:
+            with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start:
+                mock_start.return_value = (fake_proc, None)
+                result = spawn_kimi("prompt", dispatch_id="d-kimi-403-fixture", terminal_id="T1")
+        finally:
+            writer_thread.join(timeout=5)
+        return result
 
     def test_kimi_403_marks_kimi_lane_unavailable(self):
         """Assert on the cooldown write itself (file + contents), never on

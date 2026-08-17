@@ -192,11 +192,28 @@ def record_lane_failure(
     (see ``PROVIDER_INCIDENT_CLASSES``); a non-provider class raises, and the
     best-effort wrapper logs and swallows it so no bogus cooldown is written.
 
+    ``lane`` must additionally be a member of ``_LANE_CHECKS`` (OI-1328): seven
+    provider strings reach this function via ``_emit_governance`` /
+    ``_maybe_record_provider_lane_cooldown``, but ``lane_available`` only ever
+    gates the five lanes ``_LANE_CHECKS`` knows (an unknown lane reads as
+    unconditionally available by design — see ``lane_available``'s own
+    docstring). Writing a cooldown file for a lane outside that set would be a
+    write nobody ever reads back: a permanent cooldown that silently does
+    nothing. A lane outside ``_LANE_CHECKS`` raises here too, and the
+    best-effort wrapper logs and swallows it — refused, never silent.
+
     Best-effort and fail-open: a failure to persist cooldown state is logged and
     swallowed — cooldown bookkeeping must never break a dispatch.
     """
     try:
         _validate_lane(lane)
+        if lane not in _LANE_CHECKS:
+            raise ValueError(
+                f"record_lane_failure: lane {lane!r} is not in _LANE_CHECKS; "
+                f"lane_available would never gate on it, so a cooldown write "
+                f"here would be unread — refusing. Known lanes: "
+                f"{sorted(_LANE_CHECKS)}"
+            )
         sd = Path(state_dir) if state_dir is not None else _resolve_state_dir()
         # New write surface: fail loud if this would write the live central
         # store under pytest (test-store-isolation guard, w19c/OI-934).
