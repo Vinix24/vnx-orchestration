@@ -94,15 +94,31 @@ class TestKimi403WritesRealLaneCooldown:
         )
 
     def test_kimi_403_marks_kimi_lane_unavailable(self):
+        """Assert on the cooldown write itself (file + contents), never on
+        ``lane_available``'s compound verdict — that function also declines a
+        lane for a missing CLI/env var, so on a CI runner without the kimi
+        CLI on PATH the assertion would pass for the wrong reason (or fail
+        outright, as it did before this fix: the CLI-absence reason string
+        doesn't contain "cooldown")."""
+        import json
+
         import provider_dispatch as pd
-        from providers.smart_router.availability import lane_available
+        from incident_taxonomy import IncidentClass
+        from providers.smart_router import availability
 
         _emit_failure("kimi", "kimi-k3", self._kimi_403_result(), "d-kimi-403")
 
         state_dir = pd._resolve_state_dir()
-        ok, reason = lane_available("kimi", env={}, state_dir=state_dir)
-        assert ok is False
-        assert "cooldown" in reason
+        cooldown_path = availability._cooldown_file(state_dir, "kimi")
+        assert cooldown_path.is_file(), (
+            f"expected a router-lane cooldown file at {cooldown_path}"
+        )
+        data = json.loads(cooldown_path.read_text(encoding="utf-8"))
+        assert data["lane"] == "kimi"
+        assert data["failure_class"] == IncidentClass.PROVIDER_AUTH_FAILURE.value
+        # 403/forbidden classifies as an auth failure, which never
+        # auto-recovers — lane_cooldown_remaining reads that as inf.
+        assert availability.lane_cooldown_remaining("kimi", state_dir=state_dir) == float("inf")
 
     def test_next_routing_decision_skips_kimi_for_codex(self, monkeypatch):
         """After the cooldown write, the next routing decision for a
@@ -143,8 +159,13 @@ class TestDeepSeekCreditExhaustionWritesRealLaneCooldown:
         )
 
     def test_deepseek_402_as_completion_text_marks_lane_unavailable(self):
+        """Same principle as the kimi 403 test above: assert on the cooldown
+        file itself, not on ``lane_available``'s compound verdict."""
+        import json
+
         import provider_dispatch as pd
-        from providers.smart_router.availability import lane_available
+        from incident_taxonomy import IncidentClass
+        from providers.smart_router import availability
 
         _emit_failure(
             "deepseek-harness", "deepseek-v4-pro",
@@ -152,11 +173,14 @@ class TestDeepSeekCreditExhaustionWritesRealLaneCooldown:
         )
 
         state_dir = pd._resolve_state_dir()
-        ok, reason = lane_available(
-            "deepseek-harness", env={"DEEPSEEK_API_KEY": "sk-test"}, state_dir=state_dir,
+        cooldown_path = availability._cooldown_file(state_dir, "deepseek-harness")
+        assert cooldown_path.is_file(), (
+            f"expected a router-lane cooldown file at {cooldown_path}"
         )
-        assert ok is False
-        assert "cooldown" in reason
+        data = json.loads(cooldown_path.read_text(encoding="utf-8"))
+        assert data["lane"] == "deepseek-harness"
+        assert data["failure_class"] == IncidentClass.PROVIDER_QUOTA_EXHAUSTED.value
+        assert availability.lane_cooldown_remaining("deepseek-harness", state_dir=state_dir) > 0
 
 
 class TestNonProviderFailureWritesNoCooldown:
@@ -166,9 +190,14 @@ class TestNonProviderFailureWritesNoCooldown:
     positives here would take a healthy lane out of rotation."""
 
     def test_generic_kimi_exit_failure_writes_no_cooldown(self):
+        """Assert the ABSENCE of a cooldown file, not that ``lane_available``
+        returns True — on a runner without the kimi CLI on PATH,
+        ``lane_available`` returns False regardless of cooldown state (missing
+        CLI is checked before cooldown), so that assertion measured whether
+        kimi was installed, never whether this code wrote a cooldown."""
         import provider_dispatch as pd
         from provider_spawns.kimi_spawn import KimiSpawnResult
-        from providers.smart_router.availability import lane_available
+        from providers.smart_router import availability
 
         result = KimiSpawnResult(
             returncode=1,
@@ -181,8 +210,11 @@ class TestNonProviderFailureWritesNoCooldown:
         _emit_failure("kimi", "kimi-k3", result, "d-kimi-generic-failure")
 
         state_dir = pd._resolve_state_dir()
-        ok, _ = lane_available("kimi", env={}, state_dir=state_dir)
-        assert ok is True
+        cooldown_path = availability._cooldown_file(state_dir, "kimi")
+        assert not cooldown_path.exists(), (
+            f"a non-provider failure must never write a cooldown file, found {cooldown_path}"
+        )
+        assert availability.lane_cooldown_remaining("kimi", state_dir=state_dir) == 0.0
 
 
 if __name__ == "__main__":
