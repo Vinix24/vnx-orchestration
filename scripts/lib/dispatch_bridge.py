@@ -164,6 +164,7 @@ def stage_spec_bundle(
     allow_headless: bool = False,
     headless_reason: Optional[str] = None,
     post_merge_verification: bool = False,
+    irreversible: bool = False,
     pr_id: Optional[str] = None,
     # OI-1137: explicit work-ref — the branch a fix-forward dispatch delivers onto, so the
     # phantom-guard weighs the pushed branch diff when the own worktree reads empty.
@@ -284,6 +285,7 @@ def stage_spec_bundle(
         "allow_headless": bool(allow_headless),
         "headless_reason": norm_reason,
         "post_merge_verification": bool(post_merge_verification),
+        "irreversible": bool(irreversible),
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)

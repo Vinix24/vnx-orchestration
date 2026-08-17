@@ -203,6 +203,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         allow_headless=raw.get("allow_headless") is True,
         headless_reason=_sanitize_headless_reason(raw.get("headless_reason")),
         post_merge_verification=raw.get("post_merge_verification") is True,
+        irreversible=raw.get("irreversible") is True,
     )
 
 
@@ -1409,6 +1410,7 @@ def _resolve_gate_via_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Opti
             explicit_gate=spec.gate,
             dispatch_paths=[str(dp.path) for dp in spec.dispatch_paths],
             task_class=spec.task_class,
+            irreversible=spec.irreversible,
         )
     except Exception as exc:
         logger.warning(
