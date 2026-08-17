@@ -272,3 +272,74 @@ class TestNightlyDigestsV30:
         ).fetchone()
         assert row == (0, 0)
         conn.close()
+
+
+class TestNightlyDigestsV31:
+    """V31: nightly_digests gains deep_config_skips (fix1585-r2).
+
+    A config gap (missing DEEPSEEK_API_KEY, missing/unavailable ollama model,
+    unreachable ollama server) was previously folded into deep_attempts /
+    deep_failures, reading as "N attempts, all failed" and fail-closing the
+    nightly run over nothing that was ever tried. This third column lets a
+    config-gap night be told apart from a genuine deep-analysis failure.
+    """
+
+    def test_bootstrap_adds_deep_config_skips(self, tmp_path):
+        """A fresh bootstrap carries the new digest column."""
+        db_path = tmp_path / "quality_intelligence.db"
+        _bootstrap(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nightly_digests)").fetchall()}
+        conn.close()
+
+        assert "deep_config_skips" in cols
+
+    def test_v31_adds_column_to_existing_digest_table(self, tmp_path):
+        """_migrate_v31 backfills the column on a pre-v31 digest table."""
+        db_path = tmp_path / "upgrade.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE nightly_digests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                digest_date DATE NOT NULL UNIQUE,
+                sessions_analyzed INTEGER DEFAULT 0,
+                deep_analyzed INTEGER DEFAULT 0,
+                deep_attempts INTEGER DEFAULT 0,
+                deep_failures INTEGER DEFAULT 0,
+                new_suggestions INTEGER DEFAULT 0,
+                total_tokens_used INTEGER DEFAULT 0,
+                digest_markdown TEXT NOT NULL,
+                digest_path TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.execute(
+            "INSERT INTO nightly_digests (digest_date, digest_markdown) "
+            "VALUES ('2026-06-15', '# old digest')"
+        )
+        conn.commit()
+
+        quality_db_init._migrate_v31(conn)
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nightly_digests)").fetchall()}
+        assert "deep_config_skips" in cols
+
+        # Existing rows survive with the DEFAULT backfill of 0.
+        row = conn.execute(
+            "SELECT deep_config_skips FROM nightly_digests "
+            "WHERE digest_date = '2026-06-15'"
+        ).fetchone()
+        assert row == (0,)
+        conn.close()
+
+    def test_user_version_reaches_31(self, tmp_path):
+        """PRAGMA user_version equals HIGHEST_QI_VERSION (31) after bootstrap."""
+        db_path = tmp_path / "quality_intelligence.db"
+        _bootstrap(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        version = schema_migration.get_user_version(conn)
+        conn.close()
+
+        assert version == quality_db_init.HIGHEST_QI_VERSION == 31
