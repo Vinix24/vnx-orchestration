@@ -74,7 +74,7 @@ def _make_spec_with_pr_id(
         instruction_file=_fake_instruction_file(tmp_path),
         role="backend-developer",
         target_slot=target_slot,
-        gate="human-promoted",
+        gate="codex_gate",
         dispatch_paths=(),
         provider=provider,
         model=model,

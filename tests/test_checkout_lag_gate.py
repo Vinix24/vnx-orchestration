@@ -180,7 +180,7 @@ def _make_bundle(
         "instruction_file": str(inst),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "model": None,

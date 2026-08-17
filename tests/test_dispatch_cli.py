@@ -100,7 +100,7 @@ def _make_spec_file(
         "instruction_file": str(instruction_file),
         "role": "backend-developer",
         "target_slot": target_slot,
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [
             {"path": "scripts/test.py", "access": "read_write", "materialize_at_cwd": False}
         ],
@@ -240,7 +240,7 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "instruction_file": str(evil_inst),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,
@@ -269,7 +269,7 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "instruction_file": str(clean_inst),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,
@@ -418,7 +418,7 @@ def test_raw_md_legacy_under_default_on(tmp_path):
     raw .md still falls through to the legacy dry-run path (Option X1) — NOT the single-entry gate."""
     dispatch_md = tmp_path / "test-dispatch.md"
     dispatch_md.write_text(
-        "[[TARGET:T1]]\nRole: backend-developer\nGate: human-promoted\n\nTest dispatch.\n",
+        "[[TARGET:T1]]\nRole: backend-developer\nGate: codex_gate\n\nTest dispatch.\n",
         encoding="utf-8",
     )
 
@@ -479,7 +479,7 @@ def test_staging_binding_required(tmp_path, monkeypatch, capsys):
         "target_slot": "T0",  # T1/T2/T3 default-pin to kimi-k3 (workers-kimi-pinned,
         # pin_semantics=default since WPFC PR-4); explicit model on a worker slot
         # overrules the default pin. T0 stays floor-pinned to opus (t0-opus-only).
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,
@@ -539,7 +539,7 @@ def test_legacy_rollback(tmp_path):
     """VNX_DISPATCH_LEGACY=1 forces legacy path even when VNX_SINGLE_ENTRY_DISPATCH=1."""
     dispatch_md = tmp_path / "test-rollback.md"
     dispatch_md.write_text(
-        "[[TARGET:T1]]\nRole: backend-developer\nGate: human-promoted\n\nTest rollback.\n",
+        "[[TARGET:T1]]\nRole: backend-developer\nGate: codex_gate\n\nTest rollback.\n",
         encoding="utf-8",
     )
 
@@ -612,7 +612,7 @@ def _make_bundle_spec(
         # model with floor semantics, so it's the
         # clean slot for a generic "claude dispatch that should proceed" fixture.
         "target_slot": target_slot,
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": provider,
         "model": model,
@@ -703,7 +703,7 @@ def test_symlinked_pending_root_rejected(tmp_path, monkeypatch, capsys):
         "instruction_file": str(pending_link / staging_id / "instruction.md"),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,
@@ -979,7 +979,7 @@ def test_symlinked_dispatches_dir_rejected(tmp_path, monkeypatch, capsys):
         "instruction_file": str(dispatches_link / "pending" / staging_id / "instruction.md"),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,
@@ -1486,7 +1486,7 @@ def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatc
         "instruction_file": str(inst),
         "role": "backend-developer",
         "target_slot": "T1",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "model": "kimi",
@@ -1529,7 +1529,7 @@ def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, mo
         "instruction_file": str(inst),
         "role": "backend-developer",
         "target_slot": "T1",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "model": "opus",
@@ -1761,7 +1761,7 @@ def test_default_claude_still_routes_tmux(tmp_path, monkeypatch):
         "instruction_file": str(inst),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,
@@ -1805,7 +1805,7 @@ def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
         "instruction_file": str(inst),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,
@@ -1994,7 +1994,7 @@ class TestLoadSpecStrictBoolCoercion:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T1",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": provider,
             "deadline_seconds": 3600,
@@ -2076,7 +2076,7 @@ class TestLoadSpecHeadlessReasonSanitization:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T1",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": "claude",
             "deadline_seconds": 3600,
@@ -2121,7 +2121,7 @@ class TestLoadSpecHeadlessReasonSanitization:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T1",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": "claude",
             "deadline_seconds": 3600,
@@ -2221,7 +2221,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+            gate="codex_gate", dispatch_paths=(), track_id="my-track",
         )
         assert _check_track_link_verdict(spec, state_dir=state_dir) is None
 
@@ -2231,7 +2231,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="does-not-exist",
+            gate="codex_gate", dispatch_paths=(), track_id="does-not-exist",
         )
         verdict = _check_track_link_verdict(spec, state_dir=state_dir)
         assert verdict is not None
@@ -2244,7 +2244,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="finished-track",
+            gate="codex_gate", dispatch_paths=(), track_id="finished-track",
         )
         verdict = _check_track_link_verdict(spec, state_dir=state_dir)
         assert verdict is not None
@@ -2264,7 +2264,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="shared-name",
+            gate="codex_gate", dispatch_paths=(), track_id="shared-name",
         )
         verdict = _check_track_link_verdict(spec, state_dir=state_dir)
         assert verdict is not None
@@ -2277,7 +2277,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+            gate="codex_gate", dispatch_paths=(), track_id="my-track",
         )
         verdict = _check_track_link_verdict(spec, state_dir=state_dir)
         assert verdict is not None
@@ -2290,7 +2290,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id=None,
+            gate="codex_gate", dispatch_paths=(), track_id=None,
         )
         verdict = _check_track_link_verdict(spec, state_dir=tmp_path / "state")
         assert verdict is not None
@@ -2303,7 +2303,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id=None, tags=(),
+            gate="codex_gate", dispatch_paths=(), track_id=None, tags=(),
         )
         verdict = _check_track_link_verdict(spec, state_dir=tmp_path / "state")
         assert verdict is not None
@@ -2316,7 +2316,7 @@ class TestCheckTrackLinkVerdict:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id=None,
+            gate="codex_gate", dispatch_paths=(), track_id=None,
             tags=("no-track:exploratory spike",),
         )
         verdict = _check_track_link_verdict(spec, state_dir=tmp_path / "state")
@@ -2337,7 +2337,7 @@ class TestPersistTrackId:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+            gate="codex_gate", dispatch_paths=(), track_id="my-track",
         )
         _persist_track_id(spec, state_dir=state_dir)
 
@@ -2365,7 +2365,7 @@ class TestPersistTrackId:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+            gate="codex_gate", dispatch_paths=(), track_id="my-track",
         )
         _persist_track_id(spec, state_dir=state_dir)
 
@@ -2383,7 +2383,7 @@ class TestPersistTrackId:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="ghost-dispatch", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+            gate="codex_gate", dispatch_paths=(), track_id="my-track",
         )
         _persist_track_id(spec, state_dir=state_dir)  # must not raise
 
@@ -2401,7 +2401,7 @@ class TestPersistTrackId:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id=None,
+            gate="codex_gate", dispatch_paths=(), track_id=None,
         )
         _persist_track_id(spec, state_dir=state_dir)  # must not raise, must not touch the DB
 
@@ -2411,7 +2411,7 @@ class TestPersistTrackId:
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-            gate="human-promoted", dispatch_paths=(), track_id="my-track",
+            gate="codex_gate", dispatch_paths=(), track_id="my-track",
         )
         _persist_track_id(spec, state_dir=state_dir)  # must not raise
 
@@ -2447,7 +2447,7 @@ class TestTrackIdEndToEnd:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T0",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": "claude",
             "deadline_seconds": 3600,
@@ -2492,7 +2492,7 @@ class TestTrackIdEndToEnd:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T0",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": "claude",
             "deadline_seconds": 3600,
@@ -2529,7 +2529,7 @@ class TestTrackIdEndToEnd:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T0",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": "claude",
             "deadline_seconds": 3600,
@@ -2562,7 +2562,7 @@ class TestTrackIdEndToEnd:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T0",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": "claude",
             "deadline_seconds": 3600,
@@ -2600,7 +2600,7 @@ class TestTrackIdEndToEnd:
             "instruction_file": str(instruction),
             "role": "backend-developer",
             "target_slot": "T0",
-            "gate": "human-promoted",
+            "gate": "codex_gate",
             "dispatch_paths": [],
             "provider": "claude",
             "deadline_seconds": 3600,
@@ -3019,7 +3019,7 @@ class TestRegisterDispatchCreated:
         kwargs = dict(
             schema_version=1, project_id="vnx-dev", dispatch_id=plan.dispatch_id,
             staging_id="s", instruction_file=Path("/tmp/i.md"), role="backend-developer",
-            target_slot="T1", gate="human-promoted", dispatch_paths=(),
+            target_slot="T1", gate="codex_gate", dispatch_paths=(),
         )
         kwargs.update(overrides)
         return DispatchSpec(**kwargs)

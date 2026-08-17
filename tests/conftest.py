@@ -208,6 +208,62 @@ def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
 
 
+@pytest.fixture(autouse=True)
+def _stub_gate_identity_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OI-1307/B6: keep the suite offline for PR-head identity lookups.
+
+    ``get_pr_head_sha``/``get_pr_head_branch`` resolve the PR head via
+    ``gh pr view --json headRefOid|headRefName`` — a live network call that now
+    fires from every gate request/record test, since writers source the sha from
+    GitHub instead of ``git rev-parse HEAD``. Stub just that one call shape
+    (returncode!=0, empty output → the callers return "" exactly as they would on
+    a real gh failure) so the suite stays deterministic and offline, mirroring
+    ``_reconcile_git_off`` for ``gh pr list``.
+
+    ``gate_recorder.py`` does a bare ``import subprocess``, so
+    ``gate_recorder.subprocess`` IS the global ``subprocess`` module: this patch
+    replaces ``subprocess.run`` process-wide for the duration of the test, not a
+    gate_recorder-scoped attribute. Every ``subprocess.run`` call in the process
+    runs through ``fake_run``; anything whose argv is not the standalone
+    identity shape (``gh pr view <n> --json headRefOid|headRefName``) is
+    forwarded unchanged to the real ``subprocess.run`` — that forwarding is what
+    keeps the suite correct today, not the patch being narrow. The combined
+    ``--json headRefOid,headRefName`` shape used by ``pr_merge`` is NOT
+    intercepted. Tests that need a real ``headRefOid`` override
+    ``gate_recorder.subprocess.run`` themselves
+    (tests/test_pr_merge_review_gate.py::TestRealWriterThroughRealMergeCheck);
+    their function-scoped patch wins over this autouse stub.
+    """
+    import subprocess as _subprocess
+
+    try:
+        import gate_recorder
+    except (ImportError, ModuleNotFoundError):
+        # Standalone CI steps (e.g. "Run out-of-repo symlink guard unit tests")
+        # put only scripts/lib + the repo root on sys.path; gate_recorder →
+        # governance_receipts → append_receipt (scripts/append_receipt.py) is
+        # not importable there. This is a network-off stub, not a governance
+        # control: when gate_recorder can't load, the tests in that step never
+        # touch gate_recorder code, so there is nothing to stub. No-op rather
+        # than failing the test on the fixture's own import.
+        return
+
+    real_run = gate_recorder.subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if (
+            isinstance(argv, (list, tuple))
+            and len(argv) >= 6
+            and list(argv[:3]) == ["gh", "pr", "view"]
+            and argv[4] == "--json"
+            and argv[5] in ("headRefOid", "headRefName")
+        ):
+            return _subprocess.CompletedProcess(list(argv), 1, stdout="", stderr="")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(gate_recorder.subprocess, "run", fake_run)
+
+
 # ---------------------------------------------------------------------------
 # DB / registry fixtures  (shared with test_burnin_certification)
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
+from gate_recorder import get_pr_head_sha
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
     STATE_NOT_CONFIGURED,
@@ -23,20 +24,6 @@ from claude_github_receipt import (
     STATE_BLOCKED,
     STATE_COMPLETED,
 )
-
-
-def _get_head_commit_sha() -> str:
-    """Return the HEAD commit SHA via git rev-parse. Returns empty string on failure."""
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if proc.returncode == 0:
-            return proc.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return ""
 
 
 class GateRequestHandlerMixin:
@@ -187,7 +174,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
-            "commit_sha": _get_head_commit_sha(),
+            "commit_sha": get_pr_head_sha(pr_number),
             "report_path": self._build_report_path(
                 gate="gemini_review",
                 requested_at=requested_at,
@@ -213,6 +200,7 @@ class GateRequestHandlerMixin:
         available: bool,
         requested_at: str,
         prompt: str,
+        pr_number: Optional[int] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "gate": "gemini_review",
@@ -227,7 +215,7 @@ class GateRequestHandlerMixin:
             "contract_hash": contract.content_hash,
             "prompt": prompt,
             "requested_at": requested_at,
-            "commit_sha": _get_head_commit_sha(),
+            "commit_sha": get_pr_head_sha(pr_number),
             "dispatch_id": dispatch_id,
             "report_path": self._build_report_path(
                 gate="gemini_review",
@@ -250,6 +238,7 @@ class GateRequestHandlerMixin:
         contract: ReviewContract,
         mode: str = "per_pr",
         dispatch_id: str = "",
+        pr_number: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Request a Gemini review driven by a canonical ReviewContract.
 
@@ -264,7 +253,9 @@ class GateRequestHandlerMixin:
         prompt = render_gemini_prompt(contract)
         available = self._gemini_available()
         requested_at = _utc_now()
-        payload = self._build_gemini_contract_payload(contract, mode, dispatch_id, available, requested_at, prompt)
+        payload = self._build_gemini_contract_payload(
+            contract, mode, dispatch_id, available, requested_at, prompt, pr_number=pr_number,
+        )
 
         request_file = self._contract_request_path("gemini_review", contract.pr_id)
         request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -364,7 +355,7 @@ class GateRequestHandlerMixin:
         payload["review_mode"] = mode
         payload["risk_class"] = contract.risk_class
         payload["changed_files"] = contract.changed_files
-        payload["commit_sha"] = _get_head_commit_sha()
+        payload["commit_sha"] = get_pr_head_sha(receipt.pr_number)
         payload["dispatch_id"] = dispatch_id
         payload["report_path"] = self._build_report_path(
             gate="claude_github_optional",
@@ -501,7 +492,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
-            "commit_sha": _get_head_commit_sha(),
+            "commit_sha": get_pr_head_sha(pr_number),
             "report_path": self._build_report_path(
                 gate="codex_gate",
                 requested_at=requested_at,
@@ -560,7 +551,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
-            "commit_sha": _get_head_commit_sha(),
+            "commit_sha": get_pr_head_sha(pr_number),
             "report_path": self._build_report_path(
                 gate="claude_github_optional",
                 requested_at=requested_at,
@@ -592,7 +583,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
-            "commit_sha": _get_head_commit_sha(),
+            "commit_sha": get_pr_head_sha(pr_number),
             "report_path": self._build_report_path(
                 gate="ci_gate",
                 requested_at=requested_at,
@@ -631,7 +622,7 @@ class GateRequestHandlerMixin:
             "changed_files": contract.changed_files,
             "contract_hash": contract.content_hash,
             "requested_at": requested_at,
-            "commit_sha": _get_head_commit_sha(),
+            "commit_sha": get_pr_head_sha(pr_number),
             "dispatch_id": dispatch_id,
             "report_path": self._build_report_path(
                 gate="ci_gate",

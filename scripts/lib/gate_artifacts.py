@@ -225,6 +225,7 @@ def materialize_artifacts(
         "duration_seconds": duration_seconds,
         "recorded_at": now,
     }
+    gate_recorder.stamp_request_identity(result_payload, request_payload)
     if real_dispatch_id:
         result_payload["dispatch_id"] = real_dispatch_id
 

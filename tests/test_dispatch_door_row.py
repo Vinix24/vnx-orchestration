@@ -108,7 +108,7 @@ def _make_bundle(
         "instruction_file": str(instruction),
         "role": "backend-developer",
         "target_slot": target_slot,
-        "gate": "human-promoted",
+        "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
         "deadline_seconds": 3600,

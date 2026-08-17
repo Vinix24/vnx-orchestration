@@ -41,7 +41,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from plan_gate_panel import _make_default_dispatcher  # governed provider_dispatch lane
-from gate_recorder import record_terminal_result
+from gate_recorder import (
+    get_pr_head_branch,
+    get_pr_head_sha,
+    record_terminal_result,
+    stamp_request_identity,
+)
 
 _VALID_VERDICTS = {"pass", "fail", "blocked"}
 
@@ -213,6 +218,20 @@ def main(argv: "list[str] | None" = None) -> int:
         "residual_risk": residual,
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+    # A4: stamp branch + commit_sha through the shared writer so the merge
+    # door can join a kimi_gate result on the PR head (GitHub), not the local
+    # checkout HEAD. Offline runs (--diff-file) are not tied to a live PR and
+    # legitimately carry neither.
+    stamp_request_identity(
+        record,
+        {
+            "gate": record["gate"],
+            "pr_id": record["pr_id"],
+            "branch": "" if record["test_run"] else get_pr_head_branch(record["pr_number"]),
+            "commit_sha": "" if record["test_run"] else get_pr_head_sha(record["pr_number"]),
+        },
+    )
 
     if data_dir:
         results_dir = Path(data_dir) / "state" / "review_gates" / "results"

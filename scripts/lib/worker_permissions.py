@@ -541,6 +541,30 @@ def resolve_worker_profile(
     return default_code_worker_profile()
 
 
+def role_grants_write(role: Optional[str], yaml_path: Path | None = None) -> bool:
+    """True when *role* may mutate files, False for read-only roles.
+
+    The discriminator is the Edit tool: build roles (backend-developer,
+    frontend-developer, quality-engineer, …) allow Edit; read roles
+    (code-reviewer, research-analyst, plan-reviewer) deny it. The restrictive
+    code-worker fallback allows Edit, so it reads as writing.
+
+    An unresolvable role resolves to True (writing) — fail-closed for gate
+    enforcement: a review-gate requirement must never be skipped because the
+    role could not be resolved. Unknown-role rejection is a later validation
+    concern (compile_plan); this predicate only answers "may this role write".
+    """
+    try:
+        profile = resolve_worker_profile(role, yaml_path)
+    except UnknownRoleError:
+        logger.warning(
+            "role_grants_write: role %r unresolvable — assuming writing "
+            "(fail-closed for gate enforcement)", role,
+        )
+        return True
+    return "Edit" in profile.allowed_tools
+
+
 def _bash_allow_pattern_to_tool(pattern: str) -> Optional[str]:
     """Translate one ``bash_allow_pattern`` into a ``Bash(<prefix>:*)`` allowedTool.
 

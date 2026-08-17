@@ -26,7 +26,12 @@ from governance_receipts import emit_governance_receipt
 from review_contract import ReviewContract
 from codex_final_gate import enforce_codex_gate
 from codex_severity_translator import translate_findings as translate_codex_findings
-from gate_status import is_pass as gate_is_pass, is_terminal as gate_is_terminal
+from gate_status import (
+    has_complete_evidence as gate_has_complete_evidence,
+    is_pass as gate_is_pass,
+    is_terminal as gate_is_terminal,
+    is_test_run_record as _is_test_run_record,
+)
 from dispatch_spec import Gate
 
 
@@ -61,22 +66,6 @@ _KNOWN_GATES = frozenset(
     g.value for g in Gate
     if g.value not in _GATES_NOT_IMPLEMENTED_BY_CLOSURE
 )
-
-
-def _is_test_run_record(data: Dict[str, Any]) -> bool:
-    """True when a gate result/request is an offline test run, not production evidence.
-
-    Offline gate runs (e.g. ``kimi_gate --diff-file`` with a synthetic pr_id)
-    are marked ``test_run: true`` by the writer. Such records must never
-    satisfy closure for a real PR. Boolean and string forms are both recognised
-    so a non-normalising writer cannot slip a truthy marker past the check.
-    """
-    value = data.get("test_run")
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes")
-    return False
 
 
 def _run(cmd: Sequence[str], *, cwd: Optional[Path] = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
@@ -264,6 +253,7 @@ def _find_gate_result(
     results_dir: Path,
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Search for a gate result file matching the PR and gate name.
 
@@ -271,6 +261,9 @@ def _find_gate_result(
     field are rejected as stale evidence from a prior feature.
     ADR-007: if ``project_id`` is provided, results with a missing or
     mismatched ``project_id`` field are rejected.
+    OI-1307: if ``head_sha`` is provided, results whose ``commit_sha`` does not
+    match are rejected with the SAME strictness as the CI gate — a result
+    produced against a different commit is stale evidence for the merge.
     If a result carries a ``report_path``, that file must exist on disk or the
     result is treated as stale and skipped.
     """
@@ -298,6 +291,11 @@ def _find_gate_result(
         if branch:
             if (data.get("branch") or "") != branch:
                 return False
+        # OI-1307: head sha must be present and match when caller supplies one —
+        # same strictness as branch (a result without commit_sha is stale).
+        if head_sha:
+            if (data.get("commit_sha") or "") != head_sha:
+                return False
         return True
 
     pr_slug = pr_id.lower().replace("-", "")
@@ -320,6 +318,115 @@ def _find_gate_result(
         except (json.JSONDecodeError, OSError):
             continue
     return None
+
+
+def check_review_gate_for_merge(
+    pr_id: str,
+    gate: str,
+    results_dir: Path,
+    *,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
+) -> Dict[str, Any]:
+    """GO/NO-GO merge verdict: a passing, fully-evidenced gate result exists.
+
+    The merge door's second fail-closed check (next to the CI check in
+    ``pr_merge._run_ci_gate``). Reuses ``_find_gate_result`` (pr_id/branch/
+    project_id/head-sha matching + offline test_run rejection), ``gate_is_terminal``,
+    ``gate_has_complete_evidence``, ``gate_is_pass`` and
+    ``_count_report_blocking_indicators`` — the SAME evidence the closure
+    verifier already checks, never a second, weaker copy of the invariants.
+    The enforceable subset at merge time:
+
+      1. a result exists for this pr_id + gate (result exists)
+      2. it is terminal (execution actually reached a verdict)
+      3. contract_hash + report_path both non-empty (``has_complete_evidence``)
+      4. the report file exists on disk
+      5. the verdict is a pass and does not contradict the report's content
+
+    "contract_hash matches the active review contract" is enforced at closure
+    time (the contract is not available here); the merge check enforces the
+    non-empty subset so an empty-hash result can never green-light a merge.
+    The override escape hatch lives in the caller (``pr_merge._run_review_gate``),
+    mirroring how the CI gate keeps its override in ``check_ci_run_for_head``.
+    """
+    result = _find_gate_result(
+        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
+    )
+    if result is None:
+        return {
+            "verdict": "NO-GO",
+            "message": f"geen review-gate resultaat gevonden voor {gate} op {pr_id}: merge niet toetsbaar",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    if not gate_is_terminal(result):
+        status = result.get("status", "unknown")
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate} resultaat is niet terminaal (status={status}): bewijs onvolledig",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    if not gate_has_complete_evidence(result):
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate} resultaat mist contract_hash en/of report_path: bewijs onvolledig",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    report_path = Path(result["report_path"])
+    if not report_path.exists():
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate} report_path bestaat niet: {report_path}",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    passed, reason = gate_is_pass(result)
+    if not passed:
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate} staat merge niet toe — {reason}",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    # Invariant 7: a passing verdict whose report still carries blocking
+    # indicators is a contradiction, not evidence.
+    try:
+        report_content = report_path.read_text(encoding="utf-8")
+    except OSError:
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate} report_path onleesbaar: {report_path}",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    if _count_report_blocking_indicators(report_content) > 0:
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"{gate} resultaat zegt pass maar het rapport bevat blocking-indicatoren "
+                "— bewijs spreekt zichzelf tegen"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    return {
+        "verdict": "GO",
+        "message": f"{gate} resultaat aanwezig en passing voor {pr_id}",
+        "overridden": False,
+        "override_reason": None,
+        "gate": gate,
+    }
 
 
 # Request-side states for the optional Claude GitHub review gate that record

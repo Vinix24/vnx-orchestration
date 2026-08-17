@@ -548,7 +548,8 @@ def test_contract_hash_determinism(gate_env):
             headless_reports_dir=gate_env["headless_reports_dir"],
         )
         with patch("gate_executor.subprocess") as mock_sub, \
-             patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+             patch("gate_executor.shutil.which", return_value="/usr/bin/gh"), \
+             patch("gate_recorder.get_pr_head_sha", return_value=head_sha):
             mock_sub.run.side_effect = _run
             mock_sub.TimeoutExpired = subprocess.TimeoutExpired
             result = executor._execute_ci_gate(
@@ -662,7 +663,8 @@ def test_legacy_mode_contract_hash_is_sha256_of_execution_params(gate_env):
     )
 
     with patch("gate_executor.subprocess") as mock_sub, \
-         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"), \
+         patch("gate_recorder.get_pr_head_sha", return_value=head_sha):
         mock_sub.run.side_effect = _make_subprocess_run(json.dumps(checks), head_sha=head_sha)
         mock_sub.TimeoutExpired = subprocess.TimeoutExpired
         result = executor._execute_ci_gate(

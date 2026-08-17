@@ -50,6 +50,17 @@ class Gate(str, Enum):
     WIRING_GATE             = "wiring_gate"
 
 
+# Legacy lifecycle PHASE names that leak into the spec ``gate`` field but are not
+# review gates. "planning" (dispatch_create.sh) and "implementation"
+# (pr_queue_manager.py) are produced by real legacy code as no-gate markers; no
+# gate runner has ever matched on either string. They are admitted as the same
+# "no gate assigned" sentinel that an empty value carries, NOT as enum members —
+# adding them to the closed ``Gate`` enum would legitimise gates no runner
+# implements. Single source of truth: dispatch_bridge._canonical_gate imports this
+# set so the bridge path and this module's validate() Rule 16 can never drift (OI-845).
+LEGACY_GATE_SENTINELS = frozenset({"planning", "implementation"})
+
+
 class Isolation(str, Enum):
     WORKTREE = "worktree"  # the ONLY legal value in 1.0 — every worker spawn is isolated, fail-loud
 
@@ -454,6 +465,25 @@ def validate(
                 "bad-work-ref",
                 f"work_ref {spec.work_ref!r} is not a valid branch name ({_err})",
             )
+
+    # Rule 16 — review gate must be a known Gate enum member (OI-845 / fix-1588
+    # advisory). Empty means "no gate assigned" (the smart router derives one
+    # later); any non-empty value outside the closed enum is a typo (e.g.
+    # "codex_gat") and must be refused at the door, not discovered later as a
+    # silently-unknown gate that passes on file presence alone. Legacy lifecycle
+    # phase names (LEGACY_GATE_SENTINELS) are admitted as the no-gate sentinel,
+    # mirroring dispatch_bridge._canonical_gate.
+    _gate_name = (spec.gate or "").strip()
+    if (
+        _gate_name
+        and _gate_name not in Gate._value2member_map_
+        and _gate_name.lower() not in LEGACY_GATE_SENTINELS
+    ):
+        return Reject(
+            "bad-gate",
+            f"gate {spec.gate!r} is not a known review gate; "
+            f"valid gates: {', '.join(sorted(Gate._value2member_map_))}",
+        )
 
     return ValidatedSpec(
         spec=spec,

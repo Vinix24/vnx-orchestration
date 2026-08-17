@@ -72,7 +72,7 @@ def _spec(track_id: str) -> DispatchSpec:
     return DispatchSpec(
         schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
         instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
-        gate="human-promoted", dispatch_paths=(), track_id=track_id,
+        gate="codex_gate", dispatch_paths=(), track_id=track_id,
     )
 
 

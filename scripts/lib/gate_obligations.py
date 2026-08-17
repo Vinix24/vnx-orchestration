@@ -61,6 +61,14 @@ STATUS_FAILED = "failed"
 
 TERMINAL_STATUSES = frozenset({STATUS_FULFILLED, STATUS_NOT_EXECUTABLE, STATUS_FAILED})
 
+# Distinct sentinel gate key for explicit no-gate records (dispatch
+# 20260816-gate-never-skippable). Deliberately NOT a member of the Gate enum: a
+# no-gate dispatch is not declaring any gate, but the freshness scanner needs a
+# stable key to group/count these records under. Using "" here would fall
+# through to the per-dispatch filename in scan_gate_obligations and create a
+# new key per dispatch instead of one countable bucket.
+NO_GATE_KEY = "__no_gate__"
+
 # Whole-string match: bare digits, or the PR-<digits> family. Contract slugs
 # like "pr-4d" must NOT resolve to PR 4 — they are not GitHub PRs.
 _PR_NUMBER_RE = re.compile(r"^(?:#|PR[- ]?#?)?(\d+)$", re.IGNORECASE)
@@ -121,6 +129,7 @@ def register_obligation(
     gate: str,
     project_id: str = "",
     pr_number: Optional[int] = None,
+    pr_id: Optional[str] = None,
     branch: Optional[str] = None,
 ) -> Optional[Path]:
     """Register the review-gate obligation for a door-accepted dispatch.
@@ -131,6 +140,11 @@ def register_obligation(
 
     Idempotent: an existing obligation for the same dispatch_id is left
     untouched, so a retry never resets a fulfilled obligation to pending.
+
+    ``pr_id`` (the internal PR-N/PR-LABEL) is the stable join key the merge
+    gate uses to find a PR's declared gate: ``pr_number`` is only derivable
+    for numeric pr_ids, so alphanumeric labels (PR-HYG-1) would otherwise be
+    unfindable at merge time.
     """
     gate = (gate or "").strip()
     dispatch_id = (dispatch_id or "").strip()
@@ -148,6 +162,7 @@ def register_obligation(
             "project_id": project_id or "",
             "declared_at": _utc_now_iso(),
             "pr_number": pr_number,
+            "pr_id": pr_id,
             "branch": branch,
             "status": STATUS_PENDING,
             "attempts": 0,
@@ -164,6 +179,67 @@ def register_obligation(
         logger.warning(
             "gate_obligations: registration failed for dispatch=%s gate=%s (non-fatal): %s",
             dispatch_id, gate, exc,
+        )
+        return None
+
+
+def register_no_gate_obligation(
+    state_dir: Path,
+    *,
+    dispatch_id: str,
+    project_id: str = "",
+    pr_number: Optional[int] = None,
+    pr_id: Optional[str] = None,
+    branch: Optional[str] = None,
+    reason: str = "no_gate_declared",
+    reason_detail: str = "",
+) -> Optional[Path]:
+    """Record an explicit no-gate decision for a door-accepted dispatch.
+
+    The inverse of :func:`register_obligation`: a read-only dispatch
+    legitimately runs without a review gate, but "no gate" must still be an
+    explicit, countable record rather than a silent absence. This writes a
+    terminal no-gate obligation (status ``not_executable``, resolved at write
+    time) under the ``NO_GATE_KEY`` sentinel, so the producer-freshness
+    scanner groups every no-gate dispatch under one countable key instead of a
+    new key per dispatch.
+
+    Never raises; idempotent like :func:`register_obligation`.
+    """
+    dispatch_id = (dispatch_id or "").strip()
+    if not dispatch_id:
+        return None
+    try:
+        path = obligation_path(state_dir, dispatch_id)
+        if path.exists():
+            return path
+        now = _utc_now_iso()
+        record: Dict[str, Any] = {
+            "schema_version": 1,
+            "kind": "review_gate_obligation",
+            "dispatch_id": dispatch_id,
+            "gate": NO_GATE_KEY,
+            "project_id": project_id or "",
+            "declared_at": now,
+            "pr_number": pr_number,
+            "pr_id": pr_id,
+            "branch": branch,
+            "status": STATUS_NOT_EXECUTABLE,
+            "attempts": 0,
+            "last_attempt_at": None,
+            "resolved_at": now,
+            "request_path": None,
+            "result_path": None,
+            "reason": reason,
+            "reason_detail": reason_detail,
+            "no_gate": True,
+        }
+        _atomic_write_json(path, record)
+        return path
+    except OSError as exc:
+        logger.warning(
+            "gate_obligations: no-gate registration failed for dispatch=%s (non-fatal): %s",
+            dispatch_id, exc,
         )
         return None
 
@@ -217,10 +293,12 @@ __all__ = [
     "STATUS_NOT_EXECUTABLE",
     "STATUS_FAILED",
     "TERMINAL_STATUSES",
+    "NO_GATE_KEY",
     "obligations_dir",
     "obligation_path",
     "pr_number_from_pr_id",
     "register_obligation",
+    "register_no_gate_obligation",
     "iter_obligations",
     "update_obligation",
 ]

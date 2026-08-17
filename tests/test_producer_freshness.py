@@ -31,6 +31,13 @@ def _touch(path: Path, age_seconds: float) -> None:
     os.utime(path, (ts, ts))
 
 
+def _write_result(path: Path, age_seconds: float, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    ts = NOW - age_seconds
+    os.utime(path, (ts, ts))
+
+
 def _make_review_gates(state_dir: Path) -> None:
     # The 2026-07-31 incident shape: codex_gate requests silent ~6 days,
     # results silent ~3 days; kimi_gate results fresh.
@@ -155,6 +162,8 @@ def test_real_config_loads() -> None:
         "review_gate_results",
         # OI-876/OI-881: declared-gate obligations, grouped per gate key
         "review_gate_obligations",
+        # 20260816: aggregate "newest gate result" key with merged-PR demand
+        "review_gate_results_freshness",
         "dispatches_table",
         "governance_metrics",
         # OI-896: auto-dream cycles, grouped per cycle status
@@ -559,3 +568,173 @@ def test_cli_no_write_persists_findings_in_report(fake_state: Path) -> None:
     # Heartbeat also written.
     heartbeat = fake_state.parent / "health" / "producer_freshness_monitor.json"
     assert heartbeat.exists(), "heartbeat must be written on every run"
+
+
+# ---------------------------------------------------------------------------
+# 20260816: "PRs merged since the last gate result" — scan_newest + event filter
+# ---------------------------------------------------------------------------
+
+
+def test_scan_newest_returns_newest_mtime(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    _touch(results_dir / "pr-1-codex_gate.json", 3 * DAY)
+    _touch(results_dir / "pr-2-kimi_gate.json", 0.5 * DAY)
+
+    spec = {"path": str(results_dir), "glob": "*.json", "key": "results"}
+    seen = pf.scan_newest(spec, now=NOW)
+
+    assert seen == {"results": seen["results"]}
+    assert NOW - seen["results"] < DAY, "newest key must be the 0.5-day-old file, not the 3-day-old one"
+
+
+def test_scan_newest_empty_dir_returns_empty(tmp_path: Path) -> None:
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+
+    spec = {"path": str(results_dir), "glob": "*.json", "key": "results"}
+    assert pf.scan_newest(spec, now=NOW) == {}
+
+
+def test_scan_newest_ignores_non_review_records(tmp_path: Path) -> None:
+    """OI-1307/B4: a FRESH not_executable/unavailable/failed/test_run record must
+    not keep the results directory "fresh". Only a genuine reviewed outcome
+    (a terminal pass verdict) counts, so the newest genuine outcome wins."""
+    results_dir = tmp_path / "results"
+    _write_result(
+        results_dir / "pr-1-codex_gate.json", 3 * DAY,
+        {"gate": "codex_gate", "status": "completed"},
+    )
+    # Fresh junk: each newer than the genuine result, none a real review.
+    _write_result(
+        results_dir / "pr-2-codex_gate.json", 0.5 * DAY,
+        {"gate": "codex_gate", "status": "failed"},
+    )
+    _write_result(
+        results_dir / "pr-3-codex_gate.json", 0.4 * DAY,
+        {"gate": "codex_gate", "status": "not_executable"},
+    )
+    _write_result(
+        results_dir / "pr-4-codex_gate.json", 0.3 * DAY,
+        {"gate": "codex_gate", "status": "unavailable"},
+    )
+    _write_result(
+        results_dir / "pr-5-codex_gate.json", 0.2 * DAY,
+        {"gate": "codex_gate", "status": "completed", "test_run": True},
+    )
+
+    spec = {"path": str(results_dir), "glob": "*.json", "key": "results"}
+    seen = pf.scan_newest(spec, now=NOW)
+
+    assert set(seen) == {"results"}
+    # The only genuine outcome is the 3-day-old completed record; the four
+    # fresher non-review records must not count.
+    assert NOW - seen["results"] >= 2.9 * DAY
+
+
+def test_count_demand_events_filters_by_event_value(tmp_path: Path) -> None:
+    register = tmp_path / "dispatch_register.ndjson"
+    lines = [
+        {"timestamp": _dream_iso(1.0), "event": "pr_merged"},
+        {"timestamp": _dream_iso(0.9), "event": "pr_merged"},
+        {"timestamp": _dream_iso(0.8), "event": "dispatch_started"},
+        {"timestamp": _dream_iso(0.7), "event": "pr_merged"},
+    ]
+    register.write_text("\n".join(json.dumps(r) for r in lines) + "\n", encoding="utf-8")
+
+    spec = {
+        "cadence_seconds": DAY,
+        "demand": {
+            "type": "ndjson_events",
+            "path": str(register),
+            "timestamp_field": "timestamp",
+            "event_field": "event",
+            "event_value": "pr_merged",
+            "label": "merged PRs",
+        },
+    }
+    count = pf.count_demand_events(spec, since_ts=NOW - 2 * DAY, now=NOW)
+
+    assert count == 3, "only pr_merged events count; dispatch_started is filtered out"
+
+
+def test_real_config_review_gate_results_freshness_producer() -> None:
+    registry = pf.load_registry(REPO_ROOT / "configs" / "producer_freshness.yaml")
+    by_name = {p["name"]: p for p in registry}
+    producer = by_name["review_gate_results_freshness"]
+    assert producer["type"] == "newest"
+    assert producer["key"] == "results"
+    assert producer["expected_keys"] == ["results"]
+    assert producer["demand"]["event_field"] == "event"
+    assert producer["demand"]["event_value"] == "pr_merged"
+
+
+def test_review_gate_results_freshness_flags_stale_with_merged_pr_demand(tmp_path: Path) -> None:
+    """The 2026-08-12..16 shape: an old gate result + merged PRs since = a
+    stale finding whose demand evidence counts the merged PRs, not every
+    dispatch_register event."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    results_dir = state_dir / "review_gates" / "results"
+    _touch(results_dir / "pr-1-codex_gate.json", 3 * DAY)
+
+    register = state_dir / "dispatch_register.ndjson"
+    lines = [
+        {"timestamp": _dream_iso(1.0), "event": "pr_merged"},
+        {"timestamp": _dream_iso(0.9), "event": "pr_merged"},
+        {"timestamp": _dream_iso(0.5), "event": "dispatch_started"},
+    ]
+    register.write_text("\n".join(json.dumps(r) for r in lines) + "\n", encoding="utf-8")
+
+    spec = {
+        "name": "review_gate_results_freshness",
+        "type": "newest",
+        "path": str(results_dir),
+        "glob": "*.json",
+        "key": "results",
+        "cadence_seconds": DAY,
+        "expected_keys": ["results"],
+        "demand": {
+            "type": "ndjson_events",
+            "path": str(register),
+            "timestamp_field": "timestamp",
+            "event_field": "event",
+            "event_value": "pr_merged",
+            "label": "merged PRs",
+        },
+    }
+    section = pf.evaluate_producer(spec, now=NOW)
+
+    assert section["status"] == "stale"
+    assert len(section["findings"]) == 1
+    finding = section["findings"][0]
+    assert finding["key"] == "results"
+    assert finding["kind"] == "stale"
+    assert finding["demand"]["source"] == "merged PRs"
+    assert finding["demand"]["events_since_last_seen"] == 2, (
+        "only pr_merged events newer than the 3-day-old result count"
+    )
+
+
+def test_review_gate_results_freshness_empty_dir_is_missing(tmp_path: Path) -> None:
+    """An empty results dir is an asserted absence: the 'results' key never
+    wrote, so the finding is 'missing', not a silent green."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    results_dir = state_dir / "review_gates" / "results"
+    results_dir.mkdir(parents=True)
+
+    spec = {
+        "name": "review_gate_results_freshness",
+        "type": "newest",
+        "path": str(results_dir),
+        "glob": "*.json",
+        "key": "results",
+        "cadence_seconds": DAY,
+        "expected_keys": ["results"],
+    }
+    section = pf.evaluate_producer(spec, now=NOW)
+
+    assert section["status"] == "stale"
+    assert section["findings"][0]["key"] == "results"
+    assert section["findings"][0]["kind"] == "missing"
+    assert section["findings"][0]["expected_key_absent"] is True
