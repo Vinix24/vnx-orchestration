@@ -88,7 +88,7 @@ class TestMergePrEmitsReceipt:
             "number": n, "title": "feat: test PR", "headRefName": "feature-branch",
             "state": "OPEN",
         })
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         result = pr_merge.merge_pr(
@@ -118,7 +118,7 @@ class TestMergePrEmitsReceipt:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: {
             "number": n, "title": "chore: cleanup", "headRefName": "chore-branch",
         })
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         pr_merge.merge_pr(pr_number=42, receipts_file=str(receipts_path))
@@ -137,7 +137,7 @@ class TestMergePrEmitsReceipt:
             "title": "refactor(receipt): extract mtime-calc python",
             "headRefName": "gov2-receipt-mtime",
         })
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         result = pr_merge.merge_pr(pr_number=648, receipts_file=str(receipts_path))
@@ -157,7 +157,7 @@ class TestMergePrEmitsReceipt:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: {
             "number": n, "title": "fix: hotfix", "headRefName": "hotfix-branch",
         })
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         result = pr_merge.merge_pr(pr_number=77, receipts_file=str(receipts_path))
@@ -175,7 +175,7 @@ class TestMergePrEmitsReceipt:
         query_called = []
         merge_called = []
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: query_called.append(n) or None)
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: merge_called.append((n, m)) or (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: merge_called.append((n, m)) or (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         result = pr_merge.merge_pr(pr_number=55, dry_run=True, receipts_file=str(receipts_path))
@@ -193,7 +193,7 @@ class TestMergePrEmitsReceipt:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: {
             "number": n, "title": "...", "headRefName": "...",
         })
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (False, "merge conflict"))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (False, "merge conflict"))
 
         receipts_path = vnx_env["receipts_path"]
         result = pr_merge.merge_pr(pr_number=33, receipts_file=str(receipts_path))
@@ -210,7 +210,7 @@ class TestMergePrEmitsReceipt:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: {
             "number": n, "title": "test", "headRefName": "branch",
         })
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         pr_merge.merge_pr(pr_number=11, receipts_file=str(receipts_path))
@@ -230,7 +230,7 @@ class TestEmitRegisterEvent:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: {
             "number": n, "title": "test register", "headRefName": "reg-branch",
         })
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         register_path = vnx_env["state_dir"] / "dispatch_register.ndjson"

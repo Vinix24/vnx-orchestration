@@ -189,7 +189,7 @@ def test_merge_pr_surfaces_overlap_warning(monkeypatch):
 
     monkeypatch.setattr(pr_merge, "_query_pr",
                         lambda pr: {"title": "fix: t", "headRefName": "dispatch/merging"})
-    monkeypatch.setattr(pr_merge, "_do_merge", lambda pr, method: (True, ""))
+    monkeypatch.setattr(pr_merge, "_do_merge", lambda pr, method, *a, **k: (True, ""))
     monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **kw: {"append_status": "ok"})
     monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **kw: True)
     monkeypatch.setattr(
@@ -206,7 +206,7 @@ def test_merge_pr_overlap_check_failure_does_not_block(monkeypatch):
 
     monkeypatch.setattr(pr_merge, "_query_pr",
                         lambda pr: {"title": "fix: t", "headRefName": "dispatch/merging"})
-    monkeypatch.setattr(pr_merge, "_do_merge", lambda pr, method: (True, ""))
+    monkeypatch.setattr(pr_merge, "_do_merge", lambda pr, method, *a, **k: (True, ""))
     monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **kw: {"append_status": "ok"})
     monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **kw: True)
 
