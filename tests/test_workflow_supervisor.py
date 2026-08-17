@@ -801,96 +801,66 @@ class TestEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# Router lane cooldown — write side on the production path (OI-1263 / OI-1298)
+# Router lane cooldown — NOT written from handle_incident (OI-1263 / OI-1298)
 # ---------------------------------------------------------------------------
 
-class TestRouterLaneCooldown:
-    """A provider-failure incident on the production path must write the
+class TestHandleIncidentNeverTouchesLaneCooldown:
+    """``handle_incident`` must never write (or attempt to write) a
     smart-router lane cooldown.
 
-    OI-1263: the cooldown is consulted (``lane_available`` in tier_routing)
-    but ``record_lane_failure`` had zero production callers, so a quota/auth
-    failure never marked the lane out and the next dispatch re-entered the
-    same dead lane. OI-1298: ``record_lane_failure`` was unit-tested but no
-    test covered the call site, so the missing wiring went unnoticed. These
-    tests run the incident write side (``handle_incident``) against the router
-    read side (``lane_available`` / ``resolve_tier_route``) over one state dir.
+    OI-1263 was originally "fixed" by hanging a cooldown write off
+    ``handle_incident``, gated on a PROVIDER_* incident class. That gate never
+    opened in production: the only real callers of ``handle_incident``
+    (``subprocess_health_monitor.py``) raise PROCESS_CRASH/TERMINAL_UNRESPONSIVE
+    with ``component="subprocess_adapter"`` — never a PROVIDER_* class, and
+    "subprocess_adapter" is not even a lane name ``_LANE_CHECKS`` knows. The
+    old tests here proved nothing: they called ``handle_incident`` with a
+    fabricated ``component="deepseek-harness"`` + a hand-picked PROVIDER_*
+    class no real caller ever supplies, so the "coverage" tested the
+    write-then-read wiring in isolation, never whether production could reach
+    it — same anti-pattern as
+    ``test-die-beide-kanten-voedt-toetst-de-koppeling-niet-de-herkomst``.
+
+    The real fix moved the write to the actual observation point — the
+    provider-lane dispatch itself, in ``provider_dispatch._emit_governance``
+    via ``_maybe_record_provider_lane_cooldown`` — covered by
+    ``tests/test_provider_dispatch_lane_cooldown.py`` using the real
+    event-payload shapes (kimi-403, deepseek 402-as-500). The
+    ``_record_provider_lane_cooldown`` method that used to live on
+    ``WorkflowSupervisor`` was removed as a dead second write path nothing in
+    production ever reached. This test is the regression guard: it proves the
+    real production incident shape (PROCESS_CRASH, ``subprocess_adapter``)
+    still leaves the lane-cooldown system completely untouched, and that a
+    hand-fed PROVIDER_* class through ``handle_incident`` no longer does
+    anything either — so nobody re-wires a second, untested cooldown path
+    through this class again without a test that would actually catch it.
     """
 
-    def _force_kimi(self, monkeypatch, present: bool):
-        import shutil as _shutil
+    def test_real_production_incident_shape_writes_no_lane_cooldown(self, state_dir, supervisor):
+        from providers.smart_router.availability import lane_cooldown_remaining
 
-        monkeypatch.setattr(
-            _shutil,
-            "which",
-            (lambda name: "/usr/local/bin/kimi") if present else (lambda name: None),
+        supervisor.handle_incident(
+            incident_class=IncidentClass.PROCESS_CRASH,
+            component="subprocess_adapter",
+            reason="worker process died",
         )
+        assert lane_cooldown_remaining("subprocess_adapter", state_dir=Path(state_dir)) == 0.0
 
-    def test_provider_quota_failure_writes_router_lane_cooldown(self, state_dir, supervisor):
-        """A quota-exhausted incident on the production path writes a cooldown
-        that the availability gate then honours."""
+    def test_provider_incident_class_through_handle_incident_writes_no_lane_cooldown(
+        self, state_dir, supervisor,
+    ):
+        """Even a hand-fed PROVIDER_* class (no real caller does this) must not
+        write a cooldown: the wiring that used to do so has been removed."""
         from providers.smart_router.availability import lane_available
 
         supervisor.handle_incident(
             incident_class=IncidentClass.PROVIDER_QUOTA_EXHAUSTED,
             component="deepseek-harness",
             reason="quota exhausted",
-        )
-        ok, reason = lane_available(
-            "deepseek-harness",
-            env={"DEEPSEEK_API_KEY": "sk-test"},
-            state_dir=Path(state_dir),
-        )
-        assert ok is False
-        assert "cooldown" in reason
-
-    def test_provider_auth_failure_writes_non_recoverable_cooldown(self, state_dir, supervisor):
-        """An auth-failure incident writes a non-recoverable cooldown: the lane
-        stays out even far past any quota window (an expired key never improves
-        by waiting)."""
-        from providers.smart_router.availability import lane_available
-
-        supervisor.handle_incident(
-            incident_class=IncidentClass.PROVIDER_AUTH_FAILURE,
-            component="deepseek-harness",
-            reason="403 authentication failed",
         )
         ok, _ = lane_available(
             "deepseek-harness",
             env={"DEEPSEEK_API_KEY": "sk-test"},
             state_dir=Path(state_dir),
-            now=1_000_000_000.0,
         )
-        assert ok is False
-
-    def test_next_routing_decision_skips_cooled_down_lane(self, state_dir, supervisor, monkeypatch):
-        """The routing decision AFTER a provider failure skips the cooled-down
-        lane and lands on the fallback (cooldown is consulted at decision time)."""
-        from providers.smart_router.cost_tier import TIER_LOW
-        from providers.smart_router.tier_routing import resolve_tier_route
-
-        self._force_kimi(monkeypatch, present=True)
-        supervisor.handle_incident(
-            incident_class=IncidentClass.PROVIDER_QUOTA_EXHAUSTED,
-            component="deepseek-harness",
-            reason="quota exhausted",
-        )
-        route = resolve_tier_route(
-            TIER_LOW,
-            env={"DEEPSEEK_API_KEY": "sk-test"},
-            state_dir=Path(state_dir),
-        )
-        assert route.provider == "kimi"
-        assert "deepseek-harness unavailable" in route.reason
-
-    def test_non_provider_incident_writes_no_lane_cooldown(self, state_dir, supervisor):
-        """A non-provider incident never writes a lane cooldown — the write is
-        gated on the provider incident classes, not on a matching component."""
-        from providers.smart_router.availability import lane_cooldown_remaining
-
-        supervisor.handle_incident(
-            incident_class=IncidentClass.PROCESS_CRASH,
-            component="deepseek-harness",
-            reason="worker process died",
-        )
-        assert lane_cooldown_remaining("deepseek-harness", state_dir=Path(state_dir)) == 0.0
+        assert ok is True

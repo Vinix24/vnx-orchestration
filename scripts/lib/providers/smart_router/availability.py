@@ -31,10 +31,19 @@ unexpected error is logged loudly and the lane is treated as available, so the
 router falls through to its existing behaviour.
 
 ``record_lane_failure`` is the producer side of the cooldown contract: the
-production incident path (``WorkflowSupervisor.handle_incident``) calls it when
-a provider quota/auth/rate-limit failure is already classified, passing the
-``IncidentClass`` through so there is no second 403/429 detection (OI-1263).
-This module provides the mechanism, the incident path provides the write.
+production write call is ``provider_dispatch._maybe_record_provider_lane_cooldown``
+(OI-1263), invoked from ``_emit_governance`` right after every provider-lane
+dispatch — the one place a provider failure is actually observed, with the
+real lane name the dispatch used. It passes the already-classified
+``IncidentClass`` through so there is no second 403/429 detection. This module
+provides the mechanism; the provider-lane dispatch path provides the write.
+
+(``WorkflowSupervisor.handle_incident`` gates writes the same way via
+``PROVIDER_INCIDENT_CLASSES`` in principle, but has no production caller that
+ever raises a PROVIDER_* incident class — its two real callers
+(``subprocess_health_monitor.py``) only raise PROCESS_CRASH/TERMINAL_UNRESPONSIVE
+— so it was removed as a dead second write path OI-1263 originally, and
+incorrectly, hung the fix on.)
 """
 from __future__ import annotations
 
@@ -177,8 +186,9 @@ def record_lane_failure(
     clears the state (an expired key does not improve by waiting).
 
     ``incident_class`` lets a caller that ALREADY classified the failure pass
-    the class in directly (the incident path does this — no second 403/429
-    detection, OI-1263). When provided it must be a provider incident class
+    the class in directly (``provider_dispatch._maybe_record_provider_lane_cooldown``
+    does this — no second 403/429 detection, OI-1263). When provided it must
+    be a provider incident class
     (see ``PROVIDER_INCIDENT_CLASSES``); a non-provider class raises, and the
     best-effort wrapper logs and swallows it so no bogus cooldown is written.
 
