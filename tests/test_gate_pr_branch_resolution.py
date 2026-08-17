@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""OI-904 — `vnx gate` must derive --branch from the PR's headRefName, not the
-local checkout branch.
+"""OI-904 / OI-1268 — `vnx gate` must derive --branch from the PR's headRefName,
+never the local checkout branch.
 
 T0 routinely runs `vnx gate <pr>` from main; the local checkout branch is then
 'main' while the branch under review is the PR's head branch. Passing the local
@@ -8,10 +8,15 @@ branch to review_gate_manager made create_gate_worktree checkout origin/main
 instead of the PR branch, so the gate agent's own file reads (sed/rg/cat)
 missed the diff under review.
 
+Since OI-904 the branch is resolved from `gh pr view headRefName`. OI-1268
+closes the residual hole: when that resolution fails, the gate run must ABORT
+instead of silently gating the local branch. A gate that does not know what it
+is reviewing reviews nothing.
+
 These tests run cmd_gate from scripts/commands/gate.sh with a mocked `gh`
 binary (headRefName resolution) and a capturing fake review_gate_manager.py to
-prove --branch carries the PR head ref — and that the local branch is only used
-as an explicitly-logged fallback when gh cannot resolve the PR.
+prove --branch carries the PR head ref — and that an unresolvable PR aborts the
+run before review_gate_manager is ever invoked.
 """
 
 from __future__ import annotations
@@ -130,6 +135,12 @@ def _captured_branch(env) -> str:
     return captured[captured.index("--branch") + 1]
 
 
+def _captured_review_stack(env) -> str:
+    captured = json.loads(env["capture"].read_text(encoding="utf-8"))
+    assert "--review-stack" in captured
+    return captured[captured.index("--review-stack") + 1]
+
+
 class TestGateBranchDerivation:
     def test_branch_is_pr_head_ref_not_local_branch(self, env):
         """`vnx gate 1281` must pass --branch <headRefName>, never 'main'."""
@@ -144,14 +155,17 @@ class TestGateBranchDerivation:
         assert "Resolved PR 1281 head branch" in result.stdout
         assert PR_HEAD in result.stdout
 
-    def test_falls_back_to_local_branch_when_gh_fails(self, env):
-        """When gh cannot resolve the PR, --branch must be the local checkout
-        branch and the fallback is logged explicitly."""
+    def test_unresolvable_pr_head_ref_aborts_gate_run(self, env):
+        """When gh cannot resolve the PR head ref, the gate run must fail loudly
+        (OI-1268). It must NOT fall back to the local checkout branch, because
+        the gate would then produce PASS evidence for the wrong branch."""
         result = _run_cmd_gate(env, "9999", "--only", "codex")
-        assert result.returncode == 0, result.stderr
-        assert "WARNING" in result.stdout
-        assert "fell back to local branch" in result.stdout
-        assert _captured_branch(env) == "main"
+        assert result.returncode != 0, result.stdout
+        assert "could not resolve" in result.stderr.lower() or "refusing" in result.stderr.lower()
+        # review_gate_manager must never be invoked for an unresolvable PR.
+        assert not env["capture"].exists(), (
+            "gate ran review_gate_manager for an unresolvable PR branch"
+        )
 
     def test_head_ref_wins_even_when_local_branch_differs(self, env):
         """Regression guard: on a non-main local branch, the PR head ref must
@@ -163,3 +177,10 @@ class TestGateBranchDerivation:
         result = _run_cmd_gate(env, "1281", "--only", "codex")
         assert result.returncode == 0, result.stderr
         assert _captured_branch(env) == PR_HEAD
+
+    def test_only_ci_normalizes_to_ci_gate(self, env):
+        """`--only ci` must pass the gate name review_gate_manager knows
+        (ci_gate), never the orphan name ci (OI-1265)."""
+        result = _run_cmd_gate(env, "1281", "--only", "ci")
+        assert result.returncode == 0, result.stderr
+        assert _captured_review_stack(env) == "ci_gate"

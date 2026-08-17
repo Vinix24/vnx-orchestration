@@ -77,11 +77,15 @@ try:
 except Exception as e:
     print(f'warn: {e}', file=sys.stderr)
 
-# Map enforcement check names to gate names used by review_gate_manager
+# Map enforcement check names to gate names used by review_gate_manager.
+# The manager builds its stack with 'ci_gate' (scripts/review_gate_manager.py);
+# 'ci' is not a name it knows, so a ci_green_required requirement would
+# resolve to an orphan gate that the manager books as blocked and never
+# enforces (OI-1265).
 gate_map = {
     'codex_gate_required': 'codex_gate',
     'gemini_review_required': 'gemini_review',
-    'ci_green_required': 'ci',
+    'ci_green_required': 'ci_gate',
 }
 result = []
 for g in gates:
@@ -210,7 +214,7 @@ Options:
 Gate names:
   codex_gate            Codex static analysis gate
   gemini_review         Gemini code review gate
-  ci                    CI green check
+  ci_gate               CI green check
 
 Examples:
   vnx gate 221
@@ -242,21 +246,26 @@ HELP
     return 0
   fi
 
-  # Auto-detect branch. Prefer the PR's head ref (gh pr view headRefName) so
-  # the gate worktree matches the diff under review; fall back to the local
-  # checkout branch only when no PR number is available or gh cannot resolve
-  # the head ref.
+  # Auto-detect branch. The PR's head ref (gh pr view headRefName) is the only
+  # acceptable answer: the gate worktree must match the diff under review, and
+  # T0 routinely runs `vnx gate` from main (OI-904). A PR whose head ref cannot
+  # be resolved is a hard error (OI-1268) — falling back to the local checkout
+  # branch would gate a different tree than the one being reviewed and stamp
+  # PASS evidence on it. A gate that does not know what it reviews reviews
+  # nothing.
   local branch
-  if [ -n "$pr_number" ] && branch="$(_g_pr_head_branch "$pr_number")"; then
-    log "[gate] Resolved PR $pr_number head branch: $branch"
+  if [ -n "$pr_number" ]; then
+    if branch="$(_g_pr_head_branch "$pr_number")"; then
+      log "[gate] Resolved PR $pr_number head branch: $branch"
+    else
+      err "[gate] Could not resolve PR $pr_number head branch via gh pr view; refusing to gate on the local branch"
+      return 1
+    fi
   else
     branch=$(_g_current_branch)
     if [ -z "$branch" ]; then
       err "[gate] Could not determine current git branch"
       return 1
-    fi
-    if [ -n "$pr_number" ]; then
-      log "[gate] WARNING: could not resolve PR $pr_number head branch via gh pr view; fell back to local branch '$branch'"
     fi
   fi
 
@@ -282,10 +291,12 @@ HELP
 
   if [ -n "$only_gate" ]; then
     # Run a specific gate
-    # Normalize short names: codex -> codex_gate, gemini -> gemini_review
+    # Normalize short names: codex -> codex_gate, gemini -> gemini_review,
+    # ci -> ci_gate (the name review_gate_manager knows; OI-1265).
     case "$only_gate" in
       codex)  only_gate="codex_gate" ;;
       gemini) only_gate="gemini_review" ;;
+      ci)     only_gate="ci_gate" ;;
     esac
 
     log "[gate] Running gate '$only_gate' for PR $pr_number (branch: $branch)"
