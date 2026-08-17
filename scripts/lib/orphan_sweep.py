@@ -22,11 +22,14 @@ runtime objects persist forever:
    leftover-process cleanup. Uncommitted work is never silently deleted. The
    session listing that decides which worktrees still have a live session is
    itself tri-state (OI-1286): a real empty listing (tmux running, no server
-   because zero sessions exist — rc=1 with "no server running" in stderr) is
-   read as "zero sessions" and the sweep proceeds; an UNMEASURABLE listing
-   (tmux not installed, the runner raised, or an unrecognized non-zero exit)
-   is never read as "zero sessions" — it records an error and skips the
-   worktree reap for this entire run instead of guessing.
+   because zero sessions exist — rc=1 with either "no server running" in
+   stderr, or a connect failure against a socket that does not exist on disk,
+   e.g. tmux 3.5a's "error connecting to <path> (No such file or
+   directory)") is read as "zero sessions" and the sweep proceeds; an
+   UNMEASURABLE listing (tmux not installed, the runner raised, a connect
+   failure against a socket that DOES exist, or an unrecognized non-zero
+   exit) is never read as "zero sessions" — it records an error and skips
+   the worktree reap for this entire run instead of guessing.
 
 3. **``dispatches/active/<id>/manifest.json``** — the subprocess lane's active
    manifests. Delegated to :mod:`crash_recovery_sweep`, which already recovers
@@ -154,18 +157,33 @@ def _run_tmux(args: list[str], timeout: int = 10) -> tuple[int, str, str]:
 def _real_list_sessions() -> "list[str] | None":
     """List tmux session names; tri-state on failure (OI-1286).
 
-    Returns the real listing on success. On a non-zero exit, tmux's own
-    "no server running" (rc=1, that phrase in stderr) is a genuinely empty
-    listing — zero sessions really exist — and returns ``[]``. Every other
-    non-zero outcome (tmux not installed, the runner raising OSError/
-    TimeoutExpired, or any other unrecognized rc) was never actually
-    measured and returns ``None``. Callers must not collapse ``None`` into
-    ``[]``: that is exactly the "cannot measure" == "dead" bug this fixes.
+    Returns the real listing on success. On a non-zero exit, two stderr
+    shapes both mean "no server is listening on this socket, so there are
+    genuinely zero sessions" and return ``[]``:
+
+      * the classic phrasing, "no server running" (older/other tmux builds);
+      * a connect failure against a socket that does not exist on disk —
+        tmux 3.5a on macOS emits ``error connecting to <path> (No such file
+        or directory)`` for this case instead of the classic phrase (that is
+        exactly the OI-1286 scenario: a restarted host, or a worker using a
+        different ``TMUX_TMPDIR``, where no socket was ever created).
+
+    Every other non-zero outcome (tmux not installed, the runner raising
+    OSError/TimeoutExpired, a connect failure against a socket that DOES
+    exist — e.g. a permission error or a protocol mismatch — or any other
+    unrecognized rc) was never actually measured and returns ``None``.
+    Callers must not collapse ``None`` into ``[]``: that is exactly the
+    "cannot measure" == "dead" bug this fixes. The "no such file" check is
+    what keeps that distinction real: a missing socket is a measurement, a
+    socket you can't reach is not.
     """
     rc, out, err = _run_tmux(["list-sessions", "-F", "#{session_name}"])
     if rc == 0:
         return [line.strip() for line in out.splitlines() if line.strip()]
-    if "no server running" in (err or "").lower():
+    err_lower = (err or "").lower()
+    if "no server running" in err_lower:
+        return []
+    if "error connecting to" in err_lower and "no such file or directory" in err_lower:
         return []
     return None
 

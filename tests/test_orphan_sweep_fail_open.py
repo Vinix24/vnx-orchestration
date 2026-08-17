@@ -29,8 +29,10 @@ real ``_real_list_sessions`` runs in every test below.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -189,6 +191,47 @@ def test_tmux_runner_timeout_worktree_survives_and_is_errored(env, tmp_path, mon
     )
 
 
+def test_unrecognized_nonzero_rc_worktree_survives_and_is_errored(env, tmp_path, monkeypatch):
+    """A plain non-zero rc whose stderr is neither empty nor about a missing
+    socket (e.g. a permission error or protocol mismatch on a socket that
+    DOES exist) is unmeasurable, not 'zero sessions' — must not reap.
+
+    This is the branch between the two fenced cases: rc=0 (real listing) and
+    the two recognized "genuinely zero sessions" stderr shapes. Anything else
+    non-zero must stay None. Modeled on a real tmux 3.5a stderr measured
+    against an unreadable-but-existing socket file: "error connecting to
+    <path> (Socket operation on non-socket)" — "error connecting to" is
+    present (like the real no-socket case) but "no such file or directory"
+    is not, so this must NOT be read as zero sessions.
+    """
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "unknown-stderr-1")
+    assert handle.path.is_dir()
+
+    def fake_run_tmux(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=("tmux", *args),
+            returncode=1,
+            stdout="",
+            stderr="error connecting to /tmp/xyz/tmux-501/default (Socket operation on non-socket)",
+        )
+
+    monkeypatch.setattr(osweep.shutil, "which", lambda name: "/usr/local/bin/tmux")
+    monkeypatch.setattr(osweep, "_adapter_run_tmux", fake_run_tmux)
+
+    res = osweep.sweep(repo_root=local, data_dir=env)
+
+    assert handle.path.is_dir(), (
+        "worktree was reaped even though the tmux listing returned an "
+        "unrecognized non-zero rc — fail-open contract violated"
+    )
+    assert str(handle.path) not in res.worktrees_removed
+    assert res.errors, (
+        "an unrecognized non-zero rc must surface as an error in the "
+        "result, not pass silently as 'zero sessions'"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Direction 2 — REALLY ZERO: rc=1 "no server running" is a real empty listing.
 # GREEN on main; must stay green — regression guard against an over-eager
@@ -215,6 +258,41 @@ def test_no_server_running_is_real_zero_sessions_worktree_still_reaped(env, tmp_
 
     assert str(handle.path) in res.worktrees_removed
     assert not handle.path.exists()
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux binary not installed")
+def test_real_tmux_empty_socket_dir_reads_as_real_zero_sessions(monkeypatch):
+    """Pin the discriminator against the ACTUAL tmux binary, not a stubbed
+    string (the review finding on PR #1601): point ``TMUX_TMPDIR`` at a fresh,
+    empty directory (no socket ever created there) and confirm the real
+    stderr is read as genuinely zero sessions.
+
+    Measured on this machine, tmux 3.5a / macOS: this scenario does NOT
+    produce "no server running" — it produces ``error connecting to <path>
+    (No such file or directory)``. A discriminator that only recognizes the
+    classic phrase reads this as unmeasurable and skips the worktree reap in
+    exactly the restarted-host / different-TMUX_TMPDIR scenario OI-1286
+    exists for. This test gets its stderr from the binary itself; it must
+    never hardcode the expected phrase into the fixture.
+    """
+    with tempfile.TemporaryDirectory(dir="/tmp") as empty_socket_dir:
+        monkeypatch.setenv("TMUX_TMPDIR", empty_socket_dir)
+        monkeypatch.delenv("TMUX", raising=False)
+
+        rc, out, err = osweep._run_tmux(["list-sessions", "-F", "#{session_name}"])
+        assert rc != 0, (
+            f"expected the real tmux binary to fail to connect against an "
+            f"empty, freshly-created TMUX_TMPDIR (no socket present) — got "
+            f"rc=0, out={out!r}. If tmux now succeeds here the premise of "
+            f"this test no longer holds."
+        )
+
+        sessions = osweep._real_list_sessions()
+
+    assert sessions == [], (
+        f"real tmux binary against an empty TMUX_TMPDIR must be read as "
+        f"genuinely zero sessions, got {sessions!r} (rc={rc}, stderr={err!r})"
+    )
 
 
 if __name__ == "__main__":
