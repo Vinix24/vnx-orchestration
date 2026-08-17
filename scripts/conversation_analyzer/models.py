@@ -136,6 +136,7 @@ class RunStats:
     sessions_deep: int = 0
     deep_attempts: int = 0
     deep_failures: int = 0
+    deep_config_skips: int = 0
     total_tokens: int = 0
     errors: int = 0
     skipped: int = 0

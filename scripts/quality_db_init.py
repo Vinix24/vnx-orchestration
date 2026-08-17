@@ -29,7 +29,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 30
+HIGHEST_QI_VERSION = 31
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1619,6 +1619,22 @@ def _migrate_v30(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v31(conn: sqlite3.Connection) -> None:
+    """V31: nightly_digests deep_config_skips column (fix1585-r2).
+
+    A config gap (missing DEEPSEEK_API_KEY, missing/unavailable ollama model,
+    unreachable ollama server) was previously indistinguishable from a real
+    failed attempt — it folded into ``deep_attempts``/``deep_failures`` and
+    fail-closed the nightly run over nothing that was ever tried. This column
+    lets a config-gap night be told apart from a genuine deep-analysis failure.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nightly_digests)").fetchall()}
+    if "deep_config_skips" not in cols:
+        conn.execute(
+            "ALTER TABLE nightly_digests ADD COLUMN deep_config_skips INTEGER DEFAULT 0"
+        )
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1651,6 +1667,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     28: _migrate_v28,
     29: _migrate_v29,
     30: _migrate_v30,
+    31: _migrate_v31,
 }
 
 

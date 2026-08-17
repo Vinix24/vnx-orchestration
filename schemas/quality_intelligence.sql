@@ -432,6 +432,7 @@ CREATE TABLE IF NOT EXISTS nightly_digests (
     deep_analyzed INTEGER DEFAULT 0,
     deep_attempts INTEGER DEFAULT 0,
     deep_failures INTEGER DEFAULT 0,
+    deep_config_skips INTEGER DEFAULT 0,
     new_suggestions INTEGER DEFAULT 0,
     total_tokens_used INTEGER DEFAULT 0,
     digest_markdown TEXT NOT NULL,

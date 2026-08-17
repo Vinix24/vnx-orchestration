@@ -24,28 +24,40 @@ from provider_spawns.deepseek_harness_spawn import (
 
 
 @dataclass(frozen=True)
-class ClaudeOutcome:
-    """Result of one ``claude`` CLI invocation, with the failure mode explicit.
+class LLMOutcome:
+    """Result of one LLM-invocation attempt, with the failure mode explicit.
 
     ``status`` is one of:
-      - ``ok``          — CLI succeeded (rc 0) and produced usable text
-      - ``empty``       — CLI succeeded (rc 0) but produced no usable text
-      - ``missing_cli`` — claude binary absent from PATH (FileNotFoundError)
-      - ``cli_failed``  — claude exited non-zero (``returncode`` + ``stderr``)
-      - ``timeout``     — claude exceeded the 90s deadline
-      - ``error``       — any other unexpected exception
+      - ``ok``           — call succeeded and produced usable text
+      - ``empty``        — call succeeded (rc 0) but produced no usable text
+      - ``missing_cli``  — claude binary absent from PATH (FileNotFoundError)
+      - ``cli_failed``   — claude exited non-zero (``returncode`` + ``stderr``)
+      - ``timeout``      — call exceeded its deadline
+      - ``error``        — any other unexpected exception
+      - ``config_skip``  — no invocation was ever made: a config gap (missing
+                           API key, unreachable/unconfigured Ollama) refused
+                           the attempt before any subprocess started
 
     ``text`` carries the assistant output for ``ok`` (and the raw stdout for
-    ``empty``, kept for diagnostics). A caller can tell all six apart without
-    parsing logs — the gap the old ``Optional[str]`` return left open, where a
-    missing CLI, a crashed CLI, and a successful-but-empty run all collapsed to
-    ``None`` (OI-1258).
+    ``empty``, kept for diagnostics). A caller can tell every mode apart
+    without parsing logs — the gap the old ``Optional[str]`` return left open,
+    where a missing CLI, a crashed CLI, and a successful-but-empty run all
+    collapsed to ``None`` (OI-1258).
+
+    ``attempted`` is derived from ``status``: every status reflects a real
+    invocation that fired except ``config_skip``, which by definition never
+    started one. This is what distinguishes a failed attempt from a skipped
+    one (fix1585-r2): a config gap must not count as "tried and failed".
     """
 
     status: str
     text: Optional[str] = None
     returncode: Optional[int] = None
     stderr: str = ""
+
+    @property
+    def attempted(self) -> bool:
+        return self.status != "config_skip"
 
 
 class DeepAnalyzer:
@@ -73,6 +85,11 @@ class DeepAnalyzer:
         # digest counter spans claude, deepseek-harness, and ollama paths.
         self.deep_attempts = 0
         self.deep_failures = 0
+        # fix1585-r2: sessions where every candidate strategy refused before
+        # invoking anything (missing DEEPSEEK_API_KEY, no usable Ollama model
+        # or server) — a config gap, not a failed attempt. Kept separate from
+        # ``deep_attempts``/``deep_failures`` so it never fail-closes the run.
+        self.deep_config_skips = 0
 
     SYSTEM_PROMPT = """You are a VNX orchestration system analyst. Analyze this Claude Code session summary and extract actionable improvement suggestions.
 
@@ -119,29 +136,32 @@ Respond with valid JSON:
         prompt = f"{self.SYSTEM_PROMPT}\n\n## Session Summary\n\n{summary}"
 
         result_text = None
-        # ``attempted`` records whether an LLM was actually invoked this
-        # session. It stays False for the billing-guard skip (no LLM called),
-        # so a deliberate skip never counts as a failed attempt.
-        attempted = False
+        # ``any_attempted`` records whether an LLM was actually invoked this
+        # session — derived from each candidate's own LLMOutcome.attempted,
+        # not from which branch was merely tried. A config gap (missing
+        # DEEPSEEK_API_KEY, no usable Ollama model/server) refuses before any
+        # subprocess starts, so it must never flip this to True (fix1585-r2).
+        any_attempted = False
 
         # deepseek-harness: own-key auth via the claude CLI driving DeepSeek's
         # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
         # unset — never falls back to the OAuth subscription (constraint
         # deepseek-harness-subscription-blocked).
         if LLM_STRATEGY == "deepseek-harness":
-            attempted = True
-            result_text = self._try_deepseek_harness(prompt)
+            outcome = self._try_deepseek_harness(prompt)
+            any_attempted = any_attempted or outcome.attempted
+            result_text = outcome.text if outcome.status == "ok" else None
         # Billing guard: in "auto" mode, refuse the claude path when the
         # session backlog exceeds the threshold. "claude-only" bypasses
         # the guard — the operator explicitly opted in to metered spend.
         elif LLM_STRATEGY == "claude-only":
-            attempted = True
             outcome = self._try_claude_max(prompt)
+            any_attempted = any_attempted or outcome.attempted
             result_text = outcome.text if outcome.status == "ok" else None
         elif LLM_STRATEGY == "auto":
             if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
-                attempted = True
                 outcome = self._try_claude_max(prompt)
+                any_attempted = any_attempted or outcome.attempted
                 result_text = outcome.text if outcome.status == "ok" else None
             else:
                 if self._session_backlog > 0:
@@ -152,23 +172,31 @@ Respond with valid JSON:
                         f"Use VNX_ANALYZER_LLM=claude-only to override.")
 
         if result_text is None and LLM_STRATEGY in ("auto", "ollama-only"):
-            attempted = True
-            result_text = self._try_ollama(prompt)
+            outcome = self._try_ollama(prompt)
+            any_attempted = any_attempted or outcome.attempted
+            result_text = outcome.text if outcome.status == "ok" else None
 
-        if attempted:
+        if any_attempted:
             self.deep_attempts += 1
+        else:
+            # No candidate strategy ever invoked an LLM this session — every
+            # branch that ran refused on a config gap. That is a skipped
+            # attempt, not a failed one (fix1585-r2).
+            self.deep_config_skips += 1
 
         if result_text is None:
-            if attempted:
+            if any_attempted:
                 self.deep_failures += 1
-            log("WARNING", "No LLM available for deep analysis")
+                log("WARNING", "No LLM available for deep analysis")
             return None
 
         parsed = self._parse_response(result_text)
-        if parsed is None:
-            # The LLM answered but nothing parseable came back — an attempt
-            # that produced no usable result, distinct from a hard failure.
+        if parsed is None or "suggestions" not in parsed:
+            # The LLM answered but nothing parseable — or no "suggestions"
+            # key — came back: an attempt that produced no usable result,
+            # distinct from a hard failure but still not success.
             self.deep_failures += 1
+            return None
         return parsed
 
     @classmethod
@@ -271,7 +299,7 @@ Respond with valid JSON:
         return "\n".join(lines)
 
     @staticmethod
-    def _try_claude_max(prompt: str) -> ClaudeOutcome:
+    def _try_claude_max(prompt: str) -> LLMOutcome:
         try:
             result = subprocess.run(
                 ["claude", "-p", "--output-format", "json", "--max-turns", "1"],
@@ -285,20 +313,20 @@ Respond with valid JSON:
             # profile, so this is a distinct failure from a binary that runs
             # and then errors out (OI-1258).
             log("ERROR", "Claude CLI not found on PATH")
-            return ClaudeOutcome("missing_cli")
+            return LLMOutcome("missing_cli")
         except subprocess.TimeoutExpired:
             log("ERROR", "Claude CLI timed out after 90s")
-            return ClaudeOutcome("timeout")
+            return LLMOutcome("timeout")
         except Exception as e:
             log("ERROR", f"Claude CLI error: {e}")
-            return ClaudeOutcome("error", stderr=str(e))
+            return LLMOutcome("error", stderr=str(e))
 
         if result.returncode != 0:
             snippet = (result.stderr or "").strip()[:200]
             log("ERROR",
                 f"Claude CLI failed (rc={result.returncode}): {snippet}")
-            return ClaudeOutcome("cli_failed",
-                                 returncode=result.returncode, stderr=snippet)
+            return LLMOutcome("cli_failed",
+                              returncode=result.returncode, stderr=snippet)
 
         try:
             output = json.loads(result.stdout)
@@ -308,19 +336,21 @@ Respond with valid JSON:
 
         if not (text or "").strip():
             log("ERROR", "Claude CLI succeeded (rc=0) but produced no usable text")
-            return ClaudeOutcome("empty", text=result.stdout)
+            return LLMOutcome("empty", text=result.stdout)
 
-        return ClaudeOutcome("ok", text=text)
+        return LLMOutcome("ok", text=text)
 
     @staticmethod
-    def _try_deepseek_harness(prompt: str) -> Optional[str]:
+    def _try_deepseek_harness(prompt: str) -> LLMOutcome:
         """Run deep analysis via the claude CLI driving DeepSeek's Anthropic-compatible endpoint.
 
         Uses the measured-safe key-auth recipe from
         ``provider_spawns.deepseek_harness_spawn``: own ``DEEPSEEK_API_KEY``,
         ``ANTHROPIC_AUTH_TOKEN`` bearer, telemetry suppressed.  Fails closed
         when no own key is available — never falls back to the OAuth
-        subscription (constraint deepseek-harness-subscription-blocked).
+        subscription (constraint deepseek-harness-subscription-blocked). A
+        missing key is a ``config_skip``, not an attempt: no subprocess is
+        ever started (fix1585-r2).
 
         Model is ``VNX_ANALYZER_DEEPSEEK_MODEL`` (default ``deepseek-v4-flash``).
         """
@@ -330,7 +360,7 @@ Respond with valid JSON:
                 f"{DEEPSEEK_API_KEY_ENV} not set; "
                 f"deepseek-harness requires own API key (account safety — "
                 f"the lane must never ride the OAuth subscription)")
-            return None
+            return LLMOutcome("config_skip")
 
         harness_env = build_harness_env(api_key)
         # Override model to the analyzer-specific default (flash, not pro).
@@ -352,28 +382,37 @@ Respond with valid JSON:
                 env=child_env,
             )
             if result.returncode != 0:
+                snippet = (result.stderr or "").strip()[:200]
                 log("WARNING", f"DeepSeek harness failed (rc={result.returncode}): "
-                               f"{result.stderr[:200]}")
-                return None
+                               f"{snippet}")
+                return LLMOutcome("cli_failed",
+                                  returncode=result.returncode, stderr=snippet)
             try:
                 output = json.loads(result.stdout)
-                return output.get("result", result.stdout)
+                text = output.get("result", result.stdout)
             except json.JSONDecodeError:
-                return result.stdout
+                text = result.stdout
+            if not (text or "").strip():
+                return LLMOutcome("empty", text=result.stdout)
+            return LLMOutcome("ok", text=text)
         except FileNotFoundError:
             log("INFO", "Claude CLI not found for deepseek-harness")
-            return None
+            return LLMOutcome("missing_cli")
         except subprocess.TimeoutExpired:
             log("WARNING", "DeepSeek harness timed out (120s)")
-            return None
+            return LLMOutcome("timeout")
         except Exception as e:
             log("WARNING", f"DeepSeek harness error: {e}")
-            return None
+            return LLMOutcome("error", stderr=str(e))
 
     @classmethod
-    def _try_ollama(cls, prompt: str) -> Optional[str]:
+    def _try_ollama(cls, prompt: str) -> LLMOutcome:
         if not cls._probe_ollama():
-            return None
+            # The probe already logs the specific reason (unreachable server,
+            # zero models, or the configured model missing) — no subprocess-
+            # equivalent call was ever issued, so this is a config_skip, not
+            # an attempted-and-failed call (fix1585-r2).
+            return LLMOutcome("config_skip")
         try:
             import urllib.request
             payload = json.dumps({
@@ -390,10 +429,14 @@ Respond with valid JSON:
             )
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-                return body.get("response", "")
+                text = body.get("response", "")
         except Exception as e:
             log("INFO", f"Ollama not available: {e}")
-            return None
+            return LLMOutcome("error", stderr=str(e))
+
+        if not (text or "").strip():
+            return LLMOutcome("empty", text=text)
+        return LLMOutcome("ok", text=text)
 
     @staticmethod
     def _parse_response(text: str) -> Optional[dict]:

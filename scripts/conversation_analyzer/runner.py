@@ -275,13 +275,13 @@ class ConversationAnalyzer:
         cur.execute("""
             INSERT OR REPLACE INTO nightly_digests (
                 digest_date, sessions_analyzed, deep_analyzed,
-                deep_attempts, deep_failures,
+                deep_attempts, deep_failures, deep_config_skips,
                 new_suggestions, total_tokens_used,
                 digest_markdown, digest_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run_date, stats.sessions_analyzed, stats.sessions_deep,
-            stats.deep_attempts, stats.deep_failures,
+            stats.deep_attempts, stats.deep_failures, stats.deep_config_skips,
             len(stats.suggestions), stats.total_tokens,
             markdown, str(digest_path),
         ))
@@ -320,6 +320,7 @@ class ConversationAnalyzer:
         # attempts/failures alongside the success-only ``sessions_deep``.
         stats.deep_attempts = self.deep.deep_attempts
         stats.deep_failures = self.deep.deep_failures
+        stats.deep_config_skips = self.deep.deep_config_skips
 
         if not dry_run:
             self._finalize_run(stats, session_rows, run_date)
@@ -370,6 +371,7 @@ class ConversationAnalyzer:
         print(f"Deep Analyzed:     {stats.sessions_deep}")
         print(f"Deep Attempts:     {stats.deep_attempts}")
         print(f"Deep Failures:     {stats.deep_failures}")
+        print(f"Deep Config Skips: {stats.deep_config_skips}")
         print(f"Suggestions:       {len(stats.suggestions)}")
         print(f"Total Tokens:      {stats.total_tokens:,}")
         print(f"Errors:            {stats.errors}")
