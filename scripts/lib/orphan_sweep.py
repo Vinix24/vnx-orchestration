@@ -19,7 +19,14 @@ runtime objects persist forever:
    (``tmux_worktree.classify_path`` + ``reap``): a DIRTY worktree is MARKED
    (``git worktree lock`` with a reason) and NEVER deleted; clean/committed/
    pushed are removed exactly as teardown would, including process-group and
-   leftover-process cleanup. Uncommitted work is never silently deleted.
+   leftover-process cleanup. Uncommitted work is never silently deleted. The
+   session listing that decides which worktrees still have a live session is
+   itself tri-state (OI-1286): a real empty listing (tmux running, no server
+   because zero sessions exist — rc=1 with "no server running" in stderr) is
+   read as "zero sessions" and the sweep proceeds; an UNMEASURABLE listing
+   (tmux not installed, the runner raised, or an unrecognized non-zero exit)
+   is never read as "zero sessions" — it records an error and skips the
+   worktree reap for this entire run instead of guessing.
 
 3. **``dispatches/active/<id>/manifest.json``** — the subprocess lane's active
    manifests. Delegated to :mod:`crash_recovery_sweep`, which already recovers
@@ -36,6 +43,9 @@ Safety (both requirements from the dispatch):
     ``--current-dispatch``) fences that id off from all three kinds, because a
     live dispatch can be driven under a liveness signal this module cannot see
     (e.g. a harness that named its tmux session differently from ``vnx-<id>``).
+    The tmux session LISTING itself is fail-open too: when it cannot be taken
+    at all, no worktree is reaped this run, not just the ones whose id happens
+    to appear in a (possibly empty-because-broken) listing.
 """
 from __future__ import annotations
 
@@ -141,11 +151,23 @@ def _run_tmux(args: list[str], timeout: int = 10) -> tuple[int, str, str]:
         return (1, "", str(exc))
 
 
-def _real_list_sessions() -> list[str]:
-    rc, out, _ = _run_tmux(["list-sessions", "-F", "#{session_name}"])
-    if rc != 0:
+def _real_list_sessions() -> "list[str] | None":
+    """List tmux session names; tri-state on failure (OI-1286).
+
+    Returns the real listing on success. On a non-zero exit, tmux's own
+    "no server running" (rc=1, that phrase in stderr) is a genuinely empty
+    listing — zero sessions really exist — and returns ``[]``. Every other
+    non-zero outcome (tmux not installed, the runner raising OSError/
+    TimeoutExpired, or any other unrecognized rc) was never actually
+    measured and returns ``None``. Callers must not collapse ``None`` into
+    ``[]``: that is exactly the "cannot measure" == "dead" bug this fixes.
+    """
+    rc, out, err = _run_tmux(["list-sessions", "-F", "#{session_name}"])
+    if rc == 0:
+        return [line.strip() for line in out.splitlines() if line.strip()]
+    if "no server running" in (err or "").lower():
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    return None
 
 
 def _real_probe_liveness(session: str, pid_alive: Callable[[Optional[int]], bool]) -> "bool | None":
@@ -202,7 +224,7 @@ def sweep(
     current_dispatch_id: Optional[str] = None,
     max_orphans: int = DEFAULT_MAX_ORPHANS,
     dry_run: bool = False,
-    list_sessions: Optional[Callable[[], list[str]]] = None,
+    list_sessions: Optional[Callable[[], "list[str] | None"]] = None,
     probe_liveness: Optional[Callable[[str], "bool | None"]] = None,
     kill_session: Optional[Callable[[str], bool]] = None,
     pid_alive: Optional[Callable[[Optional[int]], bool]] = None,
@@ -227,6 +249,11 @@ def sweep(
         list_sessions / probe_liveness / kill_session / pid_alive:
                             Injectable backends (defaults to real tmux/os).
                             Tests override them; production never does.
+                            ``list_sessions`` returning ``None`` means the
+                            listing was not measurable this run (OI-1286):
+                            kind-1 sees no sessions and kind-2 reaps nothing,
+                            with an error recorded in the result instead of
+                            treating "cannot measure" as "zero sessions".
 
     Returns:
         :class:`OrphanSweepResult` — per-object failures are recorded in
@@ -257,7 +284,25 @@ def sweep(
     # OR it is the protected invoking dispatch.
     surviving_ids: set[str] = set(protected)
 
-    for name in sorted(list_fn()):
+    sessions = list_fn()
+    listing_unmeasurable = sessions is None
+    if listing_unmeasurable:
+        sessions = []
+        result.errors.append({
+            "kind": "tmux",
+            "error": (
+                "tmux session listing was not measurable this run (tmux "
+                "missing, the runner raised, or an unrecognized non-zero "
+                "exit) — worktree reap skipped entirely so 'cannot measure' "
+                "is never read as 'zero sessions'"
+            ),
+        })
+        logger.warning(
+            "orphan_sweep: tmux session listing unmeasurable — skipping "
+            "worktree reap this run (fail-open)"
+        )
+
+    for name in sorted(sessions):
         m = _SESSION_RE.match(name)
         if not m:
             continue
@@ -306,7 +351,7 @@ def sweep(
                 continue
             wid = m.group("id")
             result.worktrees_scanned.append(str(entry))
-            if wid in surviving_ids:
+            if listing_unmeasurable or wid in surviving_ids:
                 result.worktrees_skipped_live.append(str(entry))
                 continue
             branch = f"dispatch/{wid}"
