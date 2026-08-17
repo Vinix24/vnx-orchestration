@@ -218,7 +218,11 @@ class TestRecommendCostAware:
             "03_refactoring": [
                 {"model_id": "claude-sonnet-4-6", "composite_score": 8.5,
                  "avg_duration_seconds": 209.0, "cost_usd_per_call": None},
-                {"model_id": "glm-5-1", "composite_score": 1.0,
+                # codex-gpt-5-4 stands in as the incapable cheap model: the
+                # previous fixture used glm-5-1, which is a deprecated GLM
+                # version — since OI-1255 a blocked model in a recommendations
+                # file raises BlockedRecommendationError at load by design.
+                {"model_id": "codex-gpt-5-4", "composite_score": 1.0,
                  "avg_duration_seconds": 0.85, "cost_usd_per_call": 0.000001},
             ],
         }
@@ -226,9 +230,9 @@ class TestRecommendCostAware:
         candidates = recommend("03_refactoring", recommendations_path=rec_path)
 
         assert len(candidates) == 2
-        # sonnet (capable, score=8.5) must beat glm-5-1 (incapable, score=1.0) despite glm being cheaper
+        # sonnet (capable, score=8.5) must beat codex-gpt-5-4 (incapable, score=1.0) despite codex being cheaper
         assert candidates[0].model_id == "claude-sonnet-4-6"
-        assert candidates[1].model_id == "glm-5-1"
+        assert candidates[1].model_id == "codex-gpt-5-4"
 
     def test_null_costs_preserve_score_order(self, tmp_path):
         """When all costs are null, sort falls back to score descending."""
@@ -276,7 +280,10 @@ class TestDecideCostAware:
                  "avg_duration_seconds": 209.0, "cost_usd_per_call": None},
                 {"model_id": "deepseek-v4-flash", "composite_score": 8.5,
                  "avg_duration_seconds": 19.0, "cost_usd_per_call": None},
-                {"model_id": "glm-5-1", "composite_score": 1.0,
+                # codex-gpt-5-4 replaces the former glm-5-1 fixture entry:
+                # glm-5-1 is blocked by deprecated-glm-models and now fails
+                # loud at load (OI-1255) instead of ranking as a candidate.
+                {"model_id": "codex-gpt-5-4", "composite_score": 1.0,
                  "avg_duration_seconds": 0.85, "cost_usd_per_call": None},
             ],
         }
