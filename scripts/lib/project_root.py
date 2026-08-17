@@ -6,6 +6,7 @@ state pollution. See upstream-fix issue Vinix24/vnx-orchestration#225.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import warnings
 from pathlib import Path
@@ -146,6 +147,28 @@ def resolve_dispatch_dir(caller_file: str | None = None) -> Path:
     return data / "dispatches"
 
 
+def is_local_path_origin(origin: str) -> bool:
+    """True when a git ``origin`` names a local filesystem path, not a project remote.
+
+    A git origin that is a local path (an absolute path, a ``~``-expanded path,
+    a Windows drive path, or a ``file://`` URL) is a checkout/install artifact
+    — e.g. the temp checkout dir ``vnx release publish`` passes as ``--source`` —
+    not a stable, shareable project identity. Such an origin must never yield a
+    project_id: an install map is not a project checkout (OI-1253).
+    """
+    expanded = os.path.expanduser(origin.strip())
+    if expanded.startswith("file://"):
+        return True
+    if expanded.startswith("~"):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", expanded):
+        return True
+    try:
+        return Path(expanded).is_absolute()
+    except (OSError, ValueError):
+        return False
+
+
 def resolve_project_id(project_dir: str | Path | None = None) -> str:
     """Resolve the current project_id for tenant-scoped operations.
 
@@ -189,6 +212,8 @@ def resolve_project_id(project_dir: str | Path | None = None) -> str:
                 text=True,
             ).strip()
             if out:
+                if is_local_path_origin(out):
+                    continue
                 name = out.rstrip("/").split("/")[-1]
                 if name.endswith(".git"):
                     name = name[:-4]

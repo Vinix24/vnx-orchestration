@@ -25,6 +25,7 @@ if _lib not in _sys.path:
 from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 import data_dir_guard
+from project_root import is_local_path_origin
 
 log = logging.getLogger(__name__)
 
@@ -294,6 +295,13 @@ def _project_id_from_git_remote(project_root: Path) -> Optional[str]:
     Scoped strictly to ``project_root`` — unlike ``project_root.resolve_project_id``
     this never consults the CWD, so resolving a bare repo does not leak a
     marker/id from wherever the caller happens to be running.
+
+    Only a real project remote (https/ssh/scp-style URL) is a valid identity
+    signal. A local-filesystem origin is refused: a central install or release
+    checkout whose origin points at a temp/dangling path must never fabricate a
+    project_id from its basename (OI-1253: the install's origin
+    ``/var/folders/.../checkout`` produced project_id ``checkout`` and made every
+    script resolve to the non-existent store ``~/.vnx-data/checkout``).
     """
     try:
         out = subprocess.check_output(
@@ -303,7 +311,7 @@ def _project_id_from_git_remote(project_root: Path) -> Optional[str]:
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
-    if not out:
+    if not out or is_local_path_origin(out):
         return None
     name = out.rstrip("/").split("/")[-1]
     if name.endswith(".git"):

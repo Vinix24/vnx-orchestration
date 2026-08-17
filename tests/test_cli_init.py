@@ -522,6 +522,49 @@ class TestGateObligationRunnerInstall:
         assert any("load" in c for c in cmds), "launchctl load not called"
         assert any("list" in c for c in cmds), "launchctl list not called"
 
+    def test_install_substitutes_project_id(self, tmp_path, monkeypatch):
+        """vnx init must inject the project id into VNX_PROJECT_ID (OI-1253):
+        the job identifies its project via the env var, never a store path."""
+        from vnx_cli.commands import init_cmd
+
+        engine_root = tmp_path / "engine"
+        launchd_dir = engine_root / "scripts" / "launchd"
+        launchd_dir.mkdir(parents=True)
+        (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
+            '<?xml version="1.0"?><plist><dict>'
+            "<key>Label</key><string>com.vnx.gate-obligation-runner</string>"
+            "<key>EnvironmentVariables</key><dict>"
+            "<key>VNX_PROJECT_ID</key><string>${VNX_PROJECT_ID}</string>"
+            "</dict></dict></plist>",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(init_cmd._engine, "engine_root", lambda: engine_root)
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stderr = ""
+            m.stdout = f"{self.PLIST_NAME}\n" if cmd == ["launchctl", "list"] else ""
+            return m
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", fake_run)
+
+        result = init_cmd._install_gate_obligation_runner(
+            str(engine_root), project_id="vnx-dev",
+        )
+        assert result is True
+
+        dest = fake_home / "Library" / "LaunchAgents" / f"{self.PLIST_NAME}.plist"
+        content = dest.read_text(encoding="utf-8")
+        assert "${VNX_PROJECT_ID}" not in content, (
+            "The VNX_PROJECT_ID placeholder must be substituted at install"
+        )
+        assert "vnx-dev" in content, "The plist must carry the project id"
+
     def test_install_returns_false_when_template_missing(self, tmp_path, monkeypatch):
         from vnx_cli.commands import init_cmd
 
