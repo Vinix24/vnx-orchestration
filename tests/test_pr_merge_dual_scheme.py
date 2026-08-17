@@ -125,7 +125,7 @@ class TestMergePrDualScheme:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: self._make_pr_data(
             n, "chore(hygiene): remove dead code (PR-HYG-1)", "feat/hyg-1-dead-code"
         ))
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         result = pr_merge.merge_pr(pr_number=668, receipts_file=str(receipts_path))
@@ -146,7 +146,7 @@ class TestMergePrDualScheme:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: self._make_pr_data(
             n, "docs(readme): update installation instructions", "feat/docs-readme"
         ))
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         result = pr_merge.merge_pr(pr_number=674, receipts_file=str(receipts_path))
@@ -169,7 +169,7 @@ class TestMergePrDualScheme:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: self._make_pr_data(
             n, "fix: hotfix with no label", "fix/hotfix"
         ))
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         pr_merge.merge_pr(pr_number=999, receipts_file=str(receipts_path))
@@ -185,7 +185,7 @@ class TestMergePrDualScheme:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: self._make_pr_data(
             n, "feat: implement schema versioning (PR-42)", "feat/schema-versioning"
         ))
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         pr_merge.merge_pr(pr_number=642, receipts_file=str(receipts_path))
@@ -201,7 +201,7 @@ class TestMergePrDualScheme:
         monkeypatch.setattr(pr_merge, "_query_pr", lambda n: self._make_pr_data(
             n, "feat(trace): fix traceability gap (PR-B-TRACE)", "feat/trace-gap-fix"
         ))
-        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m: (True, ""))
+        monkeypatch.setattr(pr_merge, "_do_merge", lambda n, m, *a, **k: (True, ""))
 
         receipts_path = vnx_env["receipts_path"]
         pr_merge.merge_pr(
