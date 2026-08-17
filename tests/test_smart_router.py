@@ -15,6 +15,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
 from smart_router import (
+    BlockedRecommendationError,
     RouteCandidate,
     RouteDecision,
     classify_task,
@@ -486,3 +487,119 @@ class TestNullCostSortKey:
         assert decision.primary.model_id == "claude-sonnet-4-6"
         assert decision.primary.composite_score == 9.5
         assert decision.primary.model_id != "deepseek-v4-flash"
+
+
+# ---------------------------------------------------------------------------
+# Blocked-model load validation (OI-1255)
+#
+# routing_recommendations.yaml recommended glm-5 (base) in five places while
+# provider_constraints.yaml `deprecated-glm-models` blocks every GLM except
+# glm-5.2. decide() silently filtered those entries, so the drift was
+# invisible. The loader now fails loud instead: a blocked model anywhere in
+# the file raises BlockedRecommendationError.
+# ---------------------------------------------------------------------------
+
+def _single_candidate_yaml(tmp_path, model_id, task_class="01_code_generation"):
+    data = {
+        "routing_by_task": {
+            task_class: [
+                {"model_id": model_id, "composite_score": 8.0,
+                 "avg_duration_seconds": 100.0, "cost_usd_per_call": None},
+            ],
+        }
+    }
+    p = tmp_path / "routing_recommendations.yaml"
+    p.write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
+    return p
+
+
+class TestBlockedModelValidation:
+
+    @pytest.mark.parametrize("blocked", ["glm-5", "glm-5.1", "glm-4.5", "glm-4.6", "glm-5-1"])
+    def test_blocked_glm_model_fails_loud(self, tmp_path, blocked):
+        """A deprecated GLM variant in the file must raise, not be silently dropped."""
+        rec_path = _single_candidate_yaml(tmp_path, blocked)
+        with pytest.raises(BlockedRecommendationError, match="deprecated-glm-models"):
+            recommend("01_code_generation", recommendations_path=rec_path)
+
+    def test_error_names_model_task_class_and_source(self, tmp_path):
+        rec_path = _single_candidate_yaml(tmp_path, "glm-5", task_class="05_debugging")
+        with pytest.raises(BlockedRecommendationError) as excinfo:
+            _load_recommendations(rec_path)
+        msg = str(excinfo.value)
+        assert "glm-5" in msg
+        assert "05_debugging" in msg
+        assert str(rec_path) in msg
+        assert "deprecated-glm-models" in msg
+
+    def test_decide_also_fails_loud(self, tmp_path):
+        """decide() goes through the same loader, so it raises the same error."""
+        rec_path = _single_candidate_yaml(tmp_path, "glm-5")
+        with pytest.raises(BlockedRecommendationError):
+            decide("implement a new module", recommendations_path=rec_path)
+
+    def test_glm_5_2_remains_a_valid_candidate(self, tmp_path):
+        """The one allowed GLM version loads and ranks normally."""
+        rec_path = _single_candidate_yaml(tmp_path, "glm-5.2")
+        candidates = recommend("01_code_generation", recommendations_path=rec_path)
+        assert [c.model_id for c in candidates] == ["glm-5.2"]
+        decision = decide("implement a new module", recommendations_path=rec_path)
+        assert decision.primary is not None
+        assert decision.primary.model_id == "glm-5.2"
+        assert decision.constraints_applied == []
+
+    def test_non_glm_candidates_unaffected(self, tmp_path):
+        """Non-GLM models keep passing validation, incl. env-keyed deepseek lanes
+        (deepseek-harness-subscription-blocked is runtime-route policy, not model
+        identity, so it must NOT fail the load even with no DEEPSEEK_API_KEY)."""
+        data = {
+            "routing_by_task": {
+                "01_code_generation": [
+                    {"model_id": "claude-sonnet-5", "composite_score": 9.0,
+                     "avg_duration_seconds": 100.0, "cost_usd_per_call": None},
+                    {"model_id": "deepseek-v4-flash", "composite_score": 8.0,
+                     "avg_duration_seconds": 100.0, "cost_usd_per_call": None},
+                    {"model_id": "kimi-k2-7-code", "composite_score": 7.0,
+                     "avg_duration_seconds": 100.0, "cost_usd_per_call": None},
+                    {"model_id": "codex-gpt-5-5", "composite_score": 6.0,
+                     "avg_duration_seconds": 100.0, "cost_usd_per_call": None},
+                ],
+            }
+        }
+        rec_path = tmp_path / "routing_recommendations.yaml"
+        rec_path.write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
+        candidates = recommend("01_code_generation", recommendations_path=rec_path)
+        assert len(candidates) == 4
+
+    def test_real_yaml_has_no_blocked_candidates(self):
+        """The shipped file passes its own validation and names no deprecated GLM."""
+        recs = _load_recommendations()  # raises BlockedRecommendationError if violated
+        all_ids = [c.model_id for cands in recs.values() for c in cands]
+        assert "glm-5" not in all_ids
+        assert "glm-5.1" not in all_ids
+        assert "glm-5-1" not in all_ids
+        assert "glm-4.5" not in all_ids
+        assert "glm-4.6" not in all_ids
+        # The allowed GLM is still recommended (canonical registry spelling).
+        assert "glm-5.2" in all_ids
+
+    def test_real_yaml_glm_5_2_survives_decide_constraint_filter(self):
+        """End-to-end: a GLM-capable task class can surface glm-5.2 from decide().
+
+        Before the canonical-spelling fix, the dash-form glm-5-2 entries were
+        caught by the same deprecated-glm-models filter as the genuinely
+        blocked glm-5, so GLM could never be recommended at all.
+        """
+        from smart_router import _filter_by_constraints
+
+        recs = _load_recommendations()
+        glm_classes = [
+            tc for tc, cands in recs.items()
+            if any(c.model_id == "glm-5.2" for c in cands)
+        ]
+        assert glm_classes, "expected at least one task class recommending glm-5.2"
+        for tc in glm_classes:
+            allowed, _applied = _filter_by_constraints(recs[tc], env={})
+            assert any(c.model_id == "glm-5.2" for c in allowed), (
+                f"glm-5.2 must survive the constraint filter for {tc}"
+            )

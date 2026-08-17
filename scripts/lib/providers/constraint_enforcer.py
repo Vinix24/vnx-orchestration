@@ -628,6 +628,57 @@ def _get_enforcer() -> ConstraintEnforcer:
     return _enforcer
 
 
+def _model_policy_constraint_ids(constraints: list[dict[str, Any]]) -> frozenset[str]:
+    """Ids of constraints that gate on MODEL IDENTITY, derived from the SSOT.
+
+    A constraint qualifies when it is blocking, cannot be env-overridden, and
+    its required_route/forbidden_route carries a ``model`` key. Constraints
+    keyed on via/role/env (e.g. deepseek-harness-subscription-blocked, which
+    only bites when DEEPSEEK_API_KEY is absent) are runtime-route policy, not
+    model identity, and are excluded — a config file naming a model must never
+    be judged by whether a secret happens to be present in this shell.
+    """
+    ids: set[str] = set()
+    for constraint in constraints:
+        if str(constraint.get("audit_severity") or "") != "blocking":
+            continue
+        if bool(constraint.get("override_allowed", False)):
+            continue
+        route = constraint.get("required_route") or constraint.get("forbidden_route") or {}
+        if isinstance(route, Mapping) and route.get("model") is not None:
+            ids.add(str(constraint.get("id") or constraint.get("code") or "unknown"))
+    return frozenset(ids)
+
+
+def blocking_model_violations(
+    *,
+    provider: Optional[str] = None,
+    sub_provider: Optional[str] = None,
+    model: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> list[ConstraintViolation]:
+    """Blocking, non-overridable violations from MODEL-IDENTITY constraints only.
+
+    This is the config-load-time view of the constraint SSOT: it answers "is
+    this model one the dispatch layer would refuse?" without the runtime axes
+    (via/role/env) that check_constraints also weighs. Callers that load a
+    model list from a file (smart_router's routing_recommendations.yaml, the
+    benchmark export generators) use this to FAIL LOUD when a blocked model
+    (e.g. a deprecated GLM version under deprecated-glm-models) lands in a
+    recommendations file, instead of silently filtering it and hiding the
+    drift (OI-1255).
+    """
+    enforcer = _get_enforcer()
+    policy_ids = _model_policy_constraint_ids(enforcer._constraints)
+    violations = enforcer.check_constraints(
+        provider=provider, sub_provider=sub_provider, model=model, env=env,
+    )
+    return [
+        v for v in violations
+        if v.severity == "blocking" and v.code in policy_ids
+    ]
+
+
 def check_constraints(**kwargs: Any) -> list[ConstraintViolation]:
     return _get_enforcer().check_constraints(**kwargs)
 

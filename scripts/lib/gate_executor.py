@@ -367,18 +367,23 @@ class GateExecutorMixin:
                 if gate_name != "claude_github_optional" and required and not decided_pass:
                     has_required_failure = True
             else:
+                passed, pass_reason = is_pass(req)
                 gates.append({
                     "gate": gate_name,
                     "request_status": req_status,
                     "execution_status": req_status,
+                    "passed": passed,
+                    "pass_reason": pass_reason,
                     "reason": req.get("reason", ""),
                     "reason_detail": req.get("reason_detail", ""),
                     "detail": req,
                 })
-                if req_status in ("not_executable", "not_configured"):
-                    required = req.get("required", True)
-                    if gate_name != "claude_github_optional" and required:
-                        has_required_failure = True
+                # OI-1265: count what did NOT pass, not a closed list of known
+                # failing statuses. A required gate pre-booked with any non-pass
+                # status (blocked, an unknown gate, fail, …) must block; a new
+                # status added later must not silently slip past enforcement.
+                if gate_name != "claude_github_optional" and req.get("required", True) and not passed:
+                    has_required_failure = True
 
         return gates, has_required_failure
 

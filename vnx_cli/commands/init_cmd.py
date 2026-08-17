@@ -723,12 +723,15 @@ def vnx_init(args) -> int:
         return 1
 
 
-def _install_gate_obligation_runner(vnx_home: str) -> bool:
+def _install_gate_obligation_runner(vnx_home: str, project_id: str = "") -> bool:
     """Install the gate-obligation-runner launchd plist (OI-917).
 
     Reads the plist template from the engine root's scripts/launchd/ directory,
-    substitutes ``${VNX_HOME}`` with the resolved VNX home path, writes
-    atomically to ``~/Library/LaunchAgents/``, and loads via launchctl.
+    substitutes ``${VNX_HOME}`` with the resolved VNX home path and
+    ``${VNX_PROJECT_ID}`` with the project's id (OI-1253 fix-forward: the job
+    identifies its project via VNX_PROJECT_ID, one instance per project, never
+    via a hardcoded store path), writes atomically to ``~/Library/LaunchAgents/``,
+    and loads via launchctl.
 
     Returns True if the plist was installed or reloaded.
     Returns False if the template does not exist (not a VNX orchestration repo
@@ -776,6 +779,7 @@ def _install_gate_obligation_runner(vnx_home: str) -> bool:
 
     content = template.read_text(encoding="utf-8")
     content = content.replace("${VNX_HOME}", vnx_home)
+    content = content.replace("${VNX_PROJECT_ID}", project_id)
 
     fd, tmp_name = tempfile.mkstemp(dir=str(dest_dir), suffix=".tmp")
     try:
@@ -937,7 +941,9 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
     print()
     print("Installing launchd agents...")
     try:
-        installed = _install_gate_obligation_runner(str(_engine.engine_root()))
+        installed = _install_gate_obligation_runner(
+            str(_engine.engine_root()), project_id=project_id
+        )
         if not installed:
             print("  skipped gate-obligation-runner (plist template not found)")
     except (OSError, RuntimeError) as exc:

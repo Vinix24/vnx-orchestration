@@ -14,10 +14,20 @@
     Also installable manually via reload_plist.sh:
       bash scripts/launchd/reload_plist.sh com.vnx.gate-obligation-runner
 
-    Exit 11 (obligations still pending) is captured into job_exits.ndjson by
+    Exit 11 (obligations still open) is captured into job_exits.ndjson by
     the producer-freshness monitor's launchd harvest; obligations pending
     longer than a day are flagged per gate key by the same monitor's
     review_gate_obligations producer.
+
+    The store is NOT pinned by path. The job identifies its project via
+    VNX_PROJECT_ID (below), one instance per project; the runner then resolves
+    the store from that id and, independently, the GitHub owner/repo whose PRs
+    its obligations live in. A consumer installing this template for their own
+    project MUST set VNX_PROJECT_ID to their project id: vnx init substitutes
+    the ${VNX_PROJECT_ID} placeholder with the --project-id value, so manual
+    installs must edit it by hand. Hardcoding a store path here would make a
+    copied template run on the original project's obligations
+    (OI-1253 fix-forward).
   -->
   <key>ProgramArguments</key>
   <array>
@@ -33,6 +43,8 @@
   <dict>
     <key>VNX_HOME</key>
     <string>${VNX_HOME}</string>
+    <key>VNX_PROJECT_ID</key>
+    <string>${VNX_PROJECT_ID}</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

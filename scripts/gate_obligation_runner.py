@@ -17,16 +17,23 @@ runner fulfils them:
      ``gate_recorder.record_not_executable`` writes both records with status
      ``not_executable`` plus a skip-rationale audit entry. Silence is not an
      end state.
-  4. If no PR exists yet the obligation stays ``pending`` — and the producer
-     freshness monitor (``review_gate_obligations`` producer) flags the gate
-     key once the oldest pending declaration exceeds cadence.
+  4. If no PR exists yet the obligation stays ``pending`` — a genuine wait for
+     a PR that has not been opened, which the producer freshness monitor
+     (``review_gate_obligations`` producer) flags per gate key once the oldest
+     pending declaration exceeds cadence.
+  5. If the PR cannot be resolved because the environment is wrong — the
+     project has no attributable GitHub ``owner/repo`` (no checkout registered
+     in ``~/.vnx/projects.json`` and no GitHub ``origin`` remote) — the
+     obligation is recorded in the distinct ``unresolvable`` status (a fault,
+     NOT a wait). It stays retryable for a bounded term and then escalates to
+     the loud terminal ``not_executable`` with ``reason=unresolvable_timeout``.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
 (terminal obligations are never re-run).
 
-Exit codes: 0 = no pending obligations remain after this run;
-11 = one or more obligations still pending (PR unresolved);
+Exit codes: 0 = no open obligations remain after this run;
+11 = one or more obligations still open (pending or unresolvable);
 20 = state dir / configuration error.
 """
 
@@ -36,10 +43,12 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -50,6 +59,7 @@ from gate_obligations import (  # noqa: E402
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
+    STATUS_UNRESOLVABLE,
     TERMINAL_STATUSES,
     iter_obligations,
     pr_number_from_pr_id,
@@ -59,6 +69,32 @@ from gate_obligations import (  # noqa: E402
 _LOG = logging.getLogger("gate_obligation_runner")
 
 _GH_TIMEOUT_SECONDS = 20
+
+# An obligation whose PR can't be resolved because the environment is wrong
+# (repo unattributable, no GitHub remote, gh unusable) is a config FAULT, not a
+# wait. It stays retryable in the distinct ``unresolvable`` status for a bounded
+# term, then escalates to the loud terminal ``not_executable``. 96 attempts at
+# the launchd 900s cadence ≈ 24h — the same window the producer-freshness
+# monitor uses before flagging a silently-pending gate key.
+_UNRESOLVABLE_ESCALATION_ATTEMPTS = 96
+
+# PR-resolution outcomes. The runner must tell "no PR yet" (a wait) apart from
+# "cannot resolve because the environment is wrong" (a fault) IN THE RECORD,
+# not only in a log line — a pending obligation that is actually misconfigured
+# reads as "not yet" forever and never alarms anyone (OI-1253 fix-forward).
+RESOLUTION_RESOLVED = "resolved"
+RESOLUTION_AWAITING = "awaiting"
+RESOLUTION_UNRESOLVABLE = "unresolvable"
+
+
+@dataclass
+class PrResolution:
+    """Outcome of resolving an obligation's PR number."""
+
+    status: str
+    pr_number: Optional[int] = None
+    owner_repo: Optional[str] = None
+    reason: Optional[str] = None
 
 
 def utc_now_iso() -> str:
@@ -96,13 +132,25 @@ def _pr_from_dispatch_metadata(state_dir: Path, dispatch_id: str) -> Optional[in
     return pr_number_from_pr_id(str(row[0]))
 
 
-def _gh_json(args: List[str]) -> Optional[Any]:
-    """Run a gh CLI command, returning parsed JSON or None on any failure."""
+def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[Any]:
+    """Run a gh CLI command scoped to ``owner_repo``, returning parsed JSON.
+
+    ``owner_repo`` (``owner/repo``) is injected as ``--repo`` so the query never
+    depends on the ambient cwd. A central install's cwd is the install tree
+    whose ``origin`` is a release-time temp checkout; bare ``gh`` resolves that
+    as the repo and returns nothing, which read as an eternal "no PR yet"
+    instead of the misconfiguration it actually is (OI-1253 fix-forward).
+    Returns None on any failure (gh missing, timeout, non-zero exit, non-JSON).
+    """
     if shutil.which("gh") is None:
         return None
+    cmd = ["gh"]
+    if owner_repo:
+        cmd += ["--repo", owner_repo]
+    cmd += args
     try:
         proc = subprocess.run(
-            ["gh", *args],
+            cmd,
             capture_output=True, text=True, timeout=_GH_TIMEOUT_SECONDS, check=False,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
@@ -116,11 +164,12 @@ def _gh_json(args: List[str]) -> Optional[Any]:
         return None
 
 
-def _pr_from_github(dispatch_id: str) -> Optional[int]:
+def _pr_from_github(dispatch_id: str, owner_repo: str) -> Optional[int]:
     """Find the open/merged PR whose head branch is dispatch/<dispatch_id>."""
     data = _gh_json(
         ["pr", "list", "--state", "all", "--head", f"dispatch/{dispatch_id}",
-         "--json", "number", "--limit", "1"]
+         "--json", "number", "--limit", "1"],
+        owner_repo=owner_repo,
     )
     if isinstance(data, list) and data:
         number = data[0].get("number")
@@ -129,8 +178,11 @@ def _pr_from_github(dispatch_id: str) -> Optional[int]:
     return None
 
 
-def _branch_from_github(pr_number: int) -> Optional[str]:
-    data = _gh_json(["pr", "view", str(pr_number), "--json", "headRefName"])
+def _branch_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
+    data = _gh_json(
+        ["pr", "view", str(pr_number), "--json", "headRefName"],
+        owner_repo=owner_repo,
+    )
     if isinstance(data, dict):
         branch = data.get("headRefName")
         if isinstance(branch, str) and branch.strip():
@@ -138,17 +190,155 @@ def _branch_from_github(pr_number: int) -> Optional[str]:
     return None
 
 
-def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> Optional[int]:
-    """Resolve the obligation's PR number from every available source."""
+def _owner_repo_from_remote_url(url: str) -> Optional[str]:
+    """Derive ``owner/repo`` from a GitHub remote URL (https or ssh form).
+
+    Mirrors the regex in ``chain_origin_anchor._owner_repo_from_remote``; the
+    runner stays a lightweight stdlib script and must not import that module.
+    Returns None for any non-GitHub URL — including a local-filesystem origin,
+    which is a release/install artifact, never a project identity (OI-1253).
+    """
+    match = re.search(r"github\.com[:/]+([^/]+)/(.+?)(?:\.git)?/?$", url.strip())
+    if not match:
+        return None
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def _git_remote_origin(project_root: Path) -> Optional[str]:
+    """Return the ``origin`` remote URL for ``project_root``, or None."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(project_root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def _project_checkout_path(project_id: str) -> Optional[Path]:
+    """Resolve the project's checkout path from the operator registry.
+
+    ``~/.vnx/projects.json`` (vnx_identity schema v2) maps ``project_id`` →
+    ``path``. This is the cwd-independent link from a central-install runner's
+    store (``~/.vnx-data/<project_id>/state``) back to the actual checkout whose
+    ``origin`` remote is a real GitHub URL. Returns None when the id is not
+    registered or the path is gone.
+    """
+    if not project_id:
+        return None
+    try:
+        registry_path = Path("~/.vnx/projects.json").expanduser()
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    for entry in registry.get("projects", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("project_id") != project_id:
+            continue
+        raw_path = entry.get("path")
+        if not raw_path:
+            continue
+        try:
+            candidate = Path(raw_path).expanduser()
+        except (OSError, ValueError):
+            continue
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _resolve_github_owner_repo(state_dir: Path) -> Optional[str]:
+    """Resolve the GitHub ``owner/repo`` whose PRs this runner's obligations live in.
+
+    CWD-independent on purpose: ``gh`` must never infer the repo from the
+    ambient cwd, because a central install's cwd is the install tree (its origin
+    is a release-time temp checkout). Resolution order:
+
+      1. The checkout registered for the runner's project_id
+         (``~/.vnx/projects.json``) — its ``origin`` remote is the project's
+         real GitHub URL, even when the runner runs from ``$VNX_HOME``.
+      2. The current working directory — only as a convenience fallback for a
+         dev checkout run from within the repo. A local-path origin never
+         matches, so this fallback cannot fabricate an owner/repo from an
+         install's temp checkout.
+
+    Returns None when neither source yields a GitHub remote — the caller turns
+    that into the distinct, loud ``unresolvable`` state, never a silent wait.
+    """
+    import vnx_paths  # noqa: PLC0415
+
+    pid = (
+        vnx_paths.project_id_from_state_dir(state_dir)
+        or (os.environ.get("VNX_PROJECT_ID") or "").strip()
+    )
+    candidates: List[Path] = []
+    if pid:
+        checkout = _project_checkout_path(pid)
+        if checkout is not None:
+            candidates.append(checkout)
+    candidates.append(Path.cwd().resolve())
+
+    for root in candidates:
+        url = _git_remote_origin(root)
+        if not url:
+            continue
+        owner_repo = _owner_repo_from_remote_url(url)
+        if owner_repo:
+            return owner_repo
+    return None
+
+
+def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
+    """Resolve the obligation's PR number from every available source.
+
+    Returns a :class:`PrResolution` carrying one of three statuses so the caller
+    can record the distinction in the obligation's state:
+
+      - ``resolved``   — a PR number is known (record, dispatch metadata, GitHub).
+      - ``awaiting``   — the repo resolves and ``gh`` works, but no PR exists yet
+                         for the head branch: a genuine wait, stays ``pending``.
+      - ``unresolvable`` — the environment is wrong (no GitHub owner/repo, no
+                         checkout, gh missing): a fault, recorded distinctly.
+    """
     pr_number = record.get("pr_number")
     if isinstance(pr_number, int) and pr_number > 0:
-        return pr_number
+        return PrResolution(RESOLUTION_RESOLVED, pr_number=pr_number)
     dispatch_id = str(record.get("dispatch_id") or "")
     if not dispatch_id:
-        return None
-    return (
-        _pr_from_dispatch_metadata(state_dir, dispatch_id)
-        or _pr_from_github(dispatch_id)
+        return PrResolution(
+            RESOLUTION_UNRESOLVABLE,
+            reason="obligation has no dispatch_id to resolve a PR for",
+        )
+
+    from_metadata = _pr_from_dispatch_metadata(state_dir, dispatch_id)
+    if from_metadata:
+        return PrResolution(RESOLUTION_RESOLVED, pr_number=from_metadata)
+
+    owner_repo = _resolve_github_owner_repo(state_dir)
+    if not owner_repo:
+        return PrResolution(
+            RESOLUTION_UNRESOLVABLE,
+            reason=(
+                "cannot resolve a GitHub owner/repo for this runner: the "
+                "project checkout is not registered (~/.vnx/projects.json) and "
+                "no GitHub 'origin' remote resolves from the checkout or cwd. "
+                "gh would otherwise infer the repo from the ambient cwd, which "
+                "for a central install is a release-time temp checkout (OI-1253)"
+            ),
+        )
+    from_github = _pr_from_github(dispatch_id, owner_repo)
+    if from_github:
+        return PrResolution(
+            RESOLUTION_RESOLVED, pr_number=from_github, owner_repo=owner_repo,
+        )
+    return PrResolution(
+        RESOLUTION_AWAITING,
+        owner_repo=owner_repo,
+        reason=f"no PR yet for head branch dispatch/{dispatch_id}",
     )
 
 
@@ -241,15 +431,61 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
     attempts = int(record.get("attempts") or 0) + 1
     now = utc_now_iso()
 
-    pr_number = resolve_pr_number(state_dir, record)
-    if pr_number is None:
-        update_obligation(path, attempts=attempts, last_attempt_at=now)
+    resolution = resolve_pr_number(state_dir, record)
+
+    if resolution.status == RESOLUTION_UNRESOLVABLE:
+        # The environment is wrong (repo unattributable, gh unusable): a fault,
+        # not a wait. Record it in a state distinct from ``pending`` so a
+        # misconfigured obligation can never masquerade as "not yet". It stays
+        # retryable — the env may be fixed — until it crosses the escalation
+        # threshold, where it becomes the loud terminal not_executable.
+        update_obligation(
+            path,
+            status=STATUS_UNRESOLVABLE,
+            attempts=attempts,
+            last_attempt_at=now,
+            reason="unresolvable_repo",
+            reason_detail=resolution.reason,
+        )
+        outcome["action"] = "unresolvable"
+        outcome["detail"] = resolution.reason
+        if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
+            update_obligation(
+                path,
+                status=STATUS_NOT_EXECUTABLE,
+                attempts=attempts,
+                last_attempt_at=now,
+                resolved_at=now,
+                reason="unresolvable_timeout",
+                reason_detail=(
+                    f"PR unresolved after {attempts} attempts because the "
+                    f"environment is misconfigured: {resolution.reason}. Fix "
+                    "the project attribution (VNX_PROJECT_ID / "
+                    "~/.vnx/projects.json / the checkout's git origin remote) "
+                    "and reset this obligation to pending."
+                ),
+            )
+            outcome["action"] = "not_executable"
+        return outcome
+
+    if resolution.status == RESOLUTION_AWAITING:
+        # The repo resolves and gh works, but no PR exists yet for the head
+        # branch. A genuine wait: stays pending for the freshness monitor.
+        update_obligation(
+            path,
+            status=STATUS_PENDING,
+            attempts=attempts,
+            last_attempt_at=now,
+        )
         outcome["detail"] = "no PR resolvable yet — stays pending for the freshness monitor"
         return outcome
 
+    pr_number = resolution.pr_number
+    owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
+
     branch = (
         str(record.get("branch") or "").strip()
-        or (_branch_from_github(pr_number) or "")
+        or (_branch_from_github(pr_number, owner_repo) if owner_repo else "")
         or f"dispatch/{dispatch_id}"
     )
 
@@ -367,7 +603,7 @@ def run(state_dir: Path, *, write: bool = True) -> Dict[str, Any]:
             continue
         outcome = fulfill_obligation(state_dir, path, record)
         outcomes.append(outcome)
-        if outcome["action"] == "pending":
+        if outcome["action"] in ("pending", "unresolvable"):
             pending_after += 1
     return {
         "state_dir": str(state_dir),
@@ -375,13 +611,35 @@ def run(state_dir: Path, *, write: bool = True) -> Dict[str, Any]:
         "obligations_seen": len(obligations),
         "outcomes": outcomes,
         "pending_after": pending_after,
+        "unresolvable_after": sum(
+            1 for o in outcomes if o.get("action") == "unresolvable"
+        ),
     }
 
 
-def _default_state_dir() -> Path:
-    from vnx_paths import ensure_env  # noqa: PLC0415
+class UnresolvableProjectError(RuntimeError):
+    """The runner cannot attribute its store to a project (no ``--state-dir``
+    and no resolvable project_id). Loud on purpose: proceeding would write
+    obligations to a fabricated or project-local store (OI-1253)."""
 
-    return Path(ensure_env()["VNX_STATE_DIR"])
+
+def _default_state_dir() -> Path:
+    import vnx_paths  # noqa: PLC0415
+
+    paths = vnx_paths.ensure_env()
+    project_root = Path(paths["PROJECT_ROOT"])
+    project_id = vnx_paths._resolve_state_project_id(project_root)
+    if project_id is None:
+        raise UnresolvableProjectError(
+            f"cannot resolve a project_id for project root {project_root}: "
+            "the store is unattributable, so obligations cannot be written "
+            "safely. A central install's git origin is not a project identity "
+            "(it may point at a release-time temp checkout). Pass --state-dir "
+            "(~/.vnx-data/<project_id>/state), or set VNX_PROJECT_ID / write a "
+            ".vnx-project-id marker for the project whose obligations this "
+            "runner fulfils."
+        )
+    return Path(paths["VNX_STATE_DIR"])
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -403,7 +661,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         format="%(name)s: %(levelname)s: %(message)s",
     )
 
-    state_dir = args.state_dir or _default_state_dir()
+    try:
+        state_dir = args.state_dir or _default_state_dir()
+    except UnresolvableProjectError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 20
     if not Path(state_dir).is_dir():
         print(f"ERROR: state dir not found: {state_dir}", file=sys.stderr)
         return 20

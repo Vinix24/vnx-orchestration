@@ -703,15 +703,23 @@ class GateRequestHandlerMixin:
     ) -> Dict[str, Any]:
         from review_gate_manager import _utc_now
         from wiring_gate import WiringGateError, check_pr_wiring
+        import config_runtime
 
         available = self._wiring_gate_available()
         requested_at = _utc_now()
+        # The gate's blocking posture is the same toggle that decides its status
+        # (check_pr_wiring: status="fail" if required else "advisory"). Carrying it
+        # explicitly lets the required-failure count in gate_executor honor the
+        # advisory contract: a shadow-mode gate (VNX_WIRING_GATE_REQUIRED=0) is
+        # required=False and must never gate the merge, while required=True blocks.
+        required = config_runtime.get_bool("VNX_WIRING_GATE_REQUIRED")
 
         if not available:
             payload: Dict[str, Any] = {
                 "gate": "wiring_gate",
                 "status": "not_executable",
                 "provider": "gh_cli",
+                "required": required,
                 "branch": branch,
                 "pr_number": pr_number,
                 "requested_at": requested_at,
@@ -733,6 +741,7 @@ class GateRequestHandlerMixin:
                 "gate": "wiring_gate",
                 "status": "fail",
                 "provider": "ast_grep",
+                "required": required,
                 "branch": branch,
                 "pr_number": pr_number,
                 "requested_at": requested_at,
@@ -760,6 +769,7 @@ class GateRequestHandlerMixin:
             "gate": "wiring_gate",
             "status": result.status,
             "provider": "ast_grep",
+            "required": required,
             "branch": branch,
             "pr_number": pr_number,
             "requested_at": requested_at,

@@ -209,8 +209,9 @@ def scan_gate_obligations(spec: Dict[str, Any], *, now: float) -> Dict[str, Opti
 
     Per-key ``last_seen`` semantics — declaration checked against evidence:
 
-      - if any obligation for the key is still ``pending``, last_seen = the
-        OLDEST pending declaration. A declared gate that produced no result
+      - if any obligation for the key is still open (``pending`` — waiting for a
+        not-yet-opened PR — or ``unresolvable`` — environment wrong), last_seen
+        = the OLDEST such declaration. A declared gate that produced no result
         within cadence then reads as stale: exactly the 2026-07-31 incident
         (nine dispatches declared codex_gate, zero ran, nothing noticed).
       - otherwise last_seen = the NEWEST terminal resolution (fulfilled /
@@ -237,7 +238,10 @@ def scan_gate_obligations(spec: Dict[str, Any], *, now: float) -> Dict[str, Opti
             raise ValueError(f"gate obligation {entry.name} is not a JSON object")
         key = str(record.get("gate") or entry.stem)
         status = record.get("status", "pending")
-        if status == "pending":
+        # "unresolvable" (env wrong, no attributable owner/repo) is a declared-
+        # but-unfulfilled state too — it must drive staleness exactly like
+        # "pending", never read as resolved evidence (OI-1253 fix-forward).
+        if status in ("pending", "unresolvable"):
             ts = _parse_ts(record.get("declared_at"))
             if ts is None:
                 ts = entry.stat().st_mtime

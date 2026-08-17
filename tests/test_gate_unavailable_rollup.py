@@ -223,3 +223,46 @@ def test_not_executable_branch_still_blocks():
         pr_number=1481,
     )
     assert has_required_failure is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "blocked",          # OI-1265: unknown gate fallback books this status
+        "weird_status",     # a status not in any closed list must still count
+        "fail",             # a pre-booked verdict failure is a non-pass
+    ],
+)
+def test_required_non_pass_status_blocks_else_branch(status):
+    """A required gate pre-booked with any non-pass status must set
+    has_required_failure (OI-1265). The count is inverted: everything that is
+    NOT a pass blocks, instead of a closed list of known failing statuses."""
+    mixin = GateExecutorMixin()
+    gates, has_required_failure = mixin._execute_requested_gates(
+        {"requested": [{"gate": "ci_gate", "status": status, "required": True}]},
+        pr_number=1265,
+    )
+    assert has_required_failure is True
+    assert gates[0]["passed"] is False
+
+
+def test_required_pass_status_does_not_block_else_branch():
+    """A required gate pre-booked as a pass must NOT set has_required_failure."""
+    mixin = GateExecutorMixin()
+    gates, has_required_failure = mixin._execute_requested_gates(
+        {"requested": [{"gate": "wiring_gate", "status": "pass", "required": True}]},
+        pr_number=1265,
+    )
+    assert has_required_failure is False
+    assert gates[0]["passed"] is True
+
+
+def test_optional_unknown_status_does_not_block_else_branch():
+    """claude_github_optional stays optional even with a non-pass status."""
+    mixin = GateExecutorMixin()
+    gates, has_required_failure = mixin._execute_requested_gates(
+        {"requested": [{"gate": "claude_github_optional", "status": "blocked", "required": True}]},
+        pr_number=1265,
+    )
+    assert has_required_failure is False
+    assert gates[0]["passed"] is False

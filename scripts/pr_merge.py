@@ -19,6 +19,13 @@ for this PR (see ``_run_review_gate`` ->
 ``contract_hash``/``report_path``, or a verdict contradicting its report is a
 refusal. The same ``--override-reason`` valve applies with a mandatory reason.
 
+Merge pinning (OI-1264): the merge is pinned to the exact head the gates
+approved. ``_run_ci_gate`` establishes the head SHA, and ``_do_merge`` passes
+it as ``gh pr merge --match-head-commit <sha>`` so ``gh`` refuses to merge any
+other commit. A push to the branch after the gates ran moves the head, and the
+merge is then refused with a "gates must re-run" message instead of silently
+merging a commit the gates never saw.
+
 Usage:
     python3 scripts/pr_merge.py --pr 123
     python3 scripts/pr_merge.py --pr 123 --dispatch-id 20260526-gov2-something
@@ -303,16 +310,58 @@ def _run_review_gate(
     return gate, pr_data
 
 
-def _do_merge(pr_number: int, method: str) -> tuple[bool, str]:
-    """Execute gh pr merge and return (success, error_message)."""
+_HEAD_MOVED_MARKERS = (
+    "head branch is not up to date",
+    "head branch was modified",
+    "head was modified",
+    "head changed",
+    "head has changed",
+)
+
+
+def _is_head_moved_refusal(output: str) -> bool:
+    """True when a failed ``gh pr merge`` refusal signals the PR head moved.
+
+    ``gh`` surfaces the GitHub server's refusal text verbatim and has no stable
+    exit-code vocabulary for a ``--match-head-commit`` mismatch, so this matches
+    the phrasings GitHub emits when the head no longer equals the pinned commit.
+    A non-match falls through to the raw error, never to a silent pass.
+    """
+    low = (output or "").lower()
+    return any(marker in low for marker in _HEAD_MOVED_MARKERS)
+
+
+def _head_moved_refusal_message(pr_number: int, head_sha: str, raw: str) -> str:
+    """Explain a head-moved refusal as the gates working, not a crash."""
+    return (
+        f"merge van PR #{pr_number} geweigerd: de head van de branch is "
+        f"verschoven na de goedkeuring (goedgekeurd op {head_sha}). "
+        "Er is na de CI-/review-gate naar de branch gepusht; de gates moeten "
+        "opnieuw draaien op de nieuwe head voordat deze PR gemerged mag worden. "
+        f"gh: {raw}"
+    )
+
+
+def _do_merge(pr_number: int, method: str, head_sha: str = "") -> tuple[bool, str]:
+    """Execute gh pr merge pinned to the approved head and return (success, error).
+
+    ``head_sha`` is the exact commit the CI and review gates approved. It is
+    passed as ``--match-head-commit`` so ``gh`` refuses to merge any other
+    commit: a push to the branch after the gates ran moves the head, and the
+    merge must then be refused (so the gates re-run) rather than silently merged.
+    A head-moved refusal is reported as that — the system working — not as a
+    generic ``gh`` failure.
+    """
     method_flag = f"--{method}"
-    result = _gh([
-        "pr", "merge", str(pr_number),
-        method_flag, "--auto",
-    ])
+    args = ["pr", "merge", str(pr_number), method_flag, "--auto"]
+    if head_sha:
+        args += ["--match-head-commit", head_sha]
+    result = _gh(args)
     if result.returncode != 0:
-        msg = (result.stderr or result.stdout or "gh pr merge failed").strip()
-        return False, msg
+        raw = (result.stderr or result.stdout or "gh pr merge failed").strip()
+        if head_sha and _is_head_moved_refusal(raw):
+            return False, _head_moved_refusal_message(pr_number, head_sha, raw)
+        return False, raw
     return True, ""
 
 
@@ -383,8 +432,16 @@ def merge_pr(
     merge_method: str = "squash",
     dry_run: bool = False,
     receipts_file: Optional[str] = None,
+    head_sha: str = "",
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
+
+    ``head_sha`` is the exact commit the gates approved; it is threaded into
+    ``gh pr merge --match-head-commit`` so the merge refuses any other commit.
+    It is established once by ``_run_ci_gate`` and must not be re-fetched here
+    (a second fetch would be a second source for the same identity). Empty
+    (default) preserves the pre-pinning behavior for callers that never ran a
+    gate.
 
     Returns a dict with keys: success, pr_number, dispatch_id, merge_method,
     pr_title, branch, receipt_status, register_ok, error.
@@ -426,8 +483,8 @@ def merge_pr(
             print(f"[dry-run] dispatch_id: {dispatch_id}")
         return result
 
-    # Execute the merge
-    ok, err = _do_merge(pr_number, merge_method)
+    # Execute the merge, pinned to the head the gates approved.
+    ok, err = _do_merge(pr_number, merge_method, head_sha)
     if not ok:
         result["error"] = err
         print(f"ERROR: gh pr merge failed for #{pr_number}: {err}", file=sys.stderr)
@@ -493,7 +550,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     method = args.merge_method or "squash"
 
     # ── Merge gate: VNX CI conclusion=success for the exact PR head ──────
-    gate, _ = _run_ci_gate(args.pr, override_reason=args.override_reason)
+    gate, pr_data = _run_ci_gate(args.pr, override_reason=args.override_reason)
     if gate["verdict"] != "GO":
         if args.json:
             print(json.dumps({
@@ -528,11 +585,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         print(f"Review gate: {review_gate['message']}")
 
+    # The head SHA the gates approved is established once in _run_ci_gate; the
+    # merge is pinned to it (--match-head-commit) so a post-gate push is refused.
+    head_sha = (pr_data or {}).get("headRefOid") or ""
+
     result = merge_pr(
         pr_number=args.pr,
         dispatch_id=args.dispatch_id or "",
         merge_method=method,
         dry_run=args.dry_run,
+        head_sha=head_sha,
     )
 
     if args.json:
