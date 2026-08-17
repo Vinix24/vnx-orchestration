@@ -6,7 +6,7 @@ Covers:
   3. Malformed roadmap.yaml → degrades gracefully (roadmap=None, others may load)
   4. Missing decisions.ndjson → empty recent_decisions list
   5. Heavy detail caps decisions at 20 even when log holds more
-  6. Light light caps decisions at 5
+  6. Light detail caps decisions at 5
   7. Budget guard — single-call build budget < 200ms on representative fixture
   8. Integration: full build_t0_state output dict carries strategic_state +
      _strategic_state_heavy keys (the latter consumed by the detail writer)
