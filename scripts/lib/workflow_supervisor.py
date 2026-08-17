@@ -26,6 +26,7 @@ Architecture:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -62,6 +63,8 @@ from workflow_incident_handler import (
     record_incident,
     select_recovery_action,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +311,16 @@ class WorkflowSupervisor:
 
             conn.commit()
 
+        # A provider failure (quota/auth/rate-limit) must write the router-lane
+        # cooldown the decision-time gate consults, or the lane stays "available"
+        # and the router keeps picking it (OI-1263). Written AFTER the DB commit
+        # so a cooldown-write issue can never corrupt the incident transaction.
+        self._record_provider_lane_cooldown(
+            incident_class=incident_class,
+            component=component,
+            reason=reason,
+        )
+
         decision = SupervisionDecision(
             dispatch_id=dispatch_id or "",
             incident_class=effective_class.value,
@@ -324,6 +337,50 @@ class WorkflowSupervisor:
         )
 
         return decision
+
+    def _record_provider_lane_cooldown(
+        self,
+        *,
+        incident_class: IncidentClass,
+        component: Optional[str],
+        reason: str,
+    ) -> None:
+        """Write a router-lane cooldown when the incident is a provider failure.
+
+        The router's decision-time gate consults ``lane_available``, which reads
+        cooldown state written by ``record_lane_failure``. Without this write the
+        gate never sees the failure: a lane stays "available" directly after a
+        quota/auth failure and the router keeps picking it (OI-1263). The lane
+        name is the incident ``component``, and the already-classified
+        ``incident_class`` is passed through so there is no second 403/429
+        detection (the classifier is only a fallback for callers without one).
+
+        Only PROVIDER_* classes write a cooldown — the router contract rejects
+        every other class (see ``PROVIDER_INCIDENT_CLASSES`` in
+        ``providers.smart_router.availability``), so gate before importing.
+        Best-effort by design: ``record_lane_failure`` logs and swallows its own
+        write failures, so cooldown bookkeeping never breaks the incident path.
+        """
+        from providers.smart_router.availability import (
+            PROVIDER_INCIDENT_CLASSES,
+            record_lane_failure,
+        )
+
+        if incident_class not in PROVIDER_INCIDENT_CLASSES:
+            return
+        if not component:
+            logger.info(
+                "workflow_supervisor: provider incident %s has no component; "
+                "no router-lane cooldown written",
+                incident_class.value,
+            )
+            return
+        record_lane_failure(
+            component,
+            reason or incident_class.value,
+            state_dir=self._state_dir,
+            incident_class=incident_class,
+        )
 
     # ------------------------------------------------------------------
     # Resume path validation
