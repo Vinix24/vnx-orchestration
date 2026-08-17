@@ -1267,9 +1267,11 @@ def run_gate_checks(
     ``pr_head`` is the resolved PR reference (see :func:`resolve_pr_ref`).
     When it is set, the diff-based checks (``pr_size``, ``net_deletion``)
     measure ``merge_base(origin/main, pr_head.head_ref)..pr_head.head_ref`` —
-    the PR as it exists on GitHub — instead of the local HEAD. When it is
-    None, the gate measures the local working copy (HEAD), the unchanged
-    default (OI-1141).
+    the PR as it exists on GitHub — instead of the local HEAD, and the
+    ``ci_workflow`` check binds to the PR head (``head_ref`` + ``head_ref_name``)
+    so CI is verified on the PR's exact commit, never the local HEAD
+    (OI-1266). When it is None, the gate measures the local working copy
+    (HEAD), the unchanged default (OI-1141).
 
     A check that returns SKIPPED_UNVERIFIED (couldn't establish an answer —
     see check_ci_workflow, check_pytest) blocks the verdict exactly like
@@ -1291,7 +1293,35 @@ def run_gate_checks(
     checks.append(check_artifacts(pr_id, dispatch_dir, project_root))
     checks.append(check_shell_syntax(project_root))
     checks.append(check_net_deletion(project_root, head_ref=head_ref))
-    checks.append(check_ci_workflow(project_root, workflow_name=ci_workflow_name))
+
+    # OI-1266: ci_workflow must verify CI on the PR's exact commit, never the
+    # local HEAD. Without branch/head_sha the check silently measures whatever
+    # is checked out locally — booking local main's CI status as the PR's GO.
+    # Follow the fail-closed form of pr_merge._run_ci_gate: an undeterminable
+    # PR head is unverifiable (SKIPPED_UNVERIFIED), never a silent fallback.
+    if pr_head is not None:
+        ci_branch = pr_head.head_ref_name
+        ci_head_sha = pr_head.head_ref
+        if not ci_head_sha or not ci_branch:
+            checks.append({
+                "check": "ci_workflow",
+                "status": SKIPPED_UNVERIFIED,
+                "detail": (
+                    "PR head (sha/branch) could not be determined — "
+                    "CI workflow could not be verified"
+                ),
+                "ci_conclusion": None,
+                "ci_ran_on_sha": False,
+            })
+        else:
+            checks.append(check_ci_workflow(
+                project_root,
+                branch=ci_branch,
+                head_sha=ci_head_sha,
+                workflow_name=ci_workflow_name,
+            ))
+    else:
+        checks.append(check_ci_workflow(project_root, workflow_name=ci_workflow_name))
 
     if not skip_pytest:
         checks.append(check_pytest(project_root))
