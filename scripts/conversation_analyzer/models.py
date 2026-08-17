@@ -134,6 +134,9 @@ class SessionFlags:
 class RunStats:
     sessions_analyzed: int = 0
     sessions_deep: int = 0
+    deep_attempts: int = 0
+    deep_failures: int = 0
+    deep_config_skips: int = 0
     total_tokens: int = 0
     errors: int = 0
     skipped: int = 0
@@ -141,7 +144,7 @@ class RunStats:
 
 
 def fail_closed_exit_code(stats: "RunStats | None") -> int:
-    """Return a non-zero exit code when the run failed closed (OI-862).
+    """Return a non-zero exit code when the run failed closed (OI-862, OI-1258).
 
     A run whose every session errored is a failed run and must not exit 0:
     the per-session exception handler in the runner already counted the
@@ -149,7 +152,17 @@ def fail_closed_exit_code(stats: "RunStats | None") -> int:
     session would otherwise report launchd status 0 — the same silent-failure
     pattern this chain exists to catch. Partial runs (some sessions analyzed)
     stay green so a single session hiccup does not alarm the nightly job.
+
+    OI-1258 adds the deep-analysis half of the same failure: a run that
+    attempted deep analysis on N sessions and produced no usable result on
+    any of them also exits non-zero. Without it, a night where every deep
+    call failed read as "deep_analyzed=0" — indistinguishable from "nothing
+    was tried" — and launchd stayed green.
     """
-    if stats is not None and stats.errors > 0 and stats.sessions_analyzed == 0:
+    if stats is None:
+        return 0
+    if stats.errors > 0 and stats.sessions_analyzed == 0:
+        return 1
+    if stats.deep_attempts > 0 and stats.deep_failures >= stats.deep_attempts:
         return 1
     return 0

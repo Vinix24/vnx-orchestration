@@ -29,7 +29,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 29
+HIGHEST_QI_VERSION = 31
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1600,6 +1600,41 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
         log('INFO', f'Backfilled project_id for {null_count} legacy session_analytics rows')
 
 
+def _migrate_v30(conn: sqlite3.Connection) -> None:
+    """V30: nightly_digests deep_attempts + deep_failures columns (OI-1258).
+
+    The digest recorded only ``deep_analyzed`` — a success-only count. A digest
+    of ``deep_analyzed=0`` was uninterpretable: it read as "nothing was tried"
+    but could equally mean "N attempts, all failed". Add the attempt and
+    failure counts so a zero success count can be read against its cause.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nightly_digests)").fetchall()}
+    if "deep_attempts" not in cols:
+        conn.execute(
+            "ALTER TABLE nightly_digests ADD COLUMN deep_attempts INTEGER DEFAULT 0"
+        )
+    if "deep_failures" not in cols:
+        conn.execute(
+            "ALTER TABLE nightly_digests ADD COLUMN deep_failures INTEGER DEFAULT 0"
+        )
+
+
+def _migrate_v31(conn: sqlite3.Connection) -> None:
+    """V31: nightly_digests deep_config_skips column (fix1585-r2).
+
+    A config gap (missing DEEPSEEK_API_KEY, missing/unavailable ollama model,
+    unreachable ollama server) was previously indistinguishable from a real
+    failed attempt — it folded into ``deep_attempts``/``deep_failures`` and
+    fail-closed the nightly run over nothing that was ever tried. This column
+    lets a config-gap night be told apart from a genuine deep-analysis failure.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nightly_digests)").fetchall()}
+    if "deep_config_skips" not in cols:
+        conn.execute(
+            "ALTER TABLE nightly_digests ADD COLUMN deep_config_skips INTEGER DEFAULT 0"
+        )
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1631,6 +1666,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     27: _migrate_v27,
     28: _migrate_v28,
     29: _migrate_v29,
+    30: _migrate_v30,
+    31: _migrate_v31,
 }
 
 

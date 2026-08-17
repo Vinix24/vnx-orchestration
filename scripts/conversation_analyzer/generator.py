@@ -19,6 +19,7 @@ class DigestGenerator:
             "## Samenvatting",
             f"- **{run_stats.sessions_analyzed}** sessies geanalyseerd",
             f"- **{run_stats.sessions_deep}** sessies diep geanalyseerd (LLM)",
+            f"- **{run_stats.deep_attempts}** diepte-pogingen, **{run_stats.deep_failures}** zonder bruikbaar resultaat",
             f"- **{len(run_stats.suggestions)}** nieuwe verbeter-suggesties",
             f"- **{run_stats.total_tokens:,}** output tokens totaal",
             "",
