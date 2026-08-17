@@ -166,6 +166,51 @@ class TestCooldownLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# Writes to a lane outside _LANE_CHECKS (OI-1328)
+# ---------------------------------------------------------------------------
+
+class TestUnknownLaneWrite:
+    """OI-1328: seven provider strings reach ``_emit_governance`` and therefore
+    ``record_lane_failure`` (via ``_maybe_record_provider_lane_cooldown``), but
+    only five are in ``_LANE_CHECKS``. ``gemini`` and ``glm-harness`` are not.
+    ``lane_available`` deliberately does not gate an unknown lane (see
+    ``test_unknown_lane_not_gated`` above — a lane this layer has no
+    requirements for must not be removed from rotation), so a cooldown file
+    written for one of them is a write nobody ever reads back: a permanent
+    cooldown that silently does nothing, with no error anywhere."""
+
+    def test_write_to_unknown_lane_writes_no_file(self, state_dir, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            record_lane_failure("gemini", "403 forbidden", state_dir=state_dir)
+
+        cooldown_file = state_dir / "router_lane_cooldown" / "gemini.json"
+        assert not cooldown_file.exists(), (
+            "a lane outside _LANE_CHECKS must never get a cooldown file — "
+            "lane_available never reads it back"
+        )
+        assert any("gemini" in rec.message for rec in caplog.records), (
+            "refusing the write must be loud (logged), never silent"
+        )
+
+    def test_write_to_glm_harness_writes_no_file(self, state_dir):
+        record_lane_failure("glm-harness", "402 credits", state_dir=state_dir)
+
+        cooldown_file = state_dir / "router_lane_cooldown" / "glm-harness.json"
+        assert not cooldown_file.exists()
+
+    def test_write_to_known_lane_still_writes(self, state_dir):
+        """The refusal is scoped to lanes outside _LANE_CHECKS — a known lane
+        (e.g. codex, now that it has a real production caller too) still gets
+        its cooldown file written exactly as before."""
+        record_lane_failure("codex", "403 auth", state_dir=state_dir)
+
+        cooldown_file = state_dir / "router_lane_cooldown" / "codex.json"
+        assert cooldown_file.is_file()
+
+
+# ---------------------------------------------------------------------------
 # Cooldown duration config (single clock, OI-1188)
 # ---------------------------------------------------------------------------
 

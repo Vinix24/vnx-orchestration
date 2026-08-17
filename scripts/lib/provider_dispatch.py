@@ -703,6 +703,70 @@ def _derive_delivery_state(status: str, result: Any) -> str:
     return _DELIVERY_STATE_SUBMIT_FAILED
 
 
+# failure_classification categories that are unambiguous provider quota/auth
+# failures (OI-1263 fix). The prior wiring hung the router-lane cooldown write
+# off WorkflowSupervisor.handle_incident, gated on a PROVIDER_* incident class
+# — but the only production callers of handle_incident (subprocess_health_monitor.py)
+# only ever raise PROCESS_CRASH/TERMINAL_UNRESPONSIVE, so that gate never opened
+# and 9 dispatches died on the same kimi-403 (2026-08-16 11:03:24-11:11:32)
+# with the lane never marked out. The actual observation point is here: every
+# dispatch function funnels its outcome through _emit_governance, which ALREADY
+# computes failure_class from the same event-payload text a 500-wrapper or a
+# bare exit code would otherwise hide (see failure_classification.py's own
+# docstring and lege-provider-credits-lezen-als-server-error) — this hook just
+# consumes that existing classification instead of discarding it.
+#
+# "model_error" is deliberately excluded: it also matches generic
+# 5xx/overloaded/capacity text that is not necessarily this lane out of
+# budget, and incident_taxonomy.classify_provider_failure has no "not a
+# provider failure" branch of its own (by design — see its docstring, the gate
+# is the caller's job); feeding it an unrelated transient blip would still
+# resolve to PROVIDER_QUOTA_EXHAUSTED and cool the lane down for hours.
+_PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES = frozenset({"auth_rejected", "credit_exhausted"})
+
+
+def _maybe_record_provider_lane_cooldown(
+    *,
+    lane: str,
+    failure_class: Optional[str],
+    reason: str,
+    state_dir: Path,
+) -> None:
+    """Write a router-lane cooldown at the place a provider failure is actually
+    observed: the provider-lane dispatch itself (OI-1263).
+
+    ``failure_class``/``reason`` are what ``failure_classification.classify_failure_safe``
+    already computed a few lines above this call's call site, from the SAME
+    payload text (``result.error`` / ``completion_text``) that carries the real
+    reason even when the transport wraps it in a generic 500. Only the two
+    classes that are unambiguous provider failures gate a write;
+    ``incident_taxonomy.classify_provider_failure`` then reuses that same
+    reason text to pick the specific sub-class (auth / rate-limit / quota) —
+    no second 403/429 detector. ``lane`` is the literal provider string the
+    dispatch actually used (e.g. "kimi", "deepseek-harness"), never a
+    component label — the exact value the smart router's ``lane_available``
+    gate keys on.
+
+    Best-effort: ``record_lane_failure`` already swallows its own failures, so
+    this can only ever add a log line, never break a dispatch.
+    """
+    if not lane or failure_class not in _PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES:
+        return
+    try:
+        from incident_taxonomy import classify_provider_failure  # noqa: PLC0415
+        from providers.smart_router.availability import record_lane_failure  # noqa: PLC0415
+
+        incident_class = classify_provider_failure(reason)
+        record_lane_failure(
+            lane, reason or failure_class, state_dir=state_dir, incident_class=incident_class,
+        )
+    except Exception as exc:  # noqa: BLE001 — cooldown bookkeeping must never break a dispatch
+        logger.warning(
+            "_maybe_record_provider_lane_cooldown: failed for lane=%r (non-fatal): %s",
+            lane, exc,
+        )
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -1033,6 +1097,20 @@ def _emit_governance(
                 _EMIT_MAX_RETRIES, exc,
             )
             raise
+
+    # OI-1263: the router-lane cooldown write, at the point a provider failure
+    # is actually observed. Uses the failure_class/failure_reason the retry
+    # loop above already computed from the event payload — never a second
+    # 403/429 detector. Written after the receipt is durably emitted so a
+    # cooldown-write issue can never affect receipt delivery; best-effort
+    # internally, so it can never raise back into this function.
+    if status != "success":
+        _maybe_record_provider_lane_cooldown(
+            lane=provider,
+            failure_class=_fail_class,
+            reason=_fail_reason or (getattr(result, "error", None) or ""),
+            state_dir=state_dir,
+        )
 
     # Clear (truncate) the live event file now that the archive + receipt are done.
     # Only when event_store is wired in — otherwise the caller's finally block handles it.

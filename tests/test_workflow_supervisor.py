@@ -798,3 +798,69 @@ class TestEdgeCases:
         assert d2.budget_remaining == delivery_max - 1  # 3 - 1 = 2
         # Verify they're tracked independently (different classes)
         assert d1.incident_class != d2.incident_class
+
+
+# ---------------------------------------------------------------------------
+# Router lane cooldown — NOT written from handle_incident (OI-1263 / OI-1298)
+# ---------------------------------------------------------------------------
+
+class TestHandleIncidentNeverTouchesLaneCooldown:
+    """``handle_incident`` must never write (or attempt to write) a
+    smart-router lane cooldown.
+
+    OI-1263 was originally "fixed" by hanging a cooldown write off
+    ``handle_incident``, gated on a PROVIDER_* incident class. That gate never
+    opened in production: the only real callers of ``handle_incident``
+    (``subprocess_health_monitor.py``) raise PROCESS_CRASH/TERMINAL_UNRESPONSIVE
+    with ``component="subprocess_adapter"`` — never a PROVIDER_* class, and
+    "subprocess_adapter" is not even a lane name ``_LANE_CHECKS`` knows. The
+    old tests here proved nothing: they called ``handle_incident`` with a
+    fabricated ``component="deepseek-harness"`` + a hand-picked PROVIDER_*
+    class no real caller ever supplies, so the "coverage" tested the
+    write-then-read wiring in isolation, never whether production could reach
+    it — same anti-pattern as
+    ``test-die-beide-kanten-voedt-toetst-de-koppeling-niet-de-herkomst``.
+
+    The real fix moved the write to the actual observation point — the
+    provider-lane dispatch itself, in ``provider_dispatch._emit_governance``
+    via ``_maybe_record_provider_lane_cooldown`` — covered by
+    ``tests/test_provider_dispatch_lane_cooldown.py`` using the real
+    event-payload shapes (kimi-403, deepseek 402-as-500). The
+    ``_record_provider_lane_cooldown`` method that used to live on
+    ``WorkflowSupervisor`` was removed as a dead second write path nothing in
+    production ever reached. This test is the regression guard: it proves the
+    real production incident shape (PROCESS_CRASH, ``subprocess_adapter``)
+    still leaves the lane-cooldown system completely untouched, and that a
+    hand-fed PROVIDER_* class through ``handle_incident`` no longer does
+    anything either — so nobody re-wires a second, untested cooldown path
+    through this class again without a test that would actually catch it.
+    """
+
+    def test_real_production_incident_shape_writes_no_lane_cooldown(self, state_dir, supervisor):
+        from providers.smart_router.availability import lane_cooldown_remaining
+
+        supervisor.handle_incident(
+            incident_class=IncidentClass.PROCESS_CRASH,
+            component="subprocess_adapter",
+            reason="worker process died",
+        )
+        assert lane_cooldown_remaining("subprocess_adapter", state_dir=Path(state_dir)) == 0.0
+
+    def test_provider_incident_class_through_handle_incident_writes_no_lane_cooldown(
+        self, state_dir, supervisor,
+    ):
+        """Even a hand-fed PROVIDER_* class (no real caller does this) must not
+        write a cooldown: the wiring that used to do so has been removed."""
+        from providers.smart_router.availability import lane_available
+
+        supervisor.handle_incident(
+            incident_class=IncidentClass.PROVIDER_QUOTA_EXHAUSTED,
+            component="deepseek-harness",
+            reason="quota exhausted",
+        )
+        ok, _ = lane_available(
+            "deepseek-harness",
+            env={"DEEPSEEK_API_KEY": "sk-test"},
+            state_dir=Path(state_dir),
+        )
+        assert ok is True

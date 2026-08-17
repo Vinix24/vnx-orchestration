@@ -30,10 +30,20 @@ Fail-open by design: a broken availability layer never blocks a dispatch. Any
 unexpected error is logged loudly and the lane is treated as available, so the
 router falls through to its existing behaviour.
 
-``record_lane_failure`` is the producer side of the cooldown contract:
-lane-execution paths call it when a lane fails on quota/auth
-(403/429/quota-exhausted). Wiring those call sites is the fallback-chain op;
-this module provides the mechanism and the decision-time check.
+``record_lane_failure`` is the producer side of the cooldown contract: the
+production write call is ``provider_dispatch._maybe_record_provider_lane_cooldown``
+(OI-1263), invoked from ``_emit_governance`` right after every provider-lane
+dispatch — the one place a provider failure is actually observed, with the
+real lane name the dispatch used. It passes the already-classified
+``IncidentClass`` through so there is no second 403/429 detection. This module
+provides the mechanism; the provider-lane dispatch path provides the write.
+
+(``WorkflowSupervisor.handle_incident`` gates writes the same way via
+``PROVIDER_INCIDENT_CLASSES`` in principle, but has no production caller that
+ever raises a PROVIDER_* incident class — its two real callers
+(``subprocess_health_monitor.py``) only raise PROCESS_CRASH/TERMINAL_UNRESPONSIVE
+— so it was removed as a dead second write path OI-1263 originally, and
+incorrectly, hung the fix on.)
 """
 from __future__ import annotations
 
@@ -47,6 +57,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from incident_taxonomy import IncidentClass
+
 logger = logging.getLogger(__name__)
 
 # Lane names this module understands. Values are provider strings the
@@ -57,6 +69,17 @@ LOCAL_GEMMA_DISABLED_REASON = (
     "local models skipped per operator decision 2026-08-02; reactivate when "
     "gemma-4-12b-integration ships"
 )
+
+# The incident classes the lane-cooldown contract recognises (OI-1185 split).
+# A cooldown is only ever written for one of these — rate-limit cools in
+# seconds, exhausted quota in hours, and an auth failure never auto-recovers —
+# never for a process/terminal/delivery incident. The write side (the incident
+# path) gates on this set so a non-provider incident can never mark a lane out.
+PROVIDER_INCIDENT_CLASSES: frozenset = frozenset({
+    IncidentClass.PROVIDER_RATE_LIMIT,
+    IncidentClass.PROVIDER_QUOTA_EXHAUSTED,
+    IncidentClass.PROVIDER_AUTH_FAILURE,
+})
 
 
 @dataclass(frozen=True)
@@ -152,6 +175,7 @@ def record_lane_failure(
     *,
     state_dir: Optional[Path] = None,
     now: Optional[float] = None,
+    incident_class: Optional[IncidentClass] = None,
 ) -> None:
     """Mark a lane as in cooldown after a quota/auth/rate-limit failure.
 
@@ -161,11 +185,35 @@ def record_lane_failure(
     failure is recorded as non-recoverable: it stays out until an operator
     clears the state (an expired key does not improve by waiting).
 
+    ``incident_class`` lets a caller that ALREADY classified the failure pass
+    the class in directly (``provider_dispatch._maybe_record_provider_lane_cooldown``
+    does this — no second 403/429 detection, OI-1263). When provided it must
+    be a provider incident class
+    (see ``PROVIDER_INCIDENT_CLASSES``); a non-provider class raises, and the
+    best-effort wrapper logs and swallows it so no bogus cooldown is written.
+
+    ``lane`` must additionally be a member of ``_LANE_CHECKS`` (OI-1328): seven
+    provider strings reach this function via ``_emit_governance`` /
+    ``_maybe_record_provider_lane_cooldown``, but ``lane_available`` only ever
+    gates the five lanes ``_LANE_CHECKS`` knows (an unknown lane reads as
+    unconditionally available by design — see ``lane_available``'s own
+    docstring). Writing a cooldown file for a lane outside that set would be a
+    write nobody ever reads back: a permanent cooldown that silently does
+    nothing. A lane outside ``_LANE_CHECKS`` raises here too, and the
+    best-effort wrapper logs and swallows it — refused, never silent.
+
     Best-effort and fail-open: a failure to persist cooldown state is logged and
     swallowed — cooldown bookkeeping must never break a dispatch.
     """
     try:
         _validate_lane(lane)
+        if lane not in _LANE_CHECKS:
+            raise ValueError(
+                f"record_lane_failure: lane {lane!r} is not in _LANE_CHECKS; "
+                f"lane_available would never gate on it, so a cooldown write "
+                f"here would be unread — refusing. Known lanes: "
+                f"{sorted(_LANE_CHECKS)}"
+            )
         sd = Path(state_dir) if state_dir is not None else _resolve_state_dir()
         # New write surface: fail loud if this would write the live central
         # store under pytest (test-store-isolation guard, w19c/OI-934).
@@ -178,7 +226,12 @@ def record_lane_failure(
             get_cooldown_seconds,
         )
 
-        failure_class = classify_provider_failure(reason)
+        if incident_class is not None and incident_class not in PROVIDER_INCIDENT_CLASSES:
+            raise ValueError(
+                f"record_lane_failure requires a provider incident class, "
+                f"got {incident_class.value!r}"
+            )
+        failure_class = incident_class if incident_class is not None else classify_provider_failure(reason)
         contract = get_contract(failure_class)
         recoverable = not contract.escalation.halt_auto_recovery
         duration = get_cooldown_seconds(failure_class, 0)

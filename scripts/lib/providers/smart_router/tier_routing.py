@@ -14,8 +14,15 @@ cooldown). A lane that is unavailable — missing key, CLI absent, or in cooldow
 after a quota/auth failure — is skipped and the next step in the ``fallback``
 chain takes over (OI-1185). Missing key and cooldown follow the SAME chain: the
 availability layer is the single gate, so there is no separate "missing key"
-branch. The chain terminates in an ungated lane (claude/codex), so a route is
-always returned.
+branch. The chain terminates in codex (or claude, for tiers that route there
+directly): a lane with no env/CLI requirement of its own, but NOT exempt from
+the cooldown gate (OI-1330) — ``record_lane_failure`` has a real production
+caller now (``provider_dispatch._maybe_record_provider_lane_cooldown``), and a
+codex quota failure is daily practice. So the terminal can itself be
+unavailable, with nowhere further to walk. ``_walk_chain`` still always
+returns a route (the door must never receive None) but never silently: when
+the terminal itself was unavailable, the returned route carries the
+accumulated skipped-reason instead of ``reason=None``.
 
 Two mechanisms live here and are deliberately opposite in intent (OI-1221):
 
@@ -235,8 +242,16 @@ def _walk_chain(
     """Walk the fallback chain, skipping unavailable lanes (OI-1185).
 
     Missing key, CLI absent, and cooldown all funnel through the same
-    ``lane_available`` gate, so they walk the same chain. The terminal lane is
-    ungated (claude/codex), so this always returns a route.
+    ``lane_available`` gate, so they walk the same chain. This always returns
+    a route — but "returned" no longer implies "available" (OI-1330): the
+    terminal lane (claude/codex) has no env/CLI requirement of its own, yet it
+    is still cooldown-gated like every other lane, and ``record_lane_failure``
+    now has a real production caller that writes to it. When the terminal is
+    ALSO unavailable there is nowhere further to walk to, so it is returned
+    anyway (the door must never receive None) — but never silently: the
+    accumulated skipped-reason is attached instead of dropped, so a
+    receipt/report built from ``route.reason`` shows the chosen lane was
+    known-dead at decision time.
     """
     from .availability import lane_available  # noqa: PLC0415
 
@@ -256,9 +271,12 @@ def _walk_chain(
             return current
         skipped.append(f"{current.provider} unavailable ({reason})")
         current = current.fallback
-    # Unreachable in practice: every chain terminates in an ungated lane
-    # (claude/codex). Defensive only — the door must never receive None.
-    return last
+    # Every lane in the chain, including the terminal, was unavailable
+    # (OI-1330). There is no further step to walk to, so the terminal is
+    # still returned (the door must never receive None) — but with the
+    # accumulated skipped-reason attached, never as a silent reason=None that
+    # would read as a clean, available route.
+    return dataclasses.replace(last, reason=_fallback_reason(last, skipped))
 
 
 def resolve_tier_route(
