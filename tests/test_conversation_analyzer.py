@@ -118,6 +118,7 @@ def _create_schema(conn: sqlite3.Connection):
             deep_analyzed INTEGER DEFAULT 0,
             deep_attempts INTEGER DEFAULT 0,
             deep_failures INTEGER DEFAULT 0,
+            deep_config_skips INTEGER DEFAULT 0,
             new_suggestions INTEGER DEFAULT 0,
             total_tokens_used INTEGER DEFAULT 0,
             digest_markdown TEXT NOT NULL,
@@ -391,13 +392,13 @@ class TestDeepAnalyzer:
 # Phase 3a: _try_claude_max outcome classification (OI-1258)
 # ---------------------------------------------------------------------------
 
-class TestClaudeOutcome:
+class TestLLMOutcome:
     """``_try_claude_max`` must return a distinct outcome per failure mode.
 
     The old ``Optional[str]`` return collapsed four different situations —
     missing CLI, crashed CLI, successful-but-empty, and successful-with-result —
     into a single ``None``. Each test below asserts a different
-    ``ClaudeOutcome.status`` so a caller can tell them apart without parsing logs.
+    ``LLMOutcome.status`` so a caller can tell them apart without parsing logs.
     """
 
     @staticmethod
@@ -416,6 +417,10 @@ class TestClaudeOutcome:
         outcome = self._run_outcome(side_effect=FileNotFoundError())
         assert outcome.status == "missing_cli"
         assert outcome.text is None
+        # A missing binary is a real invocation attempt (subprocess.run WAS
+        # called) that happened to fail — distinct from config_skip, where no
+        # call is ever made.
+        assert outcome.attempted is True
 
     def test_nonzero_rc_returns_cli_failed_with_rc_and_stderr(self):
         outcome = self._run_outcome(returncode=2, stderr="boom: something broke")
@@ -450,9 +455,16 @@ class TestClaudeOutcome:
         assert outcome.status == "error"
         assert "disk full" in outcome.stderr
 
+    def test_config_skip_status_is_not_attempted(self):
+        """``config_skip`` is the one status where no invocation ever fired."""
+        from conversation_analyzer.deep_analyzer import LLMOutcome
+        outcome = LLMOutcome("config_skip")
+        assert outcome.attempted is False
+
 
 class TestDeepAnalyzerCounter:
-    """``deep_attempts``/``deep_failures`` track invoked-vs-failed deep analysis."""
+    """``deep_attempts``/``deep_failures``/``deep_config_skips`` track
+    invoked-vs-failed-vs-never-invoked deep analysis (fix1585-r2)."""
 
     @staticmethod
     def _analyze_with_claude(outcome):
@@ -478,31 +490,153 @@ class TestDeepAnalyzerCounter:
             os.unlink(jsonl_path)
 
     def test_failed_attempt_counts_attempt_and_failure(self):
-        from conversation_analyzer.deep_analyzer import ClaudeOutcome
-        analyzer, result = self._analyze_with_claude(ClaudeOutcome("missing_cli"))
+        from conversation_analyzer.deep_analyzer import LLMOutcome
+        analyzer, result = self._analyze_with_claude(LLMOutcome("missing_cli"))
         assert result is None
         assert analyzer.deep_attempts == 1
         assert analyzer.deep_failures == 1
+        assert analyzer.deep_config_skips == 0
 
     def test_successful_attempt_counts_attempt_no_failure(self):
-        from conversation_analyzer.deep_analyzer import ClaudeOutcome
+        from conversation_analyzer.deep_analyzer import LLMOutcome
         analyzer, result = self._analyze_with_claude(
-            ClaudeOutcome("ok", text='{"suggestions":[]}')
+            LLMOutcome("ok", text='{"suggestions":[]}')
         )
         assert result is not None
         assert analyzer.deep_attempts == 1
         assert analyzer.deep_failures == 0
+        assert analyzer.deep_config_skips == 0
 
     def test_parseable_but_empty_result_counts_failure(self):
         # LLM answered but returned no parseable JSON — an attempt that
         # produced nothing usable, distinct from a hard CLI failure.
-        from conversation_analyzer.deep_analyzer import ClaudeOutcome
+        from conversation_analyzer.deep_analyzer import LLMOutcome
         analyzer, result = self._analyze_with_claude(
-            ClaudeOutcome("ok", text="no json here")
+            LLMOutcome("ok", text="no json here")
         )
         assert result is None
         assert analyzer.deep_attempts == 1
         assert analyzer.deep_failures == 1
+        assert analyzer.deep_config_skips == 0
+
+    def test_json_without_suggestions_key_counts_as_failure_not_success(self):
+        """A JSON reply that parses but lacks 'suggestions' is a silent-zero
+        on the other side of the same bug (advisory point, fix1585-r2): it
+        must count as a failed attempt, not slip through as a usable result."""
+        from conversation_analyzer.deep_analyzer import LLMOutcome
+        analyzer, result = self._analyze_with_claude(
+            LLMOutcome("ok", text='{"patterns": ["foo"], "bottlenecks": []}')
+        )
+        assert result is None
+        assert analyzer.deep_attempts == 1
+        assert analyzer.deep_failures == 1
+        assert analyzer.deep_config_skips == 0
+
+    def test_deepseek_harness_missing_key_is_config_skip_not_attempt(self):
+        """Live bug (fix1585-r2): deepseek-harness without DEEPSEEK_API_KEY
+        must not count as an attempted-and-failed session. This drives the
+        REAL ``_try_deepseek_harness`` production code (not a hand-built
+        outcome) so the test fails if the production skip check regresses —
+        it feeds the writing side, not a value invented on the checking side.
+        """
+        import conversation_analyzer.deep_analyzer as da_module
+
+        analyzer = DeepAnalyzer()
+        metrics = SessionMetrics(session_id="deepseek-nokey-test",
+                                  total_output_tokens=5000, tool_calls_total=20)
+        flags = SessionFlags()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"user","message":{"role":"user","content":"test"}}\n')
+            f.flush()
+            jsonl_path = Path(f.name)
+
+        try:
+            with patch.object(DeepAnalyzer, '_build_session_summary',
+                              return_value='test summary'), \
+                 patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'), \
+                 patch.dict(da_module.os.environ, {}, clear=True):
+                result = analyzer.analyze_session(jsonl_path, metrics, flags)
+        finally:
+            os.unlink(jsonl_path)
+
+        assert result is None
+        assert analyzer.deep_attempts == 0, (
+            "a missing API key never started a subprocess — it must not "
+            "count as an attempt"
+        )
+        assert analyzer.deep_failures == 0, (
+            "no attempt was made, so there is nothing to count as a failure"
+        )
+        assert analyzer.deep_config_skips == 1
+
+    def test_ollama_probe_failure_is_config_skip_not_attempt(self):
+        """Live bug (fix1585-r2): ollama-only with a missing/wrong model (or
+        an unreachable server) must not count as an attempted-and-failed
+        session. Drives the REAL ``_try_ollama`` production code; only the
+        network-dependent probe is stubbed (no real Ollama server in CI) —
+        the config_skip classification itself is the production code path.
+        """
+        import conversation_analyzer.deep_analyzer as da_module
+
+        analyzer = DeepAnalyzer()
+        metrics = SessionMetrics(session_id="ollama-noprobe-test",
+                                  total_output_tokens=5000, tool_calls_total=20)
+        flags = SessionFlags()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"user","message":{"role":"user","content":"test"}}\n')
+            f.flush()
+            jsonl_path = Path(f.name)
+
+        try:
+            with patch.object(DeepAnalyzer, '_build_session_summary',
+                              return_value='test summary'), \
+                 patch.object(da_module, 'LLM_STRATEGY', 'ollama-only'), \
+                 patch.object(DeepAnalyzer, '_probe_ollama', return_value=False):
+                result = analyzer.analyze_session(jsonl_path, metrics, flags)
+        finally:
+            os.unlink(jsonl_path)
+
+        assert result is None
+        assert analyzer.deep_attempts == 0, (
+            "a failed probe never issued the generate call — it must not "
+            "count as an attempt"
+        )
+        assert analyzer.deep_failures == 0
+        assert analyzer.deep_config_skips == 1
+
+    def test_config_skip_run_stays_green_on_fail_closed_exit_code(self):
+        """The end-to-end point of fix1585-r2: a run where every flagged
+        session hit a config gap must not fail-close the nightly job. Feeds
+        fail_closed_exit_code with counters produced by the real
+        analyze_session() call above, not hand-crafted RunStats."""
+        from conversation_analyzer import fail_closed_exit_code, RunStats
+        import conversation_analyzer.deep_analyzer as da_module
+
+        analyzer = DeepAnalyzer()
+        metrics = SessionMetrics(session_id="deepseek-nokey-rc-test",
+                                  total_output_tokens=5000, tool_calls_total=20)
+        flags = SessionFlags()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"user","message":{"role":"user","content":"test"}}\n')
+            f.flush()
+            jsonl_path = Path(f.name)
+
+        try:
+            with patch.object(DeepAnalyzer, '_build_session_summary',
+                              return_value='test summary'), \
+                 patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'), \
+                 patch.dict(da_module.os.environ, {}, clear=True):
+                analyzer.analyze_session(jsonl_path, metrics, flags)
+        finally:
+            os.unlink(jsonl_path)
+
+        stats = RunStats(sessions_analyzed=1, deep_attempts=analyzer.deep_attempts,
+                         deep_failures=analyzer.deep_failures,
+                         deep_config_skips=analyzer.deep_config_skips)
+        assert fail_closed_exit_code(stats) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +648,7 @@ class TestDeepAnalyzerStrategy:
     def test_deepseek_harness_strategy_skips_claude_and_ollama(self):
         """LLM_STRATEGY=deepseek-harness calls only the harness path, not claude or ollama."""
         import conversation_analyzer.deep_analyzer as da_module
+        from conversation_analyzer.deep_analyzer import LLMOutcome
 
         analyzer = DeepAnalyzer()
         metrics = SessionMetrics(session_id="strat-test", total_output_tokens=5000,
@@ -530,7 +665,7 @@ class TestDeepAnalyzerStrategy:
             with patch.object(DeepAnalyzer, '_build_session_summary',
                               return_value='test summary'), \
                  patch.object(DeepAnalyzer, '_try_deepseek_harness',
-                              return_value=mock_result) as mock_harness, \
+                              return_value=LLMOutcome("ok", text=mock_result)) as mock_harness, \
                  patch.object(DeepAnalyzer, '_try_claude_max') as mock_claude, \
                  patch.object(DeepAnalyzer, '_try_ollama') as mock_ollama, \
                  patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'):
@@ -542,11 +677,14 @@ class TestDeepAnalyzerStrategy:
                 mock_harness.assert_called_once()
                 mock_claude.assert_not_called()
                 mock_ollama.assert_not_called()
+                assert analyzer.deep_attempts == 1
+                assert analyzer.deep_config_skips == 0
         finally:
             os.unlink(jsonl_path)
 
     def test_deepseek_harness_fail_closed_without_key(self):
-        """_try_deepseek_harness returns None when DEEPSEEK_API_KEY is unset."""
+        """_try_deepseek_harness returns a config_skip outcome (no subprocess
+        started) when DEEPSEEK_API_KEY is unset."""
         # Consumer-namespace patch: the method reads os.environ at call time
         # inside deep_analyzer.py, so we patch os.environ in that module's
         # namespace to ensure the method sees the empty key.
@@ -554,7 +692,8 @@ class TestDeepAnalyzerStrategy:
 
         with patch.dict(da_module.os.environ, {}, clear=True):
             result = DeepAnalyzer._try_deepseek_harness("test prompt")
-            assert result is None
+            assert result.status == "config_skip"
+            assert result.attempted is False
 
     def test_deepseek_harness_model_default(self):
         """VNX_ANALYZER_DEEPSEEK_MODEL defaults to deepseek-v4-flash."""
@@ -564,6 +703,7 @@ class TestDeepAnalyzerStrategy:
     def test_ollama_only_strategy_still_works(self):
         """LLM_STRATEGY=ollama-only (default) still dispatches correctly (no regression)."""
         import conversation_analyzer.deep_analyzer as da_module
+        from conversation_analyzer.deep_analyzer import LLMOutcome
 
         analyzer = DeepAnalyzer()
         metrics = SessionMetrics(session_id="ollama-test", total_output_tokens=5000,
@@ -579,7 +719,7 @@ class TestDeepAnalyzerStrategy:
             with patch.object(DeepAnalyzer, '_build_session_summary',
                               return_value='test summary'), \
                  patch.object(DeepAnalyzer, '_try_ollama',
-                              return_value='{"result":"ok"}') as mock_ollama, \
+                              return_value=LLMOutcome("ok", text='{"suggestions":[]}')) as mock_ollama, \
                  patch.object(DeepAnalyzer, '_try_claude_max') as mock_claude, \
                  patch.object(DeepAnalyzer, '_try_deepseek_harness') as mock_harness, \
                  patch.object(da_module, 'LLM_STRATEGY', 'ollama-only'):
@@ -590,6 +730,8 @@ class TestDeepAnalyzerStrategy:
                 mock_ollama.assert_called_once()
                 mock_claude.assert_not_called()
                 mock_harness.assert_not_called()
+                assert analyzer.deep_attempts == 1
+                assert analyzer.deep_config_skips == 0
         finally:
             os.unlink(jsonl_path)
 
@@ -786,7 +928,7 @@ class TestDigestGenerator:
         analyzer.conn = conn
 
         stats = RunStats(sessions_analyzed=5, sessions_deep=1, deep_attempts=4,
-                         deep_failures=3, total_tokens=10000)
+                         deep_failures=3, deep_config_skips=2, total_tokens=10000)
         md = "# Test Digest"
 
         with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
@@ -802,9 +944,82 @@ class TestDigestGenerator:
         assert row["deep_analyzed"] == 1
         assert row["deep_attempts"] == 4
         assert row["deep_failures"] == 3
+        assert row["deep_config_skips"] == 2
         assert row["digest_markdown"] == "# Test Digest"
         conn.close()
         os.unlink(digest_path)
+
+
+# ---------------------------------------------------------------------------
+# ConversationAnalyzer.run() production wiring (advisory, fix1585-r2)
+# ---------------------------------------------------------------------------
+
+class TestRunCopiesDeepCountersIntoStats:
+    """runner.py's ``run()`` copies ``self.deep.deep_attempts`` /
+    ``deep_failures`` / ``deep_config_skips`` into ``stats`` after the
+    session loop (runner.py ~321-323). Nothing else exercises that specific
+    copy: ``DeepAnalyzer``'s counters are covered in isolation above, and
+    ``RunStats``/``_store_digest`` are covered by constructing ``RunStats``
+    directly. Deleting those three lines would leave every other test in
+    this file green while the digest, DB row, and fail-closed exit code
+    silently went back to reading 0/0/0 forever. This pins the wiring
+    itself.
+    """
+
+    def test_run_copies_deep_counters_from_analyzer_to_stats(self):
+        analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
+        analyzer.deep = DeepAnalyzer()
+        # Simulate attempts/failures/config-skips having accumulated during
+        # session processing, without needing a real LLM call.
+        analyzer.deep.deep_attempts = 3
+        analyzer.deep.deep_failures = 2
+        analyzer.deep.deep_config_skips = 5
+
+        def _fake_process_one_session(jsonl_path, dry_run, deep_remaining,
+                                      stats, session_rows):
+            stats.sessions_analyzed += 1
+            return deep_remaining
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_session = Path(tmpdir) / "fake.jsonl"
+            with patch.object(ConversationAnalyzer, 'find_unanalyzed_sessions',
+                              return_value=[fake_session]), \
+                 patch.object(ConversationAnalyzer, '_process_one_session',
+                              side_effect=_fake_process_one_session), \
+                 patch.object(ConversationAnalyzer, '_finalize_run'):
+                stats = analyzer.run(max_sessions=1, deep_budget=1)
+
+        assert stats.deep_attempts == 3
+        assert stats.deep_failures == 2
+        assert stats.deep_config_skips == 5
+
+    def test_run_with_zero_deep_activity_leaves_stats_at_zero(self):
+        """Control case: sessions were processed but none triggered deep
+        analysis -> the copy still runs and leaves all three counters at 0
+        (not unset/None). Uses the same processed-session path as the
+        non-zero case above so the early ``if not sessions: return stats``
+        short-circuit in run() (which never reaches the copy at all) isn't
+        mistaken for coverage of the wiring."""
+        analyzer = ConversationAnalyzer.__new__(ConversationAnalyzer)
+        analyzer.deep = DeepAnalyzer()
+
+        def _fake_process_one_session(jsonl_path, dry_run, deep_remaining,
+                                      stats, session_rows):
+            stats.sessions_analyzed += 1
+            return deep_remaining
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_session = Path(tmpdir) / "fake.jsonl"
+            with patch.object(ConversationAnalyzer, 'find_unanalyzed_sessions',
+                              return_value=[fake_session]), \
+                 patch.object(ConversationAnalyzer, '_process_one_session',
+                              side_effect=_fake_process_one_session), \
+                 patch.object(ConversationAnalyzer, '_finalize_run'):
+                stats = analyzer.run(max_sessions=1, deep_budget=1)
+
+        assert stats.deep_attempts == 0
+        assert stats.deep_failures == 0
+        assert stats.deep_config_skips == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1642,6 +1857,28 @@ class TestFailClosedExitCode:
         # Deep failure does not need errors/sessions to be zero to fail closed.
         assert fail_closed_exit_code(
             RunStats(errors=0, sessions_analyzed=50, deep_attempts=20, deep_failures=20)
+        ) == 1
+
+    def test_fail_closed_config_skip_night_stays_green(self):
+        """A run where every flagged session hit a configuration gap (no API
+        key, no model, unreachable lane) must not fail-close (fix1585-r2).
+
+        Before the fix, ``deep_attempts`` was incremented the moment a
+        strategy branch was entered — including a pure config-gap
+        short-circuit — so a 20-session config-gap night reported
+        ``deep_attempts=20, deep_failures=20`` and fail-closed the nightly
+        job over a problem no attempt was ever made to solve. With the fix,
+        those 20 sessions land in ``deep_config_skips`` instead and
+        ``deep_attempts`` stays 0.
+        """
+        from conversation_analyzer import fail_closed_exit_code, RunStats
+        assert fail_closed_exit_code(
+            RunStats(deep_attempts=0, deep_failures=0, deep_config_skips=20)
+        ) == 0
+        # Mixed run: some genuine attempts failed alongside config skips ->
+        # still fails closed on the genuine failures.
+        assert fail_closed_exit_code(
+            RunStats(deep_attempts=5, deep_failures=5, deep_config_skips=15)
         ) == 1
 
     def test_main_returns_nonzero_when_all_sessions_fail(self):
