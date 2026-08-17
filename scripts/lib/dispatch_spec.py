@@ -119,15 +119,34 @@ def write_paths(paths: "tuple[DispatchPath, ...]") -> list[str]:
     ``PathAccess.READ`` entry is excluded (see WRITE_GRANTING_PATH_ACCESS);
     everything else is included.
 
-    Not yet wired to the tmux-lane ``--dispatch-paths`` CLI surface
-    (``scripts/lib/worker_permissions.resolve_dispatch_write_scope``, which
-    enforces the write-scope narrowing this function's output is meant to
-    feed): that surface currently carries plain path strings sourced from
-    ``dispatch_cli.py``/``dispatch_bridge.py`` (the single-entry dispatch
-    door's staging/bridge layer), which are outside this change's file
-    boundary. Once that bridge threads typed ``DispatchPath`` objects
-    through instead of bare strings, it should call this function rather
-    than re-deriving which access values mean "write".
+    This function's own caller is door-time classification, not wire
+    encoding: ``dispatch_cli._spec_is_writing`` calls ``write_paths()`` to
+    decide whether a dispatch is "writing" (and therefore needs a review
+    gate) — it only needs to know whether the write-granting subset is
+    non-empty, so the filtered, stripped-to-bare-string return shape is
+    exactly what it wants.
+
+    OI-1271 wired ``DispatchPath.access`` onto the tmux-lane
+    ``--dispatch-paths`` CLI surface, but not by routing through this
+    function. The sending side is ``dispatch_cli._dispatch_path_wire_entry``,
+    called once per ``DispatchPath`` while building the ``dispatch_paths``
+    kwarg for ``TmuxInteractiveDispatch.dispatch``; the receiving side is
+    ``worker_permissions._parse_dispatch_path_entry``, which reads each wire
+    entry back into a ``(path, access)`` pair for
+    ``worker_permissions.resolve_dispatch_write_scope``. That bridge cannot
+    call ``write_paths()``: the wire needs every declared path present, each
+    carrying its own access, because two other consumers of the same list —
+    ``benchmark_worker_isolation.materialize_benchmark_seed`` and
+    ``TmuxInteractiveDispatch._scope_note`` — read every entry as a literal
+    repo-relative path, and a pre-filtered, write-only subset would silently
+    drop the read-only paths they still need to see.
+    ``_dispatch_path_wire_entry`` instead re-derives write-intent per path
+    against ``WRITE_GRANTING_PATH_ACCESS`` directly — the same frozenset
+    this function already consults, and the same one ``worker_permissions``
+    imports (as ``WRITE_GRANTING_ACCESS``) for the receiving side — so
+    "which access values mean write" still has one source of truth even
+    though door-time classification and wire encoding evaluate it through
+    two independent call paths rather than one calling the other.
     """
     return [str(dp.path) for dp in paths if dp.access in WRITE_GRANTING_PATH_ACCESS]
 

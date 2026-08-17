@@ -36,6 +36,7 @@ from dispatch_spec import (  # noqa: E402
     Provider,
     Reject,
     ValidatedSpec,
+    WRITE_GRANTING_PATH_ACCESS,
     validate,
     write_paths,
 )
@@ -1826,17 +1827,34 @@ def _dispatch_path_wire_entry(dp: DispatchPath) -> str:
     READ_WRITE. The receiving parser already understands the ``path:access``
     suffix form; only the sender was missing it.
 
-    READ_WRITE (``DispatchPath``'s own default) is emitted as a bare path,
-    unchanged from before this fix: that keeps every existing caller that
-    never declares ``access`` byte-for-byte identical on the wire, which
-    matters beyond this module — ``benchmark_worker_isolation.materialize_benchmark_seed``
-    and ``TmuxInteractiveDispatch._scope_note`` both consume this same list
-    and treat an entry as a literal repo-relative path, not a
-    ``path:access`` pair. Only a path that actually restricts or narrows
-    access (READ/WRITE/CREATE) needs the explicit suffix to survive the
-    trip.
+    Only READ gets the ``:access`` suffix. WRITE, READ_WRITE, and CREATE
+    (every member of WRITE_GRANTING_PATH_ACCESS) are all emitted as a bare
+    path. This is a deliberate minimal-wire-change choice, not an
+    oversight: ``resolve_dispatch_write_scope`` treats WRITE, READ_WRITE,
+    and CREATE identically, and a suffix-less entry already parses to
+    READ_WRITE — itself write-granting — so tagging WRITE or CREATE changes
+    nothing about the resulting write scope. READ is the only access value
+    that narrows anything, so it is the only one worth the suffix. The
+    membership check against WRITE_GRANTING_PATH_ACCESS (rather than an
+    equality check against PathAccess.READ) keeps this function deriving
+    "which access values need no suffix" from the same single source of
+    truth ``worker_permissions`` already imports for "which access values
+    mean write", instead of redeclaring the inverse.
+
+    That restraint matters beyond this module: ``benchmark_worker_isolation.
+    materialize_benchmark_seed`` and ``TmuxInteractiveDispatch._scope_note``
+    both consume this same list and treat every entry as a literal
+    repo-relative path, not a ``path:access`` pair — neither strips a
+    suffix. Suffixing WRITE/CREATE for no enforcement benefit would only add
+    a way to break those two consumers the day a caller declares
+    ``access=write``/``access=create`` on a path that also flows through
+    them; today no caller does (only READ and the READ_WRITE default are
+    used anywhere in this codebase). Keeping the wire form byte-for-byte
+    unchanged for every access value except the one that actually needs it
+    is the same reasoning the original OI-1271 fix already applied to
+    READ_WRITE, carried through consistently instead of stopping short.
     """
-    if dp.access == PathAccess.READ_WRITE:
+    if dp.access in WRITE_GRANTING_PATH_ACCESS:
         return str(dp.path)
     return f"{dp.path}:{dp.access.value}"
 
