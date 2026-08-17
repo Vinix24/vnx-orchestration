@@ -244,6 +244,139 @@ class TestRunGateChecksPRHead:
 
 
 # ---------------------------------------------------------------------------
+# run_gate_checks binds the ci_workflow check to the PR head (OI-1266)
+# ---------------------------------------------------------------------------
+
+class TestRunGateChecksCIHead:
+    """OI-1266: the ci_workflow check must verify CI on the PR's exact commit.
+
+    ``check_ci_workflow`` accepts ``branch`` + ``head_sha`` so both its
+    ``gh run list`` query and its sha-match pin the PR as it exists on GitHub.
+    Without threading those through from the resolved ``pr_head``, the check
+    silently measures the local HEAD — booking local main's CI status as the
+    PR's GO. These tests pin the provenance (the values come from ``pr_head``,
+    not from local git) and the fail-closed refusal when the PR head can't be
+    determined.
+    """
+
+    @staticmethod
+    def _stub_heavy(monkeypatch):
+        monkeypatch.setattr(
+            pre_merge_gate, "check_pr_size",
+            lambda project_root, **kw: {
+                "check": "pr_size", "status": "GO", "detail": "stub",
+                "lines_added": 0, "lines_removed": 0, "lines_changed": 0,
+            },
+        )
+        monkeypatch.setattr(
+            pre_merge_gate, "check_net_deletion",
+            lambda project_root, **kw: {
+                "check": "net_deletion", "status": "GO", "detail": "stub",
+                "deleted_count": 0, "deleted_files": [], "net_line_deletion": 0,
+                "net_line_deletion_warn": False, "file_deletion_warn": False,
+            },
+        )
+
+    @staticmethod
+    def _ci_router(*, local_sha, gh_runs):
+        """Route subprocess.run so the local-HEAD fallback is a *different* sha.
+
+        ``git rev-parse HEAD`` resolves to ``local_sha`` (the trap: only
+        reached when the check wrongly falls back to local git), and
+        ``gh run list`` returns ``gh_runs``. Every other git call returns an
+        empty success so the remaining gate checks stay GO. All argv lists are
+        recorded so tests can assert what was (never) invoked.
+        """
+        calls = []
+
+        def _route(argv, **kw):
+            calls.append(list(argv))
+            if argv[:2] == ["git", "rev-parse"]:
+                if len(argv) > 2 and argv[2] == "HEAD":
+                    return MagicMock(returncode=0, stdout=local_sha + "\n", stderr="")
+                if len(argv) > 2 and argv[2] == "--abbrev-ref":
+                    return MagicMock(returncode=0, stdout="main\n", stderr="")
+            if argv and argv[0] == "gh":
+                return MagicMock(returncode=0, stdout=json.dumps(gh_runs), stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return _route, calls
+
+    def test_ci_binds_to_pr_head_not_local_head(
+        self, state_dir, dispatch_dir, tmp_path, monkeypatch
+    ):
+        pr_sha = "1" * 40
+        local_sha = "9" * 40  # different — the local HEAD must never be used
+        pr_branch = "feature/oi-1266"
+        route, calls = self._ci_router(
+            local_sha=local_sha,
+            gh_runs=[{
+                "conclusion": "success", "headSha": pr_sha,
+                "status": "completed", "databaseId": 4242,
+            }],
+        )
+        self._stub_heavy(monkeypatch)
+        pr_head = ResolvedPRRef(
+            pr_ref="1522", head_ref=pr_sha, head_ref_name=pr_branch,
+            merge_base="0" * 40,
+        )
+
+        with patch("pre_merge_gate.subprocess.run", side_effect=route):
+            result = run_gate_checks(
+                pr_id="1522", project_root=tmp_path, state_dir=state_dir,
+                dispatch_dir=dispatch_dir, skip_pytest=True, pr_head=pr_head,
+            )
+
+        ci_check = next(c for c in result["checks"] if c["check"] == "ci_workflow")
+        assert ci_check["status"] == "GO"
+        assert ci_check["ci_head_sha"] == pr_sha      # equal to the PR head
+        assert ci_check["ci_head_sha"] != local_sha   # never the local HEAD
+
+        # Provenance: gh was queried for the PR branch, and git rev-parse HEAD
+        # (the silent local fallback) was never invoked.
+        gh_calls = [a for a in calls if a and a[0] == "gh"]
+        assert gh_calls, "gh run list was never invoked"
+        gh_argv = gh_calls[0]
+        assert gh_argv[gh_argv.index("--branch") + 1] == pr_branch
+        assert not any(a[:2] == ["git", "rev-parse"] for a in calls)
+
+    @pytest.mark.parametrize("head_ref,head_ref_name", [
+        ("", "feature/oi-1266"),  # no sha — can't pin CI to a commit
+        ("1" * 40, ""),            # no branch — can't scope the run list
+        ("", ""),
+    ])
+    def test_undeterminable_pr_head_is_never_go(
+        self, state_dir, dispatch_dir, tmp_path, monkeypatch, head_ref, head_ref_name
+    ):
+        # Without the fix, run_gate_checks falls back to the local HEAD; here
+        # that fallback would resolve to local_sha and gh would report success
+        # on it — i.e. the check would (wrongly) GO. With the fix, the empty
+        # PR head short-circuits before any subprocess is consulted.
+        local_sha = "9" * 40
+        route, calls = self._ci_router(
+            local_sha=local_sha,
+            gh_runs=[{
+                "conclusion": "success", "headSha": local_sha,
+                "status": "completed", "databaseId": 1,
+            }],
+        )
+        self._stub_heavy(monkeypatch)
+        pr_head = ResolvedPRRef("1522", head_ref, head_ref_name, "0" * 40)
+
+        with patch("pre_merge_gate.subprocess.run", side_effect=route):
+            result = run_gate_checks(
+                pr_id="1522", project_root=tmp_path, state_dir=state_dir,
+                dispatch_dir=dispatch_dir, skip_pytest=True, pr_head=pr_head,
+            )
+
+        ci_check = next(c for c in result["checks"] if c["check"] == "ci_workflow")
+        assert ci_check["status"] != "GO"
+        assert result["verdict"] == "HOLD"
+        # Fail-closed: the refusal must not have consulted local HEAD either.
+        assert not any(a[:2] == ["git", "rev-parse"] for a in calls)
+
+
+# ---------------------------------------------------------------------------
 # main() wiring: --pr resolves, unresolvable --pr exits non-zero
 # ---------------------------------------------------------------------------
 
