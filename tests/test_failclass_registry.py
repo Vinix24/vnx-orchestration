@@ -576,6 +576,149 @@ class TestDryRunReachability:
 
 
 # ===========================================================================
+# OI-1248: known-rejected lane blocks BEFORE spawn
+# ===========================================================================
+
+
+class TestKnownRejectedLane:
+    """OI-1248: a provider lane that is a KNOWN-rejected fact (a recent
+    auth/quota receipt for the same provider in the ledger) must return a
+    block=True verdict BEFORE the door commits to firing. A healthy lane and a
+    no-probe lane keep their old non-blocking behavior, and the refusal reason
+    surfaces the quota/auth cause instead of the JSON-parse noise."""
+
+    @staticmethod
+    def _plan(provider_value, lane="provider"):
+        from unittest.mock import MagicMock
+
+        plan = MagicMock()
+        plan.provider.value = provider_value
+        plan.lane = lane
+        plan.dispatch_id = "test-known-rejected"
+        return plan
+
+    @staticmethod
+    def _write_receipt(
+        state_dir,
+        *,
+        provider,
+        failure_class,
+        dispatch_id,
+        minutes_ago,
+        failure_reason=None,
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        state_dir.mkdir(parents=True, exist_ok=True)
+        ledger = state_dir / "t0_receipts.ndjson"
+        ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+        receipt = {
+            "receipt_kind": "dispatch",
+            "dispatch_id": dispatch_id,
+            "provider": provider,
+            "failure_class": failure_class,
+            "failure_reason": failure_reason
+            or (
+                "kimi-cli: [quota_or_auth] provider=kimi reason=quota_or_auth "
+                "msg='Expecting value: line 1 column 1 (char 0)' "
+                "raw='Error code: 403 - {'error': {'message': \"You've reached "
+                "your usage limit for this billing cycle.\"}}'"
+            ),
+            "timestamp": ts,
+        }
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(receipt) + "\n")
+        return ledger
+
+    def test_recent_rejection_blocks_before_spawn(self, tmp_path):
+        """A provider with a recent auth_rejected receipt -> block=True."""
+        from dispatch_cli import _check_reachability
+
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-p2-blocked-split",
+            minutes_ago=1,
+        )
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is True
+        assert "kimi" in verdict.reason
+        # the quota cause is surfaced, not the JSON-parse noise
+        assert "usage limit" in verdict.reason
+
+    def test_rejection_outside_window_does_not_block(self, tmp_path):
+        """A rejection outside the window is not a known fact -> block=False."""
+        from dispatch_cli import _check_reachability
+
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="stale-20260816",
+            minutes_ago=120,
+        )
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is False
+
+    def test_credit_exhausted_also_blocks(self, tmp_path):
+        """credit_exhausted is quota-shaped too — a recent one also blocks."""
+        from dispatch_cli import _check_reachability
+
+        self._write_receipt(
+            tmp_path,
+            provider="deepseek-harness",
+            failure_class="credit_exhausted",
+            dispatch_id="20260816-ds-402",
+            minutes_ago=2,
+            failure_reason="deepseek-api: credit/balance exhausted — API Error: 402 Insufficient Balance",
+        )
+        plan = self._plan("deepseek-harness")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is True
+        assert "insufficient balance" in verdict.reason.lower()
+
+    def test_healthy_lane_unchanged(self, tmp_path):
+        """No recent rejection for the provider -> block=False (unchanged)."""
+        from dispatch_cli import _check_reachability
+
+        # Empty ledger: no rejection fact at all.
+        plan = self._plan("deepseek-harness")
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("down")):
+            verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is False
+
+    def test_no_precheck_lane_is_explicit_not_checkable(self, tmp_path, capsys):
+        """A kimi lane with no rejection and no endpoint probe prints an
+        explicit NOT CHECKABLE note — never silence."""
+        from dispatch_cli import _check_reachability
+
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is False
+        captured = capsys.readouterr()
+        assert "NOT CHECKABLE" in captured.err
+
+    def test_other_provider_rejection_does_not_block(self, tmp_path):
+        """A kimi rejection must not block a deepseek-harness dispatch."""
+        from dispatch_cli import _check_reachability
+
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-p2-blocked-split",
+            minutes_ago=1,
+        )
+        plan = self._plan("deepseek-harness")
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("down")):
+            verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is False
+
+
+# ===========================================================================
 # Integration: end-to-end classification → receipt
 # ===========================================================================
 
