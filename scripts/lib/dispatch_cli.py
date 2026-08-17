@@ -1815,6 +1815,32 @@ def build_runtime_snapshot(
 # Lane executors
 # ---------------------------------------------------------------------------
 
+def _dispatch_path_wire_entry(dp: DispatchPath) -> str:
+    """Encode one DispatchPath for the tmux-lane ``--dispatch-paths`` wire format.
+
+    OI-1271: dispatch_cli previously handed the lane bare ``str(dp.path)``
+    strings, so ``DispatchPath.access`` never reached
+    ``worker_permissions.resolve_dispatch_write_scope`` — a path declared
+    ``access=read`` landed in the worker's write scope anyway, because
+    ``_parse_dispatch_path_entry`` defaults a suffix-less entry to
+    READ_WRITE. The receiving parser already understands the ``path:access``
+    suffix form; only the sender was missing it.
+
+    READ_WRITE (``DispatchPath``'s own default) is emitted as a bare path,
+    unchanged from before this fix: that keeps every existing caller that
+    never declares ``access`` byte-for-byte identical on the wire, which
+    matters beyond this module — ``benchmark_worker_isolation.materialize_benchmark_seed``
+    and ``TmuxInteractiveDispatch._scope_note`` both consume this same list
+    and treat an entry as a literal repo-relative path, not a
+    ``path:access`` pair. Only a path that actually restricts or narrows
+    access (READ/WRITE/CREATE) needs the explicit suffix to survive the
+    trip.
+    """
+    if dp.access == PathAccess.READ_WRITE:
+        return str(dp.path)
+    return f"{dp.path}:{dp.access.value}"
+
+
 def _execute_claude(
     plan: ExecutionPlan,
     permit: ExecutionPermit,
@@ -1865,7 +1891,7 @@ def _execute_claude(
         plan.dispatch_id,
         role=role,
         model=plan.model,
-        dispatch_paths=[str(dp.path) for dp in plan.dispatch_paths],
+        dispatch_paths=[_dispatch_path_wire_entry(dp) for dp in plan.dispatch_paths],
         deadline_seconds=plan.deadline_seconds,
         base_ref=plan.base_ref,
         isolated_worktree=True,
