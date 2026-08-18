@@ -643,6 +643,12 @@ _RATE_LIMIT_MARKERS = (
     "429", "rate limit", "rate_limit", "ratelimit", "too many requests",
 )
 
+# Signals that the reason is (at least in part) a quota/balance problem.
+# Used only by the ambiguity check in classify_provider_failure() below, not
+# as a branch of its own — the function already falls through to
+# PROVIDER_QUOTA_EXHAUSTED as its unconditional default.
+_QUOTA_SIGNAL_MARKERS = ("quota", "balance", "insufficient", "402")
+
 
 def classify_provider_failure(reason: str) -> IncidentClass:
     """Map a lane-failure reason to its provider incident class.
@@ -651,6 +657,7 @@ def classify_provider_failure(reason: str) -> IncidentClass:
     never improves by waiting, so auth outranks rate-limit, and a 429 outranks
     the quota default.
 
+      - ambiguous (both quota AND auth signals present) -> PROVIDER_QUOTA_EXHAUSTED
       - auth markers (401/403/unauthorized/...)  -> PROVIDER_AUTH_FAILURE
       - rate-limit markers (429/too-many-requests) -> PROVIDER_RATE_LIMIT
       - anything else (quota/balance/402/...)    -> PROVIDER_QUOTA_EXHAUSTED
@@ -658,9 +665,43 @@ def classify_provider_failure(reason: str) -> IncidentClass:
     Quota is the catch-all default: the availability layer only calls this for
     quota/auth/rate-limit failures, and an unrecognized reason is treated as
     the long-lived (hours) class rather than the transient (seconds) one.
+
+    OI-1346: classification is effectively three-valued, not two. A reason can
+    name both quota and auth in the same string — kimi-cli's own reason text
+    is literally "quota_or_auth": the upstream tool cannot tell the two apart
+    and says so. That case must not fall into either single-signal branch; the
+    explicit ambiguity check below runs before the marker list decides.
+
+    This checks CO-OCCURRENCE (a quota signal AND an auth signal present),
+    not just a word-boundary fix on the bare "auth" marker. A \\bauth\\b regex
+    would resolve the literal "quota_or_auth" token (underscore is a word
+    character, so there is no boundary before "auth" there) but only patches
+    that one spelling — any other free-text reason naming both concepts (e.g.
+    "quota or auth, unable to tell") would still hard-classify as auth, since
+    "auth" there sits on real word boundaries. Dropping the bare "auth"
+    marker entirely was also rejected: every other marker in the auth list is
+    a specific phrase, and "auth"/"auth error"/"auth failed" style text with
+    no other marker present would silently stop matching altogether and fall
+    to the quota default even when genuinely unambiguous — real lost
+    coverage, not a bug fix.
+
+    The ambiguous case resolves to quota, not auth, because the two wrong
+    guesses are not symmetric in cost. Quota-exhausted on a real auth failure
+    costs an hour of cooldown before the next attempt notices it is still
+    broken. Auth-failure on a real quota issue sets recoverable=False (see
+    RECOVERY_CONTRACTS[PROVIDER_AUTH_FAILURE]) and lane_cooldown_remaining
+    (scripts/lib/providers/smart_router/availability.py) short-circuits to
+    infinite cooldown for a non-recoverable failure before it ever looks at
+    "until" — the lane stays out until an operator clears state, permanently,
+    since auth's own 0s cooldown duration never even gets consulted. The
+    ambiguous tail must fall to the recoverable side.
     """
     lowered = (reason or "").lower()
-    if any(marker in lowered for marker in _AUTH_FAILURE_MARKERS):
+    has_quota_signal = any(marker in lowered for marker in _QUOTA_SIGNAL_MARKERS)
+    has_auth_signal = any(marker in lowered for marker in _AUTH_FAILURE_MARKERS)
+    if has_quota_signal and has_auth_signal:
+        return IncidentClass.PROVIDER_QUOTA_EXHAUSTED
+    if has_auth_signal:
         return IncidentClass.PROVIDER_AUTH_FAILURE
     if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
         return IncidentClass.PROVIDER_RATE_LIMIT
