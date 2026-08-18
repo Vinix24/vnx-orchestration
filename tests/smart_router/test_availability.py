@@ -266,6 +266,75 @@ class TestCooldownSeconds:
 
 
 # ---------------------------------------------------------------------------
+# OI-1346: ambiguous quota-or-auth reason through the full lane chain
+# ---------------------------------------------------------------------------
+
+class TestAmbiguousReasonChain:
+    """OI-1346: the classifier bug (bare "auth" substring matching inside
+    "quota_or_auth" — see tests/test_incident_taxonomy.py::
+    TestAmbiguousQuotaOrAuthClassification) has a behavioural consequence
+    through the full record_lane_failure -> lane_available chain, not just a
+    wrong label.
+
+    Measured on main before writing this test (see the dispatch report for
+    the literal command + output): because the ambiguous reason currently
+    classifies as PROVIDER_AUTH_FAILURE, record_lane_failure writes
+    recoverable=False. lane_cooldown_remaining short-circuits to float("inf")
+    for a non-recoverable failure (see test_auth_failure_never_auto_recovers
+    above) *before* it ever looks at "until" — so the lane's 0-second auth
+    cooldown never even matters: the lane goes unavailable and stays that way
+    forever, requiring operator intervention, even though the failure might
+    have been a plain hourly quota exhaustion that should self-heal.
+
+    A bare "assert not available" right after record_lane_failure would
+    already pass on unpatched main (the lane IS unavailable — just for the
+    wrong reason and for the wrong duration), so it would not be a red test.
+    The real, provable symptom is that the lane never re-engages: once the
+    correct classification (PROVIDER_QUOTA_EXHAUSTED) lands, the same
+    ambiguous reason must produce a *bounded* cooldown (3600s) and the lane
+    must become available again once that cooldown elapses.
+    """
+
+    AMBIGUOUS_KIMI_REASON = (
+        "kimi-cli: [quota_or_auth] provider=kimi reason=quota_or_auth "
+        "msg='Expecting value: line 1 column 1 (char 0)'"
+    )
+
+    def test_ambiguous_reason_self_heals_after_quota_cooldown(self, state_dir, monkeypatch):
+        import shutil
+
+        # Isolate the cooldown-classification bug from the unrelated
+        # CLI-presence gate: lane_available("kimi", ...) also refuses when
+        # the kimi CLI isn't on PATH, which would mask the cooldown bug on a
+        # machine without kimi installed.
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/kimi")
+
+        now = 5_000.0
+        record_lane_failure(
+            "kimi", self.AMBIGUOUS_KIMI_REASON, state_dir=state_dir, now=now,
+        )
+
+        # Immediately after the failure the lane must be unavailable —
+        # true both before and after the OI-1346 fix, included as a sanity
+        # check rather than the discriminating assertion.
+        ok_immediately, _ = lane_available("kimi", env={}, state_dir=state_dir, now=now)
+        assert ok_immediately is False
+
+        # The discriminating assertion: once a full quota cooldown (3600s)
+        # has elapsed, the lane must be available again. On unpatched main
+        # this fails — the misclassification marks the failure
+        # non-recoverable, so lane_cooldown_remaining stays float("inf")
+        # forever and the lane never re-engages on its own.
+        ok_after_cooldown, reason_after = lane_available(
+            "kimi", env={}, state_dir=state_dir, now=now + 3601,
+        )
+        assert ok_after_cooldown is True, (
+            f"lane should have self-healed after the quota cooldown, "
+            f"got: {reason_after!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Fail-open
 # ---------------------------------------------------------------------------
 
