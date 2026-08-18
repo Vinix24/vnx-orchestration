@@ -509,5 +509,121 @@ class TestDeliveryFailureClassification(unittest.TestCase):
         self.assertFalse(result["retryable"])
 
 
+# ---------------------------------------------------------------------------
+# TestNearEmptyCompletionMisclassifiedAsUnknown — OI-1333
+#
+# scripts/lib/failure_classification.py:132 only treats a FULLY empty
+# completion as `empty_completion` (`if not completion and error is None`).
+# Measured case, dispatch 20260817-d1592r3-pro: a deepseek-v4-pro review
+# dispatch ran 733s, spent 57,505 input / 1,937 output tokens, and returned a
+# 17-character completion. That completion cannot possibly be a report — the
+# envelope rejected it on the report contract (all four mandatory headings
+# absent) — yet classify_failure still calls it `unknown` because the
+# completion is merely non-empty rather than blank.
+#
+# The consequence sits one layer up: _ESCALATION_TABLE in
+# providers/smart_router/tier_routing.py maps `empty_completion` to
+# `retry_same_tier` but `unknown` to `no_climb`. The exact failure mode that
+# deserves a retry gets none. This class does not touch
+# failure_classification.py or tier_routing.py — it only proves the current
+# behavior is wrong and pins the two adjacent behaviors that must not
+# regress once the fix lands.
+# ---------------------------------------------------------------------------
+
+class TestNearEmptyCompletionMisclassifiedAsUnknown(unittest.TestCase):
+    """OI-1333: a vrijwel-lege completion (non-empty, but not a report) must
+    classify as `empty_completion`, not fall through to `unknown`."""
+
+    # The measured deepseek-v4-pro completion length (dispatch
+    # 20260817-d1592r3-pro) — demonstrably not a report: no headings, no
+    # structure, a single abrupt sentence fragment.
+    _NEAR_EMPTY_COMPLETION = "I cannot proceed."
+
+    _FULL_REPORT_COMPLETION = (
+        "## Summary\n"
+        "Fixed the empty completion misclassification bug so near-empty text "
+        "no longer falls through to the unknown bucket and misses a retry.\n\n"
+        "## Changes\n"
+        "Updated failure_classification.py to recognize a report-shaped "
+        "completion boundary.\n\n"
+        "## Verification\n"
+        "Ran the targeted pytest module; all cases green.\n\n"
+        "## Open Items\n"
+        "None\n"
+    )
+
+    def test_near_empty_completion_classifies_as_empty_completion(self):
+        """A short, demonstrably-not-a-report completion with no error must
+        classify as empty_completion, not unknown."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=None,
+            completion_text=self._NEAR_EMPTY_COMPLETION,
+            timed_out=False,
+            provider="litellm:deepseek",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "empty_completion")
+
+    def test_full_report_completion_is_not_classified_as_empty(self):
+        """A completion carrying all four mandatory report headings must NOT
+        be swept into empty_completion — this guards against a fix that
+        overshoots and starts treating legitimate output as empty. This test
+        passes today and must keep passing after the fix lands."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=None,
+            completion_text=self._FULL_REPORT_COMPLETION,
+            timed_out=False,
+            provider="litellm:deepseek",
+            returncode=1,
+        )
+        self.assertNotEqual(result["failure_class"], "empty_completion")
+
+    def test_fully_empty_completion_still_classifies_as_empty_completion(self):
+        """The existing fully-blank branch is untouched by this bug — it
+        already passes today and must keep passing after the fix lands."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=None,
+            completion_text="",
+            timed_out=False,
+            provider="litellm:deepseek",
+            returncode=0,
+        )
+        self.assertEqual(result["failure_class"], "empty_completion")
+
+    def test_near_empty_completion_escalates_as_retry_not_no_climb(self):
+        """The consequence, not just the label: feeding the near-empty
+        completion's failure_class through _ESCALATION_TABLE must yield
+        retry_same_tier — the same action a fully-empty completion gets.
+        Today it yields no_climb, the same as auth_rejected/unknown, so a
+        dispatch that deserves a retry gets none (measured: zero climbs
+        across 27,848 receipts)."""
+        from failure_classification import classify_failure
+        from providers.smart_router.tier_routing import escalate_tier
+
+        classification = classify_failure(
+            status="failure",
+            error=None,
+            completion_text=self._NEAR_EMPTY_COMPLETION,
+            timed_out=False,
+            provider="litellm:deepseek",
+            returncode=1,
+        )
+        escalation = escalate_tier(
+            "tier-mid",
+            "parent-dispatch-oi-1333",
+            failure_class=classification["failure_class"],
+        )
+        self.assertEqual(escalation.action, "retry_same_tier")
+
+
 if __name__ == "__main__":
     unittest.main()
