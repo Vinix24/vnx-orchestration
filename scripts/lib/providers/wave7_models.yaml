@@ -17,6 +17,8 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding-premium", "review", "analysis"]
       opus-4-8:
         litellm_name: "anthropic/claude-opus-4-8"
@@ -26,6 +28,8 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-06-18"
         task_classes: ["coding-premium", "review", "analysis"]
       opus-4-6:
         # RETIRED alias, kept deliberately (2026-07-22 model-registry-refresh): the field-test
@@ -40,6 +44,8 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-06-18"
         task_classes: ["coding-premium", "review", "analysis"]
       sonnet:
         litellm_name: "anthropic/claude-sonnet-5"
@@ -49,6 +55,8 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "review", "analysis"]
       haiku:
         litellm_name: "anthropic/claude-haiku-4-5-20251001"
@@ -58,6 +66,8 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "fast"]
       # 5-series (dispatch-20260802-model-ssot-en-ketenlink): Sonnet 5, Opus 5 and
       # Fable 5 now run in the fleet (operator + T0 run Opus 5; Fable 5 is the top
@@ -73,6 +83,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-08-03"
         task_classes: ["coding", "review", "analysis"]
       opus-5:
         litellm_name: "anthropic/claude-opus-5"
@@ -82,6 +94,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-08-03"
         task_classes: ["coding-premium", "review", "analysis"]
       fable-5:
         litellm_name: "anthropic/claude-fable-5"
@@ -91,6 +105,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-08-03"
         task_classes: ["coding-premium", "review", "analysis"]
   openai:
     enabled: true
@@ -105,6 +121,8 @@ providers:
         context_window: 128000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "review"]
       gpt-5.4:
         litellm_name: "openai/gpt-5.4"
@@ -114,6 +132,8 @@ providers:
         context_window: 128000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-06-07"
         task_classes: ["coding", "review"]
   google:
     enabled: true
@@ -127,6 +147,8 @@ providers:
         context_window: 1048576
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "review", "analysis"]
   deepseek:
     enabled: true
@@ -147,6 +169,8 @@ providers:
         context_window: 1000000      # 1M context
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-16"
         task_classes: ["coding-premium", "review", "analysis"]
         dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
       deepseek-v4-flash:
@@ -157,6 +181,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-16"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
   deepseek_harness:
@@ -175,6 +201,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-31"
         task_classes: ["coding-premium", "review", "analysis"]
         dispatch_allowed: true
       deepseek-v4-flash:
@@ -186,6 +214,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-31"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: true
       deepseek-v4-pro-default:
@@ -197,6 +227,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-31"
         task_classes: ["coding-premium", "review", "analysis"]
         dispatch_allowed: true
   moonshot:
@@ -210,6 +242,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-15"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: false  # bare-baseline only; governed dispatch uses kimi_cli
       kimi-k2-6:
@@ -219,6 +253,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-15"
         task_classes: ["coding-premium"]
         dispatch_allowed: false  # bare-baseline only; governed dispatch uses kimi_cli
   zai:
@@ -233,6 +269,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-08-10"
         task_classes: ["coding", "review"]
         deprecated_models:
           - "glm-4.5"
@@ -252,6 +290,8 @@ providers:
         context_window: 8192
         supports_streaming: false
         supports_tool_calls: false
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-06-03"
         task_classes: ["simple_synthesis", "classification", "documentation", "translation"]
         runtime: mlx
         fallback_runtime: ollama
@@ -280,6 +320,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-21"
         task_classes: ["coding", "coding-premium", "review", "analysis"]
         dispatch_allowed: true
       kimi-k2-7:
@@ -292,6 +334,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-21"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: true
       kimi-default:
@@ -301,6 +345,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: true
       kimi-k2-6:
@@ -310,6 +356,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding-premium"]
         # DISABLED 20260721 (kimi-lane-hardening): kimi-cli 1.46.0 has no "kimi-k2.6"/K2.6
         # model (verified against the installed CLI's own config.toml — only kimi-code/k3,
