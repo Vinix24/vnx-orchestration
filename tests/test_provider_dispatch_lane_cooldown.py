@@ -131,6 +131,7 @@ class TestKimi403WritesRealLaneCooldown:
         outright, as it did before this fix: the CLI-absence reason string
         doesn't contain "cooldown")."""
         import json
+        import math
 
         import provider_dispatch as pd
         from incident_taxonomy import IncidentClass
@@ -145,10 +146,16 @@ class TestKimi403WritesRealLaneCooldown:
         )
         data = json.loads(cooldown_path.read_text(encoding="utf-8"))
         assert data["lane"] == "kimi"
-        assert data["failure_class"] == IncidentClass.PROVIDER_AUTH_FAILURE.value
-        # 403/forbidden classifies as an auth failure, which never
-        # auto-recovers — lane_cooldown_remaining reads that as inf.
-        assert availability.lane_cooldown_remaining("kimi", state_dir=state_dir) == float("inf")
+        assert data["failure_class"] == IncidentClass.PROVIDER_QUOTA_EXHAUSTED.value
+        # kimi reports this 403 as `quota_or_auth` and cannot itself tell quota
+        # and auth apart; OI-940 identifies this specific case as quota
+        # exhaustion, not a broken key. A recoverable state must never
+        # permanently disable the lane, so the cooldown has to be both
+        # strictly positive (the lane is out for a while) and finite (it will
+        # come back on its own) — asserting only "> 0" would let inf through.
+        remaining = availability.lane_cooldown_remaining("kimi", state_dir=state_dir)
+        assert remaining > 0
+        assert math.isfinite(remaining)
 
     def test_next_routing_decision_skips_kimi_for_codex(self, monkeypatch):
         """After the cooldown write, the next routing decision for a
