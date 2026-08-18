@@ -452,6 +452,38 @@ class TestAmbiguousQuotaOrAuthClassification:
             ), reason
 
 
+class TestInsufficientMarkerPrecision:
+    """OI-1346 follow-up: the bare "insufficient" marker in
+    _QUOTA_SIGNAL_MARKERS is too broad. In practice "insufficient" shows up
+    far more often in auth language ("insufficient permissions",
+    "insufficient scope", "insufficient privileges") than in quota language.
+    Only the composite forms ("insufficient_quota", "insufficient balance",
+    "insufficient credit", ...) actually mean quota."""
+
+    def test_insufficient_permissions_classifies_as_auth(self):
+        assert classify_provider_failure(
+            "403 Forbidden: insufficient permissions for this resource"
+        ) == IncidentClass.PROVIDER_AUTH_FAILURE
+
+    def test_insufficient_scope_classifies_as_auth(self):
+        assert classify_provider_failure(
+            "authentication failed: insufficient scope"
+        ) == IncidentClass.PROVIDER_AUTH_FAILURE
+
+    def test_insufficient_quota_classifies_as_quota(self):
+        assert classify_provider_failure(
+            "Error 403: insufficient_quota"
+        ) == IncidentClass.PROVIDER_QUOTA_EXHAUSTED
+
+    def test_unauthorized_with_balance_signal_classifies_as_quota(self):
+        # Real ambiguity: an auth-shaped word ("unauthorized") plus a
+        # genuine balance signal — the ambiguous case must still resolve to
+        # the recoverable side.
+        assert classify_provider_failure(
+            "unauthorized: account balance is zero"
+        ) == IncidentClass.PROVIDER_QUOTA_EXHAUSTED
+
+
 class TestProviderContracts:
     """OI-1185: the three provider classes carry distinct recovery physics."""
 

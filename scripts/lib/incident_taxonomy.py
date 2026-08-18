@@ -647,7 +647,15 @@ _RATE_LIMIT_MARKERS = (
 # Used only by the ambiguity check in classify_provider_failure() below, not
 # as a branch of its own — the function already falls through to
 # PROVIDER_QUOTA_EXHAUSTED as its unconditional default.
-_QUOTA_SIGNAL_MARKERS = ("quota", "balance", "insufficient", "402")
+#
+# The bare word "insufficient" is deliberately NOT a marker here: in
+# practice it shows up more often in auth language than quota language —
+# "403 Forbidden: insufficient permissions for this resource" and
+# "authentication failed: insufficient scope" are both auth failures, not
+# quota ones, and a bare "insufficient" marker would flag both as ambiguous
+# and misclassify them as PROVIDER_QUOTA_EXHAUSTED. Only the composite forms
+# below actually mean quota.
+_QUOTA_SIGNAL_MARKERS = ("quota", "balance", "402", "insufficient credit")
 
 
 def classify_provider_failure(reason: str) -> IncidentClass:
