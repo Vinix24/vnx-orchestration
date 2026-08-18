@@ -400,6 +400,90 @@ class TestProviderFailureClassification:
         assert classify_provider_failure(None) == IncidentClass.PROVIDER_QUOTA_EXHAUSTED
 
 
+class TestAmbiguousQuotaOrAuthClassification:
+    """OI-1346: kimi-cli reports failures it cannot itself disambiguate as
+    quota-vs-auth, using the literal reason text 'quota_or_auth'. The bare
+    substring "auth" in _AUTH_FAILURE_MARKERS matches inside that word, so a
+    reason that explicitly says "I don't know if this is quota or auth" is
+    hard-classified as PROVIDER_AUTH_FAILURE — the least appropriate of the
+    two, since it also carries a zero-second cooldown (see
+    test_ambiguous_reason_gets_nonzero_cooldown) and, once written through
+    record_lane_failure, never auto-recovers (see
+    tests/smart_router/test_availability.py::TestAmbiguousReasonChain).
+    """
+
+    # Real ledger line (verbatim) — kimi-cli cannot distinguish quota
+    # exhaustion from an auth failure and says so in the reason text itself.
+    AMBIGUOUS_KIMI_REASON = (
+        "kimi-cli: [quota_or_auth] provider=kimi reason=quota_or_auth "
+        "msg='Expecting value: line 1 column 1 (char 0)'"
+    )
+
+    def test_ambiguous_reason_classifies_as_quota_not_auth(self):
+        """A reason that itself says "quota_or_auth" must fall through to the
+        quota-exhausted default, not the auth branch — the bare "auth"
+        substring inside "quota_or_auth" must not steal the match."""
+        assert classify_provider_failure(self.AMBIGUOUS_KIMI_REASON) == (
+            IncidentClass.PROVIDER_QUOTA_EXHAUSTED
+        )
+
+    def test_ambiguous_reason_gets_nonzero_cooldown(self):
+        """Whatever class the ambiguous reason resolves to, its retry-0
+        cooldown must be strictly positive. PROVIDER_AUTH_FAILURE carries a
+        0-second cooldown (waiting never fixes an expired key, so there is no
+        cooldown to wait out) — the wrong class for a reason that might just
+        be a transient/hourly quota issue."""
+        cls = classify_provider_failure(self.AMBIGUOUS_KIMI_REASON)
+        assert get_cooldown_seconds(cls, 0) > 0
+
+    def test_unambiguous_auth_reason_still_classifies_as_auth(self):
+        """Guard rail: an unambiguous auth failure (401, explicit invalid
+        API key, no mention of quota) must keep classifying as
+        PROVIDER_AUTH_FAILURE. This must be true before AND after the
+        OI-1346 fix — it protects the auth branch from being broken while
+        the ambiguous-reason bug above gets fixed."""
+        for reason in (
+            "kimi-cli: [auth] provider=kimi reason=401 "
+            "msg='Unauthorized: invalid api key'",
+            "HTTP 401: invalid api key",
+        ):
+            assert classify_provider_failure(reason) == (
+                IncidentClass.PROVIDER_AUTH_FAILURE
+            ), reason
+
+
+class TestInsufficientMarkerPrecision:
+    """OI-1346 follow-up: the bare "insufficient" marker in
+    _QUOTA_SIGNAL_MARKERS is too broad. In practice "insufficient" shows up
+    far more often in auth language ("insufficient permissions",
+    "insufficient scope", "insufficient privileges") than in quota language.
+    Only the composite forms ("insufficient_quota", "insufficient balance",
+    "insufficient credit", ...) actually mean quota."""
+
+    def test_insufficient_permissions_classifies_as_auth(self):
+        assert classify_provider_failure(
+            "403 Forbidden: insufficient permissions for this resource"
+        ) == IncidentClass.PROVIDER_AUTH_FAILURE
+
+    def test_insufficient_scope_classifies_as_auth(self):
+        assert classify_provider_failure(
+            "authentication failed: insufficient scope"
+        ) == IncidentClass.PROVIDER_AUTH_FAILURE
+
+    def test_insufficient_quota_classifies_as_quota(self):
+        assert classify_provider_failure(
+            "Error 403: insufficient_quota"
+        ) == IncidentClass.PROVIDER_QUOTA_EXHAUSTED
+
+    def test_unauthorized_with_balance_signal_classifies_as_quota(self):
+        # Real ambiguity: an auth-shaped word ("unauthorized") plus a
+        # genuine balance signal — the ambiguous case must still resolve to
+        # the recoverable side.
+        assert classify_provider_failure(
+            "unauthorized: account balance is zero"
+        ) == IncidentClass.PROVIDER_QUOTA_EXHAUSTED
+
+
 class TestProviderContracts:
     """OI-1185: the three provider classes carry distinct recovery physics."""
 
