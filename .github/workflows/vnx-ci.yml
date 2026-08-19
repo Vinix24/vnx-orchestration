@@ -9,6 +9,12 @@ jobs:
   profile-a:
     name: Profile A (doctor + core tests)
     runs-on: ubuntu-latest
+    # Bounds a hung job to minutes instead of GitHub's 6-hour hard runner
+    # limit. Measured baseline over 6 completed runs (18-08/19-08 2026):
+    # 16-21 min end to end. 45 min is well above that baseline and well
+    # under the 360-min hard limit — this is the vangnet for whatever hangs
+    # next, not a fix for the apt-mirror hang fixed below.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -56,11 +62,22 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          if command -v rg >/dev/null 2>&1; then
+            echo "ripgrep already present on the runner image, skipping apt install"
+            exit 0
+          fi
           # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
           # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
+          # A stalled external mirror can hang apt-get update indefinitely with
+          # no further log output — measured 2026-08-18/19: two runs hung six
+          # hours to the hard runner limit, a third hung until manually
+          # cancelled, all stuck after the same "noble-security InRelease"
+          # fetch line. This step normally completes in seconds, so a few
+          # minutes plus one retry bounds a slow mirror without masking a
+          # genuinely broken one.
+          sudo timeout 180s apt-get update || sudo timeout 180s apt-get update
+          sudo timeout 180s apt-get install -y ripgrep
 
       - name: Legacy path gate
         run: |
@@ -264,6 +281,9 @@ jobs:
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-latest
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -301,6 +321,9 @@ jobs:
   slug-match-check:
     name: Dispatch-ID Slug-Match Gate
     runs-on: ubuntu-latest
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -350,6 +373,9 @@ jobs:
     name: Profile C (adoption smoke tests)
     runs-on: ubuntu-latest
     needs: profile-a
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -411,6 +437,9 @@ jobs:
     name: Profile B (snapshot integration)
     runs-on: ubuntu-latest
     needs: profile-a
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -435,11 +464,18 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          if command -v rg >/dev/null 2>&1; then
+            echo "ripgrep already present on the runner image, skipping apt install"
+            exit 0
+          fi
           # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
           # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
+          # See the "Install ripgrep" step in Profile A above: a stalled
+          # mirror can hang apt-get indefinitely with no further log output.
+          # Bound it with a timeout plus one retry instead of hanging.
+          sudo timeout 180s apt-get update || sudo timeout 180s apt-get update
+          sudo timeout 180s apt-get install -y ripgrep
 
       - name: Legacy path gate
         run: |
@@ -489,6 +525,9 @@ jobs:
   dashboard-lint:
     name: Dashboard TS Lint (fixture-gate + typecheck)
     runs-on: ubuntu-latest
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -512,6 +551,9 @@ jobs:
   lint-patterns:
     name: Lint Patterns (silent-except + atomic-write)
     runs-on: ubuntu-latest
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -561,6 +603,9 @@ jobs:
   profile-d:
     name: Profile D (pip install smoke)
     runs-on: ubuntu-latest
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -583,6 +628,9 @@ jobs:
   state-pin-gate:
     name: Repo-local state-pin gate (#1043 footgun)
     runs-on: ubuntu-latest
+    # See "Profile A" above: bounds a hung job to minutes, not GitHub's
+    # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -590,11 +638,18 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          if command -v rg >/dev/null 2>&1; then
+            echo "ripgrep already present on the runner image, skipping apt install"
+            exit 0
+          fi
           # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
           # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y ripgrep
+          # See the "Install ripgrep" step in Profile A above: a stalled
+          # mirror can hang apt-get indefinitely with no further log output.
+          # Bound it with a timeout plus one retry instead of hanging.
+          sudo timeout 180s apt-get update || sudo timeout 180s apt-get update
+          sudo timeout 180s apt-get install -y ripgrep
 
       - name: Ban repo-local VNX_STATE_DIR pins
         run: |
