@@ -397,8 +397,9 @@ providers:
 # sonnet-5/opus-4-8/opus-4-6/kimi-k3/gpt-5.5 price corrections below — see
 # each model's price_source/price_checked_at for provenance): seven rungs,
 # cheapest first — the seven dispatchable (provider, model) pairs in
-# ascending output cost. A tier higher is demonstrably more expensive AND
-# more capable, so a quality escalation actually climbs:
+# ascending output cost. load_tier_ladder() enforces this order fail-loud
+# (strictly increasing cost, no duplicate primary) — it says nothing about
+# capability, only price:
 #
 #   tier-zero  deepseek-v4-flash  $0.28/Mtok out
 #   tier-low   deepseek-v4-pro    $0.87/Mtok out   (the daily workhorse)
@@ -407,6 +408,28 @@ providers:
 #   tier-high  opus-5            $25.00/Mtok out
 #   gpt-5.5    gpt-5.5           $30.00/Mtok out
 #   fable-5    fable-5           $50.00/Mtok out
+#
+# ESCALATION ORDER (routing.escalation_order, OI-1356): a SEPARATE, explicitly
+# authored list below — not derived from the cost ladder above. tier_map
+# answers "what does this tier cost"; escalation_order answers "where does a
+# REJECTED result climb to". The two used to be the same list (next_tier() and
+# escalate_tier() walked tier_map's own order), and that coupling was the
+# defect OI-1356 fixes: kimi-k3 and gpt-5.5 sit BETWEEN tier-mid/tier-high and
+# tier-high/fable-5 in cost order, so a quality climb off tier-mid landed on
+# kimi-k3 — a different lane (subscription -> provider-lane), its own quota,
+# its own failure modes, not a strictly-more-capable rung. escalation_order
+# breaks that link:
+#
+#   tier-zero -> tier-low -> tier-mid -> tier-high -> fable-5
+#
+# kimi-k3 and gpt-5.5 are deliberately NOT in escalation_order. They stay full
+# tier_map rungs — dispatchable at classification time, still fallback
+# destinations (the `fallback` lists below) — but next_tier() returns None for
+# them: no climb starts or lands there. The promise "a tier higher is
+# demonstrably more expensive AND more capable, so a quality escalation
+# actually climbs" now holds over escalation_order, not over tier_map: cost is
+# monotonic across the whole tier_map (that invariant is unchanged), but only
+# escalation_order's authored order claims capability.
 #
 # NOT on the ladder (measured 2026-08-15 over wave7_models.yaml):
 #   * glm-5.2 ($2.42/Mtok out) — the `zai` section carries NO `dispatch_enum`
@@ -421,20 +444,27 @@ providers:
 #
 # The four tier-zero/low/mid/high rungs are ALSO the classifier's scope buckets
 # (cost_tier.classify_dispatch): a NEW dispatch enters the ladder at one of them.
-# The three model-named rungs (kimi-k3, gpt-5.5, fable-5) are escalation
-# destinations only — reachable by climbing, never by classification.
+# kimi-k3 and gpt-5.5 are dispatch/fallback destinations only, never a climb
+# destination (excluded from escalation_order above).
 #
 # Two mechanisms, opposite in intent, are deliberately kept apart:
 #   * AVAILABILITY fallback (the `fallback` list below) — an unavailable lane is
 #     skipped and the next chain step takes over ON THE SAME TIER. It is a
 #     safety net, never an escalation.
-#   * QUALITY escalation (tier_routing.escalate_tier) — a REJECTED result fires
-#     a followup dispatch one tier UP (tier_to = tier_from + 1), linked by
-#     parent_dispatch. It climbs the ladder; it never walks the fallback list.
-# provider_registry.load_tier_ladder() enforces both invariants fail-loud: no
-# two tiers may resolve to the same primary (a duplicate rung escalates
-# nowhere) and primary cost must be strictly increasing (a higher rung must
-# actually be more expensive).
+#   * QUALITY escalation (tier_routing.escalate_tier / next_tier) — a REJECTED
+#     result fires a followup dispatch one tier UP escalation_order (never
+#     tier_map), linked by parent_dispatch. It climbs the escalation order; it
+#     never walks the fallback list.
+# provider_registry.load_tier_ladder() enforces the cost-ladder invariants
+# fail-loud: no two tiers may resolve to the same primary (a duplicate rung
+# escalates nowhere) and primary cost must be strictly increasing (a higher
+# rung must actually be more expensive).
+# provider_registry.load_escalation_order() enforces escalation_order's own
+# invariant fail-loud: every member must be a key in tier_map — an escalation
+# destination that is not even a valid tier is drift, not a typo to paper
+# over. A registry missing routing.escalation_order entirely also fails loud
+# (see load_escalation_order's docstring) rather than silently falling back
+# to the cost ladder, which would resurrect exactly this defect.
 # ---------------------------------------------------------------------------
 routing:
   tier_map:
@@ -484,3 +514,15 @@ routing:
       provider: anthropic
       model: fable-5
       lane: tmux_interactive
+
+  # Quality-escalation climb order (OI-1356) — see the comment block above
+  # `routing:` for the full rationale. Every member must be a key in
+  # tier_map above (provider_registry.load_escalation_order() validates this
+  # fail-loud). kimi-k3 and gpt-5.5 are intentionally absent: they stay
+  # dispatchable tier_map rungs but are not climb destinations.
+  escalation_order:
+    - tier-zero
+    - tier-low
+    - tier-mid
+    - tier-high
+    - fable-5

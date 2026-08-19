@@ -49,10 +49,10 @@ def _force_kimi(monkeypatch, present: bool):
 LADDER_ORDER = [
     TIER_ZERO,
     TIER_LOW,
-    "kimi-k3",
-    "gpt-5.5",
     TIER_MID,
+    "kimi-k3",
     TIER_HIGH,
+    "gpt-5.5",
     "fable-5",
 ]
 
@@ -96,10 +96,10 @@ def test_ladder_covers_every_dispatchable_model():
     assert [(r.tier, r.model, r.output_cost_per_mtok) for r in ladder] == [
         (TIER_ZERO, "deepseek-v4-flash", 0.28),
         (TIER_LOW, "deepseek-v4-pro", 0.87),
-        ("kimi-k3", "kimi-k3", 2.50),
-        ("gpt-5.5", "gpt-5.5", 10.00),
-        (TIER_MID, "sonnet-5", 15.00),
+        (TIER_MID, "sonnet-5", 10.00),
+        ("kimi-k3", "kimi-k3", 15.00),
         (TIER_HIGH, "opus-5", 25.00),
+        ("gpt-5.5", "gpt-5.5", 30.00),
         ("fable-5", "fable-5", 50.00),
     ]
 
@@ -193,9 +193,11 @@ def test_load_tier_ladder_fails_on_non_monotonic_cost(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_escalate_rejected_result_climbs_one_tier():
+    """OI-1356: tier-low climbs to tier-mid (escalation_order), not kimi-k3
+    (cost ladder) -- kimi-k3 is excluded from escalation_order."""
     esc = escalate_tier(TIER_LOW, "20260815-rejected-attempt", failure_class="model_error")
     assert esc.tier_from == TIER_LOW
-    assert esc.tier_to == "kimi-k3"
+    assert esc.tier_to == TIER_MID
     assert esc.parent_dispatch == "20260815-rejected-attempt"
 
 
@@ -215,22 +217,33 @@ def test_escalate_unknown_tier_returns_none():
     assert escalate_tier("tier-unknown", "d-unknown", failure_class="model_error").tier_to is None
 
 
-def test_escalate_model_named_rungs_climb_in_cost_order():
-    """The three escalation-only rungs slot into the climb at their cost position."""
-    assert escalate_tier("kimi-k3", "d1", failure_class="model_error").tier_to == "gpt-5.5"
-    assert escalate_tier("gpt-5.5", "d2", failure_class="model_error").tier_to == TIER_MID
+def test_kimi_k3_and_gpt_5_5_are_not_escalation_destinations():
+    """OI-1356: kimi-k3 and gpt-5.5 stay full tier_map rungs (dispatchable,
+    fallback-eligible) but are excluded from escalation_order, so they are
+    neither a climb source nor a climb destination.
+
+    This assertion changed meaning from the pre-OI-1356 version of this test
+    (formerly ``test_escalate_model_named_rungs_climb_in_cost_order``), which
+    asserted the three model-named rungs slotted into the climb at their cost
+    position (kimi-k3 -> gpt-5.5 -> tier-mid). That coupling -- escalation
+    walking the cost ladder instead of an explicit climb order -- is exactly
+    the defect OI-1356 removes."""
+    assert escalate_tier("kimi-k3", "d1", failure_class="model_error").tier_to is None
+    assert escalate_tier("gpt-5.5", "d2", failure_class="model_error").tier_to is None
     assert escalate_tier(TIER_HIGH, "d3", failure_class="model_error").tier_to == "fable-5"
     assert escalate_tier("fable-5", "d4", failure_class="model_error").tier_to is None
 
 
 def test_next_tier_matches_escalate_tier():
+    """OI-1356: the climb follows escalation_order (tier-zero -> tier-low ->
+    tier-mid -> tier-high -> fable-5); kimi-k3/gpt-5.5 are not on it."""
     assert next_tier(TIER_ZERO) == TIER_LOW
-    assert next_tier(TIER_LOW) == "kimi-k3"
-    assert next_tier("kimi-k3") == "gpt-5.5"
-    assert next_tier("gpt-5.5") == TIER_MID
+    assert next_tier(TIER_LOW) == TIER_MID
     assert next_tier(TIER_MID) == TIER_HIGH
     assert next_tier(TIER_HIGH) == "fable-5"
     assert next_tier("fable-5") is None
+    assert next_tier("kimi-k3") is None
+    assert next_tier("gpt-5.5") is None
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +251,10 @@ def test_next_tier_matches_escalate_tier():
 # ---------------------------------------------------------------------------
 
 def test_model_error_climbs_one_tier():
-    """model_error -> climb one tier."""
+    """model_error -> climb one tier (escalation_order: tier-low -> tier-mid)."""
     esc = escalate_tier(TIER_LOW, "d-model", failure_class="model_error")
     assert esc.action == "climb"
-    assert esc.tier_to == "kimi-k3"
+    assert esc.tier_to == TIER_MID
     assert esc.notify_operator is False
     assert esc.unknown_class is False
 
@@ -250,7 +263,7 @@ def test_credit_exhausted_climbs_and_notifies_operator():
     """credit_exhausted -> climb one tier AND notify operator."""
     esc = escalate_tier(TIER_LOW, "d-credit", failure_class="credit_exhausted")
     assert esc.action == "climb"
-    assert esc.tier_to == "kimi-k3"
+    assert esc.tier_to == TIER_MID
     assert esc.notify_operator is True
 
 
@@ -270,7 +283,7 @@ def test_timeout_retries_same_tier_then_climbs():
 
     climbed = escalate_tier(TIER_LOW, "d-timeout", failure_class="timeout", retried=True)
     assert climbed.action == "climb"
-    assert climbed.tier_to == "kimi-k3"
+    assert climbed.tier_to == TIER_MID
 
 
 def test_empty_completion_retries_same_tier_then_climbs():
@@ -281,7 +294,7 @@ def test_empty_completion_retries_same_tier_then_climbs():
 
     climbed = escalate_tier(TIER_LOW, "d-empty", failure_class="empty_completion", retried=True)
     assert climbed.action == "climb"
-    assert climbed.tier_to == "kimi-k3"
+    assert climbed.tier_to == TIER_MID
 
 
 def test_unknown_class_does_not_climb_and_reports_loud():
@@ -318,5 +331,5 @@ def test_quality_escalation_climbs_where_fallback_stays(monkeypatch):
 
     esc = escalate_tier(TIER_LOW, "d-rejected", failure_class="model_error")
     assert esc.tier_from == TIER_LOW
-    assert esc.tier_to == "kimi-k3"
+    assert esc.tier_to == TIER_MID
     assert esc.parent_dispatch == "d-rejected"

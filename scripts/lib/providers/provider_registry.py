@@ -311,6 +311,55 @@ def _output_cost_for(
     )
 
 
+def load_escalation_order(registry_path: Optional[Path] = None) -> List[str]:
+    """Resolve the quality-escalation climb order (OI-1356) from the registry.
+
+    ``routing.escalation_order`` is a separate, explicitly authored list from
+    ``routing.tier_map`` (the cost ladder): tier_map stays purely cost-ordered
+    (``load_tier_ladder``'s invariants are untouched by this function), while
+    escalation_order is the list ``tier_routing.next_tier`` reads for climb
+    destinations. A tier absent from escalation_order (e.g. kimi-k3, gpt-5.5)
+    is still a valid tier_map rung — dispatchable, fallback-eligible — just not
+    a climb destination.
+
+    Fails loud (RegistryLookupError) when:
+      * ``routing.escalation_order`` is missing entirely — silently falling
+        back to the cost ladder would resurrect the exact coupling this key
+        exists to break (a climb landing on a cheaper-but-different-lane
+        rung instead of a genuinely more-capable one). A registry that has
+        not been updated for OI-1356 must say so at load, not silently keep
+        the old behavior.
+      * a listed member is not a key in ``routing.tier_map`` — an escalation
+        destination that is not even a valid tier is drift, not a typo to
+        paper over.
+    """
+    path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
+    try:
+        with open(path) as fh:
+            raw = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        raise RegistryLookupError(f"registry file not found at {path}") from None
+    except yaml.YAMLError as exc:
+        raise RegistryLookupError(f"malformed registry yaml at {path}: {exc}") from exc
+
+    routing = raw.get("routing") or {}
+    if "escalation_order" not in routing:
+        raise RegistryLookupError(
+            f"routing.escalation_order is missing from {path}; the quality-"
+            "escalation climb order must be authored explicitly, separate "
+            "from routing.tier_map (OI-1356) — add the key to this registry"
+        )
+    escalation_order = routing.get("escalation_order") or []
+    known_tiers = set((routing.get("tier_map") or {}).keys())
+    for tier in escalation_order:
+        if tier not in known_tiers:
+            raise RegistryLookupError(
+                f"routing.escalation_order member {tier!r} is not a key in "
+                f"routing.tier_map in {path}"
+            )
+    return [str(tier) for tier in escalation_order]
+
+
 def load_tier_ladder(registry_path: Optional[Path] = None) -> List[TierLadderRung]:
     """Return the escalation ladder in the tier_map's authored order, validated.
 
