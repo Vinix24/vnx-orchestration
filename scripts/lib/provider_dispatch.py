@@ -480,9 +480,7 @@ def _resolve_registry_model_entry(cfg: Any, registry_key: str, model: str) -> Op
          boundary match). This keeps a dated/suffixed real model id (the
          registry's own "haiku" litellm_name is "claude-haiku-4-5-20251001")
          resolving after the fix, not just the two exact tiers above.
-         Longest-key-wins makes the pick independent of iteration order; a
-         tie between two equally-long candidates is refused (None) rather
-         than guessed — same principle as tier 3's total-miss case below.
+         Longest-key-wins makes the pick independent of iteration order.
 
     Returns None on a total miss. A miss is a valid, non-terminal signal here:
     `_compute_cost` falls back to the provider_costs rate table on a None, so
@@ -502,7 +500,11 @@ def _resolve_registry_model_entry(cfg: Any, registry_key: str, model: str) -> Op
         key=len,
         reverse=True,
     )
-    if candidates and (len(candidates) == 1 or len(candidates[0]) != len(candidates[1])):
+    # A same-length tie for candidates[0] is impossible by construction: two
+    # equal-length dict keys that both hyphen-prefix `stripped` would force
+    # stripped[:L] to equal both keys, i.e. the keys themselves would be
+    # equal — but cfg.models is a dict, so its keys are already unique.
+    if candidates:
         return cfg.models[candidates[0]]
     return None
 
