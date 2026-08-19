@@ -447,6 +447,65 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "local-gemma": "local_gemma",
 }
 
+# OI-1355: registry-section-specific model-name prefix a real provider model
+# slug carries but the registry's own keys do not — e.g. Anthropic hands back
+# "claude-opus-5" while wave7_models.yaml's anthropic section keys it "opus-5".
+# Only anthropic needs this today; other sections' model strings already hit
+# an exact key (litellm sub-providers) via the "/" split above the call site.
+_REGISTRY_KEY_MODEL_PREFIX: Dict[str, str] = {
+    "anthropic": "claude-",
+}
+
+
+def _resolve_registry_model_entry(cfg: Any, registry_key: str, model: str) -> Optional[Any]:
+    """Deterministically resolve `model` to one ProviderModel entry in `cfg.models`.
+
+    Three tiers, each strictly more specific than the last and NONE dependent
+    on dict iteration order (OI-1355: the prior substring scan picked
+    whichever key happened to iterate first, so "claude-opus-5" silently
+    priced as the shorter "opus" key purely because "opus" comes first in
+    wave7_models.yaml):
+
+      1. Exact key match on the raw (slash-stripped) model name — covers the
+         bare aliases ("opus", "sonnet", "haiku") and litellm sub-provider
+         model names (the "/" split already happened above).
+      2. Exact key match after stripping the registry section's known model
+         name-prefix (e.g. "claude-" for the anthropic section), so a real
+         Anthropic model slug like "claude-opus-5" or "claude-sonnet-5"
+         resolves to its OWN key ("opus-5", "sonnet-5") instead of a
+         same-family key that merely happens to be a substring of it.
+      3. The single LONGEST registry key that hyphen-bounds-prefixes the
+         (prefix-stripped) name — e.g. "haiku-4-5-20251001" against
+         {"opus", "sonnet", "haiku"} picks "haiku" (the only, hence longest,
+         boundary match). This keeps a dated/suffixed real model id (the
+         registry's own "haiku" litellm_name is "claude-haiku-4-5-20251001")
+         resolving after the fix, not just the two exact tiers above.
+         Longest-key-wins makes the pick independent of iteration order; a
+         tie between two equally-long candidates is refused (None) rather
+         than guessed — same principle as tier 3's total-miss case below.
+
+    Returns None on a total miss. A miss is a valid, non-terminal signal here:
+    `_compute_cost` falls back to the provider_costs rate table on a None, so
+    refusing to guess is always safer than fabricating a price.
+    """
+    model_key = model.split("/")[-1] if "/" in model else model
+    if model_key in cfg.models:
+        return cfg.models[model_key]
+
+    prefix = _REGISTRY_KEY_MODEL_PREFIX.get(registry_key)
+    stripped = model_key[len(prefix):] if prefix and model_key.startswith(prefix) else model_key
+    if stripped != model_key and stripped in cfg.models:
+        return cfg.models[stripped]
+
+    candidates = sorted(
+        (k for k in cfg.models if stripped.startswith(k + "-")),
+        key=len,
+        reverse=True,
+    )
+    if candidates and (len(candidates) == 1 or len(candidates[0]) != len(candidates[1])):
+        return cfg.models[candidates[0]]
+    return None
+
 
 def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str, float]]:
     """Load {input, output} pricing per MTok from wave7_models.yaml. Returns None on miss.
@@ -474,13 +533,13 @@ def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str,
                 provider, registry_key,
             )
             return None
-        model_key = model.split("/")[-1] if "/" in model else model
-        entry = (
-            cfg.models.get(model_key)
-            or next((v for k, v in cfg.models.items() if k in model_key or model_key in k), None)
-            or next(iter(cfg.models.values()), None)
-        )
+        entry = _resolve_registry_model_entry(cfg, registry_key, model)
         if entry is None:
+            logger.warning(
+                "_load_pricing_from_registry: no match for provider=%s model=%s "
+                "(registry_key=%s, %d models in section) — miss, not a fabricated price",
+                provider, model, registry_key, len(cfg.models),
+            )
             return None
         return {
             "input": float(entry.cost_input_per_mtok),
