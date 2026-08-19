@@ -20,16 +20,19 @@ providers:
         price_source: "unverified: registry-authored"
         price_checked_at: "2026-05-17"
         task_classes: ["coding-premium", "review", "analysis"]
+      # Price corrected 2026-08-19: this key carried the Opus 4.1 price
+      # (15.00/75.00) since the 4.8 rename — the OI-1335 inheritance
+      # pattern, name updated on upgrade, predecessor's price left behind.
       opus-4-8:
         litellm_name: "anthropic/claude-opus-4-8"
-        cost_input_per_mtok: 15.00
-        cost_output_per_mtok: 75.00
+        cost_input_per_mtok: 5.00
+        cost_output_per_mtok: 25.00
         max_tokens: 32000
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
-        price_source: "unverified: registry-authored"
-        price_checked_at: "2026-06-18"
+        price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
+        price_checked_at: "2026-08-19"
         task_classes: ["coding-premium", "review", "analysis"]
       opus-4-6:
         # RETIRED alias, kept deliberately (2026-07-22 model-registry-refresh): the field-test
@@ -37,15 +40,17 @@ providers:
         # reproducibility (see scripts/benchmark/models.yaml comment "pin 4-6 explicitly").
         # NOT used by current routing — smart_router / routing_recommendations.yaml use
         # `opus`/`opus-4-8` (current) instead. Do not repurpose this key for current traffic.
+        # Price corrected 2026-08-19: same OI-1335 inheritance pattern as
+        # opus-4-8 — carried the Opus 4.1 price (15.00/75.00).
         litellm_name: "anthropic/claude-opus-4-6"
-        cost_input_per_mtok: 15.00
-        cost_output_per_mtok: 75.00
+        cost_input_per_mtok: 5.00
+        cost_output_per_mtok: 25.00
         max_tokens: 32000
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
-        price_source: "unverified: registry-authored"
-        price_checked_at: "2026-06-18"
+        price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
+        price_checked_at: "2026-08-19"
         task_classes: ["coding-premium", "review", "analysis"]
       sonnet:
         litellm_name: "anthropic/claude-sonnet-5"
@@ -75,16 +80,21 @@ providers:
       # verified 2026-08-02 against the Anthropic first-party catalog: Sonnet 5
       # $3/$15 per MTok, Opus 5 $5/$25, Fable 5 $10/$50. Context/max-output are the
       # API ceilings (1M context / 128K output).
+      # Price corrected 2026-08-19: the 15.00 output price was the announced
+      # post-introductory rate. Anthropic cancelled that increase effective
+      # 2026-09-01, so the introductory 2.00/10.00 pair became the standing
+      # price instead — a scheduled change that never actually took effect,
+      # which is exactly what the price_checked_at field exists to catch.
       sonnet-5:
         litellm_name: "anthropic/claude-sonnet-5"
-        cost_input_per_mtok: 3.00
-        cost_output_per_mtok: 15.00
+        cost_input_per_mtok: 2.00
+        cost_output_per_mtok: 10.00
         max_tokens: 128000
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
-        price_source: "unverified: registry-authored"
-        price_checked_at: "2026-08-03"
+        price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
+        price_checked_at: "2026-08-19"
         task_classes: ["coding", "review", "analysis"]
       opus-5:
         litellm_name: "anthropic/claude-opus-5"
@@ -113,16 +123,18 @@ providers:
     api_key_env: OPENAI_API_KEY
     dispatch_enum: codex
     models:
+      # Price corrected 2026-08-19: this key carried the gpt-5.4 price
+      # (1.25/10.00) rather than gpt-5.5's own rate.
       gpt-5.5:
         litellm_name: "openai/gpt-5.5"
-        cost_input_per_mtok: 1.25
-        cost_output_per_mtok: 10.00
+        cost_input_per_mtok: 5.00
+        cost_output_per_mtok: 30.00
         max_tokens: 32000
         context_window: 128000
         supports_streaming: true
         supports_tool_calls: true
-        price_source: "unverified: registry-authored"
-        price_checked_at: "2026-05-17"
+        price_source: "OpenAI public pricing, verified by operator"
+        price_checked_at: "2026-08-17"
         task_classes: ["coding", "review"]
       gpt-5.4:
         litellm_name: "openai/gpt-5.4"
@@ -315,13 +327,15 @@ providers:
         # Verified 20260721 against the installed kimi-cli 1.46.0's own ~/.kimi/config.toml
         # (models."kimi-code/k3", 1M context, display_name "K3") — not guessed.
         cli_model_arg: "kimi-code/k3"
-        cost_input_per_mtok: 0.60
-        cost_output_per_mtok: 2.50
+        # Price corrected 2026-08-17: this key carried the K2-series price
+        # (0.60/2.50) inherited from kimi-k2-0905-default rather than K3's own.
+        cost_input_per_mtok: 3.00
+        cost_output_per_mtok: 15.00
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
-        price_source: "unverified: registry-authored"
-        price_checked_at: "2026-07-21"
+        price_source: "Moonshot K3 public pricing, verified by operator"
+        price_checked_at: "2026-08-17"
         task_classes: ["coding", "coding-premium", "review", "analysis"]
         dispatch_allowed: true
       kimi-k2-7:
@@ -379,17 +393,19 @@ providers:
 # RegistryLookupError (naming what+where) on anything this registry does not
 # know.
 #
-# COST LADDER (OI-1221, extended OI-1229): seven rungs, cheapest first — the
-# seven dispatchable (provider, model) pairs in ascending output cost. A tier
-# higher is demonstrably more expensive AND more capable, so a quality
-# escalation actually climbs:
+# COST LADDER (OI-1221, extended OI-1229; reordered 2026-08-19 after the
+# sonnet-5/opus-4-8/opus-4-6/kimi-k3/gpt-5.5 price corrections below — see
+# each model's price_source/price_checked_at for provenance): seven rungs,
+# cheapest first — the seven dispatchable (provider, model) pairs in
+# ascending output cost. A tier higher is demonstrably more expensive AND
+# more capable, so a quality escalation actually climbs:
 #
 #   tier-zero  deepseek-v4-flash  $0.28/Mtok out
 #   tier-low   deepseek-v4-pro    $0.87/Mtok out   (the daily workhorse)
-#   kimi-k3    kimi-k3            $2.50/Mtok out
-#   gpt-5.5    gpt-5.5           $10.00/Mtok out
-#   tier-mid   sonnet-5          $15.00/Mtok out
+#   tier-mid   sonnet-5          $10.00/Mtok out
+#   kimi-k3    kimi-k3           $15.00/Mtok out
 #   tier-high  opus-5            $25.00/Mtok out
+#   gpt-5.5    gpt-5.5           $30.00/Mtok out
 #   fable-5    fable-5           $50.00/Mtok out
 #
 # NOT on the ladder (measured 2026-08-15 over wave7_models.yaml):
@@ -444,6 +460,10 @@ routing:
         - provider: openai
           model: gpt-5.5
           lane: provider
+    tier-mid:
+      provider: anthropic
+      model: sonnet-5
+      lane: tmux_interactive
     kimi-k3:
       provider: kimi_cli
       model: kimi-k3
@@ -452,18 +472,14 @@ routing:
         - provider: openai
           model: gpt-5.5
           lane: provider
-    gpt-5.5:
-      provider: openai
-      model: gpt-5.5
-      lane: provider
-    tier-mid:
-      provider: anthropic
-      model: sonnet-5
-      lane: tmux_interactive
     tier-high:
       provider: anthropic
       model: opus-5
       lane: tmux_interactive
+    gpt-5.5:
+      provider: openai
+      model: gpt-5.5
+      lane: provider
     fable-5:
       provider: anthropic
       model: fable-5
