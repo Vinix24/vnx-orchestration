@@ -79,6 +79,32 @@ CREDIT_EXHAUSTED_KEYWORDS = (
 _JSON_MESSAGE_RE = re.compile(r'"message"\s*:\s*"([^"]*)"')
 _MAX_DETAIL_LEN = 300
 
+# OI-1333: a completion that fails every keyword match above (credit/auth/
+# model_error) AND is this short cannot possibly carry the report contract —
+# report_body_contract.py requires >= 50 non-whitespace chars for the Summary
+# heading alone, before any of the other three required headings. Below this
+# floor, a non-report reply reads as a bare, uninformative fragment rather
+# than a legitimate short answer, so it belongs in `empty_completion`
+# (escalation: retry_same_tier) rather than `unknown` (no_climb).
+#
+# Measured 2026-08-18 against t0_receipts.ndjson (schema_version=2 dispatch
+# receipts) plus the on-disk report bodies each receipt's report_path points
+# to — 504 successful completions, 69 real (non-placeholder) failed ones:
+#   SUCCESS completions : n=504, min=262 chars (smallest legitimate report)
+#   FAILURE completions : n=69,  smallest genuinely-empty fragment observed
+#                          is 17 chars ("Request timed out", the measured
+#                          OI-1333 case, dispatch 20260817-d1592r3-pro);
+#                          the smallest short-but-NAMED unmatched error text
+#                          observed is 34 chars ("API Error: Content block
+#                          not found") — informative enough to stay `unknown`
+#                          per this module's own "never silently absorb a
+#                          named-but-unmatched error" policy (see module
+#                          docstring). Nothing was observed in [18, 33].
+# 25 sits in that unobserved gap: well clear of the 17-char measured floor,
+# well clear of the 34-char named-error floor, and an order of magnitude
+# below the smallest real success (262).
+_NEAR_EMPTY_COMPLETION_CHARS = 25
+
 
 def _extract_detail(text: Optional[str], max_len: int = _MAX_DETAIL_LEN) -> str:
     """Pull a bounded, human-readable detail out of raw error/completion text.
@@ -193,10 +219,25 @@ def classify_failure(
     if error:
         return {"failure_class": "unknown", "failure_reason": error}
 
-    # ── error absent but completion is non-empty (guaranteed by the
-    # empty_completion guard above) — surface the completion itself instead
-    # of a contentless "(no error captured)" placeholder; the provider's own
-    # words are on disk, even if they match no known pattern above.
+    # ── error absent, completion non-empty, too short to be a report ─────
+    # (OI-1333) A completion under the floor is not meaningfully different
+    # from an empty one — see _NEAR_EMPTY_COMPLETION_CHARS above for the
+    # measurement backing this boundary.
+    if len(completion) < _NEAR_EMPTY_COMPLETION_CHARS:
+        return {
+            "failure_class": "empty_completion",
+            "failure_reason": (
+                f"provider={provider} returned a near-empty completion "
+                f"({len(completion)} chars, below the "
+                f"{_NEAR_EMPTY_COMPLETION_CHARS}-char floor a report needs) "
+                f"with returncode={returncode}: {_extract_detail(completion)}"
+            ),
+        }
+
+    # ── error absent but completion is non-empty and long enough to be
+    # informative — surface the completion itself instead of a contentless
+    # "(no error captured)" placeholder; the provider's own words are on
+    # disk, even if they match no known pattern above.
     return {
         "failure_class": "unknown",
         "failure_reason": f"provider={provider} returncode={returncode}: {_extract_detail(completion)}",

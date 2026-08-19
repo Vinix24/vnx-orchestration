@@ -132,7 +132,33 @@ class TestClassifyFailure:
         """A failure with no `error` but a non-empty, unrecognized completion
         surfaces the completion's own content — dispatch 20260816-p9p10-
         failure-reason-root: the old contentless '(no error captured)'
-        placeholder discarded exactly this text even though it was on disk."""
+        placeholder discarded exactly this text even though it was on disk.
+
+        The fixture is a named-but-unmatched error text at the measured
+        34-char floor (OI-1333) — long enough to clear the near-empty-
+        completion threshold in _NEAR_EMPTY_COMPLETION_CHARS, so this stays
+        `unknown` rather than `empty_completion`."""
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=None,
+            completion_text="API Error: Content block not found",
+            timed_out=False,
+            provider="mystery-provider",
+            returncode=1,
+        )
+        assert result["failure_class"] == "unknown"
+        assert result["failure_reason"] is not None
+        assert "API Error: Content block not found" in result["failure_reason"]
+        assert "no error captured" not in result["failure_reason"]
+
+    def test_empty_completion_when_completion_below_near_empty_floor(self):
+        """A failure with no `error` and a completion below the OI-1333
+        near-empty floor classifies as `empty_completion`, not `unknown` —
+        and the completion's own content still survives into failure_reason,
+        proving the near-empty branch doesn't discard content the way the
+        old '(no error captured)' placeholder used to."""
         from failure_classification import classify_failure
 
         result = classify_failure(
@@ -143,10 +169,9 @@ class TestClassifyFailure:
             provider="mystery-provider",
             returncode=1,
         )
-        assert result["failure_class"] == "unknown"
+        assert result["failure_class"] == "empty_completion"
         assert result["failure_reason"] is not None
         assert "some text" in result["failure_reason"]
-        assert "no error captured" not in result["failure_reason"]
 
     def test_success_returns_none_fields(self):
         """A success status returns None for both fields."""
