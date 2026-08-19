@@ -406,9 +406,17 @@ class TestComputeCost:
 
     def test_load_pricing_registry_openai_codex(self):
         import provider_dispatch as pd
-        pricing = pd._load_pricing_from_registry("codex", "")
+        pricing = pd._load_pricing_from_registry("codex", "gpt-5.5")
         assert pricing is not None
-        assert pricing["input"] > 0
+        assert abs(pricing["input"] - 1.25) < 1e-6
+        assert abs(pricing["output"] - 10.0) < 1e-6
+
+    def test_load_pricing_registry_openai_codex_empty_model_returns_none(self):
+        """OI-1355: an empty/unknown model name must miss, not fall back to the
+        first entry in the section (the blind first-match fallback removed in #1609)."""
+        import provider_dispatch as pd
+        pricing = pd._load_pricing_from_registry("codex", "")
+        assert pricing is None
 
     def test_load_pricing_registry_unknown_provider_returns_none(self):
         import provider_dispatch as pd
