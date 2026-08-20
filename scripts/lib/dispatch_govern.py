@@ -507,7 +507,9 @@ def _govern_error_fallback(
             model=spec.model or "",
             instruction=spec.instruction,
             response_text=f"Lane: {lane}. Error.",
-            findings=[],
+            # The error fallback synthesizes a body and never extracts structured
+            # findings, so "not captured" is the honest value, not "zero".
+            findings=None,
             duration_seconds=raw.duration_seconds,
             data_dir=spec.data_dir,
             body_override=error_body,
@@ -757,7 +759,9 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
             model=spec.model or "",
             instruction=spec.instruction,
             response_text=f"Lane: {lane}. Status: {status}.",
-            findings=[],
+            # Govern synthesis never extracts structured findings; findings=None
+            # marks "not captured" instead of a false authoritative "zero".
+            findings=None,
             duration_seconds=raw.duration_seconds,
             data_dir=spec.data_dir,
             frontmatter=emit_frontmatter,

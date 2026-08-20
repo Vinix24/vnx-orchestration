@@ -207,7 +207,9 @@ def _govern(
             model=spec.model or "",
             instruction=spec.instruction,
             response_text=adapter_result.completion_text,
-            findings=[],
+            # The generic wrapper reports the completion text, it never extracts
+            # structured findings — None marks "not captured", not a false "zero".
+            findings=None,
             duration_seconds=duration,
             data_dir=spec.data_dir,
             preserve_partial=adapter_result.status != "success",
