@@ -74,7 +74,7 @@ def test_escalation_bundle_writes_chain_link_fields_to_disk(tmp_path, monkeypatc
     payload = _read_payload(spec_file)
 
     assert payload["tier_from"] == "tier-low"
-    assert payload["tier_to"] == "kimi-k3"
+    assert payload["tier_to"] == "tier-mid"
     assert payload["parent_dispatch"] == _REJECTED_ID
     assert payload["dispatch_id"] == _FOLLOWUP_ID
 
@@ -85,8 +85,8 @@ def test_escalation_followup_runs_on_the_escalated_model(tmp_path, monkeypatch):
     _force_kimi(monkeypatch, present=True)
     payload = _read_payload(_stage_escalation(tmp_path))
 
-    assert payload["provider"] == "kimi"
-    assert payload["model"] == "kimi-k3"
+    assert payload["provider"] == "claude"
+    assert payload["model"] == "sonnet-5"
 
 
 def test_escalation_at_top_rung_refuses_to_stage(tmp_path, monkeypatch):
