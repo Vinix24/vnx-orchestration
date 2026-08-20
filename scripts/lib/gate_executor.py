@@ -16,6 +16,16 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+# `gh pr checks --json` (gh 2.76.2, measured 2026-08-20) has no `status`/
+# `conclusion` fields — it exposes `bucket`, which gh itself documents
+# (`gh pr checks --help`) as categorizing the raw `state` into exactly one
+# of: pass, fail, pending, skipping, cancel. "pending" is the only
+# non-terminal bucket; a bucket outside this known set is treated as
+# non-terminal too, so an unrecognized future value holds the verdict at
+# "running" instead of silently completing.
+_CI_CHECK_BUCKET_TERMINAL = {"pass", "fail", "skipping", "cancel"}
+_CI_CHECK_BUCKET_SKIP = {"skipping", "cancel"}
+
 
 def _format_ci_gate_report(
     *,
@@ -50,18 +60,18 @@ def _format_ci_gate_report(
         if passed:
             lines.append("### Passed")
             for c in passed:
-                lines.append(f"- [OK] {c.get('name', '?')} — {c.get('conclusion', 'SUCCESS')}")
+                lines.append(f"- [OK] {c.get('name', '?')} — {c.get('state', 'SUCCESS')}")
             lines.append("")
         if failed:
             lines.append("### Failed [BLOCKING]")
             for c in failed:
-                lines.append(f"- [BLOCKING] {c.get('name', '?')} — {c.get('conclusion', 'FAILURE')}")
+                lines.append(f"- [BLOCKING] {c.get('name', '?')} — {c.get('state', 'FAILURE')}")
                 lines.append(f"  - **Severity**: blocking")
             lines.append("")
         if skipped:
             lines.append("### Skipped / Cancelled")
             for c in skipped:
-                lines.append(f"- [ADVISORY] {c.get('name', '?')} — {c.get('conclusion', 'SKIPPED')}")
+                lines.append(f"- [ADVISORY] {c.get('name', '?')} — {c.get('state', 'SKIPPED')}")
             lines.append("")
     lines.append(f"**Status**: {'FAIL' if failed else 'PASS' if status == 'pass' else status.upper()}")
     lines.append(f"Passed: {len(passed)} | Failed: {len(failed)} | Skipped: {len(skipped)}")
@@ -161,7 +171,7 @@ class GateExecutorMixin:
         start = time.monotonic()
         try:
             proc = subprocess.run(
-                ["gh", "pr", "checks", str(pr_number), "--json", "name,status,conclusion"],
+                ["gh", "pr", "checks", str(pr_number), "--json", "name,bucket,state"],
                 capture_output=True, text=True, timeout=60, check=False,
             )
         except subprocess.TimeoutExpired:
@@ -205,11 +215,11 @@ class GateExecutorMixin:
                 )
             # no checks → vacuous pass; checks_list stays empty
 
-        passed = [c for c in checks_list if (c.get("conclusion") or "").upper() == "SUCCESS"]
-        failed = [c for c in checks_list if (c.get("conclusion") or "").upper() == "FAILURE"]
-        skipped = [c for c in checks_list if (c.get("conclusion") or "").upper() in ("SKIPPED", "CANCELLED")]
+        passed = [c for c in checks_list if (c.get("bucket") or "").lower() == "pass"]
+        failed = [c for c in checks_list if (c.get("bucket") or "").lower() == "fail"]
+        skipped = [c for c in checks_list if (c.get("bucket") or "").lower() in _CI_CHECK_BUCKET_SKIP]
         all_complete = all(
-            (c.get("status") or "").upper() == "COMPLETED" for c in checks_list
+            (c.get("bucket") or "").lower() in _CI_CHECK_BUCKET_TERMINAL for c in checks_list
         ) if checks_list else True  # vacuously complete when no checks
 
         # Determine terminal verdict
@@ -240,7 +250,7 @@ class GateExecutorMixin:
             {
                 "severity": "blocking",
                 "title": c.get("name", "unknown"),
-                "description": f"CI check '{c.get('name', '?')}' concluded with {c.get('conclusion', 'FAILURE')}",
+                "description": f"CI check '{c.get('name', '?')}' concluded with {c.get('state', 'FAILURE')}",
             }
             for c in failed
         ]
@@ -248,7 +258,7 @@ class GateExecutorMixin:
             {
                 "severity": "advisory",
                 "title": c.get("name", "unknown"),
-                "description": f"CI check '{c.get('name', '?')}' was {c.get('conclusion', 'SKIPPED')}",
+                "description": f"CI check '{c.get('name', '?')}' was {c.get('state', 'SKIPPED')}",
             }
             for c in skipped
         ]

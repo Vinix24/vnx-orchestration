@@ -140,12 +140,12 @@ def _make_subprocess_run(checks_json_str, head_sha="abc1234def5678", checks_retu
 
 
 def test_case_a_all_checks_pass(gate_env):
-    """Case A: all checks COMPLETED/SUCCESS → status=pass, blocking=[], verdict PASS."""
+    """Case A: all checks bucket=pass → status=pass, blocking=[], verdict PASS."""
     executor = _make_mock_executor(gate_env)
     pr_number = 42
     checks = [
-        {"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"name": "ci/lint", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"name": "ci/test", "bucket": "pass", "state": "SUCCESS"},
+        {"name": "ci/lint", "bucket": "pass", "state": "SUCCESS"},
     ]
     request_payload = _make_request_payload(
         pr_number=pr_number,
@@ -183,12 +183,12 @@ def test_case_a_all_checks_pass(gate_env):
 
 
 def test_case_b_one_failed_check(gate_env):
-    """Case B: 1 FAILURE check → blocking_findings has 1 entry, status=fail."""
+    """Case B: 1 bucket=fail check → blocking_findings has 1 entry, status=fail."""
     executor = _make_mock_executor(gate_env)
     pr_number = 43
     checks = [
-        {"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"name": "ci/security", "status": "COMPLETED", "conclusion": "FAILURE"},
+        {"name": "ci/test", "bucket": "pass", "state": "SUCCESS"},
+        {"name": "ci/security", "bucket": "fail", "state": "FAILURE"},
     ]
     request_payload = _make_request_payload(
         pr_number=pr_number,
@@ -225,12 +225,12 @@ def test_case_b_one_failed_check(gate_env):
 
 
 def test_case_c_checks_running(gate_env):
-    """Case C: checks IN_PROGRESS → status=running, no terminal verdict yet."""
+    """Case C: one check bucket=pending → status=running, no terminal verdict yet."""
     executor = _make_mock_executor(gate_env)
     pr_number = 44
     checks = [
-        {"name": "ci/test", "status": "IN_PROGRESS", "conclusion": None},
-        {"name": "ci/lint", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"name": "ci/test", "bucket": "pending", "state": "IN_PROGRESS"},
+        {"name": "ci/lint", "bucket": "pass", "state": "SUCCESS"},
     ]
     request_payload = _make_request_payload(
         pr_number=pr_number,
@@ -531,7 +531,7 @@ def test_contract_hash_determinism(gate_env):
     executor = _make_mock_executor(gate_env)
     pr_number = 50
     head_sha = "deadbeef1234"
-    checks = [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    checks = [{"name": "ci/test", "bucket": "pass", "state": "SUCCESS"}]
 
     def _run(cmd, **kwargs):
         cmd_str = " ".join(str(c) for c in cmd)
@@ -627,7 +627,7 @@ def test_contract_mode_uses_request_contract_hash(gate_env):
     executor = _make_mock_executor(gate_env)
     pr_number = 70
     contract_content_hash = "aabbccdd11223344"  # simulates ReviewContract.content_hash
-    checks = [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    checks = [{"name": "ci/test", "bucket": "pass", "state": "SUCCESS"}]
     request_payload = _make_request_payload(
         pr_number=pr_number,
         headless_reports_dir=gate_env["headless_reports_dir"],
@@ -655,7 +655,7 @@ def test_legacy_mode_contract_hash_is_sha256_of_execution_params(gate_env):
     executor = _make_mock_executor(gate_env)
     pr_number = 71
     head_sha = "cafebabe1234"
-    checks = [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    checks = [{"name": "ci/test", "bucket": "pass", "state": "SUCCESS"}]
     request_payload = _make_request_payload(
         pr_number=pr_number,
         headless_reports_dir=gate_env["headless_reports_dir"],
@@ -785,7 +785,7 @@ def test_running_verdict_resets_request_to_requested(gate_env):
     executor = _make_mock_executor(gate_env)
     pr_number = 80
     checks = [
-        {"name": "ci/test", "status": "IN_PROGRESS", "conclusion": None},
+        {"name": "ci/test", "bucket": "pending", "state": "IN_PROGRESS"},
     ]
     request_payload = _make_request_payload(
         pr_number=pr_number,
@@ -820,7 +820,7 @@ def test_completed_verdict_marks_request_completed(gate_env):
     """Finding 3 complement: terminal verdicts (pass/fail) still mark request as completed."""
     executor = _make_mock_executor(gate_env)
     pr_number = 81
-    checks = [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    checks = [{"name": "ci/test", "bucket": "pass", "state": "SUCCESS"}]
     request_payload = _make_request_payload(
         pr_number=pr_number,
         headless_reports_dir=gate_env["headless_reports_dir"],
@@ -904,3 +904,176 @@ def test_cli_per_pr_forwards_branch_and_require_github_pr(gate_env, tmp_path, mo
     assert captured.get("require_github_pr") is True, (
         "--require-github-pr must be forwarded to verify_pr_closure"
     )
+
+
+# ---------------------------------------------------------------------------
+# OI-1321: golden gh 2.76.2 JSON-schema fixtures.
+#
+# gh 2.76.2 (measured 2026-08-20) rejects `--json name,status,conclusion`
+# outright: "Unknown JSON field: status" / "conclusion". The only fields it
+# accepts are: bucket, completedAt, description, event, link, name,
+# startedAt, state, workflow. `gh pr checks --help` documents `bucket` as
+# categorizing the raw `state` into exactly one of: pass, fail, pending,
+# skipping, cancel.
+#
+# These three fixtures are the LITERAL `gh pr checks <pr> --json
+# name,state,bucket` output captured against real PRs in this repo on
+# 2026-08-20, not hand-written approximations — a hand-written fixture
+# could accidentally match whatever field names the parser happens to read,
+# which is exactly the failure mode this dispatch exists to close.
+# ---------------------------------------------------------------------------
+
+# Captured from `gh pr checks 1617 --json name,state,bucket` — a merged PR,
+# every check terminal and bucket=pass.
+_GH_2_76_2_GOLDEN_ALL_PASS = [
+    {"bucket": "pass", "name": "Profile B (snapshot integration)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Profile C (adoption smoke tests)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Trace Token Validation", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Dashboard TS Lint (fixture-gate + typecheck)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "ADR-003: No Anthropic SDK Imports", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "secret scan (gitleaks)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Gov-D3: Attestation signature gate (advisory)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Dispatch-ID Slug-Match Gate", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "docs/core/SUBSYSTEMS.md matches the live registry", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Repo-local state-pin gate (#1043 footgun)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Profile D (pip install smoke)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Profile A (doctor + core tests)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "vnx doctor smoke", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Lint Patterns (silent-except + atomic-write)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Anchor Immutability Check", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "ADR-003: No Anthropic SDK Imports", "state": "SUCCESS"},
+]
+
+# Captured from `gh pr checks 1613 --json name,state,bucket` — one required
+# check failed (bucket=fail), two skipped (bucket=skipping).
+_GH_2_76_2_GOLDEN_ONE_FAIL = [
+    {"bucket": "skipping", "name": "Profile B (snapshot integration)", "state": "SKIPPED"},
+    {"bucket": "skipping", "name": "Profile C (adoption smoke tests)", "state": "SKIPPED"},
+    {"bucket": "pass", "name": "secret scan (gitleaks)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Gov-D3: Attestation signature gate (advisory)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Trace Token Validation", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Lint Patterns (silent-except + atomic-write)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Anchor Immutability Check", "state": "SUCCESS"},
+    {"bucket": "fail", "name": "Profile A (doctor + core tests)", "state": "FAILURE"},
+    {"bucket": "pass", "name": "Dashboard TS Lint (fixture-gate + typecheck)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "vnx doctor smoke", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "docs/core/SUBSYSTEMS.md matches the live registry", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Repo-local state-pin gate (#1043 footgun)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Profile D (pip install smoke)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "ADR-003: No Anthropic SDK Imports", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Dispatch-ID Slug-Match Gate", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "ADR-003: No Anthropic SDK Imports", "state": "SUCCESS"},
+]
+
+# Captured from `gh pr checks 1619 --json name,state,bucket` while two
+# workflows were still mid-run — bucket=pending, state=IN_PROGRESS.
+_GH_2_76_2_GOLDEN_STILL_RUNNING = [
+    {"bucket": "pass", "name": "ADR-003: No Anthropic SDK Imports", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Lint Patterns (silent-except + atomic-write)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Repo-local state-pin gate (#1043 footgun)", "state": "SUCCESS"},
+    {"bucket": "pending", "name": "Profile A (doctor + core tests)", "state": "IN_PROGRESS"},
+    {"bucket": "pass", "name": "Profile D (pip install smoke)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Trace Token Validation", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Anchor Immutability Check", "state": "SUCCESS"},
+    {"bucket": "pending", "name": "Dashboard TS Lint (fixture-gate + typecheck)", "state": "IN_PROGRESS"},
+    {"bucket": "pass", "name": "Gov-D3: Attestation signature gate (advisory)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "Dispatch-ID Slug-Match Gate", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "docs/core/SUBSYSTEMS.md matches the live registry", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "secret scan (gitleaks)", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "vnx doctor smoke", "state": "SUCCESS"},
+    {"bucket": "pass", "name": "ADR-003: No Anthropic SDK Imports", "state": "SUCCESS"},
+]
+
+
+def test_golden_gh_2_76_2_fully_green_pr_gives_pass_with_evidence(gate_env):
+    """A fully-green PR against the real gh 2.76.2 schema reaches verdict=pass
+    with a non-empty contract_hash AND report_path, and the report file is
+    actually on disk — the layer-2 regression this dispatch exists to close
+    (a parser reading a vanished `status`/`conclusion` field silently stalls
+    at verdict=running forever and never writes a report at all)."""
+    executor = _make_mock_executor(gate_env)
+    pr_number = 1617
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        mock_sub.run.side_effect = _make_subprocess_run(
+            json.dumps(_GH_2_76_2_GOLDEN_ALL_PASS)
+        )
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        result = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=request_payload,
+        )
+
+    assert result["status"] == "pass"
+    assert result["contract_hash"] != "", "pass verdict must carry a non-empty contract_hash"
+    assert result["report_path"] != "", "pass verdict must carry a non-empty report_path"
+    assert Path(result["report_path"]).is_file(), "report must actually exist on disk"
+    assert result["blocking_findings"] == []
+    assert len(result["passed_checks"]) == len(_GH_2_76_2_GOLDEN_ALL_PASS)
+
+
+def test_golden_gh_2_76_2_one_failed_check_gives_fail(gate_env):
+    """A PR with one bucket=fail check against the real gh 2.76.2 schema
+    reaches verdict=fail, with the failing check named in blocking_findings."""
+    executor = _make_mock_executor(gate_env)
+    pr_number = 1613
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        mock_sub.run.side_effect = _make_subprocess_run(
+            json.dumps(_GH_2_76_2_GOLDEN_ONE_FAIL)
+        )
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        result = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=request_payload,
+        )
+
+    assert result["status"] == "fail"
+    assert result["blocking_count"] == 1
+    assert result["failed_checks"] == ["Profile A (doctor + core tests)"]
+    assert result["contract_hash"] != ""
+    assert result["report_path"] != ""
+    assert Path(result["report_path"]).is_file()
+    # The two skipping-bucket checks land as advisory, not blocking.
+    assert result["advisory_count"] == 2
+
+
+def test_golden_gh_2_76_2_pending_check_gives_running_and_no_report(gate_env):
+    """A PR with a bucket=pending check against the real gh 2.76.2 schema
+    reaches verdict=running and writes NO report — this is exactly the
+    silent layer-2 failure mode: before the fix, `status`/`conclusion` are
+    always None under the new schema, so verdict is permanently stuck at
+    running regardless of what the checks actually say."""
+    executor = _make_mock_executor(gate_env)
+    pr_number = 1619
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        mock_sub.run.side_effect = _make_subprocess_run(
+            json.dumps(_GH_2_76_2_GOLDEN_STILL_RUNNING)
+        )
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        result = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=request_payload,
+        )
+
+    assert result["status"] == "running"
+    assert result["contract_hash"] == ""
+    assert result["report_path"] == ""
+    # No report file was written anywhere under the reports dir.
+    assert list(gate_env["headless_reports_dir"].glob("*.md")) == []
