@@ -4,6 +4,90 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.6.0] — 2026-08-20
+
+Minor release since v1.5.0. The user-visible shape: a review gate can no
+longer be skipped — an ungated write or an ungated merge is now refused
+outright — the door refuses more before it ever spawns a worker (a
+known-rejected lane, a local-path project_id, a constraint-blocked model),
+failure classification reads structured signals (a bisect ref, tmux's real
+stderr, a measured length floor) instead of guessing from prose, dispatch
+report wrappers carry a machine-readable identity block, and CI no longer
+stalls on an external apt mirror.
+
+### Added
+
+- **A review gate can no longer be skipped (#1588, #1589, #1590, #1591)** —
+  a writing dispatch with an empty gate, and a merge without a gate
+  verdict, are now refused outright instead of merging silently — closing
+  the gap where 95 PRs merged over four days with zero review-gate runs.
+  The CI gate now binds to the PR head instead of falling back to whatever
+  is checked out locally, `ci_green_required` resolves to the actual
+  `ci_gate` check instead of an unrecognized gate name, and a merge is
+  pinned to the exact head SHA the gates approved so a late push during
+  the auto-merge wait can't slip an unreviewed commit through.
+- **The door refuses earlier and louder (#1586, #1584, #1587, #1600,
+  #1603)** — a dispatch now refuses to fire on a lane with a recent
+  quota/auth rejection before any worker spawns, instead of firing blind
+  into the same dead lane; a local filesystem git origin (e.g. a
+  release-time temp checkout) can no longer resolve as a project_id; a
+  constraint-blocked model (a deprecated GLM variant) in the routing
+  recommendations is now a hard load-time error instead of a silent
+  filter; and the `irreversible` flag and per-path `access` (read/write) a
+  dispatch declares now actually reach the router and the worker-scope
+  enforcement instead of dying partway down the door path.
+- **The dispatch report wrapper is machine-readable (D1+D2, #1619)** — the
+  generic report wrapper used to paste the full dispatch instruction under
+  `## Instruction`, which broke parsing for plan-gate seats (the
+  instruction itself carries a verdict-template fence the parser then
+  mistook for the seat's answer). The instruction echo is gone, and the
+  wrapper now stamps its own bold `**Model**`/`**Provider**` identity
+  block instead of a bullet list, so a wrapper report keeps a recoverable
+  identity even without frontmatter.
+
+### Fixed
+
+- **Failure classification is measured, not guessed (#1585, #1604, #1605,
+  #1606, #1607, #1609, #1617)** — a deep-analysis digest now distinguishes
+  "nothing was tried" from "every attempt failed" instead of collapsing
+  both to a bare zero; a near-empty completion (17 characters) is
+  classified `empty_completion` instead of falling to `unknown` and
+  missing its retry; ambiguous quota-or-auth error strings are told
+  apart; provider pricing now carries a `price_source`/`price_checked_at`
+  pair so a stale inherited price is visible; model-name resolution for
+  cost lookups is a deterministic three-tier match instead of a
+  dict-order guess that could fabricate a price; a regression's first-bad
+  commit is read structurally off the bisect ref instead of parsed from
+  git's version-dependent prose; and the orphan-sweep tmux session check
+  now recognizes tmux's real "no socket" stderr instead of a stubbed
+  string, so it no longer skips a worktree reap on an unmeasurable
+  listing.
+- **CI is more robust (#1608, #1616, #1622)** — the ripgrep install step no
+  longer runs `apt-get` against an external Ubuntu mirror that had twice
+  stalled the pipeline for hours; it is now a sha256-verified static
+  binary download, with every CI job carrying a timeout as a backstop.
+  The `ci_gate` check now speaks gh 2.76.2's current `pr-checks` JSON
+  schema (`name,bucket,state`) instead of the retired `status`/
+  `conclusion` fields, which had gone silently unrecognized and stalled
+  the gate at "running" forever.
+- **A quota/auth failure marks its lane out for the next dispatch
+  (#1592)** — `record_lane_failure` had no production caller, so a lane
+  that hit a quota or auth failure was never marked unavailable and the
+  next dispatch could re-enter the same dead lane, measured as 9
+  dispatches dying on the same kimi 403 within eight minutes. The
+  cooldown write now happens where the failure is actually observed, in
+  the provider-lane governance emit, gated on the two unambiguous
+  provider-failure classes.
+- **PR enforcement resolves the branch that was actually pushed (#1623)**
+  — PR enforcement only ever checked `dispatch/<id>` for a push and a PR.
+  A dispatch instruction that prescribes its own branch name made the
+  worker push a different branch, so the guard found nothing and booked a
+  completed, PR'd dispatch as `failure`. It now resolves the worktree's
+  actual checked-out branch for both the tmux and envelope lanes.
+- **Docstring typo corrected (#1498)** — a duplicated word ("Light light
+  caps decisions at 5") in a module docstring is fixed to match the
+  sibling item's phrasing.
+
 ## [1.5.0] — 2026-08-16
 
 Minor release since v1.4.7. The user-visible shape: the plan-gate
