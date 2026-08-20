@@ -243,7 +243,7 @@ def test_unified_report_created_for_each_provider(tmp_path, monkeypatch):
     assert _report_exists(tmp_path, dispatch_id)
     report_path = tmp_path / "data" / "unified_reports" / f"{dispatch_id}.md"
     content = report_path.read_text()
-    assert "Provider: litellm:deepseek" in content
+    assert "**Provider**: litellm:deepseek" in content
     assert "litellm response text" in content
 
 

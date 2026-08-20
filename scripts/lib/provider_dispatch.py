@@ -1195,9 +1195,12 @@ def _emit_governance(
                 dispatch_id=args.dispatch_id,
                 terminal_id=args.terminal_id,
                 provider=provider,
+                model=model_used,
                 instruction=args.instruction,
                 response_text=_extract_response_text(result),
-                findings=[],
+                # The generic wrapper reports the response text, it never extracts
+                # structured findings — None marks "not captured", not a false "zero".
+                findings=None,
                 duration_seconds=duration,
                 data_dir=data_dir,
                 frontmatter=frontmatter,

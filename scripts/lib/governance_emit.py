@@ -406,7 +406,7 @@ def emit_unified_report(
     provider: str,
     instruction: str,
     response_text: str,
-    findings: List[Dict[str, Any]],
+    findings: Optional[List[Dict[str, Any]]],
     duration_seconds: float,
     data_dir: Path,
     *,
@@ -414,6 +414,7 @@ def emit_unified_report(
     body_override: Optional[str] = None,
     overwrite: bool = False,
     preserve_partial: bool = False,
+    model: Optional[str] = None,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
@@ -437,6 +438,29 @@ def emit_unified_report(
     preserved sidecar makes the partial output retrievable while the canonical
     report stays contract-compliant. An existing report that PASSES the contract
     is never touched (idempotent early-return still applies).
+
+    The generic wrapper stamps its own bold identity block (``**Dispatch-ID**``,
+    ``**Model**`` from *model*, ``**Provider**``, ``**Terminal**``,
+    ``**Duration**``) instead of the legacy ``- Provider:`` bullet. The bold
+    form is the shape ``report_parser`` recovers model/provider identity from;
+    the bullet form is not. The wrapper no longer echoes *instruction* into the
+    report body — the instruction stays on disk in the dispatch bundle, findable
+    by dispatch-id, so echoing it only leaks instruction markers (e.g. the
+    plan-gate verdict template) into the artifact the parser reads.
+
+    ``**Model**`` is omitted when *model* is falsy (OI-1373): an empty
+    ``**Model**: `` line is the same "looks filled but says nothing" pattern the
+    findings distinction below removes, so the wrapper only stamps the field
+    when it has a value for it. The parser's bold-model regex needs a non-empty
+    value, so the empty line was already ignored; omitting it makes the wrapper
+    honest instead of merely inert.
+
+    ``findings`` distinguishes three states (D4): ``None`` means "not captured"
+    and the ``## Findings`` section is omitted entirely; an empty list means
+    "zero findings, and someone looked" and the section stays with the explicit
+    ``None``; a non-empty list renders each finding. No validation rule is
+    added and no report is refused — the wrapper simply stops writing an
+    unfilled field as the authoritative "there are none".
 
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
@@ -486,23 +510,43 @@ def emit_unified_report(
     if body_override is not None:
         body = body_override
     else:
-        if findings:
-            findings_lines = "\n".join(
-                f"- [{f.get('severity', 'info').upper()}] {f.get('message', str(f))}"
-                for f in findings
-            )
-        else:
-            findings_lines = "None"
+        # Identity block: bold fields only for what the wrapper can actually
+        # fill. OI-1373: **Model** is omitted when the caller does not know it —
+        # an empty "**Model**: " line is a field that "looks filled but says
+        # nothing", the same pattern the findings distinction below removes.
+        identity_lines = [f"**Dispatch-ID**: {dispatch_id}"]
+        if model:
+            identity_lines.append(f"**Model**: {model}")
+        identity_lines.extend([
+            f"**Provider**: {provider}",
+            f"**Terminal**: {terminal_id}",
+            f"**Duration**: {duration_seconds:.1f}s",
+        ])
+        identity_block = "\n".join(identity_lines)
 
         body = (
             f"# Dispatch {dispatch_id}\n\n"
-            f"- Provider: {provider}\n"
-            f"- Terminal: {terminal_id}\n"
-            f"- Duration: {duration_seconds:.1f}s\n\n"
-            f"## Instruction\n\n{instruction or '(not captured)'}\n\n"
-            f"## Response\n\n{response_text or '(no response captured)'}\n\n"
-            f"## Findings\n\n{findings_lines}\n"
+            f"{identity_block}\n\n"
+            f"## Response\n\n{response_text or '(no response captured)'}\n"
         )
+
+        # findings=None means "not captured": the section is omitted entirely,
+        # so the report never presents an unfilled field as the authoritative
+        # "there are none". findings=[] means "zero findings, and someone
+        # looked": the section stays with the explicit "None". A non-empty list
+        # renders each finding. This is the None-vs-[] distinction (D4, open
+        # question 2) — absent section, because no reader of the wrapper's
+        # ``## Findings`` heading exists (census in the PR) and an absent field
+        # is the one rendering that cannot be misread as a value.
+        if findings is not None:
+            if findings:
+                findings_lines = "\n".join(
+                    f"- [{f.get('severity', 'info').upper()}] {f.get('message', str(f))}"
+                    for f in findings
+                )
+            else:
+                findings_lines = "None"
+            body += f"\n## Findings\n\n{findings_lines}\n"
 
     if frontmatter:
         import yaml
