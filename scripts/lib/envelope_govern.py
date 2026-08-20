@@ -204,6 +204,7 @@ def _govern(
             dispatch_id=spec.dispatch_id,
             terminal_id=spec.terminal_id,
             provider=spec.provider,
+            model=spec.model or "",
             instruction=spec.instruction,
             response_text=adapter_result.completion_text,
             findings=[],

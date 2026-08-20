@@ -107,7 +107,7 @@ class TestFrontmatterGeneration:
         path = emit_unified_report(**kwargs)
         content = path.read_text()
         assert "# Dispatch test-d5f-001" in content
-        assert "## Instruction" in content
+        assert "## Instruction" not in content
         assert "## Response" in content
 
 

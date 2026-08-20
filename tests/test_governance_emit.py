@@ -387,7 +387,7 @@ def test_unified_report_markdown_format(tmp_data):
     path = emit_unified_report(**_base_report_kwargs(tmp_data))
     content = path.read_text()
     assert "# Dispatch test-dispatch-002" in content
-    assert "## Instruction" in content
+    assert "## Instruction" not in content
     assert "## Response" in content
     assert "## Findings" in content
 
@@ -395,7 +395,7 @@ def test_unified_report_markdown_format(tmp_data):
 def test_unified_report_includes_provider_in_header(tmp_data):
     path = emit_unified_report(**_base_report_kwargs(tmp_data))
     content = path.read_text()
-    assert "Provider: litellm:deepseek" in content
+    assert "**Provider**: litellm:deepseek" in content
 
 
 def test_unified_report_created_at_correct_path(tmp_data):

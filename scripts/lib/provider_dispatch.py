@@ -1195,6 +1195,7 @@ def _emit_governance(
                 dispatch_id=args.dispatch_id,
                 terminal_id=args.terminal_id,
                 provider=provider,
+                model=model_used,
                 instruction=args.instruction,
                 response_text=_extract_response_text(result),
                 findings=[],

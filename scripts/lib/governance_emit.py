@@ -414,6 +414,7 @@ def emit_unified_report(
     body_override: Optional[str] = None,
     overwrite: bool = False,
     preserve_partial: bool = False,
+    model: Optional[str] = None,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
@@ -437,6 +438,15 @@ def emit_unified_report(
     preserved sidecar makes the partial output retrievable while the canonical
     report stays contract-compliant. An existing report that PASSES the contract
     is never touched (idempotent early-return still applies).
+
+    The generic wrapper stamps its own bold identity block (``**Dispatch-ID**``,
+    ``**Model**`` from *model*, ``**Provider**``, ``**Terminal**``,
+    ``**Duration**``) instead of the legacy ``- Provider:`` bullet. The bold
+    form is the shape ``report_parser`` recovers model/provider identity from;
+    the bullet form is not. The wrapper no longer echoes *instruction* into the
+    report body — the instruction stays on disk in the dispatch bundle, findable
+    by dispatch-id, so echoing it only leaks instruction markers (e.g. the
+    plan-gate verdict template) into the artifact the parser reads.
 
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
@@ -496,10 +506,11 @@ def emit_unified_report(
 
         body = (
             f"# Dispatch {dispatch_id}\n\n"
-            f"- Provider: {provider}\n"
-            f"- Terminal: {terminal_id}\n"
-            f"- Duration: {duration_seconds:.1f}s\n\n"
-            f"## Instruction\n\n{instruction or '(not captured)'}\n\n"
+            f"**Dispatch-ID**: {dispatch_id}\n"
+            f"**Model**: {model or ''}\n"
+            f"**Provider**: {provider}\n"
+            f"**Terminal**: {terminal_id}\n"
+            f"**Duration**: {duration_seconds:.1f}s\n\n"
             f"## Response\n\n{response_text or '(no response captured)'}\n\n"
             f"## Findings\n\n{findings_lines}\n"
         )
