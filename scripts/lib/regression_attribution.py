@@ -33,7 +33,6 @@ from typing import Any, Dict, List, Optional
 STATUS_ATTRIBUTED = "attributed"
 STATUS_INCONCLUSIVE = "inconclusive"
 
-_FIRST_BAD_RE = re.compile(r"\b([0-9a-f]{7,40}) is the first bad commit\b")
 _DIFFSTAT_LINE_RE = re.compile(r"^\s*(.+?)\s+\|\s+\d+")
 
 
@@ -162,12 +161,79 @@ def _run_bisect(root: Path, check_cmd: str, good_sha: str, bad_sha: str) -> str:
         text=True,
     )
     output = f"{run_result.stdout}\n{run_result.stderr}"
-    match = _FIRST_BAD_RE.search(output)
-    if not match:
+    _require_bisect_converged(run_result.returncode, output)
+    return _bisect_bad_ref_sha(root, good_sha, bad_sha, output)
+
+
+def _require_bisect_converged(returncode: int, output: str) -> None:
+    """Loudly fail unless `git bisect run` reported convergence (exit status 0).
+
+    OI-1366: the bisect result is read STRUCTURALLY, never from git's
+    human-readable prose. That prose differs by git version: older git
+    prints `<sha> is the first bad commit`, newer git quotes the
+    (configurable, see `git bisect terms`) term and prints `<sha> is the
+    first 'bad' commit`. A regex on the unquoted wording silently misses on
+    newer git and attribution wrongly concluded "did not converge" — which
+    looked like flakiness because `ubuntu-latest` runners drift between
+    image versions shipping different git. Exit status 0 is the stable
+    signal: `git bisect run` exits 0 iff it found the first bad commit.
+    """
+    if returncode != 0:
         raise RegressionAttributionError(
-            f"git bisect run did not converge to a single commit:\n{output.strip()}"
+            f"git bisect run did not converge to a single commit "
+            f"(exit {returncode}):\n{output.strip()}"
         )
-    return _rev_parse(root, match.group(1))
+
+
+def _bisect_bad_ref_sha(root: Path, good_sha: str, bad_sha: str, output: str) -> str:
+    """Read the first-bad commit sha from the bisect ref after a converged run.
+
+    On convergence git points `refs/bisect/bad` at the first bad commit
+    (verified against git 2.50.1). Only `good` gets a per-sha suffix
+    (`refs/bisect/good-<sha>`, since bisect accepts more than one good ref);
+    `bad` is always the bare ref, because bisect tracks exactly one. Reading
+    the exact ref name (no glob) still requires exactly one match — that
+    alone catches the ref being absent.
+
+    The range check below only bounds the reported sha to what bisect could
+    have visited: past the merge-base of good_sha and bad_sha (git's actual
+    lower boundary once the history diverges — good_sha itself need not be
+    an ancestor of bad_sha) and no later than bad_sha. It says nothing about
+    whether the run truly converged: `refs/bisect/bad` exists and already
+    lies inside that range from the moment `git bisect start` runs, before
+    any candidate is tested, so a lying exit status would pass this check
+    too. Convergence is `_require_bisect_converged`'s job, decided from the
+    exit status alone.
+    """
+    ref_lines = _git(
+        root, "for-each-ref", "--format=%(objectname)", "refs/bisect/bad"
+    ).stdout.split()
+    unique_shas = set(ref_lines)
+    if len(unique_shas) != 1:
+        raise RegressionAttributionError(
+            f"expected exactly one bisect bad-ref sha after a converged run, "
+            f"found {len(unique_shas)} ({sorted(unique_shas)}):\n{output.strip()}"
+        )
+    sha = unique_shas.pop()
+
+    merge_base_sha = _git(root, "merge-base", good_sha, bad_sha).stdout.strip()
+
+    inside_bad_range = _git(
+        root, "merge-base", "--is-ancestor", sha, bad_sha, check=False
+    ).returncode == 0
+    past_lower_bound = (
+        sha != merge_base_sha
+        and _git(
+            root, "merge-base", "--is-ancestor", merge_base_sha, sha, check=False
+        ).returncode == 0
+    )
+    if not (inside_bad_range and past_lower_bound):
+        raise RegressionAttributionError(
+            f"bisect bad-ref sha {sha[:12]} lies outside the bisected range "
+            f"({merge_base_sha[:12]}..{bad_sha[:12]}); refusing to attribute:\n"
+            f"{output.strip()}"
+        )
+    return sha
 
 
 def _commit_details(root: Path, sha: str) -> Dict[str, Any]:
