@@ -91,6 +91,47 @@ def fixture_repo(tmp_path):
     }
 
 
+@pytest.fixture()
+def divergent_fixture_repo(tmp_path):
+    """Diverged history: the breaking commit lives on a side branch, `good`
+    sits on the mainline, and neither is an ancestor of the other.
+
+    Regression fixture for the range-check fix: the old check required
+    good_sha to be an ancestor of the reported sha, which a diverged history
+    never satisfies even though `git bisect` itself converges correctly
+    (its real lower boundary is the merge-base of good_sha and bad_sha).
+    """
+    root = tmp_path / "divergent-fixture-repo"
+    root.mkdir()
+    _git(root, "init", "--quiet")
+    _git(root, "config", "user.name", "VNX Test")
+    _git(root, "config", "user.email", "vnx-test@example.invalid")
+    _git(root, "config", "commit.gpgsign", "false")
+
+    (root / "check.sh").write_text("#!/bin/bash\nexit 0\n")
+    (root / "README.md").write_text("v1\n")
+    root_commit = _commit(root, "root: initial passing check")
+
+    _git(root, "checkout", "--quiet", "-b", "side")
+    (root / "check.sh").write_text("#!/bin/bash\nexit 1\n")
+    break_commit = _commit(root, "side: BREAKS check.sh")
+    (root / "README.md").write_text("side-v2\n")
+    bad_commit = _commit(root, "side: unrelated change after break")
+
+    _git(root, "checkout", "--quiet", root_commit)
+    _git(root, "checkout", "--quiet", "-b", "main-line")
+    (root / "README.md").write_text("main-v2\n")
+    good_commit = _commit(root, "main-line: unrelated doc change, check still passing")
+
+    return {
+        "root": root,
+        "root_commit": root_commit,
+        "break_commit": break_commit,
+        "bad_commit": bad_commit,
+        "good_commit": good_commit,
+    }
+
+
 class TestAttributesExactBreakingCommit:
     def test_names_exact_breaking_commit_and_files(self, fixture_repo):
         root = fixture_repo["root"]
@@ -252,6 +293,39 @@ class TestBisectNonConvergenceEndToEnd:
 
         assert _head_sha(root) == fixture_repo["commit4"]
         assert not _bisect_in_progress(root)
+
+
+class TestDivergentHistoryUsesMergeBaseLowerBound:
+    """OI-1617: good_sha need not be an ancestor of the bisected sha.
+
+    Before the fix, the range check required good_sha itself to be an
+    ancestor of the reported sha — false whenever history has diverged,
+    even though git bisect converges correctly. The fix moves the lower
+    bound to merge-base(good_sha, bad_sha), which is git's real boundary.
+    """
+
+    def test_attributes_breaking_commit_on_side_branch(self, divergent_fixture_repo):
+        root = divergent_fixture_repo["root"]
+
+        # Sanity check the fixture actually diverges: good_commit must NOT
+        # be an ancestor of bad_commit, or this test would not exercise the
+        # merge-base fix at all.
+        assert subprocess.run(
+            ["git", "merge-base", "--is-ancestor",
+             divergent_fixture_repo["good_commit"], divergent_fixture_repo["bad_commit"]],
+            cwd=str(root),
+        ).returncode != 0
+
+        result = attribute_regression(
+            check_cmd="bash check.sh",
+            good_ref=divergent_fixture_repo["good_commit"],
+            bad_ref=divergent_fixture_repo["bad_commit"],
+            repo_root=root,
+        )
+
+        assert result.status == "attributed"
+        assert result.commit_sha == divergent_fixture_repo["break_commit"]
+        assert result.subject == "side: BREAKS check.sh"
 
 
 class TestDirtyWorkingTreeRefused:

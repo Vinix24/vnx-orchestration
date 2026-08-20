@@ -186,19 +186,27 @@ def _require_bisect_converged(returncode: int, output: str) -> None:
 
 
 def _bisect_bad_ref_sha(root: Path, good_sha: str, bad_sha: str, output: str) -> str:
-    """Read the first-bad commit sha from the bisect refs after a converged run.
+    """Read the first-bad commit sha from the bisect ref after a converged run.
 
     On convergence git points `refs/bisect/bad` at the first bad commit
-    (verified against git 2.50.1). The glob `refs/bisect/bad*` also matches
-    the suffixed form `refs/bisect/bad-<sha>` written by some versions; the
-    dedupe below collapses both forms when they coexist.
+    (verified against git 2.50.1). Only `good` gets a per-sha suffix
+    (`refs/bisect/good-<sha>`, since bisect accepts more than one good ref);
+    `bad` is always the bare ref, because bisect tracks exactly one. Reading
+    the exact ref name (no glob) still requires exactly one match — that
+    alone catches the ref being absent.
 
-    Non-convergence stays loud even if the exit status lied: there must be
-    exactly one distinct bad-ref sha, and it must lie strictly inside
-    (good_sha, bad_sha] — a commit bisect never named can never be reported.
+    The range check below only bounds the reported sha to what bisect could
+    have visited: past the merge-base of good_sha and bad_sha (git's actual
+    lower boundary once the history diverges — good_sha itself need not be
+    an ancestor of bad_sha) and no later than bad_sha. It says nothing about
+    whether the run truly converged: `refs/bisect/bad` exists and already
+    lies inside that range from the moment `git bisect start` runs, before
+    any candidate is tested, so a lying exit status would pass this check
+    too. Convergence is `_require_bisect_converged`'s job, decided from the
+    exit status alone.
     """
     ref_lines = _git(
-        root, "for-each-ref", "--format=%(objectname)", "refs/bisect/bad*"
+        root, "for-each-ref", "--format=%(objectname)", "refs/bisect/bad"
     ).stdout.split()
     unique_shas = set(ref_lines)
     if len(unique_shas) != 1:
@@ -208,19 +216,21 @@ def _bisect_bad_ref_sha(root: Path, good_sha: str, bad_sha: str, output: str) ->
         )
     sha = unique_shas.pop()
 
+    merge_base_sha = _git(root, "merge-base", good_sha, bad_sha).stdout.strip()
+
     inside_bad_range = _git(
         root, "merge-base", "--is-ancestor", sha, bad_sha, check=False
     ).returncode == 0
-    past_good = (
-        sha != good_sha
+    past_lower_bound = (
+        sha != merge_base_sha
         and _git(
-            root, "merge-base", "--is-ancestor", good_sha, sha, check=False
+            root, "merge-base", "--is-ancestor", merge_base_sha, sha, check=False
         ).returncode == 0
     )
-    if not (inside_bad_range and past_good):
+    if not (inside_bad_range and past_lower_bound):
         raise RegressionAttributionError(
             f"bisect bad-ref sha {sha[:12]} lies outside the bisected range "
-            f"({good_sha[:12]}..{bad_sha[:12]}); refusing to attribute:\n"
+            f"({merge_base_sha[:12]}..{bad_sha[:12]}); refusing to attribute:\n"
             f"{output.strip()}"
         )
     return sha
