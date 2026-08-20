@@ -239,6 +239,65 @@ def classify(handle: WorktreeHandle) -> Literal["clean", "committed", "pushed", 
     )
 
 
+def _drift_safe_effective_branch(
+    *, current: str, branch: str, dispatch_id: str,
+) -> "tuple[str, bool]":
+    """Decide whether the ACTUAL checked-out branch (*current*) is a safe
+    substitute for the EXPECTED dispatch-id-derived branch (*branch*), or
+    OI-1124 cross-dispatch identity drift.
+
+    Returns ``(effective_branch, is_drift)``:
+    - ``(branch, False)``  — *current* is empty or already equals *branch*: no
+      substitution needed.
+    - ``(branch, True)``   — *current* names a DIFFERENT dispatch's branch
+      (cross-dispatch drift) — the caller must treat this as a safety concern
+      and never redirect enforcement onto it.
+    - ``(current, False)`` — *current* is a legitimate substitute: a
+      worker-chosen custom name (``fix/...``), or the SAME dispatch under a
+      different branch form/prefix. OI-1372: a dispatch instruction can
+      prescribe its own branch name, and the worker then pushes THAT branch,
+      not ``dispatch/<id>`` — *current* is where any push actually landed.
+    """
+    if not current or current == branch:
+        return branch, False
+    drift = _DISPATCH_BRANCH_RE.match(current)
+    expected_ids = {dispatch_id}
+    expected = _DISPATCH_BRANCH_RE.match(branch)
+    if expected:
+        expected_ids.add(expected.group("id"))
+    if drift and drift.group("id") not in expected_ids:
+        return branch, True
+    return current, False
+
+
+def resolve_effective_branch(
+    *, wt: "Path | str", expected_branch: str, dispatch_id: str,
+) -> str:
+    """OI-1372: resolve the branch push/PR enforcement should actually target.
+
+    Reads the worktree's checked-out branch directly (mirrors
+    ``envelope_govern_support._resolve_phantom_diff``'s OI-870 fix) instead of
+    trusting the dispatch-id-derived name unconditionally. A dispatch
+    instruction can prescribe its own branch name (fix-forward, or a
+    worker-chosen name) — the worker then pushes THAT branch, not
+    ``dispatch/<id>``, and PR-enforcement code that only ever looks at
+    ``dispatch/<id>`` rejects a real, delivered success as
+    ``dispatch_branch_no_pr`` (a false failure booked over completed work).
+
+    Returns the checked-out branch when it is a legitimate custom name (or the
+    same dispatch under a different form); returns *expected_branch* unchanged
+    when the checked-out branch names a DIFFERENT dispatch's identity (OI-1124
+    cross-dispatch drift) — that case is a safety concern ``classify_path``'s
+    own guard classifies ``dirty``, not a legitimate rename, so this function
+    never redirects enforcement onto it.
+    """
+    current = _current_branch(wt)
+    effective_branch, _is_drift = _drift_safe_effective_branch(
+        current=current, branch=expected_branch, dispatch_id=dispatch_id,
+    )
+    return effective_branch
+
+
 def classify_path(
     *,
     wt: "Path | str",
@@ -284,24 +343,26 @@ def classify_path(
     # reap preserves and locks it for identity review instead of reaping or
     # branch-deleting under the wrong identity. Worker-chosen non-dispatch
     # branches (``fix/...``) and a re-formed branch carrying the OWN id keep
-    # their normal verdicts: identity is intact there, only the form differs.
+    # their normal verdicts: identity is intact there, only the form differs
+    # — and (OI-1372) THAT checked-out branch, not the dispatch-id-derived
+    # name, is what the remote-push check below targets: a dispatch
+    # instruction can prescribe its own branch name, and the worker then
+    # pushes THAT branch, never touching ``dispatch/<id>`` at all.
     current = _current_branch(wt)
-    if current and current != branch:
-        drift = _DISPATCH_BRANCH_RE.match(current)
-        expected_ids = {dispatch_id}
-        expected = _DISPATCH_BRANCH_RE.match(branch)
-        if expected:
-            expected_ids.add(expected.group("id"))
-        if drift and drift.group("id") not in expected_ids:
-            logger.warning(
-                "OI-1124 BRANCH-IDENTITY DRIFT: worktree %s (dispatch %s) is "
-                "checked out on %r, which names a DIFFERENT dispatch (%r); "
-                "expected %r. Classifying 'dirty' so the worktree is preserved "
-                "for identity review instead of reaped or merged under the "
-                "wrong name.",
-                wt, dispatch_id, current, drift.group("id"), branch,
-            )
-            return "dirty"
+    effective_branch, _is_drift = _drift_safe_effective_branch(
+        current=current, branch=branch, dispatch_id=dispatch_id,
+    )
+    if _is_drift:
+        drift_id = _DISPATCH_BRANCH_RE.match(current).group("id")
+        logger.warning(
+            "OI-1124 BRANCH-IDENTITY DRIFT: worktree %s (dispatch %s) is "
+            "checked out on %r, which names a DIFFERENT dispatch (%r); "
+            "expected %r. Classifying 'dirty' so the worktree is preserved "
+            "for identity review instead of reaped or merged under the "
+            "wrong name.",
+            wt, dispatch_id, current, drift_id, branch,
+        )
+        return "dirty"
 
     status_result = _run(
         [
@@ -342,8 +403,14 @@ def classify_path(
         return "clean"
 
     # New commits exist (HEAD diverged from a known base) — determine whether
-    # they've been pushed to origin.
-    remote_ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
+    # they've been pushed to origin. Uses effective_branch (OI-1372): the
+    # actually-checked-out branch when it is a legitimate custom name, so a
+    # dispatch that pushed onto a prescribed branch is measured against WHERE
+    # it actually pushed, not the dispatch-id-derived name it never touched.
+    remote_ref = (
+        effective_branch if effective_branch.startswith("refs/")
+        else f"refs/heads/{effective_branch}"
+    )
     try:
         ls_result = _run(
             ["git", "-C", str(wt), "ls-remote", "origin", remote_ref],
@@ -351,10 +418,12 @@ def classify_path(
         )
         remote_output = ls_result.stdout.strip() if ls_result.returncode == 0 else ""
     except subprocess.TimeoutExpired:
-        logger.warning("ls-remote timed out for %s; treating as committed", branch)
+        logger.warning("ls-remote timed out for %s; treating as committed", effective_branch)
         return "committed"
     except Exception as exc:
-        logger.warning("ls-remote failed for %s (%s); treating as committed", branch, exc)
+        logger.warning(
+            "ls-remote failed for %s (%s); treating as committed", effective_branch, exc,
+        )
         return "committed"
 
     if not remote_output:
