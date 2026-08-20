@@ -405,10 +405,30 @@ class TestComputeCost:
         assert pricing["output"] > 0
 
     def test_load_pricing_registry_openai_codex(self):
+        """codex -> openai section resolution: this proves the KEY mapping
+        (codex resolves into the openai section and picks the gpt-5.5 entry
+        intact), not a specific price. The price itself is owned by the
+        registry — and by PR #1606, which corrects it — so pin against what
+        the registry itself declares for gpt-5.5, not a literal that goes
+        stale the moment that PR lands.
+        """
         import provider_dispatch as pd
-        pricing = pd._load_pricing_from_registry("codex", "")
+        from providers import provider_registry
+
+        expected = provider_registry.load()["openai"].models["gpt-5.5"]
+        pricing = pd._load_pricing_from_registry("codex", "gpt-5.5")
         assert pricing is not None
         assert pricing["input"] > 0
+        assert pricing["output"] > 0
+        assert abs(pricing["input"] - expected.cost_input_per_mtok) < 1e-6
+        assert abs(pricing["output"] - expected.cost_output_per_mtok) < 1e-6
+
+    def test_load_pricing_registry_openai_codex_empty_model_returns_none(self):
+        """OI-1355: an empty/unknown model name must miss, not fall back to the
+        first entry in the section (the blind first-match fallback removed in #1609)."""
+        import provider_dispatch as pd
+        pricing = pd._load_pricing_from_registry("codex", "")
+        assert pricing is None
 
     def test_load_pricing_registry_unknown_provider_returns_none(self):
         import provider_dispatch as pd
