@@ -62,22 +62,31 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          set -euo pipefail
           if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping apt install"
+            echo "ripgrep already present on the runner image, skipping download"
             exit 0
           fi
-          # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
-          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
-          # A stalled external mirror can hang apt-get update indefinitely with
-          # no further log output — measured 2026-08-18/19: two runs hung six
-          # hours to the hard runner limit, a third hung until manually
-          # cancelled, all stuck after the same "noble-security InRelease"
-          # fetch line. This step normally completes in seconds, so a few
-          # minutes plus one retry bounds a slow mirror without masking a
-          # genuinely broken one.
-          sudo timeout 180s apt-get update || sudo timeout 180s apt-get update
-          sudo timeout 180s apt-get install -y ripgrep
+          # Pinned release + sha256-verified static binary instead of apt-get
+          # (OI-1362): ripgrep ships on NO ubuntu-latest image, so this skip-tak
+          # never fires, and apt-get against azure.archive.ubuntu.com stalls
+          # intermittently and hangs the job even with the timeout+retry from
+          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
+          # 32291338049 (main) both died in this exact step with exit 124, on
+          # different jobs each time. x86_64-unknown-linux-musl is statically
+          # linked — no glibc dependency, so it runs unchanged across any
+          # ubuntu-latest base-image drift.
+          RG_VERSION="15.2.0"
+          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
+          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
+          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
+          mkdir -p "$RG_DIR/bin"
+          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
+          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
+          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
+          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
+          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
 
       - name: Legacy path gate
         run: |
@@ -464,18 +473,31 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          set -euo pipefail
           if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping apt install"
+            echo "ripgrep already present on the runner image, skipping download"
             exit 0
           fi
-          # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
-          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
-          # See the "Install ripgrep" step in Profile A above: a stalled
-          # mirror can hang apt-get indefinitely with no further log output.
-          # Bound it with a timeout plus one retry instead of hanging.
-          sudo timeout 180s apt-get update || sudo timeout 180s apt-get update
-          sudo timeout 180s apt-get install -y ripgrep
+          # Pinned release + sha256-verified static binary instead of apt-get
+          # (OI-1362): ripgrep ships on NO ubuntu-latest image, so this skip-tak
+          # never fires, and apt-get against azure.archive.ubuntu.com stalls
+          # intermittently and hangs the job even with the timeout+retry from
+          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
+          # 32291338049 (main) both died in this exact step with exit 124, on
+          # different jobs each time. x86_64-unknown-linux-musl is statically
+          # linked — no glibc dependency, so it runs unchanged across any
+          # ubuntu-latest base-image drift.
+          RG_VERSION="15.2.0"
+          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
+          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
+          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
+          mkdir -p "$RG_DIR/bin"
+          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
+          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
+          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
+          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
+          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
 
       - name: Legacy path gate
         run: |
@@ -638,18 +660,31 @@ jobs:
 
       - name: Install ripgrep
         run: |
+          set -euo pipefail
           if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping apt install"
+            echo "ripgrep already present on the runner image, skipping download"
             exit 0
           fi
-          # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
-          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
-          # See the "Install ripgrep" step in Profile A above: a stalled
-          # mirror can hang apt-get indefinitely with no further log output.
-          # Bound it with a timeout plus one retry instead of hanging.
-          sudo timeout 180s apt-get update || sudo timeout 180s apt-get update
-          sudo timeout 180s apt-get install -y ripgrep
+          # Pinned release + sha256-verified static binary instead of apt-get
+          # (OI-1362): ripgrep ships on NO ubuntu-latest image, so this skip-tak
+          # never fires, and apt-get against azure.archive.ubuntu.com stalls
+          # intermittently and hangs the job even with the timeout+retry from
+          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
+          # 32291338049 (main) both died in this exact step with exit 124, on
+          # different jobs each time. x86_64-unknown-linux-musl is statically
+          # linked — no glibc dependency, so it runs unchanged across any
+          # ubuntu-latest base-image drift.
+          RG_VERSION="15.2.0"
+          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
+          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
+          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
+          mkdir -p "$RG_DIR/bin"
+          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
+          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
+          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
+          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
+          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
 
       - name: Ban repo-local VNX_STATE_DIR pins
         run: |
