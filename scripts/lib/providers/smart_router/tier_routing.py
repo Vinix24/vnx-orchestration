@@ -50,6 +50,7 @@ from typing import Optional
 from providers.provider_registry import (
     RegistryLookupError,
     TierRouteSpec,
+    load_escalation_order,
     load_tier_ladder,
     load_tier_map,
 )
@@ -75,11 +76,21 @@ class TierRoute:
 # early rather than discovered mid-dispatch.
 _TIER_MAP = load_tier_map()
 
-# The cost-ordered escalation ladder (cheapest first), derived from the
-# registry's own prices. load_tier_ladder() fails loud on a duplicate rung or a
-# non-monotonic price order, so a ladder that would make escalation a no-op is
-# caught at import — same fail-early contract as _TIER_MAP above.
+# The cost-ordered ladder (cheapest first), derived from the registry's own
+# prices. load_tier_ladder() fails loud on a duplicate rung or a non-monotonic
+# price order — same fail-early contract as _TIER_MAP above. Used by
+# load_tier_ladder's own callers (cost reporting, classification); NOT read by
+# next_tier()/escalate_tier() below — see _ESCALATION_ORDER (OI-1356).
 _TIER_LADDER = load_tier_ladder()
+
+# The quality-escalation climb order (OI-1356): a SEPARATE, explicitly
+# authored list from _TIER_LADDER above. tier_map/_TIER_LADDER answer "what
+# does this tier cost"; escalation_order answers "where does a REJECTED
+# result climb to". Resolved once at import, same fail-early contract as
+# _TIER_MAP/_TIER_LADDER: a registry missing routing.escalation_order, or
+# listing a member that is not a tier_map key, raises RegistryLookupError
+# here — before any dispatch reaches next_tier()/escalate_tier().
+_ESCALATION_ORDER = load_escalation_order()
 
 
 # The escalation decision table (dispatch 20260816-p6-escalate-tier-ds): the
@@ -137,19 +148,20 @@ class TierEscalation:
 
 
 def next_tier(tier: str) -> Optional[str]:
-    """Return the tier one rung up the cost ladder, or None at the top.
+    """Return the tier one rung up the quality-escalation climb, or None at the top.
 
-    The ladder order is read from the registry (``_TIER_LADDER``), never a
-    Python literal, so a newly registered model slots into the climb without a
-    code edit. An unknown tier returns None (fail-safe: do not escalate from a
-    rung the ladder does not know).
+    Reads ``_ESCALATION_ORDER`` (registry ``routing.escalation_order``,
+    OI-1356) — a separate list from the cost ladder (``_TIER_LADDER``): a tier
+    absent from escalation_order (kimi-k3, gpt-5.5) is still a full tier_map
+    rung — dispatchable, fallback-eligible — but never a climb destination.
+    An unknown tier returns None (fail-safe: do not escalate from a rung
+    escalation_order does not know).
     """
-    names = [rung.tier for rung in _TIER_LADDER]
     try:
-        idx = names.index(tier)
+        idx = _ESCALATION_ORDER.index(tier)
     except ValueError:
         return None
-    return names[idx + 1] if idx + 1 < len(names) else None
+    return _ESCALATION_ORDER[idx + 1] if idx + 1 < len(_ESCALATION_ORDER) else None
 
 
 def escalate_tier(

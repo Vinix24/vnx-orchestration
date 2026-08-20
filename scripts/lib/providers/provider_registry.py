@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -28,6 +29,8 @@ class ProviderModel:
     max_tokens: int
     supports_streaming: bool
     supports_tool_calls: bool
+    price_source: str = ""
+    price_checked_at: str = ""
     context_window: Optional[int] = None
     task_classes: List[str] = field(default_factory=list)
     cli_model_arg: Optional[str] = None
@@ -100,10 +103,34 @@ class TierLadderRung:
     fallback: tuple = ()  # tuple[TierRouteStep, ...]
 
 
-def _parse_model(data: dict) -> ProviderModel:
+def _validate_price_checked_at(model_key: str, price_checked_at: str) -> None:
+    """Fail loud, naming the model and the field, on a malformed price_checked_at.
+
+    A bare ``date.fromisoformat`` ValueError names neither — the raised
+    message here does, so a broken date is diagnosable from the traceback
+    alone (OI-1334).
+    """
+    try:
+        date.fromisoformat(price_checked_at)
+    except ValueError as e:
+        raise ValueError(
+            f"model {model_key!r} has an invalid price_checked_at "
+            f"{price_checked_at!r} (expected YYYY-MM-DD): {e}"
+        ) from e
+
+
+def _parse_model(data: dict, model_key: Optional[str] = None) -> ProviderModel:
     context_window_raw = data.get("context_window")
     cli_model_arg_raw = data.get("cli_model_arg")
     dispatch_allowed_raw = data.get("dispatch_allowed")
+    price_source_raw = data.get("price_source")
+    price_checked_at_raw = data.get("price_checked_at")
+    price_checked_at = str(price_checked_at_raw) if price_checked_at_raw is not None else ""
+    if price_checked_at:
+        _validate_price_checked_at(
+            model_key or str(data.get("litellm_name") or "<unknown model>"),
+            price_checked_at,
+        )
     return ProviderModel(
         litellm_name=str(data["litellm_name"]),
         cost_input_per_mtok=float(data["cost_input_per_mtok"]),
@@ -111,6 +138,8 @@ def _parse_model(data: dict) -> ProviderModel:
         max_tokens=int(data["max_tokens"]),
         supports_streaming=bool(data["supports_streaming"]),
         supports_tool_calls=bool(data["supports_tool_calls"]),
+        price_source=str(price_source_raw) if price_source_raw is not None else "",
+        price_checked_at=price_checked_at,
         context_window=int(context_window_raw) if context_window_raw is not None else None,
         task_classes=list(data.get("task_classes") or []),
         cli_model_arg=str(cli_model_arg_raw) if cli_model_arg_raw is not None else None,
@@ -121,7 +150,7 @@ def _parse_model(data: dict) -> ProviderModel:
 def _parse_provider(data: dict) -> ProviderConfig:
     models: Dict[str, ProviderModel] = {}
     for model_key, model_data in (data.get("models") or {}).items():
-        models[model_key] = _parse_model(model_data)
+        models[model_key] = _parse_model(model_data, model_key)
     default_model_raw = data.get("default_model")
     dispatch_enum_raw = data.get("dispatch_enum")
     return ProviderConfig(
@@ -280,6 +309,55 @@ def _output_cost_for(
         f"cannot resolve output cost for {spec.provider!r}/{spec.model!r} "
         f"(tier {spec.tier!r}) in {path}"
     )
+
+
+def load_escalation_order(registry_path: Optional[Path] = None) -> List[str]:
+    """Resolve the quality-escalation climb order (OI-1356) from the registry.
+
+    ``routing.escalation_order`` is a separate, explicitly authored list from
+    ``routing.tier_map`` (the cost ladder): tier_map stays purely cost-ordered
+    (``load_tier_ladder``'s invariants are untouched by this function), while
+    escalation_order is the list ``tier_routing.next_tier`` reads for climb
+    destinations. A tier absent from escalation_order (e.g. kimi-k3, gpt-5.5)
+    is still a valid tier_map rung — dispatchable, fallback-eligible — just not
+    a climb destination.
+
+    Fails loud (RegistryLookupError) when:
+      * ``routing.escalation_order`` is missing entirely — silently falling
+        back to the cost ladder would resurrect the exact coupling this key
+        exists to break (a climb landing on a cheaper-but-different-lane
+        rung instead of a genuinely more-capable one). A registry that has
+        not been updated for OI-1356 must say so at load, not silently keep
+        the old behavior.
+      * a listed member is not a key in ``routing.tier_map`` — an escalation
+        destination that is not even a valid tier is drift, not a typo to
+        paper over.
+    """
+    path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
+    try:
+        with open(path) as fh:
+            raw = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        raise RegistryLookupError(f"registry file not found at {path}") from None
+    except yaml.YAMLError as exc:
+        raise RegistryLookupError(f"malformed registry yaml at {path}: {exc}") from exc
+
+    routing = raw.get("routing") or {}
+    if "escalation_order" not in routing:
+        raise RegistryLookupError(
+            f"routing.escalation_order is missing from {path}; the quality-"
+            "escalation climb order must be authored explicitly, separate "
+            "from routing.tier_map (OI-1356) — add the key to this registry"
+        )
+    escalation_order = routing.get("escalation_order") or []
+    known_tiers = set((routing.get("tier_map") or {}).keys())
+    for tier in escalation_order:
+        if tier not in known_tiers:
+            raise RegistryLookupError(
+                f"routing.escalation_order member {tier!r} is not a key in "
+                f"routing.tier_map in {path}"
+            )
+    return [str(tier) for tier in escalation_order]
 
 
 def load_tier_ladder(registry_path: Optional[Path] = None) -> List[TierLadderRung]:

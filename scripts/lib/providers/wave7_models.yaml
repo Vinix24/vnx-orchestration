@@ -17,15 +17,22 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding-premium", "review", "analysis"]
+      # Price corrected 2026-08-19: this key carried the Opus 4.1 price
+      # (15.00/75.00) since the 4.8 rename — the OI-1335 inheritance
+      # pattern, name updated on upgrade, predecessor's price left behind.
       opus-4-8:
         litellm_name: "anthropic/claude-opus-4-8"
-        cost_input_per_mtok: 15.00
-        cost_output_per_mtok: 75.00
+        cost_input_per_mtok: 5.00
+        cost_output_per_mtok: 25.00
         max_tokens: 32000
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
+        price_checked_at: "2026-08-19"
         task_classes: ["coding-premium", "review", "analysis"]
       opus-4-6:
         # RETIRED alias, kept deliberately (2026-07-22 model-registry-refresh): the field-test
@@ -33,13 +40,17 @@ providers:
         # reproducibility (see scripts/benchmark/models.yaml comment "pin 4-6 explicitly").
         # NOT used by current routing — smart_router / routing_recommendations.yaml use
         # `opus`/`opus-4-8` (current) instead. Do not repurpose this key for current traffic.
+        # Price corrected 2026-08-19: same OI-1335 inheritance pattern as
+        # opus-4-8 — carried the Opus 4.1 price (15.00/75.00).
         litellm_name: "anthropic/claude-opus-4-6"
-        cost_input_per_mtok: 15.00
-        cost_output_per_mtok: 75.00
+        cost_input_per_mtok: 5.00
+        cost_output_per_mtok: 25.00
         max_tokens: 32000
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
+        price_checked_at: "2026-08-19"
         task_classes: ["coding-premium", "review", "analysis"]
       sonnet:
         litellm_name: "anthropic/claude-sonnet-5"
@@ -49,6 +60,8 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "review", "analysis"]
       haiku:
         litellm_name: "anthropic/claude-haiku-4-5-20251001"
@@ -58,6 +71,8 @@ providers:
         context_window: 200000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "fast"]
       # 5-series (dispatch-20260802-model-ssot-en-ketenlink): Sonnet 5, Opus 5 and
       # Fable 5 now run in the fleet (operator + T0 run Opus 5; Fable 5 is the top
@@ -65,14 +80,21 @@ providers:
       # verified 2026-08-02 against the Anthropic first-party catalog: Sonnet 5
       # $3/$15 per MTok, Opus 5 $5/$25, Fable 5 $10/$50. Context/max-output are the
       # API ceilings (1M context / 128K output).
+      # Price corrected 2026-08-19: the 15.00 output price was the announced
+      # post-introductory rate. Anthropic cancelled that increase effective
+      # 2026-09-01, so the introductory 2.00/10.00 pair became the standing
+      # price instead — a scheduled change that never actually took effect,
+      # which is exactly what the price_checked_at field exists to catch.
       sonnet-5:
         litellm_name: "anthropic/claude-sonnet-5"
-        cost_input_per_mtok: 3.00
-        cost_output_per_mtok: 15.00
+        cost_input_per_mtok: 2.00
+        cost_output_per_mtok: 10.00
         max_tokens: 128000
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "Anthropic first-party pricing page (platform.claude.com/docs/en/about-claude/pricing)"
+        price_checked_at: "2026-08-19"
         task_classes: ["coding", "review", "analysis"]
       opus-5:
         litellm_name: "anthropic/claude-opus-5"
@@ -82,6 +104,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-08-03"
         task_classes: ["coding-premium", "review", "analysis"]
       fable-5:
         litellm_name: "anthropic/claude-fable-5"
@@ -91,20 +115,26 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-08-03"
         task_classes: ["coding-premium", "review", "analysis"]
   openai:
     enabled: true
     api_key_env: OPENAI_API_KEY
     dispatch_enum: codex
     models:
+      # Price corrected 2026-08-19: this key carried the gpt-5.4 price
+      # (1.25/10.00) rather than gpt-5.5's own rate.
       gpt-5.5:
         litellm_name: "openai/gpt-5.5"
-        cost_input_per_mtok: 1.25
-        cost_output_per_mtok: 10.00
+        cost_input_per_mtok: 5.00
+        cost_output_per_mtok: 30.00
         max_tokens: 32000
         context_window: 128000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "OpenAI public pricing, verified by operator"
+        price_checked_at: "2026-08-17"
         task_classes: ["coding", "review"]
       gpt-5.4:
         litellm_name: "openai/gpt-5.4"
@@ -114,6 +144,8 @@ providers:
         context_window: 128000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-06-07"
         task_classes: ["coding", "review"]
   google:
     enabled: true
@@ -127,6 +159,8 @@ providers:
         context_window: 1048576
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "review", "analysis"]
   deepseek:
     enabled: true
@@ -147,6 +181,8 @@ providers:
         context_window: 1000000      # 1M context
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-16"
         task_classes: ["coding-premium", "review", "analysis"]
         dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
       deepseek-v4-flash:
@@ -157,6 +193,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-16"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
   deepseek_harness:
@@ -175,6 +213,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-31"
         task_classes: ["coding-premium", "review", "analysis"]
         dispatch_allowed: true
       deepseek-v4-flash:
@@ -186,6 +226,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-31"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: true
       deepseek-v4-pro-default:
@@ -197,6 +239,8 @@ providers:
         context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-31"
         task_classes: ["coding-premium", "review", "analysis"]
         dispatch_allowed: true
   moonshot:
@@ -210,6 +254,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-15"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: false  # bare-baseline only; governed dispatch uses kimi_cli
       kimi-k2-6:
@@ -219,6 +265,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-15"
         task_classes: ["coding-premium"]
         dispatch_allowed: false  # bare-baseline only; governed dispatch uses kimi_cli
   zai:
@@ -233,6 +281,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-08-10"
         task_classes: ["coding", "review"]
         deprecated_models:
           - "glm-4.5"
@@ -252,6 +302,8 @@ providers:
         context_window: 8192
         supports_streaming: false
         supports_tool_calls: false
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-06-03"
         task_classes: ["simple_synthesis", "classification", "documentation", "translation"]
         runtime: mlx
         fallback_runtime: ollama
@@ -275,11 +327,15 @@ providers:
         # Verified 20260721 against the installed kimi-cli 1.46.0's own ~/.kimi/config.toml
         # (models."kimi-code/k3", 1M context, display_name "K3") — not guessed.
         cli_model_arg: "kimi-code/k3"
-        cost_input_per_mtok: 0.60
-        cost_output_per_mtok: 2.50
+        # Price corrected 2026-08-17: this key carried the K2-series price
+        # (0.60/2.50) inherited from kimi-k2-0905-default rather than K3's own.
+        cost_input_per_mtok: 3.00
+        cost_output_per_mtok: 15.00
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "Moonshot K3 public pricing, verified by operator"
+        price_checked_at: "2026-08-17"
         task_classes: ["coding", "coding-premium", "review", "analysis"]
         dispatch_allowed: true
       kimi-k2-7:
@@ -292,6 +348,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-07-21"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: true
       kimi-default:
@@ -301,6 +359,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: true
       kimi-k2-6:
@@ -310,6 +370,8 @@ providers:
         max_tokens: 8192
         supports_streaming: true
         supports_tool_calls: true
+        price_source: "unverified: registry-authored"
+        price_checked_at: "2026-05-17"
         task_classes: ["coding-premium"]
         # DISABLED 20260721 (kimi-lane-hardening): kimi-cli 1.46.0 has no "kimi-k2.6"/K2.6
         # model (verified against the installed CLI's own config.toml — only kimi-code/k3,
@@ -331,18 +393,43 @@ providers:
 # RegistryLookupError (naming what+where) on anything this registry does not
 # know.
 #
-# COST LADDER (OI-1221, extended OI-1229): seven rungs, cheapest first — the
-# seven dispatchable (provider, model) pairs in ascending output cost. A tier
-# higher is demonstrably more expensive AND more capable, so a quality
-# escalation actually climbs:
+# COST LADDER (OI-1221, extended OI-1229; reordered 2026-08-19 after the
+# sonnet-5/opus-4-8/opus-4-6/kimi-k3/gpt-5.5 price corrections below — see
+# each model's price_source/price_checked_at for provenance): seven rungs,
+# cheapest first — the seven dispatchable (provider, model) pairs in
+# ascending output cost. load_tier_ladder() enforces this order fail-loud
+# (strictly increasing cost, no duplicate primary) — it says nothing about
+# capability, only price:
 #
 #   tier-zero  deepseek-v4-flash  $0.28/Mtok out
 #   tier-low   deepseek-v4-pro    $0.87/Mtok out   (the daily workhorse)
-#   kimi-k3    kimi-k3            $2.50/Mtok out
-#   gpt-5.5    gpt-5.5           $10.00/Mtok out
-#   tier-mid   sonnet-5          $15.00/Mtok out
+#   tier-mid   sonnet-5          $10.00/Mtok out
+#   kimi-k3    kimi-k3           $15.00/Mtok out
 #   tier-high  opus-5            $25.00/Mtok out
+#   gpt-5.5    gpt-5.5           $30.00/Mtok out
 #   fable-5    fable-5           $50.00/Mtok out
+#
+# ESCALATION ORDER (routing.escalation_order, OI-1356): a SEPARATE, explicitly
+# authored list below — not derived from the cost ladder above. tier_map
+# answers "what does this tier cost"; escalation_order answers "where does a
+# REJECTED result climb to". The two used to be the same list (next_tier() and
+# escalate_tier() walked tier_map's own order), and that coupling was the
+# defect OI-1356 fixes: kimi-k3 and gpt-5.5 sit BETWEEN tier-mid/tier-high and
+# tier-high/fable-5 in cost order, so a quality climb off tier-mid landed on
+# kimi-k3 — a different lane (subscription -> provider-lane), its own quota,
+# its own failure modes, not a strictly-more-capable rung. escalation_order
+# breaks that link:
+#
+#   tier-zero -> tier-low -> tier-mid -> tier-high -> fable-5
+#
+# kimi-k3 and gpt-5.5 are deliberately NOT in escalation_order. They stay full
+# tier_map rungs — dispatchable at classification time, still fallback
+# destinations (the `fallback` lists below) — but next_tier() returns None for
+# them: no climb starts or lands there. The promise "a tier higher is
+# demonstrably more expensive AND more capable, so a quality escalation
+# actually climbs" now holds over escalation_order, not over tier_map: cost is
+# monotonic across the whole tier_map (that invariant is unchanged), but only
+# escalation_order's authored order claims capability.
 #
 # NOT on the ladder (measured 2026-08-15 over wave7_models.yaml):
 #   * glm-5.2 ($2.42/Mtok out) — the `zai` section carries NO `dispatch_enum`
@@ -357,20 +444,27 @@ providers:
 #
 # The four tier-zero/low/mid/high rungs are ALSO the classifier's scope buckets
 # (cost_tier.classify_dispatch): a NEW dispatch enters the ladder at one of them.
-# The three model-named rungs (kimi-k3, gpt-5.5, fable-5) are escalation
-# destinations only — reachable by climbing, never by classification.
+# kimi-k3 and gpt-5.5 are dispatch/fallback destinations only, never a climb
+# destination (excluded from escalation_order above).
 #
 # Two mechanisms, opposite in intent, are deliberately kept apart:
 #   * AVAILABILITY fallback (the `fallback` list below) — an unavailable lane is
 #     skipped and the next chain step takes over ON THE SAME TIER. It is a
 #     safety net, never an escalation.
-#   * QUALITY escalation (tier_routing.escalate_tier) — a REJECTED result fires
-#     a followup dispatch one tier UP (tier_to = tier_from + 1), linked by
-#     parent_dispatch. It climbs the ladder; it never walks the fallback list.
-# provider_registry.load_tier_ladder() enforces both invariants fail-loud: no
-# two tiers may resolve to the same primary (a duplicate rung escalates
-# nowhere) and primary cost must be strictly increasing (a higher rung must
-# actually be more expensive).
+#   * QUALITY escalation (tier_routing.escalate_tier / next_tier) — a REJECTED
+#     result fires a followup dispatch one tier UP escalation_order (never
+#     tier_map), linked by parent_dispatch. It climbs the escalation order; it
+#     never walks the fallback list.
+# provider_registry.load_tier_ladder() enforces the cost-ladder invariants
+# fail-loud: no two tiers may resolve to the same primary (a duplicate rung
+# escalates nowhere) and primary cost must be strictly increasing (a higher
+# rung must actually be more expensive).
+# provider_registry.load_escalation_order() enforces escalation_order's own
+# invariant fail-loud: every member must be a key in tier_map — an escalation
+# destination that is not even a valid tier is drift, not a typo to paper
+# over. A registry missing routing.escalation_order entirely also fails loud
+# (see load_escalation_order's docstring) rather than silently falling back
+# to the cost ladder, which would resurrect exactly this defect.
 # ---------------------------------------------------------------------------
 routing:
   tier_map:
@@ -396,6 +490,10 @@ routing:
         - provider: openai
           model: gpt-5.5
           lane: provider
+    tier-mid:
+      provider: anthropic
+      model: sonnet-5
+      lane: tmux_interactive
     kimi-k3:
       provider: kimi_cli
       model: kimi-k3
@@ -404,19 +502,27 @@ routing:
         - provider: openai
           model: gpt-5.5
           lane: provider
-    gpt-5.5:
-      provider: openai
-      model: gpt-5.5
-      lane: provider
-    tier-mid:
-      provider: anthropic
-      model: sonnet-5
-      lane: tmux_interactive
     tier-high:
       provider: anthropic
       model: opus-5
       lane: tmux_interactive
+    gpt-5.5:
+      provider: openai
+      model: gpt-5.5
+      lane: provider
     fable-5:
       provider: anthropic
       model: fable-5
       lane: tmux_interactive
+
+  # Quality-escalation climb order (OI-1356) — see the comment block above
+  # `routing:` for the full rationale. Every member must be a key in
+  # tier_map above (provider_registry.load_escalation_order() validates this
+  # fail-loud). kimi-k3 and gpt-5.5 are intentionally absent: they stay
+  # dispatchable tier_map rungs but are not climb destinations.
+  escalation_order:
+    - tier-zero
+    - tier-low
+    - tier-mid
+    - tier-high
+    - fable-5
