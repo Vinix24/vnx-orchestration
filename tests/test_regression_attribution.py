@@ -19,6 +19,8 @@ sys.path.insert(0, str(LIB_DIR))
 from regression_attribution import (  # noqa: E402
     AttributionResult,
     DirtyWorkingTreeError,
+    RegressionAttributionError,
+    _require_bisect_converged,
     attribute_regression,
 )
 
@@ -173,6 +175,83 @@ class TestHeadRestoration:
 
         assert _head_branch(root) == original_branch
         assert _head_sha(root) == original_sha
+
+
+class TestBisectConvergenceIsReadStructurally:
+    """OI-1366: the bisect result must not depend on git's human-readable wording.
+
+    git's "first bad commit" prose differs by git version: older git writes
+    `<sha> is the first bad commit`, newer git quotes the (configurable)
+    term: `<sha> is the first 'bad' commit`. The two blocks below are the
+    literal outputs of both forms (local git 2.50.1 and a GitHub runner,
+    verbatim from the OI-1366 dispatch). They need no real git: the
+    interpretation layer must accept both identically, because it never
+    reads the prose — only the exit status is structural.
+    """
+
+    # Literal output of git 2.50.1 (macOS), unquoted term.
+    GIT_2_50_UNQUOTED_OUTPUT = (
+        "51254e9df4a19eb1dbd402c46af696706ae1430b is the first bad commit\n"
+        "bisect found first bad commit\n"
+    )
+
+    # Literal output from the GitHub runner (CI log of run 32297581293,
+    # attempt 2, sha 37ad9d47, 2026-08-19T23:39:31Z), quoted term.
+    CI_RUNNER_QUOTED_OUTPUT = (
+        "running 'bash' '-c' 'bash check.sh'\n"
+        "118c07cf8d2dc11d6c3ae032a39aa4923e0ed8ed is the first 'bad' commit\n"
+        "commit 118c07cf8d2dc11d6c3ae032a39aa4923e0ed8ed\n"
+        "Author: VNX Test <vnx-test@example.invalid>\n"
+        "...\n"
+        "bisect found first 'bad' commit\n"
+    )
+
+    # Literal tail of a real non-converging run (every candidate skipped).
+    NON_CONVERGING_OUTPUT = (
+        "We cannot bisect more!\n"
+        "error: bisect run cannot continue any more\n"
+    )
+
+    def test_unquoted_first_bad_prose_is_accepted(self):
+        _require_bisect_converged(0, self.GIT_2_50_UNQUOTED_OUTPUT)
+
+    def test_quoted_first_bad_prose_is_accepted(self):
+        _require_bisect_converged(0, self.CI_RUNNER_QUOTED_OUTPUT)
+
+    def test_prose_wording_is_not_the_acceptance_signal(self):
+        # The same prose that reads "first bad commit found" must STILL fail
+        # when the structural signal (exit status) says the run failed —
+        # proving acceptance comes from the exit status, never the wording.
+        for prose in (self.GIT_2_50_UNQUOTED_OUTPUT, self.CI_RUNNER_QUOTED_OUTPUT):
+            with pytest.raises(RegressionAttributionError, match="did not converge"):
+                _require_bisect_converged(1, prose)
+
+    def test_real_non_converging_output_raises(self):
+        with pytest.raises(RegressionAttributionError, match="did not converge"):
+            _require_bisect_converged(2, self.NON_CONVERGING_OUTPUT)
+
+
+class TestBisectNonConvergenceEndToEnd:
+    """A real `git bisect run` that cannot converge must fail loudly."""
+
+    def test_all_candidates_skipped_raises_and_restores(self, fixture_repo):
+        root = fixture_repo["root"]
+        # check.sh passes through commit2 and fails from commit3 on. Mapping
+        # every check failure to skip (125) makes the bad boundary count as
+        # failing while every interior bisect candidate is skipped, so git
+        # genuinely cannot converge ("We cannot bisect more!").
+        check_cmd = "bash check.sh && exit 0 || exit 125"
+
+        with pytest.raises(RegressionAttributionError, match="did not converge"):
+            attribute_regression(
+                check_cmd=check_cmd,
+                good_ref=fixture_repo["commit2"],
+                bad_ref="HEAD",
+                repo_root=root,
+            )
+
+        assert _head_sha(root) == fixture_repo["commit4"]
+        assert not _bisect_in_progress(root)
 
 
 class TestDirtyWorkingTreeRefused:

@@ -33,7 +33,6 @@ from typing import Any, Dict, List, Optional
 STATUS_ATTRIBUTED = "attributed"
 STATUS_INCONCLUSIVE = "inconclusive"
 
-_FIRST_BAD_RE = re.compile(r"\b([0-9a-f]{7,40}) is the first bad commit\b")
 _DIFFSTAT_LINE_RE = re.compile(r"^\s*(.+?)\s+\|\s+\d+")
 
 
@@ -162,12 +161,69 @@ def _run_bisect(root: Path, check_cmd: str, good_sha: str, bad_sha: str) -> str:
         text=True,
     )
     output = f"{run_result.stdout}\n{run_result.stderr}"
-    match = _FIRST_BAD_RE.search(output)
-    if not match:
+    _require_bisect_converged(run_result.returncode, output)
+    return _bisect_bad_ref_sha(root, good_sha, bad_sha, output)
+
+
+def _require_bisect_converged(returncode: int, output: str) -> None:
+    """Loudly fail unless `git bisect run` reported convergence (exit status 0).
+
+    OI-1366: the bisect result is read STRUCTURALLY, never from git's
+    human-readable prose. That prose differs by git version: older git
+    prints `<sha> is the first bad commit`, newer git quotes the
+    (configurable, see `git bisect terms`) term and prints `<sha> is the
+    first 'bad' commit`. A regex on the unquoted wording silently misses on
+    newer git and attribution wrongly concluded "did not converge" — which
+    looked like flakiness because `ubuntu-latest` runners drift between
+    image versions shipping different git. Exit status 0 is the stable
+    signal: `git bisect run` exits 0 iff it found the first bad commit.
+    """
+    if returncode != 0:
         raise RegressionAttributionError(
-            f"git bisect run did not converge to a single commit:\n{output.strip()}"
+            f"git bisect run did not converge to a single commit "
+            f"(exit {returncode}):\n{output.strip()}"
         )
-    return _rev_parse(root, match.group(1))
+
+
+def _bisect_bad_ref_sha(root: Path, good_sha: str, bad_sha: str, output: str) -> str:
+    """Read the first-bad commit sha from the bisect refs after a converged run.
+
+    On convergence git points `refs/bisect/bad` at the first bad commit
+    (verified against git 2.50.1). The glob `refs/bisect/bad*` also matches
+    the suffixed form `refs/bisect/bad-<sha>` written by some versions; the
+    dedupe below collapses both forms when they coexist.
+
+    Non-convergence stays loud even if the exit status lied: there must be
+    exactly one distinct bad-ref sha, and it must lie strictly inside
+    (good_sha, bad_sha] — a commit bisect never named can never be reported.
+    """
+    ref_lines = _git(
+        root, "for-each-ref", "--format=%(objectname)", "refs/bisect/bad*"
+    ).stdout.split()
+    unique_shas = set(ref_lines)
+    if len(unique_shas) != 1:
+        raise RegressionAttributionError(
+            f"expected exactly one bisect bad-ref sha after a converged run, "
+            f"found {len(unique_shas)} ({sorted(unique_shas)}):\n{output.strip()}"
+        )
+    sha = unique_shas.pop()
+
+    inside_bad_range = _git(
+        root, "merge-base", "--is-ancestor", sha, bad_sha, check=False
+    ).returncode == 0
+    past_good = (
+        sha != good_sha
+        and _git(
+            root, "merge-base", "--is-ancestor", good_sha, sha, check=False
+        ).returncode == 0
+    )
+    if not (inside_bad_range and past_good):
+        raise RegressionAttributionError(
+            f"bisect bad-ref sha {sha[:12]} lies outside the bisected range "
+            f"({good_sha[:12]}..{bad_sha[:12]}); refusing to attribute:\n"
+            f"{output.strip()}"
+        )
+    return sha
 
 
 def _commit_details(root: Path, sha: str) -> Dict[str, Any]:
