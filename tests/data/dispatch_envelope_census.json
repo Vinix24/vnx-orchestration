@@ -2,14 +2,14 @@
   "couplings": [
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 760,
+      "line": 843,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 763,
+      "line": 846,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
@@ -632,14 +632,14 @@
     },
     {
       "file": "tests/test_failclass_registry.py",
-      "line": 736,
+      "line": 1087,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_failclass_registry.py",
-      "line": 768,
+      "line": 1119,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_resolve_phantom_diff"
@@ -869,6 +869,20 @@
       "symbol": "ProviderAdapter.run"
     },
     {
+      "file": "tests/test_oi1372_pr_enforcement_branch_resolution.py",
+      "line": 224,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_oi1372_pr_enforcement_branch_resolution.py",
+      "line": 241,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
       "file": "tests/test_phantom_guard_branch_fallback.py",
       "line": 122,
       "mechanism": "direct-call",
@@ -1010,35 +1024,35 @@
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1036,
+      "line": 1037,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1036,
+      "line": 1037,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1127,
+      "line": 1128,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1127,
+      "line": 1128,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1143,
+      "line": 1144,
       "mechanism": "logger-name",
       "module_target": "dispatch_envelope",
       "symbol": ""

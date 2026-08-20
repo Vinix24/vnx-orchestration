@@ -1288,6 +1288,7 @@ class TmuxInteractiveDispatch:
         """
         try:
             from pr_enforcement import enforce_pr_exists  # noqa: PLC0415
+            from tmux_worktree import resolve_effective_branch  # noqa: PLC0415
 
             # OI-1127: hand the worktree path through so a "dirty" verdict is
             # split into substantive vs scratch and substantive work is
@@ -1298,9 +1299,30 @@ class TmuxInteractiveDispatch:
             # directory (external cleanup, crash-restart) must degrade to the
             # back-compat path, not feed a dead path into git.
             _wt_path = worktree_handle.path if worktree_handle.path.is_dir() else None
+            # OI-1372: a dispatch instruction can prescribe its own branch name —
+            # the worker then pushes THAT branch, never touching
+            # worktree_handle.branch (dispatch/<id>) at all. Read the ACTUAL
+            # checked-out branch (mirrors _resolve_phantom_diff's OI-870 fix)
+            # instead of enforcing push+PR against a name that was never used,
+            # or the guard rejects a real, delivered success as
+            # dispatch_branch_no_pr.
+            _branch = (
+                resolve_effective_branch(
+                    wt=_wt_path, expected_branch=worktree_handle.branch,
+                    dispatch_id=dispatch_id,
+                )
+                if _wt_path is not None
+                else worktree_handle.branch
+            )
+            if _branch != worktree_handle.branch:
+                logger.info(
+                    "interactive: PR-enforcement branch resolved dispatch=%s "
+                    "expected=%r actual=%r (OI-1372)",
+                    dispatch_id, worktree_handle.branch, _branch,
+                )
             result = enforce_pr_exists(
                 dispatch_id=dispatch_id,
-                branch=worktree_handle.branch,
+                branch=_branch,
                 worktree_state=worktree_state,
                 repo_root=self._project_root,
                 receipts_file=self._receipts_file,

@@ -184,14 +184,28 @@ def _enforce_push_pr(
                 dispatch_id, _claim_reason, base_ref,
                 base_sha[:12] if base_sha else None,
             )
-        from tmux_worktree import classify_path  # noqa: PLC0415
+        from tmux_worktree import classify_path, resolve_effective_branch  # noqa: PLC0415
+        # OI-1372: a dispatch instruction can prescribe its own branch name — the
+        # worker then pushes THAT branch, never touching dispatch/<id> at all. Read
+        # the ACTUAL checked-out branch (mirrors _resolve_phantom_diff's OI-870
+        # fix) instead of enforcing push+PR against a name that was never used, or
+        # the guard rejects a real, delivered success as dispatch_branch_no_pr.
+        effective_branch = resolve_effective_branch(
+            wt=wt_path, expected_branch=branch, dispatch_id=dispatch_id,
+        )
+        if effective_branch != branch:
+            logger.info(
+                "envelope: PR-enforcement branch resolved dispatch=%s expected=%r "
+                "actual=%r (OI-1372)",
+                dispatch_id, branch, effective_branch,
+            )
         state = classify_path(
-            wt=wt_path, branch=branch, dispatch_id=dispatch_id, base_sha=base_sha,
+            wt=wt_path, branch=effective_branch, dispatch_id=dispatch_id, base_sha=base_sha,
         )
         from pr_enforcement import enforce_pr_exists  # noqa: PLC0415
         pr_result = enforce_pr_exists(
             dispatch_id=dispatch_id,
-            branch=branch,
+            branch=effective_branch,
             worktree_state=state,
             repo_root=repo_root,
             receipts_file=receipts_file,
