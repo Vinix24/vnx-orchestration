@@ -27,6 +27,9 @@ from vnx_cli.commands.update import (
     _prune_old_versions,
     _collect_protected_versions,
     _load_fleet_pins,
+    _resolve_pin_scan_roots,
+    _scan_root_for_pins,
+    _scan_disk_for_pins,
     _atomic_symlink_flip,
     _validate_version_name,
     _fetch_version,
@@ -36,7 +39,22 @@ from vnx_cli.commands.update import (
     INSTALL_MODE_MARKER,
     INSTALL_MODE_VALUE,
     DEFAULT_KEEP_LAST,
+    DEFAULT_PIN_SCAN_MAX_DEPTH,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pin_scan_roots(monkeypatch, tmp_path):
+    """Every test in this module gets an empty, isolated default disk-scan
+    root instead of the real ``$HOME`` (source 4, OI-1379). Without this, the
+    new disk-scan protection source would walk the REAL home directory of
+    whatever machine runs the suite on every test that exercises
+    ``_collect_protected_versions``/``_prune_old_versions`` — slow, and liable
+    to pick up unrelated real ``.vnx-version`` pins. Tests that want to
+    exercise the scan explicitly override via ``monkeypatch.setenv`` or an
+    explicit ``pin_scan_roots=``/``scan_roots=`` argument.
+    """
+    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(tmp_path / "empty-pin-scan-root"))
 
 
 def _git_repo(path: Path) -> Path:
@@ -1196,3 +1214,244 @@ def test_vnx_update_dry_run_threads_protect_pins(tmp_path, monkeypatch):
     assert rc == 0
     assert "Would protect from prune" in output
     assert len(list((tmp_path / "versions").iterdir())) == 5
+
+
+# ---------------------------------------------------------------------------
+# OI-1379: disk-scan protection source (4). The fleet registry (source 1)
+# only protects REGISTERED consumer projects; a project that pins a version
+# but was never registered is invisible to it. VNX_PIN_SCAN_ROOTS bounds a
+# disk scan for stray .vnx-version files outside the registry.
+# ---------------------------------------------------------------------------
+
+
+def test_prune_protects_pin_found_via_disk_scan(tmp_path, monkeypatch):
+    """A .vnx-version pin inside a scanned root protects its version, even
+    though the owning project was never registered in the fleet registry —
+    the exact OI-1379 gap (pacompany's pin sat outside ~/.vnx/projects.json)."""
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    scan_root = tmp_path / "unregistered-consumers"
+    consumer = scan_root / "pacompany" / "build" / "pa-engine"
+    consumer.mkdir(parents=True)
+    pin_file = consumer / ".vnx-version"
+    pin_file.write_text("v1.0.1\n", encoding="utf-8")
+    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+
+    output = buf.getvalue()
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == ["v1.0.1", "v1.0.3", "v1.0.4", "v1.0.5"]
+    assert "Protected from prune" in output
+    assert str(pin_file) in output
+
+    events = _audit_events(audit_log)
+    protected = [e for e in events if e["event_type"] == "central_install_prune_protected"]
+    assert len(protected) == 1
+    assert protected[0]["protected_version"] == "v1.0.1"
+    assert any(str(pin_file) in r for r in protected[0]["reasons"])
+
+
+def test_prune_disk_scan_ignores_pins_outside_configured_roots(tmp_path, monkeypatch):
+    """A pin outside every configured VNX_PIN_SCAN_ROOTS entry does NOT
+    protect its version — the scan boundary is explicit, not a silent
+    catch-all over the whole filesystem."""
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    scanned_root = tmp_path / "scanned"
+    scanned_root.mkdir()
+    unscanned = tmp_path / "outside-scan" / "some-project"
+    unscanned.mkdir(parents=True)
+    (unscanned / ".vnx-version").write_text("v1.0.1\n", encoding="utf-8")
+    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scanned_root))
+
+    _prune_old_versions(
+        tmp_path, keep_last=3, dry_run=False,
+        audit_log=tmp_path / "events" / "central_install.ndjson",
+    )
+
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    # v1.0.1's pin sits outside the configured scan root: not protected, so
+    # it prunes along with the other unprotected oldest candidate.
+    assert remaining == ["v1.0.3", "v1.0.4", "v1.0.5"]
+
+
+def test_prune_aborts_on_unreadable_pin_scan_root(tmp_path, monkeypatch, capsys):
+    """A scan root that EXISTS but cannot be listed (chmod 000) => fail
+    CLOSED, exactly like an unreadable registry or protected-versions file."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root can read chmod-000 dirs — OSError path unreachable")
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    scan_root = tmp_path / "locked-scan-root"
+    scan_root.mkdir()
+    scan_root.chmod(0o000)
+    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    try:
+        _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+    finally:
+        scan_root.chmod(0o755)
+
+    # Fail-closed: NO version dir was deleted, not even unprotected v1.0.2.
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    assert remaining == names
+
+    captured = capsys.readouterr()
+    assert "GC prune ABORTED (fail-closed)" in captured.err
+    assert str(scan_root) in captured.err
+
+    aborted = [
+        e for e in _audit_events(audit_log)
+        if e["event_type"] == "central_install_prune_aborted"
+    ]
+    assert len(aborted) == 1
+    assert aborted[0]["source"] == str(scan_root)
+    assert aborted[0]["keep_last_N"] == 3
+
+
+def test_prune_dry_run_prints_disk_scan_protection_reason(tmp_path, monkeypatch):
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    scan_root = tmp_path / "unregistered-consumers"
+    consumer = scan_root / "some-project"
+    consumer.mkdir(parents=True)
+    pin_file = consumer / ".vnx-version"
+    pin_file.write_text("v1.0.1\n", encoding="utf-8")
+    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _prune_old_versions(
+            tmp_path, keep_last=3, dry_run=True,
+            audit_log=tmp_path / "events" / "central_install.ndjson",
+        )
+
+    output = buf.getvalue()
+    assert "[dry-run] Would protect from prune:" in output
+    assert "v1.0.1" in output
+    assert str(pin_file) in output
+    assert len(list((tmp_path / "versions").iterdir())) == 5
+
+
+def test_prune_ignores_pin_under_vnx_data_but_protects_sibling_project_pin(tmp_path, monkeypatch):
+    """A .vnx-version copied into a dispatch worktree under .vnx-data/worktrees/
+    is runtime state, not a real consumer pin: it must NOT protect its version.
+    A .vnx-version on an ordinary project path in the SAME scan root, for a
+    DIFFERENT version, still protects normally — the skip is scoped to
+    .vnx-data, not the whole scan root."""
+    names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    _version_dirs(tmp_path, names)
+
+    scan_root = tmp_path / "consumers"
+    dead_worktree = (
+        scan_root / "mission-control" / ".vnx-data" / "worktrees"
+        / "dispatch-D-1fa3850c"
+    )
+    dead_worktree.mkdir(parents=True)
+    (dead_worktree / ".vnx-version").write_text("v1.0.1\n", encoding="utf-8")
+
+    real_project = scan_root / "pa-engine"
+    real_project.mkdir(parents=True)
+    real_pin = real_project / ".vnx-version"
+    real_pin.write_text("v1.0.2\n", encoding="utf-8")
+
+    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _prune_old_versions(
+            tmp_path, keep_last=3, dry_run=False,
+            audit_log=tmp_path / "events" / "central_install.ndjson",
+        )
+
+    output = buf.getvalue()
+    remaining = sorted(d.name for d in (tmp_path / "versions").iterdir())
+    # v1.0.1 (only reachable via the .vnx-data worktree copy) is NOT
+    # protected and prunes along with the other unprotected oldest
+    # candidate; v1.0.2 (protected via the ordinary project-path pin) survives.
+    assert remaining == ["v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
+    protected_line = next(
+        line for line in output.splitlines() if line.startswith("Protected from prune:")
+    )
+    assert str(real_pin) in protected_line
+    assert "v1.0.2" in protected_line
+    assert str(dead_worktree / ".vnx-version") not in output
+
+
+def test_resolve_pin_scan_roots_defaults_to_home(monkeypatch):
+    monkeypatch.delenv("VNX_PIN_SCAN_ROOTS", raising=False)
+    assert _resolve_pin_scan_roots() == [Path.home()]
+
+
+def test_resolve_pin_scan_roots_parses_colon_separated_list(tmp_path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    roots = _resolve_pin_scan_roots(f"{a}::{b}:")
+    assert roots == [a, b]
+
+
+def test_scan_root_for_pins_respects_max_depth(tmp_path):
+    """A pin deeper than max_depth is invisible; the same pin one level
+    shallower (still within budget) is found — the depth bound is exact, not
+    approximate."""
+    deep = tmp_path
+    for i in range(3):
+        deep = deep / f"level{i}"
+    deep.mkdir(parents=True)
+    (deep / ".vnx-version").write_text("v9.9.9\n", encoding="utf-8")
+
+    # 3 directory levels below tmp_path -> needs max_depth >= 3 to be found.
+    assert _scan_root_for_pins(tmp_path, max_depth=2) == {}
+    found = _scan_root_for_pins(tmp_path, max_depth=3)
+    assert "9.9.9" in found
+    assert any(str(deep / ".vnx-version") in r for r in found["9.9.9"])
+
+
+def test_scan_root_for_pins_skips_git_node_modules_and_symlinks(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / ".vnx-version").write_text("v1.1.1\n", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / ".vnx-version").write_text("v2.2.2\n", encoding="utf-8")
+    dead_worktree = tmp_path / ".vnx-data" / "worktrees" / "dispatch-D-1fa3850c"
+    dead_worktree.mkdir(parents=True)
+    (dead_worktree / ".vnx-version").write_text("v4.4.4\n", encoding="utf-8")
+
+    real_target = tmp_path / "real-project"
+    real_target.mkdir()
+    (real_target / ".vnx-version").write_text("v3.3.3\n", encoding="utf-8")
+    symlinked = tmp_path / "symlinked-project"
+    symlinked.symlink_to(real_target)
+
+    found = _scan_root_for_pins(tmp_path, max_depth=DEFAULT_PIN_SCAN_MAX_DEPTH)
+    assert "1.1.1" not in found
+    assert "4.4.4" not in found
+    assert "2.2.2" not in found
+    # The real (non-symlinked) project's own pin is still found directly.
+    assert "3.3.3" in found
+
+
+def test_scan_root_for_pins_absent_root_is_not_a_failure(tmp_path):
+    assert _scan_root_for_pins(tmp_path / "does-not-exist", max_depth=4) == {}
+
+
+def test_scan_disk_for_pins_raises_on_unreadable_root(tmp_path):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root can read chmod-000 dirs — OSError path unreachable")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(ProtectionSetUnavailable) as excinfo:
+            _scan_disk_for_pins(str(locked))
+    finally:
+        locked.chmod(0o755)
+    assert excinfo.value.source == str(locked)
