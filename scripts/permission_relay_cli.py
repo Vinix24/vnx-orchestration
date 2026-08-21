@@ -9,6 +9,7 @@ Subcommands (wired to scripts/lib/worker_permission_relay.py):
   vnx permission escalations                              list pending escalations
   vnx permission approve <dispatch_id>                    approve + relay "1" to the worker
   vnx permission deny <dispatch_id>                       deny (operator handles the worker)
+  vnx permission resolve-stale <dispatch_id> --note ...   close an escalation with no live worker session
   vnx permission scan                                     scan LIVE workers for an unmeasured stall
 
 All subcommands accept ``--json`` for machine-readable output.
@@ -30,6 +31,12 @@ tmux session and marks the escalation resolved=approved ONLY on confirmed delive
 If the keystroke does not land (no live session / send failure) the escalation is
 left pending and ``approve`` exits non-zero with a clear message, so a failed relay
 is never silently recorded as approved.
+
+``resolve-stale`` (OI-1414) closes an escalation whose worker session is long gone
+— there is no keystroke left to relay, so neither approve nor deny is a real
+decision. It writes status="stale" + a mandatory ``--note`` (audit trail for why
+it was closed) and never touches tmux. Use it to clear escalations from dead
+dispatches instead of overloading ``deny``.
 """
 
 from __future__ import annotations
@@ -305,6 +312,40 @@ def _cmd_deny(args, sd: Path) -> int:
     return 0
 
 
+def _cmd_resolve_stale(args, sd: Path) -> int:
+    try:
+        relay._safe_dispatch_id(args.dispatch_id)
+    except ValueError as exc:
+        _emit(
+            {"error": "invalid_dispatch_id", "dispatch_id": args.dispatch_id, "detail": str(exc)},
+            args.json,
+            f"[x] invalid dispatch_id {args.dispatch_id!r}: {exc}",
+        )
+        return 2
+    try:
+        record = relay.resolve_stale_escalation(args.dispatch_id, args.note, state_dir=sd)
+    except ValueError as exc:
+        _emit(
+            {"error": "invalid_note", "dispatch_id": args.dispatch_id, "detail": str(exc)},
+            args.json,
+            f"[x] {exc}",
+        )
+        return 2
+    if record is None:
+        _emit(
+            {"error": "no_escalation", "dispatch_id": args.dispatch_id},
+            args.json,
+            f"[x] no escalation found for {args.dispatch_id}",
+        )
+        return 1
+    _emit(
+        record,
+        args.json,
+        f"[ok] marked {args.dispatch_id} stale — {args.note}",
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Shared --json flag so it is accepted after the subcommand
     # (e.g. ``vnx permission window-status --json``).
@@ -340,6 +381,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_deny = sub.add_parser("deny", parents=[common], help="deny an escalation")
     p_deny.add_argument("dispatch_id")
     p_deny.set_defaults(func=_cmd_deny)
+
+    p_stale = sub.add_parser(
+        "resolve-stale",
+        parents=[common],
+        help="close an escalation whose worker session is no longer live (no tmux relay)",
+    )
+    p_stale.add_argument("dispatch_id")
+    p_stale.add_argument("--note", required=True, help="why this escalation is being closed as stale (audit)")
+    p_stale.set_defaults(func=_cmd_resolve_stale)
 
     p_scan = sub.add_parser(
         "scan", parents=[common],

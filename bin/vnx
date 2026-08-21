@@ -344,6 +344,7 @@ Permission relay (detached-worker prompt governance):
   permission escalations [--all] [--json]            List pending escalations
   permission approve <dispatch_id>                   Approve + relay "1" to the worker
   permission deny <dispatch_id>                      Deny an escalation
+  permission resolve-stale <dispatch_id> --note ...  Close an escalation with no live worker session
   permission scan [--json]                           Scan LIVE workers for an unmeasured permission stall
 
 Gate commands (pre-merge verification):

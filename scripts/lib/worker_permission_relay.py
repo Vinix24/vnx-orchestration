@@ -540,6 +540,38 @@ def resolve_escalation(
     return record
 
 
+def resolve_stale_escalation(
+    dispatch_id: str,
+    note: str,
+    *,
+    state_dir: "str | Path | None" = None,
+    now: "float | None" = None,
+) -> "dict | None":
+    """Close a pending escalation whose worker session is no longer live.
+
+    ``approve``/``deny`` record an operator DECISION on a prompt still waiting
+    on a worker's pane. Once the worker session is long gone (dispatch
+    finished, died, or was reaped days ago — OI-1414) there is nothing left to
+    relay a keystroke into, and "denied" misrepresents the record as a
+    considered "no". ``stale`` is the third, distinct terminal status for that
+    case: it requires an explicit *note* so the audit trail records WHY the
+    escalation was closed without a real approve/deny decision. Returns the
+    updated record, or None if no escalation exists for *dispatch_id*.
+    """
+    _safe_dispatch_id(dispatch_id)
+    if not note or not note.strip():
+        raise ValueError("resolve_stale_escalation requires a non-empty note")
+    sd = _coerce_state_dir(state_dir)
+    record = read_escalation(dispatch_id, state_dir=sd)
+    if record is None:
+        return None
+    record["status"] = "stale"
+    record["resolution_note"] = note.strip()
+    record["resolved_at"] = _now_iso(now)
+    _atomic_write_json(_escalation_path(sd, dispatch_id), record)
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Fingerprint persistence (idempotency)
 # ---------------------------------------------------------------------------
