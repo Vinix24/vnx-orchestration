@@ -366,6 +366,37 @@ def vnx_dispatch_agent(args) -> int:
             )
             return 1
 
+    # OI-1390: --base-ref / --work-ref / --pr-id passthrough — a consumer fix-forward onto an
+    # existing PR branch. Unset (None) preserves exactly the current behavior (stage_spec_bundle's
+    # own defaults: base_ref="origin/main", pr_id/work_ref=None, a fresh dispatch/<id> branch).
+    # Honored only on the door path (deliver_via_door -> bridge_dispatch -> stage_spec_bundle); the
+    # legacy fallback lane has no ref-override knob at all, so with the single-entry door disabled
+    # these flags would otherwise vanish silently — the same trap --deadline-seconds closes above.
+    # A silently-dropped ref flag is worse than an error: the caller believes it staged a
+    # fix-forward when it actually opened a fresh branch off origin/main (OI-1390's root cause).
+    base_ref = getattr(args, "base_ref", None)
+    work_ref = getattr(args, "work_ref", None)
+    pr_id = getattr(args, "pr_id", None)
+    ref_flags_set = [
+        flag_name
+        for flag_name, flag_value in (
+            ("--base-ref", base_ref),
+            ("--work-ref", work_ref),
+            ("--pr-id", pr_id),
+        )
+        if flag_value is not None
+    ]
+    if ref_flags_set and not single_entry_enabled():
+        print(
+            f"Warning: {', '.join(ref_flags_set)} ignored because the single-entry "
+            "dispatch door is disabled (VNX_DISPATCH_LEGACY=1 / VNX_SINGLE_ENTRY_DISPATCH=0). "
+            "The legacy dispatch lane has no fix-forward ref override; the dispatch runs a "
+            "fresh worktree off origin/main as if these flags were never passed. Unset "
+            "VNX_DISPATCH_LEGACY / VNX_SINGLE_ENTRY_DISPATCH to use the door and honor these "
+            "flags.",
+            file=sys.stderr,
+        )
+
     # Derive the project_id from the TARGET project (--project-dir), not the
     # CLI/engine cwd. Without this the door falls back to _resolve_project_id()
     # which reads the engine location (vnx-dev), so a consumer dispatch lands its
@@ -397,6 +428,9 @@ def vnx_dispatch_agent(args) -> int:
         deadline_seconds=deadline_seconds,
         allow_headless=allow_headless,
         headless_reason=headless_reason,
+        base_ref=base_ref,
+        work_ref=work_ref,
+        pr_id=pr_id,
     )
 
     status = "done" if success else "failed"

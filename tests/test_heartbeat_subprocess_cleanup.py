@@ -8,6 +8,7 @@ Fix: pop both structures before the early return.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import threading
@@ -20,6 +21,60 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
+_UNSET = object()
+
+
+@contextlib.contextmanager
+def _stubbed_heartbeat_ack_monitor_deps():
+    """Make append_receipt/python_singleton importable with the attributes
+    heartbeat_ack_monitor's module-level `from X import Y` needs, then
+    restore sys.modules to exactly its prior state on exit.
+
+    OI-1403: the previous version used `sys.modules.setdefault(...)` and
+    then unconditionally overwrote `AppendReceiptError`/`append_receipt_payload`
+    on whatever ended up in sys.modules. In a full suite, append_receipt is
+    almost always already the REAL, shared module by the time this test file
+    runs — setdefault() is a no-op, and the two lines after it stomped the
+    real module's attributes with mocks, process-wide, with no teardown.
+    Every later test that goes through append_receipt.append_receipt_payload
+    (e.g. report_to_receipt_converter.py, which re-imports it via
+    sys.modules) then silently got a mock returning None instead of the
+    real function. Restoring here — unconditionally, on every exit path —
+    is only needed for the FIRST import of heartbeat_ack_monitor in a
+    session: once `from append_receipt import ...` has executed once, the
+    names are bound into heartbeat_ack_monitor's own namespace and further
+    mutation of sys.modules["append_receipt"] has no effect on it.
+    """
+    injected = []
+    saved_attrs = []
+
+    for name in ("append_receipt", "python_singleton"):
+        if name not in sys.modules:
+            sys.modules[name] = MagicMock()
+            injected.append(name)
+
+    mod_ar = sys.modules["append_receipt"]
+    mod_ps = sys.modules["python_singleton"]
+
+    for mod, attr, value in (
+        (mod_ar, "AppendReceiptError", Exception),
+        (mod_ar, "append_receipt_payload", MagicMock(return_value=None)),
+        (mod_ps, "enforce_python_singleton", MagicMock(return_value=None)),
+    ):
+        saved_attrs.append((mod, attr, getattr(mod, attr, _UNSET)))
+        setattr(mod, attr, value)
+
+    try:
+        yield
+    finally:
+        for mod, attr, original in saved_attrs:
+            if original is _UNSET:
+                delattr(mod, attr)
+            else:
+                setattr(mod, attr, original)
+        for name in injected:
+            sys.modules.pop(name, None)
+
 
 def _build_monitor():
     """Return a HeartbeatACKMonitor with all I/O stubbed out.
@@ -29,15 +84,8 @@ def _build_monitor():
     """
     # Import the class — its module-level `from append_receipt import ...`
     # runs at import time, so we stub it in sys.modules before importing.
-    mock_ar = MagicMock()
-    mock_ps = MagicMock()
-    sys.modules.setdefault("append_receipt", mock_ar)
-    sys.modules.setdefault("python_singleton", mock_ps)
-    sys.modules["append_receipt"].AppendReceiptError = Exception
-    sys.modules["append_receipt"].append_receipt_payload = MagicMock(return_value=None)
-    sys.modules["python_singleton"].enforce_python_singleton = MagicMock(return_value=None)
-
-    from heartbeat_ack_monitor import HeartbeatACKMonitor
+    with _stubbed_heartbeat_ack_monitor_deps():
+        from heartbeat_ack_monitor import HeartbeatACKMonitor
 
     monitor = HeartbeatACKMonitor.__new__(HeartbeatACKMonitor)
     monitor.active_dispatches = {}
