@@ -78,6 +78,25 @@ _GH_TIMEOUT_SECONDS = 20
 # monitor uses before flagging a silently-pending gate key.
 _UNRESOLVABLE_ESCALATION_ATTEMPTS = 96
 
+# A gate RESULT can itself report a TEMPORARY refusal rather than a real
+# verdict on the code: ``status=running`` means a CI check is still in flight
+# (gate_executor's ci_gate path — not all checks reached a terminal bucket
+# yet), and ``status=not_executable`` with ``reason=provider_disabled`` means
+# the gate is parked by config (e.g. VNX_CI_GATE_REQUIRED=0 —
+# gate_result_parser._classify_unavailable / gate_request_handler
+# ._mark_gate_unavailable). Neither says anything about the code; both are
+# "not yet", not "no". Treating either as terminal burns the obligation
+# forever — measured live against PR #1627 (OI-1384): CI had actually passed,
+# but the recorded obligation was a dead not_executable/provider_disabled with
+# no report_path, no contract_hash, no branch, no commit_sha. Same shape as
+# the ``unresolvable`` PR-resolution path below: stays pending under a
+# bounded retry term, then escalates to the loud terminal not_executable — a
+# temporary refusal that recurs forever must still eventually alarm someone,
+# just not on the first attempt.
+_TEMPORARY_RESULT_STATUSES = frozenset({"running"})
+_TEMPORARY_NOT_EXECUTABLE_REASONS = frozenset({"provider_disabled"})
+_TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
+
 # PR-resolution outcomes. The runner must tell "no PR yet" (a wait) apart from
 # "cannot resolve because the environment is wrong" (a fault) IN THE RECORD,
 # not only in a log line — a pending obligation that is actually misconfigured
@@ -602,11 +621,74 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
         # leaves a loud not_executable/failed RESULT record — the obligation
         # must tell the same truth, not a cosmetic "fulfilled".
         result_status = ""
+        result_reason = ""
         try:
             if result_file.exists():
-                result_status = str(json.loads(result_file.read_text(encoding="utf-8")).get("status") or "")
+                result_data = json.loads(result_file.read_text(encoding="utf-8"))
+                result_status = str(result_data.get("status") or "")
+                result_reason = str(result_data.get("reason") or "")
         except (OSError, json.JSONDecodeError) as exc:
             _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
+
+        if result_status in _TEMPORARY_RESULT_STATUSES:
+            temp_reason = "gate_run_in_progress"
+            temp_detail = (
+                f"{gate} for PR #{pr_number} is still running — no verdict yet, "
+                "not a failure; will be re-attempted on the next run"
+            )
+        elif result_status == STATUS_NOT_EXECUTABLE and result_reason in _TEMPORARY_NOT_EXECUTABLE_REASONS:
+            temp_reason = "gate_parked"
+            temp_detail = (
+                f"{gate} is parked ({result_reason}: a config flag has it disabled), "
+                "not broken — the obligation waits for it to be re-enabled or for a "
+                "future run, not permanently refused"
+            )
+        else:
+            temp_reason = None
+            temp_detail = None
+
+        if temp_reason is not None:
+            # Same shape as the `unresolvable` PR-resolution path: stays
+            # pending under a bounded retry term, then escalates loudly
+            # (OI-1384) — never burns the obligation on the first temporary
+            # refusal.
+            update_obligation(
+                path,
+                status=STATUS_PENDING,
+                pr_number=pr_number,
+                branch=branch,
+                attempts=attempts,
+                last_attempt_at=now,
+                request_path=str(manager._request_path(gate, pr_number)),
+                result_path=str(result_file),
+                reason=temp_reason,
+                reason_detail=temp_detail,
+            )
+            outcome["action"] = "pending"
+            outcome["detail"] = temp_detail
+            if attempts >= _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS:
+                escalation_detail = (
+                    f"{gate} stayed temporarily unavailable ({temp_reason}) for "
+                    f"{attempts} attempts (last status={result_status!r}, "
+                    f"reason={result_reason!r}) — escalating to a loud terminal failure"
+                )
+                update_obligation(
+                    path,
+                    status=STATUS_NOT_EXECUTABLE,
+                    pr_number=pr_number,
+                    branch=branch,
+                    attempts=attempts,
+                    last_attempt_at=now,
+                    resolved_at=utc_now_iso(),
+                    request_path=str(manager._request_path(gate, pr_number)),
+                    result_path=str(result_file),
+                    reason=f"{temp_reason}_timeout",
+                    reason_detail=escalation_detail,
+                )
+                outcome["action"] = "not_executable"
+                outcome["detail"] = escalation_detail
+            return outcome
+
         terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
         updated = update_obligation(
             path,

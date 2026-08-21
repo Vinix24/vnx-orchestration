@@ -103,11 +103,23 @@ def _read_obligation(state_dir: Path, dispatch_id: str) -> dict:
 
 class _FakeManager:
     """Stands in for ReviewGateManager: writes the request+result records the
-    real manager's request_and_execute produces, without running any gate."""
+    real manager's request_and_execute produces, without running any gate.
 
-    def __init__(self, state_dir: Path, *, boom: bool = False) -> None:
+    ``result_status``/``result_reason`` let a test control what the gate
+    RESULT record reports (e.g. ``status="not_executable", reason=
+    "provider_disabled"`` for a parked gate, or ``status="running"`` for an
+    in-flight CI check) — OI-1384 fixtures for the runner's temporary-vs-
+    permanent-refusal distinction.
+    """
+
+    def __init__(
+        self, state_dir: Path, *, boom: bool = False,
+        result_status: str = "completed", result_reason: str | None = None,
+    ) -> None:
         self.state_dir = Path(state_dir)
         self.boom = boom
+        self.result_status = result_status
+        self.result_reason = result_reason
         self.calls = []
 
     def _request_path(self, gate: str, pr_number: int) -> Path:
@@ -128,8 +140,11 @@ class _FakeManager:
                 json.dumps({"gate": gate, "pr_number": pr_number, "status": "completed"}),
                 encoding="utf-8",
             )
+            result_payload = {"gate": gate, "pr_number": pr_number, "status": self.result_status}
+            if self.result_reason is not None:
+                result_payload["reason"] = self.result_reason
             self._result_path(gate, pr_number).write_text(
-                json.dumps({"gate": gate, "pr_number": pr_number, "status": "completed"}),
+                json.dumps(result_payload),
                 encoding="utf-8",
             )
         return {"pr_number": pr_number, "branch": branch, "gates": [], "has_required_failure": False}
@@ -404,6 +419,99 @@ def test_runner_never_refires_terminal_obligations(tmp_path, monkeypatch):
 
     assert summary["pending_after"] == 0
     assert manager.calls == [], "a fulfilled obligation must never re-fire the gate"
+
+
+# ---------------------------------------------------------------------------
+# 2b. OI-1384: a TEMPORARY refusal must not burn the obligation terminal.
+# ---------------------------------------------------------------------------
+
+
+def test_runner_leaves_pending_on_provider_disabled_result(tmp_path, monkeypatch):
+    """reason=provider_disabled means the gate is PARKED by config (e.g.
+    VNX_CI_GATE_REQUIRED=0), not that anything is broken — measured live
+    against PR #1627, where CI had actually passed but the obligation still
+    died as a permanent not_executable. Must stay pending so a later run can
+    retry once the gate is unparked."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260821-oi1384-parked", gate="ci_gate",
+        project_id="vnx-dev", pr_number=1627,
+    )
+    manager = _FakeManager(state_dir, result_status="not_executable", result_reason="provider_disabled")
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 1
+    record = _read_obligation(state_dir, "20260821-oi1384-parked")
+    assert record["status"] == STATUS_PENDING
+    assert record["attempts"] == 1
+    assert record["reason"] == "gate_parked"
+    assert "parked" in record["reason_detail"]
+    assert "not broken" in record["reason_detail"]
+
+
+def test_runner_leaves_pending_on_running_result(tmp_path, monkeypatch):
+    """status=running means the CI check is still in flight — a "not yet",
+    not a verdict. Must stay pending, not be marked fulfilled or terminal."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260821-oi1384-running", gate="ci_gate",
+        project_id="vnx-dev", pr_number=1628,
+    )
+    manager = _FakeManager(state_dir, result_status="running")
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 1
+    record = _read_obligation(state_dir, "20260821-oi1384-running")
+    assert record["status"] == STATUS_PENDING
+    assert record["attempts"] == 1
+    assert record["reason"] == "gate_run_in_progress"
+
+
+def test_runner_still_terminates_a_genuinely_permanent_refusal(tmp_path, monkeypatch):
+    """The fix narrows what burns the obligation — it must not widen what
+    stays pending. A gate that is not_executable for a structural reason
+    (the provider binary is not installed, not "disabled by a flag") is a
+    real, permanent refusal and must still terminate on the first attempt."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260821-oi1384-real-refusal", gate="codex_gate",
+        project_id="vnx-dev", pr_number=1629,
+    )
+    manager = _FakeManager(state_dir, result_status="not_executable", result_reason="provider_not_installed")
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260821-oi1384-real-refusal")
+    assert record["status"] == STATUS_NOT_EXECUTABLE
+    assert record["attempts"] == 1
+
+
+def test_runner_escalates_temporary_refusal_to_not_executable_after_threshold(tmp_path, monkeypatch):
+    """A temporary refusal that recurs forever must still eventually escalate
+    loudly — same shape as the `unresolvable` PR-resolution escalation path —
+    just not on the first attempt."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="20260821-oi1384-escalate", gate="ci_gate",
+        project_id="vnx-dev", pr_number=1630,
+    )
+    update_obligation(path, attempts=runner._TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS - 1)
+    manager = _FakeManager(state_dir, result_status="not_executable", result_reason="provider_disabled")
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260821-oi1384-escalate")
+    assert record["status"] == STATUS_NOT_EXECUTABLE
+    assert record["reason"] == "gate_parked_timeout"
+    assert record["attempts"] == runner._TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS
 
 
 # ---------------------------------------------------------------------------
