@@ -1,4 +1,4 @@
-"""kimi_gate provider-outage status tests (OI-1142).
+"""kimi_gate provider-outage status tests (OI-1142, OI-1291).
 
 Eleven kimi quota-403 outages were once booked as eleven review "fail"
 records (reason "no_verdict", summary 'kimi gate: fail (0 blocking
@@ -8,11 +8,46 @@ absence of evidence and must surface as status ``unavailable``, never as a
 rejected PR. These tests pin:
 
 - provider-error output (403 text, empty/truncated report) -> "unavailable",
-  exit 1, a summary that is unmistakably an outage
+  exit 1, a summary that is unmistakably not a review fail
 - a dispatcher exception still writes an ``unavailable`` record instead of
   vanishing without a trace
 - a REAL parsed verdict (pass / fail with findings) behaves exactly as before
 - gate_status treats "unavailable" as neither pass nor fail nor terminal
+
+OI-1291: ``unavailable`` conflated two very different situations under one
+"provider outage" label — a dispatcher exception (no report at all) and a
+report that came back with real content but no readable ```json``` verdict
+block (kimi reviewed in prose; the fence just didn't parse). The latter is a
+parse miss, not an outage, and must say so: reason="parse_error", and none
+of the three operator-facing strings (summary, residual_risk, stdout) may
+claim "outage" when a report actually existed. A genuinely empty report
+(no exception, but nothing came back) is not a parse miss and keeps the
+old reason="no_verdict" behavior.
+
+OI-1291 fix-forward: "did a report come back" was the WRONG axis for
+parse_error vs outage. A real quota/auth outage still writes a report —
+the failure-path ``emit_unified_report`` call runs on the dispatcher's
+failure path too — so a spooled 403 error body is "content" by the same
+measure as a real review. The first cut of this fix read that as "kimi did
+respond, parse miss", which books a real outage as a review event: the same
+failure class OI-1291 exists to remove, just mirrored. The report's own
+YAML frontmatter carries the signal content can't fake: ``exit_code`` is
+stamped by the lane from the actual spawn result. A non-zero exit_code with
+readable frontmatter means the underlying kimi run failed — that is
+reason="dispatch_error" even though a report exists. Only exit_code == 0
+with readable frontmatter and no verdict block is a genuine parse_error.
+
+OI-1291 fix-forward, meetgat correction: the first cut of the frontmatter
+axis also treated a raw zero output-token count as a failure signal on its
+own. On the kimi lane, post-run token capture is frequently unavailable —
+the lane stamps ``token_usage_measured: false`` alongside ``output: 0`` for
+those runs — so a raw zero routinely means "not measured", not "the run
+produced nothing". A count of 766 kimi reports on disk found 502 with
+exit_code 0, real content, and ``token_usage_measured: false``: successful
+runs the raw-zero check booked as provider outages, reintroducing OI-1291's
+original bug on a different axis. ``output_tokens`` now only counts as a
+failure signal when the frontmatter's own ``token_usage_measured`` flag is
+true; otherwise only ``exit_code`` decides.
 
 ``_make_default_dispatcher`` is patched on the kimi_gate module namespace,
 not on plan_gate_panel where it is defined — `from X import Y` binds the name
@@ -38,11 +73,57 @@ from gate_status import (
     is_terminal,
 )
 
-_QUOTA_403_REPORT = (
+def _kimi_report_with_frontmatter(
+    body: str,
+    *,
+    exit_code: int,
+    output_tokens: int = 0,
+    token_usage_measured: bool = False,
+    dispatch_id: str = "kimi-gate-pr0-test",
+) -> str:
+    """Build a report in the exact shape the governed lane actually writes:
+    YAML frontmatter (``governance_emit.emit_unified_report``) followed by
+    the body — the shape OI-1291's fix-forward measured on real quota-outage
+    artifacts on disk (``exit_code: 1`` / ``token_usage.output: 0`` on a
+    failed run, alongside a non-empty body from the failure-path report).
+
+    ``token_usage_measured`` defaults to False: on the kimi lane, post-run
+    token capture is frequently unavailable (kimi-cli's stream-json output
+    carries no usage accounting), so the lane stamps ``output: 0`` alongside
+    ``token_usage_measured: false`` for the overwhelming majority of real
+    reports — a measured count of 766 kimi reports on disk found only 4 with
+    a genuinely measured token count."""
+    return (
+        "---\n"
+        "schema_version: 1\n"
+        f"dispatch_id: {dispatch_id}\n"
+        "provider: kimi\n"
+        "sub_provider: moonshot\n"
+        "model: kimi-k3\n"
+        "duration_seconds: 154.095\n"
+        f"exit_code: {exit_code}\n"
+        "token_usage:\n"
+        "  input: 0\n"
+        f"  output: {output_tokens}\n"
+        "  cache_read: 0\n"
+        f"token_usage_measured: {'true' if token_usage_measured else 'false'}\n"
+        "---\n"
+        "\n"
+        f"{body}"
+    )
+
+
+_QUOTA_403_BODY = (
     "Error: API request failed with status 403: "
     '{"error":{"type":"access_terminated_error","message":'
     '"You have reached your usage limit for this billing cycle."}}\n'
 )
+
+# OI-1291 fix-forward: a REAL quota outage — the underlying kimi run failed,
+# stamped by its OWN frontmatter (exit_code: 1, output: 0), exactly like the
+# real artifacts measured on disk. This must NOT land as parse_error: the
+# provider never produced a review, it produced an error page.
+_QUOTA_403_REPORT = _kimi_report_with_frontmatter(_QUOTA_403_BODY, exit_code=1, output_tokens=0)
 
 _REAL_FAIL_REPORT = (
     "Reviewed the diff; found a real problem.\n\n"
@@ -57,6 +138,16 @@ _REAL_PASS_REPORT = (
     "```json\n"
     '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
     "```\n"
+)
+
+# OI-1291: kimi reviewed and produced real prose, but no fenced ```json```
+# verdict block — this must land as a parse miss, not a provider outage.
+# OI-1291 fix-forward: the frontmatter carries exit_code: 0 and a non-zero
+# output-token count — the run's OWN record of itself says it completed
+# cleanly, so a missing verdict block here can only be a parse miss.
+_PROSE_NO_VERDICT_BODY = "## Findings\n\nNone\n"
+_PROSE_NO_VERDICT_REPORT = _kimi_report_with_frontmatter(
+    _PROSE_NO_VERDICT_BODY, exit_code=0, output_tokens=340,
 )
 
 
@@ -76,22 +167,152 @@ def _run_gate(tmp_path, monkeypatch, dispatcher):
 # ---------------------------------------------------------------------------
 
 
-def test_quota_403_text_books_unavailable_not_fail(tmp_path, monkeypatch):
+def test_quota_403_frontmatter_exit_code_books_dispatch_error_not_parse_error(tmp_path, monkeypatch):
+    """OI-1291 fix-forward: a REAL quota outage still writes a report — the
+    failure-path ``emit_unified_report`` call runs on the dispatcher's
+    failure path too — so "content exists" alone cannot separate an outage
+    from a parse miss. That was the bug reintroduced by the first cut of
+    this fix: it read the spooled 403 body as "kimi did respond, parse
+    miss". The report's OWN frontmatter (exit_code: 1, output: 0 — exactly
+    the shape measured on real quota-outage artifacts on disk) says the
+    underlying kimi run failed, so this must land as dispatch_error, the
+    provider-outage class, never parse_error."""
     rc, record = _run_gate(tmp_path, monkeypatch, lambda *a, **k: _QUOTA_403_REPORT)
     assert record is not None
     assert record["status"] == "unavailable"
-    assert record["reason"] == "no_verdict"
+    assert record["reason"] != "parse_error"
+    assert record["reason"] == "dispatch_error"
     assert rc == 1  # infra/unavailable, not the exit-2 review fail
     assert "UNAVAILABLE" in record["summary"]
-    assert "NOT a review fail" in record["summary"]
     assert record["blocking_findings"] == []
+
+
+def test_unmeasured_zero_tokens_books_parse_error_not_dispatch_error(tmp_path, monkeypatch):
+    """Meetgat correction: on the kimi lane, post-run token capture is
+    frequently unavailable — a measured count of 766 kimi reports on disk
+    found 502 with exit_code: 0, real body content, and
+    ``token_usage_measured: false``. Those are successful runs whose zero
+    output-token count is a measurement gap, not proof the run failed. This
+    report reproduces that exact shape (clean exit_code, unmeasured zero
+    tokens, non-empty body with no readable verdict block) and MUST land as
+    a genuine parse_error, never dispatch_error — the previous cut of this
+    fix would have booked all 502 of those runs as provider outages."""
+    body = "## Review notes\n\nLooks fine, no structured verdict emitted.\n"
+    report = _kimi_report_with_frontmatter(
+        body, exit_code=0, output_tokens=0, token_usage_measured=False,
+    )
+    rc, record = _run_gate(tmp_path, monkeypatch, lambda *a, **k: report)
+    assert record is not None
+    assert record["status"] == "unavailable"
+    assert record["reason"] == "parse_error"
+    assert record["reason"] != "dispatch_error"
+    assert rc == 1
+    assert "outage" not in record["summary"].lower()
+
+
+def test_measured_zero_tokens_books_dispatch_error(tmp_path, monkeypatch):
+    """When the frontmatter's own ``token_usage_measured`` flag is true, a
+    zero output-token count is a real signal (the run's own record says it
+    produced nothing) and must still book as dispatch_error, not parse_error
+    — the conditional weighting only withholds judgement on an UNMEASURED
+    zero, it does not drop the token signal entirely."""
+    body = "## Review notes\n\nLooks fine, no structured verdict emitted.\n"
+    report = _kimi_report_with_frontmatter(
+        body, exit_code=0, output_tokens=0, token_usage_measured=True,
+    )
+    rc, record = _run_gate(tmp_path, monkeypatch, lambda *a, **k: report)
+    assert record is not None
+    assert record["status"] == "unavailable"
+    assert record["reason"] == "dispatch_error"
+    assert rc == 1
 
 
 def test_empty_report_books_unavailable(tmp_path, monkeypatch):
     rc, record = _run_gate(tmp_path, monkeypatch, lambda *a, **k: "")
     assert record is not None
     assert record["status"] == "unavailable"
+    # OI-1291: a genuinely empty report (no exception, nothing came back) is
+    # NOT a parse miss — it keeps the pre-existing no_verdict reason.
+    assert record["reason"] == "no_verdict"
     assert rc == 1
+
+
+def test_prose_report_without_fence_books_parse_error_not_outage(tmp_path, monkeypatch, capsys):
+    """OI-1291 core case, fix-forward: kimi reviewed (real prose, e.g. a
+    ``## Findings`` section) and its OWN report frontmatter stamps a clean
+    run (exit_code: 0, non-zero output tokens) — but the contract's fenced
+    ```json``` verdict block is missing. That is a genuine parse miss,
+    correctly distinguishable from a provider outage BECAUSE the frontmatter
+    says the run completed; none of the three operator surfaces (summary,
+    residual_risk, stdout) may say "outage" here."""
+    rc, record = _run_gate(tmp_path, monkeypatch, lambda *a, **k: _PROSE_NO_VERDICT_REPORT)
+    captured = capsys.readouterr()
+    assert record is not None
+    assert record["status"] == "unavailable"
+    assert record["reason"] == "parse_error"
+    assert rc == 1
+    assert "outage" not in record["summary"].lower()
+    assert "outage" not in record["residual_risk"].lower()
+    assert "outage" not in captured.out.lower()
+    # the operator must be able to see that content DID come back — the
+    # length is measured off the FULL report text (frontmatter + body), the
+    # same string the dispatcher actually returned.
+    report_len = str(len(_PROSE_NO_VERDICT_REPORT))
+    assert report_len in record["summary"]
+    assert report_len in record["residual_risk"]
+    assert record["blocking_findings"] == []
+
+
+def test_frontmatter_exit_code_alone_flips_reason_dispatch_error_vs_parse_error(tmp_path, monkeypatch):
+    """OI-1291 fix-forward, item 3: the report's own frontmatter exit_code is
+    the ONLY thing allowed to separate an outage from a parse miss — not
+    body content, not body length. Two reports share the exact same
+    non-empty body (and therefore the same body length); only the exit_code
+    (and its paired output-tokens signal) fed into the frontmatter differs,
+    and that alone must flip the reason."""
+    shared_body = "## Findings\n\nNone\n"
+    failed_exit_code = 1
+    clean_exit_code = 0
+    failed_report = _kimi_report_with_frontmatter(
+        shared_body, exit_code=failed_exit_code, output_tokens=0,
+    )
+    clean_report = _kimi_report_with_frontmatter(
+        shared_body, exit_code=clean_exit_code, output_tokens=340,
+    )
+
+    rc_failed, record_failed = _run_gate(tmp_path, monkeypatch, lambda *a, **k: failed_report)
+    rc_clean, record_clean = _run_gate(tmp_path, monkeypatch, lambda *a, **k: clean_report)
+
+    assert record_failed["reason"] == "dispatch_error"
+    assert record_clean["reason"] == "parse_error"
+    assert record_failed["reason"] != record_clean["reason"]
+    assert rc_failed == rc_clean == 1
+    assert "outage" not in record_clean["summary"].lower()
+    # the exit_code value itself, not just the derived reason, must be
+    # traceable in the failed record's residual_risk
+    assert f"exit_code={failed_exit_code!r}" in record_failed["residual_risk"]
+
+
+def test_parse_miss_and_dispatch_error_are_distinguishable(tmp_path, monkeypatch):
+    """The two 'unavailable' causes OI-1291 conflated must fall apart on
+    ``reason``: a parse miss (report with content, no fence) is not the same
+    as a dispatch exception (no report produced at all)."""
+    rc_parse, record_parse = _run_gate(
+        tmp_path, monkeypatch, lambda *a, **k: _PROSE_NO_VERDICT_REPORT
+    )
+
+    def _boom(*a, **k):
+        raise RuntimeError("kimi dispatch exploded")
+
+    rc_dispatch, record_dispatch = _run_gate(tmp_path, monkeypatch, _boom)
+
+    assert record_parse["status"] == record_dispatch["status"] == "unavailable"
+    assert record_parse["reason"] == "parse_error"
+    assert record_dispatch["reason"] == "dispatch_error"
+    assert record_parse["reason"] != record_dispatch["reason"]
+    assert rc_parse == rc_dispatch == 1
+    # only the parse-miss summary is forbidden from claiming "outage"
+    assert "outage" not in record_parse["summary"].lower()
 
 
 def test_dispatch_exception_writes_unavailable_record(tmp_path, monkeypatch):
@@ -111,6 +332,61 @@ def test_verdict_to_status_empty_verdict_is_unavailable():
     assert status == "unavailable"
     assert blocking == []
     assert "no readable verdict" in residual
+
+
+def test_content_without_frontmatter_falls_back_to_parse_error(tmp_path, monkeypatch):
+    """OI-1291 fix-forward: an older/foreign report shape with no readable
+    frontmatter at all carries no exit_code to read, so there is no signal
+    left to tell a masked provider failure apart from a genuine parse miss.
+    This falls back to the pre-fix-forward default (parse_error) — the
+    fallback is intentionally too broad, not silently wrong."""
+    no_frontmatter_report = "Reviewed in prose, no fenced block, no frontmatter at all.\n"
+    rc, record = _run_gate(tmp_path, monkeypatch, lambda *a, **k: no_frontmatter_report)
+    assert record is not None
+    assert record["status"] == "unavailable"
+    assert record["reason"] == "parse_error"
+    assert rc == 1
+
+
+def test_frontmatter_run_outcome_unit_cases():
+    """Direct coverage of the ``_frontmatter_run_outcome`` branches: failed
+    run, clean run, an unmeasured zero (the 502-report case — meetgat
+    correction), a measured zero, and unreadable/missing frontmatter."""
+    failed = _kimi_report_with_frontmatter("body text here", exit_code=1, output_tokens=0)
+    outcome, exit_code, output_tokens = kimi_gate._frontmatter_run_outcome(failed)
+    assert outcome is True
+    assert exit_code == 1
+    assert output_tokens == 0
+
+    clean = _kimi_report_with_frontmatter("body text here", exit_code=0, output_tokens=50)
+    outcome, exit_code, output_tokens = kimi_gate._frontmatter_run_outcome(clean)
+    assert outcome is False
+    assert exit_code == 0
+    assert output_tokens == 50
+
+    # meetgat correction: exit_code 0 and zero output tokens, but
+    # token_usage_measured is false (the default — the 502-report shape
+    # measured on disk). The zero is a measurement gap, not a failure
+    # signal, so this must land as a clean run (parse miss upstream), not
+    # a provider-side failure.
+    unmeasured_zero = _kimi_report_with_frontmatter(
+        "body text here", exit_code=0, output_tokens=0, token_usage_measured=False,
+    )
+    outcome, _, _ = kimi_gate._frontmatter_run_outcome(unmeasured_zero)
+    assert outcome is False
+
+    # A GENUINELY measured zero (token_usage_measured: true) is still a
+    # failure signal — the run's own record says it produced nothing.
+    measured_zero = _kimi_report_with_frontmatter(
+        "body text here", exit_code=0, output_tokens=0, token_usage_measured=True,
+    )
+    outcome, _, _ = kimi_gate._frontmatter_run_outcome(measured_zero)
+    assert outcome is True
+
+    outcome, exit_code, output_tokens = kimi_gate._frontmatter_run_outcome("no frontmatter here")
+    assert outcome is None
+    assert exit_code is None
+    assert output_tokens is None
 
 
 # ---------------------------------------------------------------------------
