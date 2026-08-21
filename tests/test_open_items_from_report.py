@@ -21,6 +21,7 @@ processing point" requirement, not a second scanner).
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import sys
 from pathlib import Path
@@ -337,3 +338,62 @@ def test_convert_one_detailed_skips_sync_when_dry_run(tmp_path: Path, monkeypatc
 
     assert outcome == "would_append"
     assert calls == []
+
+
+def test_convert_one_detailed_survives_sync_error_without_code_attr(
+    tmp_path: Path, monkeypatch, caplog,
+):
+    """A sync-branch failure carrying no ``.code`` attribute (e.g. a bare
+    AttributeError) must never abort the ledger booking. The sync sits on a
+    side branch off the main road — the receipt append is the main road and
+    must be booked and returned regardless of what the sync does, with the
+    sync failure logged loud (WARNING, dispatch-id + error) rather than
+    silently swallowed or allowed to shadow the booking outcome.
+    """
+    import report_to_receipt_converter as rtc
+
+    def _raise_no_code_attr(text, *, dispatch_id, report_path, oim=None):
+        raise AttributeError("simulated sync crash carrying no .code attribute")
+
+    monkeypatch.setattr(
+        "open_items_from_report.sync_open_items_from_report", _raise_no_code_attr
+    )
+
+    report = tmp_path / "20260821-oi-sync-crash.md"
+    report.write_text(
+        "**Dispatch-ID**: 20260821-oi-sync-crash\n"
+        "**Model**: sonnet\n"
+        "**Provider**: claude\n\n"
+        "## Summary\n\n"
+        "Implemented the sync path end to end and wired it into the converter.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 3 passed\n\n"
+        "## Open Items\n\n- [ ] [warn] Revisit the timeout value later\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+    with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+        result, outcome = rtc._convert_one_detailed(report, receipts_file=receipts_file)
+
+    # The ledger row is booked and returned — the sync crash never reaches
+    # the AppendReceiptError/.code handler and never turns a successful
+    # append into a rejected/errored one.
+    assert outcome == "appended"
+    assert result is not None
+    assert result.status == "appended"
+
+    # The failure is loud: a WARNING naming the dispatch-id and the error.
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "open-items sync failed" in msg
+        and "20260821-oi-sync-crash" in msg
+        and "simulated sync crash carrying no .code attribute" in msg
+        for msg in warnings
+    ), f"expected a loud sync-failure warning, got: {warnings}"
+
+    # The receipt line itself landed in the ledger despite the sync crash.
+    ledger_text = Path(receipts_file).read_text(encoding="utf-8")
+    assert "20260821-oi-sync-crash" in ledger_text

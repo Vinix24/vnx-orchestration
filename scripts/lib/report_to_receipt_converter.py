@@ -1154,6 +1154,7 @@ def _convert_one_detailed(
     # wrote contract_invalid).
     _guard_did = receipt.get("dispatch_id")
     _guard_kind = receipt.get("receipt_kind")
+    _guard_matched = False
     if (
         _guard_did
         and _guard_kind
@@ -1183,15 +1184,26 @@ def _convert_one_detailed(
                         "completion receipt already exists (hot-path wrote first)",
                         _guard_did,
                     )
-                    if not dry_run:
-                        _sync_report_open_items(receipt, text)
-                    return AppendResult(
-                        status="duplicate",
-                        receipts_file=Path(receipts_file),
-                        idempotency_key=_guard_did,
-                    ), "duplicate"
+                    _guard_matched = True
+                    break
         except OSError:
             pass  # can't read NDJSON — fall through to normal append (idempotency will catch it)
+
+    # The sync call sits outside the OSError-scoped try above and outside
+    # any handler that reads a specific exception attribute (see the
+    # append_receipt_payload try/except below): a sync-branch failure of
+    # ANY shape must never be mistaken for — or swallowed alongside — an
+    # NDJSON-read or booking failure. _sync_report_open_items() never raises
+    # on its own (it self-guards and logs), so this call is a plain
+    # statement, not a try body.
+    if _guard_matched:
+        if not dry_run:
+            _sync_report_open_items(receipt, text)
+        return AppendResult(
+            status="duplicate",
+            receipts_file=Path(receipts_file),
+            idempotency_key=_guard_did,
+        ), "duplicate"
 
     if dry_run:
         logger.info(
@@ -1202,6 +1214,11 @@ def _convert_one_detailed(
         )
         return receipt, "would_append"
 
+    # The booking call and its AppendReceiptError/.code handling are scoped
+    # to this try alone. The open-items sync runs strictly AFTER this block
+    # returns a result, never inside it — a sync-branch failure (of any
+    # shape, with or without a .code attribute) must never be caught by a
+    # handler that assumes every exception here is an AppendReceiptError.
     try:
         result = append_receipt_payload(
             receipt,
@@ -1209,9 +1226,6 @@ def _convert_one_detailed(
             cache_window_seconds=cache_window_seconds,
             skip_enrichment=True,  # converter receipts skip quality advisory
         )
-        if result.status in ("appended", "duplicate"):
-            _sync_report_open_items(receipt, text)
-        return result, result.status
     except AppendReceiptError as exc:
         if exc.code == "missing_model":
             logger.warning(
@@ -1230,6 +1244,10 @@ def _convert_one_detailed(
             report_path.name, exc,
         )
         return None, "error"
+
+    if result.status in ("appended", "duplicate"):
+        _sync_report_open_items(receipt, text)
+    return result, result.status
 
 
 def convert_report_to_receipt(
