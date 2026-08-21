@@ -342,6 +342,9 @@ def test_closure_verifier_ci_gate_pass(gate_env):
         "advisory_findings": [],
         "contract_hash": "abcd1234abcd1234",
         "report_path": str(report_file),
+        # ADR-005: a result without a matching branch is stale evidence and
+        # gets rejected by _find_gate_result, regardless of its other fields.
+        "branch": "feat/test",
     }
     (results_dir / "pr-99-ci_gate.json").write_text(
         json.dumps(result_data), encoding="utf-8",
@@ -382,6 +385,9 @@ def test_closure_verifier_ci_gate_fail_one_blocking(gate_env):
         "advisory_findings": [],
         "contract_hash": "abcd1234abcd1234",
         "report_path": str(report_file),
+        # ADR-005: a result without a matching branch is stale evidence and
+        # gets rejected by _find_gate_result, regardless of its other fields.
+        "branch": "feat/test",
     }
     (results_dir / "pr-100-ci_gate.json").write_text(
         json.dumps(result_data), encoding="utf-8",
@@ -399,7 +405,14 @@ def test_closure_verifier_ci_gate_fail_one_blocking(gate_env):
     ci_check = next((c for c in checks if c.name == "gate_ci_gate"), None)
     assert ci_check is not None
     assert ci_check.status == "FAIL"
-    assert "blocking" in ci_check.detail.lower() or "1" in ci_check.detail
+    # gate_status.is_pass() checks `status in FAIL_STATES` before it ever
+    # inspects blocking_findings/blocking_count, so an explicit status="fail"
+    # always reports as "status: fail" — the blocking_count in this fixture
+    # never reaches the detail string. This was true before ADR-005 too; the
+    # old "blocking"/"1" assertion never actually observed real behavior
+    # because the branch bug always short-circuited to "no ci_gate result
+    # found" first.
+    assert "status: fail" in ci_check.detail
 
 
 def test_closure_verifier_ci_gate_running_is_fail(gate_env):
@@ -421,6 +434,9 @@ def test_closure_verifier_ci_gate_running_is_fail(gate_env):
         "advisory_findings": [],
         "contract_hash": "",
         "report_path": "",
+        # ADR-005: a result without a matching branch is stale evidence and
+        # gets rejected by _find_gate_result, regardless of its other fields.
+        "branch": "feat/test",
     }
     (results_dir / "pr-101-ci_gate.json").write_text(
         json.dumps(result_data), encoding="utf-8",
@@ -460,6 +476,9 @@ def test_closure_verifier_ci_gate_rejects_empty_report_path(gate_env):
         "advisory_findings": [],
         "contract_hash": "abcd1234abcd1234",
         "report_path": "",  # empty — should be rejected
+        # ADR-005: a result without a matching branch is stale evidence and
+        # gets rejected by _find_gate_result, regardless of its other fields.
+        "branch": "feat/test",
     }
     (results_dir / "pr-102-ci_gate.json").write_text(
         json.dumps(result_data), encoding="utf-8",
@@ -501,6 +520,9 @@ def test_closure_verifier_ci_gate_rejects_empty_contract_hash(gate_env):
         "advisory_findings": [],
         "contract_hash": "",  # empty — should be rejected
         "report_path": str(report_file),
+        # ADR-005: a result without a matching branch is stale evidence and
+        # gets rejected by _find_gate_result, regardless of its other fields.
+        "branch": "feat/test",
     }
     (results_dir / "pr-103-ci_gate.json").write_text(
         json.dumps(result_data), encoding="utf-8",
@@ -519,6 +541,54 @@ def test_closure_verifier_ci_gate_rejects_empty_contract_hash(gate_env):
     assert ci_check is not None
     assert ci_check.status == "FAIL"
     assert "contract_hash" in ci_check.detail
+
+
+def test_closure_verifier_ci_gate_rejects_result_missing_branch_field(gate_env):
+    """ADR-005 pin: a result with no ``branch`` field at all is stale evidence
+    and must be rejected the same as a result for a different branch — even
+    though every other field (status/contract_hash/report_path) is valid.
+    Without this test the five tests above could regress back to writing
+    branch-less fixtures and still pass, because they'd merely be asserting
+    on whatever detail _find_gate_result happens to produce for "no match"."""
+    import closure_verifier as cv
+    from review_contract import ReviewContract
+
+    results_dir = gate_env["results_dir"]
+    pr_id = "PR-104"
+    report_file = gate_env["headless_reports_dir"] / "test-ci_gate-pr-104.md"
+    report_file.write_text("# ci_gate report\nStatus: PASS\n", encoding="utf-8")
+
+    result_data = {
+        "gate": "ci_gate",
+        "pr_id": pr_id,
+        "pr_number": 104,
+        "status": "pass",
+        "blocking_count": 0,
+        "advisory_count": 0,
+        "blocking_findings": [],
+        "advisory_findings": [],
+        "contract_hash": "abcd1234abcd1234",
+        "report_path": str(report_file),
+        # Deliberately no "branch" field — this is the stale-evidence shape
+        # ADR-005 exists to reject.
+    }
+    (results_dir / "pr-104-ci_gate.json").write_text(
+        json.dumps(result_data), encoding="utf-8",
+    )
+
+    contract = ReviewContract(
+        pr_id=pr_id,
+        branch="feat/test",
+        review_stack=["ci_gate"],
+        risk_class="medium",
+        changed_files=[],
+        content_hash="",
+    )
+    checks = cv._validate_review_evidence(contract, results_dir)
+    ci_check = next((c for c in checks if c.name == "gate_ci_gate"), None)
+    assert ci_check is not None
+    assert ci_check.status == "FAIL"
+    assert ci_check.detail == "no ci_gate result found"
 
 
 # ---------------------------------------------------------------------------

@@ -113,7 +113,6 @@ tests/test_billing_safety.py  # OI-951: doc/content drift the test already asser
 tests/test_build_t0_state_exception_handling.py  # OI-1227: red solo — build_t0_state.py exited 1 on main (1 failed, 1 passed)
 tests/test_burnin_certification.py  # hangs without VNX_HEADLESS_CLI=echo; covered by burn-in-headless.yml
 tests/test_busy_terminal_certification.py  # OI-1227: red solo — rc_check_terminal call not found in busy-term dispatch (6 failed, 5 errors, 35 passed)
-tests/test_ci_gate.py  # OI-1227: red solo — closure-verifier gate rejects/misses report_path + contract hash (5 failed, 17 passed)
 tests/test_claude_github_review_linkage.py  # OI-1227: red solo — MagicMock not JSON serializable in request handler (3 failed, 33 passed)
 tests/test_cleanup_stale_vnx_sessions.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
 tests/test_cli_flag_forwarding.py  # OI-1227: red solo — RGM lambda got unexpected kwarg 'strict' (1 failed, 17 passed)
