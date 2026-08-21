@@ -474,9 +474,9 @@ def sweep(
     # itself resolved correctly. When `central_resolve_error` is set above,
     # an empty result here is read from a fallback store instead and must be
     # cross-checked against that error, never trusted on its own as "zero
-    # dispatches known" (this is exactly how a repo-local, never-populated
-    # `.vnx-data/state/` used to read as a silent, valid zero — OI-1353
-    # follow-up).
+    # dispatches known" (this is exactly how the repo-local, never-populated
+    # state directory next to the checkout used to read as a silent, valid
+    # zero — OI-1353 follow-up).
     try:
         import dispatch_register
         register_events = dispatch_register.read_events(state_dir=state_dir)
