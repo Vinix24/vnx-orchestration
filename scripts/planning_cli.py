@@ -2484,16 +2484,29 @@ class PlanSource:
 
 
 class PlanRefusal(Exception):
-    """No acceptable plan text: the track's goal is too thin (or absent) and no
-    ``--doc`` was supplied.
+    """No acceptable plan text to hand the gate.
 
-    Carries the measured length and the threshold so the caller can render a
-    refusal that names all three (length, threshold, and the remediation) —
-    never a bare exit, and never a silent pass to a panel that would burn five
+    Two refusal kinds coexist, each raised loud rather than silently passing a
+    plan that cannot be judged:
+
+    - ``no_deliverables``: the track has zero deliverables and no ``--doc``.
+      Rubric axes 3 (scoped deliverables) and 5 (per-deliverable routing floor)
+      are unanswerable no matter how long the goal is, so a panel round would
+      burn seats on a guaranteed revise. Carries no length/threshold.
+    - ``thin_goal``: the goal falls under ``min_goal_chars`` — the anti-emptiness
+      floor, not a planability test. Carries length + threshold so the caller
+      can render a refusal that names both plus the remediation.
+
+    Never a bare exit, and never a silent pass to a panel that would burn five
     model rounds on a plan that is not there.
     """
 
+    kind: str
+    length: Optional[int]
+    threshold: Optional[int]
+
     def __init__(self, length: int, threshold: int) -> None:
+        self.kind = "thin_goal"
         self.length = length
         self.threshold = threshold
         super().__init__(
@@ -2503,23 +2516,93 @@ class PlanRefusal(Exception):
             f"characters, or pass --doc <path> with a plan document."
         )
 
+    @classmethod
+    def no_deliverables(cls) -> "PlanRefusal":
+        """A zero-deliverable track with no ``--doc``: the plan cannot be judged
+        on its scoped deliverables because there are none to show the panel."""
+        exc = cls.__new__(cls)
+        exc.kind = "no_deliverables"
+        exc.length = None
+        exc.threshold = None
+        Exception.__init__(
+            exc,
+            "plan-gate refused: the track has no deliverables, so the plan cannot "
+            "be judged on scoped deliverables or a per-deliverable routing floor. "
+            "Add deliverables (vnx deliverable add ...) or pass --doc <path> with "
+            "a plan document.",
+        )
+        return exc
+
+
+def _deliverable_field(record: dict, key: str) -> str:
+    """Render one required deliverable field, or ``<missing>`` when absent/blank.
+
+    The distinction matters: a panelist judging rubric axis 3 must be able to
+    tell "this deliverable has no title" from "the plan omitted the title".
+    """
+    value = record.get(key)
+    if value is None or str(value).strip() == "":
+        return "<missing>"
+    return str(value)
+
+
+def _deliverable_optional_field(record: dict, key: str) -> str:
+    """Render one optional per-deliverable routing tag (task_class / routing_floor).
+
+    Three states are spelled out so a panelist can distinguish them: the tag is
+    not on the deliverable at all (``<not supplied>``), it is present but blank
+    (``<empty>``), or it carries a value.
+    """
+    if key not in record:
+        return "<not supplied>"
+    value = record.get(key)
+    if value is None or str(value).strip() == "":
+        return "<empty>"
+    return str(value)
+
+
+def _compose_goal_and_deliverables_plan(goal: str, deliverables: list) -> str:
+    """Render the no-``--doc`` plan text: the goal statement followed by a
+    deliverable inventory carrying every field the rubric reads (id, output_kind,
+    title, status, and the task_class / routing_floor tags when they are set on
+    the deliverable). A missing or blank field is written out explicitly instead
+    of dropped, so axes 3 and 5 are answerable from the text alone.
+    """
+    lines: list[str] = [goal, "", "## Deliverables"]
+    for i, d in enumerate(deliverables, 1):
+        lines.append("")
+        lines.append(f"### {i}. {_deliverable_field(d, 'title')}")
+        lines.append(f"- id: {_deliverable_field(d, 'deliverable_ref')}")
+        lines.append(f"- output_kind: {_deliverable_field(d, 'output_kind')}")
+        lines.append(f"- status: {_deliverable_field(d, 'derived_status')}")
+        lines.append(f"- task_class: {_deliverable_optional_field(d, 'task_class')}")
+        lines.append(f"- routing_floor: {_deliverable_optional_field(d, 'routing_floor')}")
+    return "\n".join(lines)
+
 
 def resolve_plan_source(
     *,
     doc_text: Optional[str],
     goal_state: Optional[str],
     min_goal_chars: int,
+    deliverables: Optional[list] = None,
 ) -> PlanSource:
-    """Resolve which plan text the gate reviews, and refuse a too-thin goal.
+    """Resolve which plan text the gate reviews, and refuse an unjudgeable plan.
 
     ``--doc`` wins explicitly: when ``doc_text`` is not None it is the plan, and
     a non-empty ``goal_state`` is marked ``ignored_goal`` (the caller surfaces
-    that so the user never has to guess which source the gate judged). Otherwise
-    the track's ``goal_state`` is the plan, and it must carry at least
-    ``min_goal_chars`` MEANINGFUL characters — the length is measured AFTER
-    stripping whitespace, so a goal of 200 spaces is refused. A too-thin or
-    absent goal raises :class:`PlanRefusal`: a thin goal is never silently
-    passed and never silently refused.
+    that so the user never has to guess which source the gate judged).
+    Deliverables are NOT composed into a doc-supplied plan.
+
+    Without ``--doc`` the plan text is composed from the track's ``goal_state``
+    AND its ``deliverables`` (the two non-doc sources). The deliverables are what
+    make rubric axes 3 (scoped deliverables) and 5 (per-deliverable routing
+    floor) answerable; with none, the gate refuses loud via
+    :class:`PlanRefusal.no_deliverables` — a structural gap, not a length gap.
+    ``min_goal_chars`` stays an anti-emptiness floor on the goal: a goal under
+    it (measured AFTER stripping whitespace, so 200 spaces measure 0) raises
+    :class:`PlanRefusal` (thin goal). Neither refusal ever silently passes a
+    plan the panel cannot judge.
     """
     if doc_text is not None:
         return PlanSource(
@@ -2527,10 +2610,15 @@ def resolve_plan_source(
             source="doc",
             ignored_goal=bool((goal_state or "").strip()),
         )
+    if not deliverables:
+        raise PlanRefusal.no_deliverables()
     goal = (goal_state or "").strip()
     if len(goal) < min_goal_chars:
         raise PlanRefusal(length=len(goal), threshold=min_goal_chars)
-    return PlanSource(plan_text=goal, source="goal")
+    return PlanSource(
+        plan_text=_compose_goal_and_deliverables_plan(goal, deliverables),
+        source="goal",
+    )
 
 
 def cmd_plan_gate_seed(args: argparse.Namespace) -> int:
