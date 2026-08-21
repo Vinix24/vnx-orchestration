@@ -38,6 +38,15 @@ Constraint references (provider_constraints.yaml):
   kimi-via-cli-only: kimi_cli lane, never via=api/moonshot
   deepseek-harness-subscription-blocked: DEEPSEEK_API_KEY required; own key only
   zai-via-openrouter-only / deprecated-glm-models: not routed by this static map
+
+Vocabulary note (P3, dispatch 20260821-q3-failure-class-split): ``escalate_tier``
+only ever receives the lowercase ``failure_classification.FAILURE_CLASSES``
+vocabulary (its sole production caller, ``dispatch_cli._maybe_stage_escalation``,
+derives ``failure_class`` from ``classify_failure_safe``). ``exit_classifier.py``'s
+separate UPPERCASE ``FC_*`` taxonomy (headless CLI runs) never reaches this
+function — see ``failure_classification.py``'s module docstring for the full
+traced call chain, and ``tests/test_smart_router_quality_tier.py`` for the test
+that pins the separation.
 """
 from __future__ import annotations
 
@@ -93,21 +102,35 @@ _TIER_LADDER = load_tier_ladder()
 _ESCALATION_ORDER = load_escalation_order()
 
 
-# The escalation decision table (dispatch 20260816-p6-escalate-tier-ds): the
-# closed set of failure classes and the action each maps to. A class the table
-# does not know fails loudly — never a silent fallback to "climb".
+# The escalation decision table (dispatch 20260816-p6-escalate-tier-ds,
+# extended P3 dispatch 20260821-q3-failure-class-split): the closed set of
+# failure classes and the action each maps to. A class the table does not
+# know fails loudly — never a silent fallback to "climb".
 #   model_error      -> climb one tier
 #   credit_exhausted -> climb one tier AND notify the operator
 #   auth_rejected    -> no climb (a higher tier has the same auth problem)
 #   timeout          -> retry the same tier first, then climb
 #   empty_completion -> retry the same tier first, then climb
-#   unknown          -> no climb, report the unknown class loudly
+#   completion_without_execution -> climb one tier (a higher-tier model can
+#                       actually execute the tool calls it fabricated instead
+#                       of claiming completion without running them)
+#   no_verdict       -> retry the same tier first, then climb (a gate-runner
+#                       process flake — e.g. codex never fed stdin and
+#                       produced no verdict event — not a real model/provider
+#                       error, so it is a flake exactly like timeout)
+#   tool_missing     -> no climb (a missing CLI binary on this host is not
+#                       fixed by picking a different model on the same host)
+#   unknown          -> no climb, report the unknown class loudly (the
+#                       vangnetklasse — kept as the catch-all; do not remove)
 _ESCALATION_TABLE = {
     "model_error": "climb",
     "credit_exhausted": "climb",
     "auth_rejected": "no_climb",
     "timeout": "retry_same_tier",
     "empty_completion": "retry_same_tier",
+    "completion_without_execution": "climb",
+    "no_verdict": "retry_same_tier",
+    "tool_missing": "no_climb",
     "unknown": "no_climb",
 }
 
