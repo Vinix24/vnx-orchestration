@@ -30,11 +30,10 @@ Fail-open by design: a broken availability layer never blocks a dispatch. Any
 unexpected error is logged loudly and the lane is treated as available, so the
 router falls through to its existing behaviour.
 
-``record_lane_failure`` is the producer side of the cooldown contract: the
-production incident path (``WorkflowSupervisor.handle_incident``) calls it when
-a provider quota/auth/rate-limit failure is already classified, passing the
-``IncidentClass`` through so there is no second 403/429 detection (OI-1263).
-This module provides the mechanism, the incident path provides the write.
+``record_lane_failure`` is the producer side of the cooldown contract:
+lane-execution paths call it when a lane fails on quota/auth
+(403/429/quota-exhausted). Wiring those call sites is the fallback-chain op;
+this module provides the mechanism and the decision-time check.
 """
 from __future__ import annotations
 
@@ -48,8 +47,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from incident_taxonomy import IncidentClass
-
 logger = logging.getLogger(__name__)
 
 # Lane names this module understands. Values are provider strings the
@@ -60,17 +57,6 @@ LOCAL_GEMMA_DISABLED_REASON = (
     "local models skipped per operator decision 2026-08-02; reactivate when "
     "gemma-4-12b-integration ships"
 )
-
-# The incident classes the lane-cooldown contract recognises (OI-1185 split).
-# A cooldown is only ever written for one of these — rate-limit cools in
-# seconds, exhausted quota in hours, and an auth failure never auto-recovers —
-# never for a process/terminal/delivery incident. The write side (the incident
-# path) gates on this set so a non-provider incident can never mark a lane out.
-PROVIDER_INCIDENT_CLASSES: frozenset = frozenset({
-    IncidentClass.PROVIDER_RATE_LIMIT,
-    IncidentClass.PROVIDER_QUOTA_EXHAUSTED,
-    IncidentClass.PROVIDER_AUTH_FAILURE,
-})
 
 
 @dataclass(frozen=True)
@@ -122,6 +108,18 @@ def lane_env_vars(lane: str) -> tuple:
     return check.env_vars
 
 
+def is_router_lane(lane: str) -> bool:
+    """Return True when *lane* is a lane the router's availability layer gates.
+
+    The provider-lane failure path uses this to decide whether a provider
+    string is a router lane worth cooling down (deepseek-harness / kimi /
+    codex / claude / local-gemma). Provider strings the router does not emit
+    (gemini, glm-harness, litellm sub-routes) are not router lanes and have no
+    cooldown state to write.
+    """
+    return lane in _LANE_CHECKS
+
+
 def _cooldown_dir(state_dir: Path) -> Path:
     return Path(state_dir) / "router_lane_cooldown"
 
@@ -166,7 +164,6 @@ def record_lane_failure(
     *,
     state_dir: Optional[Path] = None,
     now: Optional[float] = None,
-    incident_class: Optional[IncidentClass] = None,
 ) -> None:
     """Mark a lane as in cooldown after a quota/auth/rate-limit failure.
 
@@ -175,12 +172,6 @@ def record_lane_failure(
     contract via the single cooldown clock (``cooldown_seconds``). An auth
     failure is recorded as non-recoverable: it stays out until an operator
     clears the state (an expired key does not improve by waiting).
-
-    ``incident_class`` lets a caller that ALREADY classified the failure pass
-    the class in directly (the incident path does this — no second 403/429
-    detection, OI-1263). When provided it must be a provider incident class
-    (see ``PROVIDER_INCIDENT_CLASSES``); a non-provider class raises, and the
-    best-effort wrapper logs and swallows it so no bogus cooldown is written.
 
     Best-effort and fail-open: a failure to persist cooldown state is logged and
     swallowed — cooldown bookkeeping must never break a dispatch.
@@ -199,12 +190,7 @@ def record_lane_failure(
             get_cooldown_seconds,
         )
 
-        if incident_class is not None and incident_class not in PROVIDER_INCIDENT_CLASSES:
-            raise ValueError(
-                f"record_lane_failure requires a provider incident class, "
-                f"got {incident_class.value!r}"
-            )
-        failure_class = incident_class if incident_class is not None else classify_provider_failure(reason)
+        failure_class = classify_provider_failure(reason)
         contract = get_contract(failure_class)
         recoverable = not contract.escalation.halt_auto_recovery
         duration = get_cooldown_seconds(failure_class, 0)
@@ -316,4 +302,5 @@ __all__ = [
     "lane_cooldown_remaining",
     "lane_available",
     "lane_env_vars",
+    "is_router_lane",
 ]

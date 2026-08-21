@@ -658,6 +658,44 @@ def _record_provider_metadata(
         )
 
 
+def _record_lane_cooldown_on_failure(
+    *,
+    provider: str,
+    result: Any,
+    status: str,
+    state_dir: Path,
+) -> None:
+    """Mark a router lane in cooldown after a failed provider-lane spawn.
+
+    The producer side of the router's availability contract, wired where a
+    provider failure is actually observed: the provider lane itself. A failed
+    spawn (status failure/timeout) marks the lane the dispatch actually used,
+    so the next routing decision skips it. ``record_lane_failure`` classifies
+    the reason via ``classify_provider_failure`` — there is no second 403/429
+    recognizer here — and the lane name is the provider string of the dispatch
+    (the vocabulary ``_LANE_CHECKS`` keys on), not a component label.
+
+    Success and blocked spawns never cool a lane down (blocked = refused before
+    any provider call). Only lanes the availability layer gates are written;
+    other provider strings (gemini, glm-harness) are not router lanes and have
+    no cooldown state. Best-effort by design: ``record_lane_failure`` swallows
+    its own write failures, so cooldown bookkeeping never breaks a dispatch.
+    """
+    if status in ("success", "blocked"):
+        return
+    from providers.smart_router.availability import (  # noqa: PLC0415
+        is_router_lane,
+        record_lane_failure,
+    )
+
+    if not is_router_lane(provider):
+        return
+    reason = getattr(result, "error", None)
+    if not reason:
+        reason = f"provider lane {provider} failed (status={status})"
+    record_lane_failure(provider, str(reason), state_dir=state_dir)
+
+
 def _event_store_safety_net(event_store: Any, args: argparse.Namespace) -> None:
     """Finally-path safety net: archive + clear the live event stream when an
     UNEXPECTED exception bypassed _emit_governance (which normally owns the
@@ -745,6 +783,20 @@ def _emit_governance(
 
     state_dir = _resolve_state_dir()
     data_dir = _resolve_data_dir()
+
+    # A failed provider-lane spawn must mark the lane it used in cooldown so
+    # the next routing decision skips it (the decision-time gate reads the
+    # state record_lane_failure writes). Wired here, at the single choke point
+    # every provider lane reports through, because this is where a provider
+    # failure is actually observed — no production path reports a provider
+    # outage as an incident to the supervisor.
+    _record_lane_cooldown_on_failure(
+        provider=provider,
+        result=result,
+        status=status,
+        state_dir=state_dir,
+    )
+
     duration = (end_time - start_time).total_seconds()
     token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
