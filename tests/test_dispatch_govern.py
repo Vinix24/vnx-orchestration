@@ -28,6 +28,7 @@ from dispatch_govern import (
     _synthesize,
     _git_changes,
     _git_summary,
+    _work_delivered,
 )
 from report_body_contract import validate_body
 
@@ -1666,7 +1667,7 @@ def test_git_summary_with_worktree_calls_subprocess_scoped_to_cwd(tmp_data, tmp_
 
     fake = subprocess.CompletedProcess(["git"], 0, stdout="feat: add foo\n", stderr="")
     with patch("dispatch_govern.subprocess.run", return_value=fake) as mock_run:
-        result = _git_summary(spec, status="done")
+        result = _git_summary(spec, status="done", delivered=True)
 
     assert mock_run.called, "patch on dispatch_govern.subprocess.run did not intercept _git_summary's call"
     _, kwargs = mock_run.call_args
@@ -1682,7 +1683,7 @@ def test_git_summary_no_worktree_never_calls_subprocess(tmp_data, tmp_state):
     spec = _make_spec(tmp_data, tmp_state, worktree_path=None)
 
     with patch("dispatch_govern.subprocess.run") as mock_run:
-        result = _git_summary(spec, status="failed")
+        result = _git_summary(spec, status="failed", delivered=True)
         mock_run.assert_not_called()
 
     assert "No commit on branch" in result
@@ -1741,7 +1742,7 @@ def test_git_summary_and_changes_with_real_worktree_unchanged(tmp_path):
         model="sonnet",
     )
 
-    summary = _git_summary(spec, status="done")
+    summary = _git_summary(spec, status="done", delivered=True)
     assert "feat: add foo" in summary
     assert "Worker status: done" in summary
 
@@ -1758,3 +1759,140 @@ def test_git_summary_and_changes_with_real_worktree_unchanged(tmp_path):
     changes2 = _git_changes(spec)
     assert "foo.py" in changes2
     assert "(no base_sha; showing HEAD~1..HEAD)" in changes2
+
+
+# ---------------------------------------------------------------------------
+# OI-1363: a synthesized report must never borrow the base branch's commit
+# message as if it were the worker's own delivered work.
+# ---------------------------------------------------------------------------
+
+def _make_base_repo(tmp_path: Path) -> "tuple[Path, str]":
+    """Real git repo with two commits; returns (repo_path, base_sha == HEAD)."""
+    repo = tmp_path / "worktree"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "foo.py").write_text("print('hi')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore: repo seed"], cwd=repo, check=True)
+    (repo / "foo.py").write_text("print('hi 2')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "feat(prior-dispatch): borrowed base commit message"],
+        cwd=repo, check=True,
+    )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return repo, base_sha
+
+
+def test_work_delivered_true_when_commits_on_top_of_base(tmp_path):
+    repo, base_sha = _make_base_repo(tmp_path)
+    (repo / "foo.py").write_text("print('worker change')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "feat(oi-1363): actual worker commit"],
+        cwd=repo, check=True,
+    )
+    spec = GovernSpec(
+        dispatch_id="d-delivered", terminal_id="T1", instruction="Do it.",
+        data_dir=tmp_path / "data", state_dir=tmp_path / "state",
+        worktree_path=repo, base_sha=base_sha, model="sonnet",
+    )
+    assert _work_delivered(spec) is True
+
+
+def test_work_delivered_false_when_head_equals_base(tmp_path):
+    repo, base_sha = _make_base_repo(tmp_path)
+    spec = GovernSpec(
+        dispatch_id="d-no-work", terminal_id="T1", instruction="Do it.",
+        data_dir=tmp_path / "data", state_dir=tmp_path / "state",
+        worktree_path=repo, base_sha=base_sha, model="sonnet",
+    )
+    assert _work_delivered(spec) is False
+
+
+def test_work_delivered_false_no_base_sha_no_dispatch_trailer(tmp_path):
+    repo, _base_sha = _make_base_repo(tmp_path)
+    spec = GovernSpec(
+        dispatch_id="d-no-base-sha", terminal_id="T1", instruction="Do it.",
+        data_dir=tmp_path / "data", state_dir=tmp_path / "state",
+        worktree_path=repo, base_sha=None, model="sonnet",
+    )
+    assert _work_delivered(spec) is False
+
+
+def test_work_delivered_true_no_base_sha_with_dispatch_trailer(tmp_path):
+    repo, _base_sha = _make_base_repo(tmp_path)
+    (repo / "foo.py").write_text("print('worker change')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m",
+         "feat(oi-1363): worker commit\n\nDispatch-ID: d-trailer-match"],
+        cwd=repo, check=True,
+    )
+    spec = GovernSpec(
+        dispatch_id="d-trailer-match", terminal_id="T1", instruction="Do it.",
+        data_dir=tmp_path / "data", state_dir=tmp_path / "state",
+        worktree_path=repo, base_sha=None, model="sonnet",
+    )
+    assert _work_delivered(spec) is True
+
+
+@pytest.mark.parametrize(
+    "status,receipt,failure_reason",
+    [
+        ("timeout", None, "tmux_receipt_deadline_exceeded"),
+        ("awaiting_permission", {"status": "awaiting_permission"}, "tmux_awaiting_permission"),
+        ("no_progress", {"status": "no_progress"}, "interactive_no_progress"),
+    ],
+)
+def test_synthesize_no_work_delivered_never_borrows_base_commit_message(
+    tmp_path, status, receipt, failure_reason,
+):
+    """OI-1363: for all three synthesized-report reasons observed 12-21 aug in the
+    ledger (deadline / awaiting_permission / no_progress), a worker that committed
+    nothing must get an honest 'no work delivered' report — never the base
+    branch's borrowed commit message."""
+    repo, base_sha = _make_base_repo(tmp_path)
+    spec = GovernSpec(
+        dispatch_id=f"d-{status}", terminal_id="T1", instruction="Do it.",
+        data_dir=tmp_path / "data", state_dir=tmp_path / "state",
+        worktree_path=repo, base_sha=base_sha, model="sonnet",
+    )
+    raw = GovernRaw(receipt=receipt, duration_seconds=1.0, failure_reason=failure_reason)
+
+    body = _synthesize(spec, raw)
+
+    assert "- delivery_verdict: no_work_delivered" in body
+    assert "borrowed base commit message" not in body
+    summary_section = body.split("## Summary")[1].split("## Changes")[0]
+    assert "No work delivered" in summary_section
+    print(f"\n--- ## Summary ({status}) ---\n{summary_section}")
+
+
+def test_synthesize_work_delivered_keeps_commit_message_and_verdict(tmp_path):
+    """Positive control: a worker commit on top of base keeps existing behavior —
+    the commit message stays in the Summary and the verdict flips to delivered."""
+    repo, base_sha = _make_base_repo(tmp_path)
+    (repo / "foo.py").write_text("print('worker change')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "foo.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "feat(oi-1363): real worker delivery"],
+        cwd=repo, check=True,
+    )
+    spec = GovernSpec(
+        dispatch_id="d-delivered-synth", terminal_id="T1", instruction="Do it.",
+        data_dir=tmp_path / "data", state_dir=tmp_path / "state",
+        worktree_path=repo, base_sha=base_sha, model="sonnet",
+    )
+    raw = GovernRaw(receipt={"status": "done"}, duration_seconds=1.0)
+
+    body = _synthesize(spec, raw)
+
+    assert "- delivery_verdict: work_delivered" in body
+    assert "feat(oi-1363): real worker delivery" in body
+    summary_section = body.split("## Summary")[1].split("## Changes")[0]
+    print(f"\n--- ## Summary (work_delivered) ---\n{summary_section}")
