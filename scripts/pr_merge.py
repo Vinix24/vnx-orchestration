@@ -26,6 +26,18 @@ other commit. A push to the branch after the gates ran moves the head, and the
 merge is then refused with a "gates must re-run" message instead of silently
 merging a commit the gates never saw.
 
+Outcome verification + conditional --auto (OI-1399 / OI-1386): ``gh pr merge
+--auto`` exits 0 both when it merges immediately AND when it only *enables*
+auto-merge (the actual merge stays pending on required checks/reviews) — the
+two are indistinguishable from the exit code alone. ``_do_merge`` therefore
+never trusts ``gh``'s exit code as proof of a merge: after a zero exit it
+re-queries the PR (``_pr_actually_merged``) and only reports success when
+``state == "MERGED"``. Separately, ``--auto`` is now conditional
+(``_repo_auto_merge_allowed``): it is only added when the repository actually
+has "Allow auto-merge" enabled, so a repo with it disabled takes the plain
+``gh pr merge`` path instead of having the merge rejected outright for
+requesting a repo feature that is off.
+
 Usage:
     python3 scripts/pr_merge.py --pr 123
     python3 scripts/pr_merge.py --pr 123 --dispatch-id 20260526-gov2-something
@@ -342,6 +354,53 @@ def _head_moved_refusal_message(pr_number: int, head_sha: str, raw: str) -> str:
     )
 
 
+def _repo_auto_merge_allowed() -> Optional[bool]:
+    """Whether the repo has "Allow auto-merge" enabled — required for ``gh --auto``.
+
+    Neither ``gh pr view`` nor ``gh repo view --json`` expose this setting; the
+    REST repo object carries it as ``allow_auto_merge``, so it is queried via
+    ``gh api``. Returns ``None`` when it could not be determined (``gh``
+    failure, unparseable output) — the caller must treat that the same as
+    "not available", never as "available": assuming availability is exactly
+    OI-1386 (``--auto`` requested on a repo where the setting is off, and
+    ``gh`` rejects the merge outright for it).
+    """
+    result = _gh(["api", "repos/{owner}/{repo}", "--jq", ".allow_auto_merge"])
+    if result.returncode != 0:
+        return None
+    out = (result.stdout or "").strip().lower()
+    if out == "true":
+        return True
+    if out == "false":
+        return False
+    return None
+
+
+def _pr_actually_merged(pr_number: int) -> tuple[bool, str]:
+    """Verify a PR is really merged — never trust a ``gh pr merge`` exit code alone.
+
+    ``gh pr merge --auto`` exits 0 both when it merges immediately AND when it
+    only *enables* auto-merge (the merge itself stays pending on required
+    checks/reviews that have not landed yet). Both look identical on the exit
+    code; only the PR's own state distinguishes them (OI-1399). An
+    unqueryable PR state is treated as "not merged" — never a silent pass.
+    """
+    pr_data = _query_pr(pr_number)
+    if pr_data is None:
+        return False, (
+            f"gh pr merge meldde succes voor #{pr_number}, maar de PR-state kon niet "
+            "worden opgevraagd om dat te bevestigen: behandel dit als een mislukte merge"
+        )
+    state = (pr_data.get("state") or "").upper()
+    if state == "MERGED":
+        return True, ""
+    return False, (
+        f"gh pr merge meldde succes voor #{pr_number}, maar de PR staat nog op "
+        f"state={state or 'onbekend'} (geen MERGED): vermoedelijk staat auto-merge nog "
+        "te wachten op openstaande vereisten. Dit telt niet als een voltooide merge."
+    )
+
+
 def _do_merge(pr_number: int, method: str, head_sha: str = "") -> tuple[bool, str]:
     """Execute gh pr merge pinned to the approved head and return (success, error).
 
@@ -351,18 +410,26 @@ def _do_merge(pr_number: int, method: str, head_sha: str = "") -> tuple[bool, st
     merge must then be refused (so the gates re-run) rather than silently merged.
     A head-moved refusal is reported as that — the system working — not as a
     generic ``gh`` failure.
+
+    ``--auto`` is added only when the repo actually supports it
+    (``_repo_auto_merge_allowed``) — see module docstring (OI-1386). A ``gh``
+    exit 0 is not itself treated as success: the PR state is re-queried
+    (``_pr_actually_merged``) and only ``state == "MERGED"`` counts (OI-1399).
     """
     method_flag = f"--{method}"
-    args = ["pr", "merge", str(pr_number), method_flag, "--auto"]
+    args = ["pr", "merge", str(pr_number), method_flag]
     if head_sha:
         args += ["--match-head-commit", head_sha]
+    if _repo_auto_merge_allowed():
+        args = args + ["--auto"]
+
     result = _gh(args)
     if result.returncode != 0:
         raw = (result.stderr or result.stdout or "gh pr merge failed").strip()
         if head_sha and _is_head_moved_refusal(raw):
             return False, _head_moved_refusal_message(pr_number, head_sha, raw)
         return False, raw
-    return True, ""
+    return _pr_actually_merged(pr_number)
 
 
 def _emit_receipt(
@@ -433,6 +500,7 @@ def merge_pr(
     dry_run: bool = False,
     receipts_file: Optional[str] = None,
     head_sha: str = "",
+    pr_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
 
@@ -442,6 +510,12 @@ def merge_pr(
     (a second fetch would be a second source for the same identity). Empty
     (default) preserves the pre-pinning behavior for callers that never ran a
     gate.
+
+    ``pr_data`` lets the caller pass PR metadata it already fetched (``main()``
+    already has it from ``_run_ci_gate``) so this does not re-query ``gh`` a
+    third time per invocation for the same PR just to read title/branch.
+    ``None`` (default) preserves the previous self-fetching behavior for
+    callers that never ran a gate.
 
     Returns a dict with keys: success, pr_number, dispatch_id, merge_method,
     pr_title, branch, receipt_status, register_ok, error.
@@ -460,8 +534,11 @@ def merge_pr(
         "overlaps": [],
     }
 
-    # Query PR metadata before merge (needed for receipt)
-    pr_data = _query_pr(pr_number)
+    # PR metadata for the receipt (title/branch). Reuse what the caller
+    # already fetched when given; otherwise fetch it here (pre-pinning
+    # behavior for callers that never ran a gate).
+    if pr_data is None:
+        pr_data = _query_pr(pr_number)
     if pr_data:
         result["pr_title"] = pr_data.get("title", "")
         result["branch"] = pr_data.get("headRefName", "")
@@ -595,6 +672,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         merge_method=method,
         dry_run=args.dry_run,
         head_sha=head_sha,
+        pr_data=pr_data,
     )
 
     if args.json:
