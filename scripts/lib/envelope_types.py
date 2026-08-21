@@ -48,9 +48,18 @@ class EnvelopeSpec:
 
 @dataclass
 class EnvelopeResult:
-    """Outcome from a complete envelope run."""
+    """Outcome from a complete envelope run.
 
-    status: str           # "success" | "failure" | "timeout"
+    OI-1287: ``status`` carries one more value than the adapter's own three —
+    ``"receipt_missing"`` — stamped by ``dispatch_envelope._envelope_outcome``
+    only when the WORK succeeded but GOVERN produced no ledger receipt (a
+    proof-chain gap). It is never used in place of a genuine "failure"/
+    "timeout", and the underlying WORK status is never rewritten to produce
+    it — see ``envelope_govern._record_receipt_emit_failure``'s trail record
+    for that untouched value.
+    """
+
+    status: str           # "success" | "failure" | "timeout" | "receipt_missing"
     returncode: int
     report_path: Optional[Path]
     receipt_path: Optional[Path]

@@ -5,8 +5,9 @@ Verifies:
 2. Failure path: spawn error -> BOTH report AND receipt emitted, status "failure".
 3. Timeout path: spawn timed_out -> BOTH report AND receipt emitted, status "timeout".
 4. Stopped_early path (claude-only): spawn stopped_early -> BOTH report AND receipt, status "success".
-5. Receipt-emit failure -> proof-chain gap recorded, work status preserved (OI-1179).
-6. receipt_path returns None -> proof-chain gap recorded, work status preserved (OI-1179).
+5. Receipt-emit failure -> proof-chain gap recorded, work status preserved (OI-1179),
+   dispatch-level outcome degraded to receipt_missing/returncode 1 (OI-1287).
+6. receipt_path returns None -> same as 5 (OI-1179 + OI-1287).
 7. Idempotent dedup: pre-existing receipt line -> GOVERN skips write, no double-emit.
 8. Flag-off: VNX_UNIFIED_ENVELOPE unset -> legacy dispatch called, envelope NOT invoked.
 9. Flag-on: VNX_UNIFIED_ENVELOPE=1 + lanes contains lane -> envelope invoked.
@@ -258,12 +259,14 @@ class TestEnvelopeEventArchiveClear:
 
 
 class TestEnvelopeReceiptEmitFailure:
-    """OI-1179: a failed receipt emit is a proof-chain gap, not a work failure.
+    """OI-1179 + OI-1287: a failed receipt emit is a proof-chain gap, not a work
+    failure — but it also must not land as a plain, unqualified success.
 
-    The dispatch's WORK status is preserved (success -> returncode 0, receipt_path
-    None) and the gap is recorded loudly to receipt_emit_failures.ndjson with the
-    VNX_RECEIPT_EMIT_FAILURE marker so governance can claim it instead of writing
-    it off as failed.
+    The WORK status is preserved untouched (recorded as "success" in the
+    receipt_emit_failures.ndjson trail's work_status field, VNX_RECEIPT_EMIT_FAILURE
+    marker, so governance can claim it instead of writing it off as failed) while the
+    dispatch-level EnvelopeResult is degraded to status="receipt_missing"/returncode 1
+    so the missing ledger line can never be mistaken for a clean pass (OI-1287).
     """
 
     def _run(self, spec, codex_result, *, receipt_side_effect=None, receipt_return=_UNSET):
@@ -284,14 +287,18 @@ class TestEnvelopeReceiptEmitFailure:
             if line.strip()
         ]
 
-    def test_receipt_emit_raises_preserves_work_status(self, spec):
+    def test_receipt_emit_raises_degrades_outcome_but_preserves_work_status(self, spec):
         codex_result = _FakeCodexResult(returncode=0)
         result = self._run(spec, codex_result, receipt_side_effect=RuntimeError("disk full"))
 
-        assert result.status == "success"
-        assert result.returncode == 0
+        # OI-1287: the outcome must no longer read as a plain success.
+        assert result.status == "receipt_missing"
+        assert result.status != "success"
+        assert result.returncode == 1
         assert result.receipt_path is None
+        assert result.error is not None and "receipt" in result.error.lower()
 
+        # OI-1179: the WORK status itself stays truthfully "success" in the trail.
         records = self._trail(spec)
         assert len(records) == 1  # single record — no double-record
         assert records[0]["marker"] == "VNX_RECEIPT_EMIT_FAILURE"
@@ -299,12 +306,13 @@ class TestEnvelopeReceiptEmitFailure:
         assert records[0]["dispatch_id"] == spec.dispatch_id
         assert "disk full" in records[0]["reason"]
 
-    def test_none_receipt_path_preserves_work_status(self, spec):
+    def test_none_receipt_path_degrades_outcome_but_preserves_work_status(self, spec):
         codex_result = _FakeCodexResult(returncode=0)
         result = self._run(spec, codex_result, receipt_return=None)
 
-        assert result.status == "success"
-        assert result.returncode == 0
+        assert result.status == "receipt_missing"
+        assert result.status != "success"
+        assert result.returncode == 1
         assert result.receipt_path is None
 
         records = self._trail(spec)
@@ -472,7 +480,8 @@ class TestClaudeEnvelopeEmitsBothReportAndReceipt:
 
 
 class TestClaudeEnvelopeReceiptEmitFailure:
-    """OI-1179: a failed receipt emit is a proof-chain gap, not a work failure (claude lane)."""
+    """OI-1179 + OI-1287: a failed receipt emit is a proof-chain gap, not a work
+    failure (claude lane) — but must not land as a plain, unqualified success either."""
 
     def _run(self, spec_claude, claude_result, *, receipt_side_effect=None, receipt_return=_UNSET):
         _, _, mock_report, mock_receipt = _stub_governance(
@@ -492,12 +501,13 @@ class TestClaudeEnvelopeReceiptEmitFailure:
             if line.strip()
         ]
 
-    def test_receipt_emit_raises_preserves_work_status(self, spec_claude):
+    def test_receipt_emit_raises_degrades_outcome_but_preserves_work_status(self, spec_claude):
         claude_result = _FakeClaudeResult(returncode=0)
         result = self._run(spec_claude, claude_result, receipt_side_effect=RuntimeError("disk full"))
 
-        assert result.status == "success"
-        assert result.returncode == 0
+        assert result.status == "receipt_missing"
+        assert result.status != "success"
+        assert result.returncode == 1
         assert result.receipt_path is None
 
         records = self._trail(spec_claude)
@@ -507,12 +517,13 @@ class TestClaudeEnvelopeReceiptEmitFailure:
         assert records[0]["dispatch_id"] == spec_claude.dispatch_id
         assert "disk full" in records[0]["reason"]
 
-    def test_none_receipt_path_preserves_work_status(self, spec_claude):
+    def test_none_receipt_path_degrades_outcome_but_preserves_work_status(self, spec_claude):
         claude_result = _FakeClaudeResult(returncode=0)
         result = self._run(spec_claude, claude_result, receipt_return=None)
 
-        assert result.status == "success"
-        assert result.returncode == 0
+        assert result.status == "receipt_missing"
+        assert result.status != "success"
+        assert result.returncode == 1
         assert result.receipt_path is None
 
         records = self._trail(spec_claude)

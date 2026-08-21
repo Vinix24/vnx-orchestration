@@ -12,6 +12,14 @@ and never flipped into a `failed` work status. Report is emitted before the
 receipt so the receipt carries the linkage even when the report file is new
 (ADR-005).
 
+OI-1287: decoupling the work fate from the receipt fate must not also mean
+laundering a proof-chain gap into a plain "success". ``_envelope_outcome``
+(used by every envelope entry point below) degrades the caller-visible
+EnvelopeResult to status="receipt_missing"/returncode=1 whenever GOVERN's
+receipt_path comes back None for otherwise-successful work — never by
+rewriting the WORK status itself, only the dispatch-level outcome built on
+top of it.
+
 Per-lane dual-receipt safety: GOVERN emits both report AND receipt. When the
 receipt NDJSON already contains a line for this dispatch_id (e.g. written by
 deliver_with_recovery's internal close-out), the GOVERN receipt write is skipped
@@ -356,16 +364,58 @@ class LaneRouter:
 # Envelope entry point
 # ---------------------------------------------------------------------------
 
+# OI-1287: the WORK outcome (did the adapter finish its job) and the PROOF
+# outcome (did a ledger line land) are different facts. OI-1179 correctly
+# stopped a receipt-emit failure from flipping a successful dispatch to
+# `failed` — but the fix left the dispatch-level EnvelopeResult reading a
+# plain "success" with returncode 0 even when GOVERN reported no receipt_path
+# at all, so a proof-chain gap could land silently as a clean pass. This
+# status is stamped only in that gap — never in place of a real
+# "failure"/"timeout", and never by rewriting adapter_result.status itself
+# (envelope_govern._record_receipt_emit_failure's trail record still carries
+# the true work_status untouched).
+RECEIPT_MISSING_STATUS = "receipt_missing"
+
+
+def _envelope_outcome(
+    work_status: str, receipt_path: Optional[Path], error: Optional[str],
+) -> "tuple[str, int, Optional[str]]":
+    """Derive the caller-visible (status, returncode, error) for an
+    EnvelopeResult from the WORK status and whether GOVERN actually produced
+    a ledger receipt.
+
+    work_status == "success" with receipt_path is None is the OI-1287 proof-
+    chain gap: the outcome is degraded to RECEIPT_MISSING_STATUS/returncode 1
+    so it can never be mistaken for a clean pass, while work_status itself
+    (recorded separately in the receipt_emit_failures.ndjson trail written by
+    envelope_govern._record_receipt_emit_failure) is never rewritten. Every
+    other combination — including idempotent dedup, where receipt_path is a
+    real path pointing at the existing ledger — passes through unchanged.
+    """
+    if work_status == "success" and receipt_path is None:
+        return (
+            RECEIPT_MISSING_STATUS,
+            1,
+            error or (
+                "work succeeded but no ledger receipt was written "
+                "(proof-chain gap — see receipt_emit_failures.ndjson)"
+            ),
+        )
+    return work_status, (0 if work_status == "success" else 1), error
+
 
 def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
     """Run PREPARE -> ROUTE -> EXECUTE -> GOVERN for the given lane.
 
-    Returns EnvelopeResult on success / failure / timeout.
+    Returns EnvelopeResult on success / failure / timeout / receipt_missing.
 
     OI-1179: a receipt-emit failure no longer raises — ``_govern`` records a
     proof-chain gap (loud error log + ``receipt_emit_failures.ndjson`` trail)
-    and returns ``receipt_path=None``, so ``returncode`` still reflects whether
-    the WORK succeeded, never whether the proof landed.
+    and returns ``receipt_path=None``; the WORK status recorded in that trail
+    is never rewritten. OI-1287: ``_envelope_outcome`` still degrades the
+    returned status/returncode to "receipt_missing"/1 in that gap so the
+    caller-visible outcome is never a plain, unqualified "success" with no
+    ledger line behind it.
     """
     # ROUTE
     router = LaneRouter()
@@ -405,14 +455,16 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
         enriched_spec, adapter_result, start_time, end_time, integrity=integrity
     )
 
-    returncode = 0 if adapter_result.status == "success" else 1
+    _status, _returncode, _error = _envelope_outcome(
+        adapter_result.status, receipt_path, adapter_result.error,
+    )
     return EnvelopeResult(
-        status=adapter_result.status,
-        returncode=returncode,
+        status=_status,
+        returncode=_returncode,
         report_path=report_path,
         receipt_path=receipt_path,
         completion_text=adapter_result.completion_text,
-        error=adapter_result.error,
+        error=_error,
     )
 
 
@@ -647,13 +699,14 @@ def run_envelope_plan(
         base_ref=_base_ref,
     )
 
+    _status, _returncode, _error = _envelope_outcome(result.status, receipt_path, result.error)
     return EnvelopeResult(
-        status=result.status,
-        returncode=0 if result.status == "success" else 1,
+        status=_status,
+        returncode=_returncode,
         report_path=report_path,
         receipt_path=receipt_path,
         completion_text=result.completion_text,
-        error=result.error,
+        error=_error,
     )
 
 
@@ -862,11 +915,12 @@ def run_envelope_headless_plan(
         base_ref=_base_ref,
     )
 
+    _status, _returncode, _error = _envelope_outcome(result.status, receipt_path, result.error)
     return EnvelopeResult(
-        status=result.status,
-        returncode=0 if result.status == "success" else 1,
+        status=_status,
+        returncode=_returncode,
         report_path=report_path,
         receipt_path=receipt_path,
         completion_text=result.completion_text,
-        error=result.error,
+        error=_error,
     )
