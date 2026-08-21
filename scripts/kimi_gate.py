@@ -45,17 +45,29 @@ failure-path ``emit_unified_report`` call runs on the dispatcher's failure
 path too. A spooled 403 error body reads as "content", so that axis booked a
 real outage as "kimi did respond, parse miss" — the same failure class this
 whole fix exists to remove, just mirrored. The report's own YAML frontmatter
-carries a signal content can't fake: ``exit_code`` and ``token_usage.output``
-are stamped by the lane from the actual spawn result, not guessed from the
-response text. A non-zero ``exit_code`` (or zero output tokens) with
-readable frontmatter means the provider run itself failed — that is
-``dispatch_error``, even though a report exists. Only ``exit_code == 0``
-with readable frontmatter and no verdict block is a genuine ``parse_error``.
-When the frontmatter can't be read at all (older/foreign report shape), the
-outcome can't be read off the report — this falls back to the pre-fix-forward
-default of ``parse_error``, which is intentionally too broad: a masked
-provider failure with no readable ``exit_code`` would still land here, but
-there is no other signal left to tell the two apart.
+carries a signal content can't fake: ``exit_code`` is stamped by the lane
+from the actual spawn result, not guessed from the response text. A
+non-zero ``exit_code`` with readable frontmatter means the provider run
+itself failed — that is ``dispatch_error``, even though a report exists.
+Only ``exit_code == 0`` with readable frontmatter and no verdict block is a
+genuine ``parse_error``. When the frontmatter can't be read at all
+(older/foreign report shape), the outcome can't be read off the report —
+this falls back to the pre-fix-forward default of ``parse_error``, which is
+intentionally too broad: a masked provider failure with no readable
+``exit_code`` would still land here, but there is no other signal left to
+tell the two apart.
+
+OI-1291 (fix-forward, meetgat correction): the first cut of the frontmatter
+axis also treated zero output tokens as a failure signal on its own. On the
+kimi lane, post-run token capture is frequently unavailable — the lane
+stamps ``token_usage_measured: false`` and ``output: 0`` on those runs, so
+zero output tokens routinely means "not measured", not "the run produced
+nothing". A count of 766 kimi reports on disk found 502 with exit_code 0,
+real content, and ``token_usage_measured: false`` — successful runs the
+raw-zero check booked as provider outages, reintroducing OI-1291's original
+bug on a different axis. ``output_tokens`` now only counts as a failure
+signal when the frontmatter's own ``token_usage_measured`` flag is true;
+otherwise only ``exit_code`` decides.
 """
 from __future__ import annotations
 
@@ -151,22 +163,35 @@ def _get_diff(pr: str, diff_file: "str | None") -> "str | None":
 def _frontmatter_run_outcome(report_text: str) -> "tuple[bool | None, object, object]":
     """Read ``exit_code``/``token_usage.output`` off the report's own YAML
     frontmatter to tell a provider-side run failure apart from a genuine
-    parse miss (OI-1291 fix-forward).
+    parse miss (OI-1291 fix-forward, meetgat correction).
 
     Content existing is not proof kimi actually completed a review: the
     failure-path ``emit_unified_report`` call writes a report too, so a
     spooled 403 body is "content" by the same measure as a real review. The
-    frontmatter's ``exit_code``/``token_usage`` fields are stamped by the
-    lane from the actual spawn result, not guessed from the response text —
-    that is the signal that can't be faked by error-page prose.
+    frontmatter's ``exit_code`` field is stamped by the lane from the actual
+    spawn result, not guessed from the response text — that is the signal
+    that can't be faked by error-page prose.
+
+    ``exit_code`` alone decides the outcome. ``token_usage.output`` is only
+    consulted when the frontmatter's own ``token_usage_measured`` flag is
+    true. On the kimi lane, post-run token capture is frequently unavailable
+    (kimi-cli's stream-json output carries no usage accounting) — the lane
+    stamps ``token_usage_measured: false`` and ``output: 0`` for those runs.
+    A measured count of 766 kimi reports on disk found 502 with exit_code 0,
+    non-trivial body content, and ``token_usage_measured: false`` — real,
+    successful reviews that a bare ``output_tokens == 0`` check would have
+    booked as provider outages. Only 4 reports carried a genuinely measured
+    token count. Treating an unmeasured zero as a failure signal reintroduces
+    the exact bug OI-1291 exists to remove, just gated on a different field.
 
     Returns ``(outcome, exit_code, output_tokens)`` where ``outcome`` is:
-        True  — frontmatter is readable and the run did not complete cleanly
-                (non-zero exit code, or zero output tokens): a provider-side
+        True  — frontmatter is readable and the run did not complete cleanly:
+                non-zero exit code, or (only when ``token_usage_measured`` is
+                true) a measured zero output-token count. A provider-side
                 failure, not a review outcome.
         False — frontmatter is readable and stamps a clean run (exit_code 0,
-                non-zero output tokens): a missing verdict block here is a
-                genuine parse miss.
+                and either tokens aren't measured or a measured non-zero
+                count): a missing verdict block here is a genuine parse miss.
         None  — no readable frontmatter, or no ``exit_code`` field in it
                 (older/foreign report shape). The outcome can't be read off
                 the report at all; callers fall back to the pre-fix-forward
@@ -181,7 +206,10 @@ def _frontmatter_run_outcome(report_text: str) -> "tuple[bool | None, object, ob
     exit_code = frontmatter.get("exit_code")
     token_usage = frontmatter.get("token_usage")
     output_tokens = token_usage.get("output") if isinstance(token_usage, dict) else None
-    if exit_code != 0 or output_tokens == 0:
+    tokens_measured = bool(frontmatter.get("token_usage_measured"))
+    if exit_code != 0:
+        return True, exit_code, output_tokens
+    if tokens_measured and output_tokens == 0:
         return True, exit_code, output_tokens
     return False, exit_code, output_tokens
 
@@ -201,8 +229,10 @@ def _verdict_to_status(
 
     ``provider_failed_detail`` (OI-1291 fix-forward): the caller passes this
     when it has already read the report's own frontmatter via
-    ``_frontmatter_run_outcome`` and found a non-zero exit code / zero output
-    tokens. When set, THIS function returns that provider-outage residual
+    ``_frontmatter_run_outcome`` and found a non-zero exit code (or a
+    measured-zero output-token count, when the frontmatter's own
+    ``token_usage_measured`` flag says the count is real). When set, THIS
+    function returns that provider-outage residual
     instead of the "kimi did respond" parse-miss residual below — the report
     having content is not proof kimi ran; the frontmatter's own exit_code is.
     """
