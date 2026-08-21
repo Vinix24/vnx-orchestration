@@ -1086,7 +1086,14 @@ class TmuxInteractiveDispatch:
                         continue
                     try:
                         rec = json.loads(line)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as exc:
+                        logger.warning(
+                            "interactive: ledger row unreadable for dispatch=%s "
+                            "(JSONDecodeError: %s) — skipping row, treating as "
+                            "no completion found for this line",
+                            dispatch_id,
+                            exc,
+                        )
                         continue
                     if not isinstance(rec, dict):
                         continue

@@ -2533,6 +2533,40 @@ class TestDryRun:
         beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
         assert not beacon_path.exists()
 
+    def test_scan_dry_run_does_not_create_state_dir(self, reports_dir, tmp_path):
+        """A dry run must leave zero trace — not even an empty state_dir.
+
+        Uses a state_dir path that does NOT exist yet (the `state_dir`
+        fixture pre-creates it, so this test builds its own path instead).
+        """
+        _write_frontmatter_report(
+            reports_dir / "20260821-dry-no-mkdir.md", "20260821-dry-no-mkdir",
+        )
+        missing_state_dir = tmp_path / "state-not-created"
+        assert not missing_state_dir.exists()
+
+        stats = scan_and_convert([reports_dir], missing_state_dir, dry_run=True)
+
+        assert stats.would_append_count == 1
+        assert not missing_state_dir.exists()
+
+    def test_dispatch_id_dry_run_does_not_create_state_dir(self, reports_dir, tmp_path):
+        """Same contract as scan_and_convert's, for the --dispatch-id entry
+        point: a dry run against a not-yet-existing state_dir must not
+        create it."""
+        _write_frontmatter_report(
+            reports_dir / "20260821-dry-id-no-mkdir.md", "20260821-dry-id-no-mkdir",
+        )
+        missing_state_dir = tmp_path / "state-not-created-by-id"
+        assert not missing_state_dir.exists()
+
+        stats = convert_dispatch_ids(
+            ["20260821-dry-id-no-mkdir"], missing_state_dir, dry_run=True,
+        )
+
+        assert stats.would_append_count == 1
+        assert not missing_state_dir.exists()
+
 
 # ---------------------------------------------------------------------------
 # PR #1635 codex-gate fix: dry_run must gate on dry_run itself, not on the

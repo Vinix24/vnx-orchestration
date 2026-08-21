@@ -1320,7 +1320,8 @@ def scan_and_convert(
     writing a receipt or a watermark entry for ANY outcome — including a
     would-be "appended"/"duplicate"/"skipped_non_dispatch" report, which under
     a real run would be marked processed. See ``_convert_one_detailed``'s
-    ``"would_append"`` outcome tag.
+    ``"would_append"`` outcome tag. A dry run also leaves ``state_dir`` itself
+    untouched: it is not created if it does not already exist.
 
     A single poisoned report can never abort the scan (OI-997): each
     report's conversion is wrapped in try/except here, in addition to
@@ -1335,7 +1336,8 @@ def scan_and_convert(
             logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
             return ScanStats()
 
-    state_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        state_dir.mkdir(parents=True, exist_ok=True)
     receipts_file = str(state_dir / "t0_receipts.ndjson")
     watermark_path = state_dir / _WATERMARK_FILENAME
     # OI-1102: also load the Bash processor's watermark so a report processed
@@ -1503,7 +1505,8 @@ def convert_dispatch_ids(
             logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
             return ScanStats()
 
-    state_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        state_dir.mkdir(parents=True, exist_ok=True)
     receipts_file = str(state_dir / "t0_receipts.ndjson")
     watermark_path = state_dir / _WATERMARK_FILENAME
     bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME

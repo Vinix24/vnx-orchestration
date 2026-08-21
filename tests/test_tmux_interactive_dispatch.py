@@ -3537,6 +3537,46 @@ class TestLedgerRowFallback(_LaneTestCase):
         self.assertIn(self.DISPATCH_ID, joined)
         self.assertIn("ledger fallback", joined)
 
+    def test_unreadable_ledger_row_warns_instead_of_silently_skipping(self):
+        """An unparseable line in t0_receipts.ndjson must not make
+        _has_ledger_completion_row silently conclude "no row" — that is
+        exactly the spot deciding whether the vangnet fires a duplicate
+        booking. A broken row on disk must be LOUD (WARNING + dispatch_id),
+        never quietly swallowed by the JSONDecodeError guard."""
+        lane, _reports_dir = self._make_lane_and_reports_dir()
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(f'{{"dispatch_id": "{self.DISPATCH_ID}", "event_type": BROKEN\n')
+
+        with self.assertLogs("tmux_interactive_dispatch", level="WARNING") as cm:
+            result = lane._has_ledger_completion_row(self.DISPATCH_ID)
+
+        self.assertFalse(result, "an unreadable row is not a completion row")
+        joined = "\n".join(cm.output)
+        self.assertIn(self.DISPATCH_ID, joined)
+        self.assertIn("JSONDecodeError", joined)
+
+    def test_unreadable_ledger_row_does_not_block_scan_of_later_valid_row(self):
+        """A broken line must be skipped (with a warning), not treated as a
+        reason to abort the scan — a genuine completion row further down the
+        same file must still be found."""
+        lane, _reports_dir = self._make_lane_and_reports_dir()
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        valid_row = {
+            "dispatch_id": self.DISPATCH_ID,
+            "event_type": "subprocess_completion",
+        }
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(f'{{"dispatch_id": "{self.DISPATCH_ID}", "event_type": BROKEN\n')
+            fh.write(json.dumps(valid_row) + "\n")
+
+        with self.assertLogs("tmux_interactive_dispatch", level="WARNING"):
+            result = lane._has_ledger_completion_row(self.DISPATCH_ID)
+
+        self.assertTrue(
+            result, "a valid completion row later in the file must still be found",
+        )
+
 
 # ---------------------------------------------------------------------------
 # RECEIPT step: dedup — authored > synthesized; late worker wins
