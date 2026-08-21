@@ -1245,6 +1245,27 @@ def _convert_one_detailed(
         )
         return None, "error"
 
+    # append_receipt_payload's documented contract (payload.py's own OI-948
+    # guard, and its mirror in scripts/append_receipt.py main()) is: return an
+    # AppendResult or raise AppendReceiptError — never return None. Every real
+    # branch of _write_receipt_under_lock honors that (confirmed by reading
+    # idempotency.py:191-281: each path returns AppendResult or raises).
+    # A None here is therefore not a legitimate "nothing was booked" outcome —
+    # it means whatever object is bound to append_receipt_payload at call time
+    # violated that contract (reproduced: pytest test-order pollution from
+    # test_heartbeat_subprocess_cleanup.py's `sys.modules["append_receipt"]`
+    # mutation can silently replace this symbol for the rest of the suite).
+    # Fail loud instead of letting it crash one line down as an opaque
+    # AttributeError, and never sync open items against a row that was never
+    # booked.
+    if result is None:
+        logger.error(
+            "report_to_receipt_converter: append_receipt_payload returned no "
+            "result (contract violation — expected AppendResult) dispatch=%s file=%s",
+            receipt.get("dispatch_id"), report_path.name,
+        )
+        return None, "error"
+
     if result.status in ("appended", "duplicate"):
         _sync_report_open_items(receipt, text)
     return result, result.status

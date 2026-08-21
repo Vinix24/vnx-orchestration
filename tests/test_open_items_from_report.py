@@ -397,3 +397,69 @@ def test_convert_one_detailed_survives_sync_error_without_code_attr(
     # The receipt line itself landed in the ledger despite the sync crash.
     ledger_text = Path(receipts_file).read_text(encoding="utf-8")
     assert "20260821-oi-sync-crash" in ledger_text
+
+
+def test_convert_one_detailed_survives_empty_append_result(
+    tmp_path: Path, monkeypatch, caplog,
+):
+    """append_receipt_payload's contract is to return an AppendResult or raise
+    AppendReceiptError — never return None (payload.py's own OI-948 guard
+    enforces exactly this on every real _write_receipt_under_lock path). A
+    caller that violates this contract (reproduced against this suite:
+    tests/test_heartbeat_subprocess_cleanup.py's ``_build_monitor()`` helper
+    permanently replaces ``sys.modules["append_receipt"].append_receipt_payload``
+    with a ``MagicMock(return_value=None)`` when ``append_receipt`` is already
+    the real, previously-imported module — a test-order pollution bug, not a
+    real booking outcome) must never crash the converter with an opaque
+    'NoneType' object has no attribute 'status'. It must fail loud (an ERROR
+    naming the dispatch-id) and skip the open-items sync — there is no booked
+    ledger row to hang open items off.
+    """
+    import report_to_receipt_converter as rtc
+
+    calls = []
+
+    def _fake_sync(text, *, dispatch_id, report_path, oim=None):
+        calls.append(dispatch_id)
+        return [("OI-999", True)]
+
+    monkeypatch.setattr(
+        "open_items_from_report.sync_open_items_from_report", _fake_sync
+    )
+    monkeypatch.setattr("append_receipt.append_receipt_payload", lambda *a, **k: None)
+
+    report = tmp_path / "20260821-oi-empty-append.md"
+    report.write_text(
+        "**Dispatch-ID**: 20260821-oi-empty-append\n"
+        "**Model**: sonnet\n"
+        "**Provider**: claude\n\n"
+        "## Summary\n\n"
+        "Implemented the sync path end to end and wired it into the converter.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 3 passed\n\n"
+        "## Open Items\n\n- [ ] [warn] Revisit the timeout value later\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipts_file = str(state_dir / "t0_receipts.ndjson")
+
+    with caplog.at_level(logging.ERROR, logger="report_to_receipt_converter"):
+        result, outcome = rtc._convert_one_detailed(report, receipts_file=receipts_file)
+
+    # No crash: the empty return is turned into an explicit "error" outcome,
+    # never a raised AttributeError.
+    assert result is None
+    assert outcome == "error"
+
+    # Nothing was booked, so the sync must never fire.
+    assert calls == []
+
+    # The failure is loud: an ERROR naming the dispatch-id.
+    errors = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(
+        "20260821-oi-empty-append" in msg for msg in errors
+    ), f"expected a loud empty-result error, got: {errors}"
+
+    # Nothing landed in the ledger — the file was never created.
+    assert not Path(receipts_file).exists()
