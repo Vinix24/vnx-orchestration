@@ -53,6 +53,50 @@ class _HugeRecorder:
 ROSTER = [("codex", "gpt-5.5"), ("kimi", "k2"), ("claude", "sonnet")]
 
 
+def _fake_report(dispatch_id, provider, exit_code, body, *, token_output=0, token_input=0, measured=None):
+    """Build a realistic unified-report text (frontmatter + body), matching what
+    ``_read_report`` hands back to a panel dispatcher on disk (OI-1358). ``exit_code``
+    and the token fields are passed in as DATA, never hardcoded per-test, so a test can
+    assert on the value it fed in rather than a literal string echoed on both sides."""
+    lines = [
+        "---",
+        "schema_version: 1",
+        f"dispatch_id: {dispatch_id}",
+        f"provider: {provider}",
+        "sub_provider: none",
+        "model: sonnet",
+        "terminal_id: T0",
+        "pool_id: headless",
+        "role: deliberation-panelist",
+        "task_class: implementation",
+        "pr_id: none",
+        "duration_seconds: 12.34",
+        f"exit_code: {exit_code}",
+        "token_usage:",
+        f"  input: {token_input}",
+        f"  output: {token_output}",
+        "  cache_read: 0",
+        "cost_usd: 0.0",
+    ]
+    if measured is not None:
+        lines.append(f"token_usage_measured: {'true' if measured else 'false'}")
+    lines.append("---")
+    lines.append("")
+    lines.append(body)
+    return "\n".join(lines)
+
+
+# The measured shape of a refused seat (panel-sweep-diverge-3-e4bafa.md, OI-1358): the
+# lane wrapper's generic instruction-echo body, non-empty, matching none of the three
+# sentinel markers _is_error used to rely on.
+REFUSAL_BODY = (
+    "# Dispatch panel-refused-seat\n\n"
+    "## Instruction\n\n"
+    "You are one seat on a deliberation panel. Analyse the question through your lens.\n"
+    "This dispatch was refused before inference ran; no analysis was produced.\n"
+)
+
+
 class TestFourStageFlow:
     def test_runs_all_four_stages(self):
         rec = _Recorder()
@@ -576,6 +620,174 @@ class TestSynthesisCoverageGate:
         res = dp.run_deliberation(
             "sweep", "q", dispatcher=one_of_five, roster=FIVE_ROSTER, max_workers=5,
         )
+        assert res.synthesis_refused_reason == ""
+        assert not res.degraded_synthesis
+        assert res.synthesis
+
+
+class TestOutcomeBasedCoverage:
+    """OI-1358: coverage must be decided from the seat's real OUTCOME (``exit_code``,
+    read from its unified-report frontmatter) — not from matching its text against
+    three sentinel strings. A seat that fail-closed REFUSES but still emits a non-empty
+    report body (the lane wrapper's generic instruction-echo) used to slip through
+    ``_is_error`` and get counted as a contributing lens."""
+
+    def test_refused_seat_with_non_empty_body_does_not_count_as_present(self):
+        """The exact bug, reproduced with a fake dispatcher: every seat gets a
+        frontmatter report whose BODY is non-empty prose matching none of the three
+        sentinels. ONE seat's ``exit_code`` is fed in as data (1, the refused seat); the
+        rest are 0. Show the OLD sentinel-only tally and the NEW outcome-based tally
+        side by side, and that they differ."""
+        exit_codes = {"codex": 0, "kimi": 0, "claude": 1}  # claude: refused, non-empty body
+
+        def dispatcher(provider, model, prompt, did):
+            code = exit_codes[provider]
+            body = REFUSAL_BODY if code != 0 else "real analysis body, cites file:line"
+            return _fake_report(did, provider, code, body)
+
+        res = dp.run_deliberation("sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3)
+
+        # OLD tally: the pre-fix _is_error only looked at text shape (empty / sentinel
+        # prefix) -- every seat's text here is non-empty prose matching no sentinel, so
+        # the old check would have called ALL THREE present.
+        def _old_is_error(text):
+            t = (text or "").strip()
+            return (not t) or t.startswith("[dispatch error") or t == "[empty]"
+
+        old_present = sum(1 for fo in res.fan_out if not _old_is_error(fo["text"]))
+        assert old_present == 3, "sanity: the old sentinel-only check misses the refusal"
+
+        # NEW tally: exactly the seats whose real exit_code (fed in as data above) is 0.
+        expected_present = sum(1 for code in exit_codes.values() if code == 0)
+        assert expected_present == 2
+        assert len(res.present_lenses) == expected_present
+        assert len(res.failed_seats) == 1
+        assert res.failed_seats[0]["provider"] == "claude"
+        assert "2/3" in res.coverage and "claude" in res.coverage and "failed" in res.coverage
+
+        # the refused seat's real exit_code is independently readable off its own text
+        claude_text = next(fo["text"] for fo in res.fan_out if fo["provider"] == "claude")
+        assert dp._seat_exit_code(claude_text) == exit_codes["claude"]
+        codex_text = next(fo["text"] for fo in res.fan_out if fo["provider"] == "codex")
+        assert dp._seat_exit_code(codex_text) == exit_codes["codex"]
+
+    def test_measurement_gap_seat_still_counts_as_present(self):
+        """A seat with ``exit_code=0`` but ``token_usage.output=0`` AND
+        ``token_usage_measured=false`` (the measured shape of 14 real failed-panel kimi
+        seats, 8 of which carried real content in a ``.partial.md`` sidecar) MUST count
+        as present. Gating presence on output-token count instead of exit_code would
+        flip this exact seat to failed -- the false-negative mirror of the bug this
+        fix repairs."""
+
+        def dispatcher(provider, model, prompt, did):
+            if provider == "kimi":
+                return _fake_report(
+                    did, provider, 0, "real panel analysis text, cites source X",
+                    token_output=0, measured=False,
+                )
+            return _fake_report(did, provider, 0, "ok")
+
+        res = dp.run_deliberation("sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3)
+
+        assert len(res.present_lenses) == 3
+        assert res.failed_seats == []
+        kimi_text = next(fo["text"] for fo in res.fan_out if fo["provider"] == "kimi")
+        assert dp._seat_exit_code(kimi_text) == 0
+
+    def test_no_frontmatter_falls_back_to_sentinel_check(self):
+        """A report with NO frontmatter (e.g. a worker-authored report that
+        ``emit_unified_report``'s idempotent no-overwrite path left in place) carries no
+        readable outcome. The discriminator must fall back to exactly the pre-fix
+        sentinel check -- no worse than today, per the dispatch instruction."""
+
+        def dispatcher(provider, model, prompt, did):
+            if provider == "kimi":
+                return "[dispatch error: boom]"       # no frontmatter -> sentinel path
+            if provider == "codex":
+                return ""                              # no frontmatter -> sentinel path
+            return "plain worker-authored report body, no frontmatter block at all"
+
+        res = dp.run_deliberation("sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3)
+
+        assert dp._seat_exit_code("[dispatch error: boom]") is None
+        assert dp._seat_exit_code("plain worker-authored report body, no frontmatter block at all") is None
+        assert len(res.present_lenses) == 1
+        assert {s["provider"] for s in res.failed_seats} == {"kimi", "codex"}
+
+
+class TestZeroSeatsDelivered:
+    """OI-1358: a caller must be able to detect "0/N seats delivered real content"
+    WITHOUT parsing the report -- independent of the min_seats gate, since a run with
+    no floor configured (or with --allow-degraded) still lets a 0/N synthesis proceed."""
+
+    def test_true_when_every_seat_is_refused(self):
+        def all_refused(provider, model, prompt, did):
+            return _fake_report(did, provider, 1, REFUSAL_BODY)
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=all_refused, roster=ROSTER, max_workers=3, allow_degraded=True,
+        )
+        assert res.present_lenses == []
+        assert res.zero_seats_delivered is True
+
+    def test_false_on_a_normal_run(self):
+        rec = _Recorder()
+        res = dp.run_deliberation("sweep", "q", dispatcher=rec, roster=ROSTER, max_workers=3)
+        assert res.zero_seats_delivered is False
+
+    def test_true_even_when_the_min_seats_floor_already_refused_the_synthesis(self):
+        """zero_seats_delivered must still read True on the early-return path (the floor
+        refusal returns before stages 2-4 run) -- present_lenses is populated before the
+        gate check, so this flag is available regardless of which path returned."""
+
+        def all_refused(provider, model, prompt, did):
+            return _fake_report(did, provider, 1, REFUSAL_BODY)
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=all_refused, roster=ROSTER, max_workers=3, min_seats=1,
+        )
+        assert res.synthesis_refused_reason
+        assert res.zero_seats_delivered is True
+
+
+class TestMinSeatsFloorWithOutcomeBasedCounting:
+    """The min_seats floor and allow_degraded must keep working the same way after
+    switching the discriminator to outcome-based counting -- a stricter tally means the
+    floor bites on real failures it used to miss (an intended behavior change per the
+    dispatch's scope, not a regression), but the floor mechanics themselves are
+    unaffected."""
+
+    def test_floor_now_correctly_catches_refused_seats_with_non_empty_bodies(self):
+        exit_codes = {"codex": 0, "kimi": 1, "claude": 1, "glm-harness": 1, "deepseek-harness": 0}
+
+        def dispatcher(provider, model, prompt, did):
+            code = exit_codes[provider]
+            body = "real content, cites file:line" if code == 0 else REFUSAL_BODY
+            return _fake_report(did, provider, code, body)
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=FIVE_ROSTER, max_workers=5, min_seats=3,
+        )
+        # 2/5 really delivered (codex, deepseek-harness) -- below the floor of 3, and the
+        # 3 refused seats all carried non-empty bodies that the OLD check would have
+        # counted as present (which would have wrongly cleared this same floor).
+        assert len(res.present_lenses) == 2
+        assert res.synthesis_refused_reason
+        assert "2/5" in res.synthesis_refused_reason
+        assert "minimum 3" in res.synthesis_refused_reason
+
+    def test_floor_still_proceeds_at_exactly_the_floor(self):
+        exit_codes = {"codex": 0, "kimi": 0, "claude": 0, "glm-harness": 1, "deepseek-harness": 1}
+
+        def dispatcher(provider, model, prompt, did):
+            code = exit_codes[provider]
+            body = "real content, cites file:line" if code == 0 else REFUSAL_BODY
+            return _fake_report(did, provider, code, body)
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=FIVE_ROSTER, max_workers=5, min_seats=3,
+        )
+        assert len(res.present_lenses) == 3
         assert res.synthesis_refused_reason == ""
         assert not res.degraded_synthesis
         assert res.synthesis

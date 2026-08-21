@@ -126,6 +126,15 @@ def main(argv: "list[str] | None" = None) -> int:
     if result.synthesis_refused_reason:
         print(f"[panel] SYNTHESIS REFUSED: {result.synthesis_refused_reason}", file=sys.stderr)
         return 1
+    # OI-1358: 0/N seats delivering real content must never exit 0, even when no
+    # min_seats floor is configured (or --allow-degraded let the synthesis run anyway) —
+    # a caller must be able to detect a phantom-full panel without parsing the report.
+    # getattr(..., False) keeps this safe against older/fake DeliberationResult doubles
+    # in tests that predate this attribute.
+    if getattr(result, "zero_seats_delivered", False):
+        total = len(getattr(result, "fan_out", []))
+        print(f"[panel] ZERO SEATS DELIVERED: 0/{total} lenses produced real content", file=sys.stderr)
+        return 1
     return 0
 
 
