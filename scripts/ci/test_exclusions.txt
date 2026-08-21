@@ -137,7 +137,7 @@ tests/test_future_state_reconciliation.py  # OI-1227: red solo — health-beacon
 tests/test_gate_dispatch_id.py  # OI-1227: red solo — dispatch-id propagation to claude-github assert False (1 failed, 11 passed)
 tests/test_gate_evidence_accuracy.py  # OI-1227: red solo — verdict='fail' with non-terminal status must still enforce report_path (4 failed, 16 passed)
 tests/test_gate_execution_certification.py  # OI-1227: red solo — MagicMock vs int comparison in evidence-chain lifecycle (10 failed, 3 passed)
-tests/test_gate_runner.py  # OI-1227: red solo — default stall threshold 180 != expected 60 (1 failed, 29 passed)
+tests/test_gate_runner.py  # OI-1227 recount 2026-08-21 (dispatch-fwd-01) after PR #1651/OI-1293 added tests to this file: red solo — default stall threshold 180 != expected 60, same assertion, unrelated to the exit_nonzero fix that PR shipped (1 failed, 32 passed, was 29 passed pre-#1651)
 tests/test_gate_status_schema.py  # OI-1227: red solo — status=completed not accepted as pass (1 failed, 25 passed)
 tests/test_gemini_prompt_no_duplicate.py  # OI-1227: red solo — FILE: markers appear >once in inlined prompt (3 failed, 1 passed)
 tests/test_governance_blockers_fix.py  # OI-1227: red solo — recorded_ts not assigned from now_ts (2 failed, 28 passed)
