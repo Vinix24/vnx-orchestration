@@ -273,6 +273,36 @@ profiles:
     file_write_scope:
       - ".vnx-data/unified_reports/**"
 
+  deliberation-panelist:
+    # Read role — seat role of the vnx deliberation panel (scripts/panel.py /
+    # scripts/lib/deliberation_panel.py, OI-811). A panel seat runs one stage —
+    # diverge, contrarian, verify, or synthesis — over a submitted question,
+    # grounds its judgment in the real repo (git log/diff/show, grep), and
+    # writes ONE report to the unified-reports drop. Never modifies code, never
+    # dispatched with the push-mandatory footer. Not T0-dispatched: registered
+    # here only because resolve_worker_profile refuses fail-closed (OI-1069
+    # pt.5, #1563) on a role absent from every register, exactly like
+    # plan-reviewer above. phantom_guard.REVIEW_ROLES and
+    # dispatch_govern._FREEFORM_ROLES already exempt this role name by law —
+    # this profile is the missing third register (OI-1359).
+    allowed_tools: [Read, Write, Grep, Glob, Bash]
+    denied_tools: [Edit, MultiEdit, WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "git log*"
+      - "git diff*"
+      - "git show*"
+      - "python3 -c*"
+      - "python3 -m py_compile*"
+      - "bash -n*"
+      - "grep*"
+    bash_deny_patterns:
+      - "git add*"
+      - "git commit*"
+      - "git push*"
+      - "rm*"
+    file_write_scope:
+      - ".vnx-data/unified_reports/**"
+
 terminal_assignments:
   T1: backend-developer
   T2: quality-engineer
