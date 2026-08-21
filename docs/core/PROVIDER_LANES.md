@@ -65,9 +65,10 @@ protection. `VNX_WORKER_SCOPED=1` opts back into the scoped posture
 `docs/operations/WORKER_PERMISSIONS.md`.
 
 **Concurrency (#1017):** the lane's serial lock is an N-slot semaphore, not a
-single mutex. Default `N=1` (fully serial, the subscription-safe default);
-`VNX_TMUX_MAX_CONCURRENT` raises it as an explicit operator opt-in. See
-`DISPATCH_RULES.md` §6.
+single mutex. Default `N=10` (operator directive 2026-08-21, the
+subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (env var, or the
+registry-backed config-store value) raises or lowers it as an explicit
+operator opt-in. See `DISPATCH_RULES.md` §6.
 
 ### claude-subprocess
 

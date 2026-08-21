@@ -45,6 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from worker_pane_classifier import classify_worker_pane
+
 logger = logging.getLogger(__name__)
 
 # Window file lives directly under the state dir; escalation records under a
@@ -732,3 +734,203 @@ class RelayHandle:
 
     thread: object
     stop_event: object
+
+
+# ---------------------------------------------------------------------------
+# Live scan (OI-1324 / OI-1344) — surface an unmeasured permission stall
+# ---------------------------------------------------------------------------
+# Detection (classify_worker_pane) and the escalation record (write_escalation)
+# already exist and work. The gap: nothing SURFACES a stall on a pane that is
+# live RIGHT NOW — the relay only escalates a session it already has a
+# background tick attached to, and ``vnx permission escalations`` only ever
+# shows records a tick already wrote. A worker that never got a tick attached
+# (or whose tick died) can sit on a permission prompt indefinitely with no
+# record anywhere. ``scan_live_awaiting_permission`` closes that gap by
+# actively enumerating THIS project's live dispatch sessions on demand.
+
+
+def _default_tmux_runner():
+    """Real tmux runner, imported lazily so this module never hard-depends on
+    the (heavy) tmux_interactive_dispatch import chain unless actually used."""
+    from tmux_interactive_dispatch import TmuxCommandRunner  # noqa: PLC0415
+
+    return TmuxCommandRunner()
+
+
+def _list_dispatch_sessions(runner) -> "tuple[list[str] | None, str | None]":
+    """List tmux session names; tri-state on failure.
+
+    Mirrors orphan_sweep's OI-1286 tri-state contract (a listing that cannot
+    be trusted must never collapse into "no sessions"), adapted to the
+    injected object-runner interface (``runner.run(args) -> result`` with
+    ``.returncode``/``.stdout``/``.stderr``) used throughout this module.
+
+    Returns ``(names, error)``: ``names`` is ``None`` when the listing could
+    not be trusted (tmux unavailable, the runner raised, or an unrecognized
+    non-zero exit) — the caller must treat that as "cannot measure", never as
+    "zero sessions". A genuine empty fleet ("no server running", or a connect
+    failure against a socket that does not exist on disk — the same OI-1286
+    shape) returns ``([], None)``.
+    """
+    if hasattr(runner, "available"):
+        try:
+            if not runner.available():
+                return None, "tmux not available"
+        except Exception as exc:  # noqa: BLE001 — must surface, not swallow
+            return None, f"availability check raised: {exc}"
+    try:
+        res = runner.run(["list-sessions", "-F", "#{session_name}"])
+    except Exception as exc:  # noqa: BLE001
+        return None, f"list-sessions raised: {exc}"
+    rc = getattr(res, "returncode", 1)
+    if rc == 0:
+        out = getattr(res, "stdout", "") or ""
+        return [ln.strip() for ln in out.splitlines() if ln.strip()], None
+    err_lower = (getattr(res, "stderr", "") or "").lower()
+    if "no server running" in err_lower:
+        return [], None
+    if "error connecting to" in err_lower and "no such file or directory" in err_lower:
+        return [], None
+    return None, f"list-sessions failed rc={rc} stderr={getattr(res, 'stderr', '')!r}"
+
+
+def _capture_pane_or_error(runner, session_id: str) -> "tuple[str | None, str | None]":
+    """Capture *session_id*'s pane, returning ``(text, None)`` or ``(None, error)``.
+
+    Deliberately distinct from ``_capture_pane`` (used by the always-retrying
+    relay tick, where a failed capture is quietly treated as "nothing on the
+    pane this tick" and retried next tick): the scan must never read a failed
+    capture as "clean" — a capture failure is "cannot measure", not "no
+    stall" — so it is reported here instead of swallowed.
+    """
+    try:
+        res = runner.run(["capture-pane", "-t", session_id, "-p"])
+    except Exception as exc:  # noqa: BLE001 — must surface, not swallow
+        return None, f"capture-pane raised: {exc}"
+    rc = getattr(res, "returncode", 1)
+    if rc != 0:
+        return None, f"capture-pane failed rc={rc} stderr={getattr(res, 'stderr', '')!r}"
+    return getattr(res, "stdout", "") or "", None
+
+
+def scan_live_awaiting_permission(
+    runner=None,
+    *,
+    state_dir: "str | Path | None" = None,
+    write_escalations: bool = True,
+) -> dict:
+    """READ-ONLY scan of THIS project's live dispatch tmux sessions for a
+    worker stalled on a permission prompt (OI-1324 / OI-1344).
+
+    Project scoping (hard requirement, never relaxed): a tmux session name
+    matching the dispatch-session pattern ``vnx-<dispatch_id>`` is only
+    in-scope when THIS project's state dir has a
+    ``tmux_interactive/<dispatch_id>.json`` handle file for that dispatch id.
+    That file is written by THIS project's own dispatch lane at spawn time
+    (``TmuxInteractiveDispatch._persist_handle``) and is the exact file
+    ``permission_relay_cli._relay_keystroke_to_worker`` already reads to find
+    a dispatch's session for ``approve``/``deny``. Reusing it as the scoping
+    signal means a session spawned by a different project's fabric — a
+    different process, writing handles into a different (per-project) state
+    dir — can never have a handle here, so it can never be scanned or
+    touched. A session whose name merely matches the pattern but has no
+    handle here is recorded in ``sessions_skipped_foreign`` and is never
+    captured.
+
+    READ-ONLY on tmux: only ``list-sessions`` and ``capture-pane`` are ever
+    issued — no ``send-keys``, no ``kill-session``.
+
+    A failed measurement (tmux unavailable, the session listing itself
+    unmeasurable, or a single session's capture-pane failing) is recorded in
+    ``errors`` and MUST be treated as "could not fully measure" by the
+    caller, never as "no stall" (OI-1324/1344: a measurement gap is not
+    evidence of a clean fleet).
+
+    Returns:
+        dict with keys:
+          - ``sessions_scanned``: in-scope session names successfully captured
+          - ``sessions_skipped_foreign``: name matched the pattern, no handle
+            for that dispatch id in this project's state dir
+          - ``hits``: list of ``{session, dispatch_id, command, matched_marker,
+            escalation_written}`` for every pane classified awaiting_permission
+          - ``errors``: list of ``{scope, session, dispatch_id, error}``
+          - ``measured``: False only when the session listing itself could not
+            be trusted (see ``_list_dispatch_sessions``)
+
+    Idempotent escalation: a hit whose dispatch already has a PENDING
+    escalation with the SAME command is left untouched by ``write_escalation``
+    — one file per dispatch id already makes a second record structurally
+    impossible; a hit with no pending record (or a changed command) gets a
+    fresh ``reason="awaiting_permission"`` record.
+    """
+    from orphan_sweep import _SESSION_RE as _DISPATCH_SESSION_RE  # noqa: PLC0415 — reuse, never duplicate
+
+    sd = _coerce_state_dir(state_dir)
+    rn = runner if runner is not None else _default_tmux_runner()
+    handle_dir = sd / "tmux_interactive"
+
+    result: dict = {
+        "sessions_scanned": [],
+        "sessions_skipped_foreign": [],
+        "hits": [],
+        "errors": [],
+        "measured": True,
+    }
+
+    names, list_err = _list_dispatch_sessions(rn)
+    if names is None:
+        result["measured"] = False
+        result["errors"].append(
+            {"scope": "list-sessions", "session": None, "dispatch_id": None, "error": list_err}
+        )
+        logger.error("permission_relay: scan could not list tmux sessions: %s", list_err)
+        return result
+
+    for name in sorted(names):
+        m = _DISPATCH_SESSION_RE.match(name)
+        if not m:
+            continue
+        dispatch_id = m.group("id")
+        if not (handle_dir / f"{dispatch_id}.json").is_file():
+            result["sessions_skipped_foreign"].append(name)
+            continue
+
+        pane_text, cap_err = _capture_pane_or_error(rn, name)
+        if cap_err is not None:
+            result["errors"].append(
+                {"scope": "capture-pane", "session": name, "dispatch_id": dispatch_id, "error": cap_err}
+            )
+            logger.warning("permission_relay: scan capture failed session=%s (%s)", name, cap_err)
+            continue
+        result["sessions_scanned"].append(name)
+
+        state = classify_worker_pane(pane_text)
+        if not state.is_awaiting_permission:
+            continue
+
+        command = parse_pending_command(pane_text) or ""
+        escalation_written = False
+        if write_escalations:
+            try:
+                write_escalation(dispatch_id, command, "awaiting_permission", state_dir=sd)
+                escalation_written = True
+            except ValueError as exc:
+                result["errors"].append(
+                    {"scope": "write_escalation", "session": name, "dispatch_id": dispatch_id, "error": str(exc)}
+                )
+
+        result["hits"].append(
+            {
+                "session": name,
+                "dispatch_id": dispatch_id,
+                "command": command,
+                "matched_marker": state.matched_marker,
+                "escalation_written": escalation_written,
+            }
+        )
+        logger.warning(
+            "permission_relay: SCAN found live stall dispatch=%s cmd=%r marker=%r",
+            dispatch_id, command, state.matched_marker,
+        )
+
+    return result

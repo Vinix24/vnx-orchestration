@@ -37,6 +37,31 @@ ReleaseClass = Literal[
 
 _UNSAFE_BRANCH_CHARS = re.compile(r"[^A-Za-z0-9._/@-]")
 
+# Exit code for a refused repo-root conflict (main() / OI-1389 fix-forward).
+# Chosen not to collide with 0 (success), 1 (problems/partial cleanup, see
+# main()'s final return), or 2 (argparse's own usage-error exit code).
+EXIT_REPO_ROOT_CONFLICT = 3
+
+
+class RepoRootConflictError(RuntimeError):
+    """Raised by ``_resolve_repo_root`` when PROJECT_ROOT and the cwd-derived
+    git root name different repositories during a destructive (--apply) run.
+
+    See ``_resolve_repo_root`` for the full precedence rule this enforces.
+    """
+
+    def __init__(self, env_root: Path, cwd_root: Path):
+        self.env_root = env_root
+        self.cwd_root = cwd_root
+        super().__init__(
+            "Refusing --apply: PROJECT_ROOT and the current working "
+            "directory's git root point at two different repositories.\n"
+            f"  PROJECT_ROOT env root : {env_root}\n"
+            f"  cwd git root          : {cwd_root}\n"
+            "Pick one explicitly: pass --repo-root <path> to say which repo "
+            "you mean, or unset/align PROJECT_ROOT with your cwd, then retry."
+        )
+
 
 @dataclass
 class ReleaseEntry:
@@ -89,16 +114,67 @@ def _git_common_dir(repo_root: Path) -> Path:
     return (repo_root / ".git").resolve()
 
 
-def _resolve_repo_root() -> Path:
-    """Resolve the git repo root from cwd or env."""
-    env_root = os.environ.get("PROJECT_ROOT", "")
-    if env_root:
-        p = Path(env_root)
+def _resolve_repo_root(*, dry_run: bool = True) -> Path:
+    """Resolve the git repo root, applying PROJECT_ROOT-over-cwd precedence.
+
+    Precedence, in order:
+
+    1. An explicit ``--repo-root`` CLI flag always wins outright — callers
+       that already have one (``main()``, and anything passing a concrete
+       ``repo_root`` into ``release_locked_worktrees``/``list_locked_worktrees``)
+       never call this function at all, so this precedence rule is enforced by
+       *not calling* rather than by a branch here.
+    2. Failing that, the ``PROJECT_ROOT`` env var wins over the cwd-derived git
+       root (``git rev-parse --show-toplevel``) — but ONLY once the two are
+       confirmed to point at the SAME repository, compared as resolved,
+       normalized paths (``Path.resolve()``, so a symlink like macOS's
+       ``/tmp`` -> ``/private/tmp`` is not a false conflict), or when the cwd
+       has no git root to compare against at all (e.g. cwd isn't inside a git
+       repo). In both those cases behavior is unchanged from before this
+       function did any conflict checking.
+    3. When PROJECT_ROOT and the cwd git root resolve to DIFFERENT
+       repositories, that disagreement is the exact defect this function used
+       to hide: a worker whose shell carried a stale PROJECT_ROOT from a prior
+       repo, but whose cwd was a throwaway repo, had PROJECT_ROOT win silently
+       — and a subsequent ``--apply`` unlocked and removed seven live
+       worktrees in the WRONG repository (OI-1389 fix-forward). To close that:
+         - during a destructive run (``dry_run=False``, i.e. ``--apply``):
+           raises ``RepoRootConflictError`` naming both paths instead of
+           picking one silently.
+         - during a dry-run: still returns PROJECT_ROOT (unchanged behavior,
+           no new refusal), but logs the disagreement as a warning (which the
+           default logging config sends to stderr) so an operator sees it
+           before they ever type ``--apply``.
+    4. With no PROJECT_ROOT set at all, falls back to the cwd git root, then
+       to the bare cwd if that git lookup also fails — unchanged from before.
+    """
+    env_root: Path | None = None
+    env_root_raw = os.environ.get("PROJECT_ROOT", "")
+    if env_root_raw:
+        p = Path(env_root_raw)
         if p.is_dir():
-            return p.resolve()
-    result = _run(["git", "rev-parse", "--show-toplevel"])
-    if result.returncode == 0:
-        return Path(result.stdout.strip()).resolve()
+            env_root = p.resolve()
+
+    cwd_result = _run(["git", "rev-parse", "--show-toplevel"])
+    cwd_root: Path | None = None
+    if cwd_result.returncode == 0:
+        cwd_root = Path(cwd_result.stdout.strip()).resolve()
+
+    if env_root is not None:
+        if cwd_root is None or cwd_root == env_root:
+            return env_root
+        if not dry_run:
+            raise RepoRootConflictError(env_root, cwd_root)
+        logger.warning(
+            "PROJECT_ROOT (%s) and the cwd git root (%s) point at different "
+            "repositories. Proceeding with PROJECT_ROOT for this dry-run — "
+            "pass --repo-root explicitly before using --apply.",
+            env_root, cwd_root,
+        )
+        return env_root
+
+    if cwd_root is not None:
+        return cwd_root
     return Path.cwd().resolve()
 
 
@@ -426,8 +502,12 @@ def release_locked_worktrees(
     Pass ``dry_run=False`` to actually rescue, unlock, and remove.
 
     Returns a ``ReleaseReport`` with one ``ReleaseEntry`` per locked worktree.
+
+    Raises ``RepoRootConflictError`` when ``repo_root`` is not given, PROJECT_ROOT
+    and the cwd git root disagree, and ``dry_run`` is False — see
+    ``_resolve_repo_root``.
     """
-    root = repo_root or _resolve_repo_root()
+    root = repo_root or _resolve_repo_root(dry_run=dry_run)
     locked = list_locked_worktrees(root)
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -534,13 +614,22 @@ def release_locked_worktrees(
 
 # ── reporting ─────────────────────────────────────────────────────────────
 
-def format_report(report: ReleaseReport) -> str:
-    """Format a ReleaseReport as a human-readable string."""
+def format_report(report: ReleaseReport, repo_root: Path | None = None) -> str:
+    """Format a ReleaseReport as a human-readable string.
+
+    ``repo_root`` should be the SAME resolved root the report's entries were
+    produced against — pass it through rather than letting this function
+    re-resolve independently, or the displayed "Repository:" line can name a
+    different repo than the one actually operated on (e.g. when an explicit
+    --repo-root was used while PROJECT_ROOT still points elsewhere). Falls
+    back to a fresh resolution only when the caller has no root on hand.
+    """
     lines: list[str] = []
     mode = "[DRY-RUN]" if report.dry_run else "[APPLY]"
     lines.append(f"=== Worktree Release {mode} ===")
     lines.append(f"Timestamp: {report.timestamp}")
-    lines.append(f"Repository: {_resolve_repo_root()}")
+    resolved = repo_root if repo_root is not None else _resolve_repo_root()
+    lines.append(f"Repository: {resolved}")
     lines.append(f"Total locked worktrees found: {len(report.entries)}")
     lines.append("")
 
@@ -614,15 +703,24 @@ def _status_char(entry: ReleaseEntry) -> str:
     return " "
 
 
-def write_report_file(report: ReleaseReport, data_dir: str | None = None) -> Path:
+def write_report_file(
+    report: ReleaseReport,
+    data_dir: str | None = None,
+    repo_root: Path | None = None,
+) -> Path:
     """Write the release report to the governed reports directory.
+
+    ``repo_root``, when given, is both the default base for ``data_dir`` (when
+    VNX_DATA_DIR is unset) and what gets threaded into ``format_report`` for
+    the "Repository:" line — the same already-resolved root the caller used
+    for the release itself, not a fresh, possibly-diverging re-resolution.
 
     Returns the path to the written report file.
     """
     if data_dir is None:
         data_dir = os.environ.get("VNX_DATA_DIR", "")
     if not data_dir:
-        root = _resolve_repo_root()
+        root = repo_root if repo_root is not None else _resolve_repo_root()
         data_dir = str(root / ".vnx-data")
 
     reports_dir = Path(data_dir) / "unified_reports"
@@ -632,7 +730,7 @@ def write_report_file(report: ReleaseReport, data_dir: str | None = None) -> Pat
     filename = f"worktree-release-{ts}.md"
     path = reports_dir / filename
 
-    content = format_report(report)
+    content = format_report(report, repo_root=repo_root)
     path.write_text(content + "\n", encoding="utf-8")
     return path
 
@@ -640,6 +738,18 @@ def write_report_file(report: ReleaseReport, data_dir: str | None = None) -> Pat
 # ── CLI entry point ───────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point.
+
+    Exit codes:
+      0  success, no problems
+      1  one or more entries had an error or a partial cleanup (see
+         format_report's WARNING section)
+      2  argparse usage error (argparse's own default)
+      3  EXIT_REPO_ROOT_CONFLICT — refused to run --apply because PROJECT_ROOT
+         and the cwd-derived git root name two different repositories and no
+         explicit --repo-root was given to disambiguate. See
+         RepoRootConflictError / _resolve_repo_root.
+    """
     parser = argparse.ArgumentParser(
         description="Release locked git worktrees (OI-1052)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -648,6 +758,13 @@ Examples:
   python3 scripts/lib/worktree_release.py           # dry-run (default)
   python3 scripts/lib/worktree_release.py --apply   # actually release
   python3 scripts/lib/worktree_release.py --json    # machine-readable dry-run
+
+Exit codes:
+  0  success
+  1  one or more entries had an error or a partial cleanup
+  2  argparse usage error
+  3  refused: --apply with PROJECT_ROOT and the cwd git root pointing at two
+     different repositories (pass --repo-root explicitly to disambiguate)
 """,
     )
     parser.add_argument(
@@ -665,21 +782,39 @@ Examples:
 
     args = parser.parse_args(argv)
     dry_run = not args.apply
-    repo_root = Path(args.repo_root) if args.repo_root else None
+    repo_root_arg = Path(args.repo_root) if args.repo_root else None
 
-    # Safety: refuse to apply without an explicit flag
-    if dry_run and args.apply:
-        pass  # handled above
+    # Resolve the root ONCE here and thread it through everything below
+    # (release, report formatting, report file placement) rather than letting
+    # each of those independently re-resolve — a second/third re-resolution
+    # can silently diverge from the root actually operated on and, worse,
+    # would each re-trigger the conflict warning/refusal on their own.
+    try:
+        root = repo_root_arg if repo_root_arg is not None else _resolve_repo_root(dry_run=dry_run)
+    except RepoRootConflictError as exc:
+        if args.json:
+            print(json.dumps(
+                {
+                    "error": "repo_root_conflict",
+                    "message": str(exc),
+                    "env_root": str(exc.env_root),
+                    "cwd_root": str(exc.cwd_root),
+                },
+                indent=2,
+            ))
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        return EXIT_REPO_ROOT_CONFLICT
 
     report = release_locked_worktrees(
-        repo_root=repo_root,
+        repo_root=root,
         dry_run=dry_run,
     )
 
     # Write report file (always, unless it fails)
     report_path = ""
     try:
-        report_path = str(write_report_file(report))
+        report_path = str(write_report_file(report, repo_root=root))
     except Exception as exc:
         logger.warning("Could not write report file: %s", exc)
 
@@ -708,7 +843,7 @@ Examples:
         }
         print(json.dumps(output, indent=2))
     else:
-        print(format_report(report))
+        print(format_report(report, repo_root=root))
         if report_path:
             print(f"\nReport written: {report_path}")
 

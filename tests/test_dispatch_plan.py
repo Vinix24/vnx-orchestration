@@ -625,14 +625,16 @@ def _make_vspec_headless(
 class TestClaudeHeadlessLane:
     def test_headless_optin_lane_fields(self, tmp_path: Path) -> None:
         """allow_headless=True → lane=claude_headless, adapter=claude_subprocess,
-        billing=subscription (no own key — billing follows auth, not lane)."""
+        billing=subscription (no own key — billing follows auth, not lane).
+        OI-1417: serialization_class joins the SAME "claude-tmux" slot class as
+        the tmux lane — the subscription is one account-wide resource."""
         vspec = _make_vspec_headless(tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot())
         assert isinstance(plan, ExecutionPlan)
         assert plan.lane == "claude_headless"
         assert plan.adapter == "claude_subprocess"
         assert plan.billing == "subscription"
-        assert plan.serialization_class is None
+        assert plan.serialization_class == "claude-tmux"
         assert plan.warmup == "n/a"
         assert plan.target_id == "ephemeral"
 
@@ -661,10 +663,24 @@ class TestClaudeHeadlessLane:
         assert plan.isolation == Isolation.WORKTREE
         assert plan.require_worktree is True
 
-    def test_headless_serial_disabled_still_no_serial_class(self, tmp_path: Path) -> None:
-        """claude_headless never gets serialization_class even when claude_serial_enabled=True."""
+    def test_headless_and_tmux_share_one_serialization_class(self, tmp_path: Path) -> None:
+        """OI-1417: headless and tmux plans resolve to the IDENTICAL
+        serialization_class string when the lock is enabled — one shared
+        account-wide slot pool, not two independent counters."""
+        headless_vspec = _make_vspec_headless(tmp_path=tmp_path)
+        tmux_vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        headless_plan = compile_plan(headless_vspec, _healthy_snapshot(claude_serial_enabled=True))
+        tmux_plan = compile_plan(tmux_vspec, _healthy_snapshot(claude_serial_enabled=True))
+        assert isinstance(headless_plan, ExecutionPlan)
+        assert isinstance(tmux_plan, ExecutionPlan)
+        assert headless_plan.serialization_class == "claude-tmux"
+        assert headless_plan.serialization_class == tmux_plan.serialization_class
+
+    def test_headless_serial_disabled_no_serial_class(self, tmp_path: Path) -> None:
+        """claude_serial_enabled=False disables the lock for headless too, same
+        as it already does for the tmux lane."""
         vspec = _make_vspec_headless(tmp_path=tmp_path)
-        plan = compile_plan(vspec, _healthy_snapshot(claude_serial_enabled=True))
+        plan = compile_plan(vspec, _healthy_snapshot(claude_serial_enabled=False))
         assert isinstance(plan, ExecutionPlan)
         assert plan.serialization_class is None
 

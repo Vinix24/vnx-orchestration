@@ -1435,6 +1435,16 @@ def _register_gate_check_subparser(subparsers: argparse.Action) -> None:
     register_gate_check_subparser(subparsers)
 
 
+def _register_worktree_release_subparser(subparsers: argparse.Action) -> None:
+    """`vnx worktree-release` — same engine as the fabric repo's `bin/vnx
+    worktree-release` (scripts/lib/worktree_release.py), exposed on the pip
+    CLI so consumer repos without `bin/vnx` (Mission Control, SEOcrawler_v2,
+    sales-copilot) can release locked worktrees too (OI-1389). Parser
+    definition lives in the command module to keep this file thin."""
+    from vnx_cli.commands.worktree import register_worktree_release_subparser
+    register_worktree_release_subparser(subparsers)
+
+
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":
         from vnx_cli.commands.init_cmd import vnx_init
@@ -1520,6 +1530,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.gate_check import vnx_gate_check
         sys.exit(vnx_gate_check(args))
 
+    elif args.command == "worktree-release":
+        from vnx_cli.commands.worktree import vnx_worktree_release
+        sys.exit(vnx_worktree_release(args))
+
     else:
         parser.print_help()
         sys.exit(0)
@@ -1564,6 +1578,7 @@ def main() -> None:
     _register_objective_subparser(subparsers)
     _register_deliverable_subparser(subparsers)
     _register_gate_check_subparser(subparsers)
+    _register_worktree_release_subparser(subparsers)
 
     args = parser.parse_args()
     _dispatch_command(args, parser)

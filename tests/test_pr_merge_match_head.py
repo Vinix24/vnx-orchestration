@@ -108,13 +108,15 @@ class TestMergePinnedToApprovedHead:
             return ok_run
 
         monkeypatch.setattr(pr_merge, "_gh", fake_gh)
+        monkeypatch.setattr(pr_merge, "_repo_auto_merge_allowed", lambda: True)
+        monkeypatch.setattr(pr_merge, "_pr_actually_merged", lambda n: (True, ""))
 
         ok, err = pr_merge._do_merge(5, "squash", head_sha=SHA)
 
         assert ok is True
         assert err == ""
         assert seen["args"] == [
-            "pr", "merge", "5", "--squash", "--auto", "--match-head-commit", SHA,
+            "pr", "merge", "5", "--squash", "--match-head-commit", SHA, "--auto",
         ]
 
     def test_do_merge_without_head_sha_omits_flag(self, monkeypatch):
@@ -127,6 +129,8 @@ class TestMergePinnedToApprovedHead:
             return ok_run
 
         monkeypatch.setattr(pr_merge, "_gh", fake_gh)
+        monkeypatch.setattr(pr_merge, "_repo_auto_merge_allowed", lambda: True)
+        monkeypatch.setattr(pr_merge, "_pr_actually_merged", lambda n: (True, ""))
 
         ok, _ = pr_merge._do_merge(5, "squash", head_sha="")
 

@@ -25,6 +25,49 @@ quota-403/429/auth error, times out, or returns output without a verdict block,
 the result status is ``unavailable`` — never ``fail``. Eleven quota-403 outages
 were once booked as eleven rejected PRs because the no-verdict path defaulted to
 "fail"; absence of evidence must surface as absence, not as a rejection.
+
+OI-1291: ``unavailable`` is not a single cause. ``reason`` distinguishes three
+disjoint states: ``dispatch_error`` (the dispatcher failed to deliver a
+working run — either it raised outright with no report at all, or a report
+DID come back but its own frontmatter stamps the underlying provider run as
+failed; see below), ``parse_error`` (a report came back from a run the
+frontmatter itself stamps as clean, with content but no readable ```json```
+verdict block — kimi DID respond, the block just didn't parse), and
+``no_verdict`` (the report was empty/whitespace — a genuinely empty
+delivery). Only ``dispatch_error``/``no_verdict`` may claim a provider
+outage in their summary text; ``parse_error`` must not, since the provider
+plainly produced output.
+
+OI-1291 (fix-forward): the first cut of this split used "did a report come
+back" as the discriminator between ``parse_error`` and outage. That axis is
+wrong — a real quota/auth outage still writes a report, because the
+failure-path ``emit_unified_report`` call runs on the dispatcher's failure
+path too. A spooled 403 error body reads as "content", so that axis booked a
+real outage as "kimi did respond, parse miss" — the same failure class this
+whole fix exists to remove, just mirrored. The report's own YAML frontmatter
+carries a signal content can't fake: ``exit_code`` is stamped by the lane
+from the actual spawn result, not guessed from the response text. A
+non-zero ``exit_code`` with readable frontmatter means the provider run
+itself failed — that is ``dispatch_error``, even though a report exists.
+Only ``exit_code == 0`` with readable frontmatter and no verdict block is a
+genuine ``parse_error``. When the frontmatter can't be read at all
+(older/foreign report shape), the outcome can't be read off the report —
+this falls back to the pre-fix-forward default of ``parse_error``, which is
+intentionally too broad: a masked provider failure with no readable
+``exit_code`` would still land here, but there is no other signal left to
+tell the two apart.
+
+OI-1291 (fix-forward, meetgat correction): the first cut of the frontmatter
+axis also treated zero output tokens as a failure signal on its own. On the
+kimi lane, post-run token capture is frequently unavailable — the lane
+stamps ``token_usage_measured: false`` and ``output: 0`` on those runs, so
+zero output tokens routinely means "not measured", not "the run produced
+nothing". A count of 766 kimi reports on disk found 502 with exit_code 0,
+real content, and ``token_usage_measured: false`` — successful runs the
+raw-zero check booked as provider outages, reintroducing OI-1291's original
+bug on a different axis. ``output_tokens`` now only counts as a failure
+signal when the frontmatter's own ``token_usage_measured`` flag is true;
+otherwise only ``exit_code`` decides.
 """
 from __future__ import annotations
 
@@ -47,6 +90,7 @@ from gate_recorder import (
     record_terminal_result,
     stamp_request_identity,
 )
+from unified_report_schema import SchemaViolation, parse_frontmatter
 
 _VALID_VERDICTS = {"pass", "fail", "blocked"}
 
@@ -116,14 +160,81 @@ def _get_diff(pr: str, diff_file: "str | None") -> "str | None":
         return None
 
 
-def _verdict_to_status(verdict: dict) -> "tuple[str, list, str]":
+def _frontmatter_run_outcome(report_text: str) -> "tuple[bool | None, object, object]":
+    """Read ``exit_code``/``token_usage.output`` off the report's own YAML
+    frontmatter to tell a provider-side run failure apart from a genuine
+    parse miss (OI-1291 fix-forward, meetgat correction).
+
+    Content existing is not proof kimi actually completed a review: the
+    failure-path ``emit_unified_report`` call writes a report too, so a
+    spooled 403 body is "content" by the same measure as a real review. The
+    frontmatter's ``exit_code`` field is stamped by the lane from the actual
+    spawn result, not guessed from the response text — that is the signal
+    that can't be faked by error-page prose.
+
+    ``exit_code`` alone decides the outcome. ``token_usage.output`` is only
+    consulted when the frontmatter's own ``token_usage_measured`` flag is
+    true. On the kimi lane, post-run token capture is frequently unavailable
+    (kimi-cli's stream-json output carries no usage accounting) — the lane
+    stamps ``token_usage_measured: false`` and ``output: 0`` for those runs.
+    A measured count of 766 kimi reports on disk found 502 with exit_code 0,
+    non-trivial body content, and ``token_usage_measured: false`` — real,
+    successful reviews that a bare ``output_tokens == 0`` check would have
+    booked as provider outages. Only 4 reports carried a genuinely measured
+    token count. Treating an unmeasured zero as a failure signal reintroduces
+    the exact bug OI-1291 exists to remove, just gated on a different field.
+
+    Returns ``(outcome, exit_code, output_tokens)`` where ``outcome`` is:
+        True  — frontmatter is readable and the run did not complete cleanly:
+                non-zero exit code, or (only when ``token_usage_measured`` is
+                true) a measured zero output-token count. A provider-side
+                failure, not a review outcome.
+        False — frontmatter is readable and stamps a clean run (exit_code 0,
+                and either tokens aren't measured or a measured non-zero
+                count): a missing verdict block here is a genuine parse miss.
+        None  — no readable frontmatter, or no ``exit_code`` field in it
+                (older/foreign report shape). The outcome can't be read off
+                the report at all; callers fall back to the pre-fix-forward
+                default (content present -> parse_error).
+    """
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return None, None, None
+    if "exit_code" not in frontmatter:
+        return None, None, None
+    exit_code = frontmatter.get("exit_code")
+    token_usage = frontmatter.get("token_usage")
+    output_tokens = token_usage.get("output") if isinstance(token_usage, dict) else None
+    tokens_measured = bool(frontmatter.get("token_usage_measured"))
+    if exit_code != 0:
+        return True, exit_code, output_tokens
+    if tokens_measured and output_tokens == 0:
+        return True, exit_code, output_tokens
+    return False, exit_code, output_tokens
+
+
+def _verdict_to_status(
+    verdict: dict, report_text: str = "", *, provider_failed_detail: "str | None" = None
+) -> "tuple[str, list, str]":
     """Map the extracted verdict to (status, blocking_findings, residual_risk).
 
-    OI-1142: an empty ``verdict`` means the provider produced no readable verdict
-    at all — the kimi CLI hit a quota-403/429/auth error, was cut off, or emitted
-    output without the contract's JSON block. That is a tool outage, not a review
-    outcome, and it maps to ``unavailable``. Only a REAL parsed verdict may ever
-    produce ``fail``.
+    OI-1142: an empty ``verdict`` means no readable verdict could be extracted.
+    OI-1291 splits that further: if ``report_text`` itself is empty/whitespace,
+    the provider delivered nothing at all (a real outage/empty-completion
+    signal). If ``report_text`` has content but no readable ```json``` block,
+    the provider DID respond — the block just failed to parse, which is a
+    parse miss, not an outage. Either way this maps to ``unavailable`` and
+    only a REAL parsed verdict may ever produce ``fail``.
+
+    ``provider_failed_detail`` (OI-1291 fix-forward): the caller passes this
+    when it has already read the report's own frontmatter via
+    ``_frontmatter_run_outcome`` and found a non-zero exit code (or a
+    measured-zero output-token count, when the frontmatter's own
+    ``token_usage_measured`` flag says the count is real). When set, THIS
+    function returns that provider-outage residual
+    instead of the "kimi did respond" parse-miss residual below — the report
+    having content is not proof kimi ran; the frontmatter's own exit_code is.
     """
     v = (verdict.get("verdict") or "").strip().lower() if verdict else ""
     findings = verdict.get("findings") or [] if verdict else []
@@ -136,17 +247,32 @@ def _verdict_to_status(verdict: dict) -> "tuple[str, list, str]":
         return "pass", [], residual
     if v in {"fail", "blocked"} or blocking:
         return "fail", blocking, residual or "kimi gate reported blocking findings"
+    if residual:
+        return "unavailable", [], residual
+    if provider_failed_detail:
+        return "unavailable", [], provider_failed_detail
+    if (report_text or "").strip():
+        return (
+            "unavailable",
+            [],
+            f"kimi returned a {len(report_text)}-char report, but it contained no "
+            "readable ```json``` verdict block (parse miss — kimi did respond)",
+        )
     return (
         "unavailable",
         [],
-        residual
-        or "kimi produced no readable verdict (provider outage/quota/truncation) — not a review outcome",
+        "kimi produced no readable verdict (provider outage/quota/truncation) — not a review outcome",
     )
 
 
-def _status_summary(status: str, blocking: list) -> str:
-    """Summary line for the result record — outage vs verdict must be unmistakable."""
+def _status_summary(status: str, blocking: list, reason: str = "", report_len: int = 0) -> str:
+    """Summary line for the result record — outage vs parse-miss vs verdict must be unmistakable."""
     if status == "unavailable":
+        if reason == "parse_error":
+            return (
+                f"kimi gate: UNAVAILABLE (parse_error — kimi returned a {report_len}-char "
+                "report, but it contained no readable verdict block — NOT a review fail)"
+            )
         return "kimi gate: UNAVAILABLE (provider outage/no verdict — NOT a review fail)"
     return f"kimi gate: {status} ({len(blocking)} blocking finding(s))"
 
@@ -192,8 +318,40 @@ def main(argv: "list[str] | None" = None) -> int:
         reason = "dispatch_error"
     else:
         verdict = _extract_verdict(report_text or "")
-        status, blocking, residual = _verdict_to_status(verdict)
-        reason = "verdict" if verdict else "no_verdict"
+        provider_failed_detail = None
+        run_failed = None
+        if not verdict and (report_text or "").strip():
+            # OI-1291 fix-forward: only consult the frontmatter once a verdict
+            # extraction has already failed — a real parsed verdict always
+            # wins regardless of what exit_code says.
+            run_failed, exit_code, output_tokens = _frontmatter_run_outcome(report_text or "")
+            if run_failed is True:
+                provider_failed_detail = (
+                    "kimi's own report frontmatter stamps this run as failed "
+                    f"(exit_code={exit_code!r}, token_usage.output={output_tokens!r}) — "
+                    "provider-side outage, not a review outcome"
+                )
+        status, blocking, residual = _verdict_to_status(
+            verdict, report_text or "", provider_failed_detail=provider_failed_detail
+        )
+        if verdict:
+            reason = "verdict"
+        elif (report_text or "").strip():
+            if run_failed is True:
+                # OI-1291 fix-forward: the report has content, but its OWN
+                # frontmatter stamps the underlying provider run as failed —
+                # this is the same outage class as a raised dispatch_error,
+                # just discovered from the report instead of an exception.
+                reason = "dispatch_error"
+            else:
+                # run_failed is False (frontmatter readable, clean run — a
+                # genuine parse miss) or None (no readable exit_code at all,
+                # so there is no signal left to tell a masked provider
+                # failure apart from a real parse miss). Both default to
+                # parse_error; the None case is intentionally too broad.
+                reason = "parse_error"
+        else:
+            reason = "no_verdict"
 
     record = {
         "gate": "kimi_gate",
@@ -206,7 +364,7 @@ def main(argv: "list[str] | None" = None) -> int:
         "status": status,
         "reason": reason,
         "duration_seconds": round(duration, 3),
-        "summary": _status_summary(status, blocking),
+        "summary": _status_summary(status, blocking, reason, len(report_text or "")),
         "provider": "kimi",
         "model": args.model,
         "dispatch_id": dispatch_id,
@@ -244,7 +402,13 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.json:
         print(json.dumps(record, indent=2))
     elif status == "unavailable":
-        print("VERDICT: UNAVAILABLE  (provider outage/no verdict — NOT a review fail)")
+        if reason == "parse_error":
+            print(
+                f"VERDICT: UNAVAILABLE  (parse_error — kimi returned a {len(report_text or '')}-char "
+                "report, but it contained no readable verdict block — NOT a review fail)"
+            )
+        else:
+            print("VERDICT: UNAVAILABLE  (provider outage/no verdict — NOT a review fail)")
     else:
         print(f"VERDICT: {status.upper()}  ({len(blocking)} blocking)")
         for f in blocking:

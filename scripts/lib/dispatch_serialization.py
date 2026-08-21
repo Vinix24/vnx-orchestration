@@ -1,14 +1,16 @@
 """dispatch_serialization.py — Claude subscription N-slot serial lock (PR-6 + tmux-concurrency-config).
 
-serialize_lane(serialization_class) context manager: serializes the claude-tmux
-lane to at most N concurrent holders per account; provider + headless lanes
-pass None -> no-op.
+serialize_lane(serialization_class) context manager: serializes BOTH claude
+lanes (claude-tmux and claude_headless) to at most N concurrent holders per
+account, since they authenticate against the same subscription (OI-1417) —
+provider lanes pass None -> no-op.
 
 The serial lock protects the Claude SUBSCRIPTION, not a resource. Running
 multiple subscription-authenticated `claude` processes concurrently risks
 rate-limits and (per prior-incident precedent) account action. Default
-concurrency is 5 (operator directive 2026-08-11, dispatch-20260811c-b).
-Concurrent tmux dispatches used to cross each other's instructions through
+concurrency is 10 (operator directive 2026-08-21, dispatch-20260821-t0-tmux-
+concurrency-10; raised from 5 -- operator directive 2026-08-11,
+dispatch-20260811c-b). Concurrent tmux dispatches used to cross each other's instructions through
 tmux's single shared paste buffer — measured 15 of 20 crossings with 4
 simultaneous dispatches. #1451 gave every dispatch its own named paste
 buffer; the same measurement came back 0 of 20 crossings after. Raising the
@@ -76,18 +78,35 @@ def _timeout_seconds() -> float:
 def _max_concurrent() -> int:
     """N-slot concurrency limit for the claude-tmux lane.
 
-    VNX_TMUX_MAX_CONCURRENT, clamped to >= 1. Missing, unparseable, zero, or
-    negative values fall back to 5 -- the subscription-safe default since the
-    per-dispatch tmux paste-buffer fix (#1451; see module docstring). Only a
-    valid positive integer overrides the default with a different
-    concurrency level.
+    Precedence: the process env var VNX_TMUX_MAX_CONCURRENT (an explicit
+    per-session override) wins; then the registry-backed config-plane value
+    (project_config via config_runtime -- the same surface an operator's
+    dashboard flips, category "dispatch", approval-gated); then 10 -- the
+    account-wide default (operator directive 2026-08-21, dispatch-20260821-
+    t0-tmux-concurrency-10; raised from 5 since the per-dispatch tmux
+    paste-buffer fix, #1451 -- see module docstring). Missing, unparseable,
+    zero, or negative values fall back to 10. Only a valid positive integer
+    overrides the default with a different concurrency level. The config
+    lookup is best-effort (fail-soft): a missing state dir / DB leaves the
+    env/default behaviour unchanged, exactly as before this flag was
+    registry-backed.
     """
-    raw = os.environ.get("VNX_TMUX_MAX_CONCURRENT", "5")
+    raw = os.environ.get("VNX_TMUX_MAX_CONCURRENT")
+    if not raw:
+        try:
+            import config_runtime  # noqa: PLC0415
+            raw = config_runtime.get("VNX_TMUX_MAX_CONCURRENT")
+        except Exception as exc:  # vnx-silent-except: unreadable config -> log + fail-soft to default
+            logger.warning(
+                "dispatch_serialization: VNX_TMUX_MAX_CONCURRENT config read failed "
+                "(falling back to default 10, fail-soft direction): %s", exc
+            )
+            raw = None
     try:
-        n = int(raw)
+        n = int(raw) if raw else 10
     except (ValueError, TypeError):
-        return 5
-    return n if n >= 1 else 5
+        return 10
+    return n if n >= 1 else 10
 
 
 def _iso_now() -> str:
@@ -215,10 +234,10 @@ def serialize_lane(
 ):
     """Serialize execution for the given serialization_class across N slots.
 
-    None -> no-op: yield immediately, touch nothing (providers + headless).
+    None -> no-op: yield immediately, touch nothing (provider lanes only).
     "claude-tmux" -> acquire the first free slot among N exclusive flocks on
     <lock_dir>/claude-tmux-slot-{0..N-1}.lock (N = VNX_TMUX_MAX_CONCURRENT,
-    default 5) and hold it through the entire with-body (execution +
+    default 10) and hold it through the entire with-body (execution +
     receipt/GOVERN). The acquired slot is released unconditionally in
     finally, including on exception. flock auto-releases on process death;
     no manual stale-lock cleanup needed.
