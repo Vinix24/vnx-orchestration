@@ -1,7 +1,9 @@
 """CI guard: FEATURE_PLAN.md and PR_QUEUE.md must stay in sync with ROADMAP.yaml.
 
-FEATURE_PLAN.md check: verifies that every feature in ROADMAP.yaml appears in
-the committed FEATURE_PLAN.md with the correct status line.
+FEATURE_PLAN.md check: FEATURE_PLAN.md is a generated, untracked artifact
+(scripts/build_feature_plan.py — OI-1376) with no committed copy to read in a
+fresh checkout, so this regenerates it in memory from ROADMAP.yaml alone and
+verifies every roadmap feature appears with the correct status line.
 
 PR_QUEUE.md check: regenerates from ROADMAP.yaml and asserts byte-exact match
 against the committed file (since PR_QUEUE.md is purely derived from ROADMAP.yaml
@@ -18,8 +20,9 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _ROADMAP = _REPO_ROOT / "ROADMAP.yaml"
-_FEATURE_PLAN = _REPO_ROOT / "FEATURE_PLAN.md"
 _PR_QUEUE = _REPO_ROOT / "PR_QUEUE.md"
+
+sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
 
 def _load_roadmap() -> dict:
@@ -37,8 +40,12 @@ def test_roadmap_yaml_is_valid() -> None:
 
 
 def test_feature_plan_contains_all_roadmap_features() -> None:
+    from build_feature_plan import generate_feature_plan
+
     data = _load_roadmap()
-    content = _FEATURE_PLAN.read_text(encoding="utf-8")
+    content = generate_feature_plan(
+        register_events=[], merged_prs=[], roadmap_features=data.get("features") or [],
+    )
 
     missing = []
     wrong_status = []
@@ -74,7 +81,11 @@ def test_pr_queue_matches_roadmap() -> None:
 
 
 def test_no_conflict_markers_in_roadmap_files() -> None:
-    for path in (_ROADMAP, _FEATURE_PLAN, _PR_QUEUE):
+    # FEATURE_PLAN.md is excluded here: it is a generated, untracked artifact
+    # (OI-1376) with no committed copy to inspect in a fresh checkout, and its
+    # content is built programmatically each time (not merged), so it cannot
+    # carry leftover conflict markers.
+    for path in (_ROADMAP, _PR_QUEUE):
         content = path.read_text(encoding="utf-8")
         for i, line in enumerate(content.splitlines(), 1):
             if line.startswith(("<<<<<<", ">>>>>>>", "=======")):
