@@ -40,6 +40,7 @@ import producer_freshness
 from dispatch_cli import run_dispatch
 from gate_obligations import (
     NO_GATE_KEY,
+    STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
@@ -512,6 +513,145 @@ def test_runner_escalates_temporary_refusal_to_not_executable_after_threshold(tm
     assert record["status"] == STATUS_NOT_EXECUTABLE
     assert record["reason"] == "gate_parked_timeout"
     assert record["attempts"] == runner._TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# 2c. OI-1400: an unknown/unavailable gate status must never fall through
+# to "fulfilled" — that silent default is exactly how a consumer project's
+# PR #966/#967 booked vervuld off a not_executable/provider-not-installed and
+# an unavailable/worktree-checkout-failed result, both with empty
+# contract_hash and empty report_path.
+# ---------------------------------------------------------------------------
+
+
+def test_runner_leaves_pending_on_unavailable_result(tmp_path, monkeypatch):
+    """status=unavailable (gate_status.UNAVAILABLE_STATES) means the provider
+    produced no verdict at all — outage, quota, timeout, or a failed setup
+    step such as a worktree checkout (measured live: a consumer project's
+    PR #967 booked vervuld off exactly this shape). Must stay pending with a
+    reason that names the outage, not "gate_parked" (that name is reserved
+    for a config-disabled gate) and never "fulfilled"."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260821-oi1400-unavailable", gate="codex_gate",
+        project_id="vnx-dev", pr_number=967,
+    )
+    manager = _FakeManager(
+        state_dir, result_status="unavailable", result_reason="worktree_checkout_failed",
+    )
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 1
+    record = _read_obligation(state_dir, "20260821-oi1400-unavailable")
+    assert record["status"] == STATUS_PENDING
+    assert record["attempts"] == 1
+    assert record["reason"] == "gate_run_unavailable"
+    assert "unavailable" in record["reason_detail"]
+    assert "worktree_checkout_failed" in record["reason_detail"]
+
+
+def test_runner_escalates_unavailable_to_not_executable_after_threshold(tmp_path, monkeypatch):
+    """Same bounded-retry-then-escalate shape as the other temporary
+    refusals: an unavailable result that recurs forever must still
+    eventually alarm someone, just not on the first attempt."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="20260821-oi1400-unavailable-escalate", gate="codex_gate",
+        project_id="vnx-dev", pr_number=968,
+    )
+    update_obligation(path, attempts=runner._TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS - 1)
+    manager = _FakeManager(state_dir, result_status="unavailable", result_reason="timeout")
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260821-oi1400-unavailable-escalate")
+    assert record["status"] == STATUS_NOT_EXECUTABLE
+    assert record["reason"] == "gate_run_unavailable_timeout"
+    assert record["attempts"] == runner._TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS
+
+
+def test_runner_does_not_fulfill_on_unknown_result_status(tmp_path, monkeypatch):
+    """A gate result status this runner has never seen before must NOT fall
+    through to `fulfilled` — that silent default is the exact bug behind
+    OI-1400. It must land somewhere safe and visible (pending, loud reason)
+    instead."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260821-oi1400-unknown-status", gate="codex_gate",
+        project_id="vnx-dev", pr_number=969,
+    )
+    manager = _FakeManager(state_dir, result_status="quantum_flux_undecided")
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    record = _read_obligation(state_dir, "20260821-oi1400-unknown-status")
+    assert record["status"] != STATUS_FULFILLED, (
+        "an unrecognised result status must never silently land as fulfilled"
+    )
+    assert summary["pending_after"] == 1
+    assert record["status"] == STATUS_PENDING
+    assert record["attempts"] == 1
+    assert record["reason"] == "gate_status_unknown"
+    assert "quantum_flux_undecided" in record["reason_detail"]
+
+
+def test_runner_fulfills_a_normal_passing_gate_result(tmp_path, monkeypatch):
+    """The doorval inversion must not touch the ordinary success path: a gate
+    that actually ran and decided PASS still lands fulfilled.
+
+    ``status="pass"`` is the real verdict value a genuine passing gate run
+    writes — confirmed via
+    ``grep -n '"status": verdict' scripts/lib/gate_executor.py``
+    (ci_gate's ``_ci_gate_summary``/``verdict`` produce exactly ``"pass"``,
+    ``"fail"``, or ``"running"``) and cross-checked against the canonical
+    vocabulary in ``scripts/lib/gate_status.py`` (``PASS_STATES = {"approve",
+    "completed", "pass", "passed"}``), which is what this fix imports as
+    ``_GATE_RESULT_PASS_STATES`` to decide the fulfilled path."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260821-oi1400-normal-pass", gate="ci_gate",
+        project_id="vnx-dev", pr_number=970,
+    )
+    manager = _FakeManager(state_dir, result_status="pass")
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260821-oi1400-normal-pass")
+    assert record["status"] == STATUS_FULFILLED
+    assert record["attempts"] == 1
+
+
+def test_runner_known_terminal_statuses_stay_unchanged(tmp_path, monkeypatch):
+    """The three obligation-level terminal statuses (failed, fulfilled,
+    not_executable) must keep resolving to themselves — the doorval
+    inversion narrows the fallback, it must not touch the already-correct
+    literal mappings."""
+    for status, pr_number in (
+        (STATUS_FAILED, 971),
+        (STATUS_FULFILLED, 972),
+        (STATUS_NOT_EXECUTABLE, 973),
+    ):
+        state_dir = _make_state_dir(tmp_path / f"terminal-{status}")
+        dispatch_id = f"20260821-oi1400-terminal-{status}"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=pr_number,
+        )
+        manager = _FakeManager(state_dir, result_status=status)
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 0
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == status, f"result status {status!r} must stay terminal as itself"
 
 
 # ---------------------------------------------------------------------------

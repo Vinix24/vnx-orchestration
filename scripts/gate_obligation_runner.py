@@ -65,6 +65,10 @@ from gate_obligations import (  # noqa: E402
     pr_number_from_pr_id,
     update_obligation,
 )
+from gate_status import (  # noqa: E402
+    PASS_STATES as _GATE_RESULT_PASS_STATES,
+    UNAVAILABLE_STATES as _GATE_RESULT_UNAVAILABLE_STATES,
+)
 
 _LOG = logging.getLogger("gate_obligation_runner")
 
@@ -81,18 +85,30 @@ _UNRESOLVABLE_ESCALATION_ATTEMPTS = 96
 # A gate RESULT can itself report a TEMPORARY refusal rather than a real
 # verdict on the code: ``status=running`` means a CI check is still in flight
 # (gate_executor's ci_gate path — not all checks reached a terminal bucket
-# yet), and ``status=not_executable`` with ``reason=provider_disabled`` means
+# yet), ``status=not_executable`` with ``reason=provider_disabled`` means
 # the gate is parked by config (e.g. VNX_CI_GATE_REQUIRED=0 —
 # gate_result_parser._classify_unavailable / gate_request_handler
-# ._mark_gate_unavailable). Neither says anything about the code; both are
-# "not yet", not "no". Treating either as terminal burns the obligation
-# forever — measured live against PR #1627 (OI-1384): CI had actually passed,
-# but the recorded obligation was a dead not_executable/provider_disabled with
-# no report_path, no contract_hash, no branch, no commit_sha. Same shape as
-# the ``unresolvable`` PR-resolution path below: stays pending under a
-# bounded retry term, then escalates to the loud terminal not_executable — a
-# temporary refusal that recurs forever must still eventually alarm someone,
-# just not on the first attempt.
+# ._mark_gate_unavailable), and ``status=unavailable`` (gate_status.py's
+# UNAVAILABLE_STATES — gate_recorder.record_failure books this for an
+# execution failure: crash, timeout, stall, a failed worktree checkout) means
+# the provider never produced a verdict at all. None of the three says
+# anything about the code; all are "not yet", not "no". Treating any of them
+# as terminal burns the obligation forever — measured live against PR #1627
+# (OI-1384): CI had actually passed, but the recorded obligation was a dead
+# not_executable/provider_disabled with no report_path, no contract_hash, no
+# branch, no commit_sha. A consumer project separately measured the
+# ``unavailable`` case (OI-1400): PR #966/#967 booked ``fulfilled`` off a
+# not_executable/provider-not-installed and an unavailable/worktree-checkout-
+# failed result respectively, both with empty contract_hash and report_path —
+# because the fallback below defaulted every non-terminal, non-temporary
+# status to fulfilled. All three temporary cases stay pending under a bounded
+# retry term, then escalate to the loud terminal not_executable — a temporary
+# refusal that recurs forever must still eventually alarm someone, just not
+# on the first attempt. Anything left over — a status this runner has never
+# seen — takes the SAME pending/escalate path (OI-1400): the fallback used to
+# read "anything I don't recognise as terminal is a pass," which is how the
+# two obligations above landed silently fulfilled with zero evidence. The
+# fallback now reads "anything I don't recognise as a pass is NOT a pass."
 _TEMPORARY_RESULT_STATUSES = frozenset({"running"})
 _TEMPORARY_NOT_EXECUTABLE_REASONS = frozenset({"provider_disabled"})
 _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
@@ -643,9 +659,39 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
                 "not broken — the obligation waits for it to be re-enabled or for a "
                 "future run, not permanently refused"
             )
-        else:
+        elif result_status in _GATE_RESULT_UNAVAILABLE_STATES:
+            temp_reason = "gate_run_unavailable"
+            temp_detail = (
+                f"{gate} for PR #{pr_number} reported unavailable"
+                + (f" ({result_reason})" if result_reason else "")
+                + " — the provider produced no verdict at all (outage, quota, "
+                "timeout, or a failed setup step such as a worktree checkout), "
+                "not a judgment on the code; will be re-attempted on the next run"
+            )
+        elif result_status in TERMINAL_STATUSES or result_status in _GATE_RESULT_PASS_STATES:
             temp_reason = None
             temp_detail = None
+        else:
+            # OI-1400: a status that is neither a known terminal obligation
+            # state nor a known gate-result pass must NEVER fall through to
+            # "fulfilled" — that silent default is exactly how PR #966/#967
+            # in a consumer project landed as vervuld with zero evidence
+            # (empty contract_hash, empty report_path). Treat an unrecognised
+            # status the same as the other temporary refusals above: pending,
+            # loud, and bounded — never a quiet pass.
+            temp_reason = "gate_status_unknown"
+            temp_detail = (
+                f"{gate} for PR #{pr_number} returned an unrecognised result "
+                f"status ({result_status!r}) — refusing to record that as "
+                "fulfilled; staying pending until a recognised status is seen "
+                "or this escalates"
+            )
+            _LOG.warning(
+                "gate_obligation_runner: unrecognised result status %r for "
+                "pr=%s gate=%s (reason=%r) — NOT marking the obligation "
+                "fulfilled (OI-1400)",
+                result_status, pr_number, gate, result_reason,
+            )
 
         if temp_reason is not None:
             # Same shape as the `unresolvable` PR-resolution path: stays
