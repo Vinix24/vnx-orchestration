@@ -116,6 +116,7 @@ tests/test_busy_terminal_certification.py  # OI-1227: red solo — rc_check_term
 tests/test_claude_github_review_linkage.py  # OI-1227: red solo — MagicMock not JSON serializable in request handler (3 failed, 33 passed)
 tests/test_cleanup_stale_vnx_sessions.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
 tests/test_cli_flag_forwarding.py  # OI-1227: red solo — RGM lambda got unexpected kwarg 'strict' (1 failed, 17 passed)
+tests/test_cli_init.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (29 failed) op ADR-007 fail-closed: project_id conflict for init backfill (marker=<testnaam>, env:VNX_PROJECT_ID='vnx-dev')
 tests/test_codex_pr311_findings.py  # OI-1227: red solo — IntelligenceSelector._record_pattern_usage missing (3 failed, 12 passed)
 tests/test_codex_r2_fixes.py  # OI-1227: red solo — ((count++)) post-increment still present in dispatcher loop (1 failed, 11 passed)
 tests/test_constraint_enforcer.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
@@ -148,17 +149,21 @@ tests/test_headless_inspect.py  # OI-1227: red solo — HealthSummary.status_lab
 # now rejoins the Profile A sweep so new drift fails the PR, not a red suite
 # nobody reads. No heavy-dep stack (sqlite3 + in-repo modules only).
 tests/test_horizon_schema_migration_fix.py  # OI-1227: red solo — pre-27 store migration to horizon fails (8 failed, 27 passed)
+tests/test_init_migrate_bootstrap.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (18 failed) op hetzelfde ADR-007 project_id-conflict — zowel de "DB bootstrap failed" init-backfill vorm als "refusing to migrate a split-tenant store" (cli-derived project vs env:VNX_PROJECT_ID='vnx-dev')
 tests/test_installer_no_template_leak.py  # OI-1227: red solo — developer machine paths found in shipped sources (2 failed, 6 passed)
 tests/test_intelligence_ab_framework.py  # OI-1227: red solo — AB-framework conn lambda unexpected kwarg 'timeout' (2 failed, 9 passed)
+tests/test_learning_feature.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (5 failed) — ANDERE oorzaak dan ADR-007: de autouse _vnx_data_dir_isolation-fixture (tests/conftest.py) pint VNX_DATA_DIR op een per-test map die learning_loop's eigen ensure_env()-call in de archive/log-helpers gebruikt i.p.v. de test's patch("learning_loop.ensure_env", ...); het schrijfpad ontbreekt en de FileNotFoundError wordt stil geslikt door `except OSError: pass`
 tests/test_litellm_agentic_runner.py  # OI-1227: red solo — full-loop subprocess rc != 0 (1 failed, 17 passed)
 tests/test_llm_decision_router.py  # OI-1227: red solo — decision comparison failed (1 failed, 18 passed)
 tests/test_migrate_future_system.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_migrate_pool_seed.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (8 failed) op dezelfde ADR-007 "refusing to migrate a split-tenant store" refusal (cli-derived project vs env:VNX_PROJECT_ID='vnx-dev'); de DB wordt daardoor nooit aangemaakt, latere seed/resolver-asserts falen mee
 tests/test_observability_linkage.py  # OI-1227: red solo — events-dir guard NotADirectoryError (4 failed, 13 passed)
 tests/test_open_items_gate_certification.py  # OI-1227: red solo — serve_dashboard._read_gate_config missing (2 failed, 8 passed)
 tests/test_pattern_id_stability.py  # OI-1227: red solo — IntelligenceSelector._record_pattern_usage missing (1 failed, 8 passed)
 tests/test_pattern_matching.py  # OI-1227: red solo — ModuleNotFoundError: cli_output (1 collection error)
 tests/test_per_pr_closure.py  # OI-1227: red solo — 'contradiction_gemini_review' missing from evidence set (9 failed, 13 passed)
 tests/test_plan_gate_panel.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
+tests/test_planning_api.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (9 failed) — ANDERE vorm dan ADR-007's fail-closed refusal: dashboard/api_planning.py::_resolve_project_id() leest env VNX_PROJECT_ID='vnx-dev' eerst en query't tracks met dat project_id, terwijl de test zijn eigen rijen seedt onder project_id='test-proj' — 0 resultaten i.p.v. de geseedde rijen
 tests/test_planning_cli.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_pool_manager_real_spawn.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (1 failed, 9 passed)
 tests/test_pool_provider_mix_integration.py  # OI-1227: red solo — terminal_leases has no column 'state' (1 failed, 15 passed)
@@ -170,10 +175,12 @@ tests/test_provider_dispatch_contract_integration.py  # OI-1227: red solo — li
 tests/test_provider_dispatch_deepseek_harness.py  # OI-1227: red solo — missing-key handler writes no receipt line (1 failed, 9 passed)
 tests/test_provider_dispatch_entry.py  # OI-1227: red solo — litellm route subprocess rc != 0 (1 failed, 17 passed)
 tests/test_queue_reconciliation_certification.py  # OI-1227: red solo — 'hash_gemini_review' missing from evidence keys (4 failed, 34 passed)
+tests/test_quickstart_validation.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (2 failed) op hetzelfde ADR-007 init-backfill project_id-conflict (env:VNX_PROJECT_ID='vnx-dev'); mode.json en .vnx-data/state worden nooit aangemaakt omdat `vnx init` fail-closed weigert
 tests/test_receipt_classifier.py  # OI-1227: red solo — classifier_providers.ollama_provider.subprocess missing (1 failed, 15 passed)
 tests/test_receipt_instruction_hash.py  # OI-1227: red solo — manifest sha256 read failed (2 failed, 7 passed)
 tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
+tests/test_repo_map.py  # OI-1420 gemeten 21-08: valt onder volle sweep (13 failed), ANDERE oorzaak dan ADR-007 — CI image mist tree-sitter (_TSParser NameError) en networkx (ModuleNotFoundError), bewust niet geïnstalleerd (zie het "networkx is deliberately NOT installed" commentaar in vnx-ci.yml's "Install Python deps" stap); een "CI image"-reden zoals elders in dit bestand
 tests/test_review_adapters.py  # OI-1227: red solo — ValueError not raised for unknown adapter (7 failed, 28 passed)
 tests/test_roadmap_consistency.py  # OI-1227: red solo — PR_QUEUE.md stale vs build_pr_queue.py (1 failed, 3 passed)
 tests/test_routing_policy.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
@@ -191,15 +198,23 @@ tests/test_subprocess_cheap_lane.py  # OI-1227: red solo — cheap-lane routes t
 tests/test_subprocess_dispatch_identity.py  # OI-1227: red solo — delivered env leaks ANTHROPIC_AUTH_TOKEN (1 failed, 5 passed)
 tests/test_subprocess_health.py  # OI-1227: red solo — deliver-with-recovery file not found (3 failed, 13 passed)
 tests/test_subprocess_w3e_robustness.py  # OI-1227: red solo — cannot import _classify_completion from delivery (3 failed, 14 passed)
+tests/test_t0_decision_log.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (2 failed) — ANDERE oorzaak dan ADR-007: TestProcessEventsFileCursorStaleness verwacht dat unlink()+herschrijven-met-gelijke-regeltelling een nieuwe inode oplevert zodat de cursor reset; onder sweep-belasting wordt dat niet gedetecteerd (written==0 i.p.v. verwacht), order/load-dependent (OI-658-klasse)
+tests/test_t0_escalations_log.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (1 failed) — zelfde cursor-staleness/inode-hergebruik klasse als test_t0_decision_log.py, order/load-dependent (OI-658-klasse)
 tests/test_t0_skill_consistency.py  # OI-1227: red solo — no bash blocks found in CLAUDE.md (2 failed, 6 passed)
+tests/test_tenant_stamp_fail_closed.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (1 failed) op de letterlijke bron-quote: "ADR-007 fail-closed: project_id conflict for init backfill — db-path='mission-control', env:VNX_PROJECT_ID='vnx-dev'. All sources must agree."
 tests/test_terminal_state_reconciler.py  # OI-1227: red solo — reconciler 'idle' != 'blocked' (2 failed, 10 passed)
 tests/test_tmux_adapter.py  # OI-1227: red solo — ModuleNotFoundError: tmux_adapter_cli (3 failed, 42 passed)
 tests/test_tmux_adapter_interface.py  # OI-1227: red solo — TmuxAdapter.shutdown() unexpected kwarg 'graceful' (2 failed, 27 passed)
 tests/test_tmux_worktree.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
 tests/test_track_cli.py  # OI-1227: red solo — track db file not found (15 failed, 3 passed)
 tests/test_track_v23_cli.py  # OI-1227: red solo — track v23 subprocess ret != 0 (4 failed, 6 passed)
+tests/test_vnx_cli.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (2 failed) op hetzelfde ADR-007 init-backfill project_id-conflict (env:VNX_PROJECT_ID='vnx-dev'); .vnx-data/state wordt nooit aangemaakt omdat `vnx init` fail-closed weigert
 tests/test_vnx_start_runtime.py  # OI-1227: red solo — VNX var set mismatch (1 failed, 46 passed)
 tests/test_w_init_project_id_threading.py  # OI-1227: red solo — migration linter flags new DEFAULT 'vnx-dev' (1 failed, 26 passed)
+tests/test_wave4_central_install_e2e.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (3 failed) — ANDERE oorzaak dan ADR-007: in de CI-omgeving staat VNX_DATA_DIR al gepind op /home/runner/.vnx-data/vnx-dev (central-install pad) i.p.v. het project-lokale pad dat de test verwacht
+tests/test_wave4_path_resolver.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (1 failed) — zelfde VNX_DATA_DIR-pin naar /home/runner/.vnx-data/vnx-dev als test_wave4_central_install_e2e.py; test_resolve_paths_end_to_end_central roept resolve_paths() in-process aan zonder de ambient env te wissen
+tests/test_wave4_save_restore.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (1 failed) — zelfde VNX_DATA_DIR-pin naar /home/runner/.vnx-data/vnx-dev
+tests/test_wave4_write_guard.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (1 failed) — zelfde VNX_DATA_DIR-pin naar /home/runner/.vnx-data/vnx-dev
 tests/test_wave7_deepseek_smoke.py  # OI-1227: smoke routes litellm:deepseek on dispatch_allowed:false (OI-867 deepseek proxy/harness split)
 tests/test_week_1_skills.py  # OI-1227: red solo — vendored vnx-system dispatcher file not found (1 failed, 3 passed)
 tests/test_wheel_install.py  # OI-1227: red solo — wheel-install smoke exit 1 (1 failed)
