@@ -625,5 +625,209 @@ class TestNearEmptyCompletionMisclassifiedAsUnknown(unittest.TestCase):
         self.assertEqual(escalation.action, "retry_same_tier")
 
 
+# ---------------------------------------------------------------------------
+# TestP3FailureClassSplit — dispatch 20260821-q3-failure-class-split
+#
+# Three real, distinguishable failure modes previously collapsed into
+# `unknown` together (measured on the ledger, 19-08 through 21-08: 15
+# `unknown` receipts, 3 separable causes, each deserving its own escalation
+# action instead of the shared `unknown -> no_climb`):
+#   - completion_without_execution (kimi fabrication guard, 8x observed)
+#   - no_verdict (codex gate-runner stdin/verdict flake, 6x observed)
+#   - tool_missing (kimi CLI resolved relative to the repo, not PATH, 1x)
+#
+# This class does not touch scripts/lib/failure_classifier.py (the unrelated,
+# runtime-coordination taxonomy the rest of this file tests) — it targets
+# scripts/lib/failure_classification.py and
+# scripts/lib/providers/smart_router/tier_routing.py, following the same
+# precedent as TestNearEmptyCompletionMisclassifiedAsUnknown above.
+# ---------------------------------------------------------------------------
+
+class TestP3FailureClassSplit(unittest.TestCase):
+    """P3: completion_without_execution / no_verdict / tool_missing each get
+    their own failure_class and their own escalation action."""
+
+    # Literal failure_reason texts as actually emitted by the source
+    # (kimi_spawn.py / codex_spawn.py), per the P3 dispatch instruction.
+    _COMPLETION_WITHOUT_EXECUTION_REASON = (
+        "kimi emitted tool_calls but the dispatch worktree shows no git "
+        "changes — completion without execution (fabrication guard). "
+        "worktree=/tmp/wt-example events=3"
+    )
+    _NO_VERDICT_REASON = "codex stderr tail: Reading prompt from stdin..."
+    _TOOL_MISSING_REASON = (
+        "kimi CLI not found: [Errno 2] No such file or directory: "
+        "'/Users/vincentvandeth/Development/vnx-orchestration/.venv/bin/kimi'"
+    )
+
+    def test_completion_without_execution_recognized(self):
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=self._COMPLETION_WITHOUT_EXECUTION_REASON,
+            completion_text=None,
+            provider="kimi",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "completion_without_execution")
+
+    def test_no_verdict_recognized(self):
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=self._NO_VERDICT_REASON,
+            completion_text=None,
+            provider="codex",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "no_verdict")
+
+    def test_tool_missing_recognized(self):
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=self._TOOL_MISSING_REASON,
+            completion_text=None,
+            provider="kimi",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "tool_missing")
+
+    def test_unknown_reason_still_falls_back_to_unknown(self):
+        """A reason matching none of the three new narrow patterns (nor any
+        existing keyword bag) must still land on `unknown` with
+        unknown_class=True — the P3 patterns must not widen the net."""
+        from failure_classification import classify_failure
+        from providers.smart_router.tier_routing import escalate_tier
+
+        result = classify_failure(
+            status="failure",
+            error=(
+                "a completely novel failure text never seen before, no "
+                "keyword in any existing or new pattern matches this"
+            ),
+            completion_text=None,
+            provider="codex",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "unknown")
+
+        escalation = escalate_tier(
+            "tier-mid", "parent-dispatch-p3-unknown",
+            failure_class=result["failure_class"],
+        )
+        self.assertEqual(escalation.action, "no_climb")
+        self.assertTrue(escalation.unknown_class)
+
+    def test_completion_without_execution_escalates_climb(self):
+        from providers.smart_router.tier_routing import escalate_tier
+
+        escalation = escalate_tier(
+            "tier-mid", "parent-dispatch-p3-cwe",
+            failure_class="completion_without_execution",
+        )
+        self.assertEqual(escalation.action, "climb")
+        self.assertEqual(escalation.tier_to, "tier-high")
+
+    def test_no_verdict_escalates_retry_same_tier(self):
+        from providers.smart_router.tier_routing import escalate_tier
+
+        escalation = escalate_tier(
+            "tier-mid", "parent-dispatch-p3-nv", failure_class="no_verdict",
+        )
+        self.assertEqual(escalation.action, "retry_same_tier")
+        self.assertEqual(escalation.tier_to, "tier-mid")
+
+    def test_no_verdict_climbs_once_already_retried(self):
+        """A second rejection of a same-tier retry must climb, exactly like
+        timeout/empty_completion do (retried=True)."""
+        from providers.smart_router.tier_routing import escalate_tier
+
+        escalation = escalate_tier(
+            "tier-mid", "parent-dispatch-p3-nv-retry",
+            failure_class="no_verdict", retried=True,
+        )
+        self.assertEqual(escalation.action, "climb")
+        self.assertEqual(escalation.tier_to, "tier-high")
+
+    def test_tool_missing_escalates_no_climb(self):
+        from providers.smart_router.tier_routing import escalate_tier
+
+        escalation = escalate_tier(
+            "tier-mid", "parent-dispatch-p3-tm", failure_class="tool_missing",
+        )
+        self.assertEqual(escalation.action, "no_climb")
+        self.assertIsNone(escalation.tier_to)
+        self.assertFalse(escalation.unknown_class)
+
+
+# ---------------------------------------------------------------------------
+# TestP3VocabularySeparation — dispatch 20260821-q3-failure-class-split
+#
+# The dispatch measured a real two-vocabulary hazard:
+# escalate_tier(failure_class="UNKNOWN") raises ValueError, but
+# escalate_tier(failure_class="unknown") does not. Traced call chain (see
+# failure_classification.py's module docstring): exit_classifier.py's
+# UPPERCASE FC_* taxonomy is consumed ONLY by headless_adapter.py, which
+# stamps it onto its own result/receipt fields and never calls escalate_tier
+# or dispatch_bridge.stage_escalation_bundle. The sole production caller of
+# stage_escalation_bundle is dispatch_cli._maybe_stage_escalation, which
+# derives failure_class exclusively from failure_classification's lowercase
+# classify_failure_safe. The two vocabularies therefore never meet at
+# escalate_tier today. These tests pin that fact instead of "fixing" it with
+# a `.lower()` that would silently paper over a real coupling if one is ever
+# introduced.
+# ---------------------------------------------------------------------------
+
+class TestP3VocabularySeparation(unittest.TestCase):
+    """P3: exit_classifier's UPPERCASE FC_* taxonomy must never reach
+    escalate_tier / _ESCALATION_TABLE."""
+
+    def test_exit_classifier_uppercase_class_rejected_by_escalate_tier(self):
+        import exit_classifier
+        from providers.smart_router.tier_routing import escalate_tier
+
+        with self.assertRaises(ValueError):
+            escalate_tier(
+                "tier-mid", "parent-dispatch-p3-vocab",
+                failure_class=exit_classifier.FC_UNKNOWN,
+            )
+
+    def test_failure_classification_lowercase_unknown_is_accepted(self):
+        """Sanity companion to the rejection above: THIS module's own
+        spelling of "unknown" (lowercase) is a valid table key and must not
+        raise — the two constants read the same in English but are different
+        vocabularies, and only the lowercase one is ever produced on the
+        production escalation call path."""
+        from providers.smart_router.tier_routing import escalate_tier
+
+        escalation = escalate_tier(
+            "tier-mid", "parent-dispatch-p3-vocab-lower", failure_class="unknown",
+        )
+        self.assertEqual(escalation.action, "no_climb")
+
+    def test_exit_classifier_constants_disjoint_from_failure_classes(self):
+        """Structural pin: none of exit_classifier's FC_* constants collide
+        with failure_classification.FAILURE_CLASSES (the _ESCALATION_TABLE
+        key set) — the two taxonomies do not even share a spelling."""
+        import exit_classifier
+        from failure_classification import FAILURE_CLASSES
+
+        exit_classifier_constants = {
+            exit_classifier.FC_SUCCESS,
+            exit_classifier.FC_TIMEOUT,
+            exit_classifier.FC_TOOL_FAIL,
+            exit_classifier.FC_INFRA_FAIL,
+            exit_classifier.FC_NO_OUTPUT,
+            exit_classifier.FC_INTERRUPTED,
+            exit_classifier.FC_PROMPT_ERR,
+            exit_classifier.FC_UNKNOWN,
+        }
+        self.assertEqual(exit_classifier_constants & FAILURE_CLASSES, set())
+
+
 if __name__ == "__main__":
     unittest.main()

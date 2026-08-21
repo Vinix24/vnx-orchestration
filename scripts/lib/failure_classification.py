@@ -24,7 +24,37 @@ timeout          — call exceeded its deadline
 model_error      — the model/provider itself returned an error (5xx, rate-limit, etc.)
 credit_exhausted — provider/gateway balance or credits ran out (HTTP 402 and
                     variants); dispatch 20260816-p9p10-failure-reason-root
+completion_without_execution — the provider emitted tool_calls but the
+                    dispatch worktree shows no git changes: kimi_spawn.py's
+                    fabrication guard fired. A real failure mode, distinct
+                    from `unknown`: a higher-tier model can actually execute
+                    the tool calls it claims to. P3, dispatch
+                    20260821-q3-failure-class-split.
+no_verdict       — the gate-runner CLI (e.g. codex) exited without producing
+                    a parseable verdict — a process-level flake (stdin never
+                    fed, no NDJSON event emitted), not a real model/provider
+                    error. P3, dispatch 20260821-q3-failure-class-split.
+tool_missing     — the provider CLI binary itself could not be found on the
+                    host (e.g. resolved relative to the repo instead of
+                    PATH). P3, dispatch 20260821-q3-failure-class-split.
 unknown          — everything else; should be rare after OI-866
+
+Vocabulary note (P3, dispatch 20260821-q3-failure-class-split): this module's
+categories are lowercase and are the ONLY vocabulary that reaches
+``providers.smart_router.tier_routing.escalate_tier`` / `_ESCALATION_TABLE`.
+``exit_classifier.py`` (headless CLI runs) has its own, separate UPPERCASE
+`FC_*` taxonomy (`FC_UNKNOWN`, `FC_TIMEOUT`, ...) — traced call chain: its
+only consumer is `headless_adapter.py`, which stamps
+`classification.failure_class` onto its own result/receipt fields and never
+calls `escalate_tier` or `dispatch_bridge.stage_escalation_bundle`. The only
+production caller of `stage_escalation_bundle` is
+`dispatch_cli._maybe_stage_escalation`, which derives `failure_class`
+exclusively from `classify_failure_safe` in THIS module. The two vocabularies
+therefore never meet at `escalate_tier` today — see
+`tests/test_smart_router_quality_tier.py`'s vocabulary-separation test, which
+pins this by asserting `escalate_tier(failure_class="UNKNOWN")` (the
+exit_classifier spelling) raises, while `failure_class="unknown"` (this
+module's spelling) does not.
 
 dispatch 20260816-p9p10-failure-reason-root: the glm-harness and
 deepseek-harness lanes route through the `claude` CLI, so a provider-side API
@@ -51,6 +81,9 @@ FAILURE_CLASSES = frozenset({
     "timeout",
     "model_error",
     "credit_exhausted",
+    "completion_without_execution",
+    "no_verdict",
+    "tool_missing",
     "unknown",
 })
 
@@ -71,6 +104,25 @@ CREDIT_EXHAUSTED_KEYWORDS = (
     "add more credits",
     "openrouter_credits",
 )
+
+# P3 (dispatch 20260821-q3-failure-class-split): three real, distinguishable
+# failure modes that previously fell into `unknown` together (measured on the
+# ledger, 19-08 through 21-08: 15 `unknown` receipts, 3 separable causes).
+# Matched on narrow, explicit substrings — never a broad word that could
+# swallow an unrelated reason — each grounded in the exact text the source
+# emits:
+#   - kimi_spawn.py's fabrication guard: "...completion without execution
+#     (fabrication guard)..."
+#   - codex_spawn.py's stderr-tail surfacing ("codex stderr tail: {tail}")
+#     when the tail is codex waiting on stdin and never emitting a verdict
+#     event: "codex stderr tail: Reading prompt from stdin..."
+#   - a provider spawn's FileNotFoundError branch, e.g. kimi_spawn.py:
+#     "kimi CLI not found: {exc}...", and the equivalent
+#     "<provider> CLI not found: {exc}" phrasing in
+#     classifier_providers/{codex,gemini,haiku,deepseek}_provider.py.
+_COMPLETION_WITHOUT_EXECUTION_MARKER = "completion without execution"
+_NO_VERDICT_MARKERS = ("codex stderr tail", "reading prompt from stdin")
+_TOOL_MISSING_MARKER = "cli not found"
 
 # Provider gateways (observed: glm-harness's litellm/OpenRouter proxy) can wrap
 # the real one-line reason inside a multi-KB nested JSON blob carrying dozens
@@ -186,6 +238,25 @@ def classify_failure(
             "failure_class": "credit_exhausted",
             "failure_reason": f"{source}: credit/balance exhausted — {detail}",
         }
+
+    # ── completion without execution (kimi fabrication guard) ────────────
+    # Checked before the auth/model keyword bags below: this marker is a
+    # narrow, specific phrase that does not overlap any of them, and a
+    # fabricated completion deserves its own class rather than falling
+    # through to `unknown`.
+    if _COMPLETION_WITHOUT_EXECUTION_MARKER in signal_text:
+        detail = error if error else _extract_detail(completion)
+        return {"failure_class": "completion_without_execution", "failure_reason": detail}
+
+    # ── no parseable verdict (gate-runner CLI flake, e.g. codex) ──────────
+    if all(marker in signal_text for marker in _NO_VERDICT_MARKERS):
+        detail = error if error else _extract_detail(completion)
+        return {"failure_class": "no_verdict", "failure_reason": detail}
+
+    # ── provider CLI binary not found ─────────────────────────────────────
+    if _TOOL_MISSING_MARKER in signal_text:
+        detail = error if error else _extract_detail(completion)
+        return {"failure_class": "tool_missing", "failure_reason": detail}
 
     # ── auth rejection ───────────────────────────────────────────────────
     auth_keywords = (
