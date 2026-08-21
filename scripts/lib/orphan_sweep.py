@@ -11,6 +11,36 @@ runtime objects persist forever:
    (``#{pane_dead}`` == 1, or ``#{pane_pid}`` no longer alive). Cleanup:
    ``tmux kill-session`` (idempotent — a missing session is already gone).
 
+1b. **completed-dispatch tmux sessions** (OI-1353) — a session whose worker
+   pane has a LIVE process (``pane_dead`` == 0, PID alive) is never touched by
+   the kind-1 dead-pane check above, even when its dispatch finished days ago
+   with an empty prompt sitting on it — five such zombies filling the
+   ``VNX_TMUX_MAX_CONCURRENT`` slots is exactly what silently starved every
+   new dispatch on 19-08. This is a SEPARATE, stricter conjunction — every
+   condition below must hold; process-liveness or session-age alone is never
+   sufficient:
+     (a) the name matches the canonical dispatch-session pattern (``_SESSION_RE``);
+     (b) the dispatch id is KNOWN to THIS project — present in the project's
+         own ``dispatch_register.ndjson`` (any event). A tmux session listing
+         is account-wide (one shared tmux server across every project on the
+         machine), so this is what keeps a sweep invoked for project X from
+         ever judging — let alone killing — a live session that belongs to
+         project Y;
+     (c) the dispatch is provably COMPLETED — a ``dispatch_completed`` register
+         event, or a terminal (success/failure) receipt in
+         ``t0_receipts.ndjson`` per ``event_outcome_semantics.classify_event_outcome``;
+     (d) its worktree (kind 2, below) is already gone — a surviving worktree
+         means the wrapper may still be about to reap it;
+     (e) its pane does not classify as ``working`` or ``awaiting_permission``
+         (``worker_pane_classifier.classify_worker_pane``) — both are
+         RECOVERABLE states (OI-863) and must never be swept;
+     (f) it is not the invoking dispatch (the same ``protected`` fence as
+         kind 1's dead-pane check).
+   Any condition that cannot be measured (register/receipts unreadable, pane
+   capture fails) fails OPEN — the session is left alone, never guessed dead.
+   Recorded under ``tmux_completed_orphans_killed`` / ``_preserved``, each
+   entry carrying the ground it was decided on.
+
 2. **git worktrees** ``<repo>/.vnx-data/worktrees/dispatch-<dispatch_id>`` — the
    same lane's ephemeral trees. An orphan is a worktree whose tmux session is
    gone (the session is the worktree's lifecycle authority: only its teardown
@@ -68,6 +98,12 @@ logger = logging.getLogger(__name__)
 # direct ``subprocess``→tmux coupling to the adapter files; this module must
 # delegate to ``tmux_adapter._run_tmux`` rather than run ``tmux`` itself.
 from tmux_adapter import _run_tmux as _adapter_run_tmux  # noqa: E402
+from event_outcome_semantics import classify_event_outcome  # noqa: E402
+from worker_pane_classifier import (  # noqa: E402
+    STATE_AWAITING_PERMISSION,
+    STATE_WORKING,
+    classify_worker_pane,
+)
 
 # The three object kinds share one dispatch-id alphabet. Both regexes pin the
 # name to the exact dispatch-id charset so a stray ``vnx-...`` / ``dispatch-...``
@@ -104,6 +140,13 @@ class OrphanSweepResult:
     tmux_killed: list = field(default_factory=list)          # sessions killed
     tmux_skipped_alive: list = field(default_factory=list)   # alive / unknown / kill-failed
     tmux_skipped_protected: list = field(default_factory=list)
+    # kind 1b — completed-dispatch sessions whose pane still has a live
+    # process (OI-1353). Each entry: {"session", "dispatch_id", "reason"} —
+    # ``reason`` is the ground the conjunction was decided on (see module
+    # docstring), so a dry-run shows WHICH condition a session was killed or
+    # spared on, never a bare verdict.
+    tmux_completed_orphans_killed: list = field(default_factory=list)
+    tmux_completed_orphans_preserved: list = field(default_factory=list)
     # kind 2 — worktrees
     worktrees_scanned: list = field(default_factory=list)
     worktrees_removed: list = field(default_factory=list)    # reaped (clean/committed/pushed)
@@ -125,6 +168,8 @@ class OrphanSweepResult:
             "tmux_killed": list(self.tmux_killed),
             "tmux_skipped_alive": list(self.tmux_skipped_alive),
             "tmux_skipped_protected": list(self.tmux_skipped_protected),
+            "tmux_completed_orphans_killed": list(self.tmux_completed_orphans_killed),
+            "tmux_completed_orphans_preserved": list(self.tmux_completed_orphans_preserved),
             "worktrees_scanned": list(self.worktrees_scanned),
             "worktrees_removed": list(self.worktrees_removed),
             "worktrees_preserved": list(self.worktrees_preserved),
@@ -219,6 +264,87 @@ def _real_kill_session(session: str) -> bool:
     return rc == 0
 
 
+def _real_capture_pane(session: str) -> "str | None":
+    """Capture a session's worker pane text; ``None`` when unmeasurable.
+
+    Mirrors ``_real_probe_liveness``'s pane targeting (``session:0.0``). A
+    non-zero exit (session gone mid-check, tmux error) is "cannot measure" —
+    never collapsed into an empty string, which ``classify_worker_pane``
+    would read as a provably-dead (empty) pane.
+    """
+    rc, out, _ = _run_tmux(["capture-pane", "-p", "-t", f"{session}:0.0"])
+    if rc != 0:
+        return None
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Kind 1b — completed-dispatch orphan conjunction (OI-1353)
+# ---------------------------------------------------------------------------
+
+def _evaluate_completed_orphan(
+    session: str,
+    dispatch_id: str,
+    *,
+    worktrees_dir: Path,
+    register_known_ids: "set[str] | None",
+    register_completed_ids: "set[str] | None",
+    receipts_index: "dict[str, list] | None",
+    capture_pane: Callable[[str], "str | None"],
+) -> "tuple[bool, str]":
+    """Evaluate the completed-dispatch/still-alive-pane orphan conjunction.
+
+    Every condition is REQUIRED — see the module docstring's kind-1b list for
+    the full (a)-(f) rationale. Returns ``(is_orphan, reason)``: ``reason`` is
+    always populated, on BOTH branches, so the caller can report the exact
+    ground a session was killed or spared on. Fail-open throughout: any
+    condition this function cannot measure returns ``(False, "..._unmeasurable")``
+    — 'cannot measure' is never read as 'orphaned'.
+
+    (a) is enforced by the caller (only ``_SESSION_RE``-matching names reach
+    here) and (f) by the caller's ``protected`` fence — neither is re-checked.
+    """
+    # (b) the dispatch id must be known to THIS project's own register.
+    if register_known_ids is None:
+        return False, "register_unmeasurable"
+    if dispatch_id not in register_known_ids:
+        return False, "unknown_project"
+
+    # (c) the dispatch must be provably COMPLETED: a dispatch_completed
+    # register event, or a terminal (success/failure) receipt.
+    evidence: "str | None" = None
+    if register_completed_ids is not None and dispatch_id in register_completed_ids:
+        evidence = "register:dispatch_completed"
+    if evidence is None:
+        if receipts_index is None:
+            return False, "receipts_unmeasurable"
+        for rec in receipts_index.get(dispatch_id) or []:
+            outcome = classify_event_outcome(rec.get("event_type"), rec.get("status"))
+            if outcome is not None:
+                evidence = f"receipt:{outcome}"
+                break
+    if evidence is None:
+        return False, "not_completed"
+
+    # (d) the dispatch's worktree must already be gone.
+    if (worktrees_dir / f"dispatch-{dispatch_id}").exists():
+        return False, "worktree_still_exists"
+
+    # (e) the pane must not be actively working or awaiting a permission
+    # prompt — both are RECOVERABLE states (OI-863), never orphans.
+    try:
+        pane_text = capture_pane(session)
+    except Exception:
+        return False, "pane_unmeasurable"
+    if pane_text is None:
+        return False, "pane_unmeasurable"
+    pane_state = classify_worker_pane(pane_text)
+    if pane_state.state in (STATE_WORKING, STATE_AWAITING_PERMISSION):
+        return False, f"pane_{pane_state.state}"
+
+    return True, f"{evidence};pane={pane_state.state}"
+
+
 # ---------------------------------------------------------------------------
 # Sweep orchestration
 # ---------------------------------------------------------------------------
@@ -246,6 +372,7 @@ def sweep(
     probe_liveness: Optional[Callable[[str], "bool | None"]] = None,
     kill_session: Optional[Callable[[str], bool]] = None,
     pid_alive: Optional[Callable[[Optional[int]], bool]] = None,
+    capture_pane: Optional[Callable[[str], "str | None"]] = None,
 ) -> OrphanSweepResult:
     """Clean/mark orphaned teardown leftovers across the three kinds.
 
@@ -264,7 +391,7 @@ def sweep(
                             Defaults to ``$VNX_CURRENT_DISPATCH_ID``.
         max_orphans:        Flood cap for the active-manifest kind.
         dry_run:            Classify everything; mutate nothing.
-        list_sessions / probe_liveness / kill_session / pid_alive:
+        list_sessions / probe_liveness / kill_session / pid_alive / capture_pane:
                             Injectable backends (defaults to real tmux/os).
                             Tests override them; production never does.
                             ``list_sessions`` returning ``None`` means the
@@ -272,6 +399,9 @@ def sweep(
                             kind-1 sees no sessions and kind-2 reaps nothing,
                             with an error recorded in the result instead of
                             treating "cannot measure" as "zero sessions".
+                            ``capture_pane`` feeds the kind-1b completed-
+                            dispatch conjunction (OI-1353) — returning
+                            ``None`` means the pane text was not measurable.
 
     Returns:
         :class:`OrphanSweepResult` — per-object failures are recorded in
@@ -288,12 +418,54 @@ def sweep(
         lambda s: _real_probe_liveness(s, pid_fn)
     )
     kill_fn = kill_session if kill_session is not None else _real_kill_session
+    capture_fn = capture_pane if capture_pane is not None else _real_capture_pane
 
     if current_dispatch_id is None:
         current_dispatch_id = os.environ.get("VNX_CURRENT_DISPATCH_ID", "").strip() or None
 
     result = OrphanSweepResult(dry_run=dry_run)
     protected: set[str] = {current_dispatch_id} if current_dispatch_id else set()
+    worktrees_dir = root / ".vnx-data" / "worktrees"
+
+    # ── kind 1b evidence, preloaded once (bounded — one file read each) ─────
+    # register_known_ids / register_completed_ids: None means the register
+    # itself could not be read this run (defensive — dispatch_register.
+    # read_events is already documented to degrade to an empty list rather
+    # than raise, so this branch is a belt-and-braces guard, not the expected
+    # path). An empty (non-None) result is a real measurement — "this
+    # project's register currently names zero dispatches" — not a failure.
+    try:
+        import dispatch_register
+        register_events = dispatch_register.read_events(state_dir=state_dir)
+    except Exception as exc:
+        register_events = None
+        result.errors.append({
+            "kind": "completed_check",
+            "error": f"dispatch_register read failed: {exc}",
+        })
+    if register_events is None:
+        register_known_ids: "set[str] | None" = None
+        register_completed_ids: "set[str] | None" = None
+    else:
+        register_known_ids = {
+            ev.get("dispatch_id") for ev in register_events if ev.get("dispatch_id")
+        }
+        register_completed_ids = {
+            ev.get("dispatch_id") for ev in register_events
+            if ev.get("event") == "dispatch_completed" and ev.get("dispatch_id")
+        }
+
+    try:
+        import dispatch_outcome_classifier
+        receipts_index: "dict[str, list] | None" = (
+            dispatch_outcome_classifier.load_receipts_index(state_dir)
+        )
+    except Exception as exc:
+        receipts_index = None
+        result.errors.append({
+            "kind": "completed_check",
+            "error": f"t0_receipts.ndjson read failed: {exc}",
+        })
 
     # ── kind 1: dead-pane tmux sessions ──────────────────────────────────────
     # ``surviving_ids`` is the set of dispatch ids whose worktree is still
@@ -331,9 +503,59 @@ def sweep(
             logger.info("orphan_sweep: SKIP tmux %s — protected dispatch", name)
             continue
         verdict = probe_fn(name)
+
+        if verdict is True:
+            # Provably alive: a candidate for the kind-1b completed-dispatch
+            # conjunction (OI-1353) — never evaluated for verdict is None
+            # (liveness itself unmeasurable), since that would stack one
+            # unmeasurable signal on top of another.
+            is_orphan, reason = _evaluate_completed_orphan(
+                name, sid,
+                worktrees_dir=worktrees_dir,
+                register_known_ids=register_known_ids,
+                register_completed_ids=register_completed_ids,
+                receipts_index=receipts_index,
+                capture_pane=capture_fn,
+            )
+            entry = {"session": name, "dispatch_id": sid, "reason": reason}
+            if is_orphan:
+                if dry_run:
+                    result.tmux_completed_orphans_killed.append(entry)
+                    surviving_ids.add(sid)  # session would still exist during dry-run
+                    logger.info(
+                        "orphan_sweep: DRY-RUN would kill completed-orphan tmux "
+                        "session %s (%s)", name, reason,
+                    )
+                    continue
+                try:
+                    killed = kill_fn(name)
+                except Exception as exc:
+                    killed = False
+                    result.errors.append(
+                        {"kind": "tmux_completed", "session": name, "error": str(exc)}
+                    )
+                if killed:
+                    result.tmux_completed_orphans_killed.append(entry)
+                    logger.info(
+                        "orphan_sweep: killed completed-orphan tmux session %s (%s)",
+                        name, reason,
+                    )
+                    continue
+                surviving_ids.add(sid)  # still exists -> keep its worktree
+                result.tmux_skipped_alive.append(name)
+                result.tmux_completed_orphans_preserved.append(
+                    {**entry, "reason": "kill_failed"}
+                )
+                logger.warning(
+                    "orphan_sweep: kill failed for completed-orphan %s; leaving session",
+                    name,
+                )
+                continue
+            result.tmux_completed_orphans_preserved.append(entry)
+
         if verdict is not False:
-            # Alive (True) or unmeasurable (None): never kill what we cannot
-            # prove is dead.
+            # Alive (True, conjunction unmet) or unmeasurable (None): never
+            # kill what we cannot prove is dead.
             surviving_ids.add(sid)
             result.tmux_skipped_alive.append(name)
             continue
@@ -357,7 +579,6 @@ def sweep(
             logger.warning("orphan_sweep: kill failed for %s; leaving session", name)
 
     # ── kind 2: worktrees whose tmux session is gone ─────────────────────────
-    worktrees_dir = root / ".vnx-data" / "worktrees"
     if worktrees_dir.is_dir():
         from tmux_worktree import WorktreeHandle, classify_path, reap
 
@@ -433,11 +654,15 @@ def sweep(
         result.errors.append({"kind": "active", **e})
 
     logger.info(
-        "orphan_sweep: complete — tmux killed=%d skipped=%d protected=%d; "
+        "orphan_sweep: complete — tmux killed=%d skipped=%d protected=%d "
+        "completed_orphans_killed=%d completed_orphans_preserved=%d; "
         "worktrees removed=%d preserved=%d skipped_live=%d; active recovered=%d "
         "scanned=%d capped=%s; dry_run=%s; errors=%d",
         len(result.tmux_killed), len(result.tmux_skipped_alive),
-        len(result.tmux_skipped_protected), len(result.worktrees_removed),
+        len(result.tmux_skipped_protected),
+        len(result.tmux_completed_orphans_killed),
+        len(result.tmux_completed_orphans_preserved),
+        len(result.worktrees_removed),
         len(result.worktrees_preserved), len(result.worktrees_skipped_live),
         len(result.active_recovered), result.active_scanned, result.active_capped,
         result.dry_run, len(result.errors),

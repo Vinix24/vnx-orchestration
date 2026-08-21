@@ -113,6 +113,31 @@ def _alloc(local: Path, dispatch_id: str) -> tmux_worktree.WorktreeHandle:
     return tmux_worktree.allocate(dispatch_id, repo_root=local)
 
 
+def _write_register_event(env: Path, event: str, dispatch_id: str) -> None:
+    """Append a raw register event, bypassing dispatch_register.append_event's
+    identity resolution/VALID_EVENTS gate — this is test data setup, not a
+    call through the write API under test."""
+    path = env / "state" / "dispatch_register.ndjson"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "timestamp": "2026-08-19T00:00:00.000000Z",
+            "event": event,
+            "dispatch_id": dispatch_id,
+        }) + "\n")
+
+
+def _write_receipt(env: Path, dispatch_id: str, *, event_type: str, status: str) -> None:
+    path = env / "state" / "t0_receipts.ndjson"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "dispatch_id": dispatch_id,
+            "event_type": event_type,
+            "status": status,
+        }) + "\n")
+
+
 def _make_active(env: Path, dispatch_id: str, *, worker_pid=None):
     d = env / "dispatches" / "active" / dispatch_id
     d.mkdir(parents=True)
@@ -288,6 +313,368 @@ def test_active_manifest_protected(env):
 
     assert res.active_skipped_protected == ["act-1"]
     assert (env / "dispatches" / "active" / "act-1").exists()
+
+
+# ---------------------------------------------------------------------------
+# Kind 1b — completed-dispatch orphan conjunction (OI-1353)
+#
+# The conjunction: (a) name matches _SESSION_RE [enforced by sweep()'s scan
+# loop, not re-tested here], (b) dispatch id known to this project's own
+# register, (c) dispatch provably completed (register event OR terminal
+# receipt), (d) worktree already gone, (e) pane not working/awaiting_permission,
+# (f) not the invoking dispatch [enforced by the pre-existing `protected`
+# fence]. Unit tests below hit ``_evaluate_completed_orphan`` directly for
+# (b)-(e); integration tests hit ``sweep()`` end-to-end, including (a)/(f).
+# ---------------------------------------------------------------------------
+
+def test_evaluate_completed_orphan_register_unmeasurable(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids=None,
+        register_completed_ids=None,
+        receipts_index={},
+        capture_pane=lambda s: "",
+    )
+    assert (is_orphan, reason) == (False, "register_unmeasurable")
+
+
+def test_evaluate_completed_orphan_unknown_project(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids=set(),  # measured — this project's register is empty
+        register_completed_ids=set(),
+        receipts_index={},
+        capture_pane=lambda s: "",
+    )
+    assert (is_orphan, reason) == (False, "unknown_project")
+
+
+def test_evaluate_completed_orphan_receipts_unmeasurable(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids=set(),  # not completed via register
+        receipts_index=None,           # and receipts could not be read
+        capture_pane=lambda s: "",
+    )
+    assert (is_orphan, reason) == (False, "receipts_unmeasurable")
+
+
+def test_evaluate_completed_orphan_not_completed(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids=set(),
+        receipts_index={},  # measured — no receipt at all for this id
+        capture_pane=lambda s: "",
+    )
+    assert (is_orphan, reason) == (False, "not_completed")
+
+
+def test_evaluate_completed_orphan_worktree_still_exists(tmp_path):
+    (tmp_path / "dispatch-x-1").mkdir()
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids={"x-1"},
+        receipts_index={},
+        capture_pane=lambda s: "",
+    )
+    assert (is_orphan, reason) == (False, "worktree_still_exists")
+
+
+def test_evaluate_completed_orphan_pane_working(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids={"x-1"},
+        receipts_index={},
+        capture_pane=lambda s: "working...\n(12s · ↓ 500 tokens · esc to interrupt)",
+    )
+    assert (is_orphan, reason) == (False, "pane_working")
+
+
+def test_evaluate_completed_orphan_pane_awaiting_permission(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids={"x-1"},
+        receipts_index={},
+        capture_pane=lambda s: "Do you want to proceed?\n1. Yes\n2. No",
+    )
+    assert (is_orphan, reason) == (False, "pane_awaiting_permission")
+
+
+def test_evaluate_completed_orphan_pane_unmeasurable(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids={"x-1"},
+        receipts_index={},
+        capture_pane=lambda s: None,
+    )
+    assert (is_orphan, reason) == (False, "pane_unmeasurable")
+
+
+def test_evaluate_completed_orphan_pane_capture_raises_fails_open(tmp_path):
+    def _raise(session):
+        raise RuntimeError("tmux capture-pane blew up")
+
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids={"x-1"},
+        receipts_index={},
+        capture_pane=_raise,
+    )
+    assert (is_orphan, reason) == (False, "pane_unmeasurable")
+
+
+def test_evaluate_completed_orphan_satisfied_via_register(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids={"x-1"},
+        receipts_index={},
+        capture_pane=lambda s: "",  # empty pane -> classify_worker_pane -> dead
+    )
+    assert is_orphan is True
+    assert reason == "register:dispatch_completed;pane=dead"
+
+
+def test_evaluate_completed_orphan_satisfied_via_receipt(tmp_path):
+    is_orphan, reason = osweep._evaluate_completed_orphan(
+        "vnx-x-1", "x-1",
+        worktrees_dir=tmp_path,
+        register_known_ids={"x-1"},
+        register_completed_ids=set(),  # not completed via register
+        receipts_index={"x-1": [{"event_type": "task_complete", "status": "success"}]},
+        capture_pane=lambda s: "",
+    )
+    assert is_orphan is True
+    assert reason == "receipt:success;pane=dead"
+
+
+# ---------------------------------------------------------------------------
+# Kind 1b — end-to-end via sweep()
+# ---------------------------------------------------------------------------
+
+def test_sweep_kills_completed_orphan_via_register_event(env, tmp_path):
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_completed", "done-1")  # no worktree -> (d) trivially holds
+    killed = []
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-done-1"],
+        probe_liveness=lambda s: True,
+        kill_session=lambda s: (killed.append(s), True)[1],
+        capture_pane=lambda s: "",
+    )
+
+    assert killed == ["vnx-done-1"]
+    assert len(res.tmux_completed_orphans_killed) == 1
+    entry = res.tmux_completed_orphans_killed[0]
+    assert entry["session"] == "vnx-done-1"
+    assert entry["dispatch_id"] == "done-1"
+    assert entry["reason"].startswith("register:dispatch_completed")
+    assert res.tmux_completed_orphans_preserved == []
+    assert "vnx-done-1" not in res.tmux_skipped_alive
+    assert "vnx-done-1" not in res.tmux_killed  # separate key from the dead-pane class
+
+
+def test_sweep_kills_completed_orphan_via_terminal_receipt(env, tmp_path):
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_created", "recv-1")  # known, NOT completed via register
+    _write_receipt(env, "recv-1", event_type="task_complete", status="success")
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-recv-1"],
+        probe_liveness=lambda s: True,
+        kill_session=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert len(res.tmux_completed_orphans_killed) == 1
+    assert res.tmux_completed_orphans_killed[0]["reason"].startswith("receipt:success")
+
+
+def test_sweep_preserves_alive_orphan_with_live_worktree(env, tmp_path):
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "wt-1")
+    _write_register_event(env, "dispatch_completed", "wt-1")
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-wt-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert res.tmux_completed_orphans_killed == []
+    assert len(res.tmux_completed_orphans_preserved) == 1
+    assert res.tmux_completed_orphans_preserved[0]["reason"] == "worktree_still_exists"
+    assert "vnx-wt-1" in res.tmux_skipped_alive
+    assert handle.path.is_dir()
+
+
+def test_sweep_preserves_alive_known_but_not_completed(env, tmp_path):
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_created", "inflight-1")  # known, still in flight
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-inflight-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert res.tmux_completed_orphans_killed == []
+    assert res.tmux_completed_orphans_preserved[0]["reason"] == "not_completed"
+    assert "vnx-inflight-1" in res.tmux_skipped_alive
+
+
+def test_sweep_preserves_alive_session_unknown_to_project(env, tmp_path):
+    """A live session on the shared tmux server that this project's register
+    has never heard of — e.g. a different project's dispatch — must never be
+    judged, let alone killed, by this project's sweep (condition b)."""
+    local = _git_repo(tmp_path)
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-other-project-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert res.tmux_completed_orphans_killed == []
+    assert res.tmux_completed_orphans_preserved[0]["reason"] == "unknown_project"
+
+
+def test_sweep_preserves_alive_completed_orphan_awaiting_permission(env, tmp_path):
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_completed", "perm-1")
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-perm-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "Do you want to proceed?\n1. Yes\n2. No",
+    )
+
+    assert res.tmux_completed_orphans_killed == []
+    assert res.tmux_completed_orphans_preserved[0]["reason"] == "pane_awaiting_permission"
+    assert "vnx-perm-1" in res.tmux_skipped_alive
+
+
+def test_sweep_preserves_alive_completed_orphan_pane_unmeasurable(env, tmp_path):
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_completed", "unmeas-1")
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-unmeas-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: None,
+    )
+
+    assert res.tmux_completed_orphans_killed == []
+    assert res.tmux_completed_orphans_preserved[0]["reason"] == "pane_unmeasurable"
+
+
+def test_sweep_preserves_protected_completed_dispatch(env, tmp_path):
+    """(f): even a session that would otherwise satisfy the full conjunction
+    is never touched when it is the invoking dispatch itself."""
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_completed", "prot-done-1")
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        current_dispatch_id="prot-done-1",
+        list_sessions=lambda: ["vnx-prot-done-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert res.tmux_completed_orphans_killed == []
+    assert res.tmux_completed_orphans_preserved == []
+    assert res.tmux_skipped_protected == ["vnx-prot-done-1"]
+
+
+def test_sweep_dry_run_completed_orphan_shows_ground_no_mutation(env, tmp_path):
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_completed", "dry-done-1")
+    killed = []
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        dry_run=True,
+        list_sessions=lambda: ["vnx-dry-done-1"],
+        probe_liveness=lambda s: True,
+        kill_session=lambda s: (killed.append(s), True)[1],
+        capture_pane=lambda s: "",
+    )
+
+    assert res.dry_run
+    assert killed == []  # would-kill only, nothing actually run
+    assert len(res.tmux_completed_orphans_killed) == 1
+    assert res.tmux_completed_orphans_killed[0]["dispatch_id"] == "dry-done-1"
+
+
+def test_sweep_completed_orphan_kill_is_idempotent(env, tmp_path):
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_completed", "idem-done-1")
+    killed = []
+
+    first = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-idem-done-1"],
+        probe_liveness=lambda s: True,
+        kill_session=lambda s: (killed.append(s), True)[1],
+        capture_pane=lambda s: "",
+    )
+    assert killed == ["vnx-idem-done-1"]
+    assert len(first.tmux_completed_orphans_killed) == 1
+
+    second = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: [],  # session is gone now, as real tmux would report
+        probe_liveness=lambda s: True,
+        kill_session=lambda s: (killed.append(s), True)[1],
+        capture_pane=lambda s: "",
+    )
+    assert second.tmux_completed_orphans_killed == []
+    assert second.tmux_sessions_scanned == []
+    assert killed == ["vnx-idem-done-1"]  # not killed twice
+
+
+def test_to_dict_includes_completed_orphan_keys(env):
+    res = osweep.sweep(data_dir=env, list_sessions=lambda: [])
+    d = res.to_dict()
+    assert d["tmux_completed_orphans_killed"] == []
+    assert d["tmux_completed_orphans_preserved"] == []
 
 
 # ---------------------------------------------------------------------------
