@@ -456,6 +456,69 @@ def test_claude_routes_to_tmux_with_permit(mock_snapshot, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# test_execute_claude_prints_failure_reason_to_stderr (OI-1367)
+# ---------------------------------------------------------------------------
+
+def test_execute_claude_prints_failure_reason_to_stderr(tmp_path, capsys):
+    """OI-1367: the door must never swallow a claude-lane failure into a bare
+    exit code — mirrors the provider lane's fail-loud contract (dispatch_cli.py
+    ~line 2499). A stale rc=1 with no explanation reads as 'lane at capacity',
+    which is the wrong conclusion when the real cause was e.g. a missing tmux
+    binary or a failed worktree add."""
+    instruction_file = _make_instruction(tmp_path)
+    plan = _make_minimal_plan(instruction_file=instruction_file)
+    permit = issue_permit(plan)
+
+    mock_dispatch_result = MagicMock()
+    mock_dispatch_result.success = False
+    mock_dispatch_result.failure_reason = "tmux binary not found in PATH"
+
+    with patch(
+        "tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch",
+        return_value=mock_dispatch_result,
+    ):
+        rc = _execute_claude(
+            plan,
+            permit,
+            state_dir=tmp_path / "state",
+            data_dir=tmp_path,
+        )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "tmux binary not found in PATH" in err
+    print(f"\n--- captured stderr ---\n{err}")
+
+
+def test_execute_claude_falls_back_to_explicit_marker_on_empty_failure_reason(tmp_path, capsys):
+    """A blank failure_reason must never render as silence — it must render as
+    an explicit '(no failure_reason captured)' marker on stderr."""
+    instruction_file = _make_instruction(tmp_path)
+    plan = _make_minimal_plan(instruction_file=instruction_file)
+    permit = issue_permit(plan)
+
+    mock_dispatch_result = MagicMock()
+    mock_dispatch_result.success = False
+    mock_dispatch_result.failure_reason = None
+
+    with patch(
+        "tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch",
+        return_value=mock_dispatch_result,
+    ):
+        rc = _execute_claude(
+            plan,
+            permit,
+            state_dir=tmp_path / "state",
+            data_dir=tmp_path,
+        )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "(no failure_reason captured)" in err
+    print(f"\n--- captured stderr ---\n{err}")
+
+
+# ---------------------------------------------------------------------------
 # test_reject_on_validate_failure
 # ---------------------------------------------------------------------------
 

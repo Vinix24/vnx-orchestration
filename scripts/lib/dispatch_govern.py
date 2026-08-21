@@ -811,7 +811,9 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
     status = (raw.receipt or {}).get("status", "unknown") if raw.receipt else "timeout"
 
     # -- ## Summary -----------------------------------------------------------
-    summary = _git_summary(spec, status)
+    delivered = _work_delivered(spec)
+    delivery_verdict = "work_delivered" if delivered else "no_work_delivered"
+    summary = _git_summary(spec, status, delivered=delivered)
 
     # -- ## Changes -----------------------------------------------------------
     changes = _git_changes(spec)
@@ -834,6 +836,7 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
         f"- Lane: tmux_interactive\n"
         f"- Status: {status}\n"
         f"- contract_status: synthesized\n"
+        f"- delivery_verdict: {delivery_verdict}\n"
         f"- {SYNTHESIZED_REPORT_MARKER}\n\n"
         f"## Summary\n\n{summary}\n\n"
         f"## Changes\n\n{changes}\n\n"
@@ -894,8 +897,54 @@ def _run_worktree_git(spec: GovernSpec, args: list, timeout: float) -> Optional[
     return result.stdout.strip() or None
 
 
-def _git_summary(spec: GovernSpec, status: str) -> str:
-    """Return git log subject + body for the worker commit, or a fallback message."""
+def _work_delivered(spec: GovernSpec) -> bool:
+    """Return True iff the worker committed at least one commit onto its base (OI-1363).
+
+    Primary check: ``git rev-list --count <base_sha>..HEAD`` — any count above
+    zero means the worktree's HEAD is a worker commit, not a borrowed base-branch
+    tip. When ``base_sha`` is absent (no baseline to diff against), HEAD cannot be
+    proven to be this dispatch's own commit by position alone, so fall back to the
+    ``Dispatch-ID: <id>`` trailer the worker convention requires in every commit
+    body — its absence means HEAD is not provably this dispatch's work.
+    """
+    if spec.base_sha:
+        try:
+            count = _run_worktree_git(
+                spec, ["rev-list", "--count", f"{spec.base_sha}..HEAD"], timeout=10
+            )
+        except _NoWorktreeError:
+            return False
+        if count is None:
+            return False
+        try:
+            return int(count) > 0
+        except ValueError:
+            return False
+
+    try:
+        msg = _run_worktree_git(spec, ["log", "-1", "--format=%s%n%b"], timeout=10)
+    except _NoWorktreeError:
+        return False
+    return bool(msg) and f"Dispatch-ID: {spec.dispatch_id}" in msg
+
+
+def _git_summary(spec: GovernSpec, status: str, *, delivered: bool) -> str:
+    """Return git log subject + body for the worker commit, or a fallback message.
+
+    When ``delivered`` is False, the worktree's HEAD commit belongs to the base
+    branch (or an earlier dispatch), not this worker — its message is never
+    surfaced here (OI-1363: a borrowed commit message reads as delivered work
+    that never happened).
+    """
+    if not delivered:
+        return (
+            f"No work delivered: the worker did not commit anything on top of "
+            f"the dispatch base ({spec.base_sha or 'no base_sha recorded'}). "
+            f"Worker status: {status}. "
+            f"Body synthesized by governance layer (no worker report file). "
+            f"[{SYNTHESIZED_REPORT_MARKER}]"
+        )
+
     try:
         msg = _run_worktree_git(spec, ["log", "-1", "--format=%s%n%b"], timeout=10)
     except _NoWorktreeError:
