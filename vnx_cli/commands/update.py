@@ -28,6 +28,21 @@ DEFAULT_KEEP_LAST = 3
 DEFAULT_REGISTRY_PATH = Path.home() / ".vnx" / "projects.json"
 PROTECTED_VERSIONS_FILE = "protected-versions"
 
+# OI-1379: the fleet registry (source 1) only protects REGISTERED consumer
+# projects. A project that pins a version via ``.vnx-version`` but was never
+# registered in ~/.vnx/projects.json is invisible to _load_fleet_pins — its
+# pin would otherwise be silently eligible for prune. VNX_PIN_SCAN_ROOTS bounds
+# where the disk-scan protection source (4) looks for stray pins; default is
+# the user's home directory, the one place every consumer project on this
+# machine is expected to live under.
+#
+# Depth 8 is not arbitrary: the OI-1379 incident pin itself
+# (~/Desktop/BUSINESS/clients/vincent/pacompany/build/pa-engine/.vnx-version)
+# sits 7 directory levels below $HOME. A shallower default would silently miss
+# the exact case this source exists to catch.
+DEFAULT_PIN_SCAN_MAX_DEPTH = 8
+_PIN_SCAN_SKIP_DIRS = frozenset({".git", "node_modules"})
+
 _VERSION_RE = re.compile(r"^(edge|latest|v?\d+\.\d+\.\d+(?:-[\w.]+)?)$")
 
 # Marker written into each central-install version dir. Mirrors
@@ -384,11 +399,118 @@ def _load_fleet_pins(registry_path: "Path | None" = None) -> dict:
     return protected
 
 
+def _resolve_pin_scan_roots(scan_roots: "str | list | None" = None) -> list:
+    """Resolve the configured disk-scan roots for stray ``.vnx-version`` pins.
+
+    ``VNX_PIN_SCAN_ROOTS`` is a ``:``-separated list of directories (mirrors
+    ``PATH`` convention). Defaults to the user's home directory when unset.
+    Blank entries are skipped; each surviving entry is ``~``-expanded but not
+    required to exist (a missing root legitimately means "no pins from this
+    source", handled by the caller).
+    """
+    if scan_roots is None:
+        env_val = os.environ.get("VNX_PIN_SCAN_ROOTS")
+        scan_roots = env_val if env_val is not None else str(Path.home())
+    raw_parts = scan_roots.split(":") if isinstance(scan_roots, str) else list(scan_roots)
+    out = []
+    for part in raw_parts:
+        part = (part or "").strip()
+        if not part:
+            continue
+        out.append(Path(part).expanduser())
+    return out
+
+
+def _scan_root_for_pins(root: Path, max_depth: int) -> dict:
+    """Walk ``root`` (bounded depth) for ``.vnx-version`` pin files.
+
+    Returns ``{normalized_pin: {reasons}}`` for this root only. Symlinks and
+    ``.git``/``node_modules`` directories are never descended into — they
+    cannot hold a legitimate ancestor pin and would otherwise let a vendored
+    tree or a symlink cycle blow up the walk. ``max_depth`` bounds how many
+    directory levels below ``root`` (root itself is depth 0) are visited, so a
+    broad default root like ``$HOME`` cannot turn every prune into a full
+    filesystem walk.
+
+    An ABSENT root is not a failure (mirrors the registry/file sources: "does
+    not exist" means "no pins from this source"). A root that EXISTS but
+    cannot be listed (permission denied, race) raises ``OSError`` — the caller
+    converts that into ``ProtectionSetUnavailable``: pruning while blind to a
+    scan root we could not read is exactly the catastrophe this mechanism
+    exists to prevent.
+    """
+    protected: dict = {}
+    if not root.is_dir():
+        return protected
+
+    def _walk(dirpath: Path, depth: int) -> None:
+        try:
+            entries = list(os.scandir(dirpath))
+        except OSError:
+            if dirpath == root:
+                raise
+            # A subdirectory that turns unreadable mid-walk (permission
+            # oddity, race) is skipped — only the configured ROOT itself is a
+            # fail-closed condition; the walk should not accumulate one flaky
+            # subtree into a whole-prune abort.
+            return
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    continue
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_dir:
+                if entry.name in _PIN_SCAN_SKIP_DIRS:
+                    continue
+                if depth < max_depth:
+                    _walk(Path(entry.path), depth + 1)
+                continue
+            if entry.name != PIN_FILE_NAME:
+                continue
+            pin_path = Path(entry.path)
+            try:
+                lines = pin_path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            pin = lines[0].strip() if lines else ""
+            if not pin or pin in (".", "..") or not _PIN_RE.match(pin):
+                continue
+            protected.setdefault(_normalize_version(pin), set()).add(
+                f"pin scan: {pin_path}"
+            )
+
+    _walk(root.resolve(), 0)
+    return protected
+
+
+def _scan_disk_for_pins(
+    scan_roots: "str | list | None" = None,
+    max_depth: int = DEFAULT_PIN_SCAN_MAX_DEPTH,
+) -> dict:
+    """Union of ``.vnx-version`` pins found by scanning configured disk roots.
+
+    Fourth protected-version source (OI-1379). See ``_scan_root_for_pins`` for
+    the walk semantics and ``_resolve_pin_scan_roots`` for root configuration.
+    """
+    protected: dict = {}
+    for root in _resolve_pin_scan_roots(scan_roots):
+        try:
+            root_protected = _scan_root_for_pins(root, max_depth)
+        except OSError as exc:
+            raise ProtectionSetUnavailable(root, exc) from exc
+        for norm, reasons in root_protected.items():
+            protected.setdefault(norm, set()).update(reasons)
+    return protected
+
+
 def _collect_protected_versions(
     root: Path,
     protect_pins: "str | list | None" = None,
     registry_path: "Path | None" = None,
     protected_file: "Path | None" = None,
+    pin_scan_roots: "str | list | None" = None,
 ) -> dict:
     """Union of all version-protection sources: ``{normalized_pin: {reasons}}``.
 
@@ -397,11 +519,16 @@ def _collect_protected_versions(
     1. Fleet registry: every registered consumer project's ``.vnx-version``.
     2. ``<root>/protected-versions``: operator-curated newline file.
     3. ``--protect-pins``: explicit comma-separated CLI argument.
+    4. Disk scan (``VNX_PIN_SCAN_ROOTS``): ``.vnx-version`` pins belonging to
+       consumer projects that were never registered in source 1 (OI-1379).
 
     Normalization matches ``vnx_cli._reexec._normalize_version`` so a pin of
     ``1.3.0`` protects the version dir ``v1.3.0`` (and vice versa).
     """
     protected = _load_fleet_pins(registry_path)
+
+    for norm, reasons in _scan_disk_for_pins(pin_scan_roots).items():
+        protected.setdefault(norm, set()).update(reasons)
 
     pfile = protected_file or (root / PROTECTED_VERSIONS_FILE)
     if pfile.is_file():
@@ -582,6 +709,7 @@ def _prune_old_versions(
     audit_log: "Path | None" = None,
     protect_pins: "str | list | None" = None,
     registry_path: "Path | None" = None,
+    pin_scan_roots: "str | list | None" = None,
 ) -> None:
     versions = _list_version_dirs(root)
     current = _current_target(root)
@@ -591,7 +719,10 @@ def _prune_old_versions(
     # GC-protect exists to prevent.
     try:
         protected = _collect_protected_versions(
-            root, protect_pins=protect_pins, registry_path=registry_path
+            root,
+            protect_pins=protect_pins,
+            registry_path=registry_path,
+            pin_scan_roots=pin_scan_roots,
         )
     except ProtectionSetUnavailable as exc:
         print(
