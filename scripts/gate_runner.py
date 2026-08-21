@@ -9,6 +9,7 @@ Entry point: GateRunner.run() — called from ReviewGateManager.execute_gate().
 
 from __future__ import annotations
 
+import json
 import os
 import select
 import shutil
@@ -57,6 +58,69 @@ GATE_CLI_ARGS: Dict[str, List[str]] = {
     "codex_gate": ["exec", "--json"],
     "claude_github_optional": [],
 }
+
+# Bounds how much raw stdout/stderr (or an extracted structured error message)
+# gets appended to reason_detail. The payload lands in a JSON result file, so
+# this must stay bounded — but never zero (OI-1293: a discarded tail hides the
+# actual failure reason, e.g. a quota-reset time, behind a bare exit code).
+_REASON_DETAIL_TAIL_CHARS = 4000
+
+
+def _tail(text: str, limit: int) -> str:
+    """Return the last `limit` characters of `text`, stripped."""
+    text = (text or "").strip()
+    return text[-limit:] if len(text) > limit else text
+
+
+def _extract_structured_error_message(stdout: str) -> Optional[str]:
+    """Find the last structured JSON error record in `stdout` and return its message.
+
+    Gates that run with machine-readable output (codex_gate: ``exec --json``,
+    gemini_review: ``--output-format json``) emit JSON/JSONL records on real
+    failures, e.g. codex: ``{"type":"error","message":"You've hit your usage
+    limit... try again at Aug 21st, 2026 11:22 AM."}``. That message carries
+    the exact failure reason (including reset times) — worth lifting forward
+    literally instead of leaving the operator to grep the raw tail for it.
+    Detection only: no guess is made when no such record is present.
+    """
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "error":
+            continue
+        message = obj.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
+
+
+def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
+    """Attach diagnostic evidence to a failure reason instead of discarding it (OI-1293).
+
+    Prefers a structured error message straight from the gate's own
+    machine-readable output when one is present (see
+    :func:`_extract_structured_error_message`); otherwise falls back to the
+    raw stdout/stderr tail so even an unanticipated failure mode still
+    surfaces something beyond a bare exit code.
+    """
+    structured = _extract_structured_error_message(stdout)
+    if structured:
+        return f"{base_detail}: {_tail(structured, _REASON_DETAIL_TAIL_CHARS)}"
+    parts = []
+    stdout_tail = _tail(stdout, _REASON_DETAIL_TAIL_CHARS)
+    stderr_tail = _tail(stderr, _REASON_DETAIL_TAIL_CHARS)
+    if stdout_tail:
+        parts.append(f"stdout: {stdout_tail}")
+    if stderr_tail:
+        parts.append(f"stderr: {stderr_tail}")
+    if not parts:
+        return base_detail
+    return base_detail + " | " + " | ".join(parts)
 
 
 class GateRunner:
@@ -504,15 +568,23 @@ class GateRunner:
         _base = {"stdout": stdout, "stderr": stderr, "duration_seconds": elapsed,
                  "partial_output_lines": lcount, "runner_pid": proc.pid}
         if status == "timeout":
+            detail = _build_reason_detail(
+                f"Subprocess exceeded {timeout}s timeout", stdout, stderr,
+            )
             return {"status": "failed", "reason": "timeout",
-                    "reason_detail": f"Subprocess exceeded {timeout}s timeout", **_base}
+                    "reason_detail": detail, **_base}
         if status == "stall":
+            detail = _build_reason_detail(
+                f"No output for {stall_threshold}s (stall threshold exceeded)", stdout, stderr,
+            )
             return {"status": "failed", "reason": "stall",
-                    "reason_detail": f"No output for {stall_threshold}s (stall threshold exceeded)",
-                    **_base}
+                    "reason_detail": detail, **_base}
         if proc.returncode != 0:
+            detail = _build_reason_detail(
+                f"Subprocess exited with code {proc.returncode}", stdout, stderr,
+            )
             return {"status": "failed", "reason": "exit_nonzero",
-                    "reason_detail": f"Subprocess exited with code {proc.returncode}", **_base}
+                    "reason_detail": detail, **_base}
         return {"status": "completed", **_base, "exit_code": proc.returncode}
 
     @staticmethod
