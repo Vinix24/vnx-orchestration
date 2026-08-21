@@ -92,13 +92,22 @@ def main(argv: "list[str] | None" = None) -> int:
     # → no cited synthesis (sales-copilot T0, 2026-07-10). unified_reports_dir().parent IS
     # that data_dir, so the write-path and read-path agree.
     data_dir = str(_resolve_reports_dir().parent)
-    # role="deliberation-panelist" (OI-811): _make_default_dispatcher defaults to
-    # "plan-reviewer" for its original run_panel caller. A diverge/contrarian/verify/
-    # synthesis prompt is NOT a plan review — tagging it plan-reviewer wrapped it in
-    # "you are an independent plan reviewer... review the IMPLEMENTATION PLAN" framing,
-    # which a plan-reviewer-role worker correctly rejected as not a plan, corrupting the
-    # panel stage.
-    dispatcher = _make_default_dispatcher(data_dir, args.timeout, role="deliberation-panelist")
+    # role="research-analyst" (OI-811, corrected OI-1359): _make_default_dispatcher
+    # defaults to "plan-reviewer" for its original run_panel caller. A diverge/
+    # contrarian/verify/synthesis prompt is NOT a plan review — tagging it
+    # plan-reviewer wrapped it in "you are an independent plan reviewer... review the
+    # IMPLEMENTATION PLAN" framing, which a plan-reviewer-role worker correctly
+    # rejected as not a plan, corrupting the panel stage. OI-811 fixed that call site
+    # but invented role="deliberation-panelist", which exists in NEITHER register
+    # (no agents/deliberation-panelist/, no profile in worker_permissions.yaml) — every
+    # seat then failed fail-closed in resolve_worker_profile before producing any
+    # content (OI-1359). "research-analyst" is a real role in both registers: it
+    # analyzes and writes only its own report (file_write_scope limited to
+    # unified_reports/**, Edit/MultiEdit denied) — the posture a panel seat needs.
+    # It is also not "plan-reviewer", so the branch in _make_default_dispatcher below
+    # still gives it the generic (non-plan-framed) file-ref instruction, preserving
+    # the OI-811 fix.
+    dispatcher = _make_default_dispatcher(data_dir, args.timeout, role="research-analyst")
     # OI-1154: the synthesis coverage floor comes from the config, never a Python literal.
     min_seats = load_synthesis_min_seats()
 

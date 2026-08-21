@@ -54,7 +54,7 @@ def test_seats_filters_to_requested_roster(tmp_path, monkeypatch):
         ("codex", "gpt-5.5"),
         ("claude", "sonnet"),
     ]
-    assert calls["dispatcher_factory"]["role"] == "deliberation-panelist"
+    assert calls["dispatcher_factory"]["role"] == "research-analyst"
 
 
 def test_unknown_seat_errors_without_dispatch(tmp_path, monkeypatch, capsys):
@@ -107,7 +107,11 @@ def test_default_omits_roster_kwarg_to_preserve_full_fleet_path(tmp_path, monkey
 
 def test_dispatcher_factory_receives_non_plan_reviewer_role(tmp_path, monkeypatch):
     """OI-811: panel.py must not dispatch its stage prompts under the plan-reviewer role —
-    that framing caused a plan-reviewer-role worker to reject a non-plan panel artifact."""
+    that framing caused a plan-reviewer-role worker to reject a non-plan panel artifact.
+    OI-1359: the OI-811 fix used role="deliberation-panelist", a role that exists in
+    neither register — every seat failed fail-closed before producing content. The role
+    is now "research-analyst" (see test_dispatcher_role_exists_in_both_registers below
+    for the register-backed check that this string stays real)."""
     panel = _load_panel_cli()
     calls = {}
 
@@ -124,7 +128,7 @@ def test_dispatcher_factory_receives_non_plan_reviewer_role(tmp_path, monkeypatc
     rc = panel.main(["sweep", "audit src/", "--out", str(tmp_path / "report.md")])
 
     assert rc == 0
-    assert calls["role"] == "deliberation-panelist"
+    assert calls["role"] == "research-analyst"
     assert calls["role"] != "plan-reviewer"
 
 
@@ -182,3 +186,51 @@ def test_panel_refusal_returns_nonzero_and_loud(tmp_path, monkeypatch, capsys):
     assert rc == 1
     assert "SYNTHESIS REFUSED" in captured.err
     assert "1/5" in captured.err
+
+
+def test_dispatcher_role_exists_in_both_registers(tmp_path, monkeypatch):
+    """OI-1359: panel.py dispatched under role="deliberation-panelist", which is a key
+    in NEITHER register (no agents/deliberation-panelist/ dir, no profile in
+    worker_permissions.yaml). resolve_worker_profile fails closed on that: every seat
+    refused before producing any content, providerneutrally (codex and kimi failed the
+    same way).
+
+    This test does not repeat a literal role string on both sides of an equality (that
+    only proves the string matches itself). It captures the role panel.py actually
+    passes to the dispatcher factory, then checks it against the two REAL registers:
+    a non-empty profile in worker_permissions.yaml (via the same load_permissions()
+    resolve_worker_profile uses), and an agents/<role>/ directory on disk.
+    """
+    import worker_permissions
+
+    panel = _load_panel_cli()
+    calls = {}
+
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        calls["role"] = role
+        return lambda provider, model, prompt, dispatch_id: "ok"
+
+    def fake_run_deliberation(*args, **kwargs):
+        return _FakeResult()
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_dispatcher_factory)
+    monkeypatch.setattr(panel, "run_deliberation", fake_run_deliberation)
+
+    rc = panel.main(["sweep", "audit src/", "--out", str(tmp_path / "report.md")])
+
+    assert rc == 0
+    role = calls["role"]
+    assert role, "panel.py must pass a non-empty role to the dispatcher factory"
+
+    profile = worker_permissions.load_permissions(role)
+    assert profile.allowed_tools, (
+        f"role {role!r} has no usable profile in worker_permissions.yaml — "
+        "resolve_worker_profile() would fall back to the restrictive code-worker "
+        "default (or raise UnknownRoleError if agents/<role>/ is also missing)"
+    )
+
+    agents_dir = REPO_ROOT / "agents" / role
+    assert agents_dir.is_dir(), (
+        f"agents/{role}/ does not exist — resolve_worker_profile() raises "
+        "UnknownRoleError for a role absent from both registers"
+    )
