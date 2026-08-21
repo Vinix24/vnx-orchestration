@@ -2532,3 +2532,156 @@ class TestDryRun:
 
         beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
         assert not beacon_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# PR #1635 codex-gate fix: dry_run must gate on dry_run itself, not on the
+# outcome tag. _convert_one_detailed()'s own dry-run branch only ever
+# returns "would_append", but two guards that run BEFORE that branch — the
+# hot-path duplicate check and the non-dispatch-filename classifier — can
+# both hand back "duplicate"/"skipped_non_dispatch" while dry_run=True.
+# Previously both outcomes fell through to _mark_processed(), so a dry run
+# could still leave a watermark entry behind.
+# ---------------------------------------------------------------------------
+
+def _seed_existing_receipt(state_dir: Path, dispatch_id: str) -> Path:
+    """Pre-populate t0_receipts.ndjson with a receipt for *dispatch_id* so
+    the hot-path duplicate guard in _convert_one_detailed() fires — same
+    setup as TestConverterDoubleCountGuard.test_existing_contract_invalid_skips_conversion."""
+    receipts_file = state_dir / "t0_receipts.ndjson"
+    existing_receipt = json.dumps({
+        "dispatch_id": dispatch_id,
+        "event_type": "report_contract_invalid",
+        "status": "contract_invalid",
+        "provider": "codex",
+        "model": "gpt-test",
+        "terminal": "T1",
+        "receipt_kind": "dispatch",
+        "role": "identity_unresolved",
+        "task_id": "unknown",
+        "timestamp": "2026-08-09T00:00:00Z",
+        "report_path": f"unified_reports/{dispatch_id}.md",
+    }, separators=(",", ":"))
+    receipts_file.write_text(existing_receipt + "\n", encoding="utf-8")
+    return receipts_file
+
+
+class TestDryRunGatesEveryOutcomeNotJustWouldAppend:
+    def test_scan_dry_run_duplicate_outcome_writes_nothing(self, reports_dir, state_dir):
+        dispatch_id = "20260821-dry-dup"
+        receipts_file = _seed_existing_receipt(state_dir, dispatch_id)
+        _write_frontmatter_report(reports_dir / f"{dispatch_id}.md", dispatch_id)
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.duplicate_count == 1
+        assert stats.new_count == 0
+        # Receipts file must still hold only the ONE pre-existing line.
+        lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        # No watermark entry — a dry-run "duplicate" must be as invisible on
+        # disk as a dry-run "would_append".
+        assert not (state_dir / _WATERMARK_FILENAME).exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+
+    def test_scan_dry_run_skipped_non_dispatch_outcome_writes_nothing(self, reports_dir, state_dir):
+        report = reports_dir / "panel-strategy-dryrun01.md"
+        report.write_text(
+            "# Deliberation panel — strategy\n\n## Synthesis (cited)\n\nfoo\n",
+            encoding="utf-8",
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.skipped_non_dispatch_count == 1
+        assert stats.new_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert not (state_dir / _WATERMARK_FILENAME).exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+        assert report.exists(), "non-dispatch report must not be moved"
+
+    def test_dispatch_id_dry_run_duplicate_outcome_writes_nothing(self, reports_dir, state_dir):
+        dispatch_id = "20260821-dry-dup-targeted"
+        receipts_file = _seed_existing_receipt(state_dir, dispatch_id)
+        _write_frontmatter_report(reports_dir / f"{dispatch_id}.md", dispatch_id)
+
+        stats = convert_dispatch_ids([dispatch_id], state_dir, dry_run=True)
+
+        assert stats.duplicate_count == 1
+        assert stats.new_count == 0
+        lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        assert not (state_dir / _WATERMARK_FILENAME).exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+
+    def test_dispatch_id_dry_run_skipped_non_dispatch_outcome_writes_nothing(self, reports_dir, state_dir):
+        """A --dispatch-id value whose resolved filename matches a known
+        non-dispatch producer prefix ("panel-...") classifies as
+        "skipped_non_dispatch" — must still write nothing under dry_run."""
+        dispatch_id = "panel-dryrun-targeted01"
+        report = reports_dir / f"{dispatch_id}.md"
+        report.write_text(
+            "# Deliberation panel — strategy\n\n## Synthesis (cited)\n\nfoo\n",
+            encoding="utf-8",
+        )
+
+        stats = convert_dispatch_ids([dispatch_id], state_dir, dry_run=True)
+
+        assert stats.skipped_non_dispatch_count == 1
+        assert stats.new_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert not (state_dir / _WATERMARK_FILENAME).exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+        assert report.exists()
+
+
+# ---------------------------------------------------------------------------
+# PR #1635 codex-gate fix: convert_dispatch_ids() must validate dispatch_id
+# against the canonical id-shape regex (dispatch_spec._ID_RE) BEFORE calling
+# resolve_report_path() — an id containing "/" or ".." would otherwise let
+# the resolver read a file outside unified_reports/. Same regex
+# dispatch_bridge.stage_spec_bundle() already validates against for exactly
+# this reason — no second definition of "a valid dispatch id".
+# ---------------------------------------------------------------------------
+
+class TestConvertDispatchIdsRejectsUnsafeIds:
+    def test_rejects_dispatch_id_containing_path_separator(self, reports_dir, state_dir, caplog):
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            stats = convert_dispatch_ids(["sub/escape"], state_dir)
+
+        assert stats.malformed_count == 1
+        assert stats.new_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert any(
+            "sub/escape" in r.message and "rejected" in r.message
+            for r in caplog.records
+        ), f"expected a loud rejection warning, got: {[r.message for r in caplog.records]}"
+
+    def test_rejects_dispatch_id_containing_dotdot_traversal(self, reports_dir, state_dir, caplog):
+        # A file OUTSIDE unified_reports/ that an unvalidated ".." id would
+        # reach if handed straight to resolve_report_path().
+        secret = reports_dir.parent / "secret.md"
+        secret.write_text("top secret\n", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            stats = convert_dispatch_ids(["../secret"], state_dir)
+
+        assert stats.malformed_count == 1
+        assert stats.new_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert any(
+            "../secret" in r.message and "rejected" in r.message
+            for r in caplog.records
+        ), f"expected a loud rejection warning, got: {[r.message for r in caplog.records]}"
+
+    def test_valid_id_still_resolves_normally(self, reports_dir, state_dir):
+        """Regression guard: the new validation must not reject a normal,
+        well-formed dispatch id."""
+        _write_frontmatter_report(
+            reports_dir / "20260821-still-valid.md", "20260821-still-valid",
+        )
+
+        stats = convert_dispatch_ids(["20260821-still-valid"], state_dir)
+
+        assert stats.new_count == 1
+        assert stats.malformed_count == 0

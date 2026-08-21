@@ -1391,9 +1391,30 @@ def scan_and_convert(
                 error_count += 1
                 continue
 
-            if outcome == "would_append":
-                # dry_run: never touch a watermark, never write anything.
-                would_append_count += 1
+            if dry_run:
+                # Codex finding (PR #1635): gate on dry_run itself, not on
+                # the outcome tag. _convert_one_detailed()'s own dry-run
+                # branch only ever returns "would_append", but the hot-path
+                # duplicate guard (checked before that branch) and the
+                # non-dispatch classifier (checked before even that) can
+                # both hand back "duplicate"/"skipped_non_dispatch" while
+                # dry_run=True. Counting here — before the write branch
+                # below is ever reached — means NO outcome tag, present or
+                # future, can fall through to _mark_processed(): the
+                # `continue` makes the write branch structurally
+                # unreachable whenever dry_run is True.
+                if outcome == "would_append":
+                    would_append_count += 1
+                elif outcome == "duplicate":
+                    duplicate_count += 1
+                elif outcome == "skipped_non_dispatch":
+                    skipped_non_dispatch_count += 1
+                elif outcome == "rejected":
+                    rejected_count += 1
+                elif outcome == "malformed":
+                    malformed_count += 1
+                else:  # "error" or any future/unrecognized tag
+                    error_count += 1
                 continue
 
             if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
@@ -1490,6 +1511,7 @@ def convert_dispatch_ids(
     bash_watermark = _load_watermark(bash_watermark_path)
 
     from report_path import resolve_report_path  # noqa: PLC0415
+    from dispatch_spec import _ID_RE  # noqa: PLC0415 — canonical id-shape guard, same regex dispatch_bridge.py uses to kill path traversal before any path join
     data_dir = state_dir.parent
 
     new_count = 0
@@ -1501,6 +1523,23 @@ def convert_dispatch_ids(
     would_append_count = 0
 
     for dispatch_id in ids:
+        # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
+        # and resolve_report_path() formats it straight into filenames — a
+        # value containing "/" or ".." could resolve reads outside
+        # unified_reports/. Validate against the same id-shape regex
+        # dispatch_bridge.stage_spec_bundle() already validates against
+        # before any path join, so there is exactly one definition of "a
+        # valid dispatch id" in the codebase. Rejected loudly (WARNING +
+        # malformed_count), never silently dropped.
+        if not _ID_RE.match(dispatch_id):
+            logger.warning(
+                "report_to_receipt_converter: --dispatch-id %r rejected — does not "
+                "match the dispatch id pattern (dispatch_spec._ID_RE); refusing to "
+                "resolve a report path from it",
+                dispatch_id,
+            )
+            malformed_count += 1
+            continue
         resolved = resolve_report_path(dispatch_id, data_dir=data_dir)
         if resolved is None:
             logger.warning(
@@ -1544,8 +1583,26 @@ def convert_dispatch_ids(
             error_count += 1
             continue
 
-        if outcome == "would_append":
-            would_append_count += 1
+        if dry_run:
+            # Codex finding (PR #1635): same gate as scan_and_convert() —
+            # branch on dry_run itself, before the outcome tag is ever
+            # inspected, so the write branch below is structurally
+            # unreachable under dry_run regardless of which outcome
+            # _convert_one_detailed() hands back (including "duplicate"/
+            # "skipped_non_dispatch", both of which can occur even when
+            # dry_run=True — see scan_and_convert()'s equivalent comment).
+            if outcome == "would_append":
+                would_append_count += 1
+            elif outcome == "duplicate":
+                duplicate_count += 1
+            elif outcome == "skipped_non_dispatch":
+                skipped_non_dispatch_count += 1
+            elif outcome == "rejected":
+                rejected_count += 1
+            elif outcome == "malformed":
+                malformed_count += 1
+            else:  # "error" or any future/unrecognized tag
+                error_count += 1
             continue
 
         if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
