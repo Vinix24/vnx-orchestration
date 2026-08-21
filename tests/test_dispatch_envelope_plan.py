@@ -826,3 +826,48 @@ class TestEnvelopeWorktreeIsolation:
         assert adapter_calls == [], "ProviderAdapter.run must NOT be called when worktree creation fails"
         mock_govern.assert_called_once()
         mock_remove.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# OI-1287: work succeeded but GOVERN produced no ledger receipt -> the
+# dispatch-level outcome must not read as a plain success.
+# ---------------------------------------------------------------------------
+
+
+class TestEnvelopeReceiptGapDegradesOutcome:
+    """OI-1287 (provider lane): _govern returning receipt_path=None for
+    otherwise-successful work must not land as EnvelopeResult(status="success").
+    """
+
+    def test_receipt_gap_degrades_outcome_but_preserves_work_completion(self, tmp_path):
+        plan = _make_provider_plan(tmp_path, dispatch_id="receipt-gap-provider-test")
+        permit = issue_permit(plan)
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+        fake_report = data_dir / "unified_reports" / "receipt-gap-provider-test.md"
+
+        def fake_adapter_run(self, plan_arg, instruction, *, event_writer=None, cwd=None, role=None):
+            return _fake_adapter_success()
+
+        _fake_consumer_root = tmp_path / "consumer-root"
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+                   return_value=_fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree",
+                   return_value=_FAKE_WT_PATH), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
+             patch.object(ProviderAdapter, "run", fake_adapter_run), \
+             patch("dispatch_envelope._govern", return_value=(fake_report, None)):
+            result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+
+        # OI-1287: no ledger line landed -> the outcome must not read as success.
+        assert result.status == "receipt_missing"
+        assert result.status != "success"
+        assert result.returncode == 1
+        assert result.receipt_path is None
+        # The report GOVERN did produce, and the worker's completion text, are
+        # still surfaced — the WORK itself is not erased, only the outcome
+        # is no longer an unqualified pass.
+        assert result.report_path == fake_report
+        assert result.completion_text == "done"

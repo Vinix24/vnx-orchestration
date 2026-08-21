@@ -277,6 +277,52 @@ class TestHeadlessWorktreeIsolation:
             "the worktree would leak on every headless dispatch"
         )
 
+    def test_receipt_gap_degrades_outcome_but_preserves_work_completion(self, tmp_path: Path) -> None:
+        """OI-1287 (headless lane): _govern returning receipt_path=None for
+        otherwise-successful work must not land as EnvelopeResult(status="success")."""
+        spec = _make_headless_spec(tmp_path=tmp_path)
+        vspec = _make_vspec_from_spec(spec)
+        plan = compile_plan(vspec, _healthy_snapshot())
+        assert plan.lane == "claude_headless"
+        permit = issue_permit(plan)
+
+        state_dir = tmp_path / "state"
+        data_dir = tmp_path / "data"
+        state_dir.mkdir()
+        data_dir.mkdir()
+        fake_report = data_dir / "unified_reports" / f"{plan.dispatch_id}.md"
+
+        fake_consumer_root = tmp_path / "consumer-root"
+        fake_consumer_root.mkdir()
+        fake_wt_path = fake_consumer_root / ".vnx-data" / "worktrees" / f"dispatch-{plan.dispatch_id}"
+        fake_wt_path.mkdir(parents=True)
+
+        def capture_govern(spec_arg, *args, **kwargs):
+            return (fake_report, None)
+
+        with patch("dispatch_worktree_isolation.resolve_consumer_project_root",
+                   return_value=fake_consumer_root), \
+             patch("dispatch_worktree_isolation.create_dispatch_worktree",
+                   return_value=fake_wt_path), \
+             patch("dispatch_worktree_isolation.remove_dispatch_worktree"), \
+             patch.object(dispatch_envelope.ClaudeSubprocessAdapter, "run",
+                          return_value=_fake_adapter_success()), \
+             patch("dispatch_envelope._govern", side_effect=capture_govern):
+            result = run_envelope_headless_plan(
+                plan, permit, state_dir=state_dir, data_dir=data_dir,
+                role=plan.role,
+            )
+
+        # OI-1287: no ledger line landed -> the outcome must not read as success.
+        assert result.status == "receipt_missing"
+        assert result.status != "success"
+        assert result.returncode == 1
+        assert result.receipt_path is None
+        # The report GOVERN did produce, and the worker's completion text, are
+        # still surfaced — the WORK itself is not erased.
+        assert result.report_path == fake_report
+        assert result.completion_text == "done"
+
 
 # ---------------------------------------------------------------------------
 # Test 2 — OI-1158: the isolation boundary through the ACTUAL door entry point
