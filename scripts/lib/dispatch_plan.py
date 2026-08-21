@@ -336,9 +336,18 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         model = spec.model or "default"
     fired.append("D4")
 
-    # D5 — serialization class; headless lane has no tmux serial lock
+    # D5 — serialization class; the subscription is ONE account-wide resource,
+    # so both claude lanes (tmux + headless) share the SAME slot class. OI-1417:
+    # headless previously fell through to None (no-op) here, which meant a
+    # headless burst of `claude -p` processes was unbounded even though it
+    # runs on the same Max subscription (billing already treats it that way —
+    # see D2's claude_api_metered comment). "claude-tmux" is the class name
+    # dispatch_serialization.py's lock files, force_release(), and the CLI's
+    # --force-release-lock default are keyed on; kept as-is rather than
+    # renamed so the headless lane joins the existing account-wide lock
+    # instead of standing up a second, uncoordinated one.
     serialization_class: Optional[str]
-    if is_claude_lane and not is_claude_headless and snapshot.claude_serial_enabled:
+    if is_claude_lane and snapshot.claude_serial_enabled:
         serialization_class = "claude-tmux"
     else:
         serialization_class = None

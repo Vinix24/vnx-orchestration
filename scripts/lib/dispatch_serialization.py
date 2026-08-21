@@ -1,8 +1,9 @@
 """dispatch_serialization.py — Claude subscription N-slot serial lock (PR-6 + tmux-concurrency-config).
 
-serialize_lane(serialization_class) context manager: serializes the claude-tmux
-lane to at most N concurrent holders per account; provider + headless lanes
-pass None -> no-op.
+serialize_lane(serialization_class) context manager: serializes BOTH claude
+lanes (claude-tmux and claude_headless) to at most N concurrent holders per
+account, since they authenticate against the same subscription (OI-1417) —
+provider lanes pass None -> no-op.
 
 The serial lock protects the Claude SUBSCRIPTION, not a resource. Running
 multiple subscription-authenticated `claude` processes concurrently risks
@@ -233,7 +234,7 @@ def serialize_lane(
 ):
     """Serialize execution for the given serialization_class across N slots.
 
-    None -> no-op: yield immediately, touch nothing (providers + headless).
+    None -> no-op: yield immediately, touch nothing (provider lanes only).
     "claude-tmux" -> acquire the first free slot among N exclusive flocks on
     <lock_dir>/claude-tmux-slot-{0..N-1}.lock (N = VNX_TMUX_MAX_CONCURRENT,
     default 10) and hold it through the entire with-body (execution +
