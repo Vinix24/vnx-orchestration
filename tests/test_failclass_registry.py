@@ -618,6 +618,144 @@ class TestReachabilityAuthHeaders:
 
 
 # ===========================================================================
+# OI-1147 pt.11: glm-harness gets its own reachability probe, not the
+# generic "no cheap endpoint check" fallback
+# ===========================================================================
+
+class TestGlmHarnessReachability:
+    """glm-harness talks to the same :4141 litellm proxy as litellm:zai, but
+    its provider string ("glm-harness") never starts with "litellm:", so on
+    origin/main it silently falls into the generic no-endpoint-check bucket
+    below and a dead proxy is discovered only after a worker has already
+    spent tokens. Every test here fails on origin/main (the probe never
+    fires, so the assertions on 'glm-harness proxy'/'unreachable' output
+    never match) and passes on this branch."""
+
+    @staticmethod
+    def _plan(provider_value, lane="provider"):
+        from unittest.mock import MagicMock
+
+        plan = MagicMock()
+        plan.provider.value = provider_value
+        plan.lane = lane
+        plan.dispatch_id = "test-reach-glm"
+        return plan
+
+    def test_glm_harness_does_not_fall_back_to_no_endpoint_check(self, capsys):
+        """glm-harness must not land in the generic 'no cheap endpoint check'
+        bucket that claude-tmux/codex/kimi use — it has a real proxy to probe."""
+        from dispatch_cli import _check_reachability
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return json.dumps({"data": [{"id": "glm-5.2"}]}).encode()
+
+        plan = self._plan("glm-harness")
+        with mock.patch("urllib.request.urlopen", return_value=_Resp()):
+            _check_reachability(plan, mock.MagicMock())
+
+        captured = capsys.readouterr()
+        assert "no cheap endpoint check" not in captured.err
+
+    def test_glm_harness_unreachable_proxy_fails_loud_before_spend(self, capsys):
+        """An unreachable glm-harness proxy must be named explicitly at the
+        door — BEFORE a worker is spawned and tokens are spent — instead of
+        surfacing later as the opaque 'returncode=1 ... (no error captured)'
+        the door previously produced no evidence for."""
+        from dispatch_cli import _check_reachability
+
+        def _fake_refused(req, timeout=5):
+            raise OSError("Connection refused")
+
+        plan = self._plan("glm-harness")
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_refused):
+            _check_reachability(plan, mock.MagicMock())
+
+        captured = capsys.readouterr()
+        assert "glm-harness proxy unreachable" in captured.err
+        assert "no cheap endpoint check" not in captured.err
+
+    def test_glm_harness_probe_authenticates_with_local_proxy_key(self):
+        """The probe must hit the SAME url/key glm_harness_spawn actually
+        redirects ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN to — no drift
+        between what the door checks and what the spawn connects to."""
+        from dispatch_cli import _check_reachability
+        from provider_spawns.glm_harness_spawn import (
+            DEFAULT_GLM_PROXY_KEY,
+            DEFAULT_GLM_PROXY_URL,
+        )
+
+        captured = {}
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return json.dumps({"data": [{"id": "glm-5.2"}]}).encode()
+
+        def _fake_urlopen(req, timeout=5):
+            captured["headers"] = {k: v for k, v in req.header_items()}
+            captured["url"] = req.full_url
+            return _Resp()
+
+        plan = self._plan("glm-harness")
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            _check_reachability(plan, mock.MagicMock())
+
+        assert captured["url"] == f"{DEFAULT_GLM_PROXY_URL}/v1/models"
+        auth = captured["headers"].get("Authorization")
+        assert auth == f"Bearer {DEFAULT_GLM_PROXY_KEY}", (
+            f"probe must authenticate with the glm-harness proxy key; got {auth!r}"
+        )
+
+    def test_glm_harness_probe_honors_url_override(self):
+        """VNX_GLM_PROXY_URL override must be honored by the door probe, the
+        same way glm_harness_spawn._proxy_url() honors it for the real spawn."""
+        from dispatch_cli import _check_reachability
+
+        captured = {}
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return json.dumps({"data": [{"id": "glm-5.2"}]}).encode()
+
+        def _fake_urlopen(req, timeout=5):
+            captured["url"] = req.full_url
+            return _Resp()
+
+        plan = self._plan("glm-harness")
+        with mock.patch.dict(
+            "os.environ", {"VNX_GLM_PROXY_URL": "http://127.0.0.1:9999"}, clear=True
+        ), mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            _check_reachability(plan, mock.MagicMock())
+
+        assert captured["url"] == "http://127.0.0.1:9999/v1/models"
+
+    def test_glm_harness_probe_ok_prints_reachability(self, capsys):
+        """A 200 with a non-empty model list must print the OK branch,
+        labeled distinctly from the litellm:zai benchmark-baseline lane."""
+        from dispatch_cli import _check_reachability
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return json.dumps({"data": [{"id": "glm-5.2"}]}).encode()
+
+        plan = self._plan("glm-harness")
+        with mock.patch("urllib.request.urlopen", return_value=_Resp()):
+            _check_reachability(plan, mock.MagicMock())
+
+        captured = capsys.readouterr()
+        assert "glm-harness proxy OK: 1 models" in captured.err
+
+
+# ===========================================================================
 # OI-866: HTTP status survives the litellm normalization chain
 # ===========================================================================
 
