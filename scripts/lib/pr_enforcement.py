@@ -54,6 +54,19 @@ honors ``autopr_rejected`` the same way it honors ``phantom_rejected``) — so a
 dispatch that committed real work but never got it to a PR does NOT silently
 resolve as 'done'.
 
+work_ref (OI-1392): a dispatch spec can prescribe an explicit delivery branch —
+the phantom-guard has honored this since OI-1137. Push+PR enforcement did not:
+it always enforced against the worktree's own branch (OI-1372's resolved
+checked-out name, still ``dispatch/<id>`` when the worker never checks out
+anything else locally). A worker that commits on its own ``dispatch/<id>``
+AND separately pushes the same sha onto ``work_ref`` got a SECOND branch
+pushed and a SECOND PR opened against the stale ``dispatch/<id>`` base
+(#1631, #1632) — reverting already-merged work when that PR was merged. When
+*work_ref* is passed to ``enforce_pr_exists``, it is authoritative: the branch
+and worktree_state arguments are never consulted, nothing is ever pushed (the
+worker already delivered there), and at most one PR is ensured for
+*work_ref* itself. See ``_enforce_pr_exists_for_work_ref``.
+
 BILLING SAFETY: No Anthropic SDK. CLI-only (gh/git via subprocess, through
 gh_pr_ensure).
 """
@@ -94,6 +107,24 @@ class PrEnforcementResult:
     created: bool = False
     pushed: bool = False
     reason: Optional[str] = None
+
+
+def _normalize_work_ref(work_ref: "Optional[str]") -> "Optional[str]":
+    """Strip common ref prefixes from a work_ref so it names a bare branch.
+
+    Mirrors ``phantom_guard._normalize_branch_name`` (deliberately not
+    imported — that name is private to phantom_guard, which this module must
+    not be coupled to). ``work_ref`` may be declared as a bare branch name
+    (``dispatch/20260815-foo``) or with a remote/refs prefix
+    (``origin/dispatch/20260815-foo``); gh_pr_ensure targets a bare branch
+    name via ``--head``.
+    """
+    name = (work_ref or "").strip()
+    for prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name or None
 
 
 def _get_remote_head(*, branch: str, repo_root: Path) -> "Optional[str]":
@@ -272,6 +303,7 @@ def enforce_pr_exists(
     target_remote_head: "Optional[str]" = None,
     skip_pr: bool = False,
     wt_path: "Optional[Path | str]" = None,
+    work_ref: "Optional[str]" = None,
 ) -> PrEnforcementResult:
     """Ensure *branch* is pushed to origin AND has an open PR.
 
@@ -306,11 +338,30 @@ def enforce_pr_exists(
     this through yet), a ``dirty`` verdict keeps the pre-OI-1119 behaviour:
     applicable=False, ok=True.
 
+    *work_ref* (OI-1392): when set, it is the authoritative delivery branch —
+    *branch*, *worktree_state* and *wt_path* are never consulted, and nothing
+    is ever pushed. This is intentionally a full bypass of the worktree_state
+    dispatch below, not an additional case inside it: any of those states
+    (including ``dirty``'s salvage path, which itself pushes a branch) could
+    still act on the worktree's OWN branch, which is exactly the second-branch
+    bug this closes. See ``_enforce_pr_exists_for_work_ref``.
+
     Never raises: a push or gh_pr_ensure exception is treated as a failure (still
     enforced — reported via PrEnforcementResult.ok=False + corrective receipt), not
     propagated, so a transient git/GitHub/network error never crashes the dispatch
     lane.
     """
+    work_ref_branch = _normalize_work_ref(work_ref)
+    if work_ref_branch:
+        return _enforce_pr_exists_for_work_ref(
+            dispatch_id=dispatch_id,
+            work_ref_branch=work_ref_branch,
+            repo_root=repo_root,
+            receipts_file=receipts_file,
+            pr_title=pr_title,
+            pr_body=pr_body,
+        )
+
     if worktree_state == "clean":
         return PrEnforcementResult(
             applicable=False, ok=True,
@@ -415,6 +466,70 @@ def enforce_pr_exists(
         kind="pr_failed",
     )
     return PrEnforcementResult(applicable=True, ok=False, pushed=pushed, reason=reason)
+
+
+def _enforce_pr_exists_for_work_ref(
+    *,
+    dispatch_id: str,
+    work_ref_branch: str,
+    repo_root: Path,
+    receipts_file: "str | Path",
+    pr_title: str,
+    pr_body: str,
+) -> PrEnforcementResult:
+    """OI-1392: enforcement scoped to a spec-declared work_ref — never the
+    worktree's own branch.
+
+    Never pushes anything: ``gh_pr_ensure.ensure_pr``/``create_pr`` only ever
+    run ``gh pr create --head <branch>``, which requires the branch to already
+    exist on origin — there is no push call in this path, by construction, so
+    the worktree's own ``dispatch/<id>`` branch (or any other branch) can never
+    be pushed as a side effect of this function.
+
+    - a PR already open for *work_ref_branch* → done, nothing created
+      (``ensure_pr``'s own ``find_open_pr`` short-circuit before any create
+      call — see gh_pr_ensure.py);
+    - none open yet → ensure exactly one, for *work_ref_branch*;
+    - *work_ref_branch* missing from origin (the worker declared a work_ref
+      but never actually delivered there) → a genuine, receipt-visible
+      failure, exactly like any other ``pr_failed``. This never falls back to
+      the worktree's own branch — that silent fallback is the bug OI-1392
+      closes (a stale-based second PR that reverts merged work when merged).
+    """
+    try:
+        from gh_pr_ensure import ensure_pr  # noqa: PLC0415
+        result = ensure_pr(work_ref_branch, repo_root, title=pr_title, body=pr_body, draft=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "pr_enforcement: ensure_pr raised for work_ref=%s: %s", work_ref_branch, exc,
+        )
+        result = {"pr_number": None, "created": False, "reason": f"ensure_pr exception: {exc}"}
+
+    pr_number = result.get("pr_number")
+    if pr_number is not None:
+        return PrEnforcementResult(
+            applicable=True, ok=True, pushed=False,
+            pr_number=pr_number, created=bool(result.get("created")),
+            reason=(
+                f"work_ref={work_ref_branch!r} (OI-1392) — "
+                + ("PR created" if result.get("created") else "PR already existed")
+            ),
+        )
+
+    reason = (
+        (result.get("reason") or f"gh pr create failed for work_ref branch {work_ref_branch!r}")
+        + " (OI-1392: work_ref was set — the worktree's own dispatch branch is "
+        "intentionally never used as a fallback destination)"
+    )
+    logger.warning(
+        "pr_enforcement: REJECTED (work_ref) dispatch=%s work_ref_branch=%s — %s",
+        dispatch_id, work_ref_branch, reason,
+    )
+    _record_corrective_receipt(
+        dispatch_id=dispatch_id, branch=work_ref_branch, reason=reason,
+        receipts_file=receipts_file, kind="pr_failed",
+    )
+    return PrEnforcementResult(applicable=True, ok=False, pushed=False, reason=reason)
 
 
 def _handle_dirty_substantive(
