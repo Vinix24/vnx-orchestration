@@ -296,6 +296,90 @@ def _headless_isolation_guard(plan: "ExecutionPlan") -> "Optional[str]":
     return _HEADLESS_ISOLATION_WARNING
 
 
+def _probe_litellm_style_proxy(
+    label: str, models_url: str, api_key: str, key_env_name: str
+) -> None:
+    """Shared HTTP GET /v1/models probe for any litellm-backed local proxy lane.
+
+    Used by both the plain litellm:* lanes and the glm-harness lane (OI-1147
+    punt 11) — they front the SAME local litellm proxy shape (Anthropic/OpenAI
+    -compatible /v1/models, Bearer auth), just resolved from different env
+    vars. One probe body, parametrized by label/url/key/env-name, keeps the
+    two call sites from drifting instead of duplicating the HTTP handling.
+    """
+    import urllib.request
+    import urllib.error
+
+    try:
+        req = urllib.request.Request(models_url)
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
+        resp = urllib.request.urlopen(req, timeout=5)
+        body = resp.read().decode("utf-8", errors="replace")
+        # A 200 with an empty model list is suspicious but not a hard
+        # failure — the proxy may be warming up.
+        if resp.status == 200:
+            try:
+                data = json.loads(body)
+                model_count = len(data.get("data", []))
+                if model_count == 0:
+                    print(
+                        f"[dispatch_cli] [WARN] {label} returned 0 models "
+                        f"from {models_url} — the lane may be stale. Evidence: "
+                        f"empty model list.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"[dispatch_cli] [reachability] {label} OK: "
+                        f"{model_count} models at {models_url}",
+                        file=sys.stderr,
+                    )
+            except json.JSONDecodeError:
+                print(
+                    f"[dispatch_cli] [WARN] {label} response is not valid "
+                    f"JSON from {models_url} — response: {body[:200]}",
+                    file=sys.stderr,
+                )
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:200]
+        except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
+            pass
+        if status in (401, 403):
+            if not api_key:
+                auth_hint = (
+                    f"{key_env_name} is not set — ANY dispatch on this "
+                    "lane will fail silently."
+                )
+            else:
+                auth_hint = (
+                    f"The proxy API key ({key_env_name}) is missing or "
+                    "invalid — ANY dispatch on this lane will fail silently."
+                )
+            print(
+                f"[dispatch_cli] [WARN] {label} AUTH REJECTED "
+                f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
+                f"{auth_hint}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[dispatch_cli] [WARN] {label} returned HTTP {status} "
+                f"from {models_url}. Evidence: {body or str(exc)}",
+                file=sys.stderr,
+            )
+    except (urllib.error.URLError, OSError) as exc:
+        print(
+            f"[dispatch_cli] [WARN] {label} unreachable at "
+            f"{models_url} ({exc}). The lane may be down — dispatch will "
+            f"likely fail.",
+            file=sys.stderr,
+        )
+
+
 def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
     """Verify the selected lane's endpoint is reachable (OI-867).
 
@@ -309,6 +393,14 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
       env is set (OI-893) so an auth-gated proxy is probed the way the lane
       actually talks to it.  401/403 → hard warning (auth broken).  Connection
       refused/timeout → soft warning (proxy may be down).
+    - glm-harness: same local litellm-proxy shape as above (OI-1147 punt 11),
+      but resolved from glm_harness_spawn's own VNX_GLM_PROXY_URL /
+      VNX_GLM_PROXY_KEY so the probe hits the exact endpoint/credential the
+      spawn will actually use — glm-harness is NOT prefixed "litellm:" so it
+      fell through to the "no cheap endpoint check" branch before this;
+      spawn_glm_harness's own TCP-only _proxy_reachable() check still catches
+      a fully-down proxy at spawn time, but a proxy that accepts the TCP
+      connection while misconfigured/auth-rejecting only surfaces here.
     - deepseek-harness: HTTP GET to api.deepseek.com/v1/models with
       Authorization: Bearer $DEEPSEEK_API_KEY (OI-893).
     - Other lanes: skipped (no cheap endpoint check available; claude-tmux
@@ -337,74 +429,29 @@ def _check_reachability(plan: "ExecutionPlan", spec: "DispatchSpec") -> None:
         # is absent, the 401 the proxy returns is genuine and is reported as
         # AUTH REJECTED with a "key not set" hint, never as an OK.
         litellm_key = os.environ.get("LITELLM_API_KEY", "").strip()
-        try:
-            req = urllib.request.Request(models_url)
-            if litellm_key:
-                req.add_header("Authorization", f"Bearer {litellm_key}")
-            resp = urllib.request.urlopen(req, timeout=5)
-            body = resp.read().decode("utf-8", errors="replace")
-            # A 200 with an empty model list is suspicious but not a hard
-            # failure — the proxy may be warming up.
-            if resp.status == 200:
-                try:
-                    data = json.loads(body)
-                    model_count = len(data.get("data", []))
-                    if model_count == 0:
-                        print(
-                            f"[dispatch_cli] [WARN] litellm proxy returned 0 models "
-                            f"from {models_url} — the lane may be stale. Evidence: "
-                            f"empty model list.",
-                            file=sys.stderr,
-                        )
-                    else:
-                        print(
-                            f"[dispatch_cli] [reachability] litellm proxy OK: "
-                            f"{model_count} models at {models_url}",
-                            file=sys.stderr,
-                        )
-                except json.JSONDecodeError:
-                    print(
-                        f"[dispatch_cli] [WARN] litellm proxy response is not valid "
-                        f"JSON from {models_url} — response: {body[:200]}",
-                        file=sys.stderr,
-                    )
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            body = ""
-            try:
-                body = exc.read().decode("utf-8", errors="replace")[:200]
-            except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
-                pass
-            if status in (401, 403):
-                if not litellm_key:
-                    auth_hint = (
-                        "LITELLM_API_KEY is not set — ANY dispatch on this "
-                        "lane will fail silently."
-                    )
-                else:
-                    auth_hint = (
-                        "The proxy API key (LITELLM_API_KEY) is missing or "
-                        "invalid — ANY dispatch on this lane will fail silently."
-                    )
-                print(
-                    f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
-                    f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
-                    f"{auth_hint}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"[dispatch_cli] [WARN] litellm proxy returned HTTP {status} "
-                    f"from {models_url}. Evidence: {body or str(exc)}",
-                    file=sys.stderr,
-                )
-        except (urllib.error.URLError, OSError) as exc:
-            print(
-                f"[dispatch_cli] [WARN] litellm proxy unreachable at "
-                f"{models_url} ({exc}). The lane may be down — dispatch will "
-                f"likely fail.",
-                file=sys.stderr,
-            )
+        _probe_litellm_style_proxy(
+            "litellm proxy", models_url, litellm_key, "LITELLM_API_KEY"
+        )
+        return
+
+    # ── glm-harness lane: claude-CLI harness → local litellm proxy → OpenRouter ──
+    # Same physical proxy shape as the litellm:* branch above, but glm-harness
+    # is a distinct provider string (not "litellm:*") and resolves its own
+    # endpoint/key via VNX_GLM_PROXY_URL / VNX_GLM_PROXY_KEY (glm_harness_spawn
+    # defaults), so it needs its own probe call rather than being swallowed by
+    # the branch above with the wrong env vars.
+    if lane == "provider" and provider_val == "glm-harness":
+        from provider_spawns.glm_harness_spawn import (  # noqa: PLC0415
+            _proxy_key as _glm_proxy_key,
+            _proxy_url as _glm_proxy_url,
+        )
+
+        proxy_url = _glm_proxy_url()
+        glm_key = _glm_proxy_key()
+        models_url = f"{proxy_url.rstrip('/')}/v1/models"
+        _probe_litellm_style_proxy(
+            "glm-harness litellm proxy", models_url, glm_key, "VNX_GLM_PROXY_KEY"
+        )
         return
 
     # ── deepseek-harness lane ──
