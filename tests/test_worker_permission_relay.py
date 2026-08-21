@@ -28,6 +28,7 @@ from worker_permission_relay import (  # noqa: E402
     read_escalation,
     relay_tick,
     resolve_escalation,
+    scan_live_awaiting_permission,
     write_escalation,
 )
 
@@ -632,3 +633,257 @@ class TestManualApproveSurfacesSendFailure:
             "noux", tmp_path, runner=FakeRunner(tmux_available=False)
         )
         assert status == "error"
+
+
+# ---------------------------------------------------------------------------
+# OI-1324 / OI-1344 — live scan for an unmeasured permission stall
+# ---------------------------------------------------------------------------
+# Three distinct real-world prompt shapes (per the dispatch's measured
+# stalls): a decorated box (rm -rf), the newer numbered-menu-only form with
+# no prose line (git worktree), and the OI-863 prose form (chmod).
+GIT_WORKTREE_OI1007_PANE = (
+    "1. Yes / 2. Yes, and don't ask again for: "
+    "git worktree remove --force /tmp/wt-demo / 3. No"
+)
+
+CHMOD_PERMISSION_PANE = (
+    "Permission rule Bash(chmod:*) requires confirmation for this command.\n"
+    "\n"
+    "Do you want to proceed?\n"
+    "  1. Yes\n"
+    "  2. Yes, and don't ask again for this project\n"
+    "  3. No\n"
+)
+
+
+class FakeScanRunner:
+    """Fake tmux runner for scan tests: scripted list-sessions + per-session panes.
+
+    ``capture_fail_sessions`` makes capture-pane fail (rc!=0) for the named
+    sessions so the "capture failure is an error, not clean" contract can be
+    exercised without a real tmux.
+    """
+
+    def __init__(
+        self,
+        sessions,
+        panes,
+        *,
+        list_rc=0,
+        list_stderr="",
+        tmux_available=True,
+        capture_fail_sessions=None,
+    ):
+        self.sessions = list(sessions)
+        self.panes = dict(panes)
+        self.list_rc = list_rc
+        self.list_stderr = list_stderr
+        self._tmux_available = tmux_available
+        self.capture_fail_sessions = set(capture_fail_sessions or [])
+        self.calls = []
+
+    def available(self):
+        return self._tmux_available
+
+    def run(self, args, **kwargs):
+        self.calls.append(list(args))
+        if args[:1] == ["list-sessions"]:
+            if self.list_rc != 0:
+                return _FakeResult(returncode=self.list_rc, stderr=self.list_stderr)
+            stdout = "".join(f"{s}\n" for s in self.sessions)
+            return _FakeResult(returncode=0, stdout=stdout)
+        if args[:1] == ["capture-pane"]:
+            session = args[2] if len(args) > 2 else None
+            if session in self.capture_fail_sessions:
+                return _FakeResult(returncode=1, stderr="capture-pane failed")
+            return _FakeResult(returncode=0, stdout=self.panes.get(session, ""))
+        # No send-keys / kill-session should ever be issued by the scan.
+        raise AssertionError(f"scan issued an unexpected/writing tmux call: {args}")
+
+
+class TestScanLiveAwaitingPermission:
+    def test_finds_three_prompt_forms_in_one_call(self, tmp_path):
+        sessions = ["vnx-rmrf-demo", "vnx-worktree-demo", "vnx-chmod-demo"]
+        for dispatch_id in ("rmrf-demo", "worktree-demo", "chmod-demo"):
+            _write_handle(tmp_path, dispatch_id, f"vnx-{dispatch_id}")
+        panes = {
+            "vnx-rmrf-demo": PROMPT_PANE,
+            "vnx-worktree-demo": GIT_WORKTREE_OI1007_PANE,
+            "vnx-chmod-demo": CHMOD_PERMISSION_PANE,
+        }
+        runner = FakeScanRunner(sessions, panes)
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path)
+
+        assert result["measured"] is True
+        assert result["errors"] == []
+        by_dispatch = {h["dispatch_id"]: h for h in result["hits"]}
+        assert set(by_dispatch) == {"rmrf-demo", "worktree-demo", "chmod-demo"}
+        assert by_dispatch["rmrf-demo"]["command"] == "rm -rf /tmp/scratch"
+        assert by_dispatch["worktree-demo"]["command"] == "git worktree remove --force /tmp/wt-demo"
+        assert by_dispatch["chmod-demo"]["command"] == "chmod:*"
+        for hit in by_dispatch.values():
+            assert hit["escalation_written"] is True
+            assert hit["matched_marker"]
+
+        # No send-keys / kill-session ever issued — read-only on tmux.
+        assert all(c[:1] in (["list-sessions"], ["capture-pane"]) for c in runner.calls)
+
+        # Escalation records actually landed on disk.
+        for dispatch_id in ("rmrf-demo", "worktree-demo", "chmod-demo"):
+            rec = read_escalation(dispatch_id, state_dir=tmp_path)
+            assert rec is not None
+            assert rec["status"] == "pending"
+            assert rec["reason"] == "awaiting_permission"
+
+    def test_ignores_working_pane(self, tmp_path):
+        _write_handle(tmp_path, "busy", "vnx-busy")
+        runner = FakeScanRunner(
+            ["vnx-busy"],
+            {"vnx-busy": "✢ Working… (3s · ↓ 120 tokens) · esc to interrupt"},
+        )
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path)
+        assert result["hits"] == []
+        assert result["sessions_scanned"] == ["vnx-busy"]
+        assert read_escalation("busy", state_dir=tmp_path) is None
+
+    def test_ignores_foreign_session_without_handle(self, tmp_path):
+        # Session name matches the dispatch-session pattern, but no handle
+        # file exists under THIS project's state dir -> must never be
+        # captured, scanned, or written to.
+        runner = FakeScanRunner(
+            ["vnx-foreign-project-disp"],
+            {"vnx-foreign-project-disp": PROMPT_PANE},
+        )
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path)
+        assert result["hits"] == []
+        assert result["sessions_scanned"] == []
+        assert result["sessions_skipped_foreign"] == ["vnx-foreign-project-disp"]
+        # Only list-sessions was called -- capture-pane never touched the
+        # foreign session.
+        assert all(c[:1] == ["list-sessions"] for c in runner.calls)
+        assert read_escalation("foreign-project-disp", state_dir=tmp_path) is None
+
+    def test_idempotent_on_existing_pending_escalation(self, tmp_path):
+        _write_handle(tmp_path, "dupe", "vnx-dupe")
+        runner = FakeScanRunner(["vnx-dupe"], {"vnx-dupe": PROMPT_PANE})
+
+        scan_live_awaiting_permission(runner, state_dir=tmp_path)
+        rec1 = read_escalation("dupe", state_dir=tmp_path)
+        assert rec1["status"] == "pending"
+
+        # Second scan of the same still-stalled pane must not create a
+        # second/different record.
+        runner2 = FakeScanRunner(["vnx-dupe"], {"vnx-dupe": PROMPT_PANE})
+        scan_live_awaiting_permission(runner2, state_dir=tmp_path)
+        rec2 = read_escalation("dupe", state_dir=tmp_path)
+        assert rec2["captured_at"] == rec1["captured_at"]
+        assert rec2 == rec1
+
+    def test_capture_failure_is_error_not_clean(self, tmp_path):
+        _write_handle(tmp_path, "flaky", "vnx-flaky")
+        runner = FakeScanRunner(
+            ["vnx-flaky"],
+            {},
+            capture_fail_sessions={"vnx-flaky"},
+        )
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path)
+        assert result["hits"] == []
+        assert result["sessions_scanned"] == []
+        assert result["measured"] is True  # listing itself succeeded
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["scope"] == "capture-pane"
+        assert result["errors"][0]["dispatch_id"] == "flaky"
+        assert read_escalation("flaky", state_dir=tmp_path) is None
+
+    def test_list_sessions_unmeasurable_is_error_not_clean(self, tmp_path):
+        runner = FakeScanRunner([], {}, tmux_available=False)
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path)
+        assert result["measured"] is False
+        assert result["hits"] == []
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["scope"] == "list-sessions"
+
+    def test_no_server_running_is_clean_not_error(self, tmp_path):
+        # A genuinely empty tmux fleet (no server) is a measured clean scan,
+        # not a measurement error (OI-1286 tri-state contract).
+        runner = FakeScanRunner([], {}, list_rc=1, list_stderr="no server running")
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path)
+        assert result["measured"] is True
+        assert result["errors"] == []
+        assert result["hits"] == []
+
+
+# ---------------------------------------------------------------------------
+# `vnx permission scan` CLI exit codes
+# ---------------------------------------------------------------------------
+class _ScanArgs:
+    def __init__(self, as_json=False):
+        self.json = as_json
+
+
+class TestCmdScanExitCodes:
+    def test_hits_exit_1(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            relay,
+            "scan_live_awaiting_permission",
+            lambda **kw: {
+                "sessions_scanned": ["vnx-x"],
+                "sessions_skipped_foreign": [],
+                "hits": [
+                    {
+                        "session": "vnx-x",
+                        "dispatch_id": "x",
+                        "command": "rm -rf /tmp/x",
+                        "matched_marker": "do you want to proceed",
+                        "escalation_written": True,
+                    }
+                ],
+                "errors": [],
+                "measured": True,
+            },
+        )
+        assert cli._cmd_scan(_ScanArgs(), tmp_path) == 1
+
+    def test_clean_exit_0(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            relay,
+            "scan_live_awaiting_permission",
+            lambda **kw: {
+                "sessions_scanned": [],
+                "sessions_skipped_foreign": [],
+                "hits": [],
+                "errors": [],
+                "measured": True,
+            },
+        )
+        assert cli._cmd_scan(_ScanArgs(), tmp_path) == 0
+
+    def test_measurement_error_exit_2(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            relay,
+            "scan_live_awaiting_permission",
+            lambda **kw: {
+                "sessions_scanned": [],
+                "sessions_skipped_foreign": [],
+                "hits": [],
+                "errors": [
+                    {"scope": "list-sessions", "session": None, "dispatch_id": None, "error": "tmux not available"}
+                ],
+                "measured": False,
+            },
+        )
+        assert cli._cmd_scan(_ScanArgs(), tmp_path) == 2
+
+    def test_json_output_emits_full_result(self, tmp_path, monkeypatch, capsys):
+        payload = {
+            "sessions_scanned": [],
+            "sessions_skipped_foreign": [],
+            "hits": [],
+            "errors": [],
+            "measured": True,
+        }
+        monkeypatch.setattr(relay, "scan_live_awaiting_permission", lambda **kw: payload)
+        rc = cli._cmd_scan(_ScanArgs(as_json=True), tmp_path)
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out == payload

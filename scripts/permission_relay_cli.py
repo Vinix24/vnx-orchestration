@@ -9,8 +9,19 @@ Subcommands (wired to scripts/lib/worker_permission_relay.py):
   vnx permission escalations                              list pending escalations
   vnx permission approve <dispatch_id>                    approve + relay "1" to the worker
   vnx permission deny <dispatch_id>                       deny (operator handles the worker)
+  vnx permission scan                                     scan LIVE workers for an unmeasured stall
 
 All subcommands accept ``--json`` for machine-readable output.
+
+``scan`` (OI-1324 / OI-1344): read-only tmux scan of this project's live
+dispatch sessions for a pane classified ``awaiting_permission`` that has not
+yet surfaced anywhere — writes an escalation record for each new find
+(idempotent) so ``escalations`` becomes a current view instead of an archive.
+Exit code encodes the verdict for a supervisor tick / operator script:
+  0 = measured cleanly, zero stalls found
+  1 = at least one live stall found (see the printed dispatch id + command)
+  2 = could not fully measure (tmux missing/unmeasurable, or a capture
+      failed) — never conflated with "clean"
 
 The relay model: outside an open window every worker permission prompt escalates;
 inside the window routine prompts auto-approve; catastrophic ops always escalate.
@@ -104,6 +115,46 @@ def _cmd_escalations(args, sd: Path) -> int:
             f"      cmd: {rec.get('command')}"
         )
     print("\nResolve with: vnx permission approve <dispatch_id>  |  deny <dispatch_id>")
+    return 0
+
+
+def _cmd_scan(args, sd: Path) -> int:
+    """OI-1324 / OI-1344: scan live worker panes; alarm loudly, never silently.
+
+    Exit code: 0 clean, 1 at least one live stall found, 2 could not fully
+    measure (tmux unavailable, listing unmeasurable, or a capture failed) —
+    a measurement gap is reported distinctly and is NEVER read as "clean".
+    """
+    result = relay.scan_live_awaiting_permission(state_dir=sd)
+    hits = result.get("hits") or []
+    errors = result.get("errors") or []
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        if hits:
+            print(f"[!] {len(hits)} worker(s) awaiting permission:")
+            for h in hits:
+                print(
+                    f"  - {h.get('dispatch_id')}  cmd: {h.get('command')}  "
+                    f"(session={h.get('session')}, marker={h.get('matched_marker')!r})"
+                )
+        elif errors:
+            print("[x] scan could not fully measure the live fleet")
+        else:
+            print("[ok] no worker is awaiting permission")
+        if errors:
+            print(f"\n[!] {len(errors)} measurement error(s):")
+            for e in errors:
+                print(
+                    f"  - scope={e.get('scope')} session={e.get('session')} "
+                    f"dispatch_id={e.get('dispatch_id')}: {e.get('error')}"
+                )
+
+    if hits:
+        return 1
+    if errors:
+        return 2
     return 0
 
 
@@ -289,6 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_deny = sub.add_parser("deny", parents=[common], help="deny an escalation")
     p_deny.add_argument("dispatch_id")
     p_deny.set_defaults(func=_cmd_deny)
+
+    p_scan = sub.add_parser(
+        "scan", parents=[common],
+        help="read-only scan of live worker panes for an unmeasured permission stall",
+    )
+    p_scan.set_defaults(func=_cmd_scan)
 
     return parser
 
