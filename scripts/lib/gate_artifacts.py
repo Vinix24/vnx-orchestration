@@ -45,8 +45,59 @@ def _compute_contract_hash(request_payload: Dict[str, Any], gate: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def format_report(gate: str, stdout: str, request_payload: Dict[str, Any]) -> str:
-    """Format gate output as a normalized headless report."""
+def _format_findings_section(
+    blocking: List[Dict[str, Any]], advisory: List[Dict[str, Any]]
+) -> str:
+    """Render the normalized findings block closure_verifier's indicator scan reads.
+
+    Kept separate from the raw ``## Gate Output`` tool transcript that follows
+    it: that transcript is the reviewer's read material (tool calls, contents
+    of files it inspected while working) and can contain the literal
+    substrings the scan looks for — a ``blocking:`` parameter name, a
+    ``severity: blocking`` string literal — in code the reviewer merely read,
+    never in its verdict (OI-1394). Only this section is ever counted.
+    """
+    lines = ["## Findings", "", f"Blocking count: {len(blocking)}", f"Advisory count: {len(advisory)}"]
+    if blocking:
+        lines.append("")
+        lines.append("### Blocking")
+        lines.append("")
+        for finding in blocking:
+            message = finding.get("message", "") if isinstance(finding, dict) else str(finding)
+            severity = finding.get("severity", "") if isinstance(finding, dict) else ""
+            # Omit the parenthetical when severity is literally "blocking" —
+            # it would otherwise also match the `severity:\s*blocking`
+            # pattern, double-counting a single finding as two indicators.
+            suffix = f" (original severity: {severity})" if severity and severity != "blocking" else ""
+            lines.append(f"- [BLOCKING] {message}{suffix}")
+    if advisory:
+        lines.append("")
+        lines.append("### Advisory")
+        lines.append("")
+        for finding in advisory:
+            message = finding.get("message", "") if isinstance(finding, dict) else str(finding)
+            severity = finding.get("severity", "warning") if isinstance(finding, dict) else "warning"
+            lines.append(f"- {message} (severity: {severity})")
+    return "\n".join(lines)
+
+
+def format_report(
+    gate: str,
+    stdout: str,
+    request_payload: Dict[str, Any],
+    blocking: Optional[List[Dict[str, Any]]] = None,
+    advisory: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Format gate output as a normalized headless report.
+
+    When ``blocking``/``advisory`` are not None (i.e. this gate parses
+    structured findings — currently codex_gate only), a normalized
+    ``## Findings`` section is written ahead of the raw tool-output dump. See
+    ``_format_findings_section`` for why the scan must never see the raw
+    transcript. Gates that do not parse structured findings get no such
+    section, so closure_verifier falls back to its prior full-content scan —
+    unchanged behavior for those gates.
+    """
     pr_ref = request_payload.get("pr_id") or str(request_payload.get("pr_number", ""))
     branch = request_payload.get("branch", "")
     lines = [
@@ -59,11 +110,16 @@ def format_report(gate: str, stdout: str, request_payload: Dict[str, Any]) -> st
         "",
         "---",
         "",
+    ]
+    if blocking is not None or advisory is not None:
+        lines.append(_format_findings_section(blocking or [], advisory or []))
+        lines.append("")
+    lines.extend([
         "## Gate Output",
         "",
         stdout.strip() if stdout.strip() else "(no output)",
         "",
-    ]
+    ])
     return "\n".join(lines) + "\n"
 
 
@@ -172,10 +228,33 @@ def materialize_artifacts(
             reason_detail="No report_path in request payload",
         )
 
+    # Parsed ahead of the report write (not after, as previously) so the
+    # normalized findings section can be embedded in the report itself,
+    # separate from the raw tool-output dump (OI-1394). Only codex_gate
+    # parses structured findings today; other gates pass blocking=None/
+    # advisory=None so format_report omits the section and closure_verifier
+    # falls back to scanning the full report, unchanged from prior behavior.
+    findings: List[Dict[str, Any]] = []
+    residual_risk = ""
+    findings_parsed = False
+    if gate == "codex_gate":
+        parsed = parse_codex_findings(stdout)
+        findings = parsed["findings"]
+        residual_risk = parsed.get("residual_risk", "") or ""
+        findings_parsed = True
+    blocking, advisory = _classify_findings(findings)
+
     report_file = Path(report_path)
     try:
         report_file.parent.mkdir(parents=True, exist_ok=True)
-        report_file.write_text(format_report(gate, stdout, request_payload), encoding="utf-8")
+        report_file.write_text(
+            format_report(
+                gate, stdout, request_payload,
+                blocking=blocking if findings_parsed else None,
+                advisory=advisory if findings_parsed else None,
+            ),
+            encoding="utf-8",
+        )
     except OSError as exc:
         return gate_recorder.record_failure_simple(
             **_fail, reason="artifact_materialization_failed",
@@ -200,13 +279,6 @@ def materialize_artifacts(
 
     contract_hash = _compute_contract_hash(request_payload, gate)
     now = utc_now_iso()
-    findings: List[Dict[str, Any]] = []
-    residual_risk = ""
-    if gate == "codex_gate":
-        parsed = parse_codex_findings(stdout)
-        findings = parsed["findings"]
-        residual_risk = parsed.get("residual_risk", "") or ""
-    blocking, advisory = _classify_findings(findings)
 
     real_dispatch_id = request_payload.get("dispatch_id", "")
     result_payload: Dict[str, Any] = {
