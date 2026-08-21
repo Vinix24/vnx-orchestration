@@ -25,6 +25,15 @@ quota-403/429/auth error, times out, or returns output without a verdict block,
 the result status is ``unavailable`` — never ``fail``. Eleven quota-403 outages
 were once booked as eleven rejected PRs because the no-verdict path defaulted to
 "fail"; absence of evidence must surface as absence, not as a rejection.
+
+OI-1291: ``unavailable`` is not a single cause. ``reason`` distinguishes three
+disjoint states: ``dispatch_error`` (the dispatcher itself raised — no report
+was ever produced), ``parse_error`` (a report came back with content but no
+readable ```json``` verdict block — kimi DID respond, the block just didn't
+parse), and ``no_verdict`` (the report was empty/whitespace — a genuinely
+empty delivery). Only ``dispatch_error``/``no_verdict`` may claim a provider
+outage in their summary text; ``parse_error`` must not, since the provider
+plainly produced output.
 """
 from __future__ import annotations
 
@@ -116,14 +125,16 @@ def _get_diff(pr: str, diff_file: "str | None") -> "str | None":
         return None
 
 
-def _verdict_to_status(verdict: dict) -> "tuple[str, list, str]":
+def _verdict_to_status(verdict: dict, report_text: str = "") -> "tuple[str, list, str]":
     """Map the extracted verdict to (status, blocking_findings, residual_risk).
 
-    OI-1142: an empty ``verdict`` means the provider produced no readable verdict
-    at all — the kimi CLI hit a quota-403/429/auth error, was cut off, or emitted
-    output without the contract's JSON block. That is a tool outage, not a review
-    outcome, and it maps to ``unavailable``. Only a REAL parsed verdict may ever
-    produce ``fail``.
+    OI-1142: an empty ``verdict`` means no readable verdict could be extracted.
+    OI-1291 splits that further: if ``report_text`` itself is empty/whitespace,
+    the provider delivered nothing at all (a real outage/empty-completion
+    signal). If ``report_text`` has content but no readable ```json``` block,
+    the provider DID respond — the block just failed to parse, which is a
+    parse miss, not an outage. Either way this maps to ``unavailable`` and
+    only a REAL parsed verdict may ever produce ``fail``.
     """
     v = (verdict.get("verdict") or "").strip().lower() if verdict else ""
     findings = verdict.get("findings") or [] if verdict else []
@@ -136,17 +147,30 @@ def _verdict_to_status(verdict: dict) -> "tuple[str, list, str]":
         return "pass", [], residual
     if v in {"fail", "blocked"} or blocking:
         return "fail", blocking, residual or "kimi gate reported blocking findings"
+    if residual:
+        return "unavailable", [], residual
+    if (report_text or "").strip():
+        return (
+            "unavailable",
+            [],
+            f"kimi returned a {len(report_text)}-char report, but it contained no "
+            "readable ```json``` verdict block (parse miss — kimi did respond)",
+        )
     return (
         "unavailable",
         [],
-        residual
-        or "kimi produced no readable verdict (provider outage/quota/truncation) — not a review outcome",
+        "kimi produced no readable verdict (provider outage/quota/truncation) — not a review outcome",
     )
 
 
-def _status_summary(status: str, blocking: list) -> str:
-    """Summary line for the result record — outage vs verdict must be unmistakable."""
+def _status_summary(status: str, blocking: list, reason: str = "", report_len: int = 0) -> str:
+    """Summary line for the result record — outage vs parse-miss vs verdict must be unmistakable."""
     if status == "unavailable":
+        if reason == "parse_error":
+            return (
+                f"kimi gate: UNAVAILABLE (parse_error — kimi returned a {report_len}-char "
+                "report, but it contained no readable verdict block — NOT a review fail)"
+            )
         return "kimi gate: UNAVAILABLE (provider outage/no verdict — NOT a review fail)"
     return f"kimi gate: {status} ({len(blocking)} blocking finding(s))"
 
@@ -192,8 +216,16 @@ def main(argv: "list[str] | None" = None) -> int:
         reason = "dispatch_error"
     else:
         verdict = _extract_verdict(report_text or "")
-        status, blocking, residual = _verdict_to_status(verdict)
-        reason = "verdict" if verdict else "no_verdict"
+        status, blocking, residual = _verdict_to_status(verdict, report_text or "")
+        if verdict:
+            reason = "verdict"
+        elif (report_text or "").strip():
+            # OI-1291: a report came back with content, it just didn't parse —
+            # distinct from a genuinely empty delivery (see reason="no_verdict"
+            # below) and from a dispatch_error (no report at all, above).
+            reason = "parse_error"
+        else:
+            reason = "no_verdict"
 
     record = {
         "gate": "kimi_gate",
@@ -206,7 +238,7 @@ def main(argv: "list[str] | None" = None) -> int:
         "status": status,
         "reason": reason,
         "duration_seconds": round(duration, 3),
-        "summary": _status_summary(status, blocking),
+        "summary": _status_summary(status, blocking, reason, len(report_text or "")),
         "provider": "kimi",
         "model": args.model,
         "dispatch_id": dispatch_id,
@@ -244,7 +276,13 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.json:
         print(json.dumps(record, indent=2))
     elif status == "unavailable":
-        print("VERDICT: UNAVAILABLE  (provider outage/no verdict — NOT a review fail)")
+        if reason == "parse_error":
+            print(
+                f"VERDICT: UNAVAILABLE  (parse_error — kimi returned a {len(report_text or '')}-char "
+                "report, but it contained no readable verdict block — NOT a review fail)"
+            )
+        else:
+            print("VERDICT: UNAVAILABLE  (provider outage/no verdict — NOT a review fail)")
     else:
         print(f"VERDICT: {status.upper()}  ({len(blocking)} blocking)")
         for f in blocking:
