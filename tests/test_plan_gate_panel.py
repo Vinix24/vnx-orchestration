@@ -1590,6 +1590,110 @@ def test_provider_lane_dispatcher_sets_vnx_data_dir_env(tmp_path, monkeypatch):
     assert seen_envs[0].get("VNX_DATA_DIR_EXPLICIT") == "1"
 
 
+# --------------------------------------------------------------------------
+# OI-1422: a provider-lane seat built by _make_default_dispatcher (plan-reviewer
+# OR deliberation-panelist) is read-only — it reads a doc/prompt and writes a
+# verdict report, it never touches repo files. Without an explicit --task-class
+# the seat's receipt fell back to task_class="implementation"
+# (provider_dispatch.py _build_frontmatter's own default), and kimi_spawn.py's
+# completion-vs-execution fabrication guard keys off task_class ALONE (it has no
+# role parameter), so a clean-worktree kimi seat was wrongly classified as a
+# delivery worker that "completed without executing" — 7/7 kimi panel seats on
+# 21-08 false-failed this way despite each producing a real, substantive report.
+# --------------------------------------------------------------------------
+
+def test_provider_lane_dispatcher_carries_read_only_task_class(tmp_path):
+    """The provider-lane cmd _make_default_dispatcher builds must carry a
+    --task-class value that is a member of phantom_guard.REVIEW_TASK_CLASSES —
+    the SSOT kimi_spawn.py's fabrication guard keys off — so the seat is
+    classified as read-only end to end, not just at the phantom_guard layer."""
+    import unittest.mock as mock
+
+    from phantom_guard import REVIEW_TASK_CLASSES
+
+    seen_cmds = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60, role="deliberation-panelist")
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
+            dispatcher("kimi", "kimi-k3", "some panel prompt", "panel-sweep-diverge-2-oi1422")
+
+    assert len(seen_cmds) == 1
+    cmd = seen_cmds[0]
+    task_class = cmd[cmd.index("--task-class") + 1]
+    assert task_class in REVIEW_TASK_CLASSES, (
+        f"task_class={task_class!r} is not in phantom_guard.REVIEW_TASK_CLASSES "
+        "— the kimi-lane fabrication guard (kimi_spawn._finalize_kimi_result) "
+        "would still classify this seat as a writing worker"
+    )
+
+
+def test_provider_lane_task_class_disarms_kimi_fabrication_guard_on_clean_worktree(tmp_path):
+    """End-to-end proof (PASS criterion): the EXACT task_class value
+    _make_default_dispatcher's provider-lane cmd carries, fed into the real
+    kimi-lane fabrication check, must NOT fire on a clean/unchanged worktree —
+    a panel seat's report IS its deliverable; an empty diff is the expected,
+    correct outcome, not evidence of fabrication."""
+    import unittest.mock as mock
+
+    from provider_spawns.kimi_spawn import _finalize_kimi_result
+
+    seen_cmds = []
+
+    def _mock_subprocess_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        import subprocess as _sp
+        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60, role="deliberation-panelist")
+
+    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
+        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
+            dispatcher("kimi", "kimi-k3", "some panel prompt", "panel-sweep-diverge-3-oi1422")
+
+    cmd = seen_cmds[0]
+    dispatched_task_class = cmd[cmd.index("--task-class") + 1]
+
+    class _FakeProc:
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return None
+
+    with mock.patch(
+        "provider_spawns.kimi_spawn._worktree_has_changes", return_value=False
+    ) as mock_check:
+        result = _finalize_kimi_result(
+            proc=_FakeProc(),
+            completion_text="## Panel seat analysis\n\nFindings: ...",
+            events_written=5,
+            token_usage=None,
+            timed_out=False,
+            stopped_early=False,
+            event_writer_failures=0,
+            errors_captured=[],
+            saw_stream_output=True,
+            raw_samples=[],
+            saw_tool_calls=True,
+            worktree=Path("/tmp/fake-panel-worktree"),
+            task_class=dispatched_task_class,
+        )
+
+    assert result.error is None, (
+        f"fabrication guard fired on a clean worktree for a real panel seat "
+        f"report: {result.error!r}"
+    )
+    assert result.returncode == 0
+    # A known read-only class short-circuits before the git probe is consulted.
+    mock_check.assert_not_called()
+
+
 def test_claude_lane_no_report_error_surfaces_stdout_failure_reason(tmp_path):
     """The 'no report' RuntimeError must include proc.stdout, not just stderr.
 
