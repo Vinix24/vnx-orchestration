@@ -90,6 +90,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "deterministic canary fraction)."
     ),
     "cross-project-federation": "Cross-project intelligence federation (not yet implemented).",
+    "claude-tmux-serialization": (
+        "N-slot serial lock protecting the shared Claude subscription session cap "
+        "for the claude-tmux dispatch lane."
+    ),
 }
 
 # Ledger row order (framework-status-audit-and-cockpit PR-3). Grouped by
@@ -110,6 +114,7 @@ _ROW_ORDER: List[str] = [
     "headless-dispatch-routing",
     "central-db-routing",
     "smart-router-staging",
+    "claude-tmux-serialization",
     # PARK-with-trigger / CUT
     "migration-mechanisms",
     "within-db-tenancy",

@@ -100,7 +100,7 @@ Review-gate status + the full mapping: DISPATCH_RULES §2.
 ## 5. Concurrency + billing (the two that bite)
 
 - **claude-tmux is subscription-session-capped, shared with every Claude agent on the
-  account → serialize it (N-slot, default 5).** Providers stay parallel. The door enforces
+  account → serialize it (N-slot, default 10).** Providers stay parallel. The door enforces
   this (PR-6 lock + #1017 concurrency config); direct callers self-serialize
   (`--claude-serial`). A ~0.1s `rc=1` exit = capacity, not a bug. See DISPATCH_RULES §6.
 - **Claude routes via the tmux subscription lane by default; headless `claude -p` is

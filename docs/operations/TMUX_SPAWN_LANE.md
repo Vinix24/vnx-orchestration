@@ -42,7 +42,7 @@ The detached spawn also defaults to blanket `--dangerously-skip-permissions` (#1
 
 ## Concurrency
 
-The lane's account-level serial lock (`scripts/lib/dispatch_serialization.py`) defaults to `N=1` (fully serial — the historically subscription-safe behavior for a shared Claude account). Set `VNX_TMUX_MAX_CONCURRENT=<N>` to run up to `N` tmux-spawn workers concurrently; this is an explicit operator opt-in, not a default the lane creeps towards, and it trades serialization safety for throughput against the account's real session cap. A stale lock (any slot) is cleared with `vnx dispatch --force-release-lock claude-tmux`.
+The lane's account-level serial lock (`scripts/lib/dispatch_serialization.py`) defaults to `N=10` (operator directive 2026-08-21, dispatch-20260821-t0-tmux-concurrency-10 — the subscription-safe default now that #1451 gives every tmux dispatch its own named paste buffer; see `DISPATCH_RULES.md` §6). Set `VNX_TMUX_MAX_CONCURRENT=<N>` to run up to `N` tmux-spawn workers concurrently instead; this is an explicit operator opt-in (env var, or the registry-backed config-store value), not a default the lane creeps towards, and raising it further trades serialization safety for throughput against the account's real session cap. A stale lock (any slot) is cleared with `vnx dispatch --force-release-lock claude-tmux`.
 
 ## Known reliability gaps
 

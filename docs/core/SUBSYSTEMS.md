@@ -16,6 +16,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | headless-dispatch-routing | Headless dispatch routing mode selector. | `VNX_HEADLESS_ROUTING` | LIVE | unknown — no probe yet |
 | central-db-routing | Central-DB read mode for the runtime coordination store (per-project vs central vs shadow). | `VNX_USE_CENTRAL_DB` | LIVE | unknown — no probe yet |
 | smart-router-staging | Phased smart-router AUTO routing rollout (per-tier enable + deterministic canary fraction). | `VNX_SMART_ROUTER_CANARY_PCT` | LIVE | unknown — no probe yet |
+| claude-tmux-serialization | N-slot serial lock protecting the shared Claude subscription session cap for the claude-tmux dispatch lane. | `VNX_TMUX_MAX_CONCURRENT` | LIVE | unknown — no probe yet |
 | migration-mechanisms | Schema-evolution surfaces (42 SQL files + 6 appliers). Consolidation PARKed pending inventory-lock. | `VNX_MIGRATION_SYSTEM` | PARK-with-trigger | degraded — 42 SQL files + 6 appliers; consolidation PARKed pending inventory-lock (`scripts/lib/migration_inventory.py`, PR-8) |
 | within-db-tenancy | Composite (project_id, id) keys inside per-project DBs. Removal PARKed pending per-table central-DB safety proof. | — | PARK-with-trigger | degraded — keys present; drop deferred (central-store/dual-write/ADR-026 interaction) |
 | docs-bloat | Comparisons, stale archive, marketing docs inflating docs/ count. | — | CUT | degraded — ~288 markdown files, large `_archive/` |
