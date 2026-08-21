@@ -122,7 +122,7 @@ tests/test_codex_pr311_findings.py  # OI-1227: red solo — IntelligenceSelector
 tests/test_codex_r2_fixes.py  # OI-1227: red solo — ((count++)) post-increment still present in dispatcher loop (1 failed, 11 passed)
 tests/test_constraint_enforcer.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
 tests/test_context_rotation.py  # OI-1227: red solo — project-id scoping resolves to worktree path not isolated home (1 failed, 53 passed)
-tests/test_conversation_analyzer.py  # OI-1227: red solo — memory suggestions empty where rows expected (2 failed, 65 passed)
+tests/test_conversation_analyzer.py  # OI-1227 recount 2026-08-21 (dispatch-fwd-02) after PR #1585/OI-1258 added tests to this file: red solo — same two pre-existing failures (test_active_concerns_high_error_rate, test_memory_suggestions_from_db), unrelated stale asserts against model_inference_guard's difficulty-bucket routing per #1585's own note (2 failed, 84 passed, was 65 passed pre-#1585)
 tests/test_conversation_resume.py  # OI-1227: red solo — serve_dashboard resume api broken: session-id/conflict asserts fail (4 failed, 16 passed)
 tests/test_dashboard_feature.py  # OI-1227: red solo — serve_dashboard._format_duration missing (11 failed, 51 passed)
 tests/test_dashboard_kanban_certification.py  # OI-1227: red solo — serve_dashboard._DIR_TO_STAGE missing (6 failed, 9 passed)
@@ -171,7 +171,12 @@ tests/test_per_pr_closure.py  # OI-1227: red solo — 'contradiction_gemini_revi
 tests/test_plan_gate_panel.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_planning_api.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_planning_cli.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
-tests/test_planning_cli_objective.py  # OI-1227: red solo — objective list missing feat-b (2 failed, 13 passed)
+# tests/test_planning_cli_objective.py — REPAIRED (OI-1227 recount 2026-08-21,
+# dispatch-fwd-02): PR #1576/OI-1190 split the blocked review state into
+# unread/refused and rewrote `objective list`'s badge+summary output, which
+# was the red this exclusion hid (objective list missing feat-b). Suite is
+# 24/24 green solo and now rejoins the Profile A sweep. No heavy-dep stack
+# (sqlite3 + in-repo modules only).
 tests/test_pool_manager_real_spawn.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (1 failed, 9 passed)
 tests/test_pool_provider_mix_integration.py  # OI-1227: red solo — terminal_leases has no column 'state' (1 failed, 15 passed)
 tests/test_pool_state_repo.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (6 failed, 3 passed)
