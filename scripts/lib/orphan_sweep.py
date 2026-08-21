@@ -380,11 +380,25 @@ def sweep(
         repo_root:          Main repo root whose ``.vnx-data/worktrees/`` holds
                             the dispatch worktrees (defaults to the resolved
                             project root).
-        data_dir:           ``.vnx-data`` directory for the active-manifest kind
-                            (defaults to ``$VNX_DATA_DIR``). Worktrees live under
-                            ``repo_root``; manifests live under ``data_dir``.
-        state_dir:          Runtime state dir override for crash-recovery
-                            (defaults to ``data_dir / "state"``).
+        data_dir:           ``.vnx-data`` directory for the register/receipts
+                            (kind 1b) and active-manifest (kind 3) reads.
+                            When omitted (together with ``state_dir``), this
+                            is resolved via the fabric's canonical resolver
+                            (``vnx_paths.resolve_paths()["VNX_DATA_DIR"]``) —
+                            almost always the CENTRAL store
+                            (``~/.vnx-data/<project_id>``), never a
+                            repo-local ``.vnx-data/``. Worktrees (kind 2)
+                            live under ``repo_root`` regardless of this value
+                            — ``worktrees_dir`` below is always derived from
+                            ``repo_root``, never from ``data_dir``.
+        state_dir:          Runtime state dir for the register/receipts reads
+                            and crash-recovery. An explicit value always wins.
+                            When omitted together with ``data_dir``, resolved
+                            via the same fabric resolver
+                            (``vnx_paths.resolve_paths()["VNX_STATE_DIR"]``).
+                            When only ``data_dir`` is given explicitly,
+                            defaults to ``data_dir / "state"`` (unchanged
+                            operator/test override path).
         project_id:         Project id for the lease PID lookup.
         current_dispatch_id: Dispatch id to fence off — never touched by any
                             kind, even if its liveness signal reads dead.
@@ -410,8 +424,22 @@ def sweep(
     import crash_recovery_sweep
 
     root = _resolve_repo_root(repo_root)
-    data_dir = data_dir if data_dir is not None else _default_data_dir(root)
-    state_dir = state_dir if state_dir is not None else (data_dir / "state")
+    data_dir_explicit = data_dir is not None
+    central_resolve_error: "str | None" = None
+    if not data_dir_explicit:
+        # Neither data_dir nor (necessarily) state_dir was given — the CLI's
+        # real no-flags invocation. Resolve BOTH via the fabric's canonical
+        # resolver so the register/receipts/active-manifest reads land on the
+        # CENTRAL store, never a repo-local `.vnx-data/` that may not exist
+        # or may simply never have heard of this project's dispatches.
+        data_dir, central_state_dir, central_resolve_error = _resolve_central_paths(root)
+        if state_dir is None:
+            state_dir = central_state_dir
+    elif state_dir is None:
+        # data_dir given explicitly, state_dir not — derive under it
+        # (unchanged operator/test override path; explicit data_dir always
+        # wins over central resolution).
+        state_dir = data_dir / "state"
     pid_fn = pid_alive if pid_alive is not None else crash_recovery_sweep.is_pid_alive
     list_fn = list_sessions if list_sessions is not None else _real_list_sessions
     probe_fn = probe_liveness if probe_liveness is not None else (
@@ -424,6 +452,15 @@ def sweep(
         current_dispatch_id = os.environ.get("VNX_CURRENT_DISPATCH_ID", "").strip() or None
 
     result = OrphanSweepResult(dry_run=dry_run)
+    if central_resolve_error:
+        # The central-store resolver failed and a fallback path was used
+        # instead (see _resolve_central_paths). That fallback's register may
+        # be a repo-local store that has never heard of this project's
+        # dispatches — a resolver failure is a MEASUREMENT FAILURE and must
+        # never be conflated with "this project's register genuinely names
+        # zero dispatches" below.
+        result.errors.append({"kind": "data_dir_resolution", "error": central_resolve_error})
+        logger.warning("orphan_sweep: %s", central_resolve_error)
     protected: set[str] = {current_dispatch_id} if current_dispatch_id else set()
     worktrees_dir = root / ".vnx-data" / "worktrees"
 
@@ -433,7 +470,13 @@ def sweep(
     # read_events is already documented to degrade to an empty list rather
     # than raise, so this branch is a belt-and-braces guard, not the expected
     # path). An empty (non-None) result is a real measurement — "this
-    # project's register currently names zero dispatches" — not a failure.
+    # project's register currently names zero dispatches" — PROVIDED state_dir
+    # itself resolved correctly. When `central_resolve_error` is set above,
+    # an empty result here is read from a fallback store instead and must be
+    # cross-checked against that error, never trusted on its own as "zero
+    # dispatches known" (this is exactly how a repo-local, never-populated
+    # `.vnx-data/state/` used to read as a silent, valid zero — OI-1353
+    # follow-up).
     try:
         import dispatch_register
         register_events = dispatch_register.read_events(state_dir=state_dir)
@@ -670,9 +713,48 @@ def sweep(
     return result
 
 
-def _default_data_dir(repo_root: Path) -> Path:
-    """Resolve the ``.vnx-data`` dir for the active-manifest kind (issue #225)."""
-    env = os.environ.get("VNX_DATA_DIR", "").strip()
-    if env:
-        return Path(env).expanduser()
-    return repo_root / ".vnx-data"
+def _resolve_central_paths(repo_root: Path) -> "tuple[Path, Path, str | None]":
+    """Resolve the register/receipts/active-manifest store via the fabric's
+    canonical path resolver (mirrors ``dispatch_register._register_path``'s
+    own resolution chain), NOT this repo's own ``.vnx-data/``.
+
+    The kind-1b conjunction reads ``dispatch_register.ndjson`` and
+    ``t0_receipts.ndjson``, and kind 3 (delegated to ``crash_recovery_sweep``)
+    reads ``dispatches/active/`` — all three live in the CENTRAL store
+    (``vnx_paths.resolve_paths()["VNX_DATA_DIR"]``, typically
+    ``~/.vnx-data/<project_id>``), never in a repo-local ``.vnx-data/``.
+    That repo-local directory holds only this repo's own dispatch
+    WORKTREES — see ``worktrees_dir`` in :func:`sweep`, which is deliberately
+    derived from ``repo_root`` directly and never passes through here.
+
+    Measured on main 4b7d7b2f (OI-1353 follow-up): invoking this module
+    without ``--state-dir`` read a repo-local, EMPTY register and silently
+    treated every completed-dispatch session as ``unknown_project`` — the
+    fabric's own resolver, run against the same repo with no flags, found
+    1651 register events at the correct central path.
+
+    Returns ``(data_dir, state_dir, error)``. ``error`` is ``None`` on a
+    successful resolve. A resolver failure (no ``vnx_paths`` importable, or
+    it raises) is a genuine MEASUREMENT FAILURE — the caller records it in
+    ``errors`` rather than silently trusting the repo-relative fallback below
+    as though it were a valid "zero dispatches known".
+    """
+    try:
+        from vnx_paths import resolve_paths
+        paths = resolve_paths()
+        return Path(paths["VNX_DATA_DIR"]), Path(paths["VNX_STATE_DIR"]), None
+    except Exception as exc:
+        env = os.environ.get("VNX_DATA_DIR", "").strip()
+        if env:
+            fallback = Path(env).expanduser()
+            chain = "$VNX_DATA_DIR"
+        else:
+            fallback = repo_root / ".vnx-data"
+            chain = "repo-relative .vnx-data"
+        return (
+            fallback,
+            fallback / "state",
+            f"central path resolver (vnx_paths.resolve_paths) unavailable "
+            f"({exc}); fell back to {chain} — register/receipts/"
+            "active-manifest reads below may be scoped to the wrong store",
+        )
