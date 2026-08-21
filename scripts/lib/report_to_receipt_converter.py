@@ -1018,12 +1018,17 @@ def build_receipt_from_report(
 #   "skipped_non_dispatch" — OI-1120: report classified as a known non-dispatch
 #                 producer (HEADLESS gate report, panel output, worktree-release
 #                 output) — never a receipt candidate, never dead-lettered.
+#   "would_append" — OI-1383/OI-1382 (--dry-run): the receipt built cleanly and
+#                 would have been appended, but dry_run=True suppressed the
+#                 actual append_receipt_payload() call — nothing was written,
+#                 no watermark entry, no fail-closed check even attempted.
 
 def _convert_one_detailed(
     report_path: Path,
     *,
     receipts_file: Optional[str] = None,
     cache_window_seconds: int = 300,
+    dry_run: bool = False,
 ) -> Tuple[Optional[Any], str]:  # (Optional[AppendResult], outcome_tag)
     """Convert one report file to a governed receipt; classify the outcome.
 
@@ -1031,6 +1036,13 @@ def _convert_one_detailed(
     fail-closed model rejection, append failure) is caught here and turned
     into a (None, outcome_tag) result so a single poisoned report can never
     propagate an exception into a caller's batch loop.
+
+    ``dry_run=True`` (OI-1383/OI-1382): builds the receipt exactly as normal
+    (including the pre-existing-receipt duplicate guard below, which only
+    reads the ledger) but never calls ``append_receipt_payload`` — nothing is
+    written. Returns ``(receipt_dict, "would_append")`` instead of
+    ``(AppendResult, "appended")`` so the caller can report intent without a
+    write having happened.
     """
     # OI-1120: classify BEFORE any receipt-building work. A known non-dispatch
     # report (HEADLESS gate output, panel output, worktree-release output) is
@@ -1127,6 +1139,15 @@ def _convert_one_detailed(
         except OSError:
             pass  # can't read NDJSON — fall through to normal append (idempotency will catch it)
 
+    if dry_run:
+        logger.info(
+            "report_to_receipt_converter: [dry-run] would book dispatch=%s "
+            "event_type=%s status=%s file=%s",
+            receipt.get("dispatch_id"), receipt.get("event_type"),
+            receipt.get("status"), report_path.name,
+        )
+        return receipt, "would_append"
+
     try:
         result = append_receipt_payload(
             receipt,
@@ -1210,6 +1231,13 @@ class ScanStats:
     # non-dispatch reports (the headless/ directory is scanned every cycle),
     # and that must read as healthy, not as "attempted with zero success".
     skipped_non_dispatch_count: int = 0
+    # OI-1383/OI-1382 (--dry-run): reports that WOULD have produced a new
+    # receipt, counted separately from new_count because nothing was actually
+    # written. Deliberately excluded from attempted_count for the same reason
+    # skipped_non_dispatch_count is — a dry-run scan is never "attempted with
+    # zero success", and _write_scan_heartbeat is skipped entirely for a
+    # dry-run so this count never influences health status either way.
+    would_append_count: int = 0
 
     @property
     def attempted_count(self) -> int:
@@ -1270,6 +1298,7 @@ def scan_and_convert(
     state_dir: Optional[Path] = None,
     *,
     cache_window_seconds: int = 300,
+    dry_run: bool = False,
 ) -> ScanStats:
     """Scan report directories and convert unprocessed reports.
 
@@ -1286,6 +1315,12 @@ def scan_and_convert(
     never becomes a dispatch report on a later scan); rejected, malformed,
     and errored reports are NOT marked processed, so they are retried on the
     next scan once their cause is fixed.
+
+    ``dry_run=True`` (OI-1383/OI-1382): reports what WOULD be booked without
+    writing a receipt or a watermark entry for ANY outcome — including a
+    would-be "appended"/"duplicate"/"skipped_non_dispatch" report, which under
+    a real run would be marked processed. See ``_convert_one_detailed``'s
+    ``"would_append"`` outcome tag.
 
     A single poisoned report can never abort the scan (OI-997): each
     report's conversion is wrapped in try/except here, in addition to
@@ -1316,6 +1351,7 @@ def scan_and_convert(
     malformed_count = 0
     error_count = 0
     skipped_non_dispatch_count = 0
+    would_append_count = 0
 
     for reports_dir in reports_dirs:
         if not isinstance(reports_dir, Path):
@@ -1339,6 +1375,7 @@ def scan_and_convert(
                     report_path,
                     receipts_file=receipts_file,
                     cache_window_seconds=cache_window_seconds,
+                    dry_run=dry_run,
                 )
             except Exception as exc:
                 # Belt-and-suspenders: _convert_one_detailed() already catches
@@ -1352,6 +1389,11 @@ def scan_and_convert(
                     report_path.name, type(exc).__name__, exc,
                 )
                 error_count += 1
+                continue
+
+            if outcome == "would_append":
+                # dry_run: never touch a watermark, never write anything.
+                would_append_count += 1
                 continue
 
             if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
@@ -1390,8 +1432,156 @@ def scan_and_convert(
         malformed_count=malformed_count,
         error_count=error_count,
         skipped_non_dispatch_count=skipped_non_dispatch_count,
+        would_append_count=would_append_count,
     )
-    _write_scan_heartbeat(state_dir, stats)
+    # dry_run: no write happened, so no heartbeat about a scan cycle either —
+    # a dry-run must leave zero observable state behind.
+    if not dry_run:
+        _write_scan_heartbeat(state_dir, stats)
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Targeted conversion — specific dispatch_ids, no directory scan
+# ---------------------------------------------------------------------------
+
+def convert_dispatch_ids(
+    dispatch_ids: "List[str]",
+    state_dir: Optional[Path] = None,
+    *,
+    dry_run: bool = False,
+    cache_window_seconds: int = 300,
+) -> ScanStats:
+    """Convert reports for a SPECIFIC set of dispatch_ids — no directory scan.
+
+    OI-1383/OI-1382 (--dispatch-id): resolves each id directly via
+    ``report_path.resolve_report_path()`` (the canonical
+    ``$VNX_DATA_DIR/unified_reports/<id>.md`` form plus its two legacy
+    filename variants) instead of globbing every ``*.md`` file in
+    ``unified_reports/``. Built for booking a dispatch the lane's own
+    fallback (or a worker) missed, without letting a full scan loose over the
+    entire report inventory.
+
+    ``data_dir`` for the resolver is ``state_dir.parent`` — the same
+    convention ``dispatch_govern.GovernSpec`` and the rest of this module use
+    (``VNX_STATE_DIR`` defaults to ``VNX_DATA_DIR/state``).
+
+    A dispatch_id with no resolvable report file counts as ``malformed_count``
+    (logged at WARNING) rather than being silently dropped.
+
+    ``dry_run=True``: identical semantics to ``scan_and_convert``'s — nothing
+    is written, no watermark entry is left, for ANY outcome. See
+    ``_convert_one_detailed``'s ``"would_append"`` tag.
+    """
+    ids = [str(d).strip() for d in dispatch_ids if str(d).strip()]
+
+    if state_dir is None:
+        try:
+            state_dir = _resolve_state_dir()
+        except Exception as exc:
+            logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
+            return ScanStats()
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    receipts_file = str(state_dir / "t0_receipts.ndjson")
+    watermark_path = state_dir / _WATERMARK_FILENAME
+    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
+    watermark = _load_watermark(watermark_path)
+    bash_watermark = _load_watermark(bash_watermark_path)
+
+    from report_path import resolve_report_path  # noqa: PLC0415
+    data_dir = state_dir.parent
+
+    new_count = 0
+    duplicate_count = 0
+    rejected_count = 0
+    malformed_count = 0
+    error_count = 0
+    skipped_non_dispatch_count = 0
+    would_append_count = 0
+
+    for dispatch_id in ids:
+        resolved = resolve_report_path(dispatch_id, data_dir=data_dir)
+        if resolved is None:
+            logger.warning(
+                "report_to_receipt_converter: --dispatch-id %s — no report file "
+                "found under %s/unified_reports",
+                dispatch_id, data_dir,
+            )
+            malformed_count += 1
+            continue
+        report_path = resolved.path
+
+        try:
+            file_hash = _compute_sha256(report_path)
+        except OSError as exc:
+            logger.warning(
+                "report_to_receipt_converter: --dispatch-id %s — cannot hash %s: %s",
+                dispatch_id, report_path, exc,
+            )
+            malformed_count += 1
+            continue
+
+        # Same cross-processor dedup as scan_and_convert(): already-processed
+        # reports are silently skipped, not counted — in BOTH modes, so a
+        # dry-run accurately reflects what a real run would (not) do.
+        if file_hash in watermark or file_hash in bash_watermark:
+            continue
+
+        try:
+            result, outcome = _convert_one_detailed(
+                report_path,
+                receipts_file=receipts_file,
+                cache_window_seconds=cache_window_seconds,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            logger.error(
+                "report_to_receipt_converter: --dispatch-id %s unhandled exception "
+                "converting %s: %s: %s",
+                dispatch_id, report_path.name, type(exc).__name__, exc,
+            )
+            error_count += 1
+            continue
+
+        if outcome == "would_append":
+            would_append_count += 1
+            continue
+
+        if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
+            _mark_processed(file_hash, watermark_path)
+            watermark.add(file_hash)
+            _mark_processed(file_hash, bash_watermark_path)
+            bash_watermark.add(file_hash)
+            if outcome == "appended":
+                new_count += 1
+                logger.info(
+                    "report_to_receipt_converter: --dispatch-id receipt emitted "
+                    "dispatch=%s file=%s",
+                    result.idempotency_key[:20], report_path.name,
+                )
+            elif outcome == "duplicate":
+                duplicate_count += 1
+            else:  # "skipped_non_dispatch"
+                skipped_non_dispatch_count += 1
+        elif outcome == "rejected":
+            rejected_count += 1
+        elif outcome == "malformed":
+            malformed_count += 1
+        else:  # "error"
+            error_count += 1
+
+    stats = ScanStats(
+        new_count=new_count,
+        duplicate_count=duplicate_count,
+        rejected_count=rejected_count,
+        malformed_count=malformed_count,
+        error_count=error_count,
+        skipped_non_dispatch_count=skipped_non_dispatch_count,
+        would_append_count=would_append_count,
+    )
+    if not dry_run:
+        _write_scan_heartbeat(state_dir, stats)
     return stats
 
 
@@ -1414,7 +1604,8 @@ def _resolve_state_dir() -> Path:
 def main(argv: Optional[List[str]] = None) -> int:
     """Scan directories and convert frontmatter reports to receipts.
 
-    Usage: report_to_receipt_converter.py [--state-dir DIR] [DIR ...]
+    Usage: report_to_receipt_converter.py [--state-dir DIR] [--dispatch-id ID ...]
+                                           [--dry-run] [DIR ...]
     """
     import argparse
 
@@ -1424,28 +1615,59 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Generic unified_report -> receipt converter"
     )
     p.add_argument("--state-dir", default=None, help="Override $VNX_STATE_DIR path")
+    p.add_argument(
+        "--dispatch-id",
+        dest="dispatch_ids",
+        action="append",
+        default=None,
+        metavar="ID",
+        help=(
+            "Process only the report for this dispatch_id (repeatable). "
+            "Resolves via report_path.resolve_report_path() directly — no "
+            "directory scan. Ignores any positional DIR arguments."
+        ),
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Report what would be booked without writing a receipt or a "
+            "watermark entry (nothing on disk changes)."
+        ),
+    )
     p.add_argument("dirs", nargs="*", help="Reports directories to scan")
     args = p.parse_args(argv if argv is not None else sys.argv[1:])
 
     state_dir = Path(args.state_dir) if args.state_dir else None
 
-    if args.dirs:
-        dirs = [Path(d) for d in args.dirs]
+    if args.dispatch_ids:
+        stats = convert_dispatch_ids(
+            args.dispatch_ids, state_dir, dry_run=args.dry_run, cache_window_seconds=300,
+        )
     else:
-        try:
-            sd = state_dir or _resolve_state_dir()
-            from vnx_paths import ensure_env
-            paths = ensure_env()
-            data_dir = Path(paths.get("VNX_DATA_DIR", ""))
-            dirs = [
-                data_dir / "unified_reports",
-                data_dir / "unified_reports" / "headless",
-            ]
-        except Exception as exc:
-            logger.error("report_to_receipt_converter: cannot resolve dirs from env: %s", exc)
-            return 1
+        if args.dirs:
+            dirs = [Path(d) for d in args.dirs]
+        else:
+            try:
+                sd = state_dir or _resolve_state_dir()
+                from vnx_paths import ensure_env
+                paths = ensure_env()
+                data_dir = Path(paths.get("VNX_DATA_DIR", ""))
+                dirs = [
+                    data_dir / "unified_reports",
+                    data_dir / "unified_reports" / "headless",
+                ]
+            except Exception as exc:
+                logger.error("report_to_receipt_converter: cannot resolve dirs from env: %s", exc)
+                return 1
 
-    stats = scan_and_convert(dirs, state_dir, cache_window_seconds=300)
+        stats = scan_and_convert(dirs, state_dir, cache_window_seconds=300, dry_run=args.dry_run)
+
+    if args.dry_run:
+        logger.info(
+            "report_to_receipt_converter: [dry-run] %d would be booked; nothing written",
+            stats.would_append_count,
+        )
     if stats.new_count:
         logger.info("report_to_receipt_converter: %d new receipt(s) emitted", stats.new_count)
     if stats.skipped_non_dispatch_count:

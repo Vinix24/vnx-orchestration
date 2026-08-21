@@ -40,6 +40,7 @@ from report_to_receipt_converter import (
     _load_route_decision,
     _load_watermark,
     build_receipt_from_report,
+    convert_dispatch_ids,
     convert_report_to_receipt,
     parse_frontmatter,
     scan_and_convert,
@@ -2396,3 +2397,138 @@ class TestBoldBranchesLineAnchored:
         )
         fields = _extract_body_fields(text)
         assert "status" not in fields
+
+
+# ---------------------------------------------------------------------------
+# OI-1383/OI-1382: --dispatch-id (targeted conversion, no directory scan)
+# ---------------------------------------------------------------------------
+
+class TestConvertDispatchIds:
+    def test_converts_only_the_requested_dispatch(self, reports_dir, state_dir):
+        _write_frontmatter_report(reports_dir / "20260821-target-a.md", "20260821-target-a")
+        _write_frontmatter_report(reports_dir / "20260821-target-b.md", "20260821-target-b")
+
+        stats = convert_dispatch_ids(["20260821-target-a"], state_dir)
+
+        assert stats.new_count == 1
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        assert receipts[0]["dispatch_id"] == "20260821-target-a"
+
+    def test_repeatable_ids_each_booked_others_untouched(self, reports_dir, state_dir):
+        _write_frontmatter_report(reports_dir / "20260821-multi-a.md", "20260821-multi-a")
+        _write_frontmatter_report(reports_dir / "20260821-multi-b.md", "20260821-multi-b")
+        _write_frontmatter_report(reports_dir / "20260821-multi-c.md", "20260821-multi-c")
+
+        stats = convert_dispatch_ids(
+            ["20260821-multi-a", "20260821-multi-c"], state_dir,
+        )
+
+        assert stats.new_count == 2
+        ids_booked = {r["dispatch_id"] for r in _receipts(state_dir)}
+        assert ids_booked == {"20260821-multi-a", "20260821-multi-c"}
+
+    def test_unknown_dispatch_id_counts_malformed_no_crash(self, reports_dir, state_dir):
+        stats = convert_dispatch_ids(["20260821-does-not-exist"], state_dir)
+
+        assert stats.new_count == 0
+        assert stats.malformed_count == 1
+        assert _count_receipts(state_dir) == 0
+
+    def test_idempotent_rescan_by_id(self, reports_dir, state_dir):
+        _write_frontmatter_report(reports_dir / "20260821-target-idem.md", "20260821-target-idem")
+
+        stats1 = convert_dispatch_ids(["20260821-target-idem"], state_dir)
+        stats2 = convert_dispatch_ids(["20260821-target-idem"], state_dir)
+
+        assert stats1.new_count == 1
+        assert stats2.new_count == 0  # watermark prevents re-emission
+        assert _count_receipts(state_dir) == 1
+
+    def test_does_not_touch_sibling_reports_in_same_directory(self, reports_dir, state_dir):
+        """A --dispatch-id run books ONLY the requested id — a sibling report
+        sitting in the same unified_reports/ directory must be left
+        completely unprocessed (no receipt, no watermark entry)."""
+        _write_frontmatter_report(reports_dir / "20260821-scoped.md", "20260821-scoped")
+        sibling = reports_dir / "20260821-sibling.md"
+        _write_frontmatter_report(sibling, "20260821-sibling")
+
+        convert_dispatch_ids(["20260821-scoped"], state_dir)
+
+        ids_booked = {r["dispatch_id"] for r in _receipts(state_dir)}
+        assert ids_booked == {"20260821-scoped"}
+        wm = _load_watermark(state_dir / _WATERMARK_FILENAME)
+        assert _compute_sha256(sibling) not in wm
+
+
+# ---------------------------------------------------------------------------
+# OI-1383/OI-1382: --dry-run (report intent, write nothing, no watermark)
+# ---------------------------------------------------------------------------
+
+class TestDryRun:
+    def test_dry_run_writes_no_receipt(self, reports_dir, state_dir):
+        _write_frontmatter_report(reports_dir / "20260821-dry-a.md", "20260821-dry-a")
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.would_append_count == 1
+        assert stats.new_count == 0
+        assert _count_receipts(state_dir) == 0
+
+    def test_dry_run_leaves_no_watermark_entry(self, reports_dir, state_dir):
+        report = reports_dir / "20260821-dry-wm.md"
+        _write_frontmatter_report(report, "20260821-dry-wm")
+
+        scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        wm_path = state_dir / _WATERMARK_FILENAME
+        assert not wm_path.exists()
+        bash_wm_path = state_dir / "processed_receipts.txt"
+        assert not bash_wm_path.exists()
+
+    def test_dry_run_count_unchanged_before_and_after(self, reports_dir, state_dir):
+        _write_frontmatter_report(reports_dir / "20260821-dry-count.md", "20260821-dry-count")
+
+        before = _count_receipts(state_dir)
+        scan_and_convert([reports_dir], state_dir, dry_run=True)
+        after = _count_receipts(state_dir)
+
+        assert before == after == 0
+
+    def test_dry_run_then_real_run_still_books_exactly_one(self, reports_dir, state_dir):
+        """A dry run must not poison the watermark or ledger — the real run
+        immediately after still books exactly one receipt."""
+        _write_frontmatter_report(
+            reports_dir / "20260821-dry-then-real.md", "20260821-dry-then-real",
+        )
+
+        dry_stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+        assert dry_stats.would_append_count == 1
+        assert _count_receipts(state_dir) == 0
+
+        real_stats = scan_and_convert([reports_dir], state_dir)
+        assert real_stats.new_count == 1
+        assert _count_receipts(state_dir) == 1
+
+    def test_dispatch_id_dry_run_targeted_writes_nothing(self, reports_dir, state_dir):
+        _write_frontmatter_report(
+            reports_dir / "20260821-dry-targeted.md", "20260821-dry-targeted",
+        )
+
+        stats = convert_dispatch_ids(
+            ["20260821-dry-targeted"], state_dir, dry_run=True,
+        )
+
+        assert stats.would_append_count == 1
+        assert _count_receipts(state_dir) == 0
+        assert not (state_dir / _WATERMARK_FILENAME).exists()
+
+    def test_dry_run_no_health_beacon_written(self, reports_dir, state_dir):
+        """dry_run must leave zero observable state — including the health
+        beacon _write_scan_heartbeat would otherwise write on a real scan."""
+        _write_frontmatter_report(reports_dir / "20260821-dry-beacon.md", "20260821-dry-beacon")
+
+        scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
+        assert not beacon_path.exists()

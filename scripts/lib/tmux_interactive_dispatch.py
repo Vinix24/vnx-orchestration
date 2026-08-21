@@ -1054,6 +1054,109 @@ class TmuxInteractiveDispatch:
                 exc,
             )
 
+    def _has_ledger_completion_row(self, dispatch_id: str) -> bool:
+        """Return True when a completion-family ledger row already exists for *dispatch_id*.
+
+        Scans ``self._receipts_file`` (t0_receipts.ndjson) the same way
+        ``_matching_receipts_split``'s canonical-signal branch does: a row whose
+        ``event_type`` ends in ``_completion`` is a real, already-landed ledger
+        entry — written either by the worker's own Completion Protocol shell
+        command or by ``dispatch_govern.ensure_receipt()``'s lane-synthesized
+        fallback. Both write ``event_type="subprocess_completion"``.
+
+        OI-1383/OI-1382: this check exists because a non-``None`` ``receipt``
+        variable does NOT mean a row landed on disk — the report-backstop
+        signal (``_wait_for_receipt`` signal 3) fabricates an in-memory receipt
+        dict from a complete+stable report file with no ledger write at all,
+        which satisfies ``ensure_receipt()``'s ``raw.receipt is not None`` gate
+        and makes it skip. The actual ledger file is the only source of truth
+        for whether a row was really written.
+
+        Best-effort: an unreadable ledger file counts as "no row" so the
+        caller's own fallback still gets a chance to book one — failing toward
+        an extra booking attempt, never toward silence.
+        """
+        if not self._receipts_file.exists():
+            return False
+        try:
+            with self._receipts_file.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or dispatch_id not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("dispatch_id") != dispatch_id:
+                        continue
+                    if str(rec.get("event_type") or "").endswith("_completion"):
+                        return True
+        except OSError as exc:
+            logger.debug(
+                "interactive: ledger scan failed for dispatch=%s: %s", dispatch_id, exc,
+            )
+            return False
+        return False
+
+    def _fallback_book_ledger_row(
+        self, dispatch_id: str, report_path: "Path | None",
+    ) -> None:
+        """Book this dispatch's ledger row from the on-disk report when nothing else did.
+
+        OI-1383/OI-1382: audit-trail vangnet. Every ``govern()`` call in this
+        lane routes through here afterward. If neither the worker's own
+        Completion Protocol command nor ``dispatch_govern.ensure_receipt()``
+        landed a completion row (see ``_has_ledger_completion_row``), the
+        report ``govern()`` just wrote/validated on disk is the last remaining
+        source of truth — drive it through the SAME generic converter every
+        other report-to-receipt path uses
+        (``report_to_receipt_converter._convert_one_detailed``), never a
+        second parser.
+
+        Runs only when no row exists yet — a worker (or ``ensure_receipt()``)
+        that already wrote one leaves this a no-op, never a second row.
+
+        Never raises: a failure here is an audit-trail gap, and per contract
+        that must be LOUD (WARNING with dispatch_id + reason), never silent.
+        """
+        if self._has_ledger_completion_row(dispatch_id):
+            return
+        if report_path is None:
+            logger.warning(
+                "interactive: ledger fallback SKIPPED for dispatch=%s — govern() "
+                "produced no report_path to convert; no ledger row exists for "
+                "this dispatch",
+                dispatch_id,
+            )
+            return
+        try:
+            from report_to_receipt_converter import _convert_one_detailed  # noqa: PLC0415
+            _result, outcome = _convert_one_detailed(
+                Path(report_path), receipts_file=str(self._receipts_file),
+            )
+        except Exception as exc:  # noqa: BLE001 — audit-trail gap must never crash the dispatch
+            logger.warning(
+                "interactive: ledger fallback CRASHED for dispatch=%s report=%s "
+                "reason=%s: %s",
+                dispatch_id, report_path, type(exc).__name__, exc,
+            )
+            return
+        if outcome in ("appended", "duplicate"):
+            logger.info(
+                "interactive: ledger fallback booked dispatch=%s outcome=%s "
+                "via report=%s",
+                dispatch_id, outcome, report_path,
+            )
+        else:
+            logger.warning(
+                "interactive: ledger fallback did NOT book a row for dispatch=%s "
+                "reason=%s report=%s — audit-trail gap remains",
+                dispatch_id, outcome, report_path,
+            )
+
     def _govern_report(
         self,
         dispatch_id: str,
@@ -1121,6 +1224,7 @@ class TmuxInteractiveDispatch:
             token_usage=token_usage,
         )
         outcome = govern(spec, raw, lane="tmux_interactive")
+        self._fallback_book_ledger_row(dispatch_id, outcome.report_path)
         self._stamp_dispatch_metadata(
             dispatch_id=dispatch_id,
             terminal_id=terminal_id,
