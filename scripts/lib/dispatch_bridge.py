@@ -476,6 +476,7 @@ def deliver_via_door(
     gate: str = "",
     pr_id: Optional[str] = None,
     work_ref: Optional[str] = None,
+    base_ref: Optional[str] = None,
     project_id: Optional[str] = None,
     deadline_seconds: Optional[int] = None,
     allow_headless: bool = False,
@@ -505,6 +506,14 @@ def deliver_via_door(
     rules, so a caller that skips its own check still fails loud. Defaults False /
     None reproduce byte-identical prior behavior.
 
+    ``pr_id`` / ``work_ref`` / ``base_ref`` (OI-1390): threaded through to
+    ``bridge_dispatch`` -> ``stage_spec_bundle`` unchanged, so a consumer-door
+    fix-forward onto an existing PR branch (``vnx dispatch-agent``) lands the
+    same spec fields the internal callers already stage directly. All three
+    default to None, which ``stage_spec_bundle`` resolves exactly like an
+    omitted kwarg (``base_ref`` -> "origin/main", ``pr_id``/``work_ref`` ->
+    None) — byte-identical prior behavior for a caller that never passes them.
+
     Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
     and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
     """
@@ -522,6 +531,7 @@ def deliver_via_door(
             gate=gate,
             pr_id=pr_id,
             work_ref=work_ref,
+            base_ref=base_ref if base_ref is not None else "origin/main",
             project_id=project_id,
             deadline_seconds=deadline_seconds if deadline_seconds is not None else 3600,
             allow_headless=allow_headless,

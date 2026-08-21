@@ -436,6 +436,38 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
         metavar="REASON",
         help="required human-readable justification when --allow-headless is set",
     )
+    dispatch_parser.add_argument(
+        "--base-ref",
+        default=None,
+        dest="base_ref",
+        metavar="REF",
+        help=(
+            "git ref the dispatch worktree branches from (default: unset, "
+            "which preserves the lane's current origin/main default). Use for "
+            "a fix-forward that must branch from a non-main ref."
+        ),
+    )
+    dispatch_parser.add_argument(
+        "--work-ref",
+        default=None,
+        dest="work_ref",
+        metavar="REF",
+        help=(
+            "existing branch to push a fix-forward onto, instead of opening a "
+            "fresh dispatch/<id> branch (default: unset, which preserves the "
+            "lane's current new-branch behavior)"
+        ),
+    )
+    dispatch_parser.add_argument(
+        "--pr-id",
+        default=None,
+        dest="pr_id",
+        metavar="PR_ID",
+        help=(
+            "existing PR this dispatch's fix-forward belongs to, so pr "
+            "enforcement never opens a second PR (default: unset)"
+        ),
+    )
 
 
 def _register_track_subparser(subparsers: argparse.Action) -> None:
