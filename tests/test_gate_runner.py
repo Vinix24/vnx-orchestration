@@ -370,6 +370,155 @@ class TestStallDetection:
         assert mock_killpg.called or mock_proc.kill.called
 
 
+class TestExitNonzeroReasonDetail:
+    """OI-1293: the exit_nonzero branch must not discard stdout/stderr.
+
+    Before the fix, reason_detail was built purely from the exit code
+    (``f"Subprocess exited with code {proc.returncode}"``), throwing away
+    stdout/stderr even though both were already read into `_base` a line
+    earlier. Gates that run with machine-readable output (codex_gate: ``exec
+    --json``) write structured error records — e.g. a quota-exhaustion
+    message with the exact reset time — straight to stdout on failure. This
+    class proves that record survives into reason_detail, and that a
+    completely unstructured failure still carries the raw tail instead of
+    silently falling back to the bare exit code.
+    """
+
+    @staticmethod
+    def _run_codex_exit_nonzero(gate_env, payload, stdout_bytes=b"", stderr_bytes=b"", pid=24680):
+        """Drive one codex_gate subprocess run that exits 1, feeding fixed
+        stdout/stderr bytes through the select/os.read mocks the same way the
+        rest of this file simulates subprocess I/O."""
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
+        mock_proc.poll.return_value = 1
+        mock_proc.returncode = 1
+        mock_proc.pid = pid
+
+        call_count = [0]
+
+        def mock_select(rlist, wlist, xlist, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return ([10, 11], [], [])
+            return ([], [], [])
+
+        read_calls = {10: 0, 11: 0}
+
+        def mock_os_read(fd, size):
+            read_calls[fd] = read_calls.get(fd, 0) + 1
+            if fd == 10 and read_calls[10] == 1:
+                return stdout_bytes
+            if fd == 11 and read_calls[11] == 1:
+                return stderr_bytes
+            return b""
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"],
+        )
+        with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
+             patch("gate_runner.select.select", side_effect=mock_select), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=pid):
+            return runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+
+    def test_structured_error_message_surfaces_reset_time(self, gate_env, monkeypatch):
+        """A codex-style JSON error line on stdout has its `message` — here
+        carrying the quota reset time — lifted into reason_detail literally,
+        instead of being dropped in favor of a bare exit-code string."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        # The reset time is fed to the fake gate as data and asserted as a
+        # separate value below — not hand-duplicated as a literal on both sides.
+        reset_time = "Aug 21st, 2026 11:22 AM"
+        error_line = json.dumps({
+            "type": "error",
+            "message": f"You've hit your usage limit. Upgrade to Pro, or try again at {reset_time}.",
+        })
+        stdout_bytes = (
+            json.dumps({"type": "item.started", "item": {"id": "1"}}) + "\n" + error_line + "\n"
+        ).encode("utf-8")
+
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=str(gate_env["reports_dir"] / "codex-quota-report.md"),
+        )
+
+        result = self._run_codex_exit_nonzero(gate_env, payload, stdout_bytes=stdout_bytes)
+
+        before_fix_detail = "Subprocess exited with code 1"
+        after_fix_detail = result["reason_detail"]
+
+        assert result["reason"] == "exit_nonzero"
+        # Before the fix, this is exactly what reason_detail would have been.
+        assert after_fix_detail != before_fix_detail
+        assert after_fix_detail.startswith(before_fix_detail)
+        assert reset_time in after_fix_detail
+
+    def test_unstructured_output_falls_back_to_raw_tail(self, gate_env, monkeypatch):
+        """Without a recognizable structured error record, the raw stdout/
+        stderr tail must still ride along in reason_detail — not just the
+        exit code — so an unanticipated failure mode still surfaces something."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        raw_stderr_text = "panic: unexpected nil pointer dereference in codex_cli/exec.go:412"
+        stderr_bytes = (raw_stderr_text + "\n").encode("utf-8")
+
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=str(gate_env["reports_dir"] / "codex-unstructured-report.md"),
+        )
+
+        result = self._run_codex_exit_nonzero(
+            gate_env, payload, stdout_bytes=b"", stderr_bytes=stderr_bytes, pid=13579,
+        )
+
+        before_fix_detail = "Subprocess exited with code 1"
+
+        assert result["reason"] == "exit_nonzero"
+        assert result["reason_detail"] != before_fix_detail
+        assert result["reason_detail"].startswith(before_fix_detail)
+        assert raw_stderr_text in result["reason_detail"]
+
+    def test_reason_stays_unavailable_not_failed(self, gate_env, monkeypatch):
+        """Trap 1 (OI-1293 dispatch): enriching reason_detail must not smuggle
+        in a new `reason` value. `reason` stays `exit_nonzero` — already in
+        gate_recorder.EXECUTION_FAILURE_REASONS — so record_failure still
+        books status=unavailable, not `failed`. A `failed` status here would
+        misread a quota/infra failure as a rejected PR review."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        error_line = json.dumps({
+            "type": "error",
+            "message": "You've hit your usage limit. Try again at Sep 1st, 2026 09:00 AM.",
+        })
+        stdout_bytes = (error_line + "\n").encode("utf-8")
+
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=str(gate_env["reports_dir"] / "codex-status-report.md"),
+        )
+
+        result = self._run_codex_exit_nonzero(
+            gate_env, payload, stdout_bytes=stdout_bytes, pid=97531,
+        )
+
+        assert result["reason"] == "exit_nonzero"
+        assert result["status"] == "unavailable"
+        assert result["required_reruns"] == ["codex_gate"]
+        assert "NOT a review fail" in result["summary"]
+
+        result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["status"] == "unavailable"
+        assert saved["reason"] == "exit_nonzero"
+        assert "usage limit" in saved["summary"]
+
+
 class TestSkipRationaleAudit:
     """GATE-9: Skip-rationale NDJSON record written for not_executable."""
 
