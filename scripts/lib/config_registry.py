@@ -214,6 +214,19 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Canary fraction (0-100) of an enabled tier's traffic routed via the smart "
         "router; the rest follows the legacy path. Deterministic per dispatch.",
         subsystem="smart-router-staging", status="LIVE"),
+
+    # Operator directive 2026-08-21 (dispatch-20260821-t0-tmux-concurrency-10): the
+    # claude-tmux N-slot lock's concurrency cap, raised from 5 to 10 and made
+    # registry-backed so an operator can flip it from the dashboard, not just env.
+    "VNX_TMUX_MAX_CONCURRENT": _e(
+        "VNX_TMUX_MAX_CONCURRENT", "string", "10", "dispatch",
+        "N-slot concurrency cap for the claude-tmux serial lock "
+        "(scripts/lib/dispatch_serialization.py). ACCOUNT-wide: shared with every "
+        "other project and worktree running on the same Claude subscription, not "
+        "scoped to this project. The process env var still wins over this "
+        "config-store value as an explicit per-session override.",
+        approval=True,
+        subsystem="claude-tmux-serialization", status="LIVE"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems

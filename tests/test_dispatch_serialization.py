@@ -2,13 +2,15 @@
 
 Covers: intra-thread serialization, no-op for None, exception release,
 force_release escape, account-level lock directory resolution, pid liveness
-warnings, unexpected OSError re-raise, and timezone-aware _iso_now.
+warnings, unexpected OSError re-raise, timezone-aware _iso_now, and the
+registry-backed VNX_TMUX_MAX_CONCURRENT precedence (env > config-store > default).
 """
 from __future__ import annotations
 
 import errno
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -19,6 +21,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
+import config_registry as _cr_mod
+import config_runtime as _crt_mod
+import config_store_db as _csdb_mod
 import dispatch_serialization as _ds_mod
 from dispatch_serialization import _iso_now, force_release, serialize_lane
 
@@ -30,9 +35,10 @@ from dispatch_serialization import _iso_now, force_release, serialize_lane
 def test_parallel_claude_serializes(tmp_path, monkeypatch):
     """Two threads entering serialize_lane("claude-tmux") never hold body concurrently.
 
-    Pins VNX_TMUX_MAX_CONCURRENT=1 explicitly (dispatch-20260811c-b raised the unset
-    default to 5) — this test is about single-slot mutual exclusion, not the default
-    concurrency level; test_three_slots_concurrent_fourth_blocks below covers N>1."""
+    Pins VNX_TMUX_MAX_CONCURRENT=1 explicitly (the unset default is now 10 — see
+    test_max_concurrent_defaults_to_ten) — this test is about single-slot mutual
+    exclusion, not the default concurrency level; test_three_slots_concurrent_fourth_blocks
+    below covers N>1."""
     monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "1")
 
@@ -129,12 +135,30 @@ def test_three_slots_concurrent_fourth_blocks(tmp_path, monkeypatch):
 # test_max_concurrent clamping + defaults
 # ---------------------------------------------------------------------------
 
-def test_max_concurrent_defaults_to_five(monkeypatch):
-    """dispatch-20260811c-b: no VNX_TMUX_MAX_CONCURRENT set -> default concurrency is 5
-    (raised from 1 now that #1451 gives every tmux dispatch its own named paste buffer —
-    see the module docstring)."""
+@pytest.fixture(autouse=True)
+def _reset_config_registry_globals():
+    """config_registry's db-resolver / default-project and config_runtime's autowire
+    cache are module-level globals shared across the whole pytest session — reset
+    them around every test in this file so a config-store test below can never leak
+    a wired DB resolver into an unrelated env-only test (or vice versa)."""
+    _cr_mod.set_db_resolver(None)
+    _cr_mod.set_default_project_id(None)
+    _crt_mod._wired_for.clear()
+    yield
+    _cr_mod.set_db_resolver(None)
+    _cr_mod.set_default_project_id(None)
+    _crt_mod._wired_for.clear()
+
+
+def test_max_concurrent_defaults_to_ten(monkeypatch):
+    """dispatch-20260821-t0-tmux-concurrency-10: no VNX_TMUX_MAX_CONCURRENT env var, no
+    config-store row -> default concurrency is 10 (raised from 5, operator directive
+    2026-08-21; 5 itself was raised from 1 now that #1451 gives every tmux dispatch its
+    own named paste buffer — see the module docstring)."""
     monkeypatch.delenv("VNX_TMUX_MAX_CONCURRENT", raising=False)
-    assert _ds_mod._max_concurrent() == 5
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    assert _ds_mod._max_concurrent() == 10
 
 
 def test_max_concurrent_accepts_valid_positive_value(monkeypatch):
@@ -145,12 +169,57 @@ def test_max_concurrent_accepts_valid_positive_value(monkeypatch):
 
 @pytest.mark.parametrize("raw_value", ["0", "-1", "-100", "x", ""])
 def test_max_concurrent_clamps_bad_values(raw_value, monkeypatch):
-    """0, negative, or unparseable VNX_TMUX_MAX_CONCURRENT falls back to 5 (>= 1 satisfied,
-    same fallback as the missing-env-var default — see test_max_concurrent_defaults_to_five)."""
+    """0, negative, or unparseable VNX_TMUX_MAX_CONCURRENT falls back to 10 (>= 1 satisfied,
+    same fallback as the missing-env-var default — see test_max_concurrent_defaults_to_ten)."""
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", raw_value)
     result = _ds_mod._max_concurrent()
     assert result >= 1
-    assert result == 5
+    assert result == 10
+
+
+def test_max_concurrent_reads_config_store_value(tmp_path, monkeypatch):
+    """VNX_TMUX_MAX_CONCURRENT registry row (OI-1412): a config-store value with NO env
+    var set must be genuinely read via config_runtime -- a registry row nothing reads
+    is decoration, not config. Proven by writing through config_store_db (the same
+    write path the dashboard uses), not by stubbing the resolver."""
+    monkeypatch.delenv("VNX_TMUX_MAX_CONCURRENT", raising=False)
+    monkeypatch.delenv("VNX_OVERRIDE_TMUX_MAX_CONCURRENT", raising=False)
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    _csdb_mod.set_config(
+        conn, "vnx-dev", "VNX_TMUX_MAX_CONCURRENT", "7",
+        actor="op", approval_id="test-approval",
+    )
+    conn.close()
+
+    monkeypatch.setenv("VNX_STATE_DIR", str(sd))
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
+    assert _ds_mod._max_concurrent() == 7
+
+
+def test_max_concurrent_env_wins_over_config_store(tmp_path, monkeypatch):
+    """The process env var is an explicit per-session override and must win over a
+    persisted config-store row for the same key, even when the store is wired and
+    has a value -- precedence is env > config-store > default."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    conn = sqlite3.connect(sd / "runtime_coordination.db")
+    _csdb_mod.set_config(
+        conn, "vnx-dev", "VNX_TMUX_MAX_CONCURRENT", "7",
+        actor="op", approval_id="test-approval",
+    )
+    conn.close()
+
+    monkeypatch.setenv("VNX_STATE_DIR", str(sd))
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "4")
+
+    assert _ds_mod._max_concurrent() == 4
 
 
 # ---------------------------------------------------------------------------
