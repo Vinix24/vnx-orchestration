@@ -966,8 +966,17 @@ class TestGateTimeoutConfig:
 
     def test_default_stall_threshold(self):
         from headless_adapter import gate_stall_threshold
-        assert gate_stall_threshold("gemini_review") == 60
-        assert gate_stall_threshold("codex_gate") == 120
+        # Literals, not GATE_STALL_DEFAULTS lookups: comparing the function's
+        # output to the dict it reads from would pass no matter what the dict
+        # said. gemini_review's 180s (not the 60s in
+        # 180_GATE_EXECUTION_LIFECYCLE_CONTRACT.md §4.2, which was never
+        # reconciled against the code) has shipped since the gate runner's
+        # introduction (c0957d22) and every OI-105 triage since treats it as
+        # the accepted value (Gemini CLI's stdout-flush stalls, OI-048).
+        assert gate_stall_threshold("gemini_review") == 180
+        assert gate_stall_threshold("codex_gate") == 300
+        assert gate_stall_threshold("claude_github_optional") == 60
+        assert gate_stall_threshold("ci_gate") == 30
 
     def test_env_override_stall_threshold(self, monkeypatch):
         from headless_adapter import gate_stall_threshold
