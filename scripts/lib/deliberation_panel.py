@@ -145,6 +145,16 @@ class DeliberationResult:
         failed = ", ".join(f"{s['provider']} ({s['lens']})" for s in self.failed_seats)
         return f"{present}/{total} lenses present; {failed} failed"
 
+    @property
+    def zero_seats_delivered(self) -> bool:
+        """True when NOT ONE seat produced usable content (OI-1358). ``min_seats``/
+        ``allow_degraded`` govern whether the SYNTHESIS proceeds below the floor — at
+        0/N delivered, a caller with no floor set (or with ``--allow-degraded``) still
+        gets a synthesis run over nothing. This flag is the independent signal a caller
+        checks WITHOUT parsing the report to know the run produced no real content, so
+        ``scripts/panel.py`` can exit non-zero even when the gate let the run through."""
+        return len(self.fan_out) > 0 and len(self.present_lenses) == 0
+
     def to_report(self) -> str:
         lines = [
             f"# Deliberation panel — {self.mode}",
@@ -517,7 +527,56 @@ def _pick(roster: List[Tuple[str, str]], prefer: Tuple[str, ...]) -> Tuple[str, 
     return _ordered_seats(roster, prefer)[0]
 
 
+def _seat_exit_code(text: str) -> Optional[int]:
+    """Read a seat's real outcome from the ``exit_code`` in its unified-report frontmatter
+    (OI-1358), when present. Returns ``None`` when there is nothing to read: no frontmatter
+    block, malformed YAML, or an ``exit_code`` that isn't an int — the caller must then fall
+    back to the sentinel-text check, since the outcome cannot be read off this text.
+
+    Why frontmatter carries the outcome and sentinel text doesn't: a seat that fail-closed
+    REFUSES does so BEFORE inference and never writes its own report, so the lane wrapper
+    writes the unified report itself — WITH frontmatter, carrying the real ``exit_code``.
+    ``emit_unified_report`` is idempotent, so a seat that ran inference and wrote its OWN
+    report (worker-authored) leaves that report untouched — WITHOUT frontmatter. Measured
+    live: a refused glm-harness seat's report on disk
+    (``panel-sweep-diverge-3-e4bafa.md``) carries ``exit_code: 1`` in frontmatter, with a
+    2.6-14KB non-empty body (the generic instruction-echo wrapper) that matches none of the
+    sentinel markers below — this is exactly how 4/5 dead seats in a real 0/5 panel run
+    were miscounted as present before this fix.
+
+    ``token_usage`` is deliberately NEVER used as a discriminator here: for 14 of 47
+    measured failed seats (all kimi), post-run token capture is itself unavailable
+    (``token_usage_measured: false``) even when the seat produced real, verified analysis
+    (e.g. ``panel-research-diverge-1-fadf0e.partial.md``, 6.1KB of real panel content
+    alongside ``token_usage.output: 0``). Gating presence on output-token count would trade
+    the false-positive failure mode this fix repairs for a false-negative one on exactly the
+    seats that did the work — ``exit_code`` alone is the reliable signal.
+    """
+    try:
+        from unified_report_schema import parse_frontmatter, SchemaViolation  # noqa: PLC0415
+    except ImportError:
+        return None
+    try:
+        frontmatter = parse_frontmatter(text or "")
+    except SchemaViolation:
+        return None
+    exit_code = frontmatter.get("exit_code")
+    return exit_code if isinstance(exit_code, int) else None
+
+
 def _is_error(text: str) -> bool:
+    """A seat counts as failed when its OUTCOME says so, not the shape of its text
+    (OI-1358). Prefers the real ``exit_code`` carried in the seat's own unified-report
+    frontmatter (see ``_seat_exit_code``): a dispatch that REFUSES but still emits a
+    non-empty report body (the generic wrapper) used to slip through as "present" because
+    it matched none of the three sentinel strings below. Falls back to the sentinel-text
+    check ONLY when no frontmatter is present (no report on disk, or a worker-authored
+    report without frontmatter) — this is the pre-existing behaviour, not a regression: a
+    report with no frontmatter carries no readable outcome, so it stays exactly as
+    permissive as it was before this fix."""
+    exit_code = _seat_exit_code(text)
+    if exit_code is not None:
+        return exit_code != 0
     t = (text or "").strip()
     return (not t) or t.startswith("[dispatch error") or t == "[empty]"
 

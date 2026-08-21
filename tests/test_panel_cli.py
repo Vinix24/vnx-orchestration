@@ -182,3 +182,54 @@ def test_panel_refusal_returns_nonzero_and_loud(tmp_path, monkeypatch, capsys):
     assert rc == 1
     assert "SYNTHESIS REFUSED" in captured.err
     assert "1/5" in captured.err
+
+
+def test_panel_zero_seats_delivered_returns_nonzero_and_loud(tmp_path, monkeypatch, capsys):
+    """OI-1358: a run where ZERO seats delivered real content must not exit 0, even when
+    no min_seats floor caught it (synthesis_refused_reason stays empty, e.g. no floor
+    configured or --allow-degraded let it through) -- the caller must be able to detect
+    a phantom-full panel without parsing the report."""
+    panel = _load_panel_cli()
+
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        return lambda provider, model, prompt, dispatch_id: "ok"
+
+    class _ZeroDeliveredResult:
+        synthesis_refused_reason = ""
+        zero_seats_delivered = True
+        fan_out = [{"provider": f"p{i}", "lens": "x", "text": "refused"} for i in range(5)]
+
+        def to_report(self) -> str:
+            return "# fake panel report\n"
+
+    def fake_run_deliberation(*args, **kwargs):
+        return _ZeroDeliveredResult()
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_dispatcher_factory)
+    monkeypatch.setattr(panel, "run_deliberation", fake_run_deliberation)
+
+    rc = panel.main(["sweep", "audit src/", "--out", str(tmp_path / "report.md")])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "ZERO SEATS DELIVERED" in captured.err
+    assert "0/5" in captured.err
+
+
+def test_panel_normal_run_with_content_stays_exit_zero(tmp_path, monkeypatch):
+    """Sanity/regression guard: a normal successful run must still exit 0. Uses the
+    pre-existing ``_FakeResult`` double, which has no ``zero_seats_delivered`` attribute
+    at all -- the CLI's getattr(..., False) default must not treat that as a failure."""
+    panel = _load_panel_cli()
+
+    def fake_dispatcher_factory(data_dir, timeout, role=None):
+        return lambda provider, model, prompt, dispatch_id: "ok"
+
+    def fake_run_deliberation(*args, **kwargs):
+        return _FakeResult()
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_dispatcher_factory)
+    monkeypatch.setattr(panel, "run_deliberation", fake_run_deliberation)
+
+    rc = panel.main(["sweep", "audit src/", "--out", str(tmp_path / "report.md")])
+    assert rc == 0
