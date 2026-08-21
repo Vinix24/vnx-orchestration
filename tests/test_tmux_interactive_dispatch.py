@@ -3387,6 +3387,198 @@ class TestReceiptFallback(_LaneTestCase):
 
 
 # ---------------------------------------------------------------------------
+# RECEIPT step: OI-1383/OI-1382 — ledger-row fallback when neither the worker
+# nor ensure_receipt() ever wrote one (report_backstop fools ensure_receipt's
+# "raw.receipt is not None" gate: that receipt is a fabricated in-memory dict,
+# never a landed ledger row).
+# ---------------------------------------------------------------------------
+
+_FALLBACK_TEST_REPORT_BODY = (
+    "## Summary\n\nImplemented the fallback per dispatch specification. "
+    "All targeted tests pass and the change stays within scope.\n\n"
+    "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+    "## Verification\n\npytest tests/test_example.py -x: 3 passed\n\n"
+    "## Open Items\n\nNone\n"
+)
+
+
+class TestLedgerRowFallback(_LaneTestCase):
+    """_govern_report books its own ledger row when nothing else did."""
+
+    def _make_lane_and_reports_dir(self):
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        reports_dir = self.state_dir.parent / "unified_reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        return lane, reports_dir
+
+    def _ledger_rows_for(self, dispatch_id):
+        if not self.receipts_file.exists():
+            return []
+        lines = [
+            json.loads(ln)
+            for ln in self.receipts_file.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        return [r for r in lines if r.get("dispatch_id") == dispatch_id]
+
+    def test_books_ledger_row_from_report_when_worker_skipped_protocol(self):
+        """Report on disk is the ONLY source: no worker-emitted row exists, and
+        the receipt _wait_for_receipt would hand to govern() is the fabricated
+        report_backstop dict (never itself written to the ledger). The
+        fallback must still book exactly one real ledger row from the report.
+        """
+        lane, reports_dir = self._make_lane_and_reports_dir()
+        report_path = reports_dir / f"{self.DISPATCH_ID}.md"
+        report_path.write_text(_FALLBACK_TEST_REPORT_BODY, encoding="utf-8")
+
+        # Exact shape _wait_for_receipt's signal-3 report_backstop produces
+        # (tmux_interactive_dispatch.py, _wait_for_receipt): non-None, but
+        # never appended to t0_receipts.ndjson anywhere.
+        backstop_receipt = {
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "done",
+            "event_type": "subprocess_completion",
+            "source": "report_backstop",
+            "_signal": "report_backstop",
+            "report_path": str(report_path),
+        }
+
+        self.assertFalse(self.receipts_file.exists(), "no ledger row must exist before govern()")
+
+        result_path = lane._govern_report(
+            dispatch_id=self.DISPATCH_ID,
+            terminal_id="ephemeral",
+            instruction="do the thing",
+            receipt=backstop_receipt,
+            duration_seconds=42.0,
+            model="sonnet",
+            role="backend-developer",
+        )
+
+        self.assertIsNotNone(result_path, "govern() must still emit a report")
+        rows = self._ledger_rows_for(self.DISPATCH_ID)
+        self.assertEqual(
+            len(rows), 1,
+            f"expected exactly one fallback-booked ledger row, got: {rows}",
+        )
+        booked = rows[0]
+        self.assertIn(
+            booked.get("event_type"),
+            ("task_complete", "task_failed", "report_contract_invalid"),
+            f"unexpected event_type on fallback-booked row: {booked}",
+        )
+        # Identity comes from the report govern() itself wrote (frontmatter),
+        # not from an assumption made by the fallback.
+        self.assertEqual(booked.get("model"), "sonnet")
+        self.assertEqual(booked.get("provider"), "claude")
+
+    def test_no_second_row_when_worker_wrote_own(self):
+        """The worker's own Completion Protocol run already landed a row in
+        t0_receipts.ndjson before govern() is called (signal-1 canonical).
+        The fallback must be a complete no-op — no second row."""
+        lane, reports_dir = self._make_lane_and_reports_dir()
+        report_path = reports_dir / f"{self.DISPATCH_ID}.md"
+        report_path.write_text(_FALLBACK_TEST_REPORT_BODY, encoding="utf-8")
+
+        worker_receipt = {
+            "event_type": "subprocess_completion",
+            "receipt_kind": "dispatch",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "ephemeral",
+            "terminal_id": "ephemeral",
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-08-21T12:00:00Z",
+            "report_path": str(report_path),
+            "provider": "claude",
+            "sub_provider": "anthropic",
+            "model": "sonnet",
+            "lane": "tmux_interactive",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(worker_receipt) + "\n")
+
+        lane._govern_report(
+            dispatch_id=self.DISPATCH_ID,
+            terminal_id="ephemeral",
+            instruction="do the thing",
+            receipt=worker_receipt,
+            duration_seconds=12.0,
+            model="sonnet",
+            role="backend-developer",
+        )
+
+        rows = self._ledger_rows_for(self.DISPATCH_ID)
+        self.assertEqual(
+            len(rows), 1,
+            f"worker already wrote its own row — fallback must not add a second: {rows}",
+        )
+        self.assertEqual(
+            rows[0].get("source"), "tmux_interactive",
+            "the surviving row must still be the worker's own, untouched",
+        )
+
+    def test_warns_loudly_when_no_report_to_fall_back_on(self):
+        """No worker row AND govern() produced no report_path (e.g. emit
+        failure) — the fallback cannot book anything and must say so loudly
+        (WARNING with the dispatch_id), never fail silently."""
+        lane, _reports_dir = self._make_lane_and_reports_dir()
+
+        with self.assertLogs("tmux_interactive_dispatch", level="WARNING") as cm:
+            lane._fallback_book_ledger_row(self.DISPATCH_ID, None)
+
+        self.assertFalse(self._ledger_rows_for(self.DISPATCH_ID))
+        joined = "\n".join(cm.output)
+        self.assertIn(self.DISPATCH_ID, joined)
+        self.assertIn("ledger fallback", joined)
+
+    def test_unreadable_ledger_row_warns_instead_of_silently_skipping(self):
+        """An unparseable line in t0_receipts.ndjson must not make
+        _has_ledger_completion_row silently conclude "no row" — that is
+        exactly the spot deciding whether the vangnet fires a duplicate
+        booking. A broken row on disk must be LOUD (WARNING + dispatch_id),
+        never quietly swallowed by the JSONDecodeError guard."""
+        lane, _reports_dir = self._make_lane_and_reports_dir()
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(f'{{"dispatch_id": "{self.DISPATCH_ID}", "event_type": BROKEN\n')
+
+        with self.assertLogs("tmux_interactive_dispatch", level="WARNING") as cm:
+            result = lane._has_ledger_completion_row(self.DISPATCH_ID)
+
+        self.assertFalse(result, "an unreadable row is not a completion row")
+        joined = "\n".join(cm.output)
+        self.assertIn(self.DISPATCH_ID, joined)
+        self.assertIn("JSONDecodeError", joined)
+
+    def test_unreadable_ledger_row_does_not_block_scan_of_later_valid_row(self):
+        """A broken line must be skipped (with a warning), not treated as a
+        reason to abort the scan — a genuine completion row further down the
+        same file must still be found."""
+        lane, _reports_dir = self._make_lane_and_reports_dir()
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        valid_row = {
+            "dispatch_id": self.DISPATCH_ID,
+            "event_type": "subprocess_completion",
+        }
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(f'{{"dispatch_id": "{self.DISPATCH_ID}", "event_type": BROKEN\n')
+            fh.write(json.dumps(valid_row) + "\n")
+
+        with self.assertLogs("tmux_interactive_dispatch", level="WARNING"):
+            result = lane._has_ledger_completion_row(self.DISPATCH_ID)
+
+        self.assertTrue(
+            result, "a valid completion row later in the file must still be found",
+        )
+
+
+# ---------------------------------------------------------------------------
 # RECEIPT step: dedup — authored > synthesized; late worker wins
 # ---------------------------------------------------------------------------
 
