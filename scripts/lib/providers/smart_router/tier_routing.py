@@ -75,6 +75,42 @@ _TIER_MAP = load_tier_map()
 _TIER_LADDER = load_tier_ladder()
 
 
+# Escalation decisions the failure-class table can produce.
+DECISION_CLIMB = "climb"                  # one rung UP the cost ladder
+DECISION_RETRY_SAME_TIER = "retry_same_tier"  # herkansing on the SAME rung first
+DECISION_NO_CLIMB = "no_climb"            # do not climb; the ladder stays put
+
+
+class UnknownFailureClassError(ValueError):
+    """A failure_class the decision table does not know.
+
+    The table is a CLOSED set: a class that is not in it raises instead of
+    silently falling back to "klim maar" — a silent climb on an unrecognized
+    failure is exactly the rung-skipping bug this table exists to prevent.
+    """
+
+
+# The escalation decision table (dispatch 20260816-p6-escalate-tier-failure-class).
+# The rule lives in CODE, not in a docstring:
+#   model_error       — klim een trede
+#   credit_exhausted  — klim een trede EN meld aan de operator
+#   auth_rejected     — klim NIET (een hoger model heeft hetzelfde auth-probleem;
+#                       een duurder model lost een geweigerde sleutel niet op —
+#                       dat is puur geldverbranding)
+#   timeout           — eerst een herkansing op dezelfde trede, daarna pas klimmen
+#   empty_completion  — eerst een herkansing op dezelfde trede, daarna pas klimmen
+#   unknown           — klim niet, en meld de onbekende klasse luid
+# A class NOT in this mapping raises UnknownFailureClassError — never a silent climb.
+_FAILURE_CLASS_TABLE = {
+    "model_error": (DECISION_CLIMB, False),
+    "credit_exhausted": (DECISION_CLIMB, True),
+    "auth_rejected": (DECISION_NO_CLIMB, False),
+    "timeout": (DECISION_RETRY_SAME_TIER, False),
+    "empty_completion": (DECISION_RETRY_SAME_TIER, False),
+    "unknown": (DECISION_NO_CLIMB, True),
+}
+
+
 @dataclass(frozen=True)
 class TierEscalation:
     """Quality-escalation signal for a REJECTED result (OI-1221).
@@ -84,11 +120,22 @@ class TierEscalation:
     (``tier_to = tier_from + 1``), linked back to the rejected attempt via
     ``parent_dispatch``. ``tier_to`` is None when the ladder is already topped
     (no rung above ``tier_from``) — a caller must then stop climbing, not wrap.
+
+    Since dispatch 20260816-p6-escalate-tier-failure-class the climb is gated by
+    the failure class: ``decision`` is one of DECISION_CLIMB /
+    DECISION_RETRY_SAME_TIER / DECISION_NO_CLIMB, and ``operator_alert`` marks
+    the classes the operator must hear about (credit_exhausted, unknown). For
+    DECISION_RETRY_SAME_TIER ``tier_to == tier_from`` (the herkansing runs on
+    the same rung); for DECISION_NO_CLIMB ``tier_to`` is None.
     """
 
     tier_from: str
     tier_to: Optional[str]
     parent_dispatch: str
+    failure_class: str
+    decision: str
+    operator_alert: bool
+    reason: str
 
 
 def next_tier(tier: str) -> Optional[str]:
@@ -107,19 +154,83 @@ def next_tier(tier: str) -> Optional[str]:
     return names[idx + 1] if idx + 1 < len(names) else None
 
 
-def escalate_tier(tier_from: str, parent_dispatch: str) -> TierEscalation:
+def escalate_tier(
+    tier_from: str,
+    parent_dispatch: str,
+    failure_class: str,
+    *,
+    retried: bool = False,
+) -> TierEscalation:
     """Build the quality-escalation signal for a rejected result.
 
-    Deterministic: ``tier_to`` is exactly one rung above ``tier_from`` on the
-    cost ladder, and ``parent_dispatch`` names the rejected attempt so the
-    followup is traceable in the audit trail. This is quality escalation, NOT
-    availability fallback — it never walks the tier's ``fallback`` chain and it
-    never stays on the same tier.
+    The climb is decided by ``failure_class`` via the closed
+    ``_FAILURE_CLASS_TABLE`` (see above) — never by a bare boolean:
+
+      * climb           — ``tier_to`` is exactly one rung above ``tier_from``
+                          (None when the ladder is topped; the caller must stop).
+      * retry_same_tier — ``tier_to == tier_from``: a herkansing on the same
+                          rung. Only the FIRST failure of a timeout/
+                          empty_completion retries; with ``retried=True`` the
+                          same class climbs instead (eerst herkansing, daarna
+                          pas klimmen).
+      * no_climb        — ``tier_to`` is None and the caller must NOT stage a
+                          followup (auth_rejected: a higher model has the same
+                          auth problem; unknown: reported loudly instead).
+
+    ``parent_dispatch`` names the rejected attempt so the followup is traceable
+    in the audit trail. This is quality escalation, NOT availability fallback —
+    it never walks the tier's ``fallback`` chain.
+
+    Raises UnknownFailureClassError for a failure_class the table does not
+    know — the set is closed on purpose; an unrecognized class fails loud
+    instead of silently climbing.
     """
+    entry = _FAILURE_CLASS_TABLE.get((failure_class or "").strip())
+    if entry is None:
+        raise UnknownFailureClassError(
+            f"failure_class {failure_class!r} is not in the escalation decision "
+            f"table {sorted(_FAILURE_CLASS_TABLE)} — refusing to decide silently"
+        )
+    decision, operator_alert = entry
+
+    if decision == DECISION_RETRY_SAME_TIER and retried:
+        # De herkansing is al geweest — nu pas klimmen.
+        decision = DECISION_CLIMB
+
+    if decision == DECISION_CLIMB:
+        tier_to = next_tier(tier_from)
+        reason = (
+            f"{failure_class}: climb one rung up the cost ladder "
+            f"({tier_from} -> {tier_to})"
+            + (" + operator alert" if operator_alert else "")
+        )
+    elif decision == DECISION_RETRY_SAME_TIER:
+        tier_to = tier_from
+        reason = (
+            f"{failure_class}: retry once on the same rung ({tier_from}); "
+            "a repeated failure climbs"
+        )
+    else:  # DECISION_NO_CLIMB
+        tier_to = None
+        if failure_class == "auth_rejected":
+            reason = (
+                "auth_rejected: NOT climbing — a higher model has the same "
+                "auth problem; a more expensive model does not fix a rejected key"
+            )
+        else:
+            reason = (
+                f"{failure_class}: NOT climbing — reporting the unrecognized "
+                "class loudly to the operator instead"
+            )
+
     return TierEscalation(
         tier_from=tier_from,
-        tier_to=next_tier(tier_from),
+        tier_to=tier_to,
         parent_dispatch=parent_dispatch,
+        failure_class=failure_class,
+        decision=decision,
+        operator_alert=operator_alert,
+        reason=reason,
     )
 
 
