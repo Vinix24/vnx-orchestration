@@ -1033,6 +1033,25 @@ def _make_default_dispatcher(
                     "--dispatch-id", dispatch_id,
                     "--model", model_arg,
                     "--role", role,
+                    # OI-1422: every seat this dispatcher builds (plan-reviewer,
+                    # deliberation-panelist) is a read-only verdict/analysis worker —
+                    # it reads a doc and writes a report, it never touches repo files.
+                    # Without an explicit --task-class, provider_dispatch.py's
+                    # argparse default ("") falls through to VNX_TASK_CLASS, which is
+                    # unset here, so _build_frontmatter's own fallback stamps
+                    # task_class="implementation" on the receipt (provider_dispatch.py
+                    # _build_frontmatter). kimi_spawn.py's completion-vs-execution
+                    # fabrication guard (_finalize_kimi_result) keys off task_class
+                    # ALONE — it has no role parameter — so "implementation" leaves a
+                    # clean-worktree kimi seat classified as a delivery worker that
+                    # produced nothing, and the guard fires a false "completion
+                    # without execution" failure on real panel/review output.
+                    # "research_structured" is the fabric's own canonical task_class
+                    # for reviewer/architect/planner/security-engineer/data-analyst
+                    # work (dispatch_router.py SKILL_TO_TASK_CLASS) and is already a
+                    # member of phantom_guard.REVIEW_TASK_CLASSES, so this exempts the
+                    # seat through both guards without widening either SSOT.
+                    "--task-class", "research_structured",
                     "--instruction", instruction,
                     "--no-auto-commit",
                 ]
