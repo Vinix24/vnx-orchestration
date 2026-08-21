@@ -41,7 +41,17 @@ PROTECTED_VERSIONS_FILE = "protected-versions"
 # sits 7 directory levels below $HOME. A shallower default would silently miss
 # the exact case this source exists to catch.
 DEFAULT_PIN_SCAN_MAX_DEPTH = 8
-_PIN_SCAN_SKIP_DIRS = frozenset({".git", "node_modules"})
+#
+# .vnx-data is per-project VNX runtime state (dispatch worktrees, receipts,
+# logs) — never a pin's source of truth. A dispatch worktree under
+# <project>/.vnx-data/worktrees/dispatch-*/ carries its own copy of the
+# parent project's .vnx-version, checked out for the lifetime of one
+# dispatch and meant to be reaped afterward. A pin found there is a copy,
+# not a consumer: protecting a version on its strength defeats prune
+# permanently, since dispatch worktrees accumulate faster than they're
+# reaped (measured: 14 stray .vnx-version copies under .vnx-data/worktrees/
+# across two projects on this machine, none of them a real pin).
+_PIN_SCAN_SKIP_DIRS = frozenset({".git", "node_modules", ".vnx-data"})
 
 _VERSION_RE = re.compile(r"^(edge|latest|v?\d+\.\d+\.\d+(?:-[\w.]+)?)$")
 
