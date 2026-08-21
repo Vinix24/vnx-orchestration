@@ -1917,6 +1917,14 @@ def _execute_claude(
         isolated_worktree=True,
         requires_mcp=plan.requires_mcp,
     )
+    if not result.success:
+        # Fail-loud: the door must never swallow a claude-lane failure into a
+        # bare exit code - the caller (bin/vnx dispatch) prints nothing else.
+        print(
+            f"[dispatch_cli] claude lane failed: "
+            f"{result.failure_reason or '(no failure_reason captured)'}",
+            file=sys.stderr,
+        )
     return 0 if result.success else 1
 
 
