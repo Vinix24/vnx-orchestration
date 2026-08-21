@@ -45,13 +45,6 @@ if str(_LIB) not in sys.path:
 from orphan_sweep import DEFAULT_MAX_ORPHANS, sweep  # noqa: E402
 
 
-def _default_data_dir() -> Path:
-    env = os.environ.get("VNX_DATA_DIR", "").strip()
-    if env:
-        return Path(env).expanduser()
-    return _HERE.parent / ".vnx-data"
-
-
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(
         prog="orphan_sweep",
@@ -69,12 +62,16 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument(
         "--data-dir",
         default=None,
-        help="Path to .vnx-data for active manifests (default: $VNX_DATA_DIR or repo .vnx-data).",
+        help="Path to .vnx-data for register/receipts/active-manifest reads "
+             "(default: resolved via the fabric's canonical central-store "
+             "resolver, typically ~/.vnx-data/<project_id>).",
     )
     parser.add_argument(
         "--state-dir",
         default=None,
-        help="Path to runtime state dir (default: <data-dir>/state).",
+        help="Path to runtime state dir (default: <data-dir>/state when "
+             "--data-dir is given; otherwise the fabric's canonical "
+             "central-store resolver, same as --data-dir).",
     )
     parser.add_argument(
         "--project-id",
@@ -119,7 +116,12 @@ def main(argv: "list[str] | None" = None) -> int:
         parser.error("--max-orphans must be >= 1")
 
     repo_root = Path(args.repo_root).expanduser() if args.repo_root else None
-    data_dir = Path(args.data_dir).expanduser() if args.data_dir else _default_data_dir()
+    # Neither flag defaults eagerly here: an explicit --data-dir/--state-dir
+    # always wins, but omitting BOTH must reach sweep() as None so it resolves
+    # the register/receipts/active-manifest store via the fabric's canonical
+    # central-store resolver (scripts/lib/orphan_sweep.py::_resolve_central_paths)
+    # instead of this CLI's own (formerly repo-relative) guess.
+    data_dir = Path(args.data_dir).expanduser() if args.data_dir else None
     state_dir = Path(args.state_dir).expanduser() if args.state_dir else None
 
     result = sweep(

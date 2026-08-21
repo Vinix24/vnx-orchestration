@@ -35,6 +35,7 @@ sys.path.insert(0, str(_SCRIPT_DIR / "lib"))
 
 import orphan_sweep as osweep  # noqa: E402  (the lib module)
 import tmux_worktree  # noqa: E402
+import vnx_paths  # noqa: E402
 
 # scripts/ and scripts/lib both define an orphan_sweep module; the lib one wins
 # for `import orphan_sweep` (scripts/lib is inserted last). Import the CLI
@@ -122,6 +123,20 @@ def _write_register_event(env: Path, event: str, dispatch_id: str) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps({
             "timestamp": "2026-08-19T00:00:00.000000Z",
+            "event": event,
+            "dispatch_id": dispatch_id,
+        }) + "\n")
+
+
+def _write_register_event_in_state_dir(state_dir: Path, event: str, dispatch_id: str) -> None:
+    """Like _write_register_event, but writes directly under a given
+    state_dir instead of an ``env``-fixture data_dir — for tests that pin an
+    explicit state_dir independent of data_dir/central resolution."""
+    path = state_dir / "dispatch_register.ndjson"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "timestamp": "2026-08-21T00:00:00.000000Z",
             "event": event,
             "dispatch_id": dispatch_id,
         }) + "\n")
@@ -675,6 +690,198 @@ def test_to_dict_includes_completed_orphan_keys(env):
     d = res.to_dict()
     assert d["tmux_completed_orphans_killed"] == []
     assert d["tmux_completed_orphans_preserved"] == []
+
+
+# ---------------------------------------------------------------------------
+# Central-store resolution (OI-1353 follow-up) — sweep() reads the register/
+# receipts/active-manifest store via the fabric's canonical resolver when
+# neither data_dir nor state_dir is given, NOT via a repo-relative guess.
+# Worktrees stay repo-relative regardless of where that store resolves.
+# ---------------------------------------------------------------------------
+
+def test_resolve_central_paths_uses_fabric_resolver(monkeypatch, tmp_path):
+    """_resolve_central_paths must defer entirely to vnx_paths.resolve_paths()
+    — not read $VNX_DATA_DIR itself — so it stays in lockstep with every
+    other canonical caller (dispatch_register._register_path included)."""
+    fake_data_dir = tmp_path / "central" / "vnx-dev"
+    fake_state_dir = fake_data_dir / "some-other-state-subdir"
+    monkeypatch.setattr(
+        vnx_paths, "resolve_paths",
+        lambda: {"VNX_DATA_DIR": str(fake_data_dir), "VNX_STATE_DIR": str(fake_state_dir)},
+    )
+    # A real $VNX_DATA_DIR is ALSO set (by the autouse isolation fixture) to a
+    # DIFFERENT path — proves the resolver's answer wins, not a raw env read.
+    assert os.environ.get("VNX_DATA_DIR") != str(fake_data_dir)
+
+    data_dir, state_dir, error = osweep._resolve_central_paths(tmp_path / "some-repo")
+
+    assert (data_dir, state_dir, error) == (fake_data_dir, fake_state_dir, None)
+
+
+def test_resolve_central_paths_failure_records_error_and_falls_back(monkeypatch, tmp_path):
+    def _raise():
+        raise RuntimeError("no vnx runtime installed")
+
+    monkeypatch.setattr(vnx_paths, "resolve_paths", _raise)
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    repo_root = tmp_path / "repo"
+
+    data_dir, state_dir, error = osweep._resolve_central_paths(repo_root)
+
+    assert error is not None and "no vnx runtime installed" in error
+    assert data_dir == repo_root / ".vnx-data"
+    assert state_dir == repo_root / ".vnx-data" / "state"
+
+
+def test_sweep_resolves_register_from_central_store_when_dirs_omitted(env, tmp_path):
+    """Reproduces the measured bug (main 4b7d7b2f): a repo_root with NO
+    .vnx-data/state of its own must still find a completed dispatch's
+    register event, because sweep() resolves the register from the fabric's
+    central store (here, the `env` fixture's pinned VNX_DATA_DIR_EXPLICIT=1)
+    when --data-dir/--state-dir are both omitted — never from a repo-local
+    fallback that has never heard of this project's dispatches."""
+    local = _git_repo(tmp_path)  # repo_root has no .vnx-data/state of its own
+    _write_register_event(env, "dispatch_completed", "central-1")
+
+    res = osweep.sweep(
+        repo_root=local,
+        dry_run=True,
+        list_sessions=lambda: ["vnx-central-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert len(res.tmux_completed_orphans_killed) == 1
+    assert res.tmux_completed_orphans_killed[0]["dispatch_id"] == "central-1"
+    assert res.tmux_completed_orphans_preserved == []
+    assert not any(e.get("kind") == "data_dir_resolution" for e in res.errors)
+
+
+def test_sweep_preserves_unknown_project_when_dirs_omitted_and_register_elsewhere(env, tmp_path):
+    """The flip side of the reproduction above: a session whose dispatch id
+    is NOT in the (correctly-resolved) central register must still read as
+    unknown_project — proving the fix does not just turn every read into a
+    hit, it resolves to the correct store and applies the same conjunction."""
+    local = _git_repo(tmp_path)
+
+    res = osweep.sweep(
+        repo_root=local,
+        dry_run=True,
+        list_sessions=lambda: ["vnx-never-registered-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert res.tmux_completed_orphans_killed == []
+    assert res.tmux_completed_orphans_preserved[0]["reason"] == "unknown_project"
+
+
+def test_sweep_records_error_when_central_resolver_fails(tmp_path, monkeypatch):
+    """A failed central-store resolution must show up as a measurement error
+    in ``errors`` — never pass silently as though the (possibly wrong)
+    fallback store's emptiness were a valid 'zero dispatches known'."""
+    def _raise():
+        raise RuntimeError("vnx runtime not installed")
+
+    monkeypatch.setattr(vnx_paths, "resolve_paths", _raise)
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    local = _git_repo(tmp_path)
+
+    res = osweep.sweep(repo_root=local, list_sessions=lambda: [])
+
+    matches = [e for e in res.errors if e.get("kind") == "data_dir_resolution"]
+    assert matches, (
+        "a failed central-path resolution must be recorded as a measurement "
+        "error, never silently treated as 'zero dispatches known'"
+    )
+    assert "vnx runtime not installed" in matches[0]["error"]
+
+
+def test_explicit_state_dir_wins_over_central_resolution(monkeypatch, tmp_path):
+    """An explicit state_dir always wins, even when data_dir is left to
+    resolve via the fabric — the bogus resolver answer below must never be
+    consulted for state_dir once it is given explicitly."""
+    explicit_state_dir = tmp_path / "explicit-state"
+    explicit_state_dir.mkdir()
+    _write_register_event_in_state_dir(explicit_state_dir, "dispatch_completed", "explicit-1")
+    local = _git_repo(tmp_path)
+
+    bogus_central = tmp_path / "wrong-central-store"
+    monkeypatch.setattr(
+        vnx_paths, "resolve_paths",
+        lambda: {
+            "VNX_DATA_DIR": str(bogus_central),
+            "VNX_STATE_DIR": str(bogus_central / "state"),
+        },
+    )
+
+    res = osweep.sweep(
+        repo_root=local,
+        state_dir=explicit_state_dir,
+        dry_run=True,
+        list_sessions=lambda: ["vnx-explicit-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert len(res.tmux_completed_orphans_killed) == 1
+    assert res.tmux_completed_orphans_killed[0]["dispatch_id"] == "explicit-1"
+    assert not bogus_central.exists()  # resolver's answer was never touched
+
+
+def test_explicit_data_dir_still_derives_state_dir_unchanged(env, monkeypatch, tmp_path):
+    """An explicit data_dir (no state_dir) must still derive
+    ``data_dir / "state"`` exactly as before — the central resolver must not
+    even be consulted in this case (operator/test override path)."""
+    local = _git_repo(tmp_path)
+    _write_register_event(env, "dispatch_completed", "explicit-data-1")
+
+    def _fail_if_called():
+        raise AssertionError(
+            "central resolver must not be consulted when data_dir is explicit"
+        )
+
+    monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: _fail_if_called())
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        dry_run=True,
+        list_sessions=lambda: ["vnx-explicit-data-1"],
+        probe_liveness=lambda s: True,
+        capture_pane=lambda s: "",
+    )
+
+    assert len(res.tmux_completed_orphans_killed) == 1
+    assert res.tmux_completed_orphans_killed[0]["dispatch_id"] == "explicit-data-1"
+
+
+def test_worktree_kind_stays_repo_relative_when_central_store_differs(monkeypatch, tmp_path):
+    """kind 2 (worktrees) must be derived from repo_root regardless of where
+    data_dir/state_dir resolve to — only the register/receipts (1b) and
+    active-manifest (3) kinds should ever follow the central store."""
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "wt-central-1")
+
+    central_dir = tmp_path / "elsewhere-central"
+    monkeypatch.setattr(
+        vnx_paths, "resolve_paths",
+        lambda: {"VNX_DATA_DIR": str(central_dir), "VNX_STATE_DIR": str(central_dir / "state")},
+    )
+
+    res = osweep.sweep(repo_root=local, list_sessions=lambda: [])
+
+    assert len(res.worktrees_scanned) == 1
+    assert str(handle.path) in res.worktrees_removed
+    assert not handle.path.exists()
+    assert str(handle.path).startswith(str(local)), (
+        "worktree path must stay under repo_root even though data_dir "
+        "resolved to a completely different central store"
+    )
+    assert not central_dir.exists(), (
+        "the (bogus) central store must never be created/touched by the "
+        "worktree kind"
+    )
 
 
 # ---------------------------------------------------------------------------
