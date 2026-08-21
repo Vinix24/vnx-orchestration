@@ -187,47 +187,58 @@ def test_provider_lanes_stay_parallel(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# test_claude_headless_not_locked
+# test_claude_tmux_and_headless_share_lock (OI-1417)
 # ---------------------------------------------------------------------------
 
-def test_claude_headless_not_locked(tmp_path, monkeypatch):
-    """serialize_lane(None) (headless) is a no-op and does not block a concurrent claude-tmux holder."""
+def test_claude_tmux_and_headless_share_lock(tmp_path, monkeypatch):
+    """OI-1417: dispatch_plan.py's D5 resolves BOTH claude lanes (tmux and
+    headless) to the same serialization_class="claude-tmux" string, because
+    both authenticate against the same subscription. This is the door-level
+    call the CLI actually makes for a headless dispatch — serialize_lane(None)
+    is no longer what a headless plan produces. With N=1, a tmux holder must
+    block a concurrent headless caller until it releases; they must not run
+    past each other."""
     monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "1")
 
     tmux_holding = threading.Event()
-    headless_elapsed = []
+    release_gate = threading.Event()
+    headless_entered = threading.Event()
     errors = []
 
     def claude_tmux_worker():
         try:
             with serialize_lane("claude-tmux", dispatch_id="tmux-holder"):
                 tmux_holding.set()
-                time.sleep(0.3)
+                release_gate.wait(timeout=5)
         except Exception as exc:
             errors.append(("tmux", exc))
 
     def headless_worker():
         tmux_holding.wait(timeout=5)
-        t_start = time.monotonic()
         try:
-            with serialize_lane(None):
-                pass  # should not block
+            with serialize_lane("claude-tmux", dispatch_id="headless-holder"):
+                headless_entered.set()
         except Exception as exc:
             errors.append(("headless", exc))
-        headless_elapsed.append(time.monotonic() - t_start)
 
     t1 = threading.Thread(target=claude_tmux_worker)
     t2 = threading.Thread(target=headless_worker)
     t1.start()
     t2.start()
+
+    tmux_holding.wait(timeout=5)
+    assert not headless_entered.wait(timeout=0.3), (
+        "headless caller acquired the lock while the tmux holder still held it "
+        "— they crossed each other instead of colliding on the shared N"
+    )
+
+    release_gate.set()
     t1.join(timeout=5)
     t2.join(timeout=5)
 
     assert not errors, f"unexpected errors: {errors}"
-    assert headless_elapsed, "headless worker did not complete"
-    assert headless_elapsed[0] < 0.15, (
-        f"headless lane blocked unexpectedly ({headless_elapsed[0]:.3f}s)"
-    )
+    assert headless_entered.is_set(), "headless caller never acquired after tmux released"
 
 
 # ---------------------------------------------------------------------------
