@@ -813,11 +813,38 @@ def _capture_pane_or_error(runner, session_id: str) -> "tuple[str | None, str | 
     return getattr(res, "stdout", "") or "", None
 
 
+# Worktree-risk sort priority for hits (OI-1414 follow-up): 0 = urgent (the
+# stall is holding uncommitted/unpushed work that is lost if the stall is
+# abandoned), 1 = cannot be measured (never conflated with "clean" — see the
+# docstring below), 2 = confirmed clean/pushed. An absent/unrecognized
+# classification sorts as unmeasured (1), the same conservative default
+# ``classify_for_release`` itself falls back to when it cannot resolve a base.
+_WORKTREE_RISK_PRIORITY = {
+    "committable": 0,
+    "unpushed_commits": 0,
+    "both": 0,
+    "unreachable": 1,
+    "error": 1,
+    "detached": 1,
+    "releasable": 2,
+}
+
+
+def _dispatch_worktree_path(repo_root: Path, dispatch_id: str) -> Path:
+    """The dispatch worktree path for *dispatch_id*, mirroring the EXACT
+    convention ``orphan_sweep`` already uses
+    (``<repo_root>/.vnx-data/worktrees/dispatch-<dispatch_id>``) — never a
+    second path convention.
+    """
+    return repo_root / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"
+
+
 def scan_live_awaiting_permission(
     runner=None,
     *,
     state_dir: "str | Path | None" = None,
     write_escalations: bool = True,
+    repo_root: "str | Path | None" = None,
 ) -> dict:
     """READ-ONLY scan of THIS project's live dispatch tmux sessions for a
     worker stalled on a permission prompt (OI-1324 / OI-1344).
@@ -846,13 +873,48 @@ def scan_live_awaiting_permission(
     caller, never as "no stall" (OI-1324/1344: a measurement gap is not
     evidence of a clean fleet).
 
+    Worktree triage (OI-1414 follow-up): detection alone does not say how
+    URGENT a stall is — a worker stalled on a permission prompt with fully
+    committed-and-pushed work is an inconvenience; the same stall holding
+    uncommitted or unpushed work is a deadline. Every hit now also carries
+    the state of its dispatch worktree, resolved at
+    ``<repo_root>/.vnx-data/worktrees/dispatch-<dispatch_id>`` — the EXACT
+    path convention ``orphan_sweep`` already uses (see
+    ``_dispatch_worktree_path`` — never a second convention) — and classified
+    by REUSING ``worktree_release.classify_for_release`` (the same
+    releasable/committable/unpushed_commits/both/detached/unreachable/error
+    taxonomy the release path already uses), never a second, driftable
+    classifier. ``repo_root`` defaults to the same repo-root resolution
+    ``orphan_sweep``/``tmux_worktree`` already use
+    (``tmux_worktree._resolve_repo_root``). Every hit carries:
+      - ``worktree_path``: the resolved path (str)
+      - ``worktree_classification``: one of classify_for_release's states
+      - ``worktree_detail``: its human-readable detail string
+      - ``worktree_at_risk``: True for committable/unpushed_commits/both —
+        the stall is holding work that would be LOST if abandoned
+      - ``worktree_measured``: False for unreachable/error — the worktree
+        could not be read at all. An unmeasurable worktree is NEVER read as
+        "clean": it is reported explicitly instead of collapsing into
+        releasable.
+    ``hits`` is sorted worktree_at_risk-first, then unmeasured, then
+    confirmed-clean last — a triage priority order, not discovery order — so
+    the most urgent stall is always first regardless of scan order. This step
+    is entirely READ-ONLY git (``rev-parse``, ``status --porcelain``,
+    ``merge-base``, ``rev-list``, ``ls-remote``) run against the worktree —
+    the exact commands ``classify_for_release`` already runs for the (also
+    read-only, dry-run-default) release-report path. Nothing here ever writes
+    to the worktree, and the only write anywhere in this function remains the
+    existing idempotent ``write_escalation`` call below.
+
     Returns:
         dict with keys:
           - ``sessions_scanned``: in-scope session names successfully captured
           - ``sessions_skipped_foreign``: name matched the pattern, no handle
             for that dispatch id in this project's state dir
           - ``hits``: list of ``{session, dispatch_id, command, matched_marker,
-            escalation_written}`` for every pane classified awaiting_permission
+            escalation_written, worktree_path, worktree_classification,
+            worktree_detail, worktree_at_risk, worktree_measured}`` for every
+            pane classified awaiting_permission, sorted urgent-first
           - ``errors``: list of ``{scope, session, dispatch_id, error}``
           - ``measured``: False only when the session listing itself could not
             be trusted (see ``_list_dispatch_sessions``)
@@ -864,10 +926,14 @@ def scan_live_awaiting_permission(
     fresh ``reason="awaiting_permission"`` record.
     """
     from orphan_sweep import _SESSION_RE as _DISPATCH_SESSION_RE  # noqa: PLC0415 — reuse, never duplicate
+    from tmux_worktree import _resolve_repo_root as _tw_resolve_repo_root  # noqa: PLC0415 — reuse, never duplicate
+    from tmux_worktree import _current_branch as _tw_current_branch  # noqa: PLC0415 — reuse, never duplicate
+    from worktree_release import classify_for_release  # noqa: PLC0415 — reuse, never duplicate
 
     sd = _coerce_state_dir(state_dir)
     rn = runner if runner is not None else _default_tmux_runner()
     handle_dir = sd / "tmux_interactive"
+    root = Path(repo_root) if repo_root is not None else _tw_resolve_repo_root(None)
 
     result: dict = {
         "sessions_scanned": [],
@@ -919,6 +985,12 @@ def scan_live_awaiting_permission(
                     {"scope": "write_escalation", "session": name, "dispatch_id": dispatch_id, "error": str(exc)}
                 )
 
+        wt_path = _dispatch_worktree_path(root, dispatch_id)
+        branch = _tw_current_branch(wt_path) if wt_path.exists() else ""
+        wt_class, wt_detail = classify_for_release(str(wt_path), branch)
+        wt_at_risk = wt_class in ("committable", "unpushed_commits", "both")
+        wt_measured = wt_class not in ("unreachable", "error")
+
         result["hits"].append(
             {
                 "session": name,
@@ -926,11 +998,19 @@ def scan_live_awaiting_permission(
                 "command": command,
                 "matched_marker": state.matched_marker,
                 "escalation_written": escalation_written,
+                "worktree_path": str(wt_path),
+                "worktree_classification": wt_class,
+                "worktree_detail": wt_detail,
+                "worktree_at_risk": wt_at_risk,
+                "worktree_measured": wt_measured,
             }
         )
         logger.warning(
-            "permission_relay: SCAN found live stall dispatch=%s cmd=%r marker=%r",
-            dispatch_id, command, state.matched_marker,
+            "permission_relay: SCAN found live stall dispatch=%s cmd=%r marker=%r "
+            "worktree=%s(%s) at_risk=%s",
+            dispatch_id, command, state.matched_marker, wt_class, wt_detail, wt_at_risk,
         )
+
+    result["hits"].sort(key=lambda h: _WORKTREE_RISK_PRIORITY.get(h["worktree_classification"], 1))
 
     return result
