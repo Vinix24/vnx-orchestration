@@ -680,3 +680,88 @@ class TestBuildDreamReviews:
         assert "dream_reviews" in result
         assert result["dream_reviews"]["available"] is True
         assert result["dream_reviews"]["pending_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Permission escalations (OI-1414) — permission_escalations section
+# ---------------------------------------------------------------------------
+# A pending worker-permission escalation is written by worker_permission_relay
+# whenever a detached tmux worker's prompt escalates, but nothing before this
+# reader surfaced it at SessionStart — vnx permission escalations was a
+# standalone CLI nobody ran proactively. These tests pin the reader that now
+# puts the backlog in t0_state.json, and the zero case, which must be visible.
+
+import worker_permission_relay as wpr  # noqa: E402
+
+
+class TestBuildPermissionEscalations:
+    def test_pending_count_and_oldest_age(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        now = time.time()
+        wpr.write_escalation(
+            "old-dispatch", "rm -rf:*", "catastrophic",
+            state_dir=state_dir, now=now - 19 * 86400,
+        )
+        wpr.write_escalation(
+            "recent-dispatch", "chmod:*", "awaiting_permission",
+            state_dir=state_dir, now=now - 3600,
+        )
+
+        section = bts._build_permission_escalations(state_dir)
+
+        assert section["available"] is True
+        assert section["pending_count"] == 2
+        assert section["oldest_age_days"] == pytest.approx(19.0, abs=0.1)
+        by_dispatch = {r["dispatch_id"]: r for r in section["pending_escalations"]}
+        assert by_dispatch["old-dispatch"]["command"] == "rm -rf:*"
+        assert by_dispatch["old-dispatch"]["reason"] == "catastrophic"
+        assert by_dispatch["old-dispatch"]["age_days"] == pytest.approx(19.0, abs=0.1)
+        assert by_dispatch["recent-dispatch"]["age_days"] == pytest.approx(3600 / 86400, abs=0.1)
+        # Oldest first.
+        assert section["pending_escalations"][0]["dispatch_id"] == "old-dispatch"
+
+    def test_zero_pending_is_visible(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        section = bts._build_permission_escalations(state_dir)
+
+        assert section["available"] is True
+        assert section["pending_count"] == 0
+        assert section["oldest_age_days"] is None
+        assert section["pending_escalations"] == []
+
+    def test_resolved_escalations_excluded(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        wpr.write_escalation("d-pending", "pytest -q", "window_closed", state_dir=state_dir)
+        wpr.write_escalation("d-resolved", "pytest -q", "window_closed", state_dir=state_dir)
+        wpr.resolve_escalation("d-resolved", approved=False, state_dir=state_dir)
+
+        section = bts._build_permission_escalations(state_dir)
+
+        assert section["pending_count"] == 1
+        assert section["pending_escalations"][0]["dispatch_id"] == "d-pending"
+
+    def test_full_state_includes_permission_escalations_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """t0_state.json carries the escalations key at every kickoff, even at zero."""
+        monkeypatch.setenv("VNX_PROJECT_ID", SAMPLE_PROJECT_ID)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        dispatch_dir = tmp_path / "dispatches"
+        (dispatch_dir / "pending").mkdir(parents=True)
+        (dispatch_dir / "active").mkdir()
+        (dispatch_dir / "conflicts").mkdir()
+        _write_open_items_digest(state_dir, open_count=0, blocker_count=0)
+        _create_qi_db(state_dir / "quality_intelligence.db", dispatches=[SAMPLE_DISPATCH])
+        wpr.write_escalation("d-live", "rm -rf:*", "catastrophic", state_dir=state_dir)
+
+        result = bts.build_t0_state(state_dir, dispatch_dir)
+
+        assert "permission_escalations" in result
+        assert result["permission_escalations"]["available"] is True
+        assert result["permission_escalations"]["pending_count"] == 1
+        assert result["permission_escalations"]["pending_escalations"][0]["dispatch_id"] == "d-live"

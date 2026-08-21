@@ -35,6 +35,16 @@ Schema 2.2 addition (OI-896, auto-dream reviews):
     Mirrored to t0_detail/dream_reviews.json. The zero-pending case is
     explicitly reported so an absent review queue is as visible as a full one.
 
+Schema 2.2 addition (OI-1414, permission escalations):
+  - Additive, backward-compatible: a top-level ``permission_escalations``
+    section {available, pending_count, oldest_age_days, pending_escalations}
+    surfacing worker-permission prompts escalated by
+    scripts/lib/worker_permission_relay.py that are still awaiting
+    approve/deny/resolve-stale (``vnx permission ...``). Mirrored to
+    t0_detail/permission_escalations.json. Before this section the only way
+    to see the backlog was the standalone ``vnx permission escalations`` CLI,
+    which nobody ran proactively.
+
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the
     FEATURE_PLAN.md fallback fields (current_pr/next_task/assigned_track/
@@ -793,6 +803,86 @@ def _build_dream_reviews(state_dir: Path, project_id: str) -> Dict[str, Any]:
         "pending_count": len(reviews),
         "oldest_age_seconds": oldest_age,
         "pending_reviews": reviews,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Permission escalations (OI-1414) — pending worker-permission prompts
+# ---------------------------------------------------------------------------
+#
+# worker_permission_relay.write_escalation() persists a durable record whenever
+# a detached tmux worker's permission prompt escalates (catastrophic op, or the
+# operator auto-accept window is closed). Before this reader NOTHING surfaced
+# those records at SessionStart: ``vnx permission escalations`` is a standalone
+# CLI nobody runs proactively. OI-1414 measured 21 records pending up to 19
+# days, resolved_at filled in 0 of 21 — a governance record nobody reads is
+# operationally the same as a record that was never written. This section puts
+# the backlog in the one file every T0 session reads at start.
+
+def _build_permission_escalations(state_dir: Path) -> Dict[str, Any]:
+    """Pending worker-permission escalations awaiting operator resolution (OI-1414).
+
+    Best-effort and never raises: an import failure or unreadable escalations
+    dir degrades to ``available=False`` with a visible ``pending_count: 0``
+    rather than blocking SessionStart. Mirrors the ``_build_dream_reviews``
+    shape (pending_count, oldest age, per-item list).
+
+    Returned shape:
+      - ``available``: True when the reader ran (even for a zero queue).
+      - ``pending_count``: number of escalations awaiting approve/deny/resolve-stale.
+      - ``oldest_age_days``: age in days of the oldest pending escalation, or
+        None when the queue is empty.
+      - ``pending_escalations``: per-record summary (dispatch_id, command,
+        reason, captured_at, age_days), oldest first. Capped at 50 records —
+        the backlog itself (``pending_count``) is never capped.
+    """
+    empty: Dict[str, Any] = {
+        "available": False,
+        "pending_count": 0,
+        "oldest_age_days": None,
+        "pending_escalations": [],
+    }
+    try:
+        if str(_LIB_DIR) not in sys.path:
+            sys.path.insert(0, str(_LIB_DIR))
+        import worker_permission_relay as _relay
+    except Exception:
+        return empty
+    try:
+        pending = _relay.list_escalations(state_dir=state_dir, pending_only=True)
+    except Exception:
+        return empty
+    if not pending:
+        return {**empty, "available": True}
+
+    now = _now_utc()
+    records: List[Dict[str, Any]] = []
+    oldest_age: Optional[float] = None
+    for rec in pending:
+        captured_raw = (rec.get("captured_at") or "").strip()
+        age_days: Optional[float] = None
+        if captured_raw:
+            dt = _parse_iso(captured_raw)
+            if dt is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_days = round(max(0.0, (now - dt).total_seconds()) / 86400.0, 1)
+        records.append({
+            "dispatch_id": rec.get("dispatch_id"),
+            "command": rec.get("command"),
+            "reason": rec.get("reason"),
+            "captured_at": captured_raw,
+            "age_days": age_days,
+        })
+        if age_days is not None and (oldest_age is None or age_days > oldest_age):
+            oldest_age = age_days
+
+    records.sort(key=lambda r: r.get("age_days") or 0.0, reverse=True)
+    return {
+        "available": True,
+        "pending_count": len(records),
+        "oldest_age_days": oldest_age,
+        "pending_escalations": records[:50],
     }
 
 
@@ -2237,6 +2327,7 @@ def build_t0_state(
     canonical_tracks = _build_tracks_from_db(tracks_store, project_id)  # R3.2/ADR-007: tenant-scoped (central SSOT)
     human_gate_queue = _build_human_gate_queue(tracks_store, project_id)  # proposed deliverables awaiting operator promote
     dream_reviews = _build_dream_reviews(state_dir, project_id)  # auto-dream cycles awaiting T0 review (OI-896)
+    permission_escalations = _build_permission_escalations(state_dir)  # pending worker-permission escalations (OI-1414)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -2267,6 +2358,7 @@ def build_t0_state(
         "canonical_tracks": canonical_tracks,
         "human_gate_queue": human_gate_queue,
         "dream_reviews": dream_reviews,
+        "permission_escalations": permission_escalations,
         "pr_progress": pr_progress,
         "feature_state": feature_state,
         "open_items": open_items,
@@ -2367,6 +2459,7 @@ _DETAIL_SECTION_MAP: Dict[str, str] = {
     "active_chains": "active_chains",
     "intelligence": "intelligence",
     "dream_reviews": "dream_reviews",
+    "permission_escalations": "permission_escalations",
     # Phase 2 W-state-5: heavy strategic_state lives in a private state key
     # (``_strategic_state_heavy``) so it is excluded from t0_state.json/the
     # brief output but still mirrored to t0_detail/strategic_state.json.

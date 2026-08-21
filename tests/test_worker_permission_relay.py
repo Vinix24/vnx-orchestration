@@ -28,6 +28,7 @@ from worker_permission_relay import (  # noqa: E402
     read_escalation,
     relay_tick,
     resolve_escalation,
+    resolve_stale_escalation,
     write_escalation,
 )
 
@@ -451,6 +452,40 @@ class TestEscalationLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# resolve_stale_escalation (OI-1414) — resolve path for dead-dispatch escalations
+# ---------------------------------------------------------------------------
+class TestResolveStaleEscalation:
+    def test_resolves_pending_without_live_session(self, tmp_path):
+        write_escalation("d-old", "rm -rf:*", "catastrophic", state_dir=tmp_path)
+        rec = resolve_stale_escalation(
+            "d-old", "dispatch completed 19 days ago, no live tmux session", state_dir=tmp_path
+        )
+        assert rec["status"] == "stale"
+        assert rec["resolved_at"] is not None
+        assert rec["resolution_note"] == "dispatch completed 19 days ago, no live tmux session"
+        # Persisted, and no longer pending.
+        on_disk = read_escalation("d-old", state_dir=tmp_path)
+        assert on_disk["status"] == "stale"
+        assert list_escalations(state_dir=tmp_path) == []
+
+    def test_missing_escalation_returns_none(self, tmp_path):
+        assert resolve_stale_escalation("ghost", "note", state_dir=tmp_path) is None
+
+    def test_empty_note_rejected(self, tmp_path):
+        write_escalation("d-note", "pytest -q", "window_closed", state_dir=tmp_path)
+        with pytest.raises(ValueError):
+            resolve_stale_escalation("d-note", "", state_dir=tmp_path)
+        with pytest.raises(ValueError):
+            resolve_stale_escalation("d-note", "   ", state_dir=tmp_path)
+        # Left untouched — still pending.
+        assert read_escalation("d-note", state_dir=tmp_path)["status"] == "pending"
+
+    def test_traversal_dispatch_id_rejected(self, tmp_path):
+        with pytest.raises(ValueError):
+            resolve_stale_escalation("../../etc/x", "note", state_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # Finding 1 — path-traversal: dispatch_id must be sanitized before path use
 # ---------------------------------------------------------------------------
 class TestSafeDispatchId:
@@ -632,3 +667,42 @@ class TestManualApproveSurfacesSendFailure:
             "noux", tmp_path, runner=FakeRunner(tmux_available=False)
         )
         assert status == "error"
+
+
+# ---------------------------------------------------------------------------
+# `permission resolve-stale` — CLI resolve path for dead-dispatch escalations
+# (OI-1414: 21 records pending up to 19 days, all denied a live tmux session)
+# ---------------------------------------------------------------------------
+class _StaleArgs:
+    def __init__(self, dispatch_id, note, as_json=False):
+        self.dispatch_id = dispatch_id
+        self.note = note
+        self.json = as_json
+
+
+class TestResolveStaleCli:
+    def test_resolve_stale_no_session_needed(self, tmp_path):
+        write_escalation("d-dead", "rm -rf:*", "catastrophic", state_dir=tmp_path)
+        # No tmux_interactive handle written — the worker is long gone.
+        rc = cli._cmd_resolve_stale(
+            _StaleArgs("d-dead", "dispatch completed 19 days ago, no live session"), tmp_path
+        )
+        assert rc == 0
+        rec = read_escalation("d-dead", state_dir=tmp_path)
+        assert rec["status"] == "stale"
+        assert rec["resolved_at"] is not None
+        assert rec["resolution_note"] == "dispatch completed 19 days ago, no live session"
+
+    def test_resolve_stale_missing_escalation_exits_one(self, tmp_path):
+        rc = cli._cmd_resolve_stale(_StaleArgs("ghost", "note"), tmp_path)
+        assert rc == 1
+
+    def test_resolve_stale_rejects_traversal_dispatch_id(self, tmp_path):
+        rc = cli._cmd_resolve_stale(_StaleArgs("../../etc/x", "note"), tmp_path)
+        assert rc == 2
+
+    def test_resolve_stale_rejects_empty_note(self, tmp_path):
+        write_escalation("d-blank", "pytest -q", "window_closed", state_dir=tmp_path)
+        rc = cli._cmd_resolve_stale(_StaleArgs("d-blank", "  "), tmp_path)
+        assert rc == 2
+        assert read_escalation("d-blank", state_dir=tmp_path)["status"] == "pending"
