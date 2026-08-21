@@ -50,7 +50,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -101,6 +101,93 @@ def utc_now_iso() -> str:
     from datetime import datetime, timezone  # noqa: PLC0415
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# Scope filtering (OI-1378: --since / --dispatch-prefix)
+# ---------------------------------------------------------------------------
+
+_DISPATCH_ID_DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})-")
+
+
+def _parse_declared_at_date(value: Any) -> Optional[str]:
+    """Return the ``YYYY-MM-DD`` prefix of a parseable ISO8601 ``declared_at``.
+
+    Returns None when the value is missing, blank, or not a parseable
+    timestamp — the caller falls back to the dispatch_id date prefix rather
+    than guess.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    from datetime import datetime  # noqa: PLC0415
+
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return text[:10]
+
+
+def _dispatch_id_date(dispatch_id: str) -> Optional[str]:
+    """Return the ``YYYY-MM-DD`` date prefix of a ``YYYYMMDD-...`` dispatch_id."""
+    match = _DISPATCH_ID_DATE_RE.match(dispatch_id or "")
+    if not match:
+        return None
+    year, month, day = match.groups()
+    from datetime import date  # noqa: PLC0415
+
+    try:
+        date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+    return f"{year}-{month}-{day}"
+
+
+def _obligation_scope_date(record: Dict[str, Any], dispatch_id: str) -> Optional[str]:
+    """Resolve the date used to test an obligation against ``--since``.
+
+    Prefers ``declared_at``; falls back to the dispatch_id's date prefix when
+    ``declared_at`` is absent or unparseable. Returns None when neither source
+    yields a real date — an obligation with no known date counts as OUT of
+    scope under an active ``--since`` (scope means scope, no silent inclusion).
+    """
+    return _parse_declared_at_date(record.get("declared_at")) or _dispatch_id_date(dispatch_id)
+
+
+def _valid_since_date(value: str) -> str:
+    """argparse type= validator for ``--since``: must be a real YYYY-MM-DD date."""
+    from datetime import date  # noqa: PLC0415
+
+    parts = value.split("-")
+    try:
+        if len(parts) != 3:
+            raise ValueError(value)
+        date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid --since date {value!r}: expected YYYY-MM-DD"
+        ) from None
+    return value
+
+
+def _in_scope(
+    path: Path,
+    record: Dict[str, Any],
+    *,
+    since: Optional[str],
+    dispatch_prefix: Optional[str],
+) -> bool:
+    """Whether an obligation is inside the ``--since`` / ``--dispatch-prefix`` scope."""
+    dispatch_id = str(record.get("dispatch_id") or path.stem)
+    if dispatch_prefix and not dispatch_id.startswith(dispatch_prefix):
+        return False
+    if since:
+        scope_date = _obligation_scope_date(record, dispatch_id)
+        if scope_date is None or scope_date < since:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -572,8 +659,21 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
 # ---------------------------------------------------------------------------
 
 
-def run(state_dir: Path, *, write: bool = True) -> Dict[str, Any]:
-    """Fulfil every pending obligation under ``state_dir``. Returns a summary."""
+def run(
+    state_dir: Path,
+    *,
+    write: bool = True,
+    since: Optional[str] = None,
+    dispatch_prefix: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fulfil every in-scope pending obligation under ``state_dir``. Returns a summary.
+
+    ``since`` (``YYYY-MM-DD``) and ``dispatch_prefix`` narrow which obligations
+    are processed — combinable as an AND. ``obligations_seen`` always reports
+    the full store (unaffected by scope); ``obligations_in_scope`` and
+    ``pending_after`` are scope-filtered. With neither argument, scope is the
+    full store and behavior is unchanged from before scoping existed.
+    """
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
     pending_after = 0
@@ -588,7 +688,12 @@ def run(state_dir: Path, *, write: bool = True) -> Dict[str, Any]:
             "outcomes": [],
             "pending_after": -1,
         }
-    for path, record in obligations:
+    scoped: List[Tuple[Path, Dict[str, Any]]] = [
+        (path, record)
+        for path, record in obligations
+        if _in_scope(path, record, since=since, dispatch_prefix=dispatch_prefix)
+    ]
+    for path, record in scoped:
         if record.get("status", STATUS_PENDING) in TERMINAL_STATUSES:
             continue
         if not write:
@@ -609,6 +714,9 @@ def run(state_dir: Path, *, write: bool = True) -> Dict[str, Any]:
         "state_dir": str(state_dir),
         "timestamp": utc_now_iso(),
         "obligations_seen": len(obligations),
+        "obligations_in_scope": len(scoped),
+        "since": since,
+        "dispatch_prefix": dispatch_prefix,
         "outcomes": outcomes,
         "pending_after": pending_after,
         "unresolvable_after": sum(
@@ -652,6 +760,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--no-write", action="store_true",
         help="Dry run: report pending obligations without fulfilling them",
     )
+    parser.add_argument(
+        "--since", type=_valid_since_date, default=None,
+        help=(
+            "Only process obligations declared on/after this date (YYYY-MM-DD). "
+            "Falls back to the dispatch_id date prefix when declared_at is "
+            "missing/unparseable; an obligation with neither is out of scope."
+        ),
+    )
+    parser.add_argument(
+        "--dispatch-prefix", default=None,
+        help="Only process obligations whose dispatch_id starts with this string",
+    )
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -670,7 +790,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: state dir not found: {state_dir}", file=sys.stderr)
         return 20
 
-    summary = run(state_dir, write=not args.no_write)
+    summary = run(
+        state_dir,
+        write=not args.no_write,
+        since=args.since,
+        dispatch_prefix=args.dispatch_prefix,
+    )
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
