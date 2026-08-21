@@ -1444,6 +1444,15 @@ class TmuxInteractiveDispatch:
                     f"(dispatch `{dispatch_id}`) — the worker pushed this branch "
                     "but did not open a PR itself. Please review before merging."
                 ),
+                # OI-1392: a spec-declared work_ref is where delivery actually
+                # landed — never the worktree's own dispatch/<id> branch, even
+                # when the worker also committed there. Sourced the same way
+                # _fail_loud_on_empty_extraction already reads it for the
+                # phantom-guard (the door exports it, see dispatch_cli.py).
+                # enforce_pr_exists treats a truthy work_ref as authoritative
+                # and ignores branch/worktree_state entirely — see its
+                # docstring and _enforce_pr_exists_for_work_ref.
+                work_ref=os.environ.get("VNX_WORK_REF") or None,
             )
         except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
             logger.error(

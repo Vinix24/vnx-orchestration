@@ -655,3 +655,142 @@ def test_pr_failed_still_works_with_new_params(monkeypatch, tmp_path):
     assert result.ok is False
     assert "gh rate limited" in result.reason
     assert captured["payload"]["autopr_kind"] == "pr_failed"
+
+
+# ---------------------------------------------------------------------------
+# OI-1392: work_ref is authoritative — branch/worktree_state never consulted.
+# Lane-level, real-git regression tests live in
+# test_oi1392_pr_enforcement_work_ref.py; these are the pure-function unit
+# tests for the same contract.
+# ---------------------------------------------------------------------------
+
+def test_work_ref_bypasses_branch_and_worktree_state(monkeypatch):
+    """work_ref set → ensure_pr is called for work_ref, never for `branch`, and
+    the worktree_state dispatch (committed → push) never runs."""
+    import gh_pr_ensure
+    push_calls = {"n": 0}
+
+    import pr_enforcement
+    monkeypatch.setattr(
+        pr_enforcement.subprocess, "run",
+        lambda *a, **kw: (push_calls.__setitem__("n", push_calls["n"] + 1), _CompletedRC(0))[1],
+    )
+
+    captured = {}
+
+    def _fake_ensure_pr(branch, repo_root, *, title, body, draft=False):
+        captured.update(branch=branch)
+        return {"pr_number": 6001, "created": True, "reason": None}
+
+    monkeypatch.setattr(gh_pr_ensure, "ensure_pr", _fake_ensure_pr)
+
+    result = pe.enforce_pr_exists(
+        **_kwargs(worktree_state="committed", work_ref="work/oi1392-target")
+    )
+
+    assert result.applicable is True
+    assert result.ok is True
+    assert result.pushed is False
+    assert result.pr_number == 6001
+    assert result.created is True
+    assert captured["branch"] == "work/oi1392-target"
+    assert push_calls["n"] == 0, "work_ref must never trigger a git push"
+
+
+def test_work_ref_strips_ref_prefixes(monkeypatch):
+    """A work_ref declared with a remote/refs prefix is normalized to a bare
+    branch name before it reaches gh_pr_ensure (mirrors phantom_guard's own
+    normalization of the same field)."""
+    import gh_pr_ensure
+    captured = {}
+    monkeypatch.setattr(
+        gh_pr_ensure, "ensure_pr",
+        lambda branch, repo_root, **kw: (
+            captured.update(branch=branch), {"pr_number": 1, "created": True, "reason": None}
+        )[1],
+    )
+
+    pe.enforce_pr_exists(
+        **_kwargs(worktree_state="clean", work_ref="origin/work/oi1392-target")
+    )
+    assert captured["branch"] == "work/oi1392-target"
+
+
+def test_work_ref_already_open_pr_creates_nothing(monkeypatch):
+    """work_ref with an already-open PR → nothing created, no push."""
+    import gh_pr_ensure
+    monkeypatch.setattr(
+        gh_pr_ensure, "ensure_pr",
+        lambda *a, **kw: {"pr_number": 4321, "created": False, "reason": None},
+    )
+
+    result = pe.enforce_pr_exists(
+        **_kwargs(worktree_state="dirty", work_ref="work/oi1392-existing")
+    )
+
+    assert result.applicable is True
+    assert result.ok is True
+    assert result.pr_number == 4321
+    assert result.created is False
+    assert result.pushed is False
+
+
+def test_work_ref_missing_from_origin_is_loud_failure_not_a_second_branch(monkeypatch, tmp_path):
+    """work_ref set but never actually pushed to origin (gh pr create fails) →
+    a genuine, receipt-visible failure — NEVER a fallback to `branch`."""
+    import gh_pr_ensure
+    monkeypatch.setattr(
+        gh_pr_ensure, "ensure_pr",
+        lambda *a, **kw: {
+            "pr_number": None, "created": False,
+            "reason": "gh pr create failed for branch 'work/oi1392-target' (no open PR found on retry)",
+        },
+    )
+
+    import pr_enforcement
+    push_calls = {"n": 0}
+    monkeypatch.setattr(
+        pr_enforcement.subprocess, "run",
+        lambda *a, **kw: (push_calls.__setitem__("n", push_calls["n"] + 1), _CompletedRC(0))[1],
+    )
+
+    import append_receipt
+    captured = {}
+    monkeypatch.setattr(
+        append_receipt, "append_receipt_payload",
+        lambda payload, **kw: captured.update(payload=payload),
+    )
+
+    result = pe.enforce_pr_exists(
+        **_kwargs(
+            receipts_file=str(tmp_path / "r.ndjson"),
+            worktree_state="committed",
+            work_ref="work/oi1392-target",
+        )
+    )
+
+    assert result.applicable is True
+    assert result.ok is False
+    assert result.pushed is False
+    assert push_calls["n"] == 0, "a missing work_ref branch must never fall back to pushing `branch`"
+    payload = captured["payload"]
+    assert payload["branch"] == "work/oi1392-target"
+    assert payload["branch"] != "dispatch/d1"
+
+
+def test_empty_work_ref_falls_through_to_normal_behavior(monkeypatch):
+    """work_ref="" (or None) is indistinguishable from an absent work_ref — the
+    existing branch/worktree_state path runs unchanged."""
+    import gh_pr_ensure
+    captured = {}
+    monkeypatch.setattr(
+        gh_pr_ensure, "ensure_pr",
+        lambda branch, repo_root, **kw: (
+            captured.update(branch=branch), {"pr_number": 101, "created": True, "reason": None}
+        )[1],
+    )
+
+    result = pe.enforce_pr_exists(**_kwargs(work_ref=""))
+
+    assert result.ok is True
+    assert captured["branch"] == "dispatch/d1"
