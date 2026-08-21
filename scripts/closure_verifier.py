@@ -1149,6 +1149,31 @@ def _detect_gate_report_contradictions(
 
 _CLOSURE_OUTPUT_RE = re.compile(r"^\s*-?\s*\[(FAIL|PASS|WARN)\]\s")
 
+# Matches the normalized findings block gate_artifacts.format_report writes
+# (``_format_findings_section``) ahead of the raw ``## Gate Output`` tool
+# transcript. Captures everything from just past the "## Findings" heading
+# up to the next "## "-level heading (or end of string), so the raw
+# transcript that follows is never part of the captured text.
+_FINDINGS_SECTION_RE = re.compile(r"^## Findings[ \t]*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+
+
+def _extract_normalized_findings_section(content: str) -> Optional[str]:
+    """Return the report's normalized ``## Findings`` block, or None if absent.
+
+    Headless gate reports (codex_gate) pair a normalized findings section —
+    written from the reviewer's actual parsed verdict — with a raw
+    ``## Gate Output`` dump of its full tool transcript. That transcript is
+    read material (tool calls, contents of files the reviewer inspected)
+    and can contain the same substrings this scan looks for — a `blocking:`
+    parameter name, a `severity: blocking` string literal — in code the
+    reviewer merely read, never in its verdict (OI-1394). Reports without a
+    normalized section (e.g. ci_gate's compact non-toolstream output) return
+    None here, and the caller falls back to a full-content scan — unchanged
+    from prior behavior for those gates.
+    """
+    match = _FINDINGS_SECTION_RE.search(content)
+    return match.group(1) if match else None
+
 
 def _count_report_blocking_indicators(content: str) -> int:
     """Count blocking-severity indicators in a normalized report.
@@ -1157,12 +1182,23 @@ def _count_report_blocking_indicators(content: str) -> int:
     Excludes lines written by the closure verifier itself (``- [FAIL] ...``)
     to prevent a self-reference loop where the verifier's own output is
     counted as a blocking indicator on re-read.
+
+    When the report carries a normalized ``## Findings`` section (see
+    ``_extract_normalized_findings_section``), only that section is scanned —
+    never the raw tool-output transcript that follows it, which can contain
+    read-but-not-judged source text that happens to match these patterns
+    (OI-1394). Reports without such a section fall back to a full-content
+    scan, matching prior behavior.
     """
     filtered_lines = [
         line for line in content.splitlines()
         if not _CLOSURE_OUTPUT_RE.match(line)
     ]
     filtered = "\n".join(filtered_lines)
+
+    findings_section = _extract_normalized_findings_section(filtered)
+    scan_target = findings_section if findings_section is not None else filtered
+
     count = 0
     blocking_patterns = [
         r"\[BLOCKING\]",
@@ -1172,7 +1208,7 @@ def _count_report_blocking_indicators(content: str) -> int:
         r"Status:\s*FAIL",
     ]
     for pattern in blocking_patterns:
-        count += len(re.findall(pattern, filtered, re.IGNORECASE))
+        count += len(re.findall(pattern, scan_target, re.IGNORECASE))
     return count
 
 
