@@ -35,7 +35,12 @@ if str(LIB_DIR) not in sys.path:
 
 
 def _install_stub_modules():
-    """Install lightweight stub modules so intelligence_daemon imports succeed."""
+    """Install lightweight stub modules so intelligence_daemon imports succeed.
+
+    Returns the pre-existing sys.modules entries for the four names touched
+    (or None for a name that wasn't imported yet), so the caller can restore
+    them once intelligence_daemon's module-level `from X import Y` has run.
+    """
     gather_mod = types.ModuleType("gather_intelligence")
     learning_mod = types.ModuleType("learning_loop")
     cached_mod = types.ModuleType("cached_intelligence")
@@ -64,20 +69,37 @@ def _install_stub_modules():
     cached_mod.CachedIntelligence = DummyCachedIntelligence
     tag_mod.TagIntelligenceEngine = DummyTagEngine
 
+    saved = {}
     for name, mod in [
         ("gather_intelligence", gather_mod),
         ("learning_loop", learning_mod),
         ("cached_intelligence", cached_mod),
         ("tag_intelligence", tag_mod),
     ]:
+        saved[name] = sys.modules.get(name)
         sys.modules[name] = mod
+    return saved
 
 
 def _load_daemon_module():
-    _install_stub_modules()
-    if "intelligence_daemon" in sys.modules:
-        del sys.modules["intelligence_daemon"]
-    return importlib.import_module("intelligence_daemon")
+    """Import (or reload) ``intelligence_daemon`` with stubs in place, then
+    restore ``sys.modules`` to its pre-stub state so the stubs do not
+    contaminate later tests (OI-1403: gather_intelligence/learning_loop/
+    cached_intelligence/tag_intelligence are real, shared modules that other
+    test files import by these exact names — leaving the stubs in place
+    silently swapped their real classes for Dummy* stand-ins process-wide).
+    """
+    saved = _install_stub_modules()
+    try:
+        if "intelligence_daemon" in sys.modules:
+            del sys.modules["intelligence_daemon"]
+        return importlib.import_module("intelligence_daemon")
+    finally:
+        for name, original in saved.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
 
 def _make_daemon(tmp_path, monkeypatch) -> tuple:
