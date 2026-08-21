@@ -1023,6 +1023,36 @@ def build_receipt_from_report(
 #                 actual append_receipt_payload() call — nothing was written,
 #                 no watermark entry, no fail-closed check even attempted.
 
+def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
+    """Best-effort: push *text*'s ``## Open Items`` entries into the ledger.
+
+    OI-1289: runs at the point a report already has (or is confirmed to
+    already have) a governed receipt — the hook point the dispatch calls
+    for, not a second report scanner. Never raises: a sync failure must
+    never turn a successful receipt append into a failed one.
+    """
+    dispatch_id = receipt.get("dispatch_id")
+    if not dispatch_id:
+        return
+    try:
+        from open_items_from_report import sync_open_items_from_report
+        registered = sync_open_items_from_report(
+            text,
+            dispatch_id=str(dispatch_id),
+            report_path=str(receipt.get("report_path") or ""),
+        )
+        if registered:
+            logger.info(
+                "report_to_receipt_converter: synced %d open item(s) from dispatch=%s",
+                len(registered), dispatch_id,
+            )
+    except Exception as exc:
+        logger.warning(
+            "report_to_receipt_converter: open-items sync failed dispatch=%s: %s",
+            dispatch_id, exc,
+        )
+
+
 def _convert_one_detailed(
     report_path: Path,
     *,
@@ -1124,6 +1154,7 @@ def _convert_one_detailed(
     # wrote contract_invalid).
     _guard_did = receipt.get("dispatch_id")
     _guard_kind = receipt.get("receipt_kind")
+    _guard_matched = False
     if (
         _guard_did
         and _guard_kind
@@ -1153,13 +1184,26 @@ def _convert_one_detailed(
                         "completion receipt already exists (hot-path wrote first)",
                         _guard_did,
                     )
-                    return AppendResult(
-                        status="duplicate",
-                        receipts_file=Path(receipts_file),
-                        idempotency_key=_guard_did,
-                    ), "duplicate"
+                    _guard_matched = True
+                    break
         except OSError:
             pass  # can't read NDJSON — fall through to normal append (idempotency will catch it)
+
+    # The sync call sits outside the OSError-scoped try above and outside
+    # any handler that reads a specific exception attribute (see the
+    # append_receipt_payload try/except below): a sync-branch failure of
+    # ANY shape must never be mistaken for — or swallowed alongside — an
+    # NDJSON-read or booking failure. _sync_report_open_items() never raises
+    # on its own (it self-guards and logs), so this call is a plain
+    # statement, not a try body.
+    if _guard_matched:
+        if not dry_run:
+            _sync_report_open_items(receipt, text)
+        return AppendResult(
+            status="duplicate",
+            receipts_file=Path(receipts_file),
+            idempotency_key=_guard_did,
+        ), "duplicate"
 
     if dry_run:
         logger.info(
@@ -1170,6 +1214,11 @@ def _convert_one_detailed(
         )
         return receipt, "would_append"
 
+    # The booking call and its AppendReceiptError/.code handling are scoped
+    # to this try alone. The open-items sync runs strictly AFTER this block
+    # returns a result, never inside it — a sync-branch failure (of any
+    # shape, with or without a .code attribute) must never be caught by a
+    # handler that assumes every exception here is an AppendReceiptError.
     try:
         result = append_receipt_payload(
             receipt,
@@ -1177,7 +1226,6 @@ def _convert_one_detailed(
             cache_window_seconds=cache_window_seconds,
             skip_enrichment=True,  # converter receipts skip quality advisory
         )
-        return result, result.status
     except AppendReceiptError as exc:
         if exc.code == "missing_model":
             logger.warning(
@@ -1196,6 +1244,31 @@ def _convert_one_detailed(
             report_path.name, exc,
         )
         return None, "error"
+
+    # append_receipt_payload's documented contract (payload.py's own OI-948
+    # guard, and its mirror in scripts/append_receipt.py main()) is: return an
+    # AppendResult or raise AppendReceiptError — never return None. Every real
+    # branch of _write_receipt_under_lock honors that (confirmed by reading
+    # idempotency.py:191-281: each path returns AppendResult or raises).
+    # A None here is therefore not a legitimate "nothing was booked" outcome —
+    # it means whatever object is bound to append_receipt_payload at call time
+    # violated that contract (reproduced: pytest test-order pollution from
+    # test_heartbeat_subprocess_cleanup.py's `sys.modules["append_receipt"]`
+    # mutation can silently replace this symbol for the rest of the suite).
+    # Fail loud instead of letting it crash one line down as an opaque
+    # AttributeError, and never sync open items against a row that was never
+    # booked.
+    if result is None:
+        logger.error(
+            "report_to_receipt_converter: append_receipt_payload returned no "
+            "result (contract violation — expected AppendResult) dispatch=%s file=%s",
+            receipt.get("dispatch_id"), report_path.name,
+        )
+        return None, "error"
+
+    if result.status in ("appended", "duplicate"):
+        _sync_report_open_items(receipt, text)
+    return result, result.status
 
 
 def convert_report_to_receipt(
