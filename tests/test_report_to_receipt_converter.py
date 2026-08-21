@@ -1513,6 +1513,143 @@ class TestConverterDoubleCountGuard:
         assert len(lines) >= 1, "expected at least one receipt line"
 
 
+class TestConverterDedupGuardMatchesCompletionKindOnly:
+    """The hot-path duplicate guard in _convert_one_detailed() must match
+    only an existing COMPLETION record for this dispatch_id — a ledger row
+    whose receipt_kind equals the "dispatch" member of dispatch_identity.
+    RECEIPT_KINDS, the same closed set every receipt_kind is validated
+    against (dispatch_identity.validate_receipt_kind). review_gate /
+    state_mutation / sub_dispatch rows reference the dispatch_id without
+    ever recording that the dispatch itself finished, and must never block
+    booking the real completion."""
+
+    def test_non_completion_rows_do_not_block_booking(self, tmp_path, state_dir):
+        """A ledger holding only a review_gate row and a state_mutation row
+        for this dispatch_id (no receipt_kind=dispatch row at all) must NOT
+        be mistaken for an existing completion — the converter must book
+        the missing completion instead of skipping."""
+        dispatch_id = "20260821-guard-noncompletion-only"
+        receipts_file = state_dir / "t0_receipts.ndjson"
+        seed_lines = [
+            {
+                "dispatch_id": dispatch_id,
+                "event_type": "review_gate_requested",
+                "receipt_kind": "review_gate",
+                "status": "requested",
+                "source": "vnx_governance",
+                "timestamp": "2026-08-21T09:00:00Z",
+            },
+            {
+                "dispatch_id": dispatch_id,
+                "event_type": "roadmap_transition",
+                "receipt_kind": "state_mutation",
+                "status": "success",
+                "source": "pr_merge",
+                "timestamp": "2026-08-21T09:05:00Z",
+            },
+        ]
+        receipts_file.write_text(
+            "\n".join(json.dumps(l, separators=(",", ":")) for l in seed_lines) + "\n",
+            encoding="utf-8",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+
+        result = convert_report_to_receipt(report, receipts_file=str(receipts_file))
+
+        assert result is not None
+        assert result.status == "appended", (
+            f"expected the converter to book the missing completion, got {result.status!r}"
+        )
+        all_lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(all_lines) == 3, "the completion row must be booked alongside the seeded rows"
+        booked_kinds = [json.loads(l).get("receipt_kind") for l in all_lines]
+        assert booked_kinds.count("dispatch") == 1, (
+            "exactly one completion (receipt_kind=dispatch) row must exist"
+        )
+
+    def test_existing_completion_row_still_blocks_booking(self, tmp_path, state_dir):
+        """A ledger that already carries a receipt_kind=dispatch/status=done
+        completion row must still be treated as already booked — the guard
+        must not lose this case while narrowing its match."""
+        dispatch_id = "20260821-guard-completion-exists"
+        receipts_file = state_dir / "t0_receipts.ndjson"
+        existing = {
+            "dispatch_id": dispatch_id,
+            "event_type": "subprocess_completion",
+            "receipt_kind": "dispatch",
+            "status": "done",
+            "source": "tmux_interactive",
+            "terminal": "T1",
+            "timestamp": "2026-08-21T09:10:00Z",
+        }
+        receipts_file.write_text(
+            json.dumps(existing, separators=(",", ":")) + "\n", encoding="utf-8",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+
+        result = convert_report_to_receipt(report, receipts_file=str(receipts_file))
+
+        assert result is not None
+        assert result.status == "duplicate"
+        lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1, "no second completion row must be appended"
+
+    def test_completion_row_alongside_other_rows_still_blocks_booking(
+        self, tmp_path, state_dir,
+    ):
+        """A completion row (receipt_kind=dispatch) sitting NEXT TO
+        review_gate/state_mutation rows for the same dispatch_id must still
+        be detected — the guard must not require the completion row to be
+        the only line in the ledger."""
+        dispatch_id = "20260821-guard-completion-plus-others"
+        receipts_file = state_dir / "t0_receipts.ndjson"
+        seed_lines = [
+            {
+                "dispatch_id": dispatch_id,
+                "event_type": "review_gate_requested",
+                "receipt_kind": "review_gate",
+                "status": "requested",
+                "source": "vnx_governance",
+                "timestamp": "2026-08-21T09:00:00Z",
+            },
+            {
+                "dispatch_id": dispatch_id,
+                "event_type": "subprocess_completion",
+                "receipt_kind": "dispatch",
+                "status": "done",
+                "source": "tmux_interactive",
+                "terminal": "T1",
+                "timestamp": "2026-08-21T09:02:00Z",
+            },
+            {
+                "dispatch_id": dispatch_id,
+                "event_type": "roadmap_transition",
+                "receipt_kind": "state_mutation",
+                "status": "success",
+                "source": "pr_merge",
+                "timestamp": "2026-08-21T09:05:00Z",
+            },
+        ]
+        receipts_file.write_text(
+            "\n".join(json.dumps(l, separators=(",", ":")) for l in seed_lines) + "\n",
+            encoding="utf-8",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+
+        result = convert_report_to_receipt(report, receipts_file=str(receipts_file))
+
+        assert result is not None
+        assert result.status == "duplicate"
+        all_lines = receipts_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(all_lines) == 3, "no new row must be appended when a completion row already exists"
+
+
 # ---------------------------------------------------------------------------
 # Part 12: _is_known_dispatch — dispatch register cross-check (OI-1110)
 # ---------------------------------------------------------------------------

@@ -1098,16 +1098,35 @@ def _convert_one_detailed(
     # parsing/hashing the mapper file and keeps the ScanStats.duplicate_count
     # honest (the converter didn't build this receipt — the hot-path did).
     #
-    # The guard fires for ANY existing receipt (not only contract_invalid):
-    # the hot-path's emit_dispatch_receipt writes richer data (token_usage,
-    # cost_usd, session_id) than the converter can reconstruct from the
-    # report, so the hot-path's receipt should always win.  Checking only
-    # for contract_invalid would miss cases where the converter's
-    # fail-closed checks produce a different status (e.g. failure when the
-    # hot-path wrote contract_invalid).
+    # The guard must fire ONLY on an existing COMPLETION record for this
+    # dispatch, never on any line that merely carries the dispatch_id.
+    # review_gate/state_mutation/sub_dispatch/... rows (dispatch_identity.
+    # RECEIPT_KINDS — the closed set every emitter's receipt_kind is
+    # validated against) reference the dispatch_id without ever recording
+    # that the dispatch itself finished; matching on dispatch_id alone made
+    # the guard refuse to book a real completion the moment ANY such row
+    # existed, even when no completion row had ever been written. Every
+    # emitter that DOES record the dispatch's own completion — the worker's
+    # Completion Protocol, dispatch_govern.ensure_receipt's synthesized
+    # fallback, phantom_guard, pr_enforcement, envelope_govern,
+    # provider_dispatch, and this converter's own build_receipt_from_report
+    # (receipt["receipt_kind"] set above) — stamps the same receipt_kind
+    # this converter just built, so comparing against that field scopes the
+    # guard to the record kind it actually needs to detect.
+    #
+    # Once scoped to a real completion row, the guard fires for ANY status
+    # on that row (not only contract_invalid): the hot-path's
+    # emit_dispatch_receipt writes richer data (token_usage, cost_usd,
+    # session_id) than the converter can reconstruct from the report, so the
+    # hot-path's receipt should always win. Checking only for
+    # contract_invalid would miss cases where the converter's fail-closed
+    # checks produce a different status (e.g. failure when the hot-path
+    # wrote contract_invalid).
     _guard_did = receipt.get("dispatch_id")
+    _guard_kind = receipt.get("receipt_kind")
     if (
         _guard_did
+        and _guard_kind
         and receipts_file
         and Path(receipts_file).exists()
     ):
@@ -1125,10 +1144,13 @@ def _convert_one_detailed(
                     _rec = json.loads(_line)
                 except json.JSONDecodeError:
                     continue
-                if _rec.get("dispatch_id") == _guard_did:
+                if (
+                    _rec.get("dispatch_id") == _guard_did
+                    and _rec.get("receipt_kind") == _guard_kind
+                ):
                     logger.info(
                         "report_to_receipt_converter: skipping dispatch=%s — "
-                        "receipt already exists (hot-path wrote first)",
+                        "completion receipt already exists (hot-path wrote first)",
                         _guard_did,
                     )
                     return AppendResult(
