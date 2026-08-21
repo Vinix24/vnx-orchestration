@@ -1023,6 +1023,36 @@ def build_receipt_from_report(
 #                 actual append_receipt_payload() call — nothing was written,
 #                 no watermark entry, no fail-closed check even attempted.
 
+def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
+    """Best-effort: push *text*'s ``## Open Items`` entries into the ledger.
+
+    OI-1289: runs at the point a report already has (or is confirmed to
+    already have) a governed receipt — the hook point the dispatch calls
+    for, not a second report scanner. Never raises: a sync failure must
+    never turn a successful receipt append into a failed one.
+    """
+    dispatch_id = receipt.get("dispatch_id")
+    if not dispatch_id:
+        return
+    try:
+        from open_items_from_report import sync_open_items_from_report
+        registered = sync_open_items_from_report(
+            text,
+            dispatch_id=str(dispatch_id),
+            report_path=str(receipt.get("report_path") or ""),
+        )
+        if registered:
+            logger.info(
+                "report_to_receipt_converter: synced %d open item(s) from dispatch=%s",
+                len(registered), dispatch_id,
+            )
+    except Exception as exc:
+        logger.warning(
+            "report_to_receipt_converter: open-items sync failed dispatch=%s: %s",
+            dispatch_id, exc,
+        )
+
+
 def _convert_one_detailed(
     report_path: Path,
     *,
@@ -1153,6 +1183,8 @@ def _convert_one_detailed(
                         "completion receipt already exists (hot-path wrote first)",
                         _guard_did,
                     )
+                    if not dry_run:
+                        _sync_report_open_items(receipt, text)
                     return AppendResult(
                         status="duplicate",
                         receipts_file=Path(receipts_file),
@@ -1177,6 +1209,8 @@ def _convert_one_detailed(
             cache_window_seconds=cache_window_seconds,
             skip_enrichment=True,  # converter receipts skip quality advisory
         )
+        if result.status in ("appended", "duplicate"):
+            _sync_report_open_items(receipt, text)
         return result, result.status
     except AppendReceiptError as exc:
         if exc.code == "missing_model":

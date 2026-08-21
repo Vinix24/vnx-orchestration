@@ -23,6 +23,27 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from validate_template_tokens import validate_all_templates
 
+# Shape of a correctly-formatted Open Items entry: "- [ ] [severity] Title".
+# Single definition, reused by scripts/lib/open_items_from_report.py (OI-1289)
+# so the pre-submit format check and the ledger-sync path can never drift
+# apart on what counts as "a formatted item" vs. prose.
+OPEN_ITEM_PATTERN = re.compile(
+    r'-\s*\[\s*\]\s*\[(blocker|warn|info)\]\s*(.*)',
+    re.IGNORECASE,
+)
+
+
+def extract_open_items(open_items_content: str) -> List[Tuple[str, str]]:
+    """Extract (severity, title) pairs from a raw Open Items section body.
+
+    A bullet without the exact ``[blocker|warn|info]`` severity tag is prose,
+    not an item, and is not returned.
+    """
+    return [
+        (severity, title.strip())
+        for severity, title in OPEN_ITEM_PATTERN.findall(open_items_content)
+    ]
+
 
 class ReportValidator:
     """Validates unified reports for completeness and correctness"""
@@ -166,7 +187,8 @@ class ReportValidator:
             return  # Valid
 
         # Otherwise, validate item format
-        items = re.findall(r'-\s*\[\s*\]\s*\[(blocker|warn|info)\]', open_items_content, re.IGNORECASE)
+        parsed_items = extract_open_items(open_items_content)
+        items = [severity for severity, _ in parsed_items]
 
         if not items:
             # Has content but no properly formatted items
