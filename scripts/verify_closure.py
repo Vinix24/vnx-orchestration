@@ -30,8 +30,10 @@ from typing import Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import resolve_paths as _resolve_paths  # noqa: E402
+from build_feature_plan import write_feature_plan  # noqa: E402
 
 REPO_ROOT = Path(_resolve_paths()["PROJECT_ROOT"])
 
@@ -129,12 +131,41 @@ def _parse_pr_queue(path: Path) -> Dict[str, str]:
     return result
 
 
-def _parse_feature_plan_prs(path: Path) -> List[str]:
-    """Extract PR identifiers from FEATURE_PLAN.md."""
-    if not path.exists():
+def _parse_feature_plan_prs(text: str) -> List[str]:
+    """Extract PR identifiers from FEATURE_PLAN.md content."""
+    if not text:
         return []
-    text = path.read_text()
     return list(set(re.findall(r"PR-\d+", text)))
+
+
+_FEATURE_PLAN_CONTENT_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _get_feature_plan_content() -> Optional[str]:
+    """Return FEATURE_PLAN.md content.
+
+    FEATURE_PLAN.md is a generated, gitignored artifact (OI-1376) — a fresh
+    checkout has no committed copy on disk. Fall back to the file on disk
+    when one happens to exist; regenerate it in memory via
+    scripts/build_feature_plan.py otherwise. Cached per-process: multiple
+    checks need this content and regeneration touches git/gh.
+    """
+    if "content" in _FEATURE_PLAN_CONTENT_CACHE:
+        return _FEATURE_PLAN_CONTENT_CACHE["content"]
+
+    path = REPO_ROOT / "FEATURE_PLAN.md"
+    content: Optional[str]
+    if path.exists():
+        content = path.read_text()
+    else:
+        try:
+            content = write_feature_plan(output_path=path, dry_run=True)
+        except Exception as e:
+            print(f"WARNING: failed to regenerate FEATURE_PLAN.md content: {e}", file=sys.stderr)
+            content = None
+
+    _FEATURE_PLAN_CONTENT_CACHE["content"] = content
+    return content
 
 
 def _find_test_files() -> set:
@@ -151,16 +182,28 @@ def _find_test_files() -> set:
 
 def check_metadata_files_exist() -> List[ClosureCheck]:
     checks = []
-    for fname in ["FEATURE_PLAN.md", "PR_QUEUE.md"]:
-        path = REPO_ROOT / fname
-        if path.exists():
-            checks.append(ClosureCheck(
-                "metadata_exists", fname, PASS, f"{fname} exists"
-            ))
+
+    # FEATURE_PLAN.md is generated and gitignored (OI-1376); only a failure
+    # to regenerate it counts as FAIL, not a missing file on disk.
+    feature_plan_content = _get_feature_plan_content()
+    if feature_plan_content is not None:
+        if (REPO_ROOT / "FEATURE_PLAN.md").exists():
+            message = "FEATURE_PLAN.md exists"
         else:
-            checks.append(ClosureCheck(
-                "metadata_exists", fname, FAIL, f"{fname} missing"
-            ))
+            message = "FEATURE_PLAN.md regenerated in memory (OI-1376: gitignored generated artifact)"
+        checks.append(ClosureCheck("metadata_exists", "FEATURE_PLAN.md", PASS, message))
+    else:
+        checks.append(ClosureCheck(
+            "metadata_exists", "FEATURE_PLAN.md", FAIL,
+            "FEATURE_PLAN.md missing and could not be regenerated",
+        ))
+
+    path = REPO_ROOT / "PR_QUEUE.md"
+    if path.exists():
+        checks.append(ClosureCheck("metadata_exists", "PR_QUEUE.md", PASS, "PR_QUEUE.md exists"))
+    else:
+        checks.append(ClosureCheck("metadata_exists", "PR_QUEUE.md", FAIL, "PR_QUEUE.md missing"))
+
     return checks
 
 
@@ -168,7 +211,7 @@ def check_pr_queue_feature_plan_alignment() -> List[ClosureCheck]:
     """FEATURE_PLAN.md and PR_QUEUE.md must agree on which PRs exist."""
     checks = []
     queue_prs = _parse_pr_queue(REPO_ROOT / "PR_QUEUE.md")
-    plan_prs = set(_parse_feature_plan_prs(REPO_ROOT / "FEATURE_PLAN.md"))
+    plan_prs = set(_parse_feature_plan_prs(_get_feature_plan_content() or ""))
 
     if not queue_prs and not plan_prs:
         return [ClosureCheck("alignment", "all", WARN, "No PRs found in either file")]
@@ -256,12 +299,14 @@ def check_test_files_exist() -> List[ClosureCheck]:
 
 def check_feature_plan_not_draft() -> List[ClosureCheck]:
     """FEATURE_PLAN.md should not still say 'Draft' if queue shows significant completion."""
-    plan_path = REPO_ROOT / "FEATURE_PLAN.md"
     queue_path = REPO_ROOT / "PR_QUEUE.md"
-    if not plan_path.exists():
-        return [ClosureCheck("plan_status", "FEATURE_PLAN", FAIL, "File missing")]
+    text = _get_feature_plan_content()
+    if text is None:
+        return [ClosureCheck(
+            "plan_status", "FEATURE_PLAN", FAIL,
+            "FEATURE_PLAN.md missing and could not be regenerated",
+        )]
 
-    text = plan_path.read_text()
     queue_prs = _parse_pr_queue(queue_path)
     completed_count = sum(1 for s in queue_prs.values() if s == "completed")
     total = len(queue_prs)
