@@ -243,6 +243,10 @@ def test_creation_failure_appends_corrective_receipt(monkeypatch, tmp_path):
     assert payload["event_type"] == "subprocess_completion"
     assert payload["synthesized"] is False  # else dedup Tier-2 would drop it
     assert payload["timestamp"].endswith("Z")
+    # OI-1415: the canonical failure_reason field must carry the SAME text as the
+    # lane-own autopr_reason — a generic failure_reason reader must see this rejection
+    # exactly like an autopr_reason-aware reader already does.
+    assert payload["failure_reason"] == payload["autopr_reason"] == "gh auth expired"
 
 
 def test_creation_failure_default_reason_when_ensure_pr_omits_one(monkeypatch, tmp_path):
@@ -793,4 +797,55 @@ def test_empty_work_ref_falls_through_to_normal_behavior(monkeypatch):
     result = pe.enforce_pr_exists(**_kwargs(work_ref=""))
 
     assert result.ok is True
-    assert captured["branch"] == "dispatch/d1"
+
+
+# ---------------------------------------------------------------------------
+# OI-1415: the canonical failure_reason field — every corrective-receipt kind
+# must carry it with the SAME text as the lane-own autopr_reason, and a
+# successful receipt must never grow one.
+# ---------------------------------------------------------------------------
+
+
+def test_failure_reason_mirrors_autopr_reason_across_all_corrective_kinds(monkeypatch, tmp_path):
+    """_record_corrective_receipt is the single write site for every corrective
+    kind (push_failed / pr_failed / containment_failed / dirty_substantive_*) —
+    proving failure_reason mirrors autopr_reason here covers all of them at once."""
+    import append_receipt
+    captured = []
+    monkeypatch.setattr(
+        append_receipt, "append_receipt_payload",
+        lambda payload, **kw: captured.append(payload),
+    )
+
+    for kind in ("push_failed", "pr_failed", "containment_failed", "dirty_substantive_unsalvaged"):
+        pe._record_corrective_receipt(
+            dispatch_id="d1", branch="dispatch/d1", reason=f"reason for {kind}",
+            receipts_file=str(tmp_path / "r.ndjson"), kind=kind,
+        )
+
+    assert len(captured) == 4
+    for payload in captured:
+        assert payload["failure_reason"]
+        assert payload["failure_reason"] == payload["autopr_reason"]
+
+
+def test_success_path_never_gets_a_failure_reason(monkeypatch, tmp_path):
+    """OI-1415 proof #4: a found/created PR (ok=True) never appends ANY receipt,
+    so it can never carry a failure_reason either — mirrors phantom_guard's
+    success-path guarantee."""
+    import gh_pr_ensure
+    monkeypatch.setattr(
+        gh_pr_ensure, "ensure_pr",
+        lambda *a, **kw: {"pr_number": 42, "created": True, "reason": None},
+    )
+    import append_receipt
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        append_receipt, "append_receipt_payload",
+        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1),
+    )
+
+    result = pe.enforce_pr_exists(**_kwargs(receipts_file=str(tmp_path / "r.ndjson")))
+
+    assert result.ok is True
+    assert calls["n"] == 0

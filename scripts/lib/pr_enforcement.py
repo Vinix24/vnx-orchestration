@@ -720,6 +720,13 @@ def _record_corrective_receipt(
             "autopr_rejected": True,
             "autopr_reason": reason,
             "autopr_kind": kind,
+            # OI-1415: the canonical failure_reason field (receipt_schema.py /
+            # failure_classification.py, read generically by e.g.
+            # dispatch_outcome_classifier._classify_receipts) — same text as
+            # autopr_reason above. Lane-specific field is kept unchanged; this is
+            # additive so a generic failure-reason reader sees the same rejection
+            # an autopr_reason-aware reader already does.
+            "failure_reason": reason,
             "branch": branch,
             "source": "pr_enforcement",
             "synthesized": False,

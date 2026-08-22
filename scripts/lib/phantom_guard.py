@@ -488,6 +488,13 @@ def record_phantom_if_any(
                     "status": "failed",
                     "phantom_rejected": True,
                     "phantom_reason": verdict.reason,
+                    # OI-1415: the canonical failure_reason field (receipt_schema.py /
+                    # failure_classification.py, read generically by e.g.
+                    # dispatch_outcome_classifier._classify_receipts) — same text as
+                    # phantom_reason above. Lane-specific field is kept unchanged; this
+                    # is additive so a generic failure-reason reader sees the same
+                    # rejection a phantom_reason-aware reader already does.
+                    "failure_reason": verdict.reason,
                     "source": "phantom_guard",
                     "synthesized": False,
                     # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
@@ -527,6 +534,16 @@ def record_guard_error(
         if _scripts not in sys.path:
             sys.path.insert(0, _scripts)
         from append_receipt import append_receipt_payload  # noqa: PLC0415
+        error_text = str(error).strip()
+        # OI-1415: no lane-specific reason field exists for a guard crash (there is no
+        # PhantomVerdict to carry one) — `guard_error` above can itself be blank for an
+        # exception with no message, so the canonical field is built to always name the
+        # guard and the failure mode, never an empty string or a bare placeholder.
+        failure_reason = (
+            f"phantom_guard: the guard itself raised {type(error).__name__} before it "
+            f"could evaluate dispatch {dispatch_id!r}"
+            + (f" — {error_text}" if error_text else " (no error message)")
+        )
         append_receipt_payload(
             {
                 "event_type": "phantom_guard_error",
@@ -534,6 +551,7 @@ def record_guard_error(
                 "dispatch_id": dispatch_id,
                 "status": "guard_error",
                 "guard_error": str(error),
+                "failure_reason": failure_reason,
                 "source": "phantom_guard",
                 "synthesized": False,
                 "model": os.environ.get("VNX_CURRENT_MODEL") or None,
