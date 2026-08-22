@@ -626,7 +626,11 @@ def _build_frontmatter(
         "terminal_id": args.terminal_id,
         "pool_id": os.environ.get("VNX_POOL_ID", "headless"),
         "role": getattr(args, "role", None) or "backend-developer",
-        "task_class": os.environ.get("VNX_TASK_CLASS", "implementation"),
+        "task_class": (
+            (getattr(args, "task_class", "") or "").strip()
+            or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
+            or "implementation"
+        ),
         "pr_id": getattr(args, "pr_id", None) or "none",
         "duration_seconds": round(duration, 3),
         "exit_code": spawn_fm.get("exit_code", getattr(result, "returncode", 1)),
