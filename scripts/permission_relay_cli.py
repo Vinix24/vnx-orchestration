@@ -18,6 +18,10 @@ All subcommands accept ``--json`` for machine-readable output.
 dispatch sessions for a pane classified ``awaiting_permission`` that has not
 yet surfaced anywhere — writes an escalation record for each new find
 (idempotent) so ``escalations`` becomes a current view instead of an archive.
+Each hit also carries its dispatch worktree's risk state (OI-1414 follow-up):
+a stall holding uncommitted or unpushed work is flagged ``[!! WORK AT RISK]``
+and sorted to the top, distinct from a stall whose worktree is clean or
+whose worktree could not be measured (never silently reported as clean).
 Exit code encodes the verdict for a supervisor tick / operator script:
   0 = measured cleanly, zero stalls found
   1 = at least one live stall found (see the printed dispatch id + command)
@@ -125,12 +129,68 @@ def _cmd_escalations(args, sd: Path) -> int:
     return 0
 
 
+def _worktree_risk_label(hit: dict) -> str:
+    """One-glance label distinguishing a stall holding unsaved work from one
+    that does not — the label a triaging operator scans for first (OI-1414
+    follow-up). Never reads a missing/unmeasured worktree as clean."""
+    if hit.get("worktree_at_risk"):
+        return "[!! WORK AT RISK]"
+    if not hit.get("worktree_measured", True):
+        return "[?  worktree unmeasured]"
+    return "[   worktree clean   ]"
+
+
+def _format_scan_human(result: dict) -> str:
+    """Human-readable rendering of a ``scan_live_awaiting_permission`` result.
+
+    Shared by ``_cmd_scan`` and any ad-hoc scan (e.g. an evidence run against
+    an isolated state/repo root) so both read off the identical formatting —
+    never a second, driftable rendering. ``hits`` is already sorted
+    urgent-first by ``scan_live_awaiting_permission``; this function renders
+    that order as-is rather than re-sorting.
+    """
+    hits = result.get("hits") or []
+    errors = result.get("errors") or []
+    lines: "list[str]" = []
+
+    if hits:
+        lines.append(f"[!] {len(hits)} worker(s) awaiting permission:")
+        for h in hits:
+            lines.append(
+                f"  - {_worktree_risk_label(h)} {h.get('dispatch_id')}  cmd: {h.get('command')}  "
+                f"(session={h.get('session')}, marker={h.get('matched_marker')!r})"
+            )
+            lines.append(
+                f"      worktree: {h.get('worktree_classification')} — "
+                f"{h.get('worktree_detail')} ({h.get('worktree_path')})"
+            )
+    elif errors:
+        lines.append("[x] scan could not fully measure the live fleet")
+    else:
+        lines.append("[ok] no worker is awaiting permission")
+
+    if errors:
+        lines.append(f"\n[!] {len(errors)} measurement error(s):")
+        for e in errors:
+            lines.append(
+                f"  - scope={e.get('scope')} session={e.get('session')} "
+                f"dispatch_id={e.get('dispatch_id')}: {e.get('error')}"
+            )
+
+    return "\n".join(lines)
+
+
 def _cmd_scan(args, sd: Path) -> int:
     """OI-1324 / OI-1344: scan live worker panes; alarm loudly, never silently.
 
     Exit code: 0 clean, 1 at least one live stall found, 2 could not fully
     measure (tmux unavailable, listing unmeasurable, or a capture failed) —
     a measurement gap is reported distinctly and is NEVER read as "clean".
+
+    Each hit also carries its dispatch worktree's risk state (OI-1414
+    follow-up: is there unsaved work behind this stall?) — see
+    ``_worktree_risk_label`` / ``_format_scan_human``. Hits are pre-sorted
+    urgent-first by ``scan_live_awaiting_permission``.
     """
     result = relay.scan_live_awaiting_permission(state_dir=sd)
     hits = result.get("hits") or []
@@ -139,24 +199,7 @@ def _cmd_scan(args, sd: Path) -> int:
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
-        if hits:
-            print(f"[!] {len(hits)} worker(s) awaiting permission:")
-            for h in hits:
-                print(
-                    f"  - {h.get('dispatch_id')}  cmd: {h.get('command')}  "
-                    f"(session={h.get('session')}, marker={h.get('matched_marker')!r})"
-                )
-        elif errors:
-            print("[x] scan could not fully measure the live fleet")
-        else:
-            print("[ok] no worker is awaiting permission")
-        if errors:
-            print(f"\n[!] {len(errors)} measurement error(s):")
-            for e in errors:
-                print(
-                    f"  - scope={e.get('scope')} session={e.get('session')} "
-                    f"dispatch_id={e.get('dispatch_id')}: {e.get('error')}"
-                )
+        print(_format_scan_human(result))
 
     if hits:
         return 1

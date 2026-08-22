@@ -8,6 +8,7 @@ EXPLICIT-session send-keys contract.
 """
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -961,3 +962,205 @@ class TestCmdScanExitCodes:
         assert rc == 0
         out = json.loads(capsys.readouterr().out)
         assert out == payload
+
+
+# ---------------------------------------------------------------------------
+# Worktree-risk triage on scan hits (OI-1414 follow-up) — is there unsaved
+# work behind a live permission stall?
+# ---------------------------------------------------------------------------
+def _make_git_repo(path: Path, *, dirty: bool = False) -> None:
+    """A minimal REAL git repo for classify_for_release to read.
+
+    No remote is configured, which exercises classify_for_release's own
+    "base unresolvable" fallback (``git merge-base origin/main HEAD`` fails)
+    — exactly what a dispatch worktree with no reachable origin/main degrades
+    to. That fallback still correctly distinguishes dirty (-> committable)
+    from clean (-> releasable), which is all this scan needs.
+    """
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(path),
+            "-c", "user.email=t@t.local", "-c", "user.name=t",
+            "commit", "--allow-empty", "-q", "-m", "seed",
+        ],
+        check=True,
+    )
+    if dirty:
+        (path / "scratch.txt").write_text("dirty\n", encoding="utf-8")
+
+
+class TestScanWorktreeRisk:
+    def test_dirty_worktree_classified_committable_and_at_risk(self, tmp_path):
+        repo_root = tmp_path / "repo"
+        wt = repo_root / ".vnx-data" / "worktrees" / "dispatch-dirty-demo"
+        _make_git_repo(wt, dirty=True)
+        _write_handle(tmp_path, "dirty-demo", "vnx-dirty-demo")
+        runner = FakeScanRunner(["vnx-dirty-demo"], {"vnx-dirty-demo": PROMPT_PANE})
+
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path, repo_root=repo_root)
+
+        hit = result["hits"][0]
+        assert hit["dispatch_id"] == "dirty-demo"
+        assert hit["worktree_classification"] == "committable"
+        assert hit["worktree_at_risk"] is True
+        assert hit["worktree_measured"] is True
+        assert hit["worktree_path"] == str(wt)
+
+    def test_clean_worktree_classified_releasable_not_at_risk(self, tmp_path):
+        repo_root = tmp_path / "repo"
+        wt = repo_root / ".vnx-data" / "worktrees" / "dispatch-clean-demo"
+        _make_git_repo(wt, dirty=False)
+        _write_handle(tmp_path, "clean-demo", "vnx-clean-demo")
+        runner = FakeScanRunner(["vnx-clean-demo"], {"vnx-clean-demo": PROMPT_PANE})
+
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path, repo_root=repo_root)
+
+        hit = result["hits"][0]
+        assert hit["worktree_classification"] == "releasable"
+        assert hit["worktree_at_risk"] is False
+        assert hit["worktree_measured"] is True
+
+    def test_missing_worktree_is_unmeasured_never_clean(self, tmp_path):
+        repo_root = tmp_path / "repo"  # no worktree created at all
+        _write_handle(tmp_path, "gone-demo", "vnx-gone-demo")
+        runner = FakeScanRunner(["vnx-gone-demo"], {"vnx-gone-demo": PROMPT_PANE})
+
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path, repo_root=repo_root)
+
+        hit = result["hits"][0]
+        assert hit["worktree_classification"] == "unreachable"
+        assert hit["worktree_classification"] != "releasable"
+        assert hit["worktree_measured"] is False
+        assert hit["worktree_at_risk"] is False
+
+    def test_corrupted_worktree_is_unmeasured_error_never_clean(self, tmp_path):
+        # A ".git" that exists but points nowhere real: every git read fails,
+        # never conflated with "clean" (an unreadable worktree is not schoon).
+        repo_root = tmp_path / "repo"
+        wt = repo_root / ".vnx-data" / "worktrees" / "dispatch-broken-demo"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: /nonexistent-gitdir\n", encoding="utf-8")
+        _write_handle(tmp_path, "broken-demo", "vnx-broken-demo")
+        runner = FakeScanRunner(["vnx-broken-demo"], {"vnx-broken-demo": PROMPT_PANE})
+
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path, repo_root=repo_root)
+
+        hit = result["hits"][0]
+        assert hit["worktree_classification"] == "error"
+        assert hit["worktree_classification"] != "releasable"
+        assert hit["worktree_measured"] is False
+        assert hit["worktree_at_risk"] is False
+
+    def test_at_risk_hit_sorts_first(self, tmp_path):
+        repo_root = tmp_path / "repo"
+        clean_wt = repo_root / ".vnx-data" / "worktrees" / "dispatch-aaa-clean"
+        dirty_wt = repo_root / ".vnx-data" / "worktrees" / "dispatch-zzz-dirty"
+        _make_git_repo(clean_wt, dirty=False)
+        _make_git_repo(dirty_wt, dirty=True)
+        for did in ("aaa-clean", "zzz-dirty"):
+            _write_handle(tmp_path, did, f"vnx-{did}")
+        # Discovery order (sorted session names) visits the CLEAN one first —
+        # the risk-sort must still put the dirty (at-risk) one first in `hits`.
+        runner = FakeScanRunner(
+            ["vnx-aaa-clean", "vnx-zzz-dirty"],
+            {"vnx-aaa-clean": PROMPT_PANE, "vnx-zzz-dirty": ROUTINE_PROMPT_PANE},
+        )
+
+        result = scan_live_awaiting_permission(runner, state_dir=tmp_path, repo_root=repo_root)
+
+        assert [h["dispatch_id"] for h in result["hits"]] == ["zzz-dirty", "aaa-clean"]
+
+    def test_scan_never_mutates_the_worktree(self, tmp_path):
+        repo_root = tmp_path / "repo"
+        wt = repo_root / ".vnx-data" / "worktrees" / "dispatch-untouched-demo"
+        _make_git_repo(wt, dirty=True)
+        _write_handle(tmp_path, "untouched-demo", "vnx-untouched-demo")
+        runner = FakeScanRunner(["vnx-untouched-demo"], {"vnx-untouched-demo": PROMPT_PANE})
+
+        before = subprocess.run(
+            ["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True
+        ).stdout
+        scan_live_awaiting_permission(runner, state_dir=tmp_path, repo_root=repo_root)
+        after = subprocess.run(
+            ["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True
+        ).stdout
+
+        assert before == after
+        # No writing tmux call was ever issued (FakeScanRunner asserts this
+        # itself on any unexpected call, but assert the shape explicitly too).
+        assert all(c[:1] in (["list-sessions"], ["capture-pane"]) for c in runner.calls)
+
+
+# ---------------------------------------------------------------------------
+# Human-readable scan output visually distinguishes an at-risk stall
+# ---------------------------------------------------------------------------
+class TestScanHumanOutputRiskLabel:
+    def test_at_risk_hit_visually_distinct_from_clean(self, capsys, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            relay,
+            "scan_live_awaiting_permission",
+            lambda **kw: {
+                "sessions_scanned": ["vnx-risky", "vnx-safe"],
+                "sessions_skipped_foreign": [],
+                "hits": [
+                    {
+                        "session": "vnx-risky", "dispatch_id": "risky", "command": "x",
+                        "matched_marker": "m", "escalation_written": True,
+                        "worktree_classification": "committable",
+                        "worktree_detail": "1 uncommitted change(s)",
+                        "worktree_at_risk": True, "worktree_measured": True,
+                        "worktree_path": "/tmp/x/dispatch-risky",
+                    },
+                    {
+                        "session": "vnx-safe", "dispatch_id": "safe", "command": "x",
+                        "matched_marker": "m", "escalation_written": True,
+                        "worktree_classification": "releasable",
+                        "worktree_detail": "clean",
+                        "worktree_at_risk": False, "worktree_measured": True,
+                        "worktree_path": "/tmp/x/dispatch-safe",
+                    },
+                ],
+                "errors": [],
+                "measured": True,
+            },
+        )
+        rc = cli._cmd_scan(_ScanArgs(), tmp_path)
+        assert rc == 1
+        lines = capsys.readouterr().out.splitlines()
+        risky_line = next(l for l in lines if "risky" in l and "cmd:" in l)
+        safe_line = next(l for l in lines if "safe" in l and "cmd:" in l)
+        risky_label = risky_line.split("risky")[0]
+        safe_label = safe_line.split("safe")[0]
+        assert risky_label != safe_label
+        assert "RISK" in risky_label.upper()
+        assert "RISK" not in safe_label.upper()
+
+    def test_unmeasured_hit_never_labeled_clean(self, capsys, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            relay,
+            "scan_live_awaiting_permission",
+            lambda **kw: {
+                "sessions_scanned": ["vnx-gone"],
+                "sessions_skipped_foreign": [],
+                "hits": [
+                    {
+                        "session": "vnx-gone", "dispatch_id": "gone", "command": "x",
+                        "matched_marker": "m", "escalation_written": True,
+                        "worktree_classification": "unreachable",
+                        "worktree_detail": "worktree directory does not exist",
+                        "worktree_at_risk": False, "worktree_measured": False,
+                        "worktree_path": "/tmp/x/dispatch-gone",
+                    },
+                ],
+                "errors": [],
+                "measured": True,
+            },
+        )
+        cli._cmd_scan(_ScanArgs(), tmp_path)
+        lines = capsys.readouterr().out.splitlines()
+        gone_line = next(l for l in lines if "gone" in l and "cmd:" in l)
+        label = gone_line.split("gone")[0]
+        assert "clean" not in label.lower()
+        assert "unmeasured" in label.lower()
