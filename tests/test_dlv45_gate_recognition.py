@@ -148,13 +148,16 @@ class TestGlmGateSpeakingRejection:
     def test_glm_gate_request_gets_a_speaking_runner_missing_rejection(self, manager_env, monkeypatch):
         """Behavioral red/green pin (dlv45 evidence #2).
 
-        On unmodified main glm_gate also falls through to the generic
-        unknown_review_gate rejection. After this dispatch it must be
-        'not_executable' with reason 'gate_runner_missing' — a distinct,
-        speaking rejection an operator can tell apart from "not a real gate".
+        scripts/glm_gate.py now ships for real (a later dlv1 deliverable), so
+        the "runner missing" state can no longer be produced by the file's
+        actual absence on disk. Force it explicitly via the availability
+        helper instead — the rejection this test guards (speaking,
+        'gate_runner_missing', never the generic 'unknown_review_gate') must
+        still fire whenever the runner is unavailable, regardless of why.
         """
         monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda pr_number: "b" * 40)
         manager = _make_manager()
+        monkeypatch.setattr(manager, "_glm_gate_available", lambda: False)
 
         result = manager._dispatch_one_review(
             "glm_gate", pr_number=9, branch="feature/dlv45",
@@ -166,12 +169,34 @@ class TestGlmGateSpeakingRejection:
         assert result.get("reason") == "gate_runner_missing"
         assert result.get("reason") != "unknown_review_gate"
 
+    def test_glm_gate_request_is_accepted_once_the_runner_exists(self, manager_env, monkeypatch):
+        """The other side of evidence #2: with the runner present (its real,
+        shipped state in this repo since dlv1), the gate must resolve to
+        'requested', not the speaking rejection above. Without this test the
+        suite would stay green even if recognition silently broke again and
+        glm_gate started refusing a runner that is actually there."""
+        monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda pr_number: "d" * 40)
+        manager = _make_manager()
+        monkeypatch.setattr(manager, "_glm_gate_available", lambda: True)
+
+        result = manager._dispatch_one_review(
+            "glm_gate", pr_number=12, branch="feature/dlv45",
+            risk_class="low", changed_files=[],
+            mode="per_pr", dispatch_id="dlv45-glm-available",
+        )
+
+        assert result["status"] == "requested"
+        assert result.get("reason") is None
+        assert result.get("reason") != "gate_runner_missing"
+        assert result.get("reason") != "unknown_review_gate"
+
     def test_kimi_and_glm_rejections_are_distinguishable_side_by_side(self, manager_env, monkeypatch):
         """Evidence #2: the kimi (available) and glm (runner missing) outcomes
         must differ from each other AND from the old unknown_review_gate
         rejection — never collapse to the same string."""
         monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda pr_number: "c" * 40)
         manager = _make_manager()
+        monkeypatch.setattr(manager, "_glm_gate_available", lambda: False)
 
         kimi_result = manager._dispatch_one_review(
             "kimi_gate", pr_number=10, branch="feature/dlv45",
