@@ -329,6 +329,18 @@ def close_item(args):
         item["closed_at"] = datetime.now().isoformat()
         item["updated_at"] = datetime.now().isoformat()
 
+        evidence = getattr(args, 'evidence', None)
+        if evidence:
+            item["closed_evidence"] = evidence
+
+        # OI-1416: the dispatch that RESOLVES the item, not the one that
+        # discovered it. Fall back to origin_dispatch_id only when no
+        # --dispatch-id was given, so the existing trail (manually-created
+        # items with no explicit closer) still resolves to something.
+        resolving_dispatch_id = (
+            getattr(args, 'dispatch_id', None) or item.get("origin_dispatch_id")
+        )
+
         save_items(data)
 
         audit_log_entry(
@@ -337,15 +349,16 @@ def close_item(args):
             from_status=old_status,
             to_status=args.status,
             reason=args.reason,
-            dispatch_id=item.get("origin_dispatch_id"),
-            pr_id=item.get("pr_id")
+            dispatch_id=resolving_dispatch_id,
+            pr_id=item.get("pr_id"),
+            evidence=evidence,
         )
 
     _log_oi_close_decision(
         oi_id=args.item_id,
         status=args.status,
         reason=args.reason,
-        dispatch_id=item.get("origin_dispatch_id"),
+        dispatch_id=resolving_dispatch_id,
     )
 
     print(f"✅ Closed {args.item_id} as {args.status}")
@@ -422,21 +435,45 @@ def list_items(args):
                 print(f"     Closed: {item['closed_reason']}")
 
 def attach_evidence(args):
-    """Attach evidence from a report to all open items for a PR (does NOT close them)."""
+    """Attach evidence from a report to open items (does NOT close them).
+
+    Two addressing modes, at least one required (OI-1416):
+      --pr ITEM_ID: bulk-attach to every OPEN item for that PR (legacy mode).
+      --item ID: attach to exactly that item, in ANY status — evidence that
+                 isn't PR-shaped (a measurement, a ledger line, a manual
+                 verification) needs somewhere to hang that doesn't require
+                 a PR to exist.
+    """
+    pr_id = getattr(args, 'pr', None)
+    item_id = getattr(args, 'item_id', None)
+
+    if not pr_id and not item_id:
+        print("❌ attach-evidence requires --pr and/or --item", file=sys.stderr)
+        return 1
+
+    report_path = args.report or ""
+    dispatch_id = args.dispatch or ""
+
     with _with_items_lock():
         data = load_items()
 
-        pr_id = args.pr
-        report_path = args.report or ""
-        dispatch_id = args.dispatch or ""
+        if item_id:
+            matched_items = [i for i in data["items"] if i["id"] == item_id]
+            if not matched_items:
+                print(f"❌ Item {item_id} not found", file=sys.stderr)
+                return 1
+        else:
+            matched_items = [
+                i for i in data["items"]
+                if i["status"] == "open" and i.get("pr_id") == pr_id
+            ]
 
-        matched = 0
-        for item in data["items"]:
-            if item["status"] != "open":
-                continue
-            if item.get("pr_id") != pr_id:
-                continue
+        if not matched_items:
+            label = item_id or pr_id
+            print(f"ℹ️  No items found for {label}")
+            return 0
 
+        for item in matched_items:
             if "evidence" not in item:
                 item["evidence"] = []
             item["evidence"].append({
@@ -445,25 +482,115 @@ def attach_evidence(args):
                 "attached_at": datetime.now().isoformat()
             })
             item["updated_at"] = datetime.now().isoformat()
-            matched += 1
 
-        if matched == 0:
-            print(f"ℹ️  No open items found for {pr_id}")
-            return 0
-
+        matched = len(matched_items)
         save_items(data)
 
         audit_log_entry(
             "attach_evidence",
             pr_id=pr_id,
+            item_id=item_id,
             report_path=report_path,
             dispatch_id=dispatch_id,
             items_matched=matched
         )
 
-    print(f"📎 Attached evidence to {matched} open items for {pr_id}")
+    target = item_id or pr_id
+    print(f"📎 Attached evidence to {matched} item(s) for {target}")
     print(f"   Report: {report_path}")
     print(f"   T0 must review and close items manually")
+
+    generate_digest()
+    return 0
+
+
+def _resolve_text_arg(value: Optional[str], file_path: Optional[str],
+                       flag_name: str) -> Optional[str]:
+    """Resolve a text value from either a direct argument or a file.
+
+    Reading from a file lets callers pass text containing backticks or
+    quotes without a shell ever tokenizing it (OI-1416: OI-1291's closure
+    text was mangled because backticks in a --reason shell argument were
+    executed as command substitution).
+    """
+    if value is not None and file_path is not None:
+        raise SystemExit(
+            f"--{flag_name} and --{flag_name}-file are mutually exclusive"
+        )
+    if file_path is not None:
+        return Path(file_path).read_text(encoding="utf-8")
+    return value
+
+
+def amend_item(args):
+    """Correct title/closed_reason on an existing item, in ANY status.
+
+    Unlike close/defer/wontfix, amend does not require the item to be
+    'open' — its purpose is fixing text on items that are already closed
+    (OI-1416: OI-1291's closure text was truncated at write time and there
+    was no command to repair it). The correction itself is logged as a new
+    audit entry carrying old and new values; prior entries are never
+    rewritten.
+    """
+    new_title = _resolve_text_arg(args.title, args.title_file, "title")
+    new_closed_reason = _resolve_text_arg(
+        args.closed_reason, args.closed_reason_file, "closed-reason"
+    )
+
+    if new_title is None and new_closed_reason is None:
+        print(
+            "❌ Nothing to amend: provide --title/--title-file or "
+            "--closed-reason/--closed-reason-file",
+            file=sys.stderr,
+        )
+        return 1
+
+    with _with_items_lock():
+        data = load_items()
+
+        item = None
+        for i in data["items"]:
+            if i["id"] == args.item_id:
+                item = i
+                break
+
+        if not item:
+            print(f"❌ Item {args.item_id} not found", file=sys.stderr)
+            return 1
+
+        changes = {}
+        if new_title is not None:
+            changes["title"] = {"old": item.get("title"), "new": new_title}
+            item["title"] = new_title
+        if new_closed_reason is not None:
+            changes["closed_reason"] = {
+                "old": item.get("closed_reason"), "new": new_closed_reason
+            }
+            item["closed_reason"] = new_closed_reason
+
+        item["updated_at"] = datetime.now().isoformat()
+        item["amended_count"] = item.get("amended_count", 0) + 1
+
+        resolving_dispatch_id = (
+            getattr(args, 'dispatch_id', None) or item.get("origin_dispatch_id")
+        )
+
+        save_items(data)
+
+        audit_log_entry(
+            "amend",
+            item_id=args.item_id,
+            status=item["status"],
+            reason=args.reason,
+            dispatch_id=resolving_dispatch_id,
+            changes=changes,
+        )
+
+    print(f"✅ Amended {args.item_id}")
+    for field, change in changes.items():
+        old_len = len(change["old"] or "")
+        new_len = len(change["new"] or "")
+        print(f"   {field}: {old_len} chars -> {new_len} chars")
 
     generate_digest()
     return 0
@@ -910,6 +1037,8 @@ def main():
                              choices=['done'], help='Close status')
     close_parser.add_argument('--reason', required=True, help='Closure reason')
     close_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID that resolved this item')
+    close_parser.add_argument('--evidence', default=None,
+                             help='Optional free-text evidence for the closure (measurement, ledger line, manual verification)')
 
     # Defer command
     defer_parser = subparsers.add_parser('defer', help='Defer item')
@@ -924,10 +1053,23 @@ def main():
     wontfix_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID that marked this wontfix')
 
     # Attach evidence command
-    evidence_parser = subparsers.add_parser('attach-evidence', help='Attach report evidence to PR open items')
-    evidence_parser.add_argument('--pr', required=True, help='PR ID to attach evidence to')
+    evidence_parser = subparsers.add_parser('attach-evidence', help='Attach report evidence to PR open items, or to a single item')
+    evidence_parser.add_argument('--pr', default=None, help='PR ID to attach evidence to (all matching open items)')
+    evidence_parser.add_argument('--item', dest='item_id', default=None, help='Specific item ID to attach evidence to (any status)')
     evidence_parser.add_argument('--report', help='Path to the completion report')
     evidence_parser.add_argument('--dispatch', help='Dispatch ID that generated the report')
+
+    # Amend command
+    amend_parser = subparsers.add_parser('amend', help='Correct title/closed_reason on an existing item, in any status')
+    amend_parser.add_argument('item_id', help='Item ID to amend')
+    amend_parser.add_argument('--title', default=None, help='New title text')
+    amend_parser.add_argument('--title-file', dest='title_file', default=None,
+                             help='Path to a file containing the new title text (avoids shell quoting of backticks/quotes)')
+    amend_parser.add_argument('--closed-reason', dest='closed_reason', default=None, help='New closed_reason text')
+    amend_parser.add_argument('--closed-reason-file', dest='closed_reason_file', default=None,
+                             help='Path to a file containing the new closed_reason text (avoids shell quoting of backticks/quotes)')
+    amend_parser.add_argument('--reason', required=True, help='Why this item is being amended (recorded in the audit trail)')
+    amend_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID performing the amendment')
 
     # Digest command
     digest_parser = subparsers.add_parser('digest', help='Generate digest')
@@ -998,6 +1140,7 @@ def main():
         return 1
 
     # Route commands
+    result = 0
     if args.command == 'list':
         list_items(args)
     elif args.command == 'add':
@@ -1015,7 +1158,9 @@ def main():
         args.status = 'wontfix'
         close_item(args)
     elif args.command == 'attach-evidence':
-        attach_evidence(args)
+        result = attach_evidence(args)
+    elif args.command == 'amend':
+        result = amend_item(args)
     elif args.command == 'digest':
         if getattr(args, 'rescan', False):
             rescan_items(args)
@@ -1027,7 +1172,7 @@ def main():
     elif args.command == 'wontfix-pattern':
         wontfix_pattern(args)
 
-    return 0
+    return result or 0
 
 if __name__ == "__main__":
     sys.exit(main())
