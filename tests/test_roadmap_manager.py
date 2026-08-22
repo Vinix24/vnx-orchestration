@@ -597,19 +597,26 @@ def test_gates_incomplete_branch_less_result(roadmap_env, monkeypatch):
     assert result["verdict"] == "gates_incomplete", "branch-less result must be rejected as stale"
 
 
-def _write_roadmap_with_kimi_gate(project_root: Path) -> Path:
+def _write_roadmap_with_unregistered_gate(project_root: Path) -> Path:
     """A feature whose review_stack includes a gate outside closure_verifier's
-    _KNOWN_GATES — reuses feature-a's FEATURE_PLAN.md (same single PR-0)."""
-    roadmap_file = project_root / "ROADMAP_KIMI.yaml"
+    _KNOWN_GATES — reuses feature-a's FEATURE_PLAN.md (same single PR-0).
+
+    dlv45: kimi_gate moved into _KNOWN_GATES (it is now Gate.KIMI_GATE with a
+    closure handler), so it can no longer stand in for "gate outside
+    _KNOWN_GATES" here. ``totally_unknown_gate`` takes over that role — this
+    OI-1093 producer-identity check is about free-form gate names generically,
+    not about kimi_gate specifically.
+    """
+    roadmap_file = project_root / "ROADMAP_UNREGISTERED.yaml"
     roadmap_file.write_text(
         """features:
-  - feature_id: feature-kimi
-    title: Feature Kimi
+  - feature_id: feature-unregistered
+    title: Feature Unregistered
     plan_path: roadmap/features/feature-a/FEATURE_PLAN.md
     branch_name: feature/a
     risk_class: low
     merge_policy: conditional_auto
-    review_stack: [kimi_gate]
+    review_stack: [totally_unknown_gate]
     depends_on: []
     status: planned
 """,
@@ -618,16 +625,17 @@ def _write_roadmap_with_kimi_gate(project_root: Path) -> Path:
     return roadmap_file
 
 
-def _write_kimi_gate_result(gate_results_dir: Path, *, dispatch_id: str = "") -> None:
-    """Write a kimi_gate result shaped like the OI-1093 mission-control records:
-    contract_hash + report_path + branch + project_id all present. Only
-    dispatch_id varies between the hand-authored and real-writer shapes."""
+def _write_unregistered_gate_result(gate_results_dir: Path, *, dispatch_id: str = "") -> None:
+    """Write a totally_unknown_gate result shaped like the OI-1093 mission-control
+    kimi_gate records: contract_hash + report_path + branch + project_id all
+    present. Only dispatch_id varies between the hand-authored and real-writer
+    shapes."""
     gate_results_dir.mkdir(parents=True, exist_ok=True)
-    report_file = gate_results_dir / "pr0-kimi_gate-report.md"
-    report_file.write_text("# kimi_gate report for PR-0\n", encoding="utf-8")
+    report_file = gate_results_dir / "pr0-totally_unknown_gate-report.md"
+    report_file.write_text("# totally_unknown_gate report for PR-0\n", encoding="utf-8")
     data = {
         "pr_id": "PR-0",
-        "gate": "kimi_gate",
+        "gate": "totally_unknown_gate",
         "status": "passed",
         "project_id": "vnx-dev",
         "branch": "feature/a",
@@ -636,25 +644,25 @@ def _write_kimi_gate_result(gate_results_dir: Path, *, dispatch_id: str = "") ->
     }
     if dispatch_id:
         data["dispatch_id"] = dispatch_id
-    (gate_results_dir / "pr0-kimi_gate-contract.json").write_text(
+    (gate_results_dir / "pr0-totally_unknown_gate-contract.json").write_text(
         json.dumps(data), encoding="utf-8",
     )
 
 
 def test_gates_incomplete_unknown_gate_without_producer_identity(roadmap_env, monkeypatch):
-    """OI-1093: a kimi_gate result with contract_hash + report_path but no
-    dispatch_id must NOT satisfy advance — mirrors the three hand-authored
+    """OI-1093: an unregistered-gate result with contract_hash + report_path but
+    no dispatch_id must NOT satisfy advance — mirrors the three hand-authored
     mission-control records that had every field except producer identity."""
     manager = rm.RoadmapManager()
-    manager.init_roadmap(_write_roadmap_with_kimi_gate(roadmap_env["project_root"]))
-    manager.load_feature("feature-kimi")
+    manager.init_roadmap(_write_roadmap_with_unregistered_gate(roadmap_env["project_root"]))
+    manager.load_feature("feature-unregistered")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
     )
 
     gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
-    _write_kimi_gate_result(gate_results_dir, dispatch_id="")
+    _write_unregistered_gate_result(gate_results_dir, dispatch_id="")
 
     result = manager.reconcile()
     assert result["verdict"] == "gates_incomplete", (
@@ -664,17 +672,18 @@ def test_gates_incomplete_unknown_gate_without_producer_identity(roadmap_env, mo
 
 def test_advance_unknown_gate_with_producer_identity_satisfies(roadmap_env, monkeypatch):
     """OI-1093: the same record shape, but with a real dispatch_id, satisfies
-    advance unchanged — mirrors the nine real vnx-dev kimi_gate writes."""
+    advance unchanged — mirrors the nine real vnx-dev kimi_gate writes from
+    before kimi_gate was promoted to a registered gate (dlv45)."""
     manager = rm.RoadmapManager()
-    manager.init_roadmap(_write_roadmap_with_kimi_gate(roadmap_env["project_root"]))
-    manager.load_feature("feature-kimi")
+    manager.init_roadmap(_write_roadmap_with_unregistered_gate(roadmap_env["project_root"]))
+    manager.load_feature("feature-unregistered")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
     )
 
     gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
-    _write_kimi_gate_result(gate_results_dir, dispatch_id="kimi-gate-pr0-1782239641")
+    _write_unregistered_gate_result(gate_results_dir, dispatch_id="kimi-gate-pr0-1782239641")
 
     result = manager.reconcile()
     assert result["verdict"] == "pass", (

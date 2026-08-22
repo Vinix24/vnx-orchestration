@@ -103,3 +103,19 @@ class TestKnownGatesDerivedFromEnum:
         assert not stray, (
             f"_GATE_HANDLERS entries for gates not in _KNOWN_GATES: {sorted(stray)}"
         )
+
+    @pytest.mark.parametrize("gate_name", ["kimi_gate", "glm_gate"])
+    def test_dlv45_new_gate_is_known_and_has_a_handler(self, gate_name):
+        """kimi_gate and glm_gate (dlv45) must land as real Gate members —
+        recognised by name, in _KNOWN_GATES, and with a closure handler — not
+        parked on _GATES_NOT_IMPLEMENTED_BY_CLOSURE, which would let
+        _check_single_gate route them to UNVERIFIED forever and make closure
+        for either gate structurally unreachable."""
+        enum_values = {g.value for g in Gate}
+        assert gate_name in enum_values, f"{gate_name} must be a Gate enum member"
+        assert gate_name in cv._KNOWN_GATES, f"{gate_name} must be in _KNOWN_GATES"
+        assert gate_name not in cv._GATES_NOT_IMPLEMENTED_BY_CLOSURE, (
+            f"{gate_name} must not be parked on _GATES_NOT_IMPLEMENTED_BY_CLOSURE — "
+            "that would make closure for it structurally unreachable"
+        )
+        assert gate_name in cv._GATE_HANDLERS, f"{gate_name} must have a _GATE_HANDLERS entry"
