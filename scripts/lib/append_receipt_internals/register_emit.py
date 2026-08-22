@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from .common import REPO_ROOT
+from .common import REPO_ROOT, _emit
 
 
 def _emit_dispatch_register(receipt: dict) -> bool:
@@ -12,19 +12,32 @@ def _emit_dispatch_register(receipt: dict) -> bool:
 
     Maps receipt event_type → dispatch_register event (dispatch_completed,
     dispatch_failed, dispatch_started, gate_requested).  Called unconditionally
-    for every appended receipt (before the skip_enrichment gate).
+    for every appended (or duplicate-skipped, OI-1425) receipt (before the
+    skip_enrichment gate).
 
-    Returns True on success, False on any failure (best-effort, never raises).
+    Returns True on success, False on any failure OR when this event_type
+    carries no register mapping (best-effort, never raises). OI-1425: a
+    `return False` from "nothing to map here" (expected, silent) is no longer
+    indistinguishable from a `return False` caused by a real failure (import
+    error, bad receipt shape, register write failure) — the latter is always
+    logged loud via `_emit(WARN, ...)` first, fail-open on the caller's append
+    path but never silent.
     """
+    dispatch_id = str(receipt.get("dispatch_id", ""))
+
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from dispatch_register import append_event
         from event_outcome_semantics import classify_event_outcome, COMPLETION_EVENT_TYPES
+    except Exception as exc:
+        _emit("WARN", "dispatch_register_emit_failed", stage="import",
+              dispatch_id=dispatch_id, error=str(exc))
+        return False
 
+    try:
         event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
         status = str(receipt.get("status", "")).lower()
         gate = str(receipt.get("gate", "")).lower()
-        dispatch_id = str(receipt.get("dispatch_id", ""))
         terminal = str(receipt.get("terminal", ""))
         feature_id = str(receipt.get("feature_id", ""))
         pr_number = receipt.get("pr_number")
@@ -57,16 +70,21 @@ def _emit_dispatch_register(receipt: dict) -> bool:
             elif outcome == "success":
                 register_event = "dispatch_completed"
             else:
-                return False
+                return False  # no outcome signal yet — expected, not an error
         elif event_type in ("task_started", "task_start", "dispatch_start"):
             register_event = "dispatch_started"
         elif event_type == "review_gate_request":
             if gate != "codex_gate":
-                return False
+                return False  # other gates intentionally not register-tracked
             register_event = "gate_requested"
         else:
-            return False
+            return False  # event_type has no register mapping — expected, not an error
+    except Exception as exc:
+        _emit("WARN", "dispatch_register_emit_failed", stage="classify",
+              dispatch_id=dispatch_id, error=str(exc))
+        return False
 
+    try:
         return append_event(
             register_event,
             dispatch_id=dispatch_id,
@@ -75,5 +93,7 @@ def _emit_dispatch_register(receipt: dict) -> bool:
             terminal=terminal,
             gate=gate,
         )
-    except Exception:
+    except Exception as exc:
+        _emit("WARN", "dispatch_register_emit_failed", stage="append",
+              dispatch_id=dispatch_id, register_event=register_event, error=str(exc))
         return False
