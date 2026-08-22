@@ -68,6 +68,18 @@ raw-zero check booked as provider outages, reintroducing OI-1291's original
 bug on a different axis. ``output_tokens`` now only counts as a failure
 signal when the frontmatter's own ``token_usage_measured`` flag is true;
 otherwise only ``exit_code`` decides.
+
+OI-1178 (DLv2): a terminal (pass/fail) record must carry ``contract_hash`` +
+``report_path`` or ``gate_status.has_complete_evidence`` — and therefore
+``closure_verifier``'s merge check — refuses it as evidence, forever, no
+matter how good the review was. ``contract_hash`` is computed by
+``gate_artifacts._compute_contract_hash`` (the SAME function codex_gate's
+own execution path calls), never a second hashing method. ``report_path``
+points at the governed dispatch's own unified report
+(``<data_dir>/unified_reports/<dispatch_id>.md``), already written to disk
+by the time the dispatcher call returns. An ``unavailable`` result (OI-1142)
+carries neither: it is not terminal and must never look like complete
+evidence.
 """
 from __future__ import annotations
 
@@ -83,13 +95,14 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
-from plan_gate_panel import _make_default_dispatcher  # governed provider_dispatch lane
+from plan_gate_panel import _make_default_dispatcher, _resolve_data_dir  # governed provider_dispatch lane
 from gate_recorder import (
     get_pr_head_branch,
     get_pr_head_sha,
     record_terminal_result,
     stamp_request_identity,
 )
+from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
 from unified_report_schema import SchemaViolation, parse_frontmatter
 
 _VALID_VERDICTS = {"pass", "fail", "blocked"}
@@ -296,14 +309,21 @@ def main(argv: "list[str] | None" = None) -> int:
 
     data_dir = args.data_dir or None
     dispatch_id = f"kimi-gate-pr{args.pr}-{int(time.time())}"
-    dispatcher = _make_default_dispatcher(data_dir, args.timeout)
+    # Resolved once, then handed to the dispatcher as an explicit data_dir so
+    # this function's own report_path reconstruction below and the governed
+    # subprocess's actual write path can never drift apart — both derive from
+    # the SAME resolved base (see provider_dispatch.py's report_path, which is
+    # this exact <data_dir>/unified_reports/<dispatch_id>.md).
+    base_data_dir = _resolve_data_dir(data_dir)
+    dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout)
+    prompt = _build_prompt(diff, args.pr)
 
     start = time.monotonic()
     report_text = ""
     dispatch_error = ""
     try:
         # Governed lane: provider_dispatch runs kimi, writes a unified report, returns its text.
-        report_text = dispatcher("kimi", args.model, _build_prompt(diff, args.pr), dispatch_id)
+        report_text = dispatcher("kimi", args.model, prompt, dispatch_id)
     except Exception as exc:  # noqa: BLE001 — dispatch/report-read failure
         # OI-1142: do NOT bail without a record — a required gate that cannot fire
         # must surface as ``unavailable`` in the results dir, not vanish.
@@ -353,6 +373,22 @@ def main(argv: "list[str] | None" = None) -> int:
         else:
             reason = "no_verdict"
 
+    # OI-1178 (DLv2): a terminal verdict must carry the same evidence pair
+    # codex_gate/gemini_review stamp — contract_hash (gate_artifacts' single
+    # canonical hasher) + report_path (the governed dispatch's own unified
+    # report, already on disk by the time dispatcher() returned above). Only
+    # ``verdict`` ever reaches pass/fail (see _verdict_to_status), so
+    # report_text is guaranteed non-empty here. An unavailable result (no
+    # readable verdict, or the dispatch itself failed) is deliberately left
+    # with neither field: OI-1142's outage/verdict separation must not be
+    # bypassed by a record that merely LOOKS complete.
+    if status in {"pass", "fail"}:
+        contract_hash = _compute_contract_hash({"prompt": prompt}, "kimi_gate")
+        report_path = str(base_data_dir / "unified_reports" / f"{dispatch_id}.md")
+    else:
+        contract_hash = ""
+        report_path = ""
+
     record = {
         "gate": "kimi_gate",
         "pr_id": str(args.pr),
@@ -365,6 +401,8 @@ def main(argv: "list[str] | None" = None) -> int:
         "reason": reason,
         "duration_seconds": round(duration, 3),
         "summary": _status_summary(status, blocking, reason, len(report_text or "")),
+        "contract_hash": contract_hash,
+        "report_path": report_path,
         "provider": "kimi",
         "model": args.model,
         "dispatch_id": dispatch_id,
