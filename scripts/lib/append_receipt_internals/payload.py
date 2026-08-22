@@ -519,6 +519,23 @@ def append_receipt_payload(
             "the append lock path exited without a result object",
         )
 
+    # OI-1425: the register emit must fire for a "duplicate" (idempotent-skip)
+    # result too, not only "appended". A duplicate means the identical receipt
+    # content was already durably written earlier in this cache window — that
+    # earlier append is exactly the one whose own register-emit attempt may
+    # have failed (fail-open, per _emit_dispatch_register's contract below),
+    # in which case this is the only remaining chance to record the register
+    # event for this dispatch. Re-emitting for a genuine duplicate is a
+    # harmless repeat of an already-idempotent event (register readers key on
+    # dispatch_id + event, never on a per-emit count), so this is never gated
+    # behind the "appended"-only side effects below (mirror drain, OI
+    # registration, confidence update) — those must still run exactly once.
+    if result.status in ("appended", "duplicate"):
+        try:
+            facade._emit_dispatch_register(receipt)
+        except Exception as exc:
+            _emit("WARN", "dispatch_register_post_hook_failed", error=str(exc))
+
     if result.status == "appended":
         # Phase 6 P3 dual-write: drain persisted mirror debt before attempting
         # the current central write so transient mirror failures are repaired.
@@ -531,15 +548,6 @@ def append_receipt_payload(
             raise
         except Exception as exc:  # noqa: BLE001
             log.warning("payload: central mirror drain failed (best-effort, ignoring): %s", exc)
-        # OI-1105: dispatch-register emit must fire for EVERY appended receipt,
-        # not only those that flow through the non-skip_enrichment path.  The
-        # report_to_receipt_converter is the primary task_complete producer and
-        # passes skip_enrichment=True — without this unconditional call the
-        # register has been dead since the split shipped.
-        try:
-            facade._emit_dispatch_register(receipt)
-        except Exception as exc:
-            _emit("WARN", "dispatch_register_post_hook_failed", error=str(exc))
         if not skip_enrichment:
             _run_post_append_hooks(receipt)
 

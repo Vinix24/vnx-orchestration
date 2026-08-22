@@ -242,6 +242,63 @@ def test_exception_in_append_event_returns_false_never_raises(ar):
     assert result is False
 
 
+# ── OI-1425: a failure must be LOUD (never silently swallowed) ──────────────
+
+def test_exception_in_append_event_is_logged_loud_not_silent(ar, capsys):
+    """Pre-fix: the whole function was wrapped in one `except Exception:
+    return False`, so a real failure (append_event raising) was
+    indistinguishable from the expected "nothing to map here" no-op —
+    both vanished with zero trace. Post-fix: a real failure is still
+    fail-open (returns False, never raises) but is logged loud on stderr."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("register exploded")
+
+    fake_register = types.ModuleType("dispatch_register")
+    fake_register.append_event = _boom
+
+    receipt = _make_receipt("task_complete", status="success", dispatch_id="DISP-LOUD-001")
+    with patch.dict(sys.modules, {"dispatch_register": fake_register}):
+        result = ar._emit_dispatch_register(receipt)
+    assert result is False
+
+    err = capsys.readouterr().err
+    assert "dispatch_register_emit_failed" in err
+    assert "DISP-LOUD-001" in err
+    assert "register exploded" in err
+
+
+def test_import_failure_is_logged_loud_not_silent(ar, capsys):
+    """A register module that fails to import (e.g. a broken sys.path or a
+    genuine ImportError) must also surface loud, not vanish into the same
+    `return False` as an intentional no-op."""
+    receipt = _make_receipt("task_complete", status="success", dispatch_id="DISP-LOUD-002")
+    # sys.modules[name] = None forces `from dispatch_register import ...`
+    # to raise ImportError, the standard way to simulate an unimportable
+    # module without touching the real one on disk.
+    with patch.dict(sys.modules, {"dispatch_register": None}):
+        result = ar._emit_dispatch_register(receipt)
+    assert result is False
+
+    err = capsys.readouterr().err
+    assert "dispatch_register_emit_failed" in err
+    assert "DISP-LOUD-002" in err
+
+
+def test_no_mapping_no_op_stays_silent(ar, capsys):
+    """The expected 'nothing to emit for this event_type' path (unrelated to
+    any failure) must NOT be logged as a warning — only real failures are
+    loud. A gemini_review gate request is exactly the existing 'no mapping'
+    no-op (test 9 above)."""
+    captured: list = []
+    receipt = _make_receipt("review_gate_request", gate="gemini_review", dispatch_id="DISP-QUIET-001")
+    result = _run_emit(ar, receipt, captured)
+    assert result is False
+    assert captured == []
+
+    err = capsys.readouterr().err
+    assert "dispatch_register_emit_failed" not in err
+
+
 # ── Test 15: contract_invalid status → dispatch_failed (OI-1105 gap) ──────────
 
 def test_task_complete_contract_invalid_emits_dispatch_failed(ar):
@@ -1160,6 +1217,78 @@ def test_duplicate_receipt_does_not_mutate_open_items_store(tmp_path: Path, ar):
         f"_register_quality_open_items must run once (post-append) and NOT again on duplicate. "
         f"Got register calls: {register_calls!r}"
     )
+
+
+# ── OI-1425: register emit must fire on 'duplicate' too, not just 'appended' ─
+
+def test_duplicate_receipt_still_emits_dispatch_register(tmp_path: Path, ar):
+    """OI-1425: pre-fix, `_emit_dispatch_register` was only called inside the
+    `if result.status == "appended":` block — a receipt that hits the
+    idempotency cache and lands as 'duplicate' fired nothing at all. If the
+    ORIGINAL "appended" call's own register-emit attempt failed (e.g. a
+    transient register-write error), that was the only chance ever taken —
+    the duplicate is the sole remaining shot at recording the register event
+    for this dispatch. Both the 'appended' and the 'duplicate' write must
+    call the emitter; the OI-registration side effect (previous test) must
+    still run exactly once."""
+    receipts_file = tmp_path / "receipts_dup_emit.ndjson"
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-DUPEMIT-001",
+        "terminal": "T1",
+        "schema_version": 1,
+    }
+
+    emit_calls: list = []
+
+    def _record_emit(r):
+        emit_calls.append(r.get("dispatch_id"))
+        return True
+
+    with patch.object(ar, "_enrich_completion_receipt", side_effect=lambda r, **kw: dict(r)), \
+         patch.object(ar, "_register_quality_open_items", return_value=0), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_emit_dispatch_register", side_effect=_record_emit), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"):
+        first = ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+        second = ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    assert first.status == "appended"
+    assert second.status == "duplicate"
+    assert emit_calls == ["DISP-DUPEMIT-001", "DISP-DUPEMIT-001"], (
+        f"Expected _emit_dispatch_register to fire for BOTH the 'appended' and "
+        f"the 'duplicate' write, got calls: {emit_calls!r}"
+    )
+
+
+def test_never_appended_status_does_not_emit(tmp_path: Path, ar):
+    """Sanity check for the OI-1425 fix's scope: only 'appended' and
+    'duplicate' fire the register emit. This receipt is fresh (no prior
+    write), so only the single 'appended' emit is expected -- proves the fix
+    didn't accidentally make the emit unconditional regardless of status."""
+    receipts_file = tmp_path / "receipts_single.ndjson"
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-SINGLE-001",
+        "terminal": "T1",
+        "schema_version": 1,
+    }
+    emit_calls: list = []
+
+    with patch.object(ar, "_enrich_completion_receipt", side_effect=lambda r, **kw: dict(r)), \
+         patch.object(ar, "_register_quality_open_items", return_value=0), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_emit_dispatch_register",
+                      side_effect=lambda r: emit_calls.append(r.get("dispatch_id")) or True), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"):
+        result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    assert result.status == "appended"
+    assert emit_calls == ["DISP-SINGLE-001"]
 
 
 # ── OI-1074 / OI-1105: NDJSON-first ordering + flag consistency ──────────────
