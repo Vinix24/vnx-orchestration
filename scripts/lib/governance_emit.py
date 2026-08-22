@@ -23,7 +23,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure the sibling scripts/lib modules resolve even when a caller imports
 # governance_emit by path without scripts/lib already on sys.path.
@@ -400,6 +400,175 @@ def _validate_report_frontmatter(content: str, dispatch_id: str, report_path: Op
         )
 
 
+# OI-1433: lane-log lift. When response_text is empty, the generic body
+# wrapper below used to write the contentless "(no response captured)"
+# placeholder even when the real reason (a provider 403/402 billing/quota
+# rejection) was already sitting on disk in the per-dispatch raw lane log
+# (``logs/conversations/<dispatch_id>.log`` — the same file kimi_spawn.py's
+# heartbeat tees to, see its ``_resolve_heartbeat_log_path``). Measured
+# 22-08: 20 of 20 empty-response reports with a 403 body in that log said
+# "(no response captured)" — the operator read "unknown error" where the log
+# said the account was out of quota.
+#
+# NEVER read ``~/.kimi/logs/kimi.log`` here: that single file is shared by
+# every concurrent kimi dispatch (kimi_spawn.py ~L720-728) and would mask one
+# dispatch's outcome with another's. The per-dispatch tee under
+# logs/conversations/ is the only correct source.
+_LANE_LOG_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_LANE_LOG_DISPLAY_MAX_CHARS = 4000
+_LANE_LOG_READ_MAX_BYTES = 2_000_000
+
+# Reason-label markers actually observed in raw provider bodies (22-08
+# measurement) for a permanent billing/quota rejection. Matched narrowly on
+# the provider's own distinguishing phrase/type label — never on a generic
+# parser-side "msg" field. kimi's raw 403 body rides in the SAME log line as
+# an unrelated JSON-decode-failure message (the CLI's own drainer trying and
+# failing to parse the non-JSON error text as an event); a classifier keyed
+# on that "msg=" text would read the parse failure and call this
+# `unreadable_verdict` instead of `lane_exhausted`. Scanning the whole raw
+# text for the provider's own label/phrase side-steps that trap entirely.
+_LANE_EXHAUSTED_MARKERS = (
+    "access_terminated_error",              # kimi 403
+    "insufficient balance",                 # deepseek 402
+    "insufficient_balance",
+    "insufficient credits",
+    "requires more credits",                # glm/openrouter 402-in-500
+    "add more credits",
+    "openrouter_credits",
+    "usage limit for this billing cycle",   # kimi 403 prose
+    "reached your usage limit",
+)
+
+
+def _resolve_lane_log_path(dispatch_id: str, data_dir: Path) -> Optional[Path]:
+    """Path-safe resolve of logs/conversations/<dispatch_id>.log.
+
+    Mirrors kimi_spawn.py::_resolve_heartbeat_log_path's shape: a regex check
+    on dispatch_id (no "/" is legal, so no path-segment injection is even
+    possible) followed by a `relative_to` escape check as defense in depth.
+    Returns None (refuse, no read) on anything unsafe or unresolvable — a bad
+    lookup must never block report emission.
+    """
+    if not dispatch_id or not _LANE_LOG_ID_SAFE_RE.match(dispatch_id):
+        logger.warning(
+            "governance_emit: lane-log lift refused — unsafe dispatch_id %r", dispatch_id,
+        )
+        return None
+    log_dir = Path(data_dir) / "logs" / "conversations"
+    candidate = (log_dir / f"{dispatch_id}.log").resolve()
+    try:
+        candidate.relative_to(log_dir.resolve())
+    except ValueError:
+        logger.warning(
+            "governance_emit: lane-log lift refused — path %s escaped %s", candidate, log_dir,
+        )
+        return None
+    return candidate
+
+
+def _read_lane_log_text(dispatch_id: str, data_dir: Path) -> Optional[str]:
+    """Best-effort raw-text read of the per-dispatch lane log.
+
+    Returns None (never raises) when the path is unsafe, the file is
+    missing/not a regular file, is empty/whitespace-only, or cannot be read —
+    every one of those collapses to the same `no_response` state upstream.
+    """
+    path = _resolve_lane_log_path(dispatch_id, data_dir)
+    if path is None:
+        return None
+    try:
+        if not path.is_file():
+            return None
+        raw = path.read_bytes()[:_LANE_LOG_READ_MAX_BYTES]
+    except OSError as exc:
+        logger.warning(
+            "governance_emit: lane-log read failed dispatch=%s path=%s: %s",
+            dispatch_id, path, exc,
+        )
+        return None
+    text = raw.decode("utf-8", errors="replace")
+    return text if text.strip() else None
+
+
+def _bounded_snippet(text: str, max_len: int = 300) -> str:
+    """Collapse whitespace and cap length — same shape as failure_classification.py's
+    _extract_detail, so a lifted reason never carries a multi-KB blob."""
+    snippet = " ".join(text.split())
+    if len(snippet) > max_len:
+        snippet = snippet[:max_len].rstrip() + "…"
+    return snippet
+
+
+def _classify_lane_log_text(text: str) -> Tuple[str, Optional[str]]:
+    """Classify non-empty raw lane-log content into (state, reason).
+
+    state is 'lane_exhausted' (a permanent billing/quota rejection — matched
+    on a narrow provider-owned label, see _LANE_EXHAUSTED_MARKERS) or
+    'unreadable_verdict' (the lane produced content but no recognizable
+    billing/quota signal — the model may have answered, but no verdict could
+    be read out of it). reason is only populated for lane_exhausted.
+    """
+    lowered = text.lower()
+    for marker in _LANE_EXHAUSTED_MARKERS:
+        if marker in lowered:
+            return "lane_exhausted", _bounded_snippet(text)
+    return "unreadable_verdict", None
+
+
+def _lift_lane_log_for_report(
+    dispatch_id: str, data_dir: Path
+) -> Optional[Tuple[str, str, Optional[str]]]:
+    """Build (state, response_block, reason) to substitute for an empty
+    response_text, or None when there is nothing usable (log missing/empty) —
+    the caller treats None as the `no_response` state and keeps the standard
+    placeholder. Never raises: any failure here falls back to the placeholder
+    and logs loudly rather than breaking report emission — a failed lift must
+    never become a second failure on top of the one it was trying to explain.
+    """
+    try:
+        text = _read_lane_log_text(dispatch_id, data_dir)
+        if not text:
+            return None
+        state, reason = _classify_lane_log_text(text)
+
+        display = text
+        truncated_note = ""
+        if len(text) > _LANE_LOG_DISPLAY_MAX_CHARS:
+            cut = len(text) - _LANE_LOG_DISPLAY_MAX_CHARS
+            display = text[:_LANE_LOG_DISPLAY_MAX_CHARS]
+            truncated_note = (
+                f"\n\n_[lane log truncated — {cut} additional characters omitted]_"
+            )
+
+        state_note = {
+            "lane_exhausted": (
+                "diagnosed as **lane_exhausted** — the provider rejected the "
+                "call for billing/quota reasons; this is permanent until the "
+                "account is topped up or the quota resets, not a transient error."
+            ),
+            "unreadable_verdict": (
+                "diagnosed as **unreadable_verdict** — the lane produced "
+                "content but no usable verdict could be read out of it."
+            ),
+        }[state]
+
+        block = (
+            "_No response text was captured from the model. The text below is "
+            f"lifted from this dispatch's raw LANE LOG "
+            f"(`logs/conversations/{dispatch_id}.log`) — it is NOT a model "
+            f"reply. {state_note}_\n\n"
+            f"```\n{display}\n```"
+            f"{truncated_note}"
+        )
+        return state, block, reason
+    except Exception as exc:  # noqa: BLE001 — a lift failure must never break report emission
+        logger.warning(
+            "governance_emit: lane-log lift failed dispatch=%s: %s", dispatch_id, exc,
+        )
+        return None
+
+
 def emit_unified_report(
     dispatch_id: str,
     terminal_id: str,
@@ -524,10 +693,29 @@ def emit_unified_report(
         ])
         identity_block = "\n".join(identity_lines)
 
+        # OI-1433: an empty response_text gets one chance to explain itself
+        # from the per-dispatch raw lane log before falling back to the bare
+        # placeholder — see _lift_lane_log_for_report above.
+        response_block = response_text
+        if not (response_text or "").strip():
+            lift = _lift_lane_log_for_report(dispatch_id, data_dir)
+            if lift is not None:
+                empty_response_state, response_block, lane_reason = lift
+            else:
+                empty_response_state, response_block, lane_reason = "no_response", None, None
+            if frontmatter is not None:
+                frontmatter.setdefault("empty_response_state", empty_response_state)
+                # Canonical field (OI-1415/#1666): stamp the SAME failure_reason
+                # key generic failure readers already look for — never a
+                # lane-log-only field name — and never clobber a reason the
+                # caller already computed upstream.
+                if lane_reason and not frontmatter.get("failure_reason"):
+                    frontmatter["failure_reason"] = lane_reason
+
         body = (
             f"# Dispatch {dispatch_id}\n\n"
             f"{identity_block}\n\n"
-            f"## Response\n\n{response_text or '(no response captured)'}\n"
+            f"## Response\n\n{response_block or '(no response captured)'}\n"
         )
 
         # findings=None means "not captured": the section is omitted entirely,

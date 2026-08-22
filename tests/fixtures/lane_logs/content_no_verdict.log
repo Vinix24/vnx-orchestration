@@ -1,0 +1,4 @@
+{"event_type": "TurnBegin"}
+{"event_type": "StepBegin"}
+{"event_type": "ContentPart", "content": "Let me check the file structure first."}
+{"event_type": "ContentPart", "content": "Reading scripts/lib/governance_emit.py..."}
