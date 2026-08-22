@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from auto_merge_policy import codex_final_gate_required
@@ -41,6 +42,18 @@ class GateRequestHandlerMixin:
     def _ci_gate_available(self) -> bool:
         import config_runtime
         return config_runtime.get_bool("VNX_CI_GATE_REQUIRED") and shutil.which("gh") is not None
+
+    def _kimi_gate_runner_path(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "kimi_gate.py"
+
+    def _kimi_gate_available(self) -> bool:
+        return self._kimi_gate_runner_path().exists()
+
+    def _glm_gate_runner_path(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "glm_gate.py"
+
+    def _glm_gate_available(self) -> bool:
+        return self._glm_gate_runner_path().exists()
 
     def _dispatch_one_review(
         self,
@@ -78,6 +91,10 @@ class GateRequestHandlerMixin:
             return self._request_ci_gate(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if gate == "wiring_gate":
             return self._request_wiring_gate(pr_number, branch, dispatch_id)
+        if gate == "kimi_gate":
+            return self._request_kimi(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate == "glm_gate":
+            return self._request_glm(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         return {"gate": gate, "status": "blocked", "reason": "unknown_review_gate"}
 
     def request_reviews(
@@ -508,6 +525,95 @@ class GateRequestHandlerMixin:
                 dispatch_id=dispatch_id,
             )
         self._request_path("codex_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
+    def _request_kimi(
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        from review_gate_manager import _utc_now
+
+        available = self._kimi_gate_available()
+        requested_at = _utc_now()
+        payload = {
+            "gate": "kimi_gate",
+            "status": "requested" if available else "not_executable",
+            "provider": "kimi",
+            "branch": branch,
+            "pr_number": pr_number,
+            "review_mode": mode,
+            "risk_class": risk_class,
+            "changed_files": changed_files,
+            "requested_at": requested_at,
+            "commit_sha": get_pr_head_sha(pr_number),
+            "report_path": self._build_report_path(
+                gate="kimi_gate",
+                requested_at=requested_at,
+                pr_number=pr_number,
+            ),
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        if not available:
+            self._mark_gate_unavailable(
+                payload, gate="kimi_gate", binary_name="kimi_gate.py",
+                pr_number=pr_number, pr_id="",
+                dispatch_id=dispatch_id,
+            )
+        self._request_path("kimi_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
+    def _request_glm(
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        """glm_gate is a recognised Gate.GLM_GATE member whose runner
+        (scripts/glm_gate.py) has not shipped yet — a separate deliverable adds
+        it. Until then this must refuse with a reason distinct from
+        ``unknown_review_gate`` (dispatch_spec Gate rejects that request before
+        it ever reaches here) so an operator can tell "not a real gate" apart
+        from "real gate, runner not implemented yet".
+        """
+        from review_gate_manager import _utc_now
+
+        available = self._glm_gate_available()
+        requested_at = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": "glm_gate",
+            "status": "requested" if available else "not_executable",
+            "provider": "glm",
+            "branch": branch,
+            "pr_number": pr_number,
+            "review_mode": mode,
+            "risk_class": risk_class,
+            "changed_files": changed_files,
+            "requested_at": requested_at,
+            "commit_sha": get_pr_head_sha(pr_number),
+            "report_path": self._build_report_path(
+                gate="glm_gate",
+                requested_at=requested_at,
+                pr_number=pr_number,
+            ) if available else "",
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        if not available:
+            reason = "gate_runner_missing"
+            reason_detail = "scripts/glm_gate.py does not exist yet — ships in a separate deliverable"
+            payload["reason"] = reason
+            payload["reason_detail"] = reason_detail
+            payload["resolved_at"] = payload["requested_at"]
+            self._write_not_executable_result(
+                gate="glm_gate", pr_number=pr_number, pr_id="",
+                reason=reason, reason_detail=reason_detail,
+                dispatch_id=dispatch_id,
+            )
+            self._write_skip_rationale(
+                gate="glm_gate", pr_id=str(pr_number),
+                reason=reason, reason_detail=reason_detail,
+                binary_name="glm_gate.py",
+            )
+        self._request_path("glm_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
     def _apply_claude_github_configured_state(

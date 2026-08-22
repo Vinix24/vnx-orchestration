@@ -730,6 +730,69 @@ def _gate_ci_gate(
     return CheckResult(f"gate_{gate}", "FAIL", f"ci_gate not passing — {reason}")
 
 
+def _gate_full_evidence_pass(gate: str, result: Optional[Dict[str, Any]]) -> CheckResult:
+    """Shared terminal + complete-evidence + pass check (dlv45: kimi_gate/glm_gate).
+
+    Unlike codex_gate, neither kimi_gate nor glm_gate has a risk-conditional
+    "required" policy — they are only checked when present in the review
+    stack, so there is no not-required PASS branch. Modeled on
+    ``_gate_codex_gate``'s terminal + report_path requirements, plus
+    ``gate_has_complete_evidence`` (contract_hash AND report_path, mirroring
+    ``_gate_ci_gate``) so a kimi/glm result cannot pass on report_path alone —
+    a kimi_gate result must carry the same evidence discipline as codex,
+    never less.
+
+    ``unavailable`` (OI-1142 provider outage) is deliberately not terminal
+    (``gate_status.is_terminal``), so it is rejected here before
+    ``gate_is_pass`` is ever consulted — an outage can never be booked as a
+    review PASS.
+    """
+    if result is None:
+        return CheckResult(f"gate_{gate}", "FAIL", f"no {gate} result found")
+    if not gate_is_terminal(result):
+        status = result.get("status", "unknown")
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            f"{gate} result is not terminal (status={status}) — incomplete evidence",
+        )
+    if not gate_has_complete_evidence(result):
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            f"{gate} result is missing contract_hash and/or report_path",
+        )
+    passed, reason = gate_is_pass(result)
+    if passed:
+        advisory_count = result.get("advisory_count")
+        if not isinstance(advisory_count, int):
+            advisory_count = len(result.get("advisory_findings") or [])
+        return CheckResult(
+            f"gate_{gate}",
+            "PASS",
+            f"{gate} passed ({advisory_count} advisory, 0 blocking)",
+        )
+    return CheckResult(f"gate_{gate}", "FAIL", f"{gate} not passing — {reason}")
+
+
+def _gate_kimi_gate(
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    return _gate_full_evidence_pass("kimi_gate", result)
+
+
+def _gate_glm_gate(
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    return _gate_full_evidence_pass("glm_gate", result)
+
+
 # Table-driven dispatch: one entry per gate the closure verifier implements.
 # Adding a gate means adding one handler here plus (if excluded) an entry in
 # _GATES_NOT_IMPLEMENTED_BY_CLOSURE — not a new branch in _check_single_gate,
@@ -739,6 +802,8 @@ _GATE_HANDLERS: Dict[str, Any] = {
     "codex_gate": _gate_codex_gate,
     "gemini_review": _gate_gemini_review,
     "ci_gate": _gate_ci_gate,
+    "kimi_gate": _gate_kimi_gate,
+    "glm_gate": _gate_glm_gate,
 }
 
 

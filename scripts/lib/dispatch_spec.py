@@ -42,12 +42,21 @@ class Gate(str, Enum):
     dispatch on; this is the canonical enum they lacked. An empty string means
     "no gate assigned" and is handled separately by callers — it is not a member
     here so ``Gate("")`` fails the same as any other unknown value.
+
+    KIMI_GATE and GLM_GATE (dlv45) extend the closed set with the same
+    discipline as every other member: each has a ``gate_request_handler``
+    dispatch branch and a ``closure_verifier._GATE_HANDLERS`` entry, pinned by
+    ``test_closure_verifier_gate_enum_drift.py``. Extending the enum without
+    both is what OI-1094 exists to catch — see that test module before adding
+    another member.
     """
     GEMINI_REVIEW           = "gemini_review"
     CODEX_GATE              = "codex_gate"
     CLAUDE_GITHUB_OPTIONAL  = "claude_github_optional"
     CI_GATE                 = "ci_gate"
     WIRING_GATE             = "wiring_gate"
+    KIMI_GATE               = "kimi_gate"
+    GLM_GATE                = "glm_gate"
 
 
 # Legacy lifecycle PHASE names that leak into the spec ``gate`` field but are not

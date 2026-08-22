@@ -664,6 +664,8 @@ class TestRule16GateName:
         "claude_github_optional",
         "ci_gate",
         "wiring_gate",
+        "kimi_gate",         # dlv45: promoted from free-form (OI-1093) to a governed gate
+        "glm_gate",          # dlv45: recognised gate name; runner ships separately
     ])
     def test_accepts_known_gate(self, tmp_path, monkeypatch, valid_gate):
         ifile = _write_instruction(tmp_path)
@@ -683,7 +685,7 @@ class TestRule16GateName:
 
     @pytest.mark.parametrize("bad_gate", [
         "codex_gat",        # typo of codex_gate
-        "kimi_gate",        # real script but NOT a governed review gate (free-form, OI-1093)
+        "totally_unknown_gate",  # never an enum member, never will be
         "human-promoted",   # legacy test placeholder, never an enum member
     ])
     def test_rejects_unknown_gate(self, tmp_path, monkeypatch, bad_gate):
