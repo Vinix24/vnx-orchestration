@@ -46,6 +46,10 @@ def test_record_phantom_appends_corrective_failed_receipt(monkeypatch, tmp_path)
     assert captured["payload"]["synthesized"] is False  # else dedup Tier-2 drops it
     # timestamp must be the ...Z format the other receipts use — codex F4
     assert captured["payload"]["timestamp"].endswith("Z")
+    # OI-1415: the canonical failure_reason field must carry the SAME text as the
+    # lane-own phantom_reason — a generic failure_reason reader must see this
+    # rejection exactly like a phantom_reason-aware reader already does.
+    assert captured["payload"]["failure_reason"] == captured["payload"]["phantom_reason"] == "PHANTOM: test reason"
 
 
 def test_precaptured_worktree_diff_bypasses_resolution():
@@ -180,3 +184,76 @@ def test_record_phantom_no_bridge_call_without_state_dir(monkeypatch, tmp_path):
                                  receipts_file=str(tmp_path / "r.ndjson"))
     assert v.is_phantom
     assert calls["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# OI-1415: the canonical failure_reason field
+# ---------------------------------------------------------------------------
+
+
+def test_record_phantom_no_append_when_not_phantom_never_gets_a_failure_reason(monkeypatch, tmp_path):
+    """OI-1415 proof #4: a non-phantom (successful) verdict never appends a
+    receipt at all, so it can never carry a failure_reason either."""
+    monkeypatch.setattr(pg, "guard_at_govern", lambda **kw: pg.PhantomVerdict(False, "ok"))
+    import append_receipt
+    calls = {"n": 0}
+    monkeypatch.setattr(append_receipt, "append_receipt_payload",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+                                 receipts_file=str(tmp_path / "r.ndjson"))
+    assert not v.is_phantom
+    assert calls["n"] == 0
+
+
+def test_record_guard_error_stamps_descriptive_failure_reason(monkeypatch, tmp_path):
+    """The guard_error case has no PhantomVerdict-carried reason — failure_reason
+    must still be built from the exception, naming the guard and the dispatch."""
+    import append_receipt
+    captured = {}
+    monkeypatch.setattr(append_receipt, "append_receipt_payload",
+                        lambda payload, **kw: captured.update(payload=payload, kw=kw))
+
+    pg.record_guard_error(dispatch_id="d1", receipts_file=str(tmp_path / "r.ndjson"),
+                          error=RuntimeError("worktree unreadable"))
+
+    payload = captured["payload"]
+    assert payload["status"] == "guard_error"
+    assert payload["guard_error"] == "worktree unreadable"
+    assert payload["failure_reason"]
+    assert "phantom_guard" in payload["failure_reason"]
+    assert "d1" in payload["failure_reason"]
+    assert "worktree unreadable" in payload["failure_reason"]
+
+
+def test_record_guard_error_failure_reason_never_blank_on_empty_exception_message(monkeypatch, tmp_path):
+    """An exception with NO message (str(error) == '') must still produce a
+    non-empty, non-placeholder failure_reason — never a bare empty string."""
+    import append_receipt
+    captured = {}
+    monkeypatch.setattr(append_receipt, "append_receipt_payload",
+                        lambda payload, **kw: captured.update(payload=payload))
+
+    class _BlankError(Exception):
+        pass
+
+    pg.record_guard_error(dispatch_id="d2", receipts_file=str(tmp_path / "r.ndjson"),
+                          error=_BlankError())
+
+    payload = captured["payload"]
+    assert payload["guard_error"] == ""
+    assert payload["failure_reason"].strip()
+    assert "phantom_guard" in payload["failure_reason"]
+    assert "d2" in payload["failure_reason"]
+    assert "_BlankError" in payload["failure_reason"]
+
+
+def test_record_guard_error_append_failure_is_non_fatal(monkeypatch, tmp_path):
+    import append_receipt
+
+    def _boom(*a, **k):
+        raise RuntimeError("append exploded")
+
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", _boom)
+    # must not raise
+    pg.record_guard_error(dispatch_id="d1", receipts_file=str(tmp_path / "r.ndjson"),
+                          error=RuntimeError("x"))
