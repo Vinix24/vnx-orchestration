@@ -194,12 +194,18 @@ def _run_closure(verifier_env, contract, results_dir, monkeypatch):
 
 
 class TestUnknownGateNeverPasses:
+    """dlv45: these tests used ``kimi_gate`` as the "unknown gate" example.
+    kimi_gate is now a recognised Gate member with its own closure handler
+    (see test_dlv45_gate_recognition.py), so it can no longer stand in for
+    "a gate the verifier does not implement" — ``totally_unknown_gate`` takes
+    over that role, preserving the original DoD-1 intent unchanged."""
+
     def test_unknown_gate_with_pass_record_does_not_pass_closure(self, verifier_env, monkeypatch, tmp_path):
         """Fabricated gate name + status=pass record must not yield a PASS."""
-        contract = _make_contract(review_stack=["kimi_gate"])
+        contract = _make_contract(review_stack=["totally_unknown_gate"])
         results_dir = tmp_path / "results"
-        _write_gate_result(results_dir, "kimi_gate", "PR-0", {
-            "gate": "kimi_gate",
+        _write_gate_result(results_dir, "totally_unknown_gate", "PR-0", {
+            "gate": "totally_unknown_gate",
             "pr_id": "PR-0",
             "status": "pass",
             "blocking_count": 0,
@@ -211,33 +217,35 @@ class TestUnknownGateNeverPasses:
         result = _run_closure(verifier_env, contract, results_dir, monkeypatch)
 
         assert result["verdict"] == "fail"
-        check = next(c for c in result["checks"] if c["name"] == "gate_kimi_gate")
+        check = next(c for c in result["checks"] if c["name"] == "gate_totally_unknown_gate")
         assert check["status"] == "UNVERIFIED"
         assert check["status"] != "PASS"
 
     def test_unknown_gate_without_record_is_undecided_not_pass(self, verifier_env, monkeypatch, tmp_path):
         """Even with no result file, an unknown gate is undecided (not silently green)."""
-        contract = _make_contract(review_stack=["kimi_gate"])
+        contract = _make_contract(review_stack=["totally_unknown_gate"])
         results_dir = tmp_path / "results"
         results_dir.mkdir(parents=True)
 
         result = _run_closure(verifier_env, contract, results_dir, monkeypatch)
 
         assert result["verdict"] == "fail"
-        check = next(c for c in result["checks"] if c["name"] == "gate_kimi_gate")
+        check = next(c for c in result["checks"] if c["name"] == "gate_totally_unknown_gate")
         assert check["status"] == "UNVERIFIED"
 
-    def test_production_shape_kimi_gate_record_never_passes(self, verifier_env, monkeypatch, tmp_path):
-        """A real kimi_gate result (no test_run field) for an unknown gate is still refused.
+    def test_production_shape_unregistered_gate_record_never_passes(self, verifier_env, monkeypatch, tmp_path):
+        """A real free-form-gate result (no test_run field) for an unknown gate is still refused.
 
-        Mirrors the nine records currently in ~/.vnx-data/vnx-dev/state/review_gates/results/:
-        they carry no test_run flag but kimi_gate is unregistered, so the record
-        must be ignored, not treated as a passing gate.
+        Mirrors the nine kimi_gate records that used to live in
+        ~/.vnx-data/vnx-dev/state/review_gates/results/ before kimi_gate was
+        promoted to a registered gate (dlv45): they carried no test_run flag
+        but the gate name was unregistered, so the record was ignored, not
+        treated as a passing gate. Same shape, generic unknown-gate name.
         """
-        contract = _make_contract(review_stack=["kimi_gate"])
+        contract = _make_contract(review_stack=["totally_unknown_gate"])
         results_dir = tmp_path / "results"
-        _write_gate_result(results_dir, "kimi_gate", "PR-0", {
-            "gate": "kimi_gate",
+        _write_gate_result(results_dir, "totally_unknown_gate", "PR-0", {
+            "gate": "totally_unknown_gate",
             "pr_id": "0",
             "pr_number": 0,
             "status": "pass",
@@ -253,20 +261,20 @@ class TestUnknownGateNeverPasses:
         result = _run_closure(verifier_env, contract, results_dir, monkeypatch)
 
         assert result["verdict"] == "fail"
-        check = next(c for c in result["checks"] if c["name"] == "gate_kimi_gate")
+        check = next(c for c in result["checks"] if c["name"] == "gate_totally_unknown_gate")
         assert check["status"] == "UNVERIFIED"
 
     def test_check_single_gate_unknown_returns_unverified(self, tmp_path):
         """Direct unit check: unknown gate is UNVERIFIED regardless of record presence."""
-        contract = _make_contract(review_stack=["kimi_gate"])
+        contract = _make_contract(review_stack=["totally_unknown_gate"])
         results_dir = tmp_path / "results"
 
-        absent = cv._check_single_gate("kimi_gate", contract, None, results_dir, "feature/demo")
+        absent = cv._check_single_gate("totally_unknown_gate", contract, None, results_dir, "feature/demo")
         assert absent.status == "UNVERIFIED"
 
         present = cv._check_single_gate(
-            "kimi_gate", contract,
-            {"gate": "kimi_gate", "status": "pass"},
+            "totally_unknown_gate", contract,
+            {"gate": "totally_unknown_gate", "status": "pass"},
             results_dir, "feature/demo",
         )
         assert present.status == "UNVERIFIED"
