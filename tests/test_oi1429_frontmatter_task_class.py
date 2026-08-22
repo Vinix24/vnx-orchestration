@@ -80,6 +80,41 @@ def test_empty_args_task_class_falls_back_to_env(monkeypatch):
     assert fm["task_class"] == "research_structured"
 
 
+def test_non_string_args_task_class_falls_through_and_is_yaml_safe(monkeypatch):
+    """Case 4 (regression, CI break): args.task_class is a MagicMock (the real shape
+    in this suite's fixtures) or an int, never a real str. The old code trusted
+    getattr(args, "task_class", "") blindly, so `.strip()` on the Mock produced
+    another Mock that landed straight in the frontmatter dict and blew up
+    yaml.safe_dump with RepresenterError. The fixed code must type-check the
+    attribute, fall through to env/default, and the resulting value must be a
+    plain str that survives an actual yaml dump.
+    """
+    import yaml
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("VNX_TASK_CLASS", "research_structured")
+    args_mock = _make_args(MagicMock())  # type: ignore[arg-type]
+
+    fm_mock = _call(args_mock)
+
+    print(f"OI-1429 case4a frontmatter['task_class'] = {fm_mock['task_class']!r}")
+    assert isinstance(fm_mock["task_class"], str)
+    assert fm_mock["task_class"] == "research_structured"
+    dumped_mock = yaml.safe_dump(fm_mock)
+    assert "task_class: research_structured" in dumped_mock
+
+    monkeypatch.delenv("VNX_TASK_CLASS", raising=False)
+    args_int = _make_args(42)  # type: ignore[arg-type]
+
+    fm_int = _call(args_int)
+
+    print(f"OI-1429 case4b frontmatter['task_class'] = {fm_int['task_class']!r}")
+    assert isinstance(fm_int["task_class"], str)
+    assert fm_int["task_class"] == "implementation"
+    dumped_int = yaml.safe_dump(fm_int)
+    assert "task_class: implementation" in dumped_int
+
+
 if __name__ == "__main__":
     import pytest
 

@@ -617,6 +617,13 @@ def _build_frontmatter(
 
     spawn_fm = result.frontmatter_fields() if hasattr(result, "frontmatter_fields") else {}
 
+    args_task_class = getattr(args, "task_class", None)
+    task_class = (
+        (args_task_class.strip() if isinstance(args_task_class, str) else "")
+        or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
+        or "implementation"
+    )
+
     frontmatter: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "dispatch_id": args.dispatch_id,
@@ -626,11 +633,7 @@ def _build_frontmatter(
         "terminal_id": args.terminal_id,
         "pool_id": os.environ.get("VNX_POOL_ID", "headless"),
         "role": getattr(args, "role", None) or "backend-developer",
-        "task_class": (
-            (getattr(args, "task_class", "") or "").strip()
-            or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
-            or "implementation"
-        ),
+        "task_class": task_class,
         "pr_id": getattr(args, "pr_id", None) or "none",
         "duration_seconds": round(duration, 3),
         "exit_code": spawn_fm.get("exit_code", getattr(result, "returncode", 1)),
