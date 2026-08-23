@@ -5,14 +5,29 @@ Determines whether the configured CI workflow has a *successful* run for the
 exact HEAD SHA being merged. The check toetst op het BESTAAN van een geslaagde
 run voor die head, niet op de afwezigheid van een gefaalde run:
 
-  - zero runs for the head            -> NO-GO ("niet toetsbaar")
-  - run with conclusion != "success"  -> NO-GO (in_progress is NO-GO too)
-  - success but for a DIFFERENT sha   -> NO-GO (an older commit does not count)
-  - success for the exact head        -> GO
+  - zero runs for the head sha          -> NO-GO ("niet toetsbaar")
+  - any run for the head sha is running -> NO-GO (in_progress/queued blocks)
+  - any run for the head sha != success -> NO-GO
+  - every run for the head sha succeeded -> GO
 
 Every unverifiable state (``gh`` missing, ``gh`` not authenticated, ``gh run
-list`` failing or unparseable, HEAD/branch unresolvable) is a NO-GO with its
-own message. A missing tool never passes as "no red found".
+list`` failing or unparseable, HEAD unresolvable) is a NO-GO with its own
+message. A missing tool never passes as "no red found".
+
+OI-1387: the query is scoped to the exact commit (``gh run list --commit``),
+NOT the branch. The tmux-spawn dispatch lane pushes a fix-forward commit to
+both the target branch and its own per-dispatch auto-branch, so one sha can
+have VNX CI runs on two branches at once. A branch-scoped query only sees the
+run on the branch it was given and can call GO while a run for the exact same
+sha is still in progress on the other branch — which is precisely the
+disagreement OI-1387 measured between this gate (was branch-scoped) and the
+review-gate's ``gh pr checks`` (always commit-scoped). Scoping both to the
+commit, and requiring EVERY run found on that commit to be conclusion=success,
+makes them agree. ``branch`` remains an accepted argument/CLI flag for callers
+that still resolve and pass it (e.g. ``pr_merge.py`` alongside head_sha), but
+it no longer participates in the CI query — there is no fallback to a
+branch-scoped query when head_sha is unresolvable, since that fallback would
+silently reintroduce the exact defect being fixed here.
 
 Escape hatch (OI-1216 merge-gate): an operator may override the gate by
 supplying a non-empty reason via ``override_reason`` /
@@ -23,9 +38,9 @@ visible in the output rather than hidden.
 
 This is the merge-preflight counterpart to ``pre_merge_gate.check_ci_workflow``
 (OI-931), which enforces the same invariant at gate time. The two share the
-same ``gh run list`` invocation shape and the same workflow-name resolution
-order (explicit arg > ``VNX_CI_WORKFLOW_NAME`` > "VNX CI"); they differ in
-verdict vocabulary (GO/NO-GO here) and messaging (merge-preflight terms).
+same workflow-name resolution order (explicit arg > ``VNX_CI_WORKFLOW_NAME``
+> "VNX CI"); they differ in verdict vocabulary (GO/NO-GO here) and messaging
+(merge-preflight terms).
 """
 
 from __future__ import annotations
@@ -49,9 +64,9 @@ CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
 # means no override is attempted.
 OVERRIDE_ENV_VAR = "VNX_MERGE_OVERRIDE_REASON"
 
-# How many recent runs to pull per branch. Matching is by exact head SHA, so a
-# head older than the limit on a busy branch would read as "not run". The same
-# limit is used by pre_merge_gate.check_ci_workflow.
+# How many recent runs to pull for the commit. Matching is by exact head SHA,
+# so a head older than the limit would read as "not run". The same limit is
+# used by pre_merge_gate.check_ci_workflow.
 RUN_LIST_LIMIT = 10
 
 # Subprocess timeouts (seconds). Fail closed on expiry.
@@ -153,10 +168,15 @@ def check_ci_run_for_head(
     workflow_name: Optional[str] = None,
     override_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Fail-closed check: a VNX CI run with conclusion=success must exist for head_sha.
+    """Fail-closed check: every VNX CI run for the exact head_sha must be conclusion=success.
 
     Returns {"verdict": "GO"|"NO-GO", "message": str, ...}. ``project_root`` is
     the directory whose HEAD is being merged (the worktree under preflight).
+
+    ``branch`` is accepted for callers that resolve and pass it alongside
+    ``head_sha`` (e.g. ``pr_merge.py``), but per OI-1387 it is NOT used to scope
+    the CI query — see the module docstring for why a branch-scoped query can
+    disagree with the review-gate's commit-scoped one on the same commit.
 
     ``override_reason`` is the escape hatch: a non-empty value skips the check
     with a visible GO (``overridden=True``), an empty/whitespace value is a
@@ -185,6 +205,8 @@ def check_ci_run_for_head(
         )
 
     # ── Resolve HEAD SHA ───────────────────────────────────────────────────
+    # No fallback to a branch-scoped query when this fails: that fallback is
+    # exactly the defect OI-1387 fixes (see module docstring).
     if head_sha is None:
         head_sha = _git(project_root, ["rev-parse", "HEAD"])
         if not head_sha:
@@ -193,15 +215,18 @@ def check_ci_run_for_head(
                 workflow_name=resolved_workflow,
             )
 
-    # ── Resolve branch ─────────────────────────────────────────────────────
-    if branch is None:
-        branch = _git(project_root, ["rev-parse", "--abbrev-ref", "HEAD"])
-        if not branch:
-            return _no_go(
-                "branch kon niet worden bepaald: deze merge is niet toetsbaar",
-                head_sha=head_sha,
-                workflow_name=resolved_workflow,
-            )
+    # `gh run list --commit` silently returns zero rows (exit 0, no error) for
+    # an abbreviated sha — measured 2026-08-23 on PR #1672, where that read as
+    # "no CI ran" instead of "wrong query". A short head_sha here would recreate
+    # that exact false-NO-GO, so it is refused explicitly rather than queried.
+    if len(head_sha) < 40:
+        return _no_go(
+            f"head_sha '{head_sha}' is afgekort ({len(head_sha)} tekens): "
+            "gh run list --commit vereist de volle 40-teken sha, anders komt er stil nul "
+            "rijen terug: deze merge is niet toetsbaar",
+            head_sha=head_sha,
+            workflow_name=resolved_workflow,
+        )
 
     # ── gh authentication ──────────────────────────────────────────────────
     auth, auth_err = _capture([gh_bin, "auth", "status"], timeout=GH_AUTH_TIMEOUT)
@@ -224,11 +249,11 @@ def check_ci_run_for_head(
             workflow_name=resolved_workflow,
         )
 
-    # ── Query workflow runs ────────────────────────────────────────────────
+    # ── Query workflow runs, scoped to the exact commit (OI-1387) ──────────
     run_list, run_err = _capture(
         [
             gh_bin, "run", "list",
-            "--branch", branch,
+            "--commit", head_sha,
             "--workflow", resolved_workflow,
             "--limit", str(RUN_LIST_LIMIT),
             "--json", "conclusion,headSha,status,databaseId",
@@ -266,40 +291,40 @@ def check_ci_run_for_head(
             workflow_name=resolved_workflow,
         )
 
-    # ── Match a run to the exact HEAD SHA ──────────────────────────────────
-    for run in runs:
-        if run.get("headSha") != head_sha:
-            continue
-        conclusion = run.get("conclusion") or ""
-        status = run.get("status") or ""
-        run_id = run.get("databaseId")
-        if conclusion == "success":
-            return {
-                "verdict": "GO",
-                "message": (
-                    f"{resolved_workflow} geslaagd op {head_sha[:12]} "
-                    f"(run {run_id})"
-                ),
-                "ci_conclusion": conclusion,
-                "ran_on_sha": True,
-                "head_sha": head_sha,
-                "ci_run_id": run_id,
-                "workflow_name": resolved_workflow,
-                "overridden": False,
-                "override_reason": None,
-            }
-        if status in ("in_progress", "queued"):
-            return _no_go(
-                f"{resolved_workflow} draait nog op {head_sha[:12]} (status: {status}): "
-                "deze merge is niet toetsbaar tot de run op 'success' eindigt",
-                ci_conclusion=None,
-                ran_on_sha=True,
-                head_sha=head_sha,
-                ci_run_id=run_id,
-                workflow_name=resolved_workflow,
-            )
+    # ── Every run for the exact HEAD SHA must be conclusion=success ────────
+    # ``--commit`` already scopes gh's response to head_sha; this filter is a
+    # defensive no-op against a gh quirk returning extra entries. Unlike the
+    # pre-OI-1387 code, which returned on the FIRST run matching head_sha,
+    # this collects ALL of them: a sha pushed to two branches (tmux-spawn
+    # fix-forward) can have more than one VNX CI run, and one done + one still
+    # running must NO-GO, not GO on the strength of whichever run sorted first.
+    matching = [run for run in runs if run.get("headSha") == head_sha]
+    if not matching:
         return _no_go(
-            f"{resolved_workflow} conclusion is '{conclusion or status}' op {head_sha[:12]}: "
+            f"Geen VNX CI-run gevonden voor {head_sha[:12]}: deze merge is niet toetsbaar",
+            head_sha=head_sha,
+            workflow_name=resolved_workflow,
+        )
+
+    running = [run for run in matching if (run.get("status") or "") in ("in_progress", "queued")]
+    if running:
+        run_id = running[0].get("databaseId")
+        return _no_go(
+            f"{resolved_workflow} draait nog op {head_sha[:12]} (status: {running[0].get('status')}): "
+            "deze merge is niet toetsbaar tot alle runs op deze commit op 'success' eindigen",
+            ci_conclusion=None,
+            ran_on_sha=True,
+            head_sha=head_sha,
+            ci_run_id=run_id,
+            workflow_name=resolved_workflow,
+        )
+
+    failing = [run for run in matching if (run.get("conclusion") or "") != "success"]
+    if failing:
+        run_id = failing[0].get("databaseId")
+        conclusion = failing[0].get("conclusion") or ""
+        return _no_go(
+            f"{resolved_workflow} conclusion is '{conclusion}' op {head_sha[:12]}: "
             "deze merge is niet toetsbaar",
             ci_conclusion=conclusion or None,
             ran_on_sha=True,
@@ -308,23 +333,22 @@ def check_ci_run_for_head(
             workflow_name=resolved_workflow,
         )
 
-    # No run matched the HEAD SHA — distinguish "ran on a different SHA" from
-    # "never ran at all" so the two failure modes get distinct messages.
-    if runs:
-        latest_run = runs[0]
-        latest_sha = (latest_run.get("headSha") or "")[:12]
-        return _no_go(
-            f"{resolved_workflow} heeft niet gedraaid op HEAD {head_sha[:12]}; "
-            f"laatste run op '{branch}' was op {latest_sha}: "
-            "deze merge is niet toetsbaar (een run op een oudere commit telt niet)",
-            head_sha=head_sha,
-            workflow_name=resolved_workflow,
-        )
-    return _no_go(
-        f"Geen VNX CI-run gevonden voor {head_sha[:12]}: deze merge is niet toetsbaar",
-        head_sha=head_sha,
-        workflow_name=resolved_workflow,
-    )
+    run_ids = [run.get("databaseId") for run in matching]
+    run_word = "run" if len(run_ids) == 1 else "runs"
+    return {
+        "verdict": "GO",
+        "message": (
+            f"{resolved_workflow} geslaagd op {head_sha[:12]} "
+            f"({run_word} {', '.join(str(r) for r in run_ids)})"
+        ),
+        "ci_conclusion": "success",
+        "ran_on_sha": True,
+        "head_sha": head_sha,
+        "ci_run_id": run_ids[0] if len(run_ids) == 1 else run_ids,
+        "workflow_name": resolved_workflow,
+        "overridden": False,
+        "override_reason": None,
+    }
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -333,7 +357,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Fail-closed check: does VNX CI have a successful run for the exact HEAD SHA?",
     )
     parser.add_argument("--project-root", required=True, help="Directory whose HEAD is being merged")
-    parser.add_argument("--branch", help="Branch name (defaults to git rev-parse --abbrev-ref HEAD)")
+    parser.add_argument(
+        "--branch",
+        help="Accepted for backward compat; NOT used to scope the CI query (OI-1387 — see module docstring)",
+    )
     parser.add_argument("--head-sha", help="Exact HEAD SHA (defaults to git rev-parse HEAD)")
     parser.add_argument("--workflow", help="CI workflow name (default: VNX_CI_WORKFLOW_NAME or 'VNX CI')")
     parser.add_argument("--gh-bin", default="gh", help="Path/name of the gh binary")
