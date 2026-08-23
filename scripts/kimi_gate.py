@@ -490,6 +490,10 @@ def main(argv: "list[str] | None" = None) -> int:
 
     recovered_path: "Path | None" = None
 
+    # OI-1452 fix-forward: tracked across both branches below so the record
+    # build can stamp the canonical failure_reason field (see there) — only
+    # ever set by the lane-log lift in the run_failed branch, never guessed.
+    lane_log_reason: "str | None" = None
     if dispatch_error:
         verdict: dict = {}
         status, blocking = "unavailable", []
@@ -668,6 +672,21 @@ def main(argv: "list[str] | None" = None) -> int:
         ],
         "required_reruns": [],
         "residual_risk": residual,
+        # OI-1452 fix-forward (OI-1453 tracks the other four gates): also
+        # stamp the canonical failure_reason field (established OI-1415,
+        # scripts/lib/phantom_guard.py) with the SAME text placed above in
+        # residual_risk, but ONLY the lifted lane-log reason — never a
+        # placeholder or a summary of the frontmatter fields when the lift
+        # found nothing. Three ways to be wrong here, in ascending order of
+        # danger: an EMPTY field fails visibly (a reader can tell the cause
+        # is unknown); a PLACEHOLDER ("unknown", "n/a") passes every
+        # presence check and fails silently; a SUMMARY that merely looks
+        # like a cause is worst of all, because it cannot be told apart from
+        # a real one. Filling this field with anything but the real lifted
+        # reason would make every existing record look complete while
+        # explaining nothing — a regression hidden BEHIND the fix meant to
+        # surface it.
+        "failure_reason": lane_log_reason or "",
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         # dispatch-20260823-beta2-j: audit marker distinguishing a record
         # produced by a live model call from one formalized by --reprocess
