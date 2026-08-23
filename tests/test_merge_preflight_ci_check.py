@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Tests for the fail-closed VNX CI-run check (OI-1216).
+"""Tests for the fail-closed VNX CI-run check (OI-1216, OI-1387).
 
-Covers the four required states from the dispatch, each with a stubbed ``gh``
-outcome (no network):
+Covers the four required states from the original dispatch, each with a
+stubbed ``gh`` outcome (no network):
   (a) successful run for the exact head SHA            -> GO
   (b) zero runs                                        -> NO-GO
   (c) run with conclusion=failure for the exact head   -> NO-GO
-  (d) success but for a DIFFERENT sha on the branch    -> NO-GO
-
+  (d) success but for a run that (defensively) doesn't  -> NO-GO
+      match head_sha even though --commit was used
 plus the fail-closed edges the dispatch names: gh missing, gh not
 authenticated, and a still-running (in_progress) run.
+
+OI-1387 adds: the query must be scoped to the exact commit (``--commit``, not
+``--branch``), and the verdict must require EVERY run found for that commit to
+be conclusion=success, not just the first one encountered. See
+``TestCommitScopedQuery`` below.
 """
 
 import json
@@ -36,10 +41,6 @@ def _git_head_mock(sha: str) -> MagicMock:
     return MagicMock(returncode=0, stdout=sha + "\n", stderr="")
 
 
-def _git_branch_mock(branch: str = "feature-branch") -> MagicMock:
-    return MagicMock(returncode=0, stdout=branch + "\n", stderr="")
-
-
 def _gh_auth_ok() -> MagicMock:
     return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -58,15 +59,20 @@ def _gh_run_output(conclusion, head_sha, status="completed", database_id=12345):
     return MagicMock(returncode=0, stdout=json.dumps(runs), stderr="")
 
 
+def _gh_multi_run_output(runs):
+    return MagicMock(returncode=0, stdout=json.dumps(runs), stderr="")
+
+
 def _gh_empty_output():
     return MagicMock(returncode=0, stdout=json.dumps([]), stderr="")
 
 
-def _subprocess_mocks(head_sha, branch="feature-branch"):
-    """git head -> git branch -> gh auth (ok) -> gh run list."""
+def _subprocess_mocks(head_sha):
+    """git head -> gh auth (ok) -> gh run list. No branch resolution (OI-1387):
+    the query is commit-scoped now, so branch is never resolved by the function
+    itself."""
     return [
         _git_head_mock(head_sha),
-        _git_branch_mock(branch),
         _gh_auth_ok(),
     ]
 
@@ -76,7 +82,8 @@ GH_PRESENT = "/usr/local/bin/gh"
 
 class TestCheckCIRunForHead:
     def test_ci_succeeded_for_exact_head(self, tmp_path):
-        """(a) successful run for the exact head SHA -> GO."""
+        """(a) successful run for the exact head SHA -> GO. Also the OI-1387
+        control case: exactly one run, conclusion=success, still GO."""
         sha = "a" * 40
         mocks = _subprocess_mocks(sha) + [_gh_run_output("success", sha)]
         with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
@@ -113,8 +120,10 @@ class TestCheckCIRunForHead:
         assert "conclusion is 'failure'" in result["message"]
         assert "niet toetsbaar" in result["message"]
 
-    def test_success_on_different_sha_is_no_go(self, tmp_path):
-        """(d) success but for a DIFFERENT sha on the branch -> NO-GO."""
+    def test_run_with_mismatched_sha_is_no_go(self, tmp_path):
+        """(d) defensive filter: a returned run whose headSha does not match
+        head_sha (a gh quirk despite --commit scoping) never counts -> NO-GO,
+        same message as zero runs."""
         sha = "d" * 40
         other = "e" * 40
         mocks = _subprocess_mocks(sha) + [_gh_run_output("success", other, database_id=99999)]
@@ -124,8 +133,7 @@ class TestCheckCIRunForHead:
         assert result["verdict"] == "NO-GO"
         assert result["ran_on_sha"] is False
         assert result["head_sha"] == sha
-        assert "heeft niet gedraaid op HEAD" in result["message"]
-        assert "oudere commit telt niet" in result["message"]
+        assert "Geen VNX CI-run gevonden" in result["message"]
         assert "niet toetsbaar" in result["message"]
 
     def test_in_progress_run_is_no_go(self, tmp_path):
@@ -155,7 +163,6 @@ class TestCheckCIRunForHead:
         sha = "g" * 40
         mocks = [
             _git_head_mock(sha),
-            _git_branch_mock(),
             _gh_auth_fail(),
         ]
         with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
@@ -199,6 +206,18 @@ class TestCheckCIRunForHead:
         assert "HEAD-SHA kon niet worden bepaald" in result["message"]
         assert "niet toetsbaar" in result["message"]
 
+    def test_abbreviated_head_sha_is_no_go(self, tmp_path):
+        """A short head_sha is refused before querying: `gh run list --commit`
+        silently returns zero rows for an abbreviated sha (measured 2026-08-23,
+        PR #1672) which would misread as 'no CI ran' rather than 'wrong query'."""
+        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path, head_sha="abc1234")
+        assert result["verdict"] == "NO-GO"
+        assert "afgekort" in result["message"]
+        assert "niet toetsbaar" in result["message"]
+        mock_run.assert_not_called()
+
     def test_uses_default_workflow_name(self, tmp_path):
         """The gh run list call uses the default workflow name 'VNX CI'."""
         sha = "j" * 40
@@ -207,7 +226,7 @@ class TestCheckCIRunForHead:
              patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
             result = check_ci_run_for_head(tmp_path)
         assert result["verdict"] == "GO"
-        gh_call_args = mock_run.call_args_list[3].args[0]
+        gh_call_args = mock_run.call_args_list[2].args[0]
         workflow_idx = gh_call_args.index("--workflow")
         assert gh_call_args[workflow_idx + 1] == DEFAULT_CI_WORKFLOW_NAME
 
@@ -219,7 +238,7 @@ class TestCheckCIRunForHead:
              patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
             result = check_ci_run_for_head(tmp_path, workflow_name="CI/CD Pipeline")
         assert result["verdict"] == "GO"
-        gh_call_args = mock_run.call_args_list[3].args[0]
+        gh_call_args = mock_run.call_args_list[2].args[0]
         workflow_idx = gh_call_args.index("--workflow")
         assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
 
@@ -232,9 +251,88 @@ class TestCheckCIRunForHead:
              patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
             result = check_ci_run_for_head(tmp_path)
         assert result["verdict"] == "GO"
-        gh_call_args = mock_run.call_args_list[3].args[0]
+        gh_call_args = mock_run.call_args_list[2].args[0]
         workflow_idx = gh_call_args.index("--workflow")
         assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
+
+
+class TestCommitScopedQuery:
+    """OI-1387: the merge-gate and the review-gate (``gh pr checks``, always
+    commit-scoped) must agree on the same commit. Regression coverage for the
+    fix: query by ``--commit``, and require ALL runs on that commit to have
+    succeeded, not just the first one encountered.
+    """
+
+    def test_query_uses_commit_not_branch(self, tmp_path):
+        """The gh run list call is scoped by --commit <full_head_sha>, never
+        --branch, even when a branch is passed through for other callers."""
+        sha = "1" * 40
+        mocks = _subprocess_mocks(sha) + [_gh_run_output("success", sha)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks) as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path, branch="some-other-branch")
+        assert result["verdict"] == "GO"
+        gh_call_args = mock_run.call_args_list[2].args[0]
+        assert "--branch" not in gh_call_args
+        commit_idx = gh_call_args.index("--commit")
+        assert gh_call_args[commit_idx + 1] == sha
+
+    def test_running_run_on_other_branch_blocks_go(self, tmp_path):
+        """OI-1387 regression, red on main: a sha pushed to two branches (the
+        tmux-spawn fix-forward lane pushes the same commit to the target branch
+        AND its own per-dispatch auto-branch) has two VNX CI runs — one
+        success, one still running. Pre-fix ``check_ci_run_for_head`` returned
+        on the FIRST run matching head_sha and ignored the rest, so this exact
+        fixture gave GO on main (verdict='GO', measured against the pre-fix
+        snapshot before this dispatch's edit). Post-fix it must NO-GO: every
+        run for the commit must be conclusion=success, and none may still be
+        running.
+        """
+        sha = "2" * 40
+        runs = [
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111},
+            {"conclusion": None, "headSha": sha, "status": "in_progress", "databaseId": 222},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path, branch="feature-branch")
+        assert result["verdict"] == "NO-GO"
+        assert result["ran_on_sha"] is True
+        assert "draait nog" in result["message"]
+        assert "niet toetsbaar" in result["message"]
+
+    def test_two_successful_runs_on_same_commit_is_go(self, tmp_path):
+        """Two runs for the same commit, both conclusion=success (e.g. one per
+        branch after a fix-forward push) -> GO. Every run succeeded and none is
+        running, which is exactly what the fixed comparison requires."""
+        sha = "3" * 40
+        runs = [
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111},
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 222},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "GO"
+        assert result["ci_conclusion"] == "success"
+        assert result["ci_run_id"] == [111, 222]
+
+    def test_one_success_one_failed_on_same_commit_is_no_go(self, tmp_path):
+        """Two runs for the same commit, one success and one failure -> NO-GO:
+        every run must succeed, not just one of them."""
+        sha = "4" * 40
+        runs = [
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111},
+            {"conclusion": "failure", "headSha": sha, "status": "completed", "databaseId": 222},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "NO-GO"
+        assert "conclusion is 'failure'" in result["message"]
 
 
 class TestOverrideEscapeHatch:
@@ -346,3 +444,21 @@ class TestCLI:
         out = json.loads(capsys.readouterr().out)
         assert out["verdict"] == "NO-GO"
         assert "niet toetsbaar" in out["message"]
+
+    def test_cli_branch_flag_accepted_but_unused_in_query(self, tmp_path, capsys):
+        """--branch is still a valid CLI flag (backward compat for callers that
+        pass it) but must not appear in the gh run list invocation (OI-1387).
+        An explicit --head-sha skips git rev-parse HEAD entirely, so only the
+        gh auth + gh run list calls are mocked."""
+        sha = "o" * 40
+        mocks = [_gh_auth_ok(), _gh_run_output("success", sha)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks) as mock_run, \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            rc = mpci.main([
+                "--project-root", str(tmp_path), "--json",
+                "--head-sha", sha, "--branch", "some-branch",
+            ])
+        assert rc == 0
+        gh_call_args = mock_run.call_args_list[-1].args[0]
+        assert "--branch" not in gh_call_args
+        assert "--commit" in gh_call_args
