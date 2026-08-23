@@ -37,6 +37,9 @@ class GateReportGeneratorMixin:
             "status": "not_executable",
             "reason": reason,
             "reason_detail": reason_detail,
+            # OI-1415: same text as reason_detail above, in the canonical
+            # field a generic failure-reason reader looks for (#1666).
+            "failure_reason": reason_detail,
             "summary": f"{gate} not executable: {reason_detail}",
             "contract_hash": contract_hash,
             "report_path": "",

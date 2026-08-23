@@ -292,3 +292,168 @@ class TestKimiTakeoverToGlm:
         recorded = json.loads(glm_result_file.read_text(encoding="utf-8"))
         assert recorded["status"] != "pass"
         assert recorded.get("failure_reason", "").strip() != ""
+
+
+class TestMarkGateUnavailableStampsCanonicalFailureReason:
+    """Bevinding 1 (fix-forward on #1675): a seat that REFUSES on its very
+    first round (no prior recorded result yet, so ``_dispatch_review_seat``
+    never reaches the takeover branch at all) writes its reason into the
+    lane-own ``reason``/``reason_detail`` fields via ``_mark_gate_unavailable``
+    but never into the canonical ``failure_reason`` field -- precisely the
+    OI-1415 defect #1666 fixed for phantom_guard/pr_enforcement, left
+    unaddressed here.
+
+    Measured probe (23-08, kimi CLI absent from PATH, first request for a
+    fresh PR/state-dir pair -- no pre-existing result file, so no takeover
+    branch is even entered):
+
+        status          'not_executable'
+        reason          'provider_not_installed'
+        reason_detail   'kimi_gate.py binary not found in PATH'
+        failure_reason  ABSENT
+
+    RED-on-branch proof (recorded before the fix landed):
+
+        pytest tests/test_dlv5_review_gate_takeover.py::TestMarkGateUnavailableStampsCanonicalFailureReason::test_kimi_not_executable_first_round_stamps_failure_reason -x
+
+        AssertionError: failure_reason must be present on a refused seat's request record, exactly like reason_detail (OI-1415) -- got None
+        assert None is not None
+    """
+
+    def test_kimi_not_executable_first_round_stamps_failure_reason(self, manager_env, monkeypatch):
+        monkeypatch.chdir(manager_env["project_root"])
+        manager = _make_manager()
+        pr_number = 701
+        # No pre-existing result file -- this is the seat's first attempt, so
+        # `_dispatch_review_seat` never reaches the takeover branch; the
+        # refusal comes straight from `_mark_gate_unavailable` inside
+        # `_request_kimi`.
+        monkeypatch.setattr(manager, "_kimi_gate_available", lambda: False)
+
+        with patch("governance_receipts.emit_governance_receipt"):
+            result = manager.request_reviews(
+                pr_number=pr_number,
+                branch="fix/mark-unavailable-failure-reason",
+                review_stack=["kimi_gate"],
+                risk_class="medium",
+                changed_files=["scripts/lib/gate_request_handler.py"],
+                mode="per_pr",
+                dispatch_id="dlv5-mark-unavailable-test",
+            )
+
+        seat = result["requested"][0]
+        assert seat["gate"] == "kimi_gate"
+        assert seat["status"] == "not_executable"
+        assert seat["reason"] == "provider_not_installed"
+
+        assert seat.get("failure_reason") is not None, (
+            "failure_reason must be present on a refused seat's request record, "
+            f"exactly like reason_detail (OI-1415) -- got {seat.get('failure_reason')!r}"
+        )
+        assert seat["failure_reason"] == seat["reason_detail"], (
+            "failure_reason must carry the SAME text as the lane-own reason_detail, "
+            f"not a second formulation: {seat['failure_reason']!r} != {seat['reason_detail']!r}"
+        )
+
+        request_file = manager_env["requests_dir"] / f"pr-{pr_number}-kimi_gate.json"
+        assert request_file.exists()
+        on_disk_request = json.loads(request_file.read_text(encoding="utf-8"))
+        assert on_disk_request.get("failure_reason") == seat["reason_detail"], (
+            "failure_reason must be persisted on disk, not only in the in-memory payload"
+        )
+
+        result_file = manager_env["results_dir"] / f"pr-{pr_number}-kimi_gate.json"
+        assert result_file.exists()
+        on_disk_result = json.loads(result_file.read_text(encoding="utf-8"))
+        assert on_disk_result.get("failure_reason") == seat["reason_detail"], (
+            "failure_reason must land in the result record too, not only the request record"
+        )
+
+
+class TestStampTakeoverAnnotationsAtomicWrites:
+    """Bevinding 2 (fix-forward on #1675): ``_stamp_takeover_annotations``
+    must never leave a torn (partially-written) evidence file on disk.
+
+    These are the request/result records that PROVE a takeover happened. A
+    half-written record passes a bare existence check and only fails on the
+    content a reader trusts -- worse than no record at all, because it
+    surfaces exactly when the record is needed. Both writes must go through
+    the tempfile-in-same-dir + ``os.replace`` pattern (``atomic_write_json``,
+    already used elsewhere in the repo -- not a second hand-rolled variant),
+    never a bare ``write_text``.
+    """
+
+    def test_crash_mid_write_leaves_original_request_record_intact(self, manager_env, monkeypatch):
+        monkeypatch.chdir(manager_env["project_root"])
+        manager = _make_manager()
+        pr_number = 801
+        gate = "glm_gate"
+
+        original_payload = {"gate": gate, "status": "requested", "pr_number": pr_number}
+        request_file = manager_env["requests_dir"] / f"pr-{pr_number}-{gate}.json"
+        request_file.write_text(json.dumps(original_payload, indent=2), encoding="utf-8")
+
+        import atomic_io
+
+        def _boom(*args, **kwargs):
+            raise OSError("simulated crash mid-write")
+
+        monkeypatch.setattr(atomic_io.os, "replace", _boom)
+
+        with pytest.raises(OSError):
+            manager._stamp_takeover_annotations(
+                dict(original_payload),
+                pr_number=pr_number,
+                takeover_from="kimi_gate",
+                failure_reason="kimi_gate unavailable (dispatch_error): 403 -- glm_gate substituted as reader",
+                takeover_reason="dispatch_error",
+                takeover_source_status="unavailable",
+            )
+
+        # The ORIGINAL record must survive untouched -- not a half-written
+        # file, not an empty file, not the tmp file left in its place.
+        assert request_file.exists()
+        recovered = json.loads(request_file.read_text(encoding="utf-8"))
+        assert recovered == original_payload, (
+            "a crash mid-write must never leave a torn or partially-updated evidence file"
+        )
+        # No leaked temp file next to it -- atomic_write_json cleans up on failure.
+        leaked_tmp = list(manager_env["requests_dir"].glob("*.tmp"))
+        assert leaked_tmp == [], f"atomic write must clean up its temp file on failure, found: {leaked_tmp}"
+
+    def test_crash_mid_write_leaves_original_result_record_intact(self, manager_env, monkeypatch):
+        monkeypatch.chdir(manager_env["project_root"])
+        manager = _make_manager()
+        pr_number = 802
+        gate = "glm_gate"
+
+        # No request file for this PR -- only the result-record write path
+        # is exercised.
+        original_result = {"gate": gate, "status": "pass", "pr_number": pr_number, "summary": "ok"}
+        result_file = manager_env["results_dir"] / f"pr-{pr_number}-{gate}.json"
+        result_file.write_text(json.dumps(original_result, indent=2), encoding="utf-8")
+
+        import atomic_io
+
+        def _boom(*args, **kwargs):
+            raise OSError("simulated crash mid-write")
+
+        monkeypatch.setattr(atomic_io.os, "replace", _boom)
+
+        with pytest.raises(OSError):
+            manager._stamp_takeover_annotations(
+                {"gate": gate, "status": "pass", "pr_number": pr_number},
+                pr_number=pr_number,
+                takeover_from="kimi_gate",
+                failure_reason="kimi_gate unavailable (dispatch_error): 403 -- glm_gate substituted as reader",
+                takeover_reason="dispatch_error",
+                takeover_source_status="unavailable",
+            )
+
+        assert result_file.exists()
+        recovered = json.loads(result_file.read_text(encoding="utf-8"))
+        assert recovered == original_result, (
+            "a crash mid-write must never leave a torn or partially-updated result record"
+        )
+        leaked_tmp = list(manager_env["results_dir"].glob("*.tmp"))
+        assert leaked_tmp == [], f"atomic write must clean up its temp file on failure, found: {leaked_tmp}"

@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
@@ -207,6 +208,15 @@ class GateRequestHandlerMixin:
         fields. ``failure_reason`` is the CANONICAL reason field (#1666 /
         OI-1415) -- never a one-off field name a generic receipt reader would
         not recognise.
+
+        Both writes go through ``atomic_write_json`` (temp file in the same
+        directory + ``os.replace``), never a bare ``write_text``. These are
+        EVIDENCE files: a torn write here passes the existence check a reader
+        does first and only fails on the content it trusts -- worse than no
+        record at all, because it surfaces exactly when the record is
+        needed. Not suppressed with a `# vnx-atomic-write` marker: that
+        marker is for writes where a torn write is harmless, which a gate
+        evidence record is not.
         """
         gate = payload.get("gate", "")
         annotations = {
@@ -221,7 +231,7 @@ class GateRequestHandlerMixin:
         if pr_number is not None:
             request_file = self._request_path(gate, pr_number)
             if request_file.exists():
-                request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                atomic_write_json(request_file, payload)
 
             result_file = self._result_path(gate, pr_number)
             if result_file.exists():
@@ -231,7 +241,7 @@ class GateRequestHandlerMixin:
                     result_payload = None
                 if result_payload is not None:
                     result_payload.update(annotations)
-                    result_file.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+                    atomic_write_json(result_file, result_payload)
         return payload
 
     def _dispatch_review_seat(
@@ -250,6 +260,17 @@ class GateRequestHandlerMixin:
         here, before issuing a new request -- never on attest-time (rewriting
         an already-attested final verdict), since that would let evidence
         change owners after the fact.
+
+        This is DELIBERATELY two rounds, not one: the decision reads the
+        LAST SAVED result, so a seat only gets filled on the request AFTER
+        the one that recorded its failure. A synchronous refusal (binary
+        missing) and an asynchronous one (quota 403 surfacing mid-execution)
+        would otherwise need two different in-round semantics to take over
+        immediately -- one round of latency is the price of a single,
+        uniform rule instead of two. Do not "fix" this into an in-round
+        takeover: the first round after a quota-death yields an
+        undecided/refused seat, the second round fills it, and that is the
+        intended behaviour, not a bug.
         """
         existing_result = self._read_existing_gate_result(gate, pr_number)
         fallback_gate = _REVIEW_GATE_TAKEOVER_ORDER.get(gate)
@@ -357,6 +378,14 @@ class GateRequestHandlerMixin:
         reason, detail = self._classify_unavailable(gate, binary_name)
         payload["reason"] = reason
         payload["reason_detail"] = detail
+        # OI-1415 (same fix as #1666 for phantom_guard/pr_enforcement): stamp
+        # the canonical failure_reason field with the SAME text as the
+        # lane-own reason_detail above -- a seat that refuses on its very
+        # first round (no prior recorded result, so `_dispatch_review_seat`
+        # never reaches the takeover branch) must still carry a reason a
+        # generic failure-reason reader can find, not only a lane-specific
+        # field name.
+        payload["failure_reason"] = detail
         payload["resolved_at"] = payload["requested_at"]
         self._write_not_executable_result(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
