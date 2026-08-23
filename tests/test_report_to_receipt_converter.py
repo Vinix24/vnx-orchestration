@@ -118,6 +118,33 @@ def _write_frontmatter_report(path: Path, dispatch_id: str, **extra) -> Path:
     return path
 
 
+def _write_v1_report_missing_fields(
+    path: Path, dispatch_id: str, *, drop: tuple = (), **extra
+) -> Path:
+    """Write a v1-valid report with one or more frontmatter keys DROPPED
+    entirely (not overridden to empty) — mirrors a real report that never
+    declared the key, e.g. 20260823-alpha-a1-ledger-health-cadans.md
+    (exit_code: 0, no ``status`` key at all). schemas/unified_report_v1.json
+    requires ``exit_code`` but never requires ``status``, so this is a
+    schema-valid shape, not a malformed one.
+    """
+    fm = _v1_frontmatter_base(dispatch_id)
+    for key in drop:
+        fm.pop(key, None)
+    fm.update(extra)
+    fm_text = yaml.safe_dump(fm, sort_keys=False).strip()
+    content = (
+        f"---\n{fm_text}\n---\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n"
+    )
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def _write_non_v1_success_report(
     path: Path, dispatch_id: str, *, with_headings: bool = True, **extra
 ) -> Path:
@@ -327,16 +354,47 @@ class TestStatusVocabularyFailClosed:
             assert receipt["status"] == status, (status, receipt)
             assert resolve_status_category(status) == "ignorable"
 
-    def test_empty_status_is_no_signal_not_success(self, tmp_path):
-        # An empty status passes through as a no-signal task_complete (write-side
-        # behavior unchanged) but resolves to "no_signal", never "success", so
-        # the read side no longer books absence as a success.
-        from event_outcome_semantics import resolve_status_category
+    def test_empty_status_with_exit_code_zero_derives_success(self, tmp_path, monkeypatch):
+        # OI-1408: schemas/unified_report_v1.json requires exit_code but never
+        # required status — an empty/absent status is no longer waved through
+        # as a signal-less task_complete when a real exit_code sits right next
+        # to it (measured: 20260823-alpha-a1-ledger-health-cadans.md carried
+        # exit_code: 0 and no status key at all). The outcome is derived from
+        # exit_code and resolved through the SAME canonical vocabulary
+        # (resolve_status_category), never a second mapping.
+        import report_to_receipt_converter as rtc
+        monkeypatch.setattr(rtc, "_check_branch_on_origin", lambda _did: True)
 
         receipt = self._receipt_for_status(tmp_path, "")
         assert receipt is not None
         assert receipt["event_type"] == "task_complete"
-        assert receipt["status"] == ""
+        assert receipt["status"] == "success"
+
+    def test_missing_status_nonzero_exit_code_derives_failure(self, tmp_path):
+        p = tmp_path / "20260823-no-status-fail.md"
+        _write_v1_report_missing_fields(
+            p, "20260823-no-status-fail", drop=("status",), exit_code=1,
+        )
+        receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
+        assert receipt is not None
+        assert receipt["event_type"] == "task_failed"
+        assert receipt["status"] == "failed"
+
+    def test_missing_status_and_exit_code_falls_back_to_no_signal_literal(self, tmp_path):
+        # The genuine residual case: neither status nor a usable exit_code.
+        # The receipt must still carry a readable literal ("no_signal"),
+        # never an empty string.
+        from event_outcome_semantics import resolve_status_category
+
+        p = tmp_path / "20260823-truly-signal-less.md"
+        _write_v1_report_missing_fields(
+            p, "20260823-truly-signal-less", drop=("status", "exit_code"),
+        )
+        receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
+        assert receipt is not None
+        assert receipt["event_type"] == "task_complete"
+        assert receipt["status"] == "no_signal"
+        assert receipt["status"] != ""
         assert resolve_status_category("") == "no_signal"
 
 
@@ -613,16 +671,18 @@ class TestReceiptContent:
         assert "timestamp" in r
         assert "report_path" in r
 
-    def test_receipt_task_id_defaults_to_unknown(self, tmp_path, state_dir):
+    def test_receipt_omits_task_id_when_report_never_declares_one(self, tmp_path, state_dir):
+        # OI-1408: task_id is not part of the receipt_kind="dispatch" field
+        # contract — measured across 3903 dispatch receipts, no emitter has
+        # ever filled it with a real value. This used to stamp the literal
+        # "unknown" sentinel; it now omits the key entirely.
         report = tmp_path / "20260601-taskid.md"
         _write_frontmatter_report(report, "20260601-taskid")
         convert_report_to_receipt(
             report, receipts_file=str(state_dir / "t0_receipts.ndjson")
         )
         r = _receipts(state_dir)[0]
-        # task_id="unknown" aligns with report_parser.py default so
-        # append_receipt_payload() idempotency key matches the Bash path's key.
-        assert r.get("task_id") == "unknown"
+        assert "task_id" not in r
 
 
 # ---------------------------------------------------------------------------
@@ -1013,12 +1073,17 @@ class TestPoisonedReportResilience:
         (no try/except around the per-report conversion) reproduces the
         original all-or-nothing failure, not a partial one.
 
-        The poisoned report itself lands as a "report_contract_invalid"
-        receipt (its body lacks the required ## Summary/## Changes/etc
-        headings — a separate, pre-existing contract check, not this
-        dispatch's concern) rather than "task_complete"; the point proven
-        here is that it no longer crashes the SCAN, so the two healthy
-        reports after it still get their receipts.
+        The poisoned report itself lands as a "task_failed" receipt: its
+        frontmatter carries exit_code: 0 with no status field, so OI-1408's
+        exit_code fallback resolves it as a claimed success — which then hits
+        the pre-existing OI-1035 fail-closed gate (its body lacks the
+        required ## Summary/## Changes/etc headings and it has no PR/branch
+        on origin) and is refused as an explicit failure, never the
+        lower-severity "report_contract_invalid" bucket OI-1035 was written
+        to avoid for success claims. The event_type this poisoned report
+        lands as is incidental to what this test proves: that it no longer
+        crashes the SCAN, so the two healthy reports after it still get
+        their receipts.
         """
         shutil.copy(_POISONED_REPORT, reports_dir / _POISONED_REPORT.name)
         _write_frontmatter_report(reports_dir / "zzz-healthy-a.md", "zzz-healthy-a")
@@ -1032,7 +1097,7 @@ class TestPoisonedReportResilience:
         receipts = _receipts(state_dir)
         event_types = {r["event_type"] for r in receipts}
         assert "task_complete" in event_types
-        assert "report_contract_invalid" in event_types
+        assert "task_failed" in event_types
 
 
 class TestScanCrashGuard:
@@ -2596,6 +2661,79 @@ class TestConvertDispatchIds:
         assert ids_booked == {"20260821-scoped"}
         wm = _load_watermark(state_dir / _WATERMARK_FILENAME)
         assert _compute_sha256(sibling) not in wm
+
+
+# ---------------------------------------------------------------------------
+# OI-1408 Deliverable 2: a report with no ``status`` field but a real
+# ``exit_code`` (schemas/unified_report_v1.json requires exit_code, never
+# status) must land with a readable outcome on the receipt LINE THAT ACTUALLY
+# HITS DISK — not a task_complete with status="". Mirrors the real fixture
+# 20260823-alpha-a1-ledger-health-cadans.md: exit_code: 0, no status key.
+# ---------------------------------------------------------------------------
+
+class TestNoStatusExitCodeFallbackOnDisk:
+    def test_missing_status_with_exit_code_zero_lands_as_success_on_disk(
+        self, reports_dir, state_dir, monkeypatch,
+    ):
+        import report_to_receipt_converter as rtc
+        monkeypatch.setattr(rtc, "_check_branch_on_origin", lambda _did: True)
+
+        _write_v1_report_missing_fields(
+            reports_dir / "20260823-disk-no-status.md",
+            "20260823-disk-no-status",
+            drop=("status",),
+        )
+
+        convert_dispatch_ids(["20260823-disk-no-status"], state_dir)
+
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        booked = receipts[0]
+        assert booked["event_type"] == "task_complete"
+        assert booked["status"] == "success", (
+            "report declared exit_code: 0 with no status field — the receipt "
+            "line that landed on disk must read as a success, not an empty "
+            f"status. Full booked receipt: {booked}"
+        )
+
+    def test_missing_status_nonzero_exit_code_lands_as_failed_on_disk(
+        self, reports_dir, state_dir,
+    ):
+        _write_v1_report_missing_fields(
+            reports_dir / "20260823-disk-no-status-fail.md",
+            "20260823-disk-no-status-fail",
+            drop=("status",),
+            exit_code=1,
+        )
+
+        convert_dispatch_ids(["20260823-disk-no-status-fail"], state_dir)
+
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        booked = receipts[0]
+        assert booked["event_type"] == "task_failed"
+        assert booked["status"] == "failed"
+
+    def test_missing_status_and_exit_code_lands_as_no_signal_literal_on_disk(
+        self, reports_dir, state_dir,
+    ):
+        _write_v1_report_missing_fields(
+            reports_dir / "20260823-disk-truly-signal-less.md",
+            "20260823-disk-truly-signal-less",
+            drop=("status", "exit_code"),
+        )
+
+        convert_dispatch_ids(["20260823-disk-truly-signal-less"], state_dir)
+
+        receipts = _receipts(state_dir)
+        assert len(receipts) == 1
+        booked = receipts[0]
+        assert booked["event_type"] == "task_complete"
+        assert booked["status"] == "no_signal"
+        assert booked["status"] != "", (
+            "no-signal task_complete receipt landed with an empty status on "
+            f"disk — no readable outcome on the line: {booked}"
+        )
 
 
 # ---------------------------------------------------------------------------

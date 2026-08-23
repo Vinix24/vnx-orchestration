@@ -767,13 +767,22 @@ class ReportParser:
             'gate': metadata.get('gate', 'unknown'),
             'status': _receipt_status,
             'contract_valid': _contract_valid,  # governance visibility (audit #10)
-            'task_id': metadata.get('task_id', 'unknown'),
             'dispatch_id': metadata.get('dispatch_id', 'unknown'),
             'session_id': metadata.get('session_id'),  # Phase 2: Session tracking for cost attribution
             'report_path': report_path,
             'report_file': Path(report_path).name,  # Add filename for easier tracking
             'title': metadata.get('title', 'No title')
         }
+
+        # OI-1408: task_id is NOT part of the receipt_kind="dispatch" field
+        # contract — measured across 3903 dispatch receipts, no emitter has
+        # EVER filled it with a real value (only absent or the "unknown"
+        # sentinel parse_metadata() stamps via setdefault). Same missing-field
+        # contract as model/provider above: omitted when there is no real
+        # value, never written as the sentinel.
+        _task_id = str(metadata.get('task_id') or '').strip()
+        if _task_id and _task_id.lower() not in ('unknown', 'none', 'null', 'n/a', 'na', 'unset', '-'):
+            receipt['task_id'] = _task_id
 
         # OI-1086: lift model/provider from extracted metadata onto the receipt.
         # extract_metadata() already captures the `**Model**:`/`**Provider**:`
@@ -842,7 +851,10 @@ class ReportParser:
         # Mark if this is legacy format (missing required fields). `confidence`
         # dropped from this check (§3.3): the field itself no longer exists on
         # the receipt, so checking for it would spuriously flag every receipt.
-        required_fields = ['task_id', 'dispatch_id']
+        # `task_id` dropped (OI-1408): it is not part of the receipt_kind=
+        # "dispatch" field contract, so its absence is expected, not a legacy
+        # flag — see the missing-field contract comment above this method.
+        required_fields = ['dispatch_id']
         missing_fields = [f for f in required_fields if receipt.get(f) in ['unknown', None, 0]]
         if missing_fields:
             receipt['missing_fields'] = missing_fields

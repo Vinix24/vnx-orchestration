@@ -274,6 +274,32 @@ def test_unknown_frontmatter_model_omits_key(tmp_path):
     assert r["provider"] == "claude"
 
 
+def test_missing_task_id_omits_key_not_sentinel(tmp_path):
+    """OI-1408: task_id is not part of the receipt_kind='dispatch' field
+    contract. A report that never declares one must produce a receipt with
+    no task_id key at all — never the 'unknown' sentinel this used to stamp
+    via metadata.get('task_id', 'unknown')."""
+    r = _parse(tmp_path, _BOLD_MODEL_BODY)
+    assert "task_id" not in r
+
+
+def test_bold_task_id_kept_when_a_report_declares_a_real_one(tmp_path):
+    """The missing-field contract omits the sentinel, but a report that DOES
+    declare a real task_id (via the generic **Key**: value bold-field scan)
+    still has it carried through onto the receipt."""
+    body = (
+        "# Completion Report\n"
+        "**Status**: success\n"
+        "**Dispatch-ID**: 20260823-oi1408-task-id\n"
+        "**Task ID**: t-42\n"
+        "**Model**: opus\n"
+        "**Provider**: claude\n\n"
+        "## Summary\nReal task_id declared explicitly in the header block.\n"
+    )
+    r = _parse(tmp_path, body)
+    assert r["task_id"] == "t-42"
+
+
 def test_embedded_dispatch_instruction_model_recovered(tmp_path):
     """Mid-file door-stamped **Model**/**Provider** (embedded dispatch
     instruction) must be recovered even outside the 2000-char header window."""

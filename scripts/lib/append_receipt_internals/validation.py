@@ -290,6 +290,10 @@ def _validate_receipt(receipt: Dict[str, Any]) -> str:
     # a worker dispatch-terminal receipt must name the model that ran.
     _validate_model_present(receipt)
 
+    # OI-1408: per-receipt_kind field contract — see _validate_dispatch_field_
+    # contract below for what this enforces and why.
+    _validate_dispatch_field_contract(receipt, event_name)
+
     _warn_if_review_gate_missing_dispatch_id(event_name, receipt)
 
     return event_name
@@ -401,6 +405,100 @@ def _validate_model_present(receipt: Dict[str, Any]) -> None:
             "like a valid model name (contains spaces, backticks, or exceeds "
             f"{_MODEL_NAME_MAX_LENGTH} characters); refusing to write "
             "(fail-closed — prose is not a model identifier).",
+        )
+
+
+# ---------------------------------------------------------------------------
+# OI-1408: per-receipt_kind field contract.
+#
+# Before this, ``model`` (above) was the ONLY receipt field with a fail-
+# closed CONTENT check with no exemption gaps. Every other field's presence
+# check — ``dispatch_id``/``event_type`` via ``_requires_dispatch_id`` above —
+# is a structural KEY check: it fails on an absent key but is blind to a
+# present-but-empty value or a sentinel literal that reads as filled but
+# isn't. Measured on the real ledger (dispatch-20260823-alpha-a2, OI-1408):
+# 3903 dispatch receipts, 551 carrying the literal sentinel "unknown" as
+# ``task_id`` and 3352 never carrying the key at all — ZERO ever carried a
+# real value. A presence/membership check does not see the 551; it reads
+# them as filled.
+#
+# This is the same three-state discipline as ``_validate_model_present``
+# above (absent / empty / sentinel), extended to a declared per-receipt_kind
+# field list instead of the single hardcoded ``model`` field. Starts at
+# receipt_kind="dispatch" — the kind that carries the audit trail.
+#
+# ``task_id`` is deliberately NOT part of this contract. The decision (OI-
+# 1408): given zero real values across the entire measured ledger, the field
+# never carried a task concept distinct from ``dispatch_id`` — it is retired,
+# not left as an unenforced "nice to have". The two measured sentinel-writers
+# (``report_to_receipt_converter.py``'s ``base`` dict and
+# ``report_parser.py::_build_enhanced_receipt``) were fixed alongside this
+# contract to omit the key instead of stamping "unknown"; a contract that
+# required it here without that fix would refuse every dispatch receipt from
+# those two writers starting the moment this shipped. The three-state
+# discipline the decision itself was measured against (absent / empty /
+# sentinel — a plain presence check reads the 551 "unknown" receipts as
+# filled) is applied at those two write sites directly, not duplicated here
+# as an unused helper: task_id carries no fail-closed requirement to check.
+
+# event_types for which "status" is an outcome CLAIM. task_started /
+# dispatch_sent / dispatch_ack / ack / etc. (DISPATCH_REQUIRED_EVENTS minus
+# this set) precede any outcome by construction — a receipt for one of those
+# legitimately has no status yet, and is exempt by event_type, not by the
+# source-exemption below.
+_STATUS_BEARING_EVENT_TYPES = frozenset({
+    "task_complete",
+    "task_completed",
+    "subprocess_completion",
+    "task_failed",
+    "task_timeout",
+    "task_blocked",
+    "report_contract_invalid",
+})
+
+
+def _validate_dispatch_field_contract(receipt: Dict[str, Any], event_name: str) -> None:
+    """Fail-closed field contract for receipt_kind="dispatch" (OI-1408).
+
+    Currently enforces one field: ``status`` must carry a real, non-empty
+    value on a receipt whose event_type claims a terminal outcome (see
+    ``_STATUS_BEARING_EVENT_TYPES``). An absent or empty status on such a
+    receipt is the OI-1382/1383/1408 residue this dispatch closed at the
+    write side (``report_to_receipt_converter.py``'s exit_code fallback +
+    "no_signal" stamp) — this is the append-time backstop, so a future writer
+    that reintroduces the empty-status bug is refused here regardless of
+    whether it goes through that converter.
+
+    "unknown" is intentionally NOT treated as a sentinel here (contrast the
+    ``task_id``/``model`` sentinel sets): it is a recognized ignorable literal
+    in the canonical status vocabulary (event_outcome_semantics), not a
+    stand-in for "no value" — rejecting it would refuse legitimate
+    low-information-but-real status claims.
+
+    Sources exempt from the ``model`` requirement (``_MODEL_EXEMPT_SOURCES``
+    — corrective/system writers with no worker identity to report: their
+    receipts override a worker's own claim, and refusing them on a missing
+    content field would lose the rejection signal, which is worse than the
+    fail-closed gain) are exempt here too, derived from that same constant
+    rather than a second hand-typed list.
+    """
+    receipt_kind = str(receipt.get("receipt_kind") or "").strip()
+    if receipt_kind != "dispatch":
+        return
+    if event_name not in _STATUS_BEARING_EVENT_TYPES:
+        return
+    source = str(receipt.get("source") or "").strip().lower()
+    if source in _MODEL_EXEMPT_SOURCES:
+        return
+    status = receipt.get("status")
+    if status is None or not str(status).strip():
+        raise AppendReceiptError(
+            "missing_status",
+            EXIT_VALIDATION_ERROR,
+            f"receipt_kind={receipt_kind!r} source={source!r} event_type="
+            f"{event_name!r} carries no status at all (absent or empty); "
+            "refusing to write (fail-closed — OI-1408 field contract: a "
+            "receipt claiming a terminal outcome must carry a readable one).",
         )
 
 
