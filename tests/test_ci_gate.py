@@ -640,15 +640,27 @@ def test_contract_hash_determinism(gate_env):
 # ---------------------------------------------------------------------------
 
 
-def test_default_review_stack_excludes_ci_gate_by_default(monkeypatch):
-    """ci_gate is NOT in DEFAULT_REVIEW_STACK unless VNX_CI_GATE_REQUIRED=1."""
-    monkeypatch.delenv("VNX_CI_GATE_REQUIRED", raising=False)
-    # Force re-evaluation by importing the builder directly
-    import importlib
+def test_default_review_stack_excludes_ci_gate_when_explicitly_disabled(monkeypatch):
+    """ci_gate is excluded from DEFAULT_REVIEW_STACK when VNX_CI_GATE_REQUIRED=0.
+
+    OI-1385: VNX_CI_GATE_REQUIRED's registry default flipped "0" -> "1" (its 5-read-site chain
+    proved live on PR #1628, and the obligation-runner's bounded-pending handling for a
+    temporarily-unavailable gate is confirmed on main). This pins the explicit-off path,
+    replacing the old default-off pin below.
+    """
+    monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     import review_gate_manager as rgm
-    # Temporarily patch the env and call the builder
     stack = rgm._build_default_review_stack()
     assert "ci_gate" not in stack
+
+
+def test_default_review_stack_includes_ci_gate_by_default(monkeypatch):
+    """OI-1385: VNX_CI_GATE_REQUIRED now defaults to "1" (registry default, config_registry.py)
+    -- ci_gate is in DEFAULT_REVIEW_STACK even with no env var set at all."""
+    monkeypatch.delenv("VNX_CI_GATE_REQUIRED", raising=False)
+    import review_gate_manager as rgm
+    stack = rgm._build_default_review_stack()
+    assert "ci_gate" in stack
 
 
 def test_default_review_stack_includes_ci_gate_when_required(monkeypatch):

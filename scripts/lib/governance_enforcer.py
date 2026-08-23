@@ -280,6 +280,18 @@ class GovernanceEnforcer:
             for r in results
         )
 
+    def effective_summary(self) -> Dict[str, Any]:
+        """Public read-only summary: active mode + highest configured check level.
+
+        Used by the cockpit (dashboard/api_subsystems.py, OI-1385) to report the REAL
+        governance-enforcement-stack afdwingniveau read from this loaded config, instead of a
+        static registry bool that has no read-site of its own
+        (docs/core/framework-status-audit-and-cockpit_PRD.md:89). ``max_level`` is 0 when no
+        checks are configured (an empty/degenerate config) so callers never see None.
+        """
+        max_level = max((c.level for c in self._checks.values()), default=0)
+        return {"mode": self._mode, "max_level": max_level}
+
     def has_soft_failures(self, results: List[EnforcementResult]) -> bool:
         """Return True if any soft-mandatory check failed (unoverridden)."""
         return any(
