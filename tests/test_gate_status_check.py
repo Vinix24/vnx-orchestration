@@ -29,6 +29,18 @@ def _write_gate_result(results_dir: Path, pr_number: int, gate: str, status: str
     return f
 
 
+def _write_gate_request(state_dir: Path, pr_number: int, gate: str) -> Path:
+    """Write the request-side companion for a gate result (dispatch
+    20260823-beta2-e, OI-1435): _check_all_gates_passed now derives its
+    required set from review_gates/requests/, not from result-file presence
+    alone, so these tests must model both sides of the real writer flow."""
+    reqs_dir = state_dir / "review_gates" / "requests"
+    reqs_dir.mkdir(parents=True, exist_ok=True)
+    f = reqs_dir / f"pr-{pr_number}-{gate}.json"
+    f.write_text(json.dumps({"gate": gate, "pr_number": pr_number, "status": "requested"}), encoding="utf-8")
+    return f
+
+
 def _write_gate_result_extra(
     results_dir: Path,
     pr_number: int,
@@ -80,6 +92,8 @@ class TestCheckAllGatesPassed:
         """Gate file exists but status=failed — must NOT emit feature_gates_complete."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 57, "codex_gate")
+        _write_gate_request(orch.state_dir, 57, "gemini_review")
         _write_gate_result(results_dir, 57, "codex_gate", "failed")
         _write_gate_result(results_dir, 57, "gemini_review", "completed")
 
@@ -95,6 +109,8 @@ class TestCheckAllGatesPassed:
         """Both required gates have status=completed — must emit feature_gates_complete."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 57, "codex_gate")
+        _write_gate_request(orch.state_dir, 57, "gemini_review")
         _write_gate_result(results_dir, 57, "codex_gate", "completed")
         _write_gate_result(results_dir, 57, "gemini_review", "completed")
 
@@ -110,6 +126,8 @@ class TestCheckAllGatesPassed:
         """Both gates have status=pass (gate_result_parser path) — must emit complete."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 99, "codex_gate")
+        _write_gate_request(orch.state_dir, 99, "gemini_review")
         _write_gate_result(results_dir, 99, "codex_gate", "pass")
         _write_gate_result(results_dir, 99, "gemini_review", "pass")
 
@@ -120,11 +138,15 @@ class TestCheckAllGatesPassed:
         assert any(r.get("event_type") == "feature_gates_complete" for r in logged)
 
     def test_does_not_fire_when_gate_file_missing(self, tmp_path: Path) -> None:
-        """Only one required gate present — must not fire."""
+        """Both gates were requested, but gemini_review has no result yet —
+        must not fire, and (OI-1435) must log which requested gate is
+        missing evidence rather than silently returning."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 57, "codex_gate")
+        _write_gate_request(orch.state_dir, 57, "gemini_review")
         _write_gate_result(results_dir, 57, "codex_gate", "completed")
-        # gemini_review intentionally absent
+        # gemini_review requested but its result is intentionally absent
 
         logged: list[dict] = []
         with patch("headless_orchestrator._log_loop_event", side_effect=lambda _d, rec: logged.append(rec)):
@@ -136,6 +158,8 @@ class TestCheckAllGatesPassed:
         """status=pass but blocking_findings non-empty — is_pass() must block unblocking (OI-1139)."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 60, "codex_gate")
+        _write_gate_request(orch.state_dir, 60, "gemini_review")
         _write_gate_result_extra(
             results_dir, 60, "codex_gate", "pass",
             blocking_findings=["critical: hardcoded secret detected"],
@@ -154,6 +178,8 @@ class TestCheckAllGatesPassed:
         """status=completed but blocking_count=2 — is_pass() must block unblocking (OI-1139)."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 61, "codex_gate")
+        _write_gate_request(orch.state_dir, 61, "gemini_review")
         _write_gate_result(results_dir, 61, "codex_gate", "completed")
         _write_gate_result_extra(
             results_dir, 61, "gemini_review", "completed",
@@ -172,6 +198,8 @@ class TestCheckAllGatesPassed:
         """status=approve is in gate_status.PASS_STATES — must emit feature_gates_complete (OI-1139)."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 62, "codex_gate")
+        _write_gate_request(orch.state_dir, 62, "gemini_review")
         _write_gate_result(results_dir, 62, "codex_gate", "approve")
         _write_gate_result(results_dir, 62, "gemini_review", "approve")
 
@@ -189,6 +217,10 @@ class TestLatestPrScopedToCurrentFeature:
         """With gate results for PR #5 (failed) and PR #10 (completed), picks PR #10."""
         orch = _make_orchestrator(tmp_path)
         results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_request(orch.state_dir, 5, "codex_gate")
+        _write_gate_request(orch.state_dir, 5, "gemini_review")
+        _write_gate_request(orch.state_dir, 10, "codex_gate")
+        _write_gate_request(orch.state_dir, 10, "gemini_review")
         _write_gate_result(results_dir, 5, "codex_gate", "failed")
         _write_gate_result(results_dir, 5, "gemini_review", "failed")
         _write_gate_result(results_dir, 10, "codex_gate", "completed")

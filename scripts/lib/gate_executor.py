@@ -341,6 +341,14 @@ class GateExecutorMixin:
         """Execute all requested gates and classify results.
 
         Returns (gates_list, has_required_failure) tuple.
+
+        has_required_failure is a UNION across gates, not a majority: it flips
+        True the moment ANY required gate is not decided_pass — there is no
+        averaging or vote-counting here. Ground (measured 22-08): glm_gate and
+        kimi_gate returned OPPOSITE verdicts on the identical diff with the
+        identical contract_hash (glm FAIL with a blocking finding, kimi PASS
+        with none) — neither reader outranks the other, so one blocking
+        verdict is enough to block.
         """
         gates: List[Dict[str, Any]] = []
         has_required_failure = False

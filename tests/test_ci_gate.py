@@ -659,6 +659,38 @@ def test_default_review_stack_includes_ci_gate_when_required(monkeypatch):
     assert "ci_gate" in stack
 
 
+def test_default_review_stack_control_case_gemini_codex_combo_unchanged(monkeypatch):
+    """Control case (dispatch 20260823-beta2-e): with no config override, the
+    existing gemini_review + codex_gate + claude_github_optional combination
+    must come back byte-for-byte unchanged."""
+    monkeypatch.delenv("VNX_CI_GATE_REQUIRED", raising=False)
+    monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
+    import review_gate_manager as rgm
+    stack = rgm._build_default_review_stack()
+    assert stack == ["gemini_review", "codex_gate", "claude_github_optional"]
+
+
+def test_default_review_stack_is_config_driven_not_hardcoded(monkeypatch):
+    """OPERATOR-BESLUIT 23-08: kimi_gate/glm_gate must be reachable as the
+    default review stack via config alone — no edit to
+    _build_default_review_stack() required."""
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate,glm_gate")
+    monkeypatch.delenv("VNX_CI_GATE_REQUIRED", raising=False)
+    import review_gate_manager as rgm
+    stack = rgm._build_default_review_stack()
+    assert stack == ["kimi_gate", "glm_gate"]
+
+
+def test_default_review_stack_config_override_still_appends_ci_gate(monkeypatch):
+    """ci_gate stays a separate, always-last append gated by
+    VNX_CI_GATE_REQUIRED regardless of what VNX_DEFAULT_REVIEW_STACK carries."""
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate,glm_gate")
+    monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "1")
+    import review_gate_manager as rgm
+    stack = rgm._build_default_review_stack()
+    assert stack == ["kimi_gate", "glm_gate", "ci_gate"]
+
+
 # ---------------------------------------------------------------------------
 # gh not available → not_executable
 # ---------------------------------------------------------------------------

@@ -99,6 +99,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="LIVE"),
+    "VNX_DEFAULT_REVIEW_STACK": _e(
+        "VNX_DEFAULT_REVIEW_STACK", "string", "gemini_review,codex_gate,claude_github_optional", "gate",
+        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435). "
+        "Lets an operator route review gates to any registered gate name — e.g. "
+        "kimi_gate,glm_gate — without editing review_gate_manager.py. ci_gate is appended "
+        "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "0", "gate",
         "Require the CI gate before merge.", approval=True,
