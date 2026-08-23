@@ -164,6 +164,52 @@ def test_candidate_outside_time_window_is_excluded(tmp_path):
     assert candidate is None
 
 
+def test_window_is_the_discriminator_not_find_recovery_candidate_itself(tmp_path):
+    """T0 measured this 23-08 on the real unified_reports directory (4657 files,
+    read-only copy): a WIDE window (0 .. infinity) on PR 1672 finds 5 candidates
+    and on PR 1674 finds 3 — both AmbiguousRecoveryCandidates. The gate's REAL,
+    narrow window (the run's own wall-clock start/end) finds exactly 1 for each.
+
+    find_recovery_candidate itself has no opinion on how narrow its window is —
+    that choice is made by the CALLER (glm_gate.py/kimi_gate.py), not visible in
+    this module at all. If a caller ever "widens the window for safety", nothing
+    goes red: every case just routes to recovery_ambiguous, and recovery quietly
+    stops working. This test pins the window itself as load-bearing, not merely
+    filtering, by calling find_recovery_candidate TWICE against the exact same
+    directory contents: a narrow (real-shaped) window resolves to one candidate,
+    and a wide (0, inf) window over the identical files raises ambiguity.
+    """
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+    now = time.time()
+
+    # The one companion report actually inside the run's own (narrow) window.
+    real_companion = _write(
+        reports_dir / "pr-42-glm-gate-review.md", _VERDICT_BODY, mtime=now - 10,
+    )
+    # Two more verdict-bearing reports for the SAME PR, from earlier gate runs —
+    # long outside the narrow window, but a (0, inf) window sees them too.
+    _write(reports_dir / "pr-42-glm-gate-review-lastweek.md", _VERDICT_BODY, mtime=now - 7 * 86400)
+    _write(reports_dir / "pr-42-glm-gate-review-lastmonth.md", _VERDICT_BODY, mtime=now - 30 * 86400)
+    # The gate's own (fence-less) report — excluded either way, in both calls.
+    gate_report_name = "glm-gate-pr42-999.md"
+    _write(reports_dir / gate_report_name, "Reviewed in prose, no fence.\n", mtime=now)
+
+    narrow = find_recovery_candidate(
+        reports_dir, pr_id="42", exclude_name=gate_report_name,
+        window_start=now - 60, window_end=now,
+    )
+    assert narrow is not None
+    assert narrow.path == real_companion
+
+    with pytest.raises(AmbiguousRecoveryCandidates) as excinfo:
+        find_recovery_candidate(
+            reports_dir, pr_id="42", exclude_name=gate_report_name,
+            window_start=0, window_end=float("inf"),
+        )
+    assert len(excinfo.value.candidates) == 3
+
+
 def test_candidate_for_a_different_pr_is_excluded(tmp_path):
     reports_dir = tmp_path / "unified_reports"
     reports_dir.mkdir()
