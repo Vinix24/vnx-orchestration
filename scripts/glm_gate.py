@@ -28,18 +28,25 @@ readable verdict, or a non-glm-5.2 model was requested).
 Provider outages are NOT review verdicts (OI-1142, ported from kimi_gate): when
 the glm-harness lane dies on a quota/auth error, times out, or returns output
 without a verdict block, the result status is ``unavailable`` — never
-``fail``. ``reason`` distinguishes three disjoint states, identically to
+``fail``. ``reason`` distinguishes several disjoint states, identically to
 kimi_gate: ``dispatch_error`` (the dispatcher raised outright with no report,
 or a report came back but its own frontmatter stamps the underlying provider
-run as failed), ``parse_error`` (a report came back from a run the
-frontmatter itself stamps as clean, with content but no readable ```json```
-verdict block), and ``no_verdict`` (the report was empty/whitespace). Only
-``dispatch_error``/``no_verdict`` may claim a provider outage in their
-summary text; ``parse_error`` must not, since the provider plainly produced
-output. See ``kimi_gate._frontmatter_run_outcome`` (reused verbatim below —
-same governed-report frontmatter shape, same ``exit_code``/
-``token_usage_measured`` discrimination, provider-agnostic) for the full
-reasoning.
+run as failed), ``no_verdict`` (the report was empty/whitespace),
+``relabeled_verdict`` (the verdict was answered inline under the
+plan-reviewer role's ```vnx-plan-verdict``` fence instead of this gate's own
+```json``` — see ``gate_report_recovery.extract_relabeled_verdict``),
+``recovered_verdict`` (no verdict in the primary report, but a bounded search
+found exactly one companion report carrying one — see
+``gate_report_recovery.find_recovery_candidate``, dispatch-20260823-beta2-j),
+``recovery_empty`` (that search found nothing), and ``recovery_ambiguous``
+(that search found 2+ candidates — fail-closed, refuses rather than guesses).
+Only ``dispatch_error``/``no_verdict`` may claim a provider outage in their
+summary text; the recovery-related reasons must not, since the provider
+plainly produced output. See ``kimi_gate._frontmatter_run_outcome`` (reused
+verbatim below — same governed-report frontmatter shape, same ``exit_code``/
+``token_usage_measured`` discrimination, provider-agnostic) for the
+dispatch_error/genuine-parse-miss split that gates entry into the recovery
+path.
 
 OI-1178 / OI-1435: a terminal (pass/fail) record must carry ``contract_hash``
 + ``report_path`` or ``gate_status.has_complete_evidence`` — and therefore
@@ -92,6 +99,12 @@ from gate_recorder import (
 )
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
 from unified_report_schema import SchemaViolation, parse_frontmatter
+from gate_report_recovery import (
+    AmbiguousRecoveryCandidates,
+    extract_relabeled_verdict,
+    find_recovery_candidate,
+    recovered_verdict_conflicts,
+)
 
 _VALID_VERDICTS = {"pass", "fail", "blocked"}
 
@@ -216,8 +229,9 @@ def _frontmatter_run_outcome(report_text: str) -> "tuple[bool | None, object, ob
                 and either tokens aren't measured or a measured non-zero
                 count): a missing verdict block here is a genuine parse miss.
         None  — no readable frontmatter, or no ``exit_code`` field in it
-                (older/foreign report shape). Callers fall back to the
-                default (content present -> parse_error).
+                (older/foreign report shape). Callers fall back to the same
+                default as False (content present, no signal either way ->
+                attempt recovery rather than assume a provider failure).
     """
     try:
         frontmatter = parse_frontmatter(report_text)
@@ -234,6 +248,58 @@ def _frontmatter_run_outcome(report_text: str) -> "tuple[bool | None, object, ob
     if tokens_measured and output_tokens == 0:
         return True, exit_code, output_tokens
     return False, exit_code, output_tokens
+
+
+def _parse_reprocess_window_start(dispatch_id: str, *, pr: str) -> "float | None":
+    """Extract the original dispatch's start time (unix seconds) from its own
+    dispatch_id, which this gate always constructs as
+    ``f"glm-gate-pr{pr}-{int(time.time())}"``. Returns None when *dispatch_id*
+    does not match that exact shape for *pr* — refuse rather than guess a
+    recovery time window."""
+    prefix = f"glm-gate-pr{pr}-"
+    if not dispatch_id.startswith(prefix):
+        return None
+    ts_part = dispatch_id[len(prefix):]
+    if not ts_part.isdigit():
+        return None
+    return float(ts_part)
+
+
+def _frontmatter_duration_seconds(report_text: str) -> float:
+    """Best-effort ``duration_seconds`` read off a report's own frontmatter —
+    used only by ``--reprocess``, where no live dispatcher call happens to
+    time directly."""
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return 0.0
+    try:
+        return float(frontmatter.get("duration_seconds", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _reprocess_original_commit_sha(base_data_dir: Path, pr: str, dispatch_id: str) -> "str | None":
+    """Return the commit_sha this EXACT dispatch's own result record was
+    stamped with, or None when no addressable identity exists for it.
+
+    Results are keyed by PR number, not dispatch_id
+    (``pr-<N>-glm_gate.json``) — a LATER dispatch for the same PR overwrites
+    an EARLIER one's slot. When the stored record's own ``dispatch_id`` no
+    longer matches the dispatch being reprocessed, there is no reliable
+    historical commit_sha left to verify staleness against, and
+    ``--reprocess`` must refuse rather than guess one."""
+    path = base_data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-glm_gate.json"
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if record.get("dispatch_id") != dispatch_id:
+        return None
+    sha = record.get("commit_sha") or ""
+    return sha or None
 
 
 def _verdict_to_status(
@@ -285,14 +351,28 @@ def _verdict_to_status(
     )
 
 
-def _status_summary(status: str, blocking: list, reason: str = "", report_len: int = 0) -> str:
-    """Summary line for the result record — outage vs parse-miss vs verdict must be unmistakable."""
+# dispatch-20260823-beta2-j: reason-specific unavailable summaries. "parse_error"
+# (a single bucket for "no readable verdict on a clean run") is retired — every
+# case that used to land there now either recovers (reason="relabeled_verdict"
+# / "recovered_verdict") or gets its OWN distinguishing reason, so a reader can
+# tell "searched, found nothing" apart from "searched, found too much" apart
+# from "never searched at all" (T0 correction: these were silently the same
+# reason before, which erased exactly the information the search exists to add).
+_UNAVAILABLE_SUMMARIES = {
+    "recovery_empty": "recovery_empty — searched for a companion report, found none",
+    "recovery_ambiguous": "recovery_ambiguous — multiple companion reports found, refusing to guess",
+    "recovery_conflict": "recovery_conflict — a companion report's verdict conflicted with the primary response",
+    "reprocess_no_identity_anchor": "reprocess_no_identity_anchor — no addressable original result record to verify against",
+    "reprocess_stale_evidence": "reprocess_stale_evidence — PR head has moved since this dispatch ran",
+}
+
+
+def _status_summary(status: str, blocking: list, reason: str = "") -> str:
+    """Summary line for the result record — outage vs recovery vs verdict must be unmistakable."""
     if status == "unavailable":
-        if reason == "parse_error":
-            return (
-                f"glm gate: UNAVAILABLE (parse_error — glm returned a {report_len}-char "
-                "report, but it contained no readable verdict block — NOT a review fail)"
-            )
+        detail = _UNAVAILABLE_SUMMARIES.get(reason)
+        if detail:
+            return f"glm gate: UNAVAILABLE ({detail} — NOT a review fail)"
         return "glm gate: UNAVAILABLE (provider outage/no verdict — NOT a review fail)"
     return f"glm gate: {status} ({len(blocking)} blocking finding(s))"
 
@@ -307,6 +387,14 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--model", default=os.environ.get("VNX_GLM_GATE_MODEL", DEFAULT_MODEL))
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     ap.add_argument("--json", action="store_true", help="print the result record as JSON")
+    ap.add_argument(
+        "--reprocess", metavar="DISPATCH_ID", default=None,
+        help="reprocess an already-completed dispatch from its on-disk report "
+             "instead of calling the dispatcher again — no diff fetch, no model "
+             "call, no new receipt. Recovers a verdict a companion report or a "
+             "wrong-label fence already carries. Requires --pr for identity/"
+             "staleness verification.",
+    )
     args = ap.parse_args(argv)
 
     canonical_model = _validate_model(args.model)
@@ -320,38 +408,91 @@ def main(argv: "list[str] | None" = None) -> int:
         return 1
     args.model = canonical_model
 
-    diff = _get_diff(args.pr, args.diff_file)
-    if not diff:
-        print(f"glm_gate: no diff for PR {args.pr}", file=sys.stderr)
-        return 1
-
     data_dir = args.data_dir or None
-    dispatch_id = f"glm-gate-pr{args.pr}-{int(time.time())}"
-    # Resolved once, then handed to the dispatcher as an explicit data_dir so
-    # this function's own report_path reconstruction below and the governed
-    # subprocess's actual write path can never drift apart — both derive from
-    # the SAME resolved base (see provider_dispatch.py's report_path, which is
-    # this exact <data_dir>/unified_reports/<dispatch_id>.md).
     base_data_dir = _resolve_data_dir(data_dir)
-    dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout)
-    prompt = _build_prompt(diff, args.pr)
 
-    start = time.monotonic()
-    report_text = ""
-    dispatch_error = ""
-    try:
-        # Governed lane: provider_dispatch runs glm (via the claude-CLI harness
-        # -> local :4141 litellm proxy -> OpenRouter), writes a unified
-        # report, returns its text. "glm-harness" is the real provider string
-        # provider_dispatch.py dispatches on (see plan_gate_panel.py's own
-        # diverse-assurance panel entry: provider="glm-harness").
-        report_text = dispatcher("glm-harness", args.model, prompt, dispatch_id)
-    except Exception as exc:  # noqa: BLE001 — dispatch/report-read failure
-        # OI-1142: do NOT bail without a record — a required gate that cannot fire
-        # must surface as ``unavailable`` in the results dir, not vanish.
-        dispatch_error = str(exc)
-        print(f"glm_gate: governed glm dispatch failed: {exc}", file=sys.stderr)
-    duration = time.monotonic() - start
+    if args.reprocess:
+        # Deel 3 (dispatch-20260823-beta2-j): re-run the SAME parse/recover/
+        # record pipeline below against a dispatch that already ran, without a
+        # new model call. `report_text = dispatcher(...)` is skipped and
+        # replaced by a read of the report the ORIGINAL run already wrote to
+        # disk — everything after (verdict extraction, recovery search,
+        # record) is unchanged code, so a recovered verdict here was produced
+        # by the gate itself, on the run's own commit, in the run's own
+        # contract shape — not prose-to-verdict promotion of a new source.
+        dispatch_id = args.reprocess
+        report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
+        if not report_path_obj.is_file():
+            print(
+                f"glm_gate: --reprocess: no report on disk for dispatch_id={dispatch_id!r} "
+                f"at {report_path_obj}", file=sys.stderr,
+            )
+            return 1
+        report_text = report_path_obj.read_text(encoding="utf-8")
+        dispatch_error = ""
+        window_start = _parse_reprocess_window_start(dispatch_id, pr=args.pr)
+        if window_start is None:
+            print(
+                f"glm_gate: --reprocess: dispatch_id={dispatch_id!r} does not match the "
+                f"glm-gate-pr{args.pr}-<timestamp> shape this gate constructs — refusing "
+                "to guess a recovery time window",
+                file=sys.stderr,
+            )
+            return 1
+        window_end = report_path_obj.stat().st_mtime
+        prompt = None  # never fetched in reprocess mode — see contract_hash below
+        duration = _frontmatter_duration_seconds(report_text)
+    else:
+        diff = _get_diff(args.pr, args.diff_file)
+        if not diff:
+            print(f"glm_gate: no diff for PR {args.pr}", file=sys.stderr)
+            return 1
+
+        dispatch_id = f"glm-gate-pr{args.pr}-{int(time.time())}"
+        # role="review-gate" (dispatch-20260823-beta2-j): the default role of
+        # _make_default_dispatcher is "plan-reviewer", which carries
+        # agents/plan-reviewer/CLAUDE.md — a role written for a PLAN-GATE
+        # PANEL SEAT. That role gives the model THREE conflicting instructions
+        # against this gate's own _VERDICT_CONTRACT below: a different fence
+        # label (```vnx-plan-verdict``` vs ```json```), a different verdict
+        # vocabulary (pass/revise/block vs pass/fail/blocked), and a different
+        # destination (a self-authored report FILE vs an inline response —
+        # provider_dispatch's governed lane already captures the response text
+        # as the report, so the model writing one itself is not just unneeded,
+        # it is what caused the second-report-pit bug). agents/review-gate/
+        # CLAUDE.md is this gate's OWN role: none of the three conflicts.
+        # Distinguishing this dispatch by an explicit role= kwarg (a spec
+        # value already threaded through _make_default_dispatcher/
+        # provider_dispatch's --role) keeps plan_gate_panel's own
+        # plan-reviewer panelists (which DO need the file-authoring, fence,
+        # and vocabulary this role change removes) untouched — a role-level
+        # split, not a dispatch_id string check.
+        dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout, role="review-gate")
+        prompt = _build_prompt(diff, args.pr)
+
+        wall_start = time.time()
+        start = time.monotonic()
+        report_text = ""
+        dispatch_error = ""
+        try:
+            # Governed lane: provider_dispatch runs glm (via the claude-CLI harness
+            # -> local :4141 litellm proxy -> OpenRouter), writes a unified
+            # report, returns its text. "glm-harness" is the real provider string
+            # provider_dispatch.py dispatches on (see plan_gate_panel.py's own
+            # diverse-assurance panel entry: provider="glm-harness").
+            report_text = dispatcher("glm-harness", args.model, prompt, dispatch_id)
+        except Exception as exc:  # noqa: BLE001 — dispatch/report-read failure
+            # OI-1142: do NOT bail without a record — a required gate that cannot fire
+            # must surface as ``unavailable`` in the results dir, not vanish.
+            dispatch_error = str(exc)
+            print(f"glm_gate: governed glm dispatch failed: {exc}", file=sys.stderr)
+        duration = time.monotonic() - start
+
+        report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
+        window_start = wall_start
+        window_end = report_path_obj.stat().st_mtime if report_path_obj.is_file() else time.time()
+
+    recovered_path: "Path | None" = None
 
     if dispatch_error:
         verdict: dict = {}
@@ -360,55 +501,144 @@ def main(argv: "list[str] | None" = None) -> int:
         reason = "dispatch_error"
     else:
         verdict = _extract_verdict(report_text or "")
-        provider_failed_detail = None
-        run_failed = None
-        if not verdict and (report_text or "").strip():
-            # Only consult the frontmatter once a verdict extraction has
-            # already failed — a real parsed verdict always wins regardless
-            # of what exit_code says.
-            run_failed, exit_code, output_tokens = _frontmatter_run_outcome(report_text or "")
-            if run_failed is True:
-                provider_failed_detail = (
-                    "glm's own report frontmatter stamps this run as failed "
-                    f"(exit_code={exit_code!r}, token_usage.output={output_tokens!r}) — "
-                    "provider-side outage, not a review outcome"
-                )
-        status, blocking, residual = _verdict_to_status(
-            verdict, report_text or "", provider_failed_detail=provider_failed_detail
-        )
         if verdict:
             reason = "verdict"
-        elif (report_text or "").strip():
-            if run_failed is True:
-                # The report has content, but its OWN frontmatter stamps the
-                # underlying provider run as failed — this is the same outage
-                # class as a raised dispatch_error, just discovered from the
-                # report instead of an exception.
-                reason = "dispatch_error"
-            else:
-                # run_failed is False (frontmatter readable, clean run — a
-                # genuine parse miss) or None (no readable exit_code at all,
-                # so there is no signal left to tell a masked provider
-                # failure apart from a real parse miss). Both default to
-                # parse_error; the None case is intentionally too broad.
-                reason = "parse_error"
-        else:
+            status, blocking, residual = _verdict_to_status(verdict, report_text or "")
+        elif not (report_text or "").strip():
             reason = "no_verdict"
+            status, blocking, residual = _verdict_to_status({}, report_text or "")
+        else:
+            # dispatch-20260823-beta2-j: cheap check BEFORE the frontmatter/
+            # search path — the verdict may be sitting right here, inline,
+            # under the plan-reviewer role's fence label instead of ours
+            # (measured on glm-gate-pr1677-1787477675.md). No search needed.
+            relabeled = extract_relabeled_verdict(report_text or "")
+            if relabeled:
+                reason = "relabeled_verdict"
+                verdict = relabeled
+                status, blocking, residual = _verdict_to_status(relabeled, report_text or "")
+            else:
+                # Only consult the frontmatter once BOTH verdict extractions
+                # have failed — a real parsed verdict always wins regardless
+                # of what exit_code says.
+                run_failed, exit_code, output_tokens = _frontmatter_run_outcome(report_text or "")
+                if run_failed is True:
+                    reason = "dispatch_error"
+                    provider_failed_detail = (
+                        "glm's own report frontmatter stamps this run as failed "
+                        f"(exit_code={exit_code!r}, token_usage.output={output_tokens!r}) — "
+                        "provider-side outage, not a review outcome"
+                    )
+                    status, blocking, residual = _verdict_to_status(
+                        {}, report_text or "", provider_failed_detail=provider_failed_detail
+                    )
+                else:
+                    # A genuine parse miss on a clean (or unreadable-frontmatter)
+                    # run: search for a companion report before giving up (Deel 2).
+                    try:
+                        candidate = find_recovery_candidate(
+                            base_data_dir / "unified_reports",
+                            pr_id=str(args.pr),
+                            exclude_name=f"{dispatch_id}.md",
+                            window_start=window_start,
+                            window_end=window_end,
+                        )
+                    except AmbiguousRecoveryCandidates as exc:
+                        reason = "recovery_ambiguous"
+                        status, blocking = "unavailable", []
+                        residual = (
+                            f"glm returned a {len(report_text)}-char report with no readable "
+                            f"verdict block; {len(exc.candidates)} companion reports were "
+                            f"found for PR {args.pr} in the run's time window — refusing to "
+                            f"guess which is real: {', '.join(str(p) for p in exc.candidates)}"
+                        )
+                    else:
+                        if candidate is None:
+                            reason = "recovery_empty"
+                            status, blocking = "unavailable", []
+                            residual = (
+                                f"glm returned a {len(report_text)}-char report with no "
+                                "readable ```json``` verdict block; searched "
+                                f"unified_reports/ for a companion report for PR {args.pr} "
+                                "in the run's time window and found none (parse miss — "
+                                "no recoverable evidence)"
+                            )
+                        else:
+                            conflict = recovered_verdict_conflicts(report_text or "", candidate.verdict)
+                            if conflict:
+                                reason = "recovery_conflict"
+                                status, blocking = "unavailable", []
+                                residual = (
+                                    f"a companion report ({candidate.path}) carried a "
+                                    f"parseable verdict, but it conflicts with the primary "
+                                    f"response: {conflict} — abstaining rather than "
+                                    "overriding the primary run with a second source"
+                                )
+                            else:
+                                reason = "recovered_verdict"
+                                verdict = candidate.verdict
+                                status, blocking, recovered_residual = _verdict_to_status(candidate.verdict)
+                                residual = (
+                                    f"{recovered_residual + ' — ' if recovered_residual else ''}"
+                                    f"verdict recovered from companion report {candidate.path} "
+                                    "(same dispatch run, found via bounded search; the "
+                                    "harness-captured primary report lacked the fence)"
+                                )
+                                recovered_path = candidate.path
+
+    # dispatch-20260823-beta2-j, Deel 3 precondition #2: a reprocessed verdict
+    # may only be formalized against the commit_sha the PR carried WHEN THIS
+    # DISPATCH RAN. Results are keyed by PR number, not dispatch_id, so this
+    # is only checkable when the stored pr-<N>-glm_gate.json record still
+    # belongs to THIS exact dispatch_id; a stale or superseded slot refuses
+    # rather than guesses. Only runs once a terminal verdict is about to be
+    # formalized — an already-unavailable status needs no staleness check.
+    if args.reprocess and status in {"pass", "fail"}:
+        original_sha = _reprocess_original_commit_sha(base_data_dir, args.pr, dispatch_id)
+        if original_sha is None:
+            status, blocking = "unavailable", []
+            reason = "reprocess_no_identity_anchor"
+            residual = (
+                f"--reprocess found no addressable original result record for "
+                f"dispatch_id={dispatch_id!r} (pr-{args.pr}-glm_gate.json is missing, or "
+                "now reflects a LATER dispatch for this PR — results are keyed by PR "
+                "number, not dispatch_id) — cannot verify the commit_sha this run "
+                "evaluated against, refusing rather than guessing"
+            )
+        else:
+            current_sha = get_pr_head_sha(int(args.pr)) if str(args.pr).isdigit() else ""
+            if not current_sha or current_sha != original_sha:
+                status, blocking = "unavailable", []
+                reason = "reprocess_stale_evidence"
+                residual = (
+                    f"--reprocess: PR {args.pr} head has moved since this dispatch ran "
+                    f"(evaluated against commit_sha={original_sha!r}, current head is "
+                    f"{current_sha!r}) — the recovered evidence is stale, refusing to "
+                    "formalize it"
+                )
 
     # OI-1178 / OI-1435: a terminal verdict must carry the same evidence pair
     # codex_gate/kimi_gate stamp — contract_hash (gate_artifacts' single
-    # canonical hasher) + report_path (the governed dispatch's own unified
-    # report, already on disk by the time dispatcher() returned above). Only
-    # ``verdict`` ever reaches pass/fail (see _verdict_to_status), so
-    # report_text is guaranteed non-empty here. An unavailable result (no
-    # readable verdict, or the dispatch itself failed) is deliberately left
-    # with neither field: has_complete_evidence only checks non-emptiness, not
+    # canonical hasher) + report_path. An unavailable result (no readable
+    # verdict, or the dispatch itself failed) is deliberately left with
+    # neither field: has_complete_evidence only checks non-emptiness, not
     # whether a verdict exists, so a filled-in unavailable record would pass
     # the evidence check while carrying no judgement (OI-1435) — leaving both
     # empty here is what keeps OI-1142's outage/verdict separation intact.
     if status in {"pass", "fail"}:
-        contract_hash = _compute_contract_hash({"prompt": prompt}, "glm_gate")
-        report_path = str(base_data_dir / "unified_reports" / f"{dispatch_id}.md")
+        report_path = str(recovered_path) if recovered_path is not None else str(report_path_obj)
+        if prompt is not None:
+            contract_hash = _compute_contract_hash({"prompt": prompt}, "glm_gate")
+        else:
+            # --reprocess never re-fetches the diff (Deel 3), so there is no
+            # prompt to hash — fall back to gate_artifacts' own branch-based
+            # fallback (the same fallback codex_gate uses when it has no
+            # prompt tracked either), seeded with the PR's real branch so the
+            # hash at least varies per PR instead of being a gate-wide constant.
+            contract_hash = _compute_contract_hash(
+                {"branch": get_pr_head_branch(int(args.pr)) if str(args.pr).isdigit() else ""},
+                "glm_gate",
+            )
     else:
         contract_hash = ""
         report_path = ""
@@ -424,7 +654,7 @@ def main(argv: "list[str] | None" = None) -> int:
         "status": status,
         "reason": reason,
         "duration_seconds": round(duration, 3),
-        "summary": _status_summary(status, blocking, reason, len(report_text or "")),
+        "summary": _status_summary(status, blocking, reason),
         "contract_hash": contract_hash,
         "report_path": report_path,
         "provider": "glm-harness",
@@ -437,6 +667,10 @@ def main(argv: "list[str] | None" = None) -> int:
         "required_reruns": [],
         "residual_risk": residual,
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        # dispatch-20260823-beta2-j: audit marker distinguishing a record
+        # produced by a live model call from one formalized by --reprocess
+        # against evidence that already existed on disk from an earlier run.
+        "evidence_source": "reprocessed" if args.reprocess else "live",
     }
 
     # Stamp branch + commit_sha through the shared writer so the merge door
@@ -464,13 +698,8 @@ def main(argv: "list[str] | None" = None) -> int:
     if args.json:
         print(json.dumps(record, indent=2))
     elif status == "unavailable":
-        if reason == "parse_error":
-            print(
-                f"VERDICT: UNAVAILABLE  (parse_error — glm returned a {len(report_text or '')}-char "
-                "report, but it contained no readable verdict block — NOT a review fail)"
-            )
-        else:
-            print("VERDICT: UNAVAILABLE  (provider outage/no verdict — NOT a review fail)")
+        print(f"VERDICT: UNAVAILABLE  ({reason})")
+        print(f"  {residual}")
     else:
         print(f"VERDICT: {status.upper()}  ({len(blocking)} blocking)")
         for f in blocking:

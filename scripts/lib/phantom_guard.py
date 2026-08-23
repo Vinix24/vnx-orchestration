@@ -54,9 +54,14 @@ _LOG = logging.getLogger(__name__)
 # "deliberation-panelist" (OI-811, the vnx panel's diverge/contrarian/verify/synthesis
 # stage worker) belongs here for the same reason: it produces analysis/prose, not a code
 # diff, so an empty worktree diff is expected, never evidence of fabrication.
+# "review-gate" (dispatch-20260823-beta2-j): glm_gate.py/kimi_gate.py's own dispatcher
+# role — a PR-diff verdict pass, not a delivery worker. Already exempt today via
+# task_class="research_structured" (REVIEW_TASK_CLASSES below), but a role-based
+# reviewer belongs in the role SSOT too so a future caller that checks role alone
+# does not have to rediscover that.
 REVIEW_ROLES = frozenset({
     "plan-reviewer", "code-reviewer", "security-reviewer", "reviewer",
-    "deliberation-panelist",
+    "deliberation-panelist", "review-gate",
 })
 
 # SSOT for review/analysis task_class values — a second key onto the same exemption for callers
