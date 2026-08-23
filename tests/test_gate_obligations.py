@@ -474,15 +474,24 @@ def test_runner_leaves_pending_on_running_result(tmp_path, monkeypatch):
 
 def test_runner_still_terminates_a_genuinely_permanent_refusal(tmp_path, monkeypatch):
     """The fix narrows what burns the obligation — it must not widen what
-    stays pending. A gate that is not_executable for a structural reason
-    (the provider binary is not installed, not "disabled by a flag") is a
-    real, permanent refusal and must still terminate on the first attempt."""
+    stays pending. A gate that is not_executable for a reason outside the
+    explicit temporary set (here: the gate provider is not configured at
+    all, distinct from merely "not installed" or "disabled by a flag") is a
+    real, permanent refusal and must still terminate on the first attempt.
+
+    ``provider_not_installed`` used to be exactly this case, but OI-1400
+    residu moved it into the temporary set (see
+    ``tests/test_gate_obligation_runner.py::
+    TestProviderNotInstalledIsTemporary``) — a missing binary can be
+    installed later, same as a config flag can be flipped.
+    ``provider_not_configured`` stays outside the set on purpose so this
+    test keeps covering a genuinely permanent refusal."""
     state_dir = _make_state_dir(tmp_path)
     register_obligation(
         state_dir, dispatch_id="20260821-oi1384-real-refusal", gate="codex_gate",
         project_id="vnx-dev", pr_number=1629,
     )
-    manager = _FakeManager(state_dir, result_status="not_executable", result_reason="provider_not_installed")
+    manager = _FakeManager(state_dir, result_status="not_executable", result_reason="provider_not_configured")
     _patch_manager(monkeypatch, manager)
 
     summary = runner.run(state_dir)

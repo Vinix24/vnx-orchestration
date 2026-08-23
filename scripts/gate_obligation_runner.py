@@ -85,32 +85,44 @@ _UNRESOLVABLE_ESCALATION_ATTEMPTS = 96
 # A gate RESULT can itself report a TEMPORARY refusal rather than a real
 # verdict on the code: ``status=running`` means a CI check is still in flight
 # (gate_executor's ci_gate path — not all checks reached a terminal bucket
-# yet), ``status=not_executable`` with ``reason=provider_disabled`` means
-# the gate is parked by config (e.g. VNX_CI_GATE_REQUIRED=0 —
-# gate_result_parser._classify_unavailable / gate_request_handler
-# ._mark_gate_unavailable), and ``status=unavailable`` (gate_status.py's
-# UNAVAILABLE_STATES — gate_recorder.record_failure books this for an
-# execution failure: crash, timeout, stall, a failed worktree checkout) means
-# the provider never produced a verdict at all. None of the three says
-# anything about the code; all are "not yet", not "no". Treating any of them
-# as terminal burns the obligation forever — measured live against PR #1627
-# (OI-1384): CI had actually passed, but the recorded obligation was a dead
-# not_executable/provider_disabled with no report_path, no contract_hash, no
-# branch, no commit_sha. A consumer project separately measured the
-# ``unavailable`` case (OI-1400): PR #966/#967 booked ``fulfilled`` off a
-# not_executable/provider-not-installed and an unavailable/worktree-checkout-
-# failed result respectively, both with empty contract_hash and report_path —
-# because the fallback below defaulted every non-terminal, non-temporary
-# status to fulfilled. All three temporary cases stay pending under a bounded
-# retry term, then escalate to the loud terminal not_executable — a temporary
-# refusal that recurs forever must still eventually alarm someone, just not
-# on the first attempt. Anything left over — a status this runner has never
-# seen — takes the SAME pending/escalate path (OI-1400): the fallback used to
-# read "anything I don't recognise as terminal is a pass," which is how the
-# two obligations above landed silently fulfilled with zero evidence. The
-# fallback now reads "anything I don't recognise as a pass is NOT a pass."
+# yet), ``status=not_executable`` with a reason in
+# ``_TEMPORARY_NOT_EXECUTABLE_REASONS`` means the gate could not run for a
+# reason that can change by itself (gate_result_parser._classify_unavailable /
+# gate_request_handler._mark_gate_unavailable), and ``status=unavailable``
+# (gate_status.py's UNAVAILABLE_STATES — gate_recorder.record_failure books
+# this for an execution failure: crash, timeout, stall, a failed worktree
+# checkout) means the provider never produced a verdict at all. None of these
+# says anything about the code; all are "not yet", not "no". Treating any of
+# them as terminal burns the obligation forever — measured live against PR
+# #1627 (OI-1384): CI had actually passed, but the recorded obligation was a
+# dead not_executable/provider_disabled with no report_path, no contract_hash,
+# no branch, no commit_sha. A consumer project separately measured two more
+# shapes of the same bug (OI-1400): PR #967 booked ``fulfilled`` off an
+# unavailable/worktree-checkout-failed result (fixed by the
+# _GATE_RESULT_UNAVAILABLE_STATES branch below, and by the "anything I don't
+# recognise as a pass is NOT a pass" fallback for a status this runner has
+# never seen at all), and PR #966 booked ``fulfilled`` off a
+# not_executable/provider-not-installed result — both with empty
+# contract_hash and empty report_path. PR #966's shape survived that first
+# OI-1400 fix: ``not_executable`` is already a known TERMINAL_STATUSES member,
+# so it never reached the unknown-status fallback; it fell straight into the
+# terminal branch because ``provider_not_installed`` was not yet in this
+# frozenset (OI-1400 residu). A provider missing today can be installed
+# tomorrow — exactly as fixable as the ``provider_disabled`` config flag — so
+# it gets the identical bounded pending/escalate treatment. All temporary
+# cases stay pending under a bounded retry term, then escalate to the loud
+# terminal not_executable — a temporary refusal that recurs forever must
+# still eventually alarm someone, just not on the first attempt.
 _TEMPORARY_RESULT_STATUSES = frozenset({"running"})
-_TEMPORARY_NOT_EXECUTABLE_REASONS = frozenset({"provider_disabled"})
+_TEMPORARY_NOT_EXECUTABLE_REASONS = frozenset({
+    # OI-1384: parked by config (e.g. VNX_CI_GATE_REQUIRED=0) — flipping the
+    # flag is an operator action that can happen at any time, not a verdict.
+    "provider_disabled",
+    # OI-1400 residu: the CLI binary is not on PATH right now. A provider that
+    # is not installed today can be installed tomorrow, so this is a bounded
+    # wait for the environment to catch up, not a permanent refusal.
+    "provider_not_installed",
+})
 _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
 
 # PR-resolution outcomes. The runner must tell "no PR yet" (a wait) apart from
@@ -654,10 +666,14 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
             )
         elif result_status == STATUS_NOT_EXECUTABLE and result_reason in _TEMPORARY_NOT_EXECUTABLE_REASONS:
             temp_reason = "gate_parked"
+            if result_reason == "provider_not_installed":
+                temp_cause = "the provider binary is not on PATH in this environment yet"
+            else:
+                temp_cause = "a config flag has it disabled"
             temp_detail = (
-                f"{gate} is parked ({result_reason}: a config flag has it disabled), "
-                "not broken — the obligation waits for it to be re-enabled or for a "
-                "future run, not permanently refused"
+                f"{gate} is parked ({result_reason}: {temp_cause}), "
+                "not broken — the obligation waits for it to be re-enabled/installed "
+                "or for a future run, not permanently refused"
             )
         elif result_status in _GATE_RESULT_UNAVAILABLE_STATES:
             temp_reason = "gate_run_unavailable"
@@ -749,7 +765,11 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
             reason=None if not result.get("has_required_failure") else "required_failure",
             reason_detail=None if terminal == STATUS_FULFILLED else f"result status: {result_status}",
         )
-        outcome["action"] = "fulfilled"
+        # Mirror the status actually persisted to disk — never a hardcoded
+        # "fulfilled" label, which would lie about a not_executable/failed
+        # record and let a caller reading only the label count a burned
+        # obligation as vervuld (OI-1400 residu, defect 2).
+        outcome["action"] = updated.get("status", terminal)
         outcome["request_path"] = updated.get("request_path")
         outcome["result_path"] = updated.get("result_path")
         outcome["has_required_failure"] = bool(result.get("has_required_failure"))
