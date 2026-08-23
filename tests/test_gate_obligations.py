@@ -40,11 +40,14 @@ import producer_freshness
 from dispatch_cli import run_dispatch
 from gate_obligations import (
     NO_GATE_KEY,
+    REASON_NO_PR_BRANCH_GONE,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
+    STATUS_RETIRED,
     STATUS_UNRESOLVABLE,
+    TERMINAL_STATUSES,
     obligation_path,
     pr_number_from_pr_id,
     register_obligation,
@@ -344,7 +347,11 @@ def test_runner_gate_failure_is_loud_and_registered(tmp_path, monkeypatch):
 def test_runner_leaves_pending_when_no_pr_yet(tmp_path, monkeypatch):
     """Repo resolves and gh works, but no PR exists yet — a genuine WAIT, not a
     fault. The obligation stays pending (OI-1253 fix-forward: this must not be
-    confused with the `unresolvable` env-wrong state)."""
+    confused with the `unresolvable` env-wrong state).
+
+    The dispatch's head branch still exists (a still-running dispatch), so
+    OI-1388's dead-branch retirement path must NOT fire here — control case
+    for that new behavior, exercised below in the retirement tests."""
     state_dir = _make_state_dir(tmp_path)
     register_obligation(
         state_dir, dispatch_id="20260731-oi876-no-pr", gate="codex_gate",
@@ -353,6 +360,7 @@ def test_runner_leaves_pending_when_no_pr_yet(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
     monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: True)
 
     summary = runner.run(state_dir)
 
@@ -361,6 +369,128 @@ def test_runner_leaves_pending_when_no_pr_yet(tmp_path, monkeypatch):
     record = _read_obligation(state_dir, "20260731-oi876-no-pr")
     assert record["status"] == STATUS_PENDING
     assert record["attempts"] == 1
+
+
+def test_runner_leaves_pending_when_branch_existence_unknown(tmp_path, monkeypatch):
+    """gh could not determine whether the branch still exists (outage, rate
+    limit, timeout) — ambiguous evidence must never retire an obligation.
+    Stays pending, exactly like the "branch confirmed to exist" case."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260731-oi1388-branch-unknown", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: None)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 1
+    record = _read_obligation(state_dir, "20260731-oi1388-branch-unknown")
+    assert record["status"] == STATUS_PENDING
+
+
+# ---------------------------------------------------------------------------
+# 2d. OI-1388: a dispatch that dies without ever producing a PR must not stay
+# pending forever — nothing closes that obligation today. RED on unfixed
+# main: with no dead-branch check, resolve_pr_number returns AWAITING and the
+# obligation lands STATUS_PENDING regardless of whether the branch is gone.
+# ---------------------------------------------------------------------------
+
+
+def test_runner_retires_obligation_when_dispatch_died_without_pr(tmp_path, monkeypatch):
+    """A dispatch that never produced a PR, whose head branch no longer
+    exists on origin, is DEAD — nothing will ever gate it. The obligation
+    must land in a terminal state, never stay pending forever."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260801-oi1388-dead-no-pr", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+
+    summary = runner.run(state_dir)
+
+    # State assertion, split from the reason assertions below — a composite
+    # check would silently pass even if the wrong field carried the evidence.
+    record = _read_obligation(state_dir, "20260801-oi1388-dead-no-pr")
+    assert summary["pending_after"] == 0
+    assert record["status"] == STATUS_RETIRED
+    assert record["status"] != STATUS_FULFILLED, (
+        "a dead dispatch with no PR was never reviewed — it must never read as fulfilled"
+    )
+    assert record["status"] in TERMINAL_STATUSES, "the runner must never retry a dead-branch retirement"
+
+    assert record["reason"] == REASON_NO_PR_BRANCH_GONE
+    assert record["reason"], "the reason field is required, never empty"
+
+    assert record["reason_detail"], "the reason_detail field is required, never empty"
+    assert "20260801-oi1388-dead-no-pr" in record["reason_detail"]
+    assert "dispatch/20260801-oi1388-dead-no-pr" in record["reason_detail"]
+
+
+def test_runner_never_refires_a_retired_obligation(tmp_path, monkeypatch):
+    """A retired obligation is terminal: a later run must never touch it
+    again, exactly like an already-fulfilled one."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="20260801-oi1388-retired-stays", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    update_obligation(
+        path, status=STATUS_RETIRED, reason=REASON_NO_PR_BRANCH_GONE,
+        reason_detail="already retired", resolved_at="2026-08-01T00:00:00Z",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: (_ for _ in ()).throw(
+        AssertionError("a terminal obligation must never be re-resolved")
+    ))
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260801-oi1388-retired-stays")
+    assert record["status"] == STATUS_RETIRED
+    assert record["reason_detail"] == "already retired", "a retired obligation must never be rewritten"
+
+
+def test_retired_status_never_counts_as_fulfilled_in_a_status_tally(tmp_path):
+    """Control case: any report that tallies obligations by status must be
+    able to tell `retired` apart from `fulfilled` — a naive status-count
+    (the shape any consumer report would take) must not conflate the two."""
+    state_dir = _make_state_dir(tmp_path)
+    fulfilled_path = register_obligation(
+        state_dir, dispatch_id="d-fulfilled", gate="codex_gate", project_id="vnx-dev",
+    )
+    update_obligation(fulfilled_path, status=STATUS_FULFILLED, resolved_at="2026-08-01T00:00:00Z")
+    retired_path = register_obligation(
+        state_dir, dispatch_id="d-retired", gate="codex_gate", project_id="vnx-dev",
+    )
+    update_obligation(
+        retired_path, status=STATUS_RETIRED, reason=REASON_NO_PR_BRANCH_GONE,
+        reason_detail="dead", resolved_at="2026-08-01T00:00:00Z",
+    )
+
+    import gate_obligations as go
+
+    tally = {}
+    for _path, record in go.iter_obligations(state_dir):
+        tally[record["status"]] = tally.get(record["status"], 0) + 1
+
+    assert tally.get(STATUS_FULFILLED) == 1, "the fulfilled obligation must count as reviewed"
+    assert tally.get(STATUS_RETIRED) == 1, "the retired obligation must count separately"
+    total_terminal = sum(tally.get(s, 0) for s in TERMINAL_STATUSES)
+    assert total_terminal == 2
+    assert tally[STATUS_FULFILLED] < total_terminal, (
+        "'reviewed' (fulfilled) must not be reported as the full terminal count "
+        "— a retired obligation inflating it would be exactly the OI-1400 shape"
+    )
 
 
 def test_runner_marks_unresolvable_when_repo_unattributable(tmp_path, monkeypatch):
@@ -743,6 +873,31 @@ def test_evaluate_unreadable_obligation_is_source_unreadable(tmp_path):
 
     assert section["status"] == "error"
     assert section["findings"][0]["kind"] == "source_unreadable"
+
+
+def test_scan_treats_retired_as_resolved_not_pending(tmp_path):
+    """OI-1388: a retired obligation must read as resolved evidence for
+    freshness — the same as fulfilled/not_executable/failed — never as a
+    still-open declaration that could trip a staleness finding."""
+    state_dir = _make_state_dir(tmp_path)
+    old_declared = "2026-07-01T00:00:00Z"  # would be stale if still counted pending
+    recent_resolved = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _write_obligation(
+        state_dir, "d-retired", "codex_gate",
+        declared_at=old_declared,
+        status=STATUS_RETIRED,
+        reason=REASON_NO_PR_BRANCH_GONE,
+        reason_detail="dead",
+        resolved_at=recent_resolved,
+    )
+
+    spec = {"path": str(state_dir / "review_gates" / "obligations")}
+    seen = producer_freshness.scan_gate_obligations(spec, now=time.time())
+
+    assert time.time() - seen["codex_gate"] < 3600, (
+        "a retired obligation's OLD declared_at must not drive staleness — "
+        "its recent resolved_at must be what freshness reads"
+    )
 
 
 def test_real_config_loads_with_obligations_producer():

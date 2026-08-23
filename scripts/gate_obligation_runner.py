@@ -27,6 +27,16 @@ runner fulfils them:
      obligation is recorded in the distinct ``unresolvable`` status (a fault,
      NOT a wait). It stays retryable for a bounded term and then escalates to
      the loud terminal ``not_executable`` with ``reason=unresolvable_timeout``.
+  6. OI-1388: "no PR yet" (4) is only a genuine wait while the dispatch could
+     still produce one. If no PR ever showed up AND the dispatch's head branch
+     (``dispatch/<id>``) no longer exists on GitHub, the dispatch is dead —
+     nothing will ever gate this obligation. That is recorded in the terminal
+     ``retired`` status (``reason=no_pr_branch_gone``), distinct from
+     ``fulfilled`` (no gate ever actually reviewed it). The discriminator is
+     the branch's existence, never an age threshold: a branch that still
+     exists (or whose existence gh could not determine) leaves the obligation
+     ``pending`` exactly as before — a live dispatch must never be closed on
+     ambiguous evidence.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -56,9 +66,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from gate_obligations import (  # noqa: E402
+    REASON_NO_PR_BRANCH_GONE,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
+    STATUS_RETIRED,
     STATUS_UNRESOLVABLE,
     TERMINAL_STATUSES,
     iter_obligations,
@@ -136,12 +148,19 @@ RESOLUTION_UNRESOLVABLE = "unresolvable"
 
 @dataclass
 class PrResolution:
-    """Outcome of resolving an obligation's PR number."""
+    """Outcome of resolving an obligation's PR number.
+
+    ``branch_exists`` is only populated when ``status == RESOLUTION_AWAITING``:
+    ``True``/``False`` when GitHub was actually queried, ``None`` when it
+    could not be determined (or wasn't queried) — never treated as "gone"
+    (OI-1388: an obligation must never be retired on ambiguous evidence).
+    """
 
     status: str
     pr_number: Optional[int] = None
     owner_repo: Optional[str] = None
     reason: Optional[str] = None
+    branch_exists: Optional[bool] = None
 
 
 def utc_now_iso() -> str:
@@ -324,6 +343,39 @@ def _branch_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
     return None
 
 
+def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool]:
+    """Whether ``dispatch/<dispatch_id>`` still exists as a head ref on GitHub.
+
+    Returns ``True``/``False`` on a definite answer, ``None`` when it cannot be
+    determined (gh missing, timeout, network error, or any non-404 failure).
+    OI-1388: a caller may only treat ``False`` as "the dispatch died without a
+    PR" — ``None`` must stay a wait, never a retirement, so a transient gh
+    hiccup can never close an obligation on ambiguous evidence.
+    """
+    if shutil.which("gh") is None:
+        return None
+    branch = f"dispatch/{dispatch_id}"
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{owner_repo}/branches/{branch}"],
+            capture_output=True, text=True, timeout=_GH_TIMEOUT_SECONDS, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        _LOG.debug("branch existence check failed for %s: %s", branch, exc)
+        return None
+    if proc.returncode == 0:
+        return True
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    if "404" in combined or "Not Found" in combined:
+        return False
+    _LOG.debug(
+        "branch existence check for %s returned an unrecognised failure "
+        "(rc=%s) — treating as unknown, not gone: %s",
+        branch, proc.returncode, combined.strip(),
+    )
+    return None
+
+
 def _owner_repo_from_remote_url(url: str) -> Optional[str]:
     """Derive ``owner/repo`` from a GitHub remote URL (https or ssh form).
 
@@ -469,9 +521,14 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
         return PrResolution(
             RESOLUTION_RESOLVED, pr_number=from_github, owner_repo=owner_repo,
         )
+    # OI-1388: no PR exists yet, but that reads as "not yet" forever unless we
+    # also ask whether the dispatch could still produce one. A dead branch is
+    # the one fact that answers that without a timer.
+    branch_exists = _branch_exists_on_github(dispatch_id, owner_repo)
     return PrResolution(
         RESOLUTION_AWAITING,
         owner_repo=owner_repo,
+        branch_exists=branch_exists,
         reason=f"no PR yet for head branch dispatch/{dispatch_id}",
     )
 
@@ -603,8 +660,33 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
         return outcome
 
     if resolution.status == RESOLUTION_AWAITING:
+        if resolution.branch_exists is False:
+            # OI-1388: the dispatch never produced a PR AND its head branch is
+            # gone from origin — nothing will ever gate this obligation.
+            # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
+            branch_name = f"dispatch/{dispatch_id}"
+            update_obligation(
+                path,
+                status=STATUS_RETIRED,
+                branch=branch_name,
+                attempts=attempts,
+                last_attempt_at=now,
+                resolved_at=now,
+                reason=REASON_NO_PR_BRANCH_GONE,
+                reason_detail=(
+                    f"dispatch {dispatch_id} never produced a PR and its head "
+                    f"branch {branch_name} no longer exists on "
+                    f"{resolution.owner_repo or 'the resolved repo'} — nothing "
+                    f"left for {gate} to guard"
+                ),
+            )
+            outcome["action"] = STATUS_RETIRED
+            outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
+            return outcome
         # The repo resolves and gh works, but no PR exists yet for the head
-        # branch. A genuine wait: stays pending for the freshness monitor.
+        # branch, and the branch is still there (or its existence could not be
+        # determined) — a genuine wait: stays pending for the freshness
+        # monitor, never closed on ambiguous evidence.
         update_obligation(
             path,
             status=STATUS_PENDING,

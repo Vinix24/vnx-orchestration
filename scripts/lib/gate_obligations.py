@@ -26,6 +26,14 @@ This module is the registry half of the fix:
      declaration without evidence becomes a finding, per sleutel, never per
      directory.
 
+OI-1388 (2026-08-23): an obligation can also become permanently un-gateable —
+its PR merged or closed, or its dispatch died before ever opening one — and
+nothing closed the record. It sat ``pending`` forever, indistinguishable from
+a dispatch that is still running. :data:`STATUS_RETIRED` books that honestly
+(never ``fulfilled``): ``scripts/gate_obligation_runner.py`` closes it going
+forward when a dispatch dies without a PR, and the one-time
+``scripts/gate_obligation_retire_backlog.py`` books the existing backlog.
+
 Design notes:
   - Best-effort at the door: :func:`register_obligation` never raises; the
     door must never be blocked by bookkeeping (same contract as
@@ -63,8 +71,35 @@ STATUS_FAILED = "failed"
 # for a not-yet-opened PR) so a misconfigured obligation never reads as "not
 # yet" forever (OI-1253 fix-forward).
 STATUS_UNRESOLVABLE = "unresolvable"
+# OI-1388: an obligation whose PR/branch reality means NOTHING can ever gate
+# it any more — the PR merged/closed ungated, or the dispatch died without
+# ever producing one. Deliberately NOT "fulfilled": fulfilled means "a gate
+# actually reviewed this"; retired means "the window to review it is closed
+# and nothing did". Every consumer that counts "reviewed" work must key off
+# STATUS_FULFILLED specifically, never off TERMINAL_STATUSES membership, or a
+# retired obligation would silently inflate that count.
+STATUS_RETIRED = "retired"
 
-TERMINAL_STATUSES = frozenset({STATUS_FULFILLED, STATUS_NOT_EXECUTABLE, STATUS_FAILED})
+TERMINAL_STATUSES = frozenset(
+    {STATUS_FULFILLED, STATUS_NOT_EXECUTABLE, STATUS_FAILED, STATUS_RETIRED}
+)
+
+# The four distinct retirement reasons (OI-1388). The distinction is the
+# information this status exists to preserve — collapsing them into one
+# generic "retired" reason would throw away exactly what an audit needs.
+#
+# REASON_NO_PR_BRANCH_EXISTS is part of the vocabulary but is deliberately
+# NEVER emitted by this fleet's automation (scripts/gate_obligation_runner.py,
+# scripts/gate_obligation_retire_backlog.py): "the dispatch never produced a
+# PR, but its branch is still on origin" cannot be told apart from "the
+# dispatch is still running" without an age threshold, and OI-1388 forbids
+# using age as the discriminator. It stays defined for a human operator who
+# has out-of-band evidence the dispatch is dead (e.g. its tmux session is
+# gone) to book the same honest end-state by hand.
+REASON_PR_MERGED = "pr_merged"
+REASON_PR_CLOSED = "pr_closed"
+REASON_NO_PR_BRANCH_GONE = "no_pr_branch_gone"
+REASON_NO_PR_BRANCH_EXISTS = "no_pr_branch_exists"
 
 # Distinct sentinel gate key for explicit no-gate records (dispatch
 # 20260816-gate-never-skippable). Deliberately NOT a member of the Gate enum: a
@@ -298,6 +333,11 @@ __all__ = [
     "STATUS_NOT_EXECUTABLE",
     "STATUS_FAILED",
     "STATUS_UNRESOLVABLE",
+    "STATUS_RETIRED",
+    "REASON_PR_MERGED",
+    "REASON_PR_CLOSED",
+    "REASON_NO_PR_BRANCH_GONE",
+    "REASON_NO_PR_BRANCH_EXISTS",
     "TERMINAL_STATUSES",
     "NO_GATE_KEY",
     "obligations_dir",
