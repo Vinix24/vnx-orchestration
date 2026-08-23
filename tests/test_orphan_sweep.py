@@ -301,6 +301,109 @@ def test_sweep_is_idempotent(env, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# OI-1427 — a headless dispatch's worktree must survive a sweep even though
+# it opens NO tmux session at all (the kind-1 "surviving_ids" signal is
+# entirely tmux-derived, so a headless dispatch fails that check from second
+# one). The register knows this dispatch (a dispatch_created event is written
+# by the door for EVERY lane -- tmux, headless, and provider -- before the
+# worktree is even created) and shows no terminal outcome yet: that is the
+# life-sign this class of worktree actually has. The control test proves the
+# tmux-session path is untouched -- without it, a broken probe that always
+# "protects" would pass the headless test for the wrong reason.
+# ---------------------------------------------------------------------------
+
+def test_headless_inflight_worktree_survives_sweep_without_tmux_session(env, tmp_path):
+    """On main (pre-fix) this fails on BEHAVIOR, not a missing symbol: sweep()
+    runs to completion with no tmux session and no register knowledge of the
+    worktree's liveness, classifies the freshly-allocated (clean) worktree as
+    an orphan, and reaps it -- exactly the OI-1427 incident (a live headless
+    dispatch's worktree deleted out from under it)."""
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "headless-1")
+    _write_register_event(env, "dispatch_created", "headless-1")  # known, in flight
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: [],  # headless dispatch opens NO tmux session, ever
+    )
+
+    assert str(handle.path) in res.worktrees_skipped_live
+    assert handle.path.is_dir()
+    assert res.worktrees_removed == []
+
+
+def test_headless_worktree_reaped_once_register_shows_terminal(env, tmp_path):
+    """The flip side: once the register proves the dispatch reached a terminal
+    outcome, the new criterion must NOT protect it forever -- otherwise a
+    genuinely orphaned headless worktree (crashed wrapper, but one that got as
+    far as writing dispatch_completed) could never be swept."""
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "headless-done-1")
+    _write_register_event(env, "dispatch_created", "headless-done-1")
+    _write_register_event(env, "dispatch_completed", "headless-done-1")
+
+    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+
+    assert str(handle.path) in res.worktrees_removed
+    assert not handle.path.exists()
+
+
+def test_headless_unknown_worktree_unaffected_by_new_criterion(env, tmp_path):
+    """A worktree whose dispatch id the register has never heard of (e.g. a
+    genuinely stale leftover) must still be reaped exactly as before -- the
+    new criterion only ever ADDS protection, never removes it, and must never
+    turn 'register says nothing' into a reason to preserve."""
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "never-registered-1")
+
+    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+
+    assert str(handle.path) in res.worktrees_removed
+    assert not handle.path.exists()
+
+
+def test_headless_register_unmeasurable_fails_open_on_worktree(env, tmp_path, monkeypatch):
+    """'Cannot measure the register' must never collapse into 'not in flight'
+    -- mirrors the existing listing_unmeasurable contract for kind 1/2."""
+    import dispatch_register
+
+    def _raise(*, state_dir=None):
+        raise RuntimeError("register read blew up")
+
+    monkeypatch.setattr(dispatch_register, "read_events", _raise)
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "unmeasurable-1")
+
+    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+
+    assert str(handle.path) in res.worktrees_skipped_live
+    assert handle.path.is_dir()
+    assert res.worktrees_removed == []
+    assert any(e.get("kind") == "completed_check" for e in res.errors)
+
+
+def test_headless_control_tmux_session_still_protects_worktree(env, tmp_path):
+    """Control for the tests above: a dispatch WITH a live tmux session must
+    still be protected via the pre-existing, unrelated tmux path -- proves
+    the measurement instrument still works and the headless tests above are
+    not passing because every worktree is now unconditionally preserved."""
+    local = _git_repo(tmp_path)
+    handle = _alloc(local, "tmux-ctrl-1")
+
+    res = osweep.sweep(
+        repo_root=local,
+        data_dir=env,
+        list_sessions=lambda: ["vnx-tmux-ctrl-1"],
+        probe_liveness=lambda s: True,
+    )
+
+    assert str(handle.path) in res.worktrees_skipped_live
+    assert handle.path.is_dir()
+    assert res.worktrees_removed == []
+
+
+# ---------------------------------------------------------------------------
 # Kind 3 — active manifests (delegated to crash_recovery_sweep)
 # ---------------------------------------------------------------------------
 
