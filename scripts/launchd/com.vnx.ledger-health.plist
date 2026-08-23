@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.ledger-health</string>
+  <!--
+    OI-1409: ledger_health.py exists, works, mutates nothing, and had no
+    driver — nobody ever ran it, so its receipt-coverage/pull-cursor/chain
+    findings only ever reflected whatever state existed the one time a human
+    happened to invoke it by hand. This job is the driver, nothing else: it
+    does not fix findings, does not touch dispatch_register.ndjson or
+    t0_receipts.ndjson, and does not move DEFAULT_CURSOR_STALE_HOURS. It only
+    makes sure `python3 scripts/ledger_health.py` actually runs on a cadence,
+    so `vnx doctor`'s ledger:health check (_check_ledger_health) reads a
+    beacon that reflects current reality instead of a stale or nonexistent
+    one.
+
+    Interval: every 6h (21600s). ledger_health.py writes its own beacon with
+    BEACON_EXPECTED_INTERVAL_SECONDS=86400 (health_beacon.py: a beacon whose
+    age exceeds its own expected_interval_seconds reads as "stale" per
+    all_beacons()) and check_pull_cursor()'s DEFAULT_CURSOR_STALE_HOURS is
+    24.0h = 86400s — both windows this job exists to stay inside. A
+    StartInterval at or above 86400 would make the beacon (or the cursor
+    check it reports on) stale by construction, which is exactly the
+    "mechanism with no drive" defect this dispatch fixes. 21600s gives 4
+    runs/day: even 3 consecutive missed runs (an 18h gap) still lands inside
+    the 86400s window with margin, instead of the interval and the threshold
+    racing each other on every single run.
+
+    Installed automatically by vnx init for the VNX orchestration repo.
+    Also installable manually via reload_plist.sh:
+      bash scripts/launchd/reload_plist.sh com.vnx.ledger-health
+
+    A non-zero exit (1 = findings, 2 = SKIPPED_UNVERIFIED/cannot-measure) is
+    expected and normal — ledger_health.py's job is to measure and record,
+    not to gate. Do not wire this job's exit code into anything that fails a
+    build; that is explicitly out of scope for this dispatch (30 dispatch-ids
+    of pre-existing receipt debt would turn every PR red on someone else's
+    backlog).
+
+    The store is NOT pinned by path. The job identifies its project via
+    VNX_PROJECT_ID (below), one instance per project; ledger_health.py's
+    ambient resolver (vnx_paths.resolve_paths(), which honors VNX_PROJECT_ID
+    before any other signal) then derives VNX_DATA_DIR/VNX_STATE_DIR from
+    that id. A consumer installing this template for their own project MUST
+    set VNX_PROJECT_ID to their project id: vnx init substitutes the
+    ${VNX_PROJECT_ID} placeholder with the project id argument, so manual
+    installs must edit it by hand. Hardcoding a store path here would make a
+    copied template run on the original project's ledger (OI-1253 fix-forward,
+    same failure mode gate-obligation-runner already fixed once).
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/ledger_health.py</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>StandardOutPath</key><string>/tmp/vnx-ledger-health.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-ledger-health.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>VNX_PROJECT_ID</key>
+    <string>${VNX_PROJECT_ID}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

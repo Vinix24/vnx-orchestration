@@ -723,12 +723,12 @@ def vnx_init(args) -> int:
         return 1
 
 
-def _install_gate_obligation_runner(vnx_home: str, project_id: str = "") -> bool:
-    """Install the gate-obligation-runner launchd plist (OI-917).
+def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "") -> bool:
+    """Install a VNX launchd plist by name (OI-917, generalized for OI-1409).
 
     Reads the plist template from the engine root's scripts/launchd/ directory,
     substitutes ``${VNX_HOME}`` with the resolved VNX home path and
-    ``${VNX_PROJECT_ID}`` with the project's id (OI-1253 fix-forward: the job
+    ``${VNX_PROJECT_ID}`` with the project's id (OI-1253 fix-forward: a job
     identifies its project via VNX_PROJECT_ID, one instance per project, never
     via a hardcoded store path), writes atomically to ``~/Library/LaunchAgents/``,
     and loads via launchctl.
@@ -740,8 +740,6 @@ def _install_gate_obligation_runner(vnx_home: str, project_id: str = "") -> bool
     Raises RuntimeError if launchctl load fails (never silent).
     Raises OSError if the template exists but is unreadable.
     """
-    plist_name = "com.vnx.gate-obligation-runner"
-
     # --- OI-1117: refuse launchd agent install on an unstable root -----------
     # When vnx init runs from an ephemeral worktree (dispatch/PR isolation),
     # engine_root() resolves to a directory under .vnx-data/worktrees/. A
@@ -820,6 +818,31 @@ def _install_gate_obligation_runner(vnx_home: str, project_id: str = "") -> bool
         )
 
     return True
+
+
+def _install_gate_obligation_runner(vnx_home: str, project_id: str = "") -> bool:
+    """Install the gate-obligation-runner launchd plist (OI-917).
+
+    Thin wrapper over ``_install_launchd_agent`` — kept as its own name/
+    signature because tests and callers address it directly.
+    """
+    return _install_launchd_agent(
+        vnx_home, "com.vnx.gate-obligation-runner", project_id=project_id
+    )
+
+
+def _install_ledger_health_runner(vnx_home: str, project_id: str = "") -> bool:
+    """Install the ledger-health launchd plist (OI-1409).
+
+    ``scripts/ledger_health.py`` is read-only reconciliation tooling that
+    existed with nothing ever invoking it — this gives it the same launchd
+    drive OI-917 already gave gate-obligation-runner, on its own cadence
+    (see the plist's comment block for the interval rationale). Thin wrapper
+    over ``_install_launchd_agent``, mirroring ``_install_gate_obligation_runner``.
+    """
+    return _install_launchd_agent(
+        vnx_home, "com.vnx.ledger-health", project_id=project_id
+    )
 
 
 def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) -> int:
@@ -948,6 +971,16 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
             print("  skipped gate-obligation-runner (plist template not found)")
     except (OSError, RuntimeError) as exc:
         print(f"  warning: gate-obligation-runner install failed: {exc}")
+
+    # --- OI-1409: install ledger-health launchd agent -------------------------
+    try:
+        installed = _install_ledger_health_runner(
+            str(_engine.engine_root()), project_id=project_id
+        )
+        if not installed:
+            print("  skipped ledger-health (plist template not found)")
+    except (OSError, RuntimeError) as exc:
+        print(f"  warning: ledger-health install failed: {exc}")
 
     print()
     print(f"Runtime state: {data_root}")
