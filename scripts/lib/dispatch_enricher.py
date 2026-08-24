@@ -36,10 +36,13 @@ _REPO_MAP_SENTINEL = "### Repo Map (auto-generated"
 # Hard cap on formatted repo-map output size to avoid bloating prompts.
 _REPO_MAP_MAX_CHARS = 8_000
 
-# Roles for which repo map adds no value (review/research dispatches)
+# Roles for which repo map adds no value (review/research dispatches).
+# "review-gate" (dispatch-20260823-beta2-j): glm_gate.py/kimi_gate.py review a
+# self-contained diff handed to them inline — a repo map adds nothing a diff
+# reviewer needs, same reasoning as "reviewer"/"code-reviewer" above.
 _REVIEW_ROLES = frozenset({
     "reviewer", "architect", "code-reviewer",
-    "security-engineer", "quality-engineer",
+    "security-engineer", "quality-engineer", "review-gate",
 })
 
 # Regex patterns for extracting .py file paths from dispatch text
