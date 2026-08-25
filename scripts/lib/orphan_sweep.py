@@ -41,11 +41,14 @@ runtime objects persist forever:
    Recorded under ``tmux_completed_orphans_killed`` / ``_preserved``, each
    entry carrying the ground it was decided on.
 
-2. **git worktrees** ``<repo>/.vnx-data/worktrees/dispatch-<dispatch_id>`` — the
-   same lane's ephemeral trees. An orphan is a worktree whose tmux session is
+2. **git worktrees** ``<repo>/.vnx-data/worktrees/dispatch-<dispatch_id>`` — every
+   lane's ephemeral trees (tmux-spawn, headless ``claude -p``, and the provider
+   lanes all allocate through the same ``dispatch_worktree_isolation.
+   create_dispatch_worktree``). An orphan is a worktree whose tmux session is
    gone (the session is the worktree's lifecycle authority: only its teardown
    reaps the tree, so a surviving session means the wrapper may still be about
-   to reap it). Cleanup REUSES the exact in-process teardown path
+   to reap it) AND that is not otherwise known to be in flight (OI-1427,
+   below). Cleanup REUSES the exact in-process teardown path
    (``tmux_worktree.classify_path`` + ``reap``): a DIRTY worktree is MARKED
    (``git worktree lock`` with a reason) and NEVER deleted; clean/committed/
    pushed are removed exactly as teardown would, including process-group and
@@ -60,6 +63,39 @@ runtime objects persist forever:
    failure against a socket that DOES exist, or an unrecognized non-zero
    exit) is never read as "zero sessions" — it records an error and skips
    the worktree reap for this entire run instead of guessing.
+
+   **"No tmux session" is not "dead" (OI-1427).** A headless ``claude -p``
+   dispatch never opens a tmux session at all — kind-1's ``surviving_ids`` is
+   entirely tmux-derived, so a running headless worker fails that check from
+   the first second of its run, not just after a crash. Measured 21-08: a real
+   sweep run reaped the worktree of a headless dispatch that was still in its
+   reading phase, mid-run. A second, independent life-sign closes that gap:
+   the dispatch REGISTER (``dispatch_register.ndjson``, already loaded once
+   per run for kind 1b below) records a ``dispatch_created`` event at the
+   door's commit-to-fire moment for EVERY lane — tmux, headless, and provider
+   alike — strictly before ``create_dispatch_worktree`` ever runs. A worktree
+   whose dispatch id is KNOWN to the register and not yet provably terminal
+   (no ``dispatch_completed`` register event, no terminal receipt per
+   ``event_outcome_semantics.classify_event_outcome``) is preserved exactly
+   like a live tmux session — see ``_dispatch_known_inflight``.
+
+   Two other candidates were considered and rejected: (1) an account-wide
+   ``claude-tmux-slot-*.lock`` in ``~/.vnx-data/locks/`` DOES carry a live pid
+   for a running dispatch (measured 23-08: slot-1 held a live pid, slot-8 a
+   dead one from 10-08) but only when ``claude_serial_enabled`` is on AND only
+   for the two claude lanes — a provider-lane (kimi/glm/deepseek) dispatch
+   never acquires that lock at all (``serialization_class`` is ``None`` for
+   ``is_claude_lane=False`` — ``dispatch_plan.py`` D5), so lock-only liveness
+   would leave every in-flight provider-lane worktree with zero protection,
+   the same defect this fix closes, just for a different lane. (2) scanning
+   every process's cwd for a live worker in this worktree has no portable
+   answer on macOS (no ``/proc``; ``lsof`` per pid is expensive and permission
+   -gated for other users' processes) and was not pursued.
+
+   Register-unmeasurable (the register itself could not be read this run)
+   fails OPEN exactly like the tmux-listing case above: every worktree not
+   already proven alive by a tmux session is preserved this run rather than
+   guessed dead, and the failure is recorded in ``errors``.
 
 3. **``dispatches/active/<id>/manifest.json``** — the subprocess lane's active
    manifests. Delegated to :mod:`crash_recovery_sweep`, which already recovers
@@ -343,6 +379,56 @@ def _evaluate_completed_orphan(
         return False, f"pane_{pane_state.state}"
 
     return True, f"{evidence};pane={pane_state.state}"
+
+
+# ---------------------------------------------------------------------------
+# Kind 2 — register-derived liveness for the tmux-less lanes (OI-1427)
+# ---------------------------------------------------------------------------
+
+def _dispatch_known_inflight(
+    dispatch_id: str,
+    *,
+    register_known_ids: "set[str] | None",
+    register_completed_ids: "set[str] | None",
+    receipts_index: "dict[str, list] | None",
+) -> "bool | None":
+    """Could ``dispatch_id`` still be a live, tmux-less (headless/provider)
+    dispatch? A second, tmux-independent life-sign for kind 2 — see the
+    OI-1427 paragraph in the module docstring for why this exists and why the
+    lock-based and cwd-scanning alternatives were rejected.
+
+    True  -> the register KNOWS this dispatch id and nothing PROVES it has
+             reached a terminal outcome (no ``dispatch_completed`` register
+             event, no terminal receipt — including when the receipts index
+             itself could not be read: "can't prove it's dead" counts as "not
+             provably dead", the same fail-open direction as everywhere else
+             in this module).
+    False -> the register has never heard of this dispatch id (an ordinary,
+             pre-existing orphan — unaffected by this check), OR it has and a
+             terminal outcome IS proven.
+    None  -> unmeasurable: the register itself could not be read this run.
+
+    Deliberately a separate function from ``_evaluate_completed_orphan``
+    rather than a shared refactor of its (b)+(c) evidence lookup: that
+    function's conjunction must keep "receipts_unmeasurable" distinct from
+    "not_completed" for its per-session reason string (kind 1b), while this
+    caller (kind 2) only ever needs the two-way fold "not provably dead" —
+    forcing one shape onto both would either lose kind 1b's reason
+    granularity or make kind 2 carry reason strings it never uses.
+    """
+    if register_known_ids is None:
+        return None
+    if dispatch_id not in register_known_ids:
+        return False
+    if register_completed_ids is not None and dispatch_id in register_completed_ids:
+        return False
+    if receipts_index is None:
+        return True
+    for rec in receipts_index.get(dispatch_id) or []:
+        outcome = classify_event_outcome(rec.get("event_type"), rec.get("status"))
+        if outcome is not None:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +721,25 @@ def sweep(
             result.worktrees_scanned.append(str(entry))
             if listing_unmeasurable or wid in surviving_ids:
                 result.worktrees_skipped_live.append(str(entry))
+                continue
+            # OI-1427: no tmux session is not "dead" — a headless/provider
+            # dispatch never has one. True (known, not provably terminal) or
+            # None (register unmeasurable) both mean "never reap on doubt";
+            # only a hard False (unknown to the register, or provably
+            # terminal) falls through to the classify/reap path below.
+            inflight = _dispatch_known_inflight(
+                wid,
+                register_known_ids=register_known_ids,
+                register_completed_ids=register_completed_ids,
+                receipts_index=receipts_index,
+            )
+            if inflight is not False:
+                result.worktrees_skipped_live.append(str(entry))
+                logger.info(
+                    "orphan_sweep: SKIP worktree %s — no tmux session but register %s",
+                    entry.name,
+                    "shows it in flight" if inflight else "was unmeasurable",
+                )
                 continue
             branch = f"dispatch/{wid}"
             try:
