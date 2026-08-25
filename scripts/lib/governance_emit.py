@@ -491,10 +491,25 @@ def _read_lane_log_text(dispatch_id: str, data_dir: Path) -> Optional[str]:
     return text if text.strip() else None
 
 
-def _bounded_snippet(text: str, max_len: int = 300) -> str:
+def _bounded_snippet(text: str, max_len: int = 300, anchor: "int | None" = None) -> str:
     """Collapse whitespace and cap length — same shape as failure_classification.py's
-    _extract_detail, so a lifted reason never carries a multi-KB blob."""
-    snippet = " ".join(text.split())
+    _extract_detail, so a lifted reason never carries a multi-KB blob.
+
+    ``anchor`` (OI-1452): a character offset into the RAW (uncollapsed)
+    ``text`` to window the snippet around, instead of always starting at
+    position 0. A short single-shot error body (the original OI-1433 case)
+    has the marker right at the start, so a prefix snippet already captures
+    it. A long multi-turn lane log (measured: a real 52KB kimi conversation
+    log with the 403 body ~2KB in, past tool-call preamble) does not — a
+    prefix-only snippet silently drops the very marker phrase that decided
+    the classification, which breaks the one thing a lifted reason must do:
+    survive a later re-classification of the text it was lifted into.
+    ``anchor=None`` keeps the exact original prefix behavior.
+    """
+    window = text
+    if anchor is not None:
+        window = text[max(0, anchor - 80):]
+    snippet = " ".join(window.split())
     if len(snippet) > max_len:
         snippet = snippet[:max_len].rstrip() + "…"
     return snippet
@@ -507,12 +522,24 @@ def _classify_lane_log_text(text: str) -> Tuple[str, Optional[str]]:
     on a narrow provider-owned label, see _LANE_EXHAUSTED_MARKERS) or
     'unreadable_verdict' (the lane produced content but no recognizable
     billing/quota signal — the model may have answered, but no verdict could
-    be read out of it). reason is only populated for lane_exhausted.
+    be read out of it). reason is only populated for lane_exhausted, and is
+    windowed around the EARLIEST-occurring marker's position in the text
+    (OI-1452), not the start of the text or the first tuple-order marker —
+    see ``_bounded_snippet``'s ``anchor`` parameter. Position, not tuple
+    order, decides the anchor: a real 403 body can trip more than one marker
+    (e.g. both "reached your usage limit" and "access_terminated_error" in
+    the same message), and the tuple-order marker is not necessarily the one
+    closest to the start — anchoring on whichever happened to be listed
+    first would arbitrarily drop earlier, equally-real context.
     """
     lowered = text.lower()
+    earliest_idx: Optional[int] = None
     for marker in _LANE_EXHAUSTED_MARKERS:
-        if marker in lowered:
-            return "lane_exhausted", _bounded_snippet(text)
+        idx = lowered.find(marker)
+        if idx != -1 and (earliest_idx is None or idx < earliest_idx):
+            earliest_idx = idx
+    if earliest_idx is not None:
+        return "lane_exhausted", _bounded_snippet(text, anchor=earliest_idx)
     return "unreadable_verdict", None
 
 

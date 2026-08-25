@@ -98,6 +98,7 @@ from gate_recorder import (
     stamp_request_identity,
 )
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
+from governance_emit import _classify_lane_log_text, _read_lane_log_text  # OI-1452: lift the real reason off the raw lane log — same classifier OI-1433 built, never a second marker scan
 from unified_report_schema import SchemaViolation, parse_frontmatter
 from gate_report_recovery import (
     AmbiguousRecoveryCandidates,
@@ -367,6 +368,34 @@ _UNAVAILABLE_SUMMARIES = {
 }
 
 
+def _lift_lane_log_reason(dispatch_id: str, data_dir: "Path | None") -> "str | None":
+    """OI-1452: when ``_frontmatter_run_outcome`` says the run failed but the
+    frontmatter itself carries no WHY (just ``exit_code``/``token_usage``),
+    read the per-dispatch raw lane log (``logs/conversations/<dispatch_id>.log``)
+    and classify it with governance_emit's shared classifier — the SAME
+    function OI-1433 built for this exact purpose and kimi_gate.py reuses
+    identically. Never a second hand-rolled marker scan.
+
+    The glm lane does not always write a per-dispatch log (a run can die
+    before the tee starts). Returns the bounded reason snippet only when the
+    log carries a real billing/quota exhaustion marker
+    (``_classify_lane_log_text`` -> ``lane_exhausted``). Returns None —
+    never invents a reason — when the log is missing/empty
+    (``_read_lane_log_text`` already collapses every read failure to None)
+    or when the log has content but no exhaustion marker
+    (``unreadable_verdict``): the frontmatter-only detail stays exactly as
+    informative as it already was, and the gate does not fail on a missing
+    log.
+    """
+    if data_dir is None:
+        return None
+    text = _read_lane_log_text(dispatch_id, data_dir)
+    if not text:
+        return None
+    state, reason = _classify_lane_log_text(text)
+    return reason if state == "lane_exhausted" else None
+
+
 def _status_summary(status: str, blocking: list, reason: str = "") -> str:
     """Summary line for the result record — outage vs recovery vs verdict must be unmistakable."""
     if status == "unavailable":
@@ -494,6 +523,10 @@ def main(argv: "list[str] | None" = None) -> int:
 
     recovered_path: "Path | None" = None
 
+    # OI-1452 fix-forward: tracked across both branches below so the record
+    # build can stamp the canonical failure_reason field (see there) — only
+    # ever set by the lane-log lift in the run_failed branch, never guessed.
+    lane_log_reason: "str | None" = None
     if dispatch_error:
         verdict: dict = {}
         status, blocking = "unavailable", []
@@ -529,6 +562,17 @@ def main(argv: "list[str] | None" = None) -> int:
                         f"(exit_code={exit_code!r}, token_usage.output={output_tokens!r}) — "
                         "provider-side outage, not a review outcome"
                     )
+                    # OI-1452: the frontmatter above tells us the run failed, not
+                    # WHY. Lift the real reason off the raw lane log so the
+                    # request-time takeover classifier (which scans this same
+                    # provider_failed_detail once it lands in residual_risk) can
+                    # actually see a billing/quota exhaustion marker instead of a
+                    # generic exit_code/token_usage summary. The glm lane does
+                    # not always write this log — a missing file degrades to the
+                    # frontmatter-only detail above, never a crash or a guess.
+                    lane_log_reason = _lift_lane_log_reason(dispatch_id, base_data_dir)
+                    if lane_log_reason:
+                        provider_failed_detail += f" — lane log: {lane_log_reason}"
                     status, blocking, residual = _verdict_to_status(
                         {}, report_text or "", provider_failed_detail=provider_failed_detail
                     )
@@ -666,6 +710,21 @@ def main(argv: "list[str] | None" = None) -> int:
         ],
         "required_reruns": [],
         "residual_risk": residual,
+        # OI-1452 fix-forward (OI-1453 tracks the other four gates): also
+        # stamp the canonical failure_reason field (established OI-1415,
+        # scripts/lib/phantom_guard.py) with the SAME text placed above in
+        # residual_risk, but ONLY the lifted lane-log reason — never a
+        # placeholder or a summary of the frontmatter fields when the lift
+        # found nothing. Three ways to be wrong here, in ascending order of
+        # danger: an EMPTY field fails visibly (a reader can tell the cause
+        # is unknown); a PLACEHOLDER ("unknown", "n/a") passes every
+        # presence check and fails silently; a SUMMARY that merely looks
+        # like a cause is worst of all, because it cannot be told apart from
+        # a real one. Filling this field with anything but the real lifted
+        # reason would make every existing record look complete while
+        # explaining nothing — a regression hidden BEHIND the fix meant to
+        # surface it.
+        "failure_reason": lane_log_reason or "",
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         # dispatch-20260823-beta2-j: audit marker distinguishing a record
         # produced by a live model call from one formalized by --reprocess
