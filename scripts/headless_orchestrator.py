@@ -417,7 +417,15 @@ class HeadlessOrchestrator:
             )
 
     def _check_all_gates_passed(self, event: LoopEvent) -> None:
-        """When a gate event arrives, check if all required gates have passed."""
+        """When a gate event arrives, check if all gates ACTUALLY REQUESTED for
+        this PR have passed — provider-agnostic (dispatch 20260823-beta2-e,
+        OI-1435). The required set is read from review_gates/requests/, not a
+        hardcoded {codex_gate, gemini_review}: whatever stack was requested
+        (codex+gemini, kimi_gate+glm_gate, or any future gate) unblocks the
+        feature the same way once its gates pass. A required gate that never
+        got requested therefore can never silently sit unmet — it is simply
+        not in the set being checked.
+        """
         ctx = _flatten_context(event.context)
         latest_event = ctx.get("latest_event", "")
         if "gate" not in latest_event.lower():
@@ -430,21 +438,21 @@ class HeadlessOrchestrator:
             return
         feature_id = f"F{m.group(1)}"
 
-        # Check gate results directory for evidence that required gates passed
-        gate_results_dir = self.state_dir / "review_gates" / "results"
-        if not gate_results_dir.exists():
+        # Check gate requests directory for what was actually requested for this PR
+        gate_requests_dir = self.state_dir / "review_gates" / "requests"
+        if not gate_requests_dir.exists():
             return
 
-        result_files = list(gate_results_dir.glob("pr-*.json"))
-        if not result_files:
+        request_files = list(gate_requests_dir.glob("pr-*.json"))
+        if not request_files:
             return
 
-        # Determine highest PR number from results.
+        # Determine highest PR number from requests.
         # The event context does not carry a GitHub PR number, so we fall back
-        # to max(pr_numbers) across all result files.  This may match a PR from
+        # to max(pr_numbers) across all request files.  This may match a PR from
         # a different feature if artifacts are not cleaned between features.
         pr_numbers: List[int] = []
-        for f in result_files:
+        for f in request_files:
             m2 = re.match(r"pr-(\d+)-", f.name)
             if m2:
                 pr_numbers.append(int(m2.group(1)))
@@ -452,30 +460,77 @@ class HeadlessOrchestrator:
             return
 
         latest_pr = max(pr_numbers)
-        pr_files = [f for f in result_files if f.name.startswith(f"pr-{latest_pr}-")]
-        gate_names_present = {f.name.split(f"pr-{latest_pr}-")[1].replace(".json", "") for f in pr_files}
+        prefix = f"pr-{latest_pr}-"
+        pr_request_files = [f for f in request_files if f.name.startswith(prefix)]
 
-        required = {"codex_gate", "gemini_review"}
-        if not required.issubset(gate_names_present):
+        # claude_github_optional never gates the merge (matches gate_executor's
+        # own has_required_failure rule); any other requested gate can opt out
+        # via an explicit required=false in its own request payload (e.g.
+        # codex_gate when the diff doesn't force it) — default True when the
+        # field is absent, since kimi_gate/glm_gate/gemini_review/ci_gate/
+        # wiring_gate requests never carry that field and are required by
+        # default.
+        required_gates: List[str] = []
+        for f in pr_request_files:
+            gate_name = f.name[len(prefix):-len(".json")]
+            if gate_name == "claude_github_optional":
+                continue
+            try:
+                request_data = json.loads(f.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Could not read gate request %s: %s", f, exc)
+                return
+            if not request_data.get("required", True):
+                continue
+            required_gates.append(gate_name)
+
+        if not required_gates:
+            logger.warning(
+                "No required gates found among requests for %s PR #%d — feature NOT unblocked",
+                feature_id, latest_pr,
+            )
             return
 
         # Verify each required gate's result JSON reports a passing status.
         # File presence alone is insufficient — a failed gate still produces a
         # result file with status "failed", which must block feature unblocking.
         # is_pass() also enforces blocking_findings and blocking_count (OI-1139).
+        gate_results_dir = self.state_dir / "review_gates" / "results"
         from gate_status import is_pass  # noqa: PLC0415
+
+        # UNION across gates, not majority: ANY missing-evidence or failed
+        # required gate blocks — no averaging or vote-counting anywhere below.
+        # Ground (measured 22-08): glm_gate and kimi_gate returned OPPOSITE
+        # verdicts on the identical diff with the identical contract_hash (glm
+        # FAIL with a blocking finding, kimi PASS with none) — neither reader
+        # outranks the other, so one blocking verdict is enough to block.
+        missing_gates: List[str] = []
         failed_gates: List[str] = []
-        for gate_name in required:
-            result_file = gate_results_dir / f"pr-{latest_pr}-{gate_name}.json"
+        for gate_name in required_gates:
+            result_file = gate_results_dir / f"{prefix}{gate_name}.json"
+            if not result_file.exists():
+                missing_gates.append(gate_name)
+                continue
             try:
                 result_data = json.loads(result_file.read_text(encoding="utf-8"))
             except Exception as exc:
                 logger.warning("Could not read gate result %s: %s", result_file, exc)
-                return
+                missing_gates.append(gate_name)
+                continue
             passed, reason = is_pass(result_data)
             if not passed:
                 failed_gates.append(f"{gate_name}({reason})")
 
+        # The stille-return bug this replaces: on main, an unrequested-but-
+        # hardcoded gate silently aborted the whole check with no log line —
+        # a deblocking that doesn't happen must be exactly as visible as one
+        # that does.
+        if missing_gates:
+            logger.warning(
+                "Required gate(s) missing evidence for %s PR #%d: %s — feature NOT unblocked",
+                feature_id, latest_pr, ", ".join(missing_gates),
+            )
+            return
         if failed_gates:
             logger.warning(
                 "Required gate(s) did not pass for %s PR #%d: %s — feature NOT unblocked",
@@ -488,7 +543,7 @@ class HeadlessOrchestrator:
             "event_type": "feature_gates_complete",
             "feature_id": feature_id,
             "pr_number": latest_pr,
-            "gate_names": sorted(gate_names_present),
+            "gate_names": sorted(required_gates),
         })
         logger.info(
             "All required gates passed for %s PR #%d — next feature dispatch unblocked",
