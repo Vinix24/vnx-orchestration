@@ -13,10 +13,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
 from gate_recorder import get_pr_head_sha
+from governance_emit import _classify_lane_log_text
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
     STATE_NOT_CONFIGURED,
@@ -25,6 +27,20 @@ from claude_github_receipt import (
     STATE_BLOCKED,
     STATE_COMPLETED,
 )
+
+
+# Fixed fallback order for review-gate takeover (review-gate-provider-agnostic
+# plan, deliverable 5). This is an OPERATOR DECISION recorded 22-08, not a
+# measured defect-recall ranking: on 22-08 glm_gate and kimi_gate gave
+# OPPOSITE verdicts on the identical diff/contract_hash -- glm FAIL with a
+# blocking finding, kimi PASS with zero findings -- so there is no measured
+# basis for which reader is the better fallback, only that a working reader
+# beats an unfilled seat. The measured variant (ordered by defect-recall) is
+# a follow-up track (plan open question 1); this mapping stays a choice under
+# uncertainty until that lands.
+_REVIEW_GATE_TAKEOVER_ORDER: Dict[str, str] = {
+    "kimi_gate": "glm_gate",
+}
 
 
 class GateRequestHandlerMixin:
@@ -97,6 +113,200 @@ class GateRequestHandlerMixin:
             return self._request_glm(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         return {"gate": gate, "status": "blocked", "reason": "unknown_review_gate"}
 
+    def _read_existing_gate_result(self, gate: str, pr_number: Optional[int]) -> Optional[Dict[str, Any]]:
+        """Read a previously-recorded terminal result for (gate, pr_number) from
+        disk, if one exists.
+
+        Backs the REQUEST-time takeover decision (deliverable 5): before
+        (re-)requesting a gate, this checks whether it already produced a
+        terminal not_executable/unavailable result for this PR on an earlier
+        call, so a known-broken seat can be routed around instead of
+        re-requested. Never invents a live outcome by executing anything
+        itself. Returns None on a missing or unreadable file so a corrupt or
+        absent result reads as "no signal" -- not as a failure to take over.
+        """
+        if pr_number is None:
+            return None
+        result_file = self._result_path(gate, pr_number)
+        if not result_file.exists():
+            return None
+        try:
+            return json.loads(result_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _classify_review_seat_failure(self, result: Dict[str, Any]) -> str:
+        """Classify a previously-recorded gate result into one of the plan's
+        three failure states, or 'ok' when it is not a takeover-eligible
+        failure at all.
+
+        Returns:
+            'lane_exhausted'     -- toestand 1: exhaustion with body (a
+                                     payment/quota code, or a permanent
+                                     not_executable refusal with a
+                                     provider-owned reason). Take over.
+            'unreadable_verdict' -- toestand 2: a response existed, the
+                                     verdict block did not parse. Abstain --
+                                     never take over.
+            'no_response'        -- toestand 3: a bare non-zero exit with no
+                                     body, or no signal at all. Never take
+                                     over.
+            'ok'                 -- a real terminal verdict (pass/fail), or a
+                                     not_executable refusal that is not a
+                                     provider reason (e.g. glm's pre-dlv1
+                                     "runner not shipped yet" refusal).
+                                     Dispatch normally.
+        """
+        status = result.get("status", "")
+        if status == "not_executable":
+            # A code-not-shipped refusal is not a provider outage -- taking
+            # over FROM a seat that was never real would misattribute cause.
+            if result.get("reason") == "gate_runner_missing":
+                return "ok"
+            return "lane_exhausted"
+        if status != "unavailable":
+            return "ok"
+        reason = result.get("reason", "")
+        if reason == "parse_error":
+            return "unreadable_verdict"
+        if reason == "no_verdict":
+            return "no_response"
+        # reason == "dispatch_error" (or an unrecognised reason): scan the
+        # RAW detail text for the provider's own exhaustion marker via the
+        # SAME classifier deliverable 0 built for the lane-log lift -- never
+        # a second hand-rolled marker scan, and never keyed on a parser-side
+        # msg field. Measured: 29 kimi cases carry
+        # msg='Expecting value: line 1' beside raw='Error code: 403'; a
+        # msg-keyed check reads toestand 2 while the raw body says toestand 1.
+        detail_text = " ".join(
+            str(result.get(key, "")) for key in ("residual_risk", "reason_detail", "summary")
+        ).strip()
+        if not detail_text:
+            return "no_response"
+        state, _snippet = _classify_lane_log_text(detail_text)
+        return "lane_exhausted" if state == "lane_exhausted" else "no_response"
+
+    def _stamp_takeover_annotations(
+        self,
+        payload: Dict[str, Any],
+        *,
+        pr_number: Optional[int],
+        takeover_from: str,
+        failure_reason: str,
+        takeover_reason: str,
+        takeover_source_status: str,
+    ) -> Dict[str, Any]:
+        """Annotate a fallback gate's payload with takeover provenance and
+        persist it into whichever on-disk record(s) ``_dispatch_one_review``
+        already wrote.
+
+        An annotation that lives only in the returned dict and never reaches
+        the file an operator or ``closure_verifier`` actually reads back is
+        evidence that exists and guards nothing (the OI-1178 lesson,
+        reapplied here) -- so both the request record and, when present, the
+        terminal result record are rewritten with the same annotation
+        fields. ``failure_reason`` is the CANONICAL reason field (#1666 /
+        OI-1415) -- never a one-off field name a generic receipt reader would
+        not recognise.
+
+        Both writes go through ``atomic_write_json`` (temp file in the same
+        directory + ``os.replace``), never a bare ``write_text``. These are
+        EVIDENCE files: a torn write here passes the existence check a reader
+        does first and only fails on the content it trusts -- worse than no
+        record at all, because it surfaces exactly when the record is
+        needed. Not suppressed with a `# vnx-atomic-write` marker: that
+        marker is for writes where a torn write is harmless, which a gate
+        evidence record is not.
+        """
+        gate = payload.get("gate", "")
+        annotations = {
+            "failure_reason": failure_reason,
+            "takeover": True,
+            "takeover_from": takeover_from,
+            "takeover_reason": takeover_reason,
+            "takeover_source_status": takeover_source_status,
+        }
+        payload.update(annotations)
+
+        if pr_number is not None:
+            request_file = self._request_path(gate, pr_number)
+            if request_file.exists():
+                atomic_write_json(request_file, payload)
+
+            result_file = self._result_path(gate, pr_number)
+            if result_file.exists():
+                try:
+                    result_payload = json.loads(result_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    result_payload = None
+                if result_payload is not None:
+                    result_payload.update(annotations)
+                    atomic_write_json(result_file, result_payload)
+        return payload
+
+    def _dispatch_review_seat(
+        self,
+        gate: str,
+        pr_number: int,
+        branch: str,
+        risk_class: str,
+        changed_files: List[str],
+        mode: str,
+        dispatch_id: str,
+    ) -> Dict[str, Any]:
+        """Dispatch one review-stack seat, taking over to the configured
+        fallback gate when the seat's last recorded result was toestand 1
+        (exhaustion with body). Overname happens on REQUEST-time -- decided
+        here, before issuing a new request -- never on attest-time (rewriting
+        an already-attested final verdict), since that would let evidence
+        change owners after the fact.
+
+        This is DELIBERATELY two rounds, not one: the decision reads the
+        LAST SAVED result, so a seat only gets filled on the request AFTER
+        the one that recorded its failure. A synchronous refusal (binary
+        missing) and an asynchronous one (quota 403 surfacing mid-execution)
+        would otherwise need two different in-round semantics to take over
+        immediately -- one round of latency is the price of a single,
+        uniform rule instead of two. Do not "fix" this into an in-round
+        takeover: the first round after a quota-death yields an
+        undecided/refused seat, the second round fills it, and that is the
+        intended behaviour, not a bug.
+        """
+        existing_result = self._read_existing_gate_result(gate, pr_number)
+        fallback_gate = _REVIEW_GATE_TAKEOVER_ORDER.get(gate)
+        if existing_result is None or fallback_gate is None:
+            return self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+
+        seat_state = self._classify_review_seat_failure(existing_result)
+        if seat_state != "lane_exhausted":
+            return self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+
+        payload = self._dispatch_one_review(
+            fallback_gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id,
+        )
+        failed_reason = existing_result.get("reason", "unknown_reason")
+        failed_detail = (
+            existing_result.get("reason_detail")
+            or existing_result.get("residual_risk")
+            or existing_result.get("summary")
+            or "no detail recorded"
+        )
+        # B3: the takeover annotation is a MANDATORY, never-empty field -- an
+        # empty reason here would make this a silent refusal, not a
+        # documented overname.
+        failure_reason = (
+            f"{gate} unavailable ({failed_reason}): {failed_detail} -- "
+            f"{fallback_gate} substituted as reader"
+        )
+        return self._stamp_takeover_annotations(
+            payload,
+            pr_number=pr_number,
+            takeover_from=gate,
+            failure_reason=failure_reason,
+            takeover_reason=failed_reason,
+            takeover_source_status=existing_result.get("status", ""),
+        )
+
     def request_reviews(
         self,
         *,
@@ -121,8 +331,15 @@ class GateRequestHandlerMixin:
         requested: List[Dict[str, Any]] = []
 
         for gate in review_stack_list:
-            payload = self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+            payload = self._dispatch_review_seat(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
             requested.append(payload)
+            receipt_fields: Dict[str, Any] = {}
+            if payload.get("takeover"):
+                # Top-level, in addition to the nested `request` payload, so
+                # a generic ledger reader finds the canonical reason field
+                # without knowing to look inside `request` (OI-1415).
+                receipt_fields["failure_reason"] = payload["failure_reason"]
+                receipt_fields["takeover_from"] = payload["takeover_from"]
             emit_governance_receipt(
                 "review_gate_request",
                 receipt_kind="review_gate",
@@ -137,6 +354,7 @@ class GateRequestHandlerMixin:
                 changed_files=changed_files,
                 request=payload,
                 dispatch_id=dispatch_id,
+                **receipt_fields,
             )
 
         return {
@@ -160,6 +378,14 @@ class GateRequestHandlerMixin:
         reason, detail = self._classify_unavailable(gate, binary_name)
         payload["reason"] = reason
         payload["reason_detail"] = detail
+        # OI-1415 (same fix as #1666 for phantom_guard/pr_enforcement): stamp
+        # the canonical failure_reason field with the SAME text as the
+        # lane-own reason_detail above -- a seat that refuses on its very
+        # first round (no prior recorded result, so `_dispatch_review_seat`
+        # never reaches the takeover branch) must still carry a reason a
+        # generic failure-reason reader can find, not only a lane-specific
+        # field name.
+        payload["failure_reason"] = detail
         payload["resolved_at"] = payload["requested_at"]
         self._write_not_executable_result(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
