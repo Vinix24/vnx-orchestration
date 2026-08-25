@@ -599,8 +599,17 @@ def _resolve_report_provider_model(
 #   "success"       -> fail-closed validation (OI-1035 et al.) must all pass
 #   "failure"       -> task_failed receipt (OI-1130), never a task_complete
 #   "ignorable"     -> no outcome signal, keeps pre-existing contract semantics
-#   "no_signal"     -> empty/absent status, keeps pre-existing contract semantics
+#   "no_signal"     -> status absent AND no usable exit_code fallback (OI-1408);
+#                      the written receipt still stamps status="no_signal",
+#                      never an empty string — see the receipt construction below
 #   anything else   -> refused as task_failed with failure_reason="unknown_status"
+#
+# OI-1408: an absent status is resolved BEFORE the categorization above by
+# falling back to the report's exit_code (required by schemas/unified_report_v1.
+# json, unlike status) — exit_code==0 -> "success", nonzero -> "failed". Only
+# when exit_code is ALSO absent/unparseable does a report fall through to
+# "no_signal". This derives the input to the one canonical mapping; it is not
+# a second mapping.
 
 
 def _check_branch_on_origin(dispatch_id: str) -> bool:
@@ -838,10 +847,6 @@ def build_receipt_from_report(
         or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
 
-    # Use "unknown" for task_id so the idempotency key aligns with what
-    # report_parser.py produces (it defaults task_id to "unknown").  This lets
-    # append_receipt_payload()'s rolling cache deduplicate same-cycle runs.
-
     # OI-989/OI-993: resolve the report path via the shared resolver instead
     # of blindly using the scanner's current path.  When the worker wrote
     # multiple files (e.g. <id>.md AND dispatch-<id>.md), the resolver picks
@@ -870,13 +875,27 @@ def build_receipt_from_report(
         # Receipt-quality PR-4: real role from dispatch_metadata via the
         # resolver; fail-open to identity_unresolved (never unknown / fake).
         "role": _resolve_report_role(dispatch_id, merged, state_dir),
-        "task_id": merged.get("task_id", "unknown"),
         "terminal": merged.get("terminal", "unknown"),
         "provider": _resolved_provider,
         "model": _resolved_model,
         "timestamp": timestamp,
         "report_path": canonical_report_path,
     }
+    # OI-1408: task_id is NOT part of the receipt_kind="dispatch" field
+    # contract (append_receipt_internals/validation.py::
+    # _validate_dispatch_field_contract). Measured across every dispatch
+    # receipt written since 16-08 (3903
+    # receipts): 3352 never carried the key at all, 551 carried the literal
+    # sentinel "unknown" this line used to stamp, and ZERO ever carried a
+    # real value — no emitter has ever had a task concept distinct from
+    # dispatch_id. Fabricating "unknown" every time is worse than omitting
+    # the key: it reads as data. Carry the field through ONLY when the
+    # report itself declares a real, non-sentinel value.
+    real_task_id = str(merged.get("task_id") or "").strip()
+    if real_task_id and real_task_id.lower() not in {
+        "unknown", "none", "null", "n/a", "na", "unset", "-",
+    }:
+        base["task_id"] = real_task_id
 
     # OI-1035 fail-closed gate: when the report claims a terminal success
     # status, all three validation checks must pass before a success receipt
@@ -885,6 +904,28 @@ def build_receipt_from_report(
     # "contract_invalid" bucket (which received 96 hits in 7 days and is
     # invisible to any alarm).
     status_raw = (merged.get("status") or "").strip().lower()
+    if not status_raw:
+        # OI-1408: schemas/unified_report_v1.json REQUIRES exit_code but never
+        # required status — a schema-valid v1 report can carry no status field
+        # at all (measured: 20260823-alpha-a1-ledger-health-cadans.md, exit_code:
+        # 0, no status key). Falling straight through to "no_signal" ignored an
+        # answer sitting two lines above the missing status. Derive the outcome
+        # from exit_code before treating the report as signal-less — this feeds
+        # the SAME canonical vocabulary below (resolve_status_category), not a
+        # second mapping.
+        exit_code_raw = merged.get("exit_code")
+        if exit_code_raw is not None:
+            try:
+                exit_code = int(str(exit_code_raw).strip())
+            except (TypeError, ValueError):
+                exit_code = None
+            if exit_code is not None:
+                status_raw = "success" if exit_code == 0 else "failed"
+                logger.info(
+                    "report_to_receipt_converter: dispatch=%s no status field — "
+                    "derived status=%r from exit_code=%d",
+                    dispatch_id, status_raw, exit_code,
+                )
     try:
         status_category = resolve_status_category(status_raw)
     except UnknownStatusError:
@@ -981,10 +1022,15 @@ def build_receipt_from_report(
             ] if resolved is not None else []
         return receipt_out
 
+    # OI-1408: even with the exit_code fallback above, a report can still
+    # carry neither status nor a parseable exit_code — genuinely no signal.
+    # That residual case must still land with a readable outcome on the line
+    # that hits disk, never an empty string (the OI-1382/1383 gap moved from
+    # "no row" to "a row with no outcome"; this closes the second move).
     receipt: Dict[str, Any] = {
         **base,
         "event_type": "task_complete",
-        "status": status_raw,
+        "status": status_raw or "no_signal",
     }
     if ambiguous_report:
         receipt["ambiguous_report_path"] = True
