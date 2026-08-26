@@ -1240,20 +1240,132 @@ def _extract_normalized_findings_section(content: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _count_report_blocking_indicators(content: str) -> int:
-    """Count blocking-severity indicators in a normalized report.
+# Matches a gate report's own trailing verdict fence — the SAME shape
+# glm_gate._extract_verdict / kimi_gate._extract_verdict parse (OI-1473).
+# Kept as its own copy for the same reason those two don't share one: each
+# reader stays self-contained, but the RULE must never diverge.
+_VERDICT_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+_FENCE_VALID_VERDICTS = frozenset({"pass", "fail", "blocked", "block"})
+_FENCE_BLOCKING_SEVERITIES = frozenset({"blocking", "error"})
 
-    Looks for patterns that indicate blocking findings in headless review reports.
+
+def _extract_report_verdict_fence(content: str) -> Optional[Dict[str, Any]]:
+    """Return the report's own trailing ```json``` verdict fence as a dict.
+
+    Scans fenced JSON blocks from the END of the document and returns the
+    first one (i.e. the LAST fence in the report) whose ``verdict`` field is
+    a real verdict value — mirroring glm_gate/kimi_gate's own
+    ``_extract_verdict``, so a review-gate report and the gate script that
+    produced it can never read two different "actual answers" out of the
+    same text. This also means an echoed instruction template earlier in the
+    report (whose ``verdict`` field is the literal placeholder
+    "pass|fail|blocked") is skipped exactly like it is at the gate script
+    itself, never mistaken for a real verdict here.
+
+    Returns None when no such fence exists — the caller falls back to the
+    normalized ``## Findings`` section, then the prose scan.
+    """
+    for block in reversed(_VERDICT_FENCE_RE.findall(content or "")):
+        try:
+            obj = json.loads(block)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and str(obj.get("verdict", "")).strip().lower() in _FENCE_VALID_VERDICTS:
+            return obj
+    return None
+
+
+def _count_fence_blocking_indicators(fence: Dict[str, Any]) -> int:
+    """Count blocking-severity indicators in an already-parsed verdict fence.
+
+    Reads two STRUCTURED fields, never prose: the fence's own ``verdict``
+    (non-pass counts once) and each ``findings[]`` entry's ``severity``
+    field (``blocking``/``error`` counts once each). A finding's free-text
+    ``message`` is never scanned — that is exactly the loose-word matching
+    this invariant must not do (OI-1473).
+    """
+    count = 0
+    verdict = str(fence.get("verdict", "")).strip().lower()
+    if verdict and verdict != "pass":
+        count += 1
+    findings = fence.get("findings")
+    if isinstance(findings, list):
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            severity = str(finding.get("severity", "")).strip().lower()
+            if severity in _FENCE_BLOCKING_SEVERITIES:
+                count += 1
+    return count
+
+
+# Negation markers that flip a blocking-shaped word into its own denial — a
+# reviewer writing "Not blocking: ..." or "niet-blocking" is asserting the
+# ABSENCE of a blocking finding, and a scan that flags the denial punishes
+# the more precise report (OI-1473, live on PR #1691). Checked against the
+# few characters immediately preceding a match, case-insensitively.
+_NEGATION_MARKERS = ("niet-", "non-", "no ", "not ", "geen ")
+_NEGATION_LOOKBACK = 15
+
+# Structural severity-field markers: each requires the literal field prefix
+# the report writers emit (gate_artifacts._format_findings_section's
+# "[BLOCKING]"/"(severity: ...)" shapes), never a bare word in prose. Safe to
+# scan within a normalized ``## Findings`` section on its own.
+_FINDINGS_SECTION_PATTERNS = (
+    r"\[BLOCKING\]",
+    r"\*\*Severity\*\*:\s*blocking",
+    r"severity:\s*blocking",
+)
+
+# Vangnet patterns for reports with neither a verdict fence nor a normalized
+# findings section — the same field markers above, plus two looser prose
+# markers that only apply as a last resort.
+_PROSE_FALLBACK_PATTERNS = _FINDINGS_SECTION_PATTERNS + (
+    r"BLOCK(?:ER|ING)\s*:",
+    r"Status:\s*FAIL",
+)
+
+
+def _count_matches_excluding_negations(patterns: Sequence[str], text: str) -> int:
+    """Count regex matches across *patterns* in *text*, skipping any match
+    immediately preceded by a negation marker (see ``_NEGATION_MARKERS``)."""
+    count = 0
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            window_start = max(0, match.start() - _NEGATION_LOOKBACK)
+            preceding = text[window_start:match.start()].lower()
+            if any(marker in preceding for marker in _NEGATION_MARKERS):
+                continue
+            count += 1
+    return count
+
+
+def _count_report_blocking_indicators(content: str) -> int:
+    """Count blocking-severity indicators in a gate report, on STRUCTURED
+    evidence wherever it exists — never a loose word in prose (OI-1473).
+
     Excludes lines written by the closure verifier itself (``- [FAIL] ...``)
     to prevent a self-reference loop where the verifier's own output is
-    counted as a blocking indicator on re-read.
+    counted as a blocking indicator on re-read. Three tiers, each used only
+    when the previous one found nothing to read a verdict from:
 
-    When the report carries a normalized ``## Findings`` section (see
-    ``_extract_normalized_findings_section``), only that section is scanned —
-    never the raw tool-output transcript that follows it, which can contain
-    read-but-not-judged source text that happens to match these patterns
-    (OI-1394). Reports without such a section fall back to a full-content
-    scan, matching prior behavior.
+    1. Primary — the report's own trailing ```json``` verdict fence (see
+       ``_extract_report_verdict_fence``): a contradiction is the fence's
+       ``verdict`` being non-pass, or any ``findings[]`` entry carrying
+       severity ``blocking``/``error``. When a fence exists, it is
+       authoritative — the count it produces is returned as-is, even 0.
+    2. Secondary — the normalized ``## Findings`` section (see
+       ``_extract_normalized_findings_section``), scanned for structural
+       severity-field markers only (``_FINDINGS_SECTION_PATTERNS``). Also
+       authoritative when present, even 0.
+    3. Vangnet — neither of the above exists: a full-content prose scan
+       (``_PROSE_FALLBACK_PATTERNS``) that skips any match preceded by a
+       negation marker, so "Not blocking: ..." / "niet-blocking" cannot
+       trip a contradiction a reviewer explicitly ruled out.
+
+    A report with no fence, no findings section, and no vangnet match is
+    genuinely silent on blocking evidence — that is an absence of evidence,
+    not evidence of contradiction, so it returns 0 (fail-open by design).
     """
     filtered_lines = [
         line for line in content.splitlines()
@@ -1261,20 +1373,15 @@ def _count_report_blocking_indicators(content: str) -> int:
     ]
     filtered = "\n".join(filtered_lines)
 
-    findings_section = _extract_normalized_findings_section(filtered)
-    scan_target = findings_section if findings_section is not None else filtered
+    fence = _extract_report_verdict_fence(filtered)
+    if fence is not None:
+        return _count_fence_blocking_indicators(fence)
 
-    count = 0
-    blocking_patterns = [
-        r"\[BLOCKING\]",
-        r"\*\*Severity\*\*:\s*blocking",
-        r"severity:\s*blocking",
-        r"BLOCK(?:ER|ING)\s*:",
-        r"Status:\s*FAIL",
-    ]
-    for pattern in blocking_patterns:
-        count += len(re.findall(pattern, scan_target, re.IGNORECASE))
-    return count
+    findings_section = _extract_normalized_findings_section(filtered)
+    if findings_section is not None:
+        return _count_matches_excluding_negations(_FINDINGS_SECTION_PATTERNS, findings_section)
+
+    return _count_matches_excluding_negations(_PROSE_FALLBACK_PATTERNS, filtered)
 
 
 def verify_closure(
