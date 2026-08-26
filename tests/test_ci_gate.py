@@ -674,8 +674,15 @@ def test_default_review_stack_includes_ci_gate_when_required(monkeypatch):
 def test_default_review_stack_control_case_gemini_codex_combo_unchanged(monkeypatch):
     """Control case (dispatch 20260823-beta2-e): with no config override, the
     existing gemini_review + codex_gate + claude_github_optional combination
-    must come back byte-for-byte unchanged."""
-    monkeypatch.delenv("VNX_CI_GATE_REQUIRED", raising=False)
+    must come back byte-for-byte unchanged.
+
+    VNX_CI_GATE_REQUIRED is pinned to "0" (not delenv'd) since OI-1385 flipped its
+    registry default to "1": this test measures the BASE stack composition, not
+    ci_gate's own default, so it must isolate that axis explicitly or it starts
+    asserting a gemini/codex/claude_github_optional-only stack that no longer
+    matches the wired default.
+    """
+    monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
     import review_gate_manager as rgm
     stack = rgm._build_default_review_stack()
@@ -685,9 +692,15 @@ def test_default_review_stack_control_case_gemini_codex_combo_unchanged(monkeypa
 def test_default_review_stack_is_config_driven_not_hardcoded(monkeypatch):
     """OPERATOR-BESLUIT 23-08: kimi_gate/glm_gate must be reachable as the
     default review stack via config alone — no edit to
-    _build_default_review_stack() required."""
+    _build_default_review_stack() required.
+
+    VNX_CI_GATE_REQUIRED is pinned to "0" (not delenv'd) since OI-1385 flipped its
+    registry default to "1": this test measures whether VNX_DEFAULT_REVIEW_STACK
+    is honored verbatim, so ci_gate's independent default-on append must be
+    isolated out or it would silently ride along on every stack this test builds.
+    """
     monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate,glm_gate")
-    monkeypatch.delenv("VNX_CI_GATE_REQUIRED", raising=False)
+    monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     import review_gate_manager as rgm
     stack = rgm._build_default_review_stack()
     assert stack == ["kimi_gate", "glm_gate"]
