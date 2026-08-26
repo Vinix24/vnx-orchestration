@@ -7,10 +7,20 @@ reads the registry directly rather than shelling out to the CLI):
 
   (a) ``config_registry.CONFIG_REGISTRY`` — flag-backed subsystems. Several flags can share one
       subsystem (e.g. every intelligence-tuning flag maps to ``intelligence-self-learning-loop``);
-      the LAST-inserted flag per subsystem is shown as that row's canonical ``flag`` (PR-2's net-new
-      master-switch flags are appended after the pre-existing tuning flags they group).
+      the row's canonical ``flag`` is picked by ``config_registry.canonical_flags()`` (OI-1385) —
+      an EXPLICIT, order-independent rule (a flag with no production read-site can never win; a
+      multi-candidate subsystem needs exactly one flag marked ``cockpit_canonical=True``), not
+      "whichever entry CONFIG_REGISTRY iterates last".
   (b) ``config_registry.CONFIG_REGISTRY_SUBSYSTEMS`` — flag-less kernel subsystems (``phantom_guard``,
       ``dispatch-plan``, ...). Disjoint from (a) by construction (config_registry.py docstring).
+
+``governance-enforcement-stack``'s row is a further exception (OI-1385): its ``effective_value``
+is read directly from ``.vnx/governance_enforcement.yaml`` (via
+``governance_enforcement_effective_value()``), not from its canonical flag's registry value — that
+subsystem is governed by multi-level YAML checks, and the flag that used to be canonical here had
+zero production read-sites (see its ``read_site_wired`` entry in config_registry.py); showing its
+static default read as "parked" while the YAML ran hard-mandatory checks
+(``docs/core/framework-status-audit-and-cockpit_PRD.md:89``).
 
 HEALTH is read-only from ``health_beacon.all_beacons(data_dir)`` — the beacon root is
 ``VNX_DATA_DIR`` (health_beacon writes/reads under ``VNX_DATA_DIR/health``), NOT ``VNX_STATE_DIR``.
@@ -37,6 +47,10 @@ _SUB_SCRIPTS_LIB = str(VNX_DIR / "scripts" / "lib")
 if _SUB_SCRIPTS_LIB not in sys.path:
     sys.path.insert(0, _SUB_SCRIPTS_LIB)
 
+# The real governance-enforcement-stack afdwingniveau source (OI-1385) — read-only, never
+# written by this module. Matches governance_enforcer.DEFAULT_CONFIG_PATH's own derivation.
+_GOVERNANCE_ENFORCEMENT_YAML = VNX_DIR / ".vnx" / "governance_enforcement.yaml"
+
 try:
     import config_registry as _cr  # type: ignore[import]
     _REGISTRY_AVAILABLE = True
@@ -55,14 +69,44 @@ def _now() -> str:
 def _canonical_flags(cr) -> Dict[str, str]:
     """subsystem -> the one flag key shown as the row's canonical ``flag``.
 
-    CONFIG_REGISTRY is insertion-ordered; when several flags share a subsystem the LAST-inserted
-    one wins, matching ``vnx_cli/commands/subsystems.py``'s row-building convention.
+    Delegates to ``config_registry.canonical_flags()`` (OI-1385) — the explicit,
+    order-independent selection rule now lives there as the single source of truth so it can be
+    reused by other consumers of ``CONFIG_REGISTRY`` (e.g. ``vnx_cli/commands/subsystems.py``)
+    instead of re-deriving it. ``cr`` stays a parameter (rather than a bare module-level call)
+    so tests can inject a substitute registry module.
     """
-    canonical: Dict[str, str] = {}
-    for key, entry in cr.CONFIG_REGISTRY.items():
-        if entry.subsystem:
-            canonical[entry.subsystem] = key
-    return canonical
+    return cr.canonical_flags()
+
+
+# The one subsystem whose row's effective_value must NOT come from a CONFIG_REGISTRY bool at
+# all (OI-1385): governance-enforcement-stack is governed by multi-level checks in
+# .vnx/governance_enforcement.yaml, not a single on/off flag, and the flag that used to win
+# canonical selection here has zero production read-sites (config_registry.py:
+# read_site_wired=False). Showing its static default -- '0' -- read as "enforcement is parked"
+# while the yaml ran hard-mandatory checks (framework-status-audit-and-cockpit_PRD.md:89
+# predicted exactly this drift).
+_YAML_SOURCED_SUBSYSTEMS = frozenset({"governance-enforcement-stack"})
+
+
+def governance_enforcement_effective_value(config_path: Path) -> str:
+    """Read-only ``"<mode>:<max_check_level>"`` summary of governance_enforcement.yaml.
+
+    Never returns the registry's stale static bool. Returns the explicit sentinel "unknown" —
+    never a silent "0" -- when the file is missing, unreadable, or malformed: an unknown
+    enforcement level must never read as "off".
+    """
+    try:
+        import governance_enforcer as _ge
+        enforcer = _ge.GovernanceEnforcer()
+        enforcer.load_config(config_path)
+        summary = enforcer.effective_summary()
+        return f"{summary['mode']}:{summary['max_level']}"
+    except Exception:
+        _logger.warning(
+            "governance_enforcement.yaml at %s unreadable; reporting unknown effective value",
+            config_path, exc_info=True,
+        )
+        return "unknown"
 
 
 def build_rows(cr, project_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -82,12 +126,16 @@ def build_rows(cr, project_id: Optional[str]) -> List[Dict[str, Any]]:
 
     for subsystem, flag_key in _canonical_flags(cr).items():
         entry = cr.CONFIG_REGISTRY[flag_key]
+        if subsystem in _YAML_SOURCED_SUBSYSTEMS:
+            effective_value = governance_enforcement_effective_value(_GOVERNANCE_ENFORCEMENT_YAML)
+        else:
+            effective_value = cr.get(flag_key, project_id)
         rows.append({
             "subsystem": subsystem,
             "what": entry.description,
             "flag": flag_key,
             "status": entry.status or "COCKPIT",
-            "effective_value": cr.get(flag_key, project_id),
+            "effective_value": effective_value,
         })
 
     rows.sort(key=lambda r: r["subsystem"])
@@ -127,4 +175,4 @@ def operator_get_subsystems(params: dict, *, project_id: "str | None" = None) ->
     return {"project_id": pid, "subsystems": rows, "queried_at": _now()}, 200
 
 
-__all__ = ["operator_get_subsystems", "build_rows"]
+__all__ = ["operator_get_subsystems", "build_rows", "governance_enforcement_effective_value"]

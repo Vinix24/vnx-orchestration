@@ -10,8 +10,12 @@ pins (VNX_CODEX_MODEL…), timeouts, internal plumbing, and the `VNX_OVERRIDE_*`
 are deliberately OUT: they stay env-only and are never UI-settable.
 
 DEFAULTS MIRROR THE CURRENT CODE. Every default here is the literal fallback the read-site uses
-today (e.g. `VNX_CI_GATE_REQUIRED` defaults to "0" — off — exactly as `review_gate_manager.py`
-reads it). Changing a default here must never change runtime behaviour vs the env-only world.
+today. Most feature toggles below default "0" (off); `VNX_CI_GATE_REQUIRED` is the exception,
+activated "0" -> "1" on 23-08 (OI-1385) once its 5-read-site enforcement chain was proven live
+(PR #1628) and the obligation-runner's bounded-pending handling for a temporarily-unavailable
+gate was confirmed on main. Changing a default here changes runtime behaviour for any read-site
+consulting it with no env/DB override set — that is the intended mechanism for a deliberate
+activation like this one, not an accident to guard against.
 
 Precedence (highest first), implemented by `get()`:
   1. ``VNX_OVERRIDE_<BARE>`` env var — the operator emergency brake (e.g. VNX_OVERRIDE_SCOUT_PREPASS).
@@ -51,12 +55,22 @@ class ConfigEntry:
     planned: bool = False  # exists in the registry/UI but not yet a live runtime flag
     subsystem: Optional[str] = None  # cockpit MAP grouping — display metadata only
     status: Optional[str] = None  # one of ALLOWED_STATUSES — display metadata only
+    # OI-1385: the cockpit's canonical-flag-per-subsystem selection (canonical_flags()
+    # below) must be an EXPLICIT decision, not "whichever entry is last in this dict".
+    # read_site_wired=False means NO production code consults this flag (a fact, not a
+    # display opinion) — such an entry can never be its subsystem's canonical flag,
+    # structurally, so a flag that later gains a real read-site becomes eligible again
+    # without touching any selection logic. cockpit_canonical=True is the tie-breaker
+    # when a subsystem has more than one read_site_wired entry; exactly one must be set,
+    # or canonical_flags() raises rather than silently picking by dict order.
+    read_site_wired: bool = True
+    cockpit_canonical: bool = False
 
 
 def _e(key, type_, default, category, description, *, writable=True, approval=False, planned=False,
-       subsystem=None, status=None):
+       subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False):
     return ConfigEntry(key, type_, default, category, description, writable, approval, planned,
-                        subsystem, status)
+                        subsystem, status, read_site_wired, cockpit_canonical)
 
 
 # The inventory. Defaults verified against the read-sites (codex review finding: defaults must
@@ -107,12 +121,20 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_CI_GATE_REQUIRED": _e(
-        "VNX_CI_GATE_REQUIRED", "bool", "0", "gate",
+        "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,
-        subsystem="governance-enforcement-stack", status="PARK"),
+        subsystem="governance-enforcement-stack", status="ACTIVATE",
+        cockpit_canonical=True),
     "VNX_WIRING_GATE_REQUIRED": _e(
         "VNX_WIRING_GATE_REQUIRED", "bool", "0", "gate",
-        "Require the wiring gate.", approval=True,
+        "Require the wiring gate. Shadow mode (0) is a deliberate decision, not an "
+        "oversight (OI-1385): wiring_gate sits on "
+        "closure_verifier._GATES_NOT_IMPLEMENTED_BY_CLOSURE, so the closure verifier "
+        "cannot honestly attest its evidence yet -- promoting to required would let a "
+        "gate produce blocking findings that no sluitingscontrole can verify. Revisit "
+        "when wiring_gate is promoted off that list (pinned by "
+        "test_wiring_gate_shadow_mode_decision_tied_to_closure_verifier_exclusion).",
+        approval=True,
         subsystem="governance-enforcement-stack", status="PARK"),
     "VNX_EVIDENCE_BOUND_GATE": _e(
         "VNX_EVIDENCE_BOUND_GATE", "enum", "advisory", "gate",
@@ -145,13 +167,23 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     # already existed before this PR (backfilled with subsystem/status in PR-1) and are NOT re-added.
     "VNX_GOVERNANCE_ENFORCED": _e(
         "VNX_GOVERNANCE_ENFORCED", "bool", "0", "gate",
-        "Governance-enforcement-stack master switch (display metadata only; no read-site wired).",
+        "Governance-enforcement-stack master switch (display metadata only; no read-site "
+        "wired -- measured 23-08, OI-1385: sweep of the repo outside .git/.vnx-data finds "
+        "only the definition below, test files, and docs). read_site_wired=False so this "
+        "entry can never win canonical_flags() for its subsystem no matter where it sits "
+        "in this dict; VNX_CI_GATE_REQUIRED is the real, wired flag for "
+        "governance-enforcement-stack.",
         approval=True,
-        subsystem="governance-enforcement-stack", status="PARK"),
+        subsystem="governance-enforcement-stack", status="PARK",
+        read_site_wired=False),
     "VNX_LEARNING_LOOP_ENABLED": _e(
         "VNX_LEARNING_LOOP_ENABLED", "bool", "0", "intelligence",
         "Daily pattern learning / skill refinement / confidence-update loop.",
-        subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE",
+        # Explicit canonical pick among this subsystem's 6 flags (OI-1385): preserves the
+        # pre-existing last-wins winner now that canonical_flags() no longer picks by dict
+        # order. Not re-audited by this dispatch — out of scope.
+        cockpit_canonical=True),
     "VNX_DREAM_SCHEDULER_ENABLED": _e(
         "VNX_DREAM_SCHEDULER_ENABLED", "bool", "0", "intelligence",
         "Nightly memory consolidation + pending review dispatch.",
@@ -167,7 +199,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "the current filename-only record_adoption_from_receipt behavior (no new reads/writes). "
         "Prerequisite instrumentation for the reason-aware evaluator (PR-B); does not itself "
         "activate the learning loop.",
-        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
+        # this subsystem's 2 flags. Not re-audited by this dispatch — out of scope.
+        cockpit_canonical=True),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
         "Restrict the plan-gate panel to complex features: a LIGHT-scope plan "
@@ -220,7 +255,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_SMART_ROUTER_CANARY_PCT", "string", "0", "dispatch",
         "Canary fraction (0-100) of an enabled tier's traffic routed via the smart "
         "router; the rest follows the legacy path. Deterministic per dispatch.",
-        subsystem="smart-router-staging", status="LIVE"),
+        subsystem="smart-router-staging", status="LIVE",
+        # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
+        # this subsystem's 5 flags. Not re-audited by this dispatch — out of scope.
+        cockpit_canonical=True),
 
     # Operator directive 2026-08-21 (dispatch-20260821-t0-tmux-concurrency-10): the
     # claude-tmux N-slot lock's concurrency cap, raised from 5 to 10 and made
@@ -376,3 +414,53 @@ def all_effective(project_id: Optional[str] = None) -> List[dict]:
             "status": entry.status,
         })
     return out
+
+
+def canonical_flags(registry: Optional[Dict[str, ConfigEntry]] = None) -> Dict[str, str]:
+    """subsystem -> the one CONFIG_REGISTRY key shown as the cockpit row's canonical ``flag``.
+
+    OI-1385: selection is EXPLICIT, not "whichever entry CONFIG_REGISTRY happens to iterate
+    last" — that insertion-order rule let a flag with zero production read-sites
+    (VNX_GOVERNANCE_ENFORCED) win over real, wired flags purely by dict placement, and the
+    cockpit showed its static "0" as the entire governance-enforcement-stack's afdwingniveau
+    while the real enforcement source (.vnx/governance_enforcement.yaml) ran mandatory checks.
+
+    Per subsystem:
+      - entries with ``read_site_wired=False`` are never eligible (a structural exclusion via
+        the entry's own property, not a name check in this function — a flag that later gains
+        a real read-site becomes eligible again automatically).
+      - exactly one eligible entry -> that entry wins, regardless of dict order.
+      - more than one eligible entry -> exactly one of them must carry
+        ``cockpit_canonical=True`` as the explicit tie-breaker; zero or more than one raises
+        ValueError rather than silently picking one (order-independent: reversing the dict's
+        insertion order never changes the winner).
+
+    ``registry`` defaults to this module's CONFIG_REGISTRY; a caller may pass a substitute dict
+    of ConfigEntry for testing the selection rule in isolation.
+    """
+    reg = CONFIG_REGISTRY if registry is None else registry
+    by_subsystem: Dict[str, List[str]] = {}
+    for key, entry in reg.items():
+        if entry.subsystem:
+            by_subsystem.setdefault(entry.subsystem, []).append(key)
+
+    canonical: Dict[str, str] = {}
+    for subsystem, keys in by_subsystem.items():
+        eligible = [k for k in keys if reg[k].read_site_wired]
+        if not eligible:
+            raise ValueError(
+                f"subsystem {subsystem!r} has no read_site_wired CONFIG_REGISTRY entry among "
+                f"{keys} -- the cockpit cannot show a canonical flag for it"
+            )
+        if len(eligible) == 1:
+            canonical[subsystem] = eligible[0]
+            continue
+        marked = [k for k in eligible if reg[k].cockpit_canonical]
+        if len(marked) != 1:
+            raise ValueError(
+                f"subsystem {subsystem!r} has {len(eligible)} read_site_wired candidates "
+                f"{eligible} but {len(marked)} marked cockpit_canonical=True -- exactly one "
+                "must be explicit"
+            )
+        canonical[subsystem] = marked[0]
+    return canonical
