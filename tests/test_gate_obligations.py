@@ -48,6 +48,7 @@ from gate_obligations import (
     STATUS_RETIRED,
     STATUS_UNRESOLVABLE,
     TERMINAL_STATUSES,
+    check_gate_requirement_mismatch,
     obligation_path,
     pr_number_from_pr_id,
     register_obligation,
@@ -195,6 +196,87 @@ def test_door_registers_obligation_for_declared_gate(tmp_path, monkeypatch):
     assert record["dispatch_id"] == "20260731-oi876-declared-gate"
 
 
+def test_door_stamps_gate_requirement_resolution_on_registration(tmp_path, monkeypatch):
+    """OI-1462: the door (the eiser) must snapshot its OWN resolution of
+    VNX_CI_GATE_REQUIRED into the obligation record at registration time, so
+    a fulfiller running later in a different environment can be checked
+    against it (gate_obligations.check_gate_requirement_mismatch)."""
+    import config_runtime
+
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260826-staging-oi1462-resolution",
+        dispatch_id="20260826-oi1462-resolution",
+        gate="ci_gate",
+    )
+    _make_state_dir(tmp_path)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    real_get_bool = config_runtime.get_bool
+    monkeypatch.setattr(
+        config_runtime, "get_bool",
+        lambda key: True if key == "VNX_CI_GATE_REQUIRED" else real_get_bool(key),
+    )
+
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        rc = run_dispatch(spec_file)
+    assert rc == 0
+
+    record = _read_obligation(data_dir / "state", "20260826-oi1462-resolution")
+    assert record["gate_requirement_resolution"] == {
+        "status": "captured", "flags": {"VNX_CI_GATE_REQUIRED": True}, "error": None,
+    }
+
+
+def test_door_stamps_capture_failure_as_a_distinct_state_not_none(tmp_path, monkeypatch, caplog):
+    """OI-1462 residu (Codex-gate finding on this exact obligation mechanism):
+    when the door's OWN flag-resolution snapshot fails, that must land in the
+    record as an explicit ``status="failed"`` -- a THIRD state, never
+    collapsed into the same ``None`` a caller-never-attempted record would
+    carry. Also: the failure must be logged loudly (with the dispatch_id),
+    never swallowed silently."""
+    import logging
+
+    import config_runtime
+
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260826-staging-oi1462-capture-fail",
+        dispatch_id="20260826-oi1462-capture-fail",
+        gate="ci_gate",
+    )
+    _make_state_dir(tmp_path)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    real_get_bool = config_runtime.get_bool
+
+    def _boom(key):
+        if key == "VNX_CI_GATE_REQUIRED":
+            raise RuntimeError("config store unreachable")
+        return real_get_bool(key)
+
+    monkeypatch.setattr(config_runtime, "get_bool", _boom)
+
+    with patch("dispatch_cli._execute_claude", return_value=0), \
+         caplog.at_level(logging.WARNING, logger="dispatch_cli"):
+        rc = run_dispatch(spec_file)
+    assert rc == 0
+
+    record = _read_obligation(data_dir / "state", "20260826-oi1462-capture-fail")
+    resolution = record["gate_requirement_resolution"]
+    assert resolution["status"] == "failed", (
+        f"a broken flag-read must be recorded as failed, not silently as "
+        f"None (indistinguishable from 'never attempted'): {resolution}"
+    )
+    assert resolution["flags"] is None
+    assert "config store unreachable" in resolution["error"]
+    assert any(
+        "20260826-oi1462-capture-fail" in rec.message and "gate_requirement_resolution" in rec.message
+        for rec in caplog.records
+    ), "the capture failure must be logged loudly, with the dispatch_id, not swallowed silently"
+
+
 def test_door_without_declared_gate_derives_obligation(tmp_path, monkeypatch):
     """Punt 7 (gate-weight-by-variant): a silent spec now derives a gate.
 
@@ -274,6 +356,120 @@ def test_register_obligation_never_resets_fulfilled(tmp_path):
     assert again == path
     assert _read_obligation(state_dir, "d-1")["status"] == STATUS_FULFILLED, (
         "a retry/fix-forward must never reset a fulfilled obligation to pending"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OI-1462: gate_requirement_resolution stamp + cross-process mismatch check.
+# ---------------------------------------------------------------------------
+
+
+def test_register_obligation_stamps_gate_requirement_resolution(tmp_path):
+    state_dir = _make_state_dir(tmp_path)
+    resolution = {"status": "captured", "flags": {"VNX_CI_GATE_REQUIRED": True}, "error": None}
+    path = register_obligation(
+        state_dir, dispatch_id="d-resolution", gate="ci_gate", project_id="vnx-dev",
+        gate_requirement_resolution=resolution,
+    )
+    record = _read_obligation(state_dir, "d-resolution")
+    assert record["gate_requirement_resolution"] == resolution
+
+
+def test_register_obligation_without_resolution_defaults_to_none(tmp_path):
+    """A caller that never captures a resolution (or an old codepath) must
+    stamp None, never fabricate a value -- absent is UNKNOWN, not "off"."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(state_dir, dispatch_id="d-no-resolution", gate="codex_gate")
+    record = _read_obligation(state_dir, "d-no-resolution")
+    assert record["gate_requirement_resolution"] is None
+
+
+# ---------------------------------------------------------------------------
+# check_gate_requirement_mismatch: three input buckets, three distinct
+# answers -- (a) never attempted, (b) attempted and FAILED, (c) captured a
+# real value. Collapsing (a) and (b) into the same None was itself an
+# OI-1462-shaped bug (a Codex-gate finding on this very mechanism): a broken
+# flag-read at the writer must never look identical to "nobody ever asked".
+# ---------------------------------------------------------------------------
+
+
+def test_check_gate_requirement_mismatch_flags_divergence():
+    """Bucket (c): both sides captured a real value, and they differ."""
+    record = {
+        "gate_requirement_resolution": {
+            "status": "captured", "flags": {"VNX_CI_GATE_REQUIRED": True}, "error": None,
+        },
+    }
+    mismatch = check_gate_requirement_mismatch(
+        record, flag="VNX_CI_GATE_REQUIRED", reader_value=False,
+    )
+    assert mismatch == {
+        "flag": "VNX_CI_GATE_REQUIRED",
+        "kind": "value_mismatch",
+        "writer_value": True,
+        "reader_value": False,
+        "detected_at": mismatch["detected_at"],
+    }
+
+
+def test_check_gate_requirement_mismatch_agrees_when_values_match():
+    """Bucket (c), agreement case: no finding."""
+    record = {
+        "gate_requirement_resolution": {
+            "status": "captured", "flags": {"VNX_CI_GATE_REQUIRED": True}, "error": None,
+        },
+    }
+    assert check_gate_requirement_mismatch(
+        record, flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    ) is None
+
+
+def test_check_gate_requirement_mismatch_absent_resolution_is_unknown_not_mismatch():
+    """Bucket (a): a record predating this field, one whose resolution never
+    captured this flag, or a resolution with no recognised status must read
+    as UNKNOWN -- never as a manufactured mismatch and never as a false
+    agreement."""
+    assert check_gate_requirement_mismatch(
+        {}, flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    ) is None
+    assert check_gate_requirement_mismatch(
+        {"gate_requirement_resolution": {
+            "status": "captured", "flags": {"OTHER_FLAG": True}, "error": None,
+        }},
+        flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    ) is None
+    assert check_gate_requirement_mismatch(
+        {"gate_requirement_resolution": {"status": "unrecognised_future_status"}},
+        flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    ) is None
+
+
+def test_check_gate_requirement_mismatch_writer_capture_failed_is_a_distinct_loud_finding():
+    """Bucket (b) -- THE point of the three-bucket fix: when the writer's OWN
+    flag-read broke (status="failed"), that must NOT read as bucket (a)
+    (nothing to see) -- the function must return a real, distinct finding
+    that says something concrete: capture failed, for this reason, so the
+    obligation's requirement was never reliably established. This is what an
+    earlier version of this fix got wrong by collapsing "failed" into None."""
+    record = {
+        "gate_requirement_resolution": {
+            "status": "failed", "flags": None, "error": "RuntimeError: config store unreachable",
+        },
+    }
+    finding = check_gate_requirement_mismatch(
+        record, flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    )
+    assert finding is not None, (
+        "a writer capture FAILURE must produce a real finding, not the same "
+        "None a never-attempted resolution would produce"
+    )
+    assert finding["kind"] == "writer_capture_failed"
+    assert finding["flag"] == "VNX_CI_GATE_REQUIRED"
+    assert "config store unreachable" in finding["writer_error"]
+    # Distinguishable from bucket (a) by construction: bucket (a) always
+    # returns bare None, never a dict.
+    assert finding != check_gate_requirement_mismatch(
+        {}, flag="VNX_CI_GATE_REQUIRED", reader_value=True,
     )
 
 

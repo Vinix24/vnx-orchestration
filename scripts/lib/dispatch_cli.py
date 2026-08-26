@@ -1200,6 +1200,31 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
                 ),
             )
             return
+        # OI-1462: stamp what THIS process (the eiser) resolved for the
+        # gate-requirement flags at registration time, so a fulfiller running
+        # later in a different environment can be checked against it
+        # (gate_obligations.check_gate_requirement_mismatch) instead of the
+        # two sides silently disagreeing. A capture FAILURE is a distinct,
+        # loud state (status="failed") -- never collapsed into "never
+        # attempted" (None), which would blind check_gate_requirement_mismatch
+        # to exactly the broken-read scenario OI-1462 exists to catch.
+        try:
+            import config_runtime
+            gate_requirement_resolution = {
+                "status": "captured",
+                "flags": {"VNX_CI_GATE_REQUIRED": config_runtime.get_bool("VNX_CI_GATE_REQUIRED")},
+                "error": None,
+            }
+        except Exception as exc:  # vnx-silent-except: obligation registration must never block the door on a config-read failure; the failure is captured as an explicit, loud "failed" state below, never swallowed silently
+            logger.warning(
+                "[dispatch_cli] gate_requirement_resolution capture failed for dispatch=%s: %s",
+                spec.dispatch_id, exc,
+            )
+            gate_requirement_resolution = {
+                "status": "failed",
+                "flags": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         register_obligation(
             state_dir,
             dispatch_id=spec.dispatch_id,
@@ -1207,6 +1232,7 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
             project_id=spec.project_id,
             pr_number=pr_number_from_pr_id(spec.pr_id),
             pr_id=spec.pr_id,
+            gate_requirement_resolution=gate_requirement_resolution,
         )
     except Exception as exc:  # noqa: BLE001 — door bookkeeping must never raise
         logger.debug("[dispatch_cli] gate obligation register skipped: %s", exc)
