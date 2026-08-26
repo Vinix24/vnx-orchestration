@@ -438,6 +438,8 @@ _LANE_EXHAUSTED_MARKERS = (
     "openrouter_credits",
     "usage limit for this billing cycle",   # kimi 403 prose
     "reached your usage limit",
+    "insufficient_quota",                   # codex/openai 429 quota (error `type`/`code`)
+    "exceeded your current quota",          # codex/openai quota prose
 )
 
 
