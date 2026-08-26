@@ -244,7 +244,11 @@ def test_zero_candidates_is_unavailable_recovery_empty(module, gate_name, dispat
     assert record["reason"] == "recovery_empty"
     assert rc == 1
     assert record["contract_hash"] == ""
-    assert record["report_path"] == ""
+    # OI-1477: report_path is populated on an unavailable result too (points
+    # at the gate's own report, which is real and on disk here — the search
+    # that came up empty still ran against a genuine primary response).
+    assert record["report_path"] == record["report_path_informational"]
+    assert record["report_path"] != ""
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +465,10 @@ def test_reprocess_stale_commit_sha_refuses(module, gate_name, dispatch_prefix, 
     assert record["status"] == "unavailable"
     assert record["reason"] == "reprocess_stale_evidence"
     assert record["contract_hash"] == ""
-    assert record["report_path"] == ""
+    # OI-1477: report_path is populated on an unavailable result too — the
+    # original (now-stale) primary report is real and still on disk.
+    assert record["report_path"] == record["report_path_informational"]
+    assert record["report_path"] != ""
     assert "oldsha0000" in record["residual_risk"]
     assert "newsha1111" in record["residual_risk"]
 

@@ -158,10 +158,16 @@ def test_unavailable_result_never_has_complete_evidence(tmp_path, monkeypatch):
 
     assert rc == 1
     assert record["status"] == "unavailable"
-    assert record["contract_hash"] == ""
-    assert record["report_path"] == ""
-    # Either one alone would already keep an outage from closing a PR; both
-    # hold here, and the reason each holds is different (OI-1142 vs OI-1178):
+    assert record["contract_hash"] == "", "contract_hash is the field that must stay empty on an outage"
+    # OI-1477: report_path is populated on an unavailable result too, so a
+    # takeover-time reader can find the failure text without re-deriving the
+    # path itself — it points at the same place report_path_informational
+    # always has (the file may not exist here since this test's fake
+    # dispatcher never writes one, but the path itself is real).
+    assert record["report_path"] == record["report_path_informational"]
+    # has_complete_evidence stays False regardless: is_terminal() is checked
+    # BEFORE contract_hash/report_path are ever consulted, and is_terminal is
+    # False on an unavailable record no matter what those two fields hold.
     assert has_complete_evidence(record) is False, "an outage must never look like a decided verdict"
     assert is_terminal(record) is False, "an outage is retryable, not a decided pass/fail outcome"
 

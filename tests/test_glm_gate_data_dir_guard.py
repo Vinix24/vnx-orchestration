@@ -136,12 +136,14 @@ def test_with_explicit_data_dir_flag_lands_at_exactly_that_path(tmp_path, monkey
 
 
 # ---------------------------------------------------------------------------
-# Control case 2: an unavailable record still keeps empty contract_hash and
-# report_path (the OI-1435 separation is untouched by this fix).
+# Control case 2: an unavailable record still keeps contract_hash empty (the
+# OI-1435 separation is untouched by this fix). OI-1477: report_path is now
+# populated even here — it always pointed at the same real report location
+# report_path_informational does, so the two are the same value below.
 # ---------------------------------------------------------------------------
 
 
-def test_unavailable_still_keeps_evidence_fields_empty(tmp_path, monkeypatch):
+def test_unavailable_still_keeps_contract_hash_empty(tmp_path, monkeypatch):
     diff_file = tmp_path / "x.diff"
     diff_file.write_text(_FAKE_DIFF, encoding="utf-8")
     base_data_dir = tmp_path / "central-store"
@@ -156,7 +158,9 @@ def test_unavailable_still_keeps_evidence_fields_empty(tmp_path, monkeypatch):
     record = json.loads(out.read_text(encoding="utf-8"))
     assert record["status"] == "unavailable"
     assert record["contract_hash"] == ""
-    assert record["report_path"] == ""
+    assert record["report_path"] == record["report_path_informational"], (
+        "OI-1477: report_path is populated on an unavailable result too"
+    )
     assert has_complete_evidence(record) is False
     assert is_terminal(record) is False
     assert rc == 1
@@ -192,10 +196,19 @@ def test_report_path_and_result_path_share_the_same_resolved_base(tmp_path, monk
 # ---------------------------------------------------------------------------
 # Defect 3: an informational report-path field points a human at the real
 # report even on ``unavailable``, without ever counting as evidence.
+#
+# OI-1477: the ORIGINAL bug this test documented (report_path stayed empty
+# while a full report existed on disk with report_path_informational as the
+# only field pointing at it) is now fixed at the source — glm_gate.py stamps
+# report_path with the same value on the failure path too, so
+# gate_request_handler's takeover-time report-fallback scan can find it
+# directly off the result record. This test still proves report_path is
+# never treated AS EVIDENCE on an unavailable result (has_complete_evidence
+# gates on is_terminal() first, unaffected by which fields are populated).
 # ---------------------------------------------------------------------------
 
 
-def test_unavailable_carries_informational_report_path_but_not_as_evidence(tmp_path, monkeypatch):
+def test_unavailable_report_path_points_at_the_real_report_but_is_not_evidence(tmp_path, monkeypatch):
     diff_file = tmp_path / "x.diff"
     diff_file.write_text(_FAKE_DIFF, encoding="utf-8")
     base_data_dir = tmp_path / "central-store"
@@ -212,13 +225,14 @@ def test_unavailable_carries_informational_report_path_but_not_as_evidence(tmp_p
     record = json.loads(out.read_text(encoding="utf-8"))
     assert rc == 1
     assert record["status"] == "unavailable"
-    # The bug this closes: a full report existed on disk while report_path
-    # was empty and no field pointed a human at it.
-    assert record["report_path"] == ""
-    assert record["report_path_informational"], "informational field must point at the real report"
-    assert Path(record["report_path_informational"]).is_file()
-    # Never counted as evidence — has_complete_evidence only reads
-    # contract_hash/report_path, never the informational field.
+    # OI-1477: report_path now points at the real, on-disk report (same
+    # value as report_path_informational) instead of staying empty.
+    assert record["report_path"] == record["report_path_informational"]
+    assert record["report_path"], "informational field must point at the real report"
+    assert Path(record["report_path"]).is_file()
+    # Never counted as evidence — has_complete_evidence gates on is_terminal()
+    # BEFORE it ever looks at contract_hash/report_path, and "unavailable" is
+    # never terminal, regardless of which of those two fields are populated.
     assert has_complete_evidence(record) is False
     assert is_terminal(record) is False
 

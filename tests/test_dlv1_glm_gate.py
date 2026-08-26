@@ -207,8 +207,11 @@ def test_pass_verdict_clears_closure_verifier_merge_check(glm_gate, tmp_path, mo
 # ---------------------------------------------------------------------------
 # 3. unavailable never carries complete evidence, and is never terminal
 #    (OI-1435: has_complete_evidence only checks non-emptiness, not whether a
-#    verdict exists — the separation only holds because BOTH fields stay
-#    empty AND is_terminal is False on an unavailable record)
+#    verdict exists — the separation holds because is_terminal() is checked
+#    BEFORE contract_hash/report_path are ever consulted, and is_terminal is
+#    False on an unavailable record regardless of what those two fields
+#    contain. OI-1477: report_path is now populated even here — see below —
+#    contract_hash staying empty was always the field that mattered.)
 # ---------------------------------------------------------------------------
 
 
@@ -218,8 +221,13 @@ def test_unavailable_result_never_has_complete_evidence_and_is_not_terminal(glm_
 
     assert rc == 1
     assert record["status"] == "unavailable"
-    assert record["contract_hash"] == ""
-    assert record["report_path"] == ""
+    assert record["contract_hash"] == "", "contract_hash is the field that must stay empty on an outage"
+    # OI-1477: report_path is populated on an unavailable result too, so a
+    # takeover-time reader can find the failure text without re-deriving the
+    # path itself — it points at the same place report_path_informational
+    # always has (the file may not exist here since this test's fake
+    # dispatcher never writes one, but the path itself is real).
+    assert record["report_path"] == record["report_path_informational"]
     assert is_terminal(record) is False, "an outage is retryable, not a decided pass/fail outcome"
     assert has_complete_evidence(record) is False, "an outage must never look like complete evidence"
 
