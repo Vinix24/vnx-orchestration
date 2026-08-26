@@ -20,12 +20,21 @@ runtime objects persist forever:
    condition below must hold; process-liveness or session-age alone is never
    sufficient:
      (a) the name matches the canonical dispatch-session pattern (``_SESSION_RE``);
-     (b) the dispatch id is KNOWN to THIS project — present in the project's
-         own ``dispatch_register.ndjson`` (any event). A tmux session listing
-         is account-wide (one shared tmux server across every project on the
-         machine), so this is what keeps a sweep invoked for project X from
-         ever judging — let alone killing — a live session that belongs to
-         project Y;
+     (b) the dispatch id is KNOWN to a project's register on THIS ACCOUNT.
+         Checked first against THIS project's own ``dispatch_register.ndjson``
+         (any event). The tmux session listing is account-wide — one shared
+         tmux server across every project on the machine — so a session
+         belonging to project Y is legitimately invisible to project X's own
+         register; a sweep invoked for X used to leave every such session as
+         a permanent ``unknown_project``, no matter how long ago Y's own
+         register proved it dead (OI-1424). Unknown-to-this-project now falls
+         through to every OTHER project's register on the account
+         (``<account-root>/*/state/dispatch_register.ndjson``, lazily loaded
+         and cached per sweep run — see ``_resolve_cross_project_owner``). A
+         session is only ever judged against the register that actually
+         claims it — its owner's evidence, never a different project's — and
+         a session NO register on the account claims still reads
+         ``unknown_project`` and is left alone, exactly as before OI-1424;
      (c) the dispatch is provably COMPLETED — a ``dispatch_completed`` register
          event, or a terminal (success/failure) receipt in
          ``t0_receipts.ndjson`` per ``event_outcome_semantics.classify_event_outcome``;
@@ -315,6 +324,164 @@ def _real_capture_pane(session: str) -> "str | None":
 
 
 # ---------------------------------------------------------------------------
+# Kind 1b, condition (b) — account-wide owner lookup (OI-1424)
+#
+# The tmux session LISTING is account-wide (one shared tmux server for every
+# project on the machine), but each project's own dispatch_register.ndjson is
+# project-scoped. A sweep invoked for project X could see project Y's
+# completed session sitting there forever, unable to prove it dead, because
+# X's own register never heard of it. This searches every OTHER project's
+# register sharing this account's tmux namespace — never the other direction:
+# a session already CLAIMED by this project's own register is judged only
+# against that register (see _evaluate_completed_orphan's (b) above this).
+# ---------------------------------------------------------------------------
+
+def _account_data_root() -> Path:
+    """Account-wide root under which every project's central store lives.
+
+    Mirrors ``vnx_paths._resolve_state_root``'s ``VNX_DATA_HOME`` branch: an
+    operator who moved every project's store there (``$VNX_DATA_HOME/<pid>``)
+    gets the cross-project scan following the same root, never the hardcoded
+    ``~/.vnx-data`` when that override is active. Falls back to
+    ``~/.vnx-data`` — the fresh-install default every project resolves to
+    absent an override — when unset.
+    """
+    data_home = os.environ.get("VNX_DATA_HOME", "").strip()
+    if data_home:
+        return Path(data_home).expanduser()
+    return Path.home() / ".vnx-data"
+
+
+def _enumerate_other_project_state_dirs(
+    account_root: Path,
+    exclude_state_dir: Path,
+) -> "list[Path]":
+    """Every OTHER project's state dir sharing this account-wide tmux session
+    namespace — ``<account_root>/<project_id>/state``, identified by literally
+    having a ``dispatch_register.ndjson`` on disk (mirrors how ``~/.vnx-data``
+    mixes project dirs with account-wide non-project entries like ``locks/``
+    and ``events/`` — only a dir with a register is a project store).
+
+    A missing/empty ``account_root`` is a real, structural "there is nothing
+    else here" for ``Path.glob`` (it never raises on a missing directory,
+    unlike a tmux/register read that genuinely CAN fail) — not a measurement
+    failure to fail open on. Sorted for a deterministic scan order (first
+    matching store wins on the rare chance two claim the same id).
+    """
+    try:
+        exclude_resolved = exclude_state_dir.resolve()
+    except OSError:
+        exclude_resolved = exclude_state_dir
+    others: "list[Path]" = []
+    try:
+        candidates = sorted(account_root.glob("*/state/dispatch_register.ndjson"))
+    except OSError:
+        return others
+    for reg_path in candidates:
+        state_dir = reg_path.parent
+        try:
+            resolved = state_dir.resolve()
+        except OSError:
+            resolved = state_dir
+        if resolved == exclude_resolved:
+            continue
+        others.append(state_dir)
+    return others
+
+
+def _load_register_and_receipts(
+    state_dir: Path,
+) -> "tuple[set[str] | None, set[str] | None, dict[str, list] | None, list[dict]]":
+    """Load one project's register + receipts evidence.
+
+    Shared by ``sweep()``'s own current-project preload and the lazy
+    cross-project lookup below, so there is exactly one place that knows how
+    to turn a state_dir into (known_ids, completed_ids, receipts_index).
+    Returns ``(known_ids, completed_ids, receipts_index, errors)``; ``errors``
+    entries use the same ``{"kind": "completed_check", "error": ...}`` shape
+    ``sweep()`` already appends to ``OrphanSweepResult.errors`` — callers fold
+    them in directly (see ``_resolve_cross_project_owner``, which tags each
+    with the owning project before doing so).
+    """
+    errors: "list[dict]" = []
+    try:
+        import dispatch_register
+        register_events = dispatch_register.read_events(state_dir=state_dir)
+    except Exception as exc:
+        register_events = None
+        errors.append({
+            "kind": "completed_check",
+            "error": f"dispatch_register read failed ({state_dir}): {exc}",
+        })
+    if register_events is None:
+        known_ids: "set[str] | None" = None
+        completed_ids: "set[str] | None" = None
+    else:
+        known_ids = {ev.get("dispatch_id") for ev in register_events if ev.get("dispatch_id")}
+        completed_ids = {
+            ev.get("dispatch_id") for ev in register_events
+            if ev.get("event") == "dispatch_completed" and ev.get("dispatch_id")
+        }
+    try:
+        import dispatch_outcome_classifier
+        receipts_index: "dict[str, list] | None" = (
+            dispatch_outcome_classifier.load_receipts_index(state_dir)
+        )
+    except Exception as exc:
+        receipts_index = None
+        errors.append({
+            "kind": "completed_check",
+            "error": f"t0_receipts.ndjson read failed ({state_dir}): {exc}",
+        })
+    return known_ids, completed_ids, receipts_index, errors
+
+
+def _resolve_cross_project_owner(
+    dispatch_id: str,
+    *,
+    other_state_dirs: "list[Path]",
+    cache: "dict[Path, tuple]",
+    errors: "list[dict] | None" = None,
+) -> "tuple[str, set[str] | None, dict[str, list] | None] | None":
+    """Find the first OTHER project whose register knows ``dispatch_id``.
+
+    Lazily loads (and memoizes in ``cache``, keyed by state_dir) each
+    candidate store's evidence — at most once per store per sweep run,
+    regardless of how many sessions probe it. ``other_state_dirs`` is
+    pre-sorted by the caller (``_enumerate_other_project_state_dirs``), so
+    the first match is deterministic.
+
+    Returns ``(project_label, completed_ids, receipts_index)`` for that
+    match, or ``None`` when no other project's register names this id — a
+    real, measured "nobody on this account claims it" (kind-1b's
+    ``unknown_project``), not a failure. A store that fails to load is
+    recorded in ``errors`` (tagged with its project label) and skipped —
+    never silently treated as "doesn't know this id".
+    """
+    for state_dir in other_state_dirs:
+        if state_dir not in cache:
+            known_ids, completed_ids, receipts_index, load_errors = (
+                _load_register_and_receipts(state_dir)
+            )
+            cache[state_dir] = (known_ids, completed_ids, receipts_index)
+            if errors is not None:
+                for e in load_errors:
+                    errors.append({**e, "project": state_dir.parent.name})
+        known_ids, completed_ids, receipts_index = cache[state_dir]
+        if known_ids is not None and dispatch_id in known_ids:
+            return state_dir.parent.name, completed_ids, receipts_index
+    return None
+
+
+def _owner_tag(reason: str, owner_label: "str | None") -> str:
+    """Suffix a kind-1b reason string with its owning project when the
+    evidence came from a cross-project lookup (``owner_label is not None``);
+    unchanged when it came from this project's own register — preserves the
+    exact pre-OI-1424 reason strings for every existing caller/test."""
+    return reason if owner_label is None else f"{reason}@{owner_label}"
+
+
+# ---------------------------------------------------------------------------
 # Kind 1b — completed-dispatch orphan conjunction (OI-1353)
 # ---------------------------------------------------------------------------
 
@@ -327,6 +494,9 @@ def _evaluate_completed_orphan(
     register_completed_ids: "set[str] | None",
     receipts_index: "dict[str, list] | None",
     capture_pane: Callable[[str], "str | None"],
+    other_project_state_dirs: "list[Path] | None" = None,
+    cross_project_cache: "dict[Path, tuple] | None" = None,
+    cross_project_errors: "list[dict] | None" = None,
 ) -> "tuple[bool, str]":
     """Evaluate the completed-dispatch/still-alive-pane orphan conjunction.
 
@@ -339,28 +509,56 @@ def _evaluate_completed_orphan(
 
     (a) is enforced by the caller (only ``_SESSION_RE``-matching names reach
     here) and (f) by the caller's ``protected`` fence — neither is re-checked.
+
+    ``other_project_state_dirs`` / ``cross_project_cache`` (OI-1424): when a
+    dispatch id is unknown to THIS project's own register, these — if
+    supplied — extend (b)/(c) to every OTHER project's register on the
+    account (see ``_resolve_cross_project_owner``). Both default to ``None``,
+    which reproduces the exact pre-OI-1424 behavior (a session unknown to
+    this project's own register is always ``unknown_project``) — existing
+    callers that never pass them are unaffected.
     """
-    # (b) the dispatch id must be known to THIS project's own register.
+    # (b) the dispatch id must be known to THIS project's own register, or —
+    # since the tmux session listing is account-wide while each register is
+    # project-scoped (OI-1424) — to another project's register on this
+    # account. Whichever register claims it becomes the evidence source for
+    # (c) below; a session no register claims stays unknown_project.
     if register_known_ids is None:
         return False, "register_unmeasurable"
+
+    owner_label: "str | None" = None
+    completed_ids = register_completed_ids
+    owner_receipts_index = receipts_index
     if dispatch_id not in register_known_ids:
-        return False, "unknown_project"
+        owner = None
+        if other_project_state_dirs:
+            owner = _resolve_cross_project_owner(
+                dispatch_id,
+                other_state_dirs=other_project_state_dirs,
+                cache=cross_project_cache if cross_project_cache is not None else {},
+                errors=cross_project_errors,
+            )
+        if owner is None:
+            return False, "unknown_project"
+        owner_label, completed_ids, owner_receipts_index = owner
 
     # (c) the dispatch must be provably COMPLETED: a dispatch_completed
-    # register event, or a terminal (success/failure) receipt.
+    # register event, or a terminal (success/failure) receipt — read from
+    # whichever register claimed it in (b) above.
     evidence: "str | None" = None
-    if register_completed_ids is not None and dispatch_id in register_completed_ids:
+    if completed_ids is not None and dispatch_id in completed_ids:
         evidence = "register:dispatch_completed"
     if evidence is None:
-        if receipts_index is None:
-            return False, "receipts_unmeasurable"
-        for rec in receipts_index.get(dispatch_id) or []:
+        if owner_receipts_index is None:
+            return False, _owner_tag("receipts_unmeasurable", owner_label)
+        for rec in owner_receipts_index.get(dispatch_id) or []:
             outcome = classify_event_outcome(rec.get("event_type"), rec.get("status"))
             if outcome is not None:
                 evidence = f"receipt:{outcome}"
                 break
     if evidence is None:
-        return False, "not_completed"
+        return False, _owner_tag("not_completed", owner_label)
+    evidence = _owner_tag(evidence, owner_label)
 
     # (d) the dispatch's worktree must already be gone.
     if (worktrees_dir / f"dispatch-{dispatch_id}").exists():
@@ -459,6 +657,7 @@ def sweep(
     kill_session: Optional[Callable[[str], bool]] = None,
     pid_alive: Optional[Callable[[Optional[int]], bool]] = None,
     capture_pane: Optional[Callable[[str], "str | None"]] = None,
+    account_data_root: Optional[Path] = None,
 ) -> OrphanSweepResult:
     """Clean/mark orphaned teardown leftovers across the three kinds.
 
@@ -502,6 +701,14 @@ def sweep(
                             ``capture_pane`` feeds the kind-1b completed-
                             dispatch conjunction (OI-1353) — returning
                             ``None`` means the pane text was not measurable.
+        account_data_root: Account-wide root under which every project's
+                            central store lives, for kind-1b's OI-1424
+                            cross-project owner lookup
+                            (``<account_data_root>/<project_id>/state/...``).
+                            Defaults to ``$VNX_DATA_HOME`` or ``~/.vnx-data``
+                            (mirrors ``vnx_paths._resolve_state_root``).
+                            Tests pin this explicitly rather than touching
+                            the real account-wide store.
 
     Returns:
         :class:`OrphanSweepResult` — per-object failures are recorded in
@@ -563,38 +770,21 @@ def sweep(
     # dispatches known" (this is exactly how the repo-local, never-populated
     # state directory next to the checkout used to read as a silent, valid
     # zero — OI-1353 follow-up).
-    try:
-        import dispatch_register
-        register_events = dispatch_register.read_events(state_dir=state_dir)
-    except Exception as exc:
-        register_events = None
-        result.errors.append({
-            "kind": "completed_check",
-            "error": f"dispatch_register read failed: {exc}",
-        })
-    if register_events is None:
-        register_known_ids: "set[str] | None" = None
-        register_completed_ids: "set[str] | None" = None
-    else:
-        register_known_ids = {
-            ev.get("dispatch_id") for ev in register_events if ev.get("dispatch_id")
-        }
-        register_completed_ids = {
-            ev.get("dispatch_id") for ev in register_events
-            if ev.get("event") == "dispatch_completed" and ev.get("dispatch_id")
-        }
+    register_known_ids, register_completed_ids, receipts_index, load_errors = (
+        _load_register_and_receipts(state_dir)
+    )
+    result.errors.extend(load_errors)
 
-    try:
-        import dispatch_outcome_classifier
-        receipts_index: "dict[str, list] | None" = (
-            dispatch_outcome_classifier.load_receipts_index(state_dir)
-        )
-    except Exception as exc:
-        receipts_index = None
-        result.errors.append({
-            "kind": "completed_check",
-            "error": f"t0_receipts.ndjson read failed: {exc}",
-        })
+    # ── OI-1424: other projects' state dirs sharing this account's tmux
+    # namespace, for kind-1b's cross-project owner lookup. Cheap (one glob);
+    # each candidate's own register/receipts are loaded lazily, at most once
+    # per store, only if some session actually turns out unknown to THIS
+    # project's own register (see _resolve_cross_project_owner).
+    other_project_state_dirs = _enumerate_other_project_state_dirs(
+        account_data_root if account_data_root is not None else _account_data_root(),
+        exclude_state_dir=state_dir,
+    )
+    cross_project_cache: "dict[Path, tuple]" = {}
 
     # ── kind 1: dead-pane tmux sessions ──────────────────────────────────────
     # ``surviving_ids`` is the set of dispatch ids whose worktree is still
@@ -645,6 +835,9 @@ def sweep(
                 register_completed_ids=register_completed_ids,
                 receipts_index=receipts_index,
                 capture_pane=capture_fn,
+                other_project_state_dirs=other_project_state_dirs,
+                cross_project_cache=cross_project_cache,
+                cross_project_errors=result.errors,
             )
             entry = {"session": name, "dispatch_id": sid, "reason": reason}
             if is_orphan:
