@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from governance_receipts import utc_now_iso
 
@@ -215,6 +215,109 @@ def stamp_request_identity(
     return result_payload
 
 
+class ResultOverwriteRefused(ValueError):
+    """A write would replace a terminal, evidenced gate result with a less
+    decided one (OI-1469/OI-1470)."""
+
+
+def _read_existing_result(result_path: Path) -> Optional[Dict[str, Any]]:
+    """Best-effort read of a prior result record. None if absent/unreadable."""
+    if not result_path.exists():
+        return None
+    try:
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _check_overwrite_guard(
+    result_path: Path,
+    new_payload: Dict[str, Any],
+    *,
+    gate: str,
+    pr_ref: str,
+) -> None:
+    """Refuse a write that would downgrade an existing terminal result.
+
+    OI-1469/OI-1470: three independent writers (glm_gate's live run, its
+    ``--reprocess`` recovery path, and gate_obligation_runner) land in the
+    same ``results/pr-<N>-<gate>.json`` slot with no ordering guarantee —
+    whoever writes last wins, even when that write is a provider outage. A
+    real, decided verdict (``gate_status.is_terminal`` AND
+    ``gate_status.has_complete_evidence`` — contract_hash + report_path both
+    present) may only be replaced by another decided, evidenced verdict:
+    never by an in-flight/outage status (OI-1470's second glm_gate run:
+    ``pass`` -> ``unavailable`` on an OpenRouter 402), and never by an
+    evidence-less terminal placeholder such as ``not_executable`` (a
+    ``--reprocess`` refusal, or a fresh not_executable booking). A terminal
+    record with NO complete evidence (e.g. an existing not_executable) is
+    not "decided" and stays freely overwritable — it must not permanently
+    freeze the slot.
+    """
+    from gate_status import is_terminal, has_complete_evidence, canonical_status  # noqa: PLC0415
+
+    existing = _read_existing_result(result_path)
+    if existing is None or not is_terminal(existing):
+        return
+    existing_status = canonical_status(existing)
+    new_status = canonical_status(new_payload)
+    if not is_terminal(new_payload):
+        logger.warning(
+            "gate_recorder: REFUSING to overwrite terminal result gate=%s pr=%s "
+            "existing_status=%r with non-terminal status=%r — an outage or "
+            "in-flight status must never erase a decided verdict (OI-1469/OI-1470)",
+            gate, pr_ref, existing_status, new_status,
+        )
+        raise ResultOverwriteRefused(
+            f"{gate} result for pr={pr_ref!r} is terminal (status={existing_status!r}) "
+            f"— refusing to overwrite with non-terminal status={new_status!r}"
+        )
+    if has_complete_evidence(existing) and not has_complete_evidence(new_payload):
+        logger.warning(
+            "gate_recorder: REFUSING to overwrite decided result gate=%s pr=%s "
+            "existing_status=%r (complete evidence) with evidence-less terminal "
+            "status=%r",
+            gate, pr_ref, existing_status, new_status,
+        )
+        raise ResultOverwriteRefused(
+            f"{gate} result for pr={pr_ref!r} carries complete evidence "
+            f"(status={existing_status!r}) — refusing to overwrite with "
+            f"evidence-less status={new_status!r}"
+        )
+
+
+def _write_result_atomic(result_path: Path, payload: Dict[str, Any]) -> None:
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = result_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(result_path)
+
+
+def write_result_guarded(
+    result_path: Path,
+    payload: Dict[str, Any],
+    *,
+    gate: str,
+    pr_ref: str,
+) -> Tuple[Dict[str, Any], bool]:
+    """Write a gate result unless it would downgrade an existing terminal one.
+
+    Shared low-level write primitive (OI-1469/OI-1470): every writer of
+    ``results/pr-<N>-<gate>.json`` that is not required to raise on refusal
+    (see :func:`record_terminal_result` for the raising variant) should
+    route through this so the overwrite guard applies by construction.
+    Returns ``(payload_on_disk, written)`` — the new payload and ``True`` on
+    success, or the unchanged existing payload and ``False`` when refused.
+    """
+    try:
+        _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_ref)
+    except ResultOverwriteRefused:
+        return _read_existing_result(result_path) or payload, False
+    _write_result_atomic(result_path, payload)
+    return payload, True
+
+
 def record_terminal_result(
     *,
     gate: str,
@@ -239,6 +342,12 @@ def record_terminal_result(
     resolves ``result_path`` itself — gate writers use different filename
     conventions (legacy ``pr-N-gate.json`` vs. ``{slug}-gate-contract.json``)
     and this function does not need to know which.
+
+    Also refuses (:class:`ResultOverwriteRefused`, a ``ValueError`` subclass)
+    a write that would downgrade an existing decided, evidenced result to a
+    less-decided one — see :func:`_check_overwrite_guard`. glm_gate.py and
+    kimi_gate.py already catch ``(OSError, ValueError)`` around this call and
+    fail loudly rather than silently overwrite (OI-1469/OI-1470).
     """
     from gate_status import is_terminal, has_producer_identity  # noqa: PLC0415
 
@@ -248,10 +357,8 @@ def record_terminal_result(
             f"({payload.get('status')!r}) but no producer identity "
             f"(dispatch_id) — refusing to write unauthenticated gate evidence"
         )
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = result_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(result_path)
+    _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
+    _write_result_atomic(result_path, payload)
     return result_path
 
 
@@ -295,7 +402,9 @@ def record_not_executable(
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
-        rf.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+        result_payload, _written = write_result_guarded(
+            rf, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        )
 
     write_skip_rationale(
         state_dir, gate,
@@ -363,12 +472,18 @@ def record_failure(
     stamp_request_identity(failure_payload, request_payload)
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
+    written = True
     if rf:
-        rf.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
+        failure_payload, written = write_result_guarded(
+            rf, failure_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        )
 
     # Emit gate_failed for codex_gate only when the gate itself reported a verdict
-    # failure (not for infrastructure/execution errors like timeout or stall).
-    if gate == "codex_gate" and reason not in EXECUTION_FAILURE_REASONS:
+    # failure (not for infrastructure/execution errors like timeout or stall) AND
+    # the write actually landed — a refused write left the prior (real) result
+    # standing, so telling the register "gate_failed" would describe a write
+    # that never happened (OI-1469/OI-1470).
+    if written and gate == "codex_gate" and reason not in EXECUTION_FAILURE_REASONS:
         try:
             from gate_register_emit import emit_codex_gate_to_register
             emit_codex_gate_to_register(

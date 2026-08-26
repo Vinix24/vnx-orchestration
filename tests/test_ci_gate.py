@@ -317,6 +317,58 @@ def test_case_d_no_checks_gh_returncode_nonzero_no_checks_message(gate_env):
 
 
 # ---------------------------------------------------------------------------
+# OI-1469/OI-1470: a re-run must never downgrade an already-decided verdict
+# ---------------------------------------------------------------------------
+
+
+def test_running_recheck_never_overwrites_a_decided_pass(gate_env):
+    """ci_gate's own terminal write (gate_executor line ~311-315, bypassing
+    gate_recorder's higher-level helpers) must route through the same
+    overwrite guard. A flaky re-check that comes back "running" must not
+    erase a prior decided pass with real evidence."""
+    executor = _make_mock_executor(gate_env)
+    pr_number = 4701
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        checks = [{"name": "ci/test", "bucket": "pass", "state": "SUCCESS"}]
+        mock_sub.run.side_effect = _make_subprocess_run(json.dumps(checks))
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        first = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=dict(request_payload),
+        )
+    assert first["status"] == "pass"
+    result_file = gate_env["results_dir"] / f"pr-{pr_number}-ci_gate.json"
+    assert json.loads(result_file.read_text())["status"] == "pass"
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        pending_checks = [{"name": "ci/test", "bucket": "pending", "state": "IN_PROGRESS"}]
+        mock_sub.run.side_effect = _make_subprocess_run(json.dumps(pending_checks))
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        second = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=dict(request_payload),
+        )
+
+    # The refused write returns the existing (pass) record, not a synthetic
+    # "running" one — the caller must see reality, not the rejected attempt.
+    assert second["status"] == "pass"
+    stored = json.loads(result_file.read_text())
+    assert stored["status"] == "pass", (
+        "a running re-check must never overwrite an already-decided pass "
+        "(OI-1469/OI-1470)"
+    )
+    assert stored["contract_hash"] == first["contract_hash"]
+    assert stored["report_path"] == first["report_path"]
+
+
+# ---------------------------------------------------------------------------
 # Closure verifier: ci_gate integration
 # ---------------------------------------------------------------------------
 

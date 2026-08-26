@@ -312,7 +312,12 @@ class GateExecutorMixin:
             self.results_dir, gate, pr_number=pr_number, pr_id=pr_id,
         )
         if rf:
-            rf.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+            # OI-1469/OI-1470: refuse a write that would downgrade an existing
+            # terminal, evidenced result (e.g. a stale "running" re-check must
+            # never overwrite an already-decided pass/fail).
+            result_payload, _written = _rec.write_result_guarded(
+                rf, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+            )
 
         # When checks are still running, reset request to "requested" so it
         # can be re-executed once GitHub reports a terminal conclusion.
