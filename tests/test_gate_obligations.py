@@ -36,8 +36,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
 import gate_obligation_runner as runner
+import governance_receipts
 import producer_freshness
 from dispatch_cli import run_dispatch
+from gate_report_generator import GateReportGeneratorMixin
 from gate_obligations import (
     NO_GATE_KEY,
     REASON_NO_PR_BRANCH_GONE,
@@ -106,9 +108,19 @@ def _read_obligation(state_dir: Path, dispatch_id: str) -> dict:
     return json.loads(obligation_path(state_dir, dispatch_id).read_text(encoding="utf-8"))
 
 
-class _FakeManager:
+class _FakeManager(GateReportGeneratorMixin):
     """Stands in for ReviewGateManager: writes the request+result records the
     real manager's request_and_execute produces, without running any gate.
+
+    The not_executable result path routes through the REAL
+    ``GateReportGeneratorMixin._write_not_executable_result`` (mixed in
+    above) instead of a bare write. That method is the actual OI-1469/
+    OI-1470/OI-1471 request-time guard fix: a fake that clobbers a slot
+    unconditionally would prove nothing about whether the guard the
+    production writer now goes through actually holds. Other statuses
+    ("completed", "pass", "running", "unavailable") are synthetic
+    scaffolding for the runner's own classification logic and are not
+    produced by any single guarded writer, so they keep the plain write.
 
     ``result_status``/``result_reason`` let a test control what the gate
     RESULT record reports (e.g. ``status="not_executable", reason=
@@ -133,6 +145,10 @@ class _FakeManager:
     def _result_path(self, gate: str, pr_number: int) -> Path:
         return self.state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
 
+    def _contract_result_path(self, gate: str, pr_id: str) -> Path:
+        slug = pr_id.lower().replace("-", "")
+        return self.state_dir / "review_gates" / "results" / f"{slug}-{gate}-contract.json"
+
     def request_and_execute(self, *, pr_number, branch, review_stack, risk_class,
                             changed_files, mode, dispatch_id=""):
         self.calls.append(
@@ -145,6 +161,14 @@ class _FakeManager:
                 json.dumps({"gate": gate, "pr_number": pr_number, "status": "completed"}),
                 encoding="utf-8",
             )
+            if self.result_status == "not_executable":
+                reason = self.result_reason or "unknown_reason"
+                self._write_not_executable_result(
+                    gate=gate, pr_number=pr_number, pr_id="",
+                    reason=reason, reason_detail=reason,
+                    dispatch_id=dispatch_id,
+                )
+                continue
             result_payload = {"gate": gate, "pr_number": pr_number, "status": self.result_status}
             if self.result_reason is not None:
                 result_payload["reason"] = self.result_reason
@@ -162,6 +186,10 @@ def _patch_manager(monkeypatch, manager: "_FakeManager") -> None:
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
+    # _write_not_executable_result (mixed into _FakeManager, real production
+    # code) imports _utc_now from review_gate_manager -- this module is
+    # monkeypatched out for the whole test, so the stand-in must carry it too.
+    fake_rgm._utc_now = governance_receipts.utc_now_iso
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
 
 
@@ -815,11 +843,22 @@ def test_runner_removes_provider_not_installed_result_record(tmp_path, monkeypat
 
 def test_runner_leaves_pre_existing_pass_untouched_on_provider_not_installed(tmp_path, monkeypatch):
     """OI-1469/OI-1470 composition: if the slot already carries a real,
-    evidenced pass, gate_recorder's overwrite guard (OI-1470) refuses the
-    provider_not_installed write outright — the file on disk is still the
-    original pass, so this runner's own cleanup step must find nothing
-    matching provider_not_installed to remove, and the obligation must
-    report fulfilled off the real, untouched evidence."""
+    evidenced pass, gate_recorder's overwrite guard (OI-1470/OI-1471)
+    refuses the provider_not_installed write outright — the file on disk is
+    still the original pass, so this runner's own cleanup step must find
+    nothing matching provider_not_installed to remove, and the obligation
+    must report fulfilled off the real, untouched evidence.
+
+    ``request_and_execute`` runs unmodified here -- no wrapper that
+    manufactures the "unchanged" outcome the assertions below check for.
+    ``_FakeManager``'s not_executable path already routes through the real
+    ``_write_not_executable_result`` (see its class docstring), so this test
+    exercises the actual guard, not a stand-in for it. Before OI-1469/
+    OI-1470/OI-1471 (gate_report_generator._write_not_executable_result
+    routed through gate_recorder.write_result_guarded), this test failed:
+    the bare write clobbered the pass. A wrapper that read-back-and-restored
+    the file around the call made the assertions pass regardless of whether
+    the guard existed at all -- the test proved nothing."""
     state_dir = _make_state_dir(tmp_path)
     register_obligation(
         state_dir, dispatch_id="20260826-oi1469-protected-pass", gate="codex_gate",
@@ -835,20 +874,6 @@ def test_runner_leaves_pre_existing_pass_untouched_on_provider_not_installed(tmp
     }
     result_file.write_text(json.dumps(existing_pass), encoding="utf-8")
 
-    # Simulate gate_recorder's overwrite guard already having refused the
-    # write in-process: the fake manager here stands in for the whole
-    # request_and_execute call, so patch it to leave the pre-existing pass
-    # untouched instead of clobbering it, exactly like the real guarded
-    # writer would.
-    original_request_and_execute = manager.request_and_execute
-
-    def _guarded_request_and_execute(**kwargs):
-        before = result_file.read_text(encoding="utf-8")
-        response = original_request_and_execute(**kwargs)
-        result_file.write_text(before, encoding="utf-8")
-        return response
-
-    monkeypatch.setattr(manager, "request_and_execute", _guarded_request_and_execute)
     _patch_manager(monkeypatch, manager)
 
     summary = runner.run(state_dir)

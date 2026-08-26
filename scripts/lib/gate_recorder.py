@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 from governance_receipts import utc_now_iso
 
@@ -220,15 +220,39 @@ class ResultOverwriteRefused(ValueError):
     decided one (OI-1469/OI-1470)."""
 
 
-def _read_existing_result(result_path: Path) -> Optional[Dict[str, Any]]:
-    """Best-effort read of a prior result record. None if absent/unreadable."""
+class _CorruptResult:
+    """Sentinel: the result file exists but could not be parsed as a dict.
+
+    Distinct from ``None`` (absent). Absent, empty, and corrupt are three
+    different states (OI-1469/OI-1470 advisory) -- an existing file that
+    fails to parse might be a torn write left behind by one of the
+    non-atomic writers this guard exists to police (blocking-1 is exactly
+    that: a raw ``write_text`` with no tmp+replace), and it might be hiding
+    a real terminal, evidenced verdict underneath the truncation. Collapsing
+    it into "nothing there" would fail the guard OPEN on the one case it
+    most needs to fail closed.
+    """
+
+
+_CORRUPT_RESULT = _CorruptResult()
+
+
+def _read_existing_result(result_path: Path) -> Union[Dict[str, Any], _CorruptResult, None]:
+    """Best-effort read of a prior result record.
+
+    Returns ``None`` when the file is genuinely absent, the module-level
+    :data:`_CORRUPT_RESULT` sentinel when it exists but could not be parsed
+    (OSError, invalid JSON, or JSON that isn't an object), or the parsed
+    dict on success. Callers must check for the sentinel explicitly --
+    treating it as ``None`` was the OI-1469/OI-1470 advisory gap.
+    """
     if not result_path.exists():
         return None
     try:
         data = json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
+        return _CORRUPT_RESULT
+    return data if isinstance(data, dict) else _CORRUPT_RESULT
 
 
 def _check_overwrite_guard(
@@ -258,6 +282,25 @@ def _check_overwrite_guard(
     from gate_status import is_terminal, has_complete_evidence, canonical_status  # noqa: PLC0415
 
     existing = _read_existing_result(result_path)
+    if existing is _CORRUPT_RESULT:
+        # Advisory (OI-1469/OI-1470): absent, empty, and corrupt are three
+        # distinct states. An unreadable-but-present file must never read as
+        # "nothing there" -- that fails the guard OPEN on exactly the shape a
+        # non-atomic writer (blocking-1's raw ``write_text`` before this fix,
+        # and every writer still listed unguarded in the dispatch report) can
+        # produce: a torn write over what may have been a decided, evidenced
+        # verdict. Refuse rather than guess.
+        logger.warning(
+            "gate_recorder: REFUSING to overwrite unreadable existing result "
+            "gate=%s pr=%s path=%s -- the file exists but could not be "
+            "parsed; it may be a truncated terminal, evidenced verdict "
+            "(OI-1469/OI-1470 advisory)",
+            gate, pr_ref, result_path,
+        )
+        raise ResultOverwriteRefused(
+            f"{gate} result for pr={pr_ref!r} at {result_path} exists but is "
+            f"unreadable/corrupt -- refusing to overwrite an unverifiable record"
+        )
     if existing is None or not is_terminal(existing):
         return
     existing_status = canonical_status(existing)
@@ -309,11 +352,18 @@ def write_result_guarded(
     route through this so the overwrite guard applies by construction.
     Returns ``(payload_on_disk, written)`` — the new payload and ``True`` on
     success, or the unchanged existing payload and ``False`` when refused.
+    On a refusal caused by an unreadable/corrupt existing file (the
+    OI-1469/OI-1470 advisory case), there is no parseable existing payload to
+    hand back — the caller gets the attempted ``payload`` instead (never the
+    internal :data:`_CORRUPT_RESULT` sentinel), which is NOT what is on disk;
+    ``written is False`` is what tells the caller the write did not land.
     """
     try:
         _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_ref)
     except ResultOverwriteRefused:
-        return _read_existing_result(result_path) or payload, False
+        existing = _read_existing_result(result_path)
+        on_disk = existing if isinstance(existing, dict) else {}
+        return on_disk or payload, False
     _write_result_atomic(result_path, payload)
     return payload, True
 

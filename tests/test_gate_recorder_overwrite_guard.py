@@ -420,3 +420,76 @@ class TestWriteResultGuardedDirect:
         assert written is False
         assert result == pass_payload
         assert json.loads(out.read_text(encoding="utf-8")) == pass_payload
+
+
+# ---------------------------------------------------------------------------
+# Advisory (OI-1469/OI-1470): absent, empty, and corrupt are three distinct
+# states. A pre-existing file that exists but cannot be parsed must never be
+# treated the same as "nothing there" -- that fails the guard OPEN on the one
+# shape a non-atomic writer (blocking-1's raw ``write_text`` before it was
+# routed through this guard) can produce: a torn write that might be hiding a
+# real terminal, evidenced verdict underneath the truncation.
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptExistingResultFailsClosed:
+
+    def test_truncated_json_over_existing_file_refuses(self, tmp_path):
+        """A torn write (mid-write crash, disk full, concurrent writer) leaves
+        invalid JSON behind — the guard must refuse rather than guess it was
+        nothing."""
+        out = tmp_path / "pr-1691-glm_gate.json"
+        out.write_text('{"gate": "glm_gate", "status": "pass", "contract_h', encoding="utf-8")
+
+        with pytest.raises(ResultOverwriteRefused):
+            record_terminal_result(
+                gate="glm_gate", pr_id="1691", result_path=out,
+                payload={"gate": "glm_gate", "pr_id": "1691", "status": "pass",
+                         "contract_hash": "newhash", "report_path": "/tmp/r.md",
+                         "dispatch_id": "glm-gate-pr1691-2"},
+            )
+        # The corrupt content must survive untouched -- never silently
+        # replaced, since we cannot verify it wasn't a decided verdict.
+        assert out.read_text(encoding="utf-8") == '{"gate": "glm_gate", "status": "pass", "contract_h'
+
+    def test_empty_file_over_existing_slot_refuses(self, tmp_path):
+        """Absent, empty, and corrupt are three different states -- a
+        zero-byte file is not the same as no file at all. There is no
+        parseable existing payload to hand back on this refusal shape, so
+        ``written is False`` is what the caller must check, not the returned
+        payload (which echoes the attempted write, not what's on disk)."""
+        out = tmp_path / "pr-1691-glm_gate.json"
+        out.write_text("", encoding="utf-8")
+
+        payload = {"gate": "glm_gate", "pr_number": 1691, "status": "pass",
+                    "contract_hash": "h", "report_path": "/tmp/r.md"}
+        result, written = write_result_guarded(out, payload, gate="glm_gate", pr_ref="1691")
+        assert written is False
+        assert out.read_text(encoding="utf-8") == ""
+
+    def test_json_that_is_not_an_object_refuses(self, tmp_path):
+        """Valid JSON that parses to a list/string/etc. is not a result
+        record — must be treated the same as corrupt, not as absent."""
+        out = tmp_path / "pr-1691-glm_gate.json"
+        out.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+
+        payload = {"gate": "glm_gate", "pr_number": 1691, "status": "pass",
+                    "contract_hash": "h", "report_path": "/tmp/r.md"}
+        result, written = write_result_guarded(out, payload, gate="glm_gate", pr_ref="1691")
+        assert written is False
+        assert json.loads(out.read_text(encoding="utf-8")) == ["not", "a", "dict"]
+
+    def test_contrast_genuinely_absent_file_writes_normally(self, tmp_path):
+        """Contrast case: no file at all (never written, or already cleaned
+        up) is a THIRD state, distinct from empty/corrupt, and must not be
+        penalised by the advisory fix -- the guard only activates on
+        existing-but-unreadable content."""
+        out = tmp_path / "pr-1691-glm_gate.json"
+        assert not out.exists()
+
+        payload = {"gate": "glm_gate", "pr_number": 1691, "status": "pass",
+                    "contract_hash": "h", "report_path": "/tmp/r.md"}
+        result, written = write_result_guarded(out, payload, gate="glm_gate", pr_ref="1691")
+        assert written is True
+        assert result == payload
+        assert json.loads(out.read_text(encoding="utf-8")) == payload

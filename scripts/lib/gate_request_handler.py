@@ -452,7 +452,14 @@ class GateRequestHandlerMixin:
         contract_hash: str = "",
         dispatch_id: str = "",
     ) -> None:
-        """Record unavailability in payload and write skip/result records."""
+        """Record unavailability in payload and write skip/result records.
+
+        The in-memory ``payload`` (the REQUEST record) always carries
+        ``reason``/``reason_detail``/``failure_reason`` regardless of what
+        happens to the RESULT record below -- a request-time refusal is
+        never allowed to go quiet even when the guard blocks the write it
+        would otherwise cause (OI-1469/OI-1470/OI-1471).
+        """
         reason, detail = self._classify_unavailable(gate, binary_name)
         payload["reason"] = reason
         payload["reason_detail"] = detail
@@ -465,12 +472,24 @@ class GateRequestHandlerMixin:
         # field name.
         payload["failure_reason"] = detail
         payload["resolved_at"] = payload["requested_at"]
-        self._write_not_executable_result(
+        _result_payload, written = self._write_not_executable_result(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
             reason=reason, reason_detail=detail,
             contract_hash=contract_hash,
             dispatch_id=dispatch_id,
         )
+        if not written:
+            # gate_recorder.write_result_guarded already logged the refusal
+            # with the existing/new status; this line makes the request-time
+            # caller's own awareness explicit (OI-1469/OI-1470/OI-1471) --
+            # the PR keeps its prior decided verdict on disk, unpolluted.
+            logger.warning(
+                "gate_request_handler: not_executable write REFUSED for "
+                "gate=%s pr=%s -- an existing terminal, evidenced result "
+                "stands; this refusal (reason=%s) was request-time only "
+                "and never reached results/",
+                gate, pr_id or pr_number, reason,
+            )
         self._write_skip_rationale(
             gate=gate, pr_id=pr_id or str(pr_number),
             reason=reason, reason_detail=detail,
@@ -907,11 +926,19 @@ class GateRequestHandlerMixin:
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]
-            self._write_not_executable_result(
+            _result_payload, written = self._write_not_executable_result(
                 gate="glm_gate", pr_number=pr_number, pr_id="",
                 reason=reason, reason_detail=reason_detail,
                 dispatch_id=dispatch_id,
             )
+            if not written:
+                logger.warning(
+                    "gate_request_handler: not_executable write REFUSED for "
+                    "gate=glm_gate pr=%s -- an existing terminal, evidenced "
+                    "result stands; this refusal (reason=%s) was request-time "
+                    "only and never reached results/",
+                    pr_number, reason,
+                )
             self._write_skip_rationale(
                 gate="glm_gate", pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 class GateReportGeneratorMixin:
@@ -25,8 +25,27 @@ class GateReportGeneratorMixin:
         reason_detail: str,
         contract_hash: str = "",
         dispatch_id: str = "",
-    ) -> Dict[str, Any]:
-        """Write a not_executable result record (GATE-4)."""
+    ) -> Tuple[Dict[str, Any], bool]:
+        """Write a not_executable result record (GATE-4).
+
+        Routes through ``gate_recorder.write_result_guarded`` (OI-1469/
+        OI-1470/OI-1471) instead of a bare ``write_text``. This is a
+        REQUEST-time writer -- ``_mark_gate_unavailable`` calls it when a
+        gate is (re-)requested and its binary is unavailable, which fires
+        BEFORE any run, unlike the RESULT-time recorders in
+        ``gate_recorder.py`` that already carried the guard. Without it, a
+        request-time refusal on a PR that already carries a real, decided
+        verdict (e.g. a launchd worker missing the gate's CLI on PATH) would
+        silently erase that verdict -- measured live against PR #1691's
+        codex-gate pass (contract_hash ``466cd2ca75d7a7fb``).
+
+        Returns ``(payload_on_disk, written)``. ``payload_on_disk`` is the
+        not_executable payload just built when the write landed, or the
+        untouched pre-existing terminal record when the guard refused it.
+        ``written`` is ``False`` on refusal -- the caller must not assume
+        the constructed payload reached disk without checking it.
+        """
+        from gate_recorder import write_result_guarded
         from review_gate_manager import _utc_now
 
         now = _utc_now()
@@ -56,9 +75,10 @@ class GateReportGeneratorMixin:
         elif pr_number is not None:
             result_file = self._result_path(gate, pr_number)
         else:
-            return payload
-        result_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return payload
+            return payload, True
+        return write_result_guarded(
+            result_file, payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        )
 
     def _write_skip_rationale(
         self,
