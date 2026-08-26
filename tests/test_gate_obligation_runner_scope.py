@@ -25,6 +25,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
     if str(p) not in sys.path:
@@ -37,6 +39,27 @@ from gate_obligations import (  # noqa: E402
     register_obligation,
     update_obligation,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_gh_network(monkeypatch):
+    """This file exercises scope filtering only, never PR/branch resolution.
+
+    OI-1388 defect 2 made ``run(write=False)`` walk the same PR-resolution
+    decision tree a real run does (``resolve_pr_number`` — read-only ``gh``
+    calls). Without this, an obligation with no cached ``pr_number`` would
+    hit real ``gh``/``git`` subprocess calls against this checkout's own
+    GitHub origin for a dispatch_id that was never real, and (since neither
+    the PR nor the branch exists there) resolve to ``would_retire`` instead
+    of the "no PR yet, branch still alive" wait these tests intend to fix
+    scope filtering against. Pin PR resolution to a stable "awaiting, branch
+    exists" outcome so every test's ``pending_after`` stays about scope, not
+    about network state.
+    """
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: True)
 
 
 def _state_dir(tmp_path: Path) -> Path:

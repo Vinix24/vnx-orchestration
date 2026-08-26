@@ -32,6 +32,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
@@ -51,6 +53,7 @@ from gate_obligations import (
     check_gate_requirement_mismatch,
     obligation_path,
     pr_number_from_pr_id,
+    register_no_gate_obligation,
     register_obligation,
     update_obligation,
 )
@@ -1211,4 +1214,549 @@ def test_build_role_without_gate_is_refused_even_with_empty_paths(tmp_path, monk
     assert mock_execute.call_count == 0, "a refused dispatch must never reach execution"
     assert not obligation_path(data_dir / "state", "20260816-build-no-gate").exists(), (
         "a refused writing dispatch must not leave a gate obligation — it never ran"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OI-1388 residu (defect 1) — the evidence discriminator: a terminal
+# retirement or an unresolvable-timeout escalation must never overwrite a
+# gate result that already reviewed this dispatch. RED on unfixed main:
+# fulfill_obligation never looked at review_gates/results before writing
+# STATUS_RETIRED / STATUS_NOT_EXECUTABLE(reason=unresolvable_timeout).
+# ---------------------------------------------------------------------------
+
+
+def _write_result_record(
+    state_dir: Path,
+    *,
+    filename: str,
+    dispatch_id: str,
+    gate: str,
+    pr_number: int | None = None,
+    branch: str | None = None,
+    contract_hash: str = "sha256:deadbeef",
+    report_path: str | None = "__auto__",
+    status: str = "pass",
+) -> Path:
+    """Write a ``review_gates/results/<filename>.json`` record.
+
+    ``report_path="__auto__"`` (the default) writes a real report file next
+    to the result record and points ``report_path`` at it — the "complete
+    evidence" shape ``gate_status.has_complete_evidence`` requires. Pass an
+    explicit string (including ``""``) to build an incomplete or dangling
+    record instead.
+
+    ``status`` (BETA3-C2, default ``"pass"``) is the gate's raw verdict
+    string. glm_gate/kimi_gate have emitted BOTH ``contract_hash`` and
+    ``report_path`` on a FAILED run since #1669, so a caller can build a
+    "complete evidence" record for any verdict — pass, a decided fail
+    (``failed``/``errored``/``blocked``), or ``not_executable`` — to pin the
+    evidence discriminator's verdict-aware split.
+    """
+    results_dir = Path(state_dir) / "review_gates" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    if report_path == "__auto__":
+        report_file = Path(state_dir) / "review_gates" / "reports" / f"{filename}.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("# gate report\n\npass\n", encoding="utf-8")
+        report_path = str(report_file)
+    payload = {
+        "gate": gate,
+        "dispatch_id": dispatch_id,
+        "pr_number": pr_number,
+        "branch": branch,
+        "status": status,
+        "contract_hash": contract_hash,
+        "report_path": report_path or "",
+    }
+    path = results_dir / f"{filename}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_runner_stamps_fulfilled_instead_of_retiring_when_evidence_exists(tmp_path, monkeypatch):
+    """A dispatch that (i) never produced a PR and (ii) has a dead head
+    branch used to retire unconditionally. If a complete-evidence gate
+    result already exists for the same dispatch_id + gate, the runner must
+    stamp the obligation fulfilled instead — the gate DID review it; only
+    the branch was cleaned up afterwards.
+
+    RED on unfixed main: identical setup with no result record retires
+    (proven directly below by the no-evidence control case, and already
+    pinned by test_runner_retires_obligation_when_dispatch_died_without_pr
+    above)."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260826-oi1388r-rescued", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    result_path = _write_result_record(
+        state_dir, filename="pr-9700-codex_gate",
+        dispatch_id="20260826-oi1388r-rescued", gate="codex_gate", pr_number=9700,
+    )
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260826-oi1388r-rescued")
+    assert record["status"] == STATUS_FULFILLED, (
+        "a dispatch a gate already reviewed must never be retired as unreviewed"
+    )
+    assert record["status"] != STATUS_RETIRED
+    assert record["reason"] == "fulfilled_by_existing_evidence"
+    assert record["result_path"] == str(result_path)
+    outcome = summary["outcomes"][0]
+    assert outcome["action"] == STATUS_FULFILLED
+
+
+def test_runner_still_retires_when_no_evidence_exists(tmp_path, monkeypatch):
+    """Control: identical setup to the rescue test above, minus the result
+    record — must still retire exactly as before. Proves the discriminator
+    is doing the discriminating, not accidentally rescuing everything."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260826-oi1388r-not-rescued", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260826-oi1388r-not-rescued")
+    assert record["status"] == STATUS_RETIRED
+
+
+def test_runner_stamps_fulfilled_instead_of_escalating_when_evidence_exists(tmp_path, monkeypatch):
+    """Same rescue, via the unresolvable-timeout escalation path: the
+    environment stopped resolving a repo AFTER a gate already reviewed the
+    dispatch. The obligation must fulfil on the evidence, never escalate to
+    not_executable as if nothing ever reviewed it."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="20260826-oi1388r-rescued-escalate", gate="ci_gate",
+        project_id="vnx-dev",
+    )
+    update_obligation(path, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS - 1)
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: None)
+    _write_result_record(
+        state_dir, filename="pr-9701-ci_gate",
+        dispatch_id="20260826-oi1388r-rescued-escalate", gate="ci_gate", pr_number=9701,
+    )
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260826-oi1388r-rescued-escalate")
+    assert record["status"] == STATUS_FULFILLED
+    assert record["status"] != STATUS_NOT_EXECUTABLE
+    assert record["reason"] == "fulfilled_by_existing_evidence"
+
+
+def test_evidence_discriminator_missing_record_is_not_evidence(tmp_path):
+    """Bucket 1 of 4: no result record at all for this dispatch_id+gate."""
+    state_dir = _make_state_dir(tmp_path)
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "no-such-dispatch", "codex_gate") is None
+
+
+def test_evidence_discriminator_empty_contract_hash_is_not_evidence(tmp_path):
+    """Bucket 2 of 4: a record exists but its contract_hash is empty."""
+    state_dir = _make_state_dir(tmp_path)
+    _write_result_record(
+        state_dir, filename="pr-1-codex_gate", dispatch_id="d-empty-hash",
+        gate="codex_gate", pr_number=1, contract_hash="",
+    )
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "d-empty-hash", "codex_gate") is None
+
+
+def test_evidence_discriminator_empty_report_path_is_not_evidence(tmp_path):
+    """Bucket 3 of 4: a record exists but its report_path is empty."""
+    state_dir = _make_state_dir(tmp_path)
+    _write_result_record(
+        state_dir, filename="pr-2-codex_gate", dispatch_id="d-empty-report",
+        gate="codex_gate", pr_number=2, report_path="",
+    )
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "d-empty-report", "codex_gate") is None
+
+
+def test_evidence_discriminator_nonexistent_report_file_is_not_evidence(tmp_path):
+    """Bucket 4 of 4: contract_hash and report_path are both non-empty, but
+    the file report_path points to does not exist on disk."""
+    state_dir = _make_state_dir(tmp_path)
+    _write_result_record(
+        state_dir, filename="pr-3-codex_gate", dispatch_id="d-ghost-report",
+        gate="codex_gate", pr_number=3,
+        report_path=str(state_dir / "review_gates" / "reports" / "ghost.md"),
+    )
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "d-ghost-report", "codex_gate") is None
+
+
+def test_evidence_discriminator_finds_complete_evidence(tmp_path):
+    """Control: the positive case must actually work, or the four negatives
+    above would pass for the wrong reason (an always-None discriminator)."""
+    state_dir = _make_state_dir(tmp_path)
+    result_path = _write_result_record(
+        state_dir, filename="pr-4-codex_gate", dispatch_id="d-complete",
+        gate="codex_gate", pr_number=4,
+    )
+    index = runner._index_gate_results(state_dir)
+    found = runner._fulfilling_result(index, "d-complete", "codex_gate")
+    assert found is not None
+    found_path, found_record = found
+    assert found_path == result_path
+    assert found_record["dispatch_id"] == "d-complete"
+
+
+# ---------------------------------------------------------------------------
+# BETA3-C2 (2026-08-26) — the evidence discriminator must never launder a
+# gate's own verdict. RED on pre-BETA3-C2 code: has_complete_evidence +
+# is_terminal never look at the verdict, so ALL FIVE rows below (pass,
+# failed, errored, blocked, not_executable) stamped the obligation
+# STATUS_FULFILLED — measured live via pr-1692-glm_gate.json, a genuine
+# ``fail`` with complete evidence, and confirmed for the other four synthetically.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_discriminator_rejects_not_executable_even_with_complete_evidence(tmp_path):
+    """not_executable must never count as evidence, regardless of what its
+    evidence fields contain — the gate never ran, so nothing was reviewed.
+    Rejected INSIDE _fulfilling_result itself (not by a caller-side check),
+    matching the #1688 lesson that a caller-side check drifts with a new
+    call site."""
+    state_dir = _make_state_dir(tmp_path)
+    _write_result_record(
+        state_dir, filename="pr-5-codex_gate", dispatch_id="d-not-executable",
+        gate="codex_gate", pr_number=5, status="not_executable",
+    )
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "d-not-executable", "codex_gate") is None
+
+
+def test_evidence_discriminator_rejects_undecided_status_even_with_complete_evidence(tmp_path):
+    """An incomplete/unavailable/unrecognised status is not a decided
+    verdict either, even carrying both evidence fields — the same
+    "unknown is never a pass" principle OI-1400 applies on the live-run
+    path applies here on the rescue path too."""
+    state_dir = _make_state_dir(tmp_path)
+    _write_result_record(
+        state_dir, filename="pr-6-codex_gate", dispatch_id="d-undecided",
+        gate="codex_gate", pr_number=6, status="unavailable",
+    )
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "d-undecided", "codex_gate") is None
+
+
+def test_evidence_discriminator_accepts_decided_fail_as_evidence(tmp_path):
+    """Control: a decided FAIL is real evidence too (the gate DID review
+    it) — _fulfilling_result must return it; the caller decides how to book
+    it (STATUS_FAILED, never STATUS_FULFILLED — see the parametrized
+    verdict-split test below)."""
+    state_dir = _make_state_dir(tmp_path)
+    result_path = _write_result_record(
+        state_dir, filename="pr-7-codex_gate", dispatch_id="d-decided-fail",
+        gate="codex_gate", pr_number=7, status="failed",
+    )
+    index = runner._index_gate_results(state_dir)
+    found = runner._fulfilling_result(index, "d-decided-fail", "codex_gate")
+    assert found is not None
+    found_path, _found_record = found
+    assert found_path == result_path
+
+
+@pytest.mark.parametrize(
+    ("result_status", "expected_status", "expected_reason"),
+    [
+        ("pass", STATUS_FULFILLED, "fulfilled_by_existing_evidence"),
+        ("failed", STATUS_FAILED, "failed_by_existing_evidence"),
+        ("errored", STATUS_FAILED, "failed_by_existing_evidence"),
+        ("blocked", STATUS_FAILED, "failed_by_existing_evidence"),
+        ("not_executable", STATUS_RETIRED, REASON_NO_PR_BRANCH_GONE),
+    ],
+)
+def test_evidence_discriminator_verdict_split(
+    tmp_path, monkeypatch, result_status, expected_status, expected_reason,
+):
+    """The five-row table from the bug report, re-run against the fixed
+    code: a dispatch with a dead branch and no PR, where the ONLY thing
+    standing between it and STATUS_RETIRED is a same-dispatch_id+gate result
+    with complete evidence.
+
+    RED on pre-BETA3-C2 code: all five rows land STATUS_FULFILLED (every
+    row passes ``is_terminal`` + ``has_complete_evidence``, and the old
+    ``_fulfilling_result`` never asked what the verdict said). GREEN here:
+    ``pass`` still books ``fulfilled``; a decided fail
+    (failed/errored/blocked) books the distinct ``failed`` status, obligation
+    discharged but never disguised as a clean pass; ``not_executable`` is
+    never usable as evidence at all, so that obligation falls straight
+    through to its normal dead-branch retirement, exactly as if no result
+    file existed."""
+    state_dir = _make_state_dir(tmp_path)
+    dispatch_id = f"20260826-beta3c2-{result_status}"
+    register_obligation(
+        state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    _write_result_record(
+        state_dir, filename=f"pr-9750-{result_status}-codex_gate",
+        dispatch_id=dispatch_id, gate="codex_gate", pr_number=9750,
+        status=result_status,
+    )
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, dispatch_id)
+    assert record["status"] == expected_status, (
+        f"result status {result_status!r} must book obligation status "
+        f"{expected_status!r}, got {record['status']!r}"
+    )
+    assert record["reason"] == expected_reason
+    outcome = [o for o in summary["outcomes"] if o["dispatch_id"] == dispatch_id][0]
+    assert outcome["action"] == expected_status
+
+
+# ---------------------------------------------------------------------------
+# OI-1388 residu (defect 2) — dry-run must walk the SAME decision tree as a
+# real run, not a uniform "would_fulfill" guess. RED on unfixed main: every
+# non-terminal obligation reports "would_fulfill" regardless of what a real
+# run would actually do with it.
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_and_real_run_choose_the_same_action(tmp_path, monkeypatch):
+    """Two byte-identical stores (one run dry, one run for real) must reach
+    the same underlying decision for every obligation — retire, stay
+    pending, or get rescued by the evidence discriminator — differing only
+    in the ``would_`` prefix on the not-yet-written dry-run label."""
+    real_dir = _make_state_dir(tmp_path / "real")
+    dry_dir = _make_state_dir(tmp_path / "dry")
+    for state_dir in (real_dir, dry_dir):
+        register_obligation(
+            state_dir, dispatch_id="20260826-oi1388r-parity-retire", gate="codex_gate",
+            project_id="vnx-dev",
+        )
+        register_obligation(
+            state_dir, dispatch_id="20260826-oi1388r-parity-pending", gate="codex_gate",
+            project_id="vnx-dev",
+        )
+        register_obligation(
+            state_dir, dispatch_id="20260826-oi1388r-parity-rescued", gate="codex_gate",
+            project_id="vnx-dev",
+        )
+        _write_result_record(
+            state_dir, filename="pr-9800-codex_gate",
+            dispatch_id="20260826-oi1388r-parity-rescued", gate="codex_gate", pr_number=9800,
+        )
+
+    def branch_exists(did, owner_repo):
+        return not (did.endswith("parity-retire") or did.endswith("parity-rescued"))
+
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", branch_exists)
+
+    dry_summary = runner.run(dry_dir, write=False)
+    real_summary = runner.run(real_dir, write=True)
+
+    dry_by_id = {o["dispatch_id"]: o["action"] for o in dry_summary["outcomes"]}
+    real_by_id = {o["dispatch_id"]: o["action"] for o in real_summary["outcomes"]}
+
+    assert dry_by_id["20260826-oi1388r-parity-retire"] == "would_retire"
+    assert real_by_id["20260826-oi1388r-parity-retire"] == STATUS_RETIRED
+
+    assert dry_by_id["20260826-oi1388r-parity-pending"] == "would_stay_pending"
+    assert real_by_id["20260826-oi1388r-parity-pending"] == "pending"
+
+    assert dry_by_id["20260826-oi1388r-parity-rescued"] == "would_stamp"
+    assert real_by_id["20260826-oi1388r-parity-rescued"] == STATUS_FULFILLED
+
+
+def test_summary_reports_action_counts_breakdown(tmp_path, monkeypatch):
+    """The summary must expose a per-action breakdown so a dry run's
+    forecasted retirements/rescues can be counted apart from everything
+    else — the whole point of defect 2 is a countable forecast, not just a
+    per-obligation label."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260826-oi1388r-counts-retire", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    register_obligation(
+        state_dir, dispatch_id="20260826-oi1388r-counts-pending", gate="codex_gate",
+        project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(
+        runner, "_branch_exists_on_github",
+        lambda did, owner_repo: did.endswith("counts-pending"),
+    )
+
+    summary = runner.run(state_dir, write=False)
+
+    assert summary["action_counts"] == {"would_retire": 1, "would_stay_pending": 1}
+
+
+# ---------------------------------------------------------------------------
+# OI-1388 residu (T0 addendum, 2026-08-26) — read-only diagnostic: an
+# obligation ALREADY booked retired/not_executable before this dispatch's fix
+# landed can still contradict evidence that was there all along. Measured
+# live: 2 contradictions on ~/.vnx-data/mission-control, 1 on
+# ~/.vnx-data/vnx-dev — all three with reason=None. Report only, never
+# auto-heal: flipping a terminal status is its own write action with its own
+# risk.
+# ---------------------------------------------------------------------------
+
+
+def test_contradiction_flags_already_retired_obligation_with_reason_none(tmp_path):
+    """Mirrors the live shape T0 measured: status=retired, reason=None, but
+    a complete-evidence result exists for the same dispatch_id+gate."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="d-already-retired", gate="codex_gate", project_id="vnx-dev",
+    )
+    update_obligation(
+        path, status=STATUS_RETIRED, reason=None, reason_detail="booked before the fix",
+        resolved_at="2026-08-01T00:00:00Z",
+    )
+    result_path = _write_result_record(
+        state_dir, filename="pr-1-codex_gate", dispatch_id="d-already-retired", gate="codex_gate",
+    )
+
+    summary = runner.run(state_dir, write=False)
+
+    assert summary["terminal_evidence_contradiction_count"] == 1
+    contradiction = summary["terminal_evidence_contradictions"][0]
+    assert contradiction["dispatch_id"] == "d-already-retired"
+    assert contradiction["obligation_status"] == STATUS_RETIRED
+    assert contradiction["obligation_reason"] is None
+    assert contradiction["obligation_reason_bucket"] == "missing"
+    assert contradiction["evidence_result_path"] == str(result_path)
+    # Read-only: the retired record on disk is untouched.
+    record = _read_obligation(state_dir, "d-already-retired")
+    assert record["status"] == STATUS_RETIRED
+    assert record["reason"] is None
+
+
+def test_contradiction_flags_already_not_executable_obligation(tmp_path):
+    """Same rescue-worthy shape via not_executable, and proven with a REAL
+    (write=True) run — the diagnostic must never touch an already-terminal
+    record even when the runner is actively writing elsewhere."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="d-already-not-exec", gate="ci_gate", project_id="vnx-dev",
+    )
+    update_obligation(
+        path, status=STATUS_NOT_EXECUTABLE, reason="unresolvable_timeout",
+        reason_detail="booked before the fix", resolved_at="2026-08-01T00:00:00Z",
+    )
+    _write_result_record(
+        state_dir, filename="pr-2-ci_gate", dispatch_id="d-already-not-exec", gate="ci_gate",
+    )
+
+    summary = runner.run(state_dir, write=True)
+
+    assert summary["terminal_evidence_contradiction_count"] == 1
+    contradiction = summary["terminal_evidence_contradictions"][0]
+    assert contradiction["obligation_status"] == STATUS_NOT_EXECUTABLE
+    assert contradiction["obligation_reason"] == "unresolvable_timeout"
+    assert contradiction["obligation_reason_bucket"] == "known"
+    record = _read_obligation(state_dir, "d-already-not-exec")
+    assert record["status"] == STATUS_NOT_EXECUTABLE, "the diagnostic must never rewrite the record"
+    assert record["reason"] == "unresolvable_timeout"
+
+
+def test_contradiction_bucket_distinguishes_empty_from_missing_reason(tmp_path):
+    """Three-bucket contract: an empty-string reason is its own bucket,
+    distinct from a missing (None) reason and from a known reason string."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="d-empty-reason", gate="codex_gate", project_id="vnx-dev",
+    )
+    update_obligation(
+        path, status=STATUS_RETIRED, reason="", reason_detail="",
+        resolved_at="2026-08-01T00:00:00Z",
+    )
+    _write_result_record(
+        state_dir, filename="pr-3-codex_gate", dispatch_id="d-empty-reason", gate="codex_gate",
+    )
+
+    summary = runner.run(state_dir, write=False)
+
+    contradiction = summary["terminal_evidence_contradictions"][0]
+    assert contradiction["obligation_reason"] == ""
+    assert contradiction["obligation_reason_bucket"] == "empty"
+
+
+def test_contradiction_ignores_terminal_obligations_without_matching_evidence(tmp_path):
+    """Control: a genuinely-dead retirement (no evidence anywhere) must not
+    be flagged — this is not a blanket "list all terminal obligations"."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="d-genuinely-dead", gate="codex_gate", project_id="vnx-dev",
+    )
+    update_obligation(
+        path, status=STATUS_RETIRED, reason=REASON_NO_PR_BRANCH_GONE,
+        reason_detail="dead", resolved_at="2026-08-01T00:00:00Z",
+    )
+
+    summary = runner.run(state_dir, write=False)
+
+    assert summary["terminal_evidence_contradiction_count"] == 0
+    assert summary["terminal_evidence_contradictions"] == []
+
+
+def test_contradiction_ignores_no_gate_obligations(tmp_path):
+    """A no-gate obligation never had a gate to review it — never flagged,
+    even if a same-dispatch_id result happens to exist under a real gate."""
+    state_dir = _make_state_dir(tmp_path)
+    register_no_gate_obligation(state_dir, dispatch_id="d-no-gate", project_id="vnx-dev")
+    _write_result_record(
+        state_dir, filename="pr-4-codex_gate", dispatch_id="d-no-gate", gate="codex_gate",
+    )
+
+    summary = runner.run(state_dir, write=False)
+
+    assert summary["terminal_evidence_contradiction_count"] == 0
+
+
+def test_contradiction_scan_covers_full_store_not_just_scope(tmp_path):
+    """A --since/--dispatch-prefix slice narrows what gets ACTED on, never
+    what the read-only contradiction diagnostic reports — an already-burned
+    record outside the active scope must still surface."""
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="20260101-out-of-scope", gate="codex_gate", project_id="vnx-dev",
+    )
+    update_obligation(
+        path, status=STATUS_RETIRED, reason=None, reason_detail="booked before the fix",
+        resolved_at="2026-01-01T00:00:00Z", declared_at="2026-01-01T00:00:00Z",
+    )
+    _write_result_record(
+        state_dir, filename="pr-5-codex_gate", dispatch_id="20260101-out-of-scope", gate="codex_gate",
+    )
+
+    summary = runner.run(state_dir, write=False, since="2026-08-01")
+
+    assert summary["obligations_in_scope"] == 0, "the obligation itself is out of --since scope"
+    assert summary["terminal_evidence_contradiction_count"] == 1, (
+        "the contradiction diagnostic must still see it — evidence integrity "
+        "is not scoped by --since"
     )
