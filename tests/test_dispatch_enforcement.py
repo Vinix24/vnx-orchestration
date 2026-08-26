@@ -152,7 +152,12 @@ class TestD12ViaAndConstraint:
             f"expected via='headless', got {captured.get('via')!r}"
         )
 
-    def test_build_snapshot_via_cli_when_allow_headless_false(self, tmp_path: Path) -> None:
+    def test_build_snapshot_via_headless_when_no_explicit_choice(self, tmp_path: Path) -> None:
+        """A2 (2026-08-26): allow_headless=False with no force_tmux opt-out is no
+        longer "the normal case" — claude_headless is the default lane, so
+        build_runtime_snapshot's via must be 'headless' here too (not just for an
+        explicit allow_headless=True), mirroring dispatch_plan.resolve_claude_lane.
+        Was test_build_snapshot_via_cli_when_allow_headless_false pre-flip."""
         captured: dict = {}
 
         def fake_check(*, via=None, **kwargs):
@@ -190,8 +195,53 @@ class TestD12ViaAndConstraint:
 
             build_runtime_snapshot(vspec, data_dir=tmp_path, spec_file=tmp_path / "spec.json")
 
+        assert captured.get("via") == "headless", (
+            f"expected via='headless' (the new default), got {captured.get('via')!r}"
+        )
+
+    def test_build_snapshot_via_cli_when_force_tmux_true(self, tmp_path: Path) -> None:
+        """A2: an explicit force_tmux=True opt-out must still resolve via='cli' —
+        the only way left to reach the non-headless constraint path."""
+        captured: dict = {}
+
+        def fake_check(*, via=None, **kwargs):
+            captured["via"] = via
+            return []
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch("providers.constraint_enforcer.check_constraints", side_effect=fake_check)
+            )
+            stack.enter_context(
+                patch("staging_validator._exists_in_dir", return_value=False)
+            )
+
+            spec = DispatchSpec(
+                schema_version=1,
+                project_id="test-project",
+                dispatch_id="test-d12-force-tmux-snap",
+                staging_id="test-d12-force-tmux-snap",
+                instruction_file=tmp_path / "instruction.md",
+                role="T1",
+                target_slot="T1",
+                gate="",
+                dispatch_paths=(),
+                provider=Provider.CLAUDE,
+                force_tmux=True,
+                force_tmux_reason="unit test pins tmux",
+            )
+            inst_text = "test force-tmux instruction"
+            vspec = ValidatedSpec(
+                spec=spec,
+                instruction_text=inst_text,
+                normalized_paths=(),
+                instruction_sha256=hashlib.sha256(inst_text.encode()).hexdigest(),
+            )
+
+            build_runtime_snapshot(vspec, data_dir=tmp_path, spec_file=tmp_path / "spec.json")
+
         assert captured.get("via") == "cli", (
-            f"expected via='cli', got {captured.get('via')!r}"
+            f"expected via='cli' for an explicit force_tmux opt-out, got {captured.get('via')!r}"
         )
 
 

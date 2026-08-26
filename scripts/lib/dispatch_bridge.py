@@ -163,6 +163,8 @@ def stage_spec_bundle(
     requires_mcp: bool = False,
     allow_headless: bool = False,
     headless_reason: Optional[str] = None,
+    force_tmux: bool = False,
+    force_tmux_reason: Optional[str] = None,
     post_merge_verification: bool = False,
     irreversible: bool = False,
     pr_id: Optional[str] = None,
@@ -242,6 +244,7 @@ def stage_spec_bundle(
     # 6. assemble + write the spec atomically. instruction_file is the literal
     #    absolute child path — a real regular file, no symlink.
     norm_reason = (headless_reason or "").strip() or None
+    norm_tmux_reason = (force_tmux_reason or "").strip() or None
     spec_payload = {
         "schema_version": 1,
         "project_id": effective_project_id,
@@ -284,6 +287,8 @@ def stage_spec_bundle(
         "instruction_sha256": instruction_sha256,
         "allow_headless": bool(allow_headless),
         "headless_reason": norm_reason,
+        "force_tmux": bool(force_tmux),
+        "force_tmux_reason": norm_tmux_reason,
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
     }
@@ -481,6 +486,8 @@ def deliver_via_door(
     deadline_seconds: Optional[int] = None,
     allow_headless: bool = False,
     headless_reason: Optional[str] = None,
+    force_tmux: bool = False,
+    force_tmux_reason: Optional[str] = None,
 ) -> bool:
     """Gated delivery for the in-process python callers (pool_worker_runner, claude_adapter,
     headless_dispatch_daemon). When ``VNX_SINGLE_ENTRY_DISPATCH=1`` route through the door
@@ -504,7 +511,15 @@ def deliver_via_door(
     claude_headless lane the same way the bridge's own ``--allow-headless`` CLI
     does. The door's validate() re-enforces the reason-required + claude-only
     rules, so a caller that skips its own check still fails loud. Defaults False /
-    None reproduce byte-identical prior behavior.
+    None reproduce byte-identical prior behavior. Since A2 (2026-08-26) headless is
+    the claude lane's DEFAULT, so these defaults now mean "accept the default"
+    rather than "stay on the old default (tmux)".
+
+    ``force_tmux`` / ``force_tmux_reason`` (A2, 2026-08-26): the mirror-image
+    explicit opt-OUT back to the tmux lane, for a caller that wants the pre-flip
+    behavior instead of the new default. Same reason-required + claude-only rules
+    at the door (validate() Rule 12b). Defaults False / None reproduce the new
+    default (claude_headless) unchanged.
 
     ``pr_id`` / ``work_ref`` / ``base_ref`` (OI-1390): threaded through to
     ``bridge_dispatch`` -> ``stage_spec_bundle`` unchanged, so a consumer-door
@@ -536,6 +551,8 @@ def deliver_via_door(
             deadline_seconds=deadline_seconds if deadline_seconds is not None else 3600,
             allow_headless=allow_headless,
             headless_reason=headless_reason,
+            force_tmux=force_tmux,
+            force_tmux_reason=force_tmux_reason,
         ) == 0
     return bool(legacy())
 
@@ -568,6 +585,10 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--requires-mcp", action="store_true", dest="requires_mcp")
     parser.add_argument("--allow-headless", action="store_true", dest="allow_headless")
     parser.add_argument("--headless-reason", default=None, dest="headless_reason")
+    # A2 (2026-08-26): claude_headless is now the default lane; --force-tmux is the
+    # explicit opt-out back to the tmux lane (mirrors --allow-headless's shape).
+    parser.add_argument("--force-tmux", action="store_true", dest="force_tmux")
+    parser.add_argument("--force-tmux-reason", default=None, dest="force_tmux_reason")
     parser.add_argument(
         "--post-merge-verification",
         action="store_true",
@@ -627,6 +648,8 @@ def main(argv: Optional[list] = None) -> int:
         requires_mcp=args.requires_mcp,
         allow_headless=args.allow_headless,
         headless_reason=args.headless_reason,
+        force_tmux=args.force_tmux,
+        force_tmux_reason=args.force_tmux_reason,
         post_merge_verification=args.post_merge_verification,
         target_id_override=args.target_id_override,
         dry_run=args.dry_run,

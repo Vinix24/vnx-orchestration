@@ -47,6 +47,7 @@ from dispatch_plan import (  # noqa: E402
     RuntimeSnapshot,
     claude_auth_is_api_metered,
     compile_plan,
+    resolve_claude_lane,
 )
 from dispatch_internal import (  # noqa: E402
     ExecutionPermit,
@@ -203,6 +204,8 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         instruction_sha256=(raw.get("instruction_sha256") or None),
         allow_headless=raw.get("allow_headless") is True,
         headless_reason=_sanitize_headless_reason(raw.get("headless_reason")),
+        force_tmux=raw.get("force_tmux") is True,
+        force_tmux_reason=_sanitize_headless_reason(raw.get("force_tmux_reason")),
         post_merge_verification=raw.get("post_merge_verification") is True,
         irreversible=raw.get("irreversible") is True,
     )
@@ -1596,10 +1599,16 @@ def build_runtime_snapshot(
     else:
         effective_model = spec.model or "default"
 
-    # claude-headless enforcement: allow_headless=True sets via to 'headless', which
-    # triggers the claude-headless forbid_route constraint. Normal tmux lane keeps via='cli'.
-    if is_claude_lane and spec.allow_headless:
-        via = "headless"
+    # claude-headless enforcement: via='headless' whenever THIS spec resolves to the
+    # headless lane — which since A2 (2026-08-26) is the DEFAULT for a claude spec
+    # with no explicit lane choice, not just an explicit allow_headless=True opt-in.
+    # Reuses dispatch_plan.resolve_claude_lane (the same function compile_plan's D1
+    # calls) so this can never independently drift from the actual lane decision.
+    # Normal tmux lane (default off, or an explicit force_tmux opt-out) keeps via='cli'.
+    if is_claude_lane:
+        _lane_for_via, _, _ = resolve_claude_lane(spec)
+        if _lane_for_via == "claude_headless":
+            via = "headless"
 
     # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
     constraint_verdicts: tuple[ConstraintVerdict, ...] = ()

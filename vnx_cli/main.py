@@ -423,10 +423,11 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
         default=False,
         dest="allow_headless",
         help=(
-            "opt into the claude_headless lane (claude -p). Requires "
-            "--headless-reason and a claude provider. The lane runs on the "
-            "subscription unless an own ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL "
-            "is present."
+            "explicitly opt into the claude_headless lane (claude -p) — redundant "
+            "with the default since A2 (2026-08-26), kept for an explicit "
+            "audit-trail statement. Requires --headless-reason and a claude "
+            "provider. The lane runs on the subscription unless an own "
+            "ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL is present."
         ),
     )
     dispatch_parser.add_argument(
@@ -435,6 +436,24 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
         dest="headless_reason",
         metavar="REASON",
         help="required human-readable justification when --allow-headless is set",
+    )
+    dispatch_parser.add_argument(
+        "--force-tmux",
+        action="store_true",
+        default=False,
+        dest="force_tmux",
+        help=(
+            "opt OUT of the claude_headless default back to the "
+            "claude_tmux_subscription lane. Requires --force-tmux-reason and a "
+            "claude provider. Mutually exclusive with --allow-headless."
+        ),
+    )
+    dispatch_parser.add_argument(
+        "--force-tmux-reason",
+        default=None,
+        dest="force_tmux_reason",
+        metavar="REASON",
+        help="required human-readable justification when --force-tmux is set",
     )
     dispatch_parser.add_argument(
         "--base-ref",
