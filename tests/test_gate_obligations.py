@@ -32,6 +32,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
@@ -1225,6 +1227,7 @@ def _write_result_record(
     branch: str | None = None,
     contract_hash: str = "sha256:deadbeef",
     report_path: str | None = "__auto__",
+    status: str = "pass",
 ) -> Path:
     """Write a ``review_gates/results/<filename>.json`` record.
 
@@ -1233,6 +1236,13 @@ def _write_result_record(
     evidence" shape ``gate_status.has_complete_evidence`` requires. Pass an
     explicit string (including ``""``) to build an incomplete or dangling
     record instead.
+
+    ``status`` (BETA3-C2, default ``"pass"``) is the gate's raw verdict
+    string. glm_gate/kimi_gate have emitted BOTH ``contract_hash`` and
+    ``report_path`` on a FAILED run since #1669, so a caller can build a
+    "complete evidence" record for any verdict — pass, a decided fail
+    (``failed``/``errored``/``blocked``), or ``not_executable`` — to pin the
+    evidence discriminator's verdict-aware split.
     """
     results_dir = Path(state_dir) / "review_gates" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1246,7 +1256,7 @@ def _write_result_record(
         "dispatch_id": dispatch_id,
         "pr_number": pr_number,
         "branch": branch,
-        "status": "pass",
+        "status": status,
         "contract_hash": contract_hash,
         "report_path": report_path or "",
     }
@@ -1398,6 +1408,117 @@ def test_evidence_discriminator_finds_complete_evidence(tmp_path):
     found_path, found_record = found
     assert found_path == result_path
     assert found_record["dispatch_id"] == "d-complete"
+
+
+# ---------------------------------------------------------------------------
+# BETA3-C2 (2026-08-26) — the evidence discriminator must never launder a
+# gate's own verdict. RED on pre-BETA3-C2 code: has_complete_evidence +
+# is_terminal never look at the verdict, so ALL FIVE rows below (pass,
+# failed, errored, blocked, not_executable) stamped the obligation
+# STATUS_FULFILLED — measured live via pr-1692-glm_gate.json, a genuine
+# ``fail`` with complete evidence, and confirmed for the other four synthetically.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_discriminator_rejects_not_executable_even_with_complete_evidence(tmp_path):
+    """not_executable must never count as evidence, regardless of what its
+    evidence fields contain — the gate never ran, so nothing was reviewed.
+    Rejected INSIDE _fulfilling_result itself (not by a caller-side check),
+    matching the #1688 lesson that a caller-side check drifts with a new
+    call site."""
+    state_dir = _make_state_dir(tmp_path)
+    _write_result_record(
+        state_dir, filename="pr-5-codex_gate", dispatch_id="d-not-executable",
+        gate="codex_gate", pr_number=5, status="not_executable",
+    )
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "d-not-executable", "codex_gate") is None
+
+
+def test_evidence_discriminator_rejects_undecided_status_even_with_complete_evidence(tmp_path):
+    """An incomplete/unavailable/unrecognised status is not a decided
+    verdict either, even carrying both evidence fields — the same
+    "unknown is never a pass" principle OI-1400 applies on the live-run
+    path applies here on the rescue path too."""
+    state_dir = _make_state_dir(tmp_path)
+    _write_result_record(
+        state_dir, filename="pr-6-codex_gate", dispatch_id="d-undecided",
+        gate="codex_gate", pr_number=6, status="unavailable",
+    )
+    index = runner._index_gate_results(state_dir)
+    assert runner._fulfilling_result(index, "d-undecided", "codex_gate") is None
+
+
+def test_evidence_discriminator_accepts_decided_fail_as_evidence(tmp_path):
+    """Control: a decided FAIL is real evidence too (the gate DID review
+    it) — _fulfilling_result must return it; the caller decides how to book
+    it (STATUS_FAILED, never STATUS_FULFILLED — see the parametrized
+    verdict-split test below)."""
+    state_dir = _make_state_dir(tmp_path)
+    result_path = _write_result_record(
+        state_dir, filename="pr-7-codex_gate", dispatch_id="d-decided-fail",
+        gate="codex_gate", pr_number=7, status="failed",
+    )
+    index = runner._index_gate_results(state_dir)
+    found = runner._fulfilling_result(index, "d-decided-fail", "codex_gate")
+    assert found is not None
+    found_path, _found_record = found
+    assert found_path == result_path
+
+
+@pytest.mark.parametrize(
+    ("result_status", "expected_status", "expected_reason"),
+    [
+        ("pass", STATUS_FULFILLED, "fulfilled_by_existing_evidence"),
+        ("failed", STATUS_FAILED, "failed_by_existing_evidence"),
+        ("errored", STATUS_FAILED, "failed_by_existing_evidence"),
+        ("blocked", STATUS_FAILED, "failed_by_existing_evidence"),
+        ("not_executable", STATUS_RETIRED, REASON_NO_PR_BRANCH_GONE),
+    ],
+)
+def test_evidence_discriminator_verdict_split(
+    tmp_path, monkeypatch, result_status, expected_status, expected_reason,
+):
+    """The five-row table from the bug report, re-run against the fixed
+    code: a dispatch with a dead branch and no PR, where the ONLY thing
+    standing between it and STATUS_RETIRED is a same-dispatch_id+gate result
+    with complete evidence.
+
+    RED on pre-BETA3-C2 code: all five rows land STATUS_FULFILLED (every
+    row passes ``is_terminal`` + ``has_complete_evidence``, and the old
+    ``_fulfilling_result`` never asked what the verdict said). GREEN here:
+    ``pass`` still books ``fulfilled``; a decided fail
+    (failed/errored/blocked) books the distinct ``failed`` status, obligation
+    discharged but never disguised as a clean pass; ``not_executable`` is
+    never usable as evidence at all, so that obligation falls straight
+    through to its normal dead-branch retirement, exactly as if no result
+    file existed."""
+    state_dir = _make_state_dir(tmp_path)
+    dispatch_id = f"20260826-beta3c2-{result_status}"
+    register_obligation(
+        state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+    )
+    monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+    monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    _write_result_record(
+        state_dir, filename=f"pr-9750-{result_status}-codex_gate",
+        dispatch_id=dispatch_id, gate="codex_gate", pr_number=9750,
+        status=result_status,
+    )
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, dispatch_id)
+    assert record["status"] == expected_status, (
+        f"result status {result_status!r} must book obligation status "
+        f"{expected_status!r}, got {record['status']!r}"
+    )
+    assert record["reason"] == expected_reason
+    outcome = [o for o in summary["outcomes"] if o["dispatch_id"] == dispatch_id][0]
+    assert outcome["action"] == expected_status
 
 
 # ---------------------------------------------------------------------------

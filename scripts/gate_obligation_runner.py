@@ -48,6 +48,25 @@ runner fulfils them:
      IS the discriminator: the obligation is booked ``fulfilled``
      (``reason=fulfilled_by_existing_evidence``), never retired or escalated
      over evidence that was there all along.
+  8. BETA3-C2 (2026-08-26): item 7's evidence check only asked "is the
+     evidence trail complete" (non-empty ``contract_hash``/``report_path``),
+     never "what does the verdict say". That let a REJECTED review get
+     stamped ``fulfilled`` — glm_gate and kimi_gate have emitted both
+     evidence fields on a FAILED run since #1669, and PR #1692's own
+     glm_gate verdict on itself (a genuine ``fail`` with complete evidence)
+     is the live record that proved it. The discriminator now asks a second
+     question before writing, using :func:`gate_status.is_pass` and
+     :data:`gate_status.FAIL_STATES` — never a new vocabulary of its own:
+     a decided PASS still books ``fulfilled`` exactly as item 7 describes; a
+     decided FAIL books the distinct, already-defined terminal ``failed``
+     status instead (``reason=failed_by_existing_evidence``) — the
+     obligation is discharged, because a gate did review it, but the outcome
+     stays visibly negative, never disguised as a clean pass. ``not_executable``
+     is REJECTED as evidence outright, inside :func:`_fulfilling_result`
+     itself rather than by a caller-side check (the #1688 lesson: a
+     caller-side check drifts the moment a new call site is added) — the
+     gate never ran, so there is no verdict to rescue anything with, no
+     matter what its evidence fields contain.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -79,6 +98,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
     REASON_NO_PR_BRANCH_GONE,
+    STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
@@ -90,9 +110,12 @@ from gate_obligations import (  # noqa: E402
     update_obligation,
 )
 from gate_status import (  # noqa: E402
+    FAIL_STATES as _GATE_RESULT_FAIL_STATES,
     PASS_STATES as _GATE_RESULT_PASS_STATES,
     UNAVAILABLE_STATES as _GATE_RESULT_UNAVAILABLE_STATES,
+    canonical_status as _gate_canonical_status,
     has_complete_evidence,
+    is_pass as _gate_is_pass,
 )
 
 _LOG = logging.getLogger("gate_obligation_runner")
@@ -647,22 +670,64 @@ def _fulfilling_result(
     dispatch_id: str,
     gate: str,
 ) -> Optional[Tuple[Path, Dict[str, Any]]]:
-    """Return the (path, record) of a complete-evidence result for ``(dispatch_id, gate)``.
+    """Return the (path, record) of a complete-evidence, DECIDED result for
+    ``(dispatch_id, gate)`` — a gate that actually ran and reached a verdict.
 
     OI-1388 defect 1: a terminal retirement/escalation must never overwrite
     evidence that a gate already produced. "Complete evidence" mirrors
     ``gate_status.has_complete_evidence`` (non-empty ``contract_hash`` AND
     ``report_path`` — the same bar ``closure_verifier`` enforces at merge
     time) plus an on-disk check that the report file the record points to
-    still exists. Three distinct non-evidence states are all rejected here: a
-    result that is entirely absent (empty index bucket), one whose evidence
-    fields are empty strings (fails ``has_complete_evidence``), and one whose
-    ``report_path`` points at a file that no longer exists.
+    still exists.
+
+    BETA3-C2 (2026-08-26): complete evidence fields alone are not proof a
+    gate reviewed and decided. glm_gate/kimi_gate have emitted BOTH
+    ``contract_hash`` and ``report_path`` on a FAILED run since #1669, and
+    nothing forbids a ``not_executable`` record from echoing both fields
+    from a request payload that never actually ran. ``has_complete_evidence``
+    answers "is the trail complete"; it deliberately does not ask "what does
+    the verdict say" — callers (:func:`_pre_execution_decision`,
+    :func:`fulfill_obligation`) need that second answer to decide what to
+    stamp. Two rejections layer on top of ``has_complete_evidence``, both
+    INSIDE this function rather than at a call site, so the property holds
+    no matter what order/how many callers exist (the #1688 lesson: a
+    caller-side check drifts the moment a new call site is added; a
+    function-side check cannot):
+
+      - ``not_executable`` is never evidence, full stop, regardless of what
+        its evidence fields contain — the gate never ran, so there is no
+        verdict to rescue an obligation with.
+      - any other status that is not a DECIDED verdict — incomplete
+        (pending/running/queued/requested), ``unavailable`` (provider
+        outage, OI-1142), or a status this vocabulary has never seen — is
+        rejected the same way, even carrying both evidence fields. This
+        mirrors the OI-1400 principle already applied on the live-run path
+        ("anything I don't recognise as a pass is NOT a pass", see the
+        ``elif`` chain in :func:`fulfill_obligation`): only
+        :func:`gate_status.is_pass` returning True, or a status in
+        :data:`gate_status.FAIL_STATES`, counts as decided. No new
+        vocabulary is invented here — both checks reuse ``gate_status``'s.
+
+    Four distinct non-evidence states are rejected: a result that is
+    entirely absent (empty index bucket), one whose evidence fields are
+    empty strings (fails ``has_complete_evidence``), one whose
+    ``report_path`` points at a file that no longer exists, and — as of
+    BETA3-C2 — one whose verdict itself is not decided.
+
+    The caller determines PASS vs. FAIL on the returned record via
+    :func:`gate_status.is_pass` — this function only answers "does usable
+    evidence exist", never "what should the obligation be stamped".
     """
     for entry, record in index.get((dispatch_id, gate), []):
         if not has_complete_evidence(record):
             continue
         if not Path(str(record.get("report_path"))).exists():
+            continue
+        status = _gate_canonical_status(record)
+        if status == "not_executable":
+            continue
+        passed, _reason = _gate_is_pass(record)
+        if not passed and status not in _GATE_RESULT_FAIL_STATES:
             continue
         return entry, record
     return None
@@ -723,6 +788,27 @@ def _terminal_evidence_contradictions(
     return contradictions
 
 
+def _evidence_decision(evidence: Tuple[Path, Dict[str, Any]]) -> Dict[str, Any]:
+    """Turn OI-1388-rescue evidence into a decision, split by verdict (BETA3-C2).
+
+    ``_fulfilling_result`` guarantees ``evidence`` is a DECIDED verdict (never
+    ``not_executable``, never an incomplete/unavailable/unrecognised status)
+    — but decided can still mean PASS or FAIL, and the two must never be
+    booked the same way. A PASS is exactly the OI-1388 defect-1 rescue:
+    ``fulfill_by_evidence`` -> ``STATUS_FULFILLED``, unchanged. A FAIL must
+    NOT reuse that path — ``fulfilled`` reads as "reviewed, no problem" to
+    every downstream consumer that scans for it, and PR #1692's own
+    glm_gate verdict on itself is the live record of exactly what that would
+    launder: a rejection turned into a clean pass. ``fulfill_by_failed_evidence``
+    keeps the obligation discharged (a gate DID review this) while keeping
+    the negative outcome visible.
+    """
+    _path, record = evidence
+    passed, _reason = _gate_is_pass(record)
+    kind = "fulfill_by_evidence" if passed else "fulfill_by_failed_evidence"
+    return {"kind": kind, "evidence": evidence}
+
+
 def _pre_execution_decision(
     dispatch_id: str,
     gate: str,
@@ -741,20 +827,30 @@ def _pre_execution_decision(
     and the evidence lookup is a local file read.
 
     Returns ``{"kind": ..., ...}`` where ``kind`` is one of:
-      - ``unresolvable``        — env fault, stays retryable (below threshold)
-      - ``escalate``            — env fault, past threshold: terminal escalation
-      - ``stay_pending``        — genuine wait (branch alive / undetermined)
-      - ``retire``              — dead dispatch, no rescuing evidence
-      - ``fulfill_by_evidence`` — OI-1388 defect 1: a complete-evidence result
-        already exists for this dispatch_id + gate; carried as
+      - ``unresolvable``               — env fault, stays retryable (below threshold)
+      - ``escalate``                   — env fault, past threshold: terminal escalation
+      - ``stay_pending``               — genuine wait (branch alive / undetermined)
+      - ``retire``                     — dead dispatch, no rescuing evidence
+      - ``fulfill_by_evidence``        — OI-1388 defect 1: a complete-evidence
+        DECIDED PASS already exists for this dispatch_id + gate; carried as
         ``decision["evidence"] = (path, record)``
-      - ``attempt_gate``        — PR resolved: the caller must actually run
-        the gate to learn the outcome (only the real run does this)
+      - ``fulfill_by_failed_evidence`` — BETA3-C2: same rescue, but the
+        existing evidence is a DECIDED FAIL — never booked as
+        ``fulfill_by_evidence``, or the obligation would launder a rejection
+        into a clean pass; also carries ``decision["evidence"]``
+      - ``attempt_gate``               — PR resolved: the caller must actually
+        run the gate to learn the outcome (only the real run does this)
+
+    ``not_executable`` and any other undecided status are never returned as
+    evidence here — :func:`_fulfilling_result` rejects those itself, so a
+    dispatch whose only "evidence" is a never-ran gate falls straight through
+    to ``retire``/``escalate``/``unresolvable`` exactly as if no result
+    existed at all.
     """
     if resolution.status == RESOLUTION_UNRESOLVABLE:
         evidence = _fulfilling_result(result_index, dispatch_id, gate)
         if evidence is not None:
-            return {"kind": "fulfill_by_evidence", "evidence": evidence}
+            return _evidence_decision(evidence)
         if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
             return {"kind": "escalate"}
         return {"kind": "unresolvable"}
@@ -763,7 +859,7 @@ def _pre_execution_decision(
         if resolution.branch_exists is False:
             evidence = _fulfilling_result(result_index, dispatch_id, gate)
             if evidence is not None:
-                return {"kind": "fulfill_by_evidence", "evidence": evidence}
+                return _evidence_decision(evidence)
             return {"kind": "retire"}
         return {"kind": "stay_pending"}
 
@@ -774,6 +870,7 @@ _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "unresolvable": "would_stay_unresolvable",
     "escalate": "would_escalate_not_executable",
     "fulfill_by_evidence": "would_stamp",
+    "fulfill_by_failed_evidence": "would_stamp_failed",
     "retire": "would_retire",
     "stay_pending": "would_stay_pending",
     "attempt_gate": "would_fulfill",
@@ -818,6 +915,13 @@ def _dry_run_outcome(
     if decision["kind"] == "fulfill_by_evidence":
         evidence_path, _evidence_record = decision["evidence"]
         outcome["detail"] = f"would be rescued by the OI-1388 evidence discriminator ({evidence_path})"
+        outcome["result_path"] = str(evidence_path)
+    elif decision["kind"] == "fulfill_by_failed_evidence":
+        evidence_path, _evidence_record = decision["evidence"]
+        outcome["detail"] = (
+            "would be rescued by the OI-1388 evidence discriminator as a FAILED "
+            f"verdict — never a clean pass ({evidence_path})"
+        )
         outcome["result_path"] = str(evidence_path)
     elif decision["kind"] == "retire":
         outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
@@ -866,10 +970,13 @@ def fulfill_obligation(
     decision = _pre_execution_decision(dispatch_id, gate, resolution, attempts, result_index)
 
     if decision["kind"] == "fulfill_by_evidence":
-        # OI-1388 defect 1: a gate already produced complete evidence for
-        # this dispatch+gate — book it fulfilled, never retired/escalated as
-        # unreviewed, regardless of why the retirement/escalation path was
-        # about to fire.
+        # OI-1388 defect 1: a gate already produced a complete-evidence PASS
+        # for this dispatch+gate — book it fulfilled, never retired/escalated
+        # as unreviewed, regardless of why the retirement/escalation path was
+        # about to fire. BETA3-C2: this branch is PASS-only now —
+        # _pre_execution_decision/_evidence_decision route a DECIDED FAIL to
+        # fulfill_by_failed_evidence below instead; _fulfilling_result never
+        # hands either branch a not_executable or undecided-status record.
         evidence_path, evidence_record = decision["evidence"]
         updated = update_obligation(
             path,
@@ -882,14 +989,60 @@ def fulfill_obligation(
             result_path=str(evidence_path),
             reason="fulfilled_by_existing_evidence",
             reason_detail=(
-                f"{gate} already produced a complete-evidence result for "
+                f"{gate} already produced a complete-evidence PASS for "
                 f"dispatch {dispatch_id} ({evidence_path}) — OI-1388 defect 1: "
                 "a dispatch a gate already reviewed must never be retired or "
                 "escalated as unreviewed"
             ),
         )
         outcome["action"] = STATUS_FULFILLED
-        outcome["detail"] = "rescued by the OI-1388 evidence discriminator — a gate had already reviewed this dispatch"
+        outcome["detail"] = (
+            "rescued by the OI-1388 evidence discriminator — a gate had "
+            "already reviewed and approved this dispatch"
+        )
+        outcome["result_path"] = updated.get("result_path")
+        return outcome
+
+    if decision["kind"] == "fulfill_by_failed_evidence":
+        # BETA3-C2 (2026-08-26): a gate already produced a complete-evidence
+        # FAIL/ERRORED/BLOCKED verdict for this dispatch+gate. The obligation
+        # IS discharged — a gate genuinely reviewed this dispatch — but it
+        # must never be stamped STATUS_FULFILLED: every consumer that counts
+        # "reviewed" work treats fulfilled as a clean bill, and PR #1692's
+        # own glm_gate verdict on itself (pr-1692-glm_gate.json — a real
+        # ``fail`` with contract_hash and report_path both populated) is the
+        # live record of exactly what that would launder: a rejection
+        # rewritten into a pass. STATUS_FAILED is the pre-existing, already
+        # terminal vocabulary member gate_obligations.py defines for exactly
+        # this shape (see TERMINAL_STATUSES and
+        # producer_freshness.scan_gate_obligations's own "fulfilled /
+        # not_executable / failed" doc comment) — defined but never written
+        # by this runner until now.
+        evidence_path, evidence_record = decision["evidence"]
+        _passed, verdict_reason = _gate_is_pass(evidence_record)
+        updated = update_obligation(
+            path,
+            status=STATUS_FAILED,
+            pr_number=evidence_record.get("pr_number") or record.get("pr_number"),
+            branch=evidence_record.get("branch") or record.get("branch"),
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=now,
+            result_path=str(evidence_path),
+            reason="failed_by_existing_evidence",
+            reason_detail=(
+                f"{gate} already produced a complete-evidence FAIL for "
+                f"dispatch {dispatch_id} ({evidence_path}, {verdict_reason}) — "
+                "BETA3-C2: the gate DID review this, so the obligation is "
+                "discharged, but a rejection must never be booked as fulfilled"
+            ),
+        )
+        outcome["action"] = STATUS_FAILED
+        outcome["detail"] = (
+            "rescued by the OI-1388 evidence discriminator as a FAILED "
+            f"verdict ({verdict_reason}) — a gate had already reviewed and "
+            "rejected this dispatch; never a clean pass"
+        )
         outcome["result_path"] = updated.get("result_path")
         return outcome
 
@@ -1174,6 +1327,28 @@ def run(
     the full store (unaffected by scope); ``obligations_in_scope`` and
     ``pending_after`` are scope-filtered. With neither argument, scope is the
     full store and behavior is unchanged from before scoping existed.
+
+    ``write=False`` (dry run) still touches the network: PR/branch
+    resolution (:func:`resolve_pr_number`, called from
+    :func:`_dry_run_outcome`) runs the exact same read-only ``gh`` calls the
+    real run makes — it queries but never mutates anything. In an
+    environment without a usable ``gh`` (missing binary, auth failure,
+    timeout), resolution degrades to ``RESOLUTION_UNRESOLVABLE`` exactly as
+    the real run would, and the dry run reports that obligation's action as
+    ``would_stay_unresolvable`` (or, past the escalation-attempt threshold,
+    ``would_escalate_not_executable``) rather than a silent gap in the
+    summary.
+
+    ``pending_after`` in a dry run is a CONSERVATIVE forecast, not an exact
+    prediction of what the next real run leaves open: it counts an
+    obligation whose decision is ``attempt_gate`` (reported as
+    ``would_fulfill``) as still pending, because a dry run cannot actually
+    invoke the gate to learn whether that attempt would resolve it. The real
+    run, by contrast, only counts an obligation as pending when the gate
+    invocation itself leaves it ``pending``/``unresolvable`` — a gate that
+    resolves on the spot does not count. A dry run therefore never
+    UNDER-reports the remaining backlog; it can over-report relative to what
+    the next real run actually leaves open.
     """
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
