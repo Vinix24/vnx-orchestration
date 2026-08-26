@@ -59,6 +59,17 @@ os.environ["VNX_DATA_DIR"] = _CONFTEST_ISOLATION_TMP
 for _env_key, _subdir in _VNX_SUBSYSTEM_DIRS.items():
     os.environ[_env_key] = str(Path(_CONFTEST_ISOLATION_TMP) / _subdir)
 del _env_key, _subdir
+# VNX_DATA_HOME (scripts/lib/vnx_paths.py's operator-chosen "$VNX_DATA_HOME/
+# <project_id>" root, also the account-wide root orphan_sweep.py's OI-1424
+# cross-project owner lookup scans for OTHER projects' registers) is not one
+# of the per-project subsystem dirs above -- it is the ACCOUNT-wide parent a
+# real ~/.vnx-data would be. Left unset, any code that reads it directly
+# (nothing did before OI-1424) would resolve straight to the real ~/.vnx-data
+# and glob actual account data during a test run. Pinned here for the same
+# reason as VNX_DATA_DIR above -- tests that need it unset/pointed elsewhere
+# already delenv/setenv it themselves (test_data_dir_guard.py,
+# test_path_resolution_regression.py, etc.) and win via monkeypatch.
+os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
 # Keep the new data-dir guard from emitting warnings during normal tests.
 # Tests that exercise the guard override this explicitly.
 os.environ.setdefault("VNX_DATA_DIR_GUARD", "off")
@@ -154,6 +165,10 @@ def pin_vnx_data_dir(monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> None:
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     for env_key, subdir in _VNX_SUBSYSTEM_DIRS.items():
         monkeypatch.setenv(env_key, str(data_dir / subdir))
+    # VNX_DATA_HOME is the ACCOUNT-wide parent (sibling to data_dir here, not
+    # a subsystem dir under it) -- see the module-level pin's comment above
+    # for why this needs isolating too (OI-1424's cross-project owner scan).
+    monkeypatch.setenv("VNX_DATA_HOME", str(data_dir.parent / "_vnx_account_home"))
 
 
 @pytest.fixture(autouse=True)

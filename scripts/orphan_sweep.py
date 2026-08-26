@@ -74,6 +74,14 @@ def main(argv: "list[str] | None" = None) -> int:
              "central-store resolver, same as --data-dir).",
     )
     parser.add_argument(
+        "--account-data-root",
+        default=None,
+        help="Account-wide root under which every project's central store "
+             "lives, for the kind-1b OI-1424 cross-project owner lookup "
+             "(<root>/<project_id>/state/...). Default: $VNX_DATA_HOME or "
+             "~/.vnx-data.",
+    )
+    parser.add_argument(
         "--project-id",
         default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
         help="Project id for the lease PID lookup (default: $VNX_PROJECT_ID or vnx-dev).",
@@ -123,6 +131,9 @@ def main(argv: "list[str] | None" = None) -> int:
     # instead of this CLI's own (formerly repo-relative) guess.
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else None
     state_dir = Path(args.state_dir).expanduser() if args.state_dir else None
+    account_data_root = (
+        Path(args.account_data_root).expanduser() if args.account_data_root else None
+    )
 
     result = sweep(
         repo_root=repo_root,
@@ -132,6 +143,7 @@ def main(argv: "list[str] | None" = None) -> int:
         current_dispatch_id=args.current_dispatch,
         max_orphans=args.max_orphans,
         dry_run=args.dry_run,
+        account_data_root=account_data_root,
     )
 
     if args.json:
