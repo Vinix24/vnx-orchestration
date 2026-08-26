@@ -1243,7 +1243,6 @@
     "dispatch_envelope::_dispatch_branch_name",
     "dispatch_envelope::_enforce_push_pr",
     "dispatch_envelope::_envelope_outcome",
-    "dispatch_envelope::_is_dispatch_branch_ref",
     "dispatch_envelope::_receipts_file_for",
     "dispatch_envelope::_resolve_base_sha",
     "dispatch_envelope::run_envelope",
