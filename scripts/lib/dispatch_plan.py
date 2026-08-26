@@ -18,11 +18,49 @@ from typing import Mapping, Optional
 
 from dispatch_spec import (
     DispatchPath,
+    DispatchSpec,
     Isolation,
     Provider,
     Reject,
     ValidatedSpec,
 )
+
+
+def resolve_claude_lane(spec: DispatchSpec) -> tuple[str, str, "str | None"]:
+    """Decide the claude-provider lane + adapter + optional plan-warning.
+
+    A2 (2026-08-26): claude_headless is the DEFAULT lane for a provider=claude
+    spec carrying no explicit lane choice (main 7f93f681 measured both prior
+    governance gaps — isolation=worktree, report-before-receipt — as closed, and
+    the tmux lane's duplicate-PR defect, OI-1115's skip_pr never wired into
+    tmux_interactive_dispatch.py, as still open). Only meaningful when the caller
+    already knows spec.provider == Provider.CLAUDE.
+
+    Single source of truth for this decision: compile_plan's D1 and
+    dispatch_cli.build_runtime_snapshot's via= (which feeds the claude-headless
+    constraint check) BOTH call this rather than re-deriving the lane
+    independently — two call sites computing the same routing fact is exactly
+    how a handler drifts from its sibling (see the codex "same fix to all
+    handlers" lesson).
+
+    Exactly one of the three branches fires; every branch names an unambiguous
+    lane. Validation (dispatch_spec.validate Rule 12a/12b/12c) already rejected
+    the contradictory allow_headless=True + force_tmux=True combination and the
+    reason-missing cases before a spec can reach here.
+    """
+    if spec.allow_headless:
+        return (
+            "claude_headless",
+            "claude_subprocess",
+            f"HEADLESS lane opted-in: {spec.headless_reason}",
+        )
+    if spec.force_tmux:
+        return (
+            "claude_tmux_subscription",
+            "tmux_claude",
+            f"TMUX lane opted-in: {spec.force_tmux_reason}",
+        )
+    return "claude_headless", "claude_subprocess", None
 
 
 # ---------------------------------------------------------------------------
@@ -258,14 +296,10 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
             "AUTO must be resolved by the capability seam before compile_plan",
         )
     is_claude_lane = provider == Provider.CLAUDE
-    is_claude_headless = is_claude_lane and spec.allow_headless
-    if is_claude_headless:
-        lane = "claude_headless"
-        adapter = "claude_subprocess"
-        warnings.append(f"HEADLESS lane opted-in: {spec.headless_reason}")
-    elif is_claude_lane:
-        lane = "claude_tmux_subscription"
-        adapter = "tmux_claude"
+    if is_claude_lane:
+        lane, adapter, lane_warning = resolve_claude_lane(spec)
+        if lane_warning is not None:
+            warnings.append(lane_warning)
     else:
         lane = "provider"
         adapter = "provider"
@@ -372,7 +406,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     fired.append("D9")
 
     # D10 — warmup; headless lane has no tmux warmup
-    warmup = "verify_strict" if (is_claude_lane and not is_claude_headless) else "n/a"
+    warmup = "verify_strict" if (is_claude_lane and lane != "claude_headless") else "n/a"
     fired.append("D10")
 
     # D12 — target resolution; claude lane is leaseless (ephemeral), skip health checks

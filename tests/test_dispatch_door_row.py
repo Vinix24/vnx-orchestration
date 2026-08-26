@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -113,6 +114,16 @@ def _make_bundle(
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
+        # A2 (2026-08-26): these are door tests (dispatch row creation, target_slot,
+        # gate obligations) — they don't exercise lane behavior, and they run in a
+        # tmp_path that is NOT a real git repo. Since claude_headless became the
+        # default lane, an unpinned claude spec now hits
+        # dispatch_envelope.run_envelope_headless_plan's create_dispatch_worktree,
+        # which correctly hard-aborts on a non-git cwd (the PR #1416 isolation
+        # guarantee — never soften that). Pin to the tmux lane explicitly via the
+        # opt-out these tests actually need.
+        "force_tmux": True,
+        "force_tmux_reason": "door test asserts row/obligation state, not lane behavior; tmp_path is not a real git repo",
     }
     if track_id is not None:
         spec["track_id"] = track_id
@@ -391,3 +402,153 @@ def test_oi943_target_slot_survives_through_door(tmp_path, monkeypatch):
     assert row["target_slot"] == "T0", (
         "OI-943: target_slot must survive the full door path"
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. A2-ff2 contract (2026-08-26): an UNPINNED claude spec through the door in
+#    a non-git directory MUST fail with the isolation abort. This is PR
+#    #1416's isolation guarantee (create_dispatch_worktree hard-aborts rather
+#    than silently falling back to a shared, unisolated checkout) — not a bug
+#    to be softened. Every other test in this file pins force_tmux=True
+#    precisely because they assert door/row/obligation behavior, not lane
+#    behavior; this test is the one place that intentionally leaves the spec
+#    unpinned so the isolation contract itself stays pinned and cannot
+#    regress silently.
+#
+#    A2-ff2 (fix-forward on top of A2-ff): the ORIGINAL version of this test
+#    assumed pytest's tmp_path would be resolved by create_dispatch_worktree
+#    as the non-git working directory. That is false on the CI runner:
+#    create_dispatch_worktree never looks at tmp_path at all — it resolves the
+#    project root via dispatch_worktree_isolation.resolve_consumer_project_root(),
+#    which (absent an override) walks to the real consumer checkout. On CI
+#    that checkout IS a valid git repo, so the isolation abort this test wants
+#    never fires and the dispatch fails for some OTHER reason instead — a
+#    reason the old caplog-substring assertion could not tell apart from the
+#    real contract. Fix: FORCE the non-git condition at the exact place
+#    create_dispatch_worktree looks (resolve_consumer_project_root), instead
+#    of hoping the ambient tmp_path happens to match.
+# ---------------------------------------------------------------------------
+
+def _assert_isolation_abort(rc: int, records) -> None:
+    """Shared discriminator: rc failed AND it failed via the isolation abort.
+
+    Split out so test_control_isolation_success_makes_the_abort_check_fail
+    below can run the exact same check against a setup where isolation
+    SUCCEEDS and prove it turns red — the check must never be vacuously true.
+    """
+    assert rc != 0, (
+        "an unpinned claude spec routed through a non-git working directory "
+        "must fail — a silent success here would mean the headless lane "
+        "stopped requiring isolation, which is exactly the PR #1416 "
+        "guarantee this test protects"
+    )
+    assert any(
+        "isolation required but worktree creation failed" in r.getMessage()
+        and "no shared-checkout fallback" in r.getMessage()
+        for r in records
+    ), "the failure must be the isolation abort specifically, not some other rejection"
+
+
+def _write_unpinned_claude_spec(tmp_path: Path, *, suffix: str) -> "tuple[Path, Path]":
+    data_dir = tmp_path / f"vnx-data-{suffix}"
+    bundle_dir = data_dir / "dispatches" / "pending" / f"20260826-staging-unpinned-{suffix}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    instruction = bundle_dir / "instruction.md"
+    instruction.write_text("Do something useful.", encoding="utf-8")
+    spec = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": f"20260826-unpinned-lane-{suffix}",
+        "staging_id": f"20260826-staging-unpinned-{suffix}",
+        "instruction_file": str(instruction),
+        "role": "backend-developer",
+        "target_slot": "T0",
+        "gate": "codex_gate",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+        # Deliberately NO force_tmux / allow_headless — this is the case every
+        # other test in this file pins away, so the spec routes through the
+        # default claude_headless lane's create_dispatch_worktree.
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    return data_dir, spec_file
+
+
+def test_unpinned_claude_spec_in_non_git_dir_fails_with_isolation_abort(tmp_path, monkeypatch, caplog):
+    data_dir, spec_file = _write_unpinned_claude_spec(tmp_path, suffix="abort")
+
+    # FORCE the non-git condition at the exact place create_dispatch_worktree
+    # resolves its project root — not tmp_path, which the function never
+    # consults. An empty, freshly-created directory that was never `git init`'d
+    # guarantees `git -C <dir> rev-parse origin/main` fails with "not a git
+    # repository", which is what actually trips the isolation abort.
+    non_git_root = tmp_path / "non-git-consumer-root"
+    non_git_root.mkdir()
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0), patch(
+        "dispatch_worktree_isolation.resolve_consumer_project_root",
+        return_value=non_git_root,
+    ):
+        with caplog.at_level("ERROR"):
+            rc = run_dispatch(spec_file)
+
+    _assert_isolation_abort(rc, caplog.records)
+
+
+def test_control_isolation_success_makes_the_abort_check_fail(tmp_path, monkeypatch, caplog):
+    """Proves test_unpinned_claude_spec_in_non_git_dir_fails_with_isolation_abort
+    can actually go red for the right reason (OI: "a contract test that stays
+    green when the contract breaks protects nothing").
+
+    Setup: point resolve_consumer_project_root at a REAL, disposable git repo
+    (so create_dispatch_worktree's isolation succeeds), and make the
+    downstream adapter fail for an unrelated reason — mirroring the exact
+    shape CI hit while this test was broken: rc != 0, but
+    completion_len=0 error=(no error captured), i.e. NOT an isolation abort.
+    _assert_isolation_abort must then raise AssertionError: rc != 0 still
+    holds, but the isolation-abort log line is absent.
+    """
+    data_dir, spec_file = _write_unpinned_claude_spec(tmp_path, suffix="control")
+
+    fake_repo = tmp_path / "fake-consumer-repo"
+    fake_repo.mkdir()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "vnx-test", "GIT_AUTHOR_EMAIL": "vnx-test@example.invalid",
+           "GIT_COMMITTER_NAME": "vnx-test", "GIT_COMMITTER_EMAIL": "vnx-test@example.invalid"}
+    subprocess.run(["git", "init", "-q"], cwd=fake_repo, check=True, env=env)
+    (fake_repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "seed.txt"], cwd=fake_repo, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "seed"], cwd=fake_repo, check=True, env=env
+    )
+    # create_dispatch_worktree resolves base_ref "origin/main" via
+    # `git rev-parse origin/main`, which is satisfied by a LOCAL branch
+    # literally named "origin/main" — no real remote required, keeping this
+    # repo fully disposable and disconnected from the actual project remote.
+    subprocess.run(["git", "branch", "origin/main"], cwd=fake_repo, check=True, env=env)
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    from envelope_types import _AdapterResult  # noqa: PLC0415
+
+    with patch("dispatch_cli._execute_claude", return_value=0), patch(
+        "dispatch_worktree_isolation.resolve_consumer_project_root",
+        return_value=fake_repo,
+    ), patch(
+        "dispatch_envelope.ClaudeSubprocessAdapter.run",
+        return_value=_AdapterResult(
+            returncode=1, completion_text="", status="failure", error=None
+        ),
+    ):
+        with caplog.at_level("ERROR"):
+            rc = run_dispatch(spec_file)
+
+    assert rc != 0, "sanity: the control dispatch must still fail (for the wrong reason)"
+    with pytest.raises(AssertionError, match="isolation abort specifically"):
+        _assert_isolation_abort(rc, caplog.records)

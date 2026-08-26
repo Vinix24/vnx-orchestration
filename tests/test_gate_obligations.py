@@ -96,6 +96,15 @@ def _make_bundle(
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
+        # A2 (2026-08-26): these are door tests (gate obligation registration) — they
+        # don't exercise lane behavior, and they run in a tmp_path that is NOT a real
+        # git repo. Since claude_headless became the default lane, an unpinned claude
+        # spec now hits dispatch_envelope.run_envelope_headless_plan's
+        # create_dispatch_worktree, which correctly hard-aborts on a non-git cwd (the
+        # PR #1416 isolation guarantee — never soften that). Pin to the tmux lane
+        # explicitly via the opt-out these tests actually need.
+        "force_tmux": True,
+        "force_tmux_reason": "door test asserts gate obligation state, not lane behavior; tmp_path is not a real git repo",
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")

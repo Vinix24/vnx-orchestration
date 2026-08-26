@@ -209,8 +209,27 @@ class DispatchSpec:
     target_id_override: Optional[str] = None
     tags: tuple[str, ...] = ()
     instruction_sha256: Optional[str] = None  # P0-3: caller may pre-bind hash; validate() verifies
+    # A2 (2026-08-26): claude_headless became the DEFAULT claude lane (see
+    # dispatch_plan.resolve_claude_lane) — main 7f93f681 measured both governance
+    # gaps the old default cited (isolation=worktree, report-before-receipt) as
+    # closed, and the tmux lane duplicate-PR defect (OI-1115 skip_pr never wired
+    # into tmux_interactive_dispatch.py) as still open. allow_headless=True is now
+    # a REDUNDANT-with-default but still meaningful explicit statement (kept for
+    # the pre-flip specs that already carry it + reason, and for any future caller
+    # that wants the choice on the record rather than implied). It no longer gates
+    # ACCESS to the lane — only whether a "HEADLESS lane opted-in" audit line is
+    # emitted for a spec that asked for it by name.
     allow_headless: bool = False              # PR-5: explicit opt-in to the claude_headless lane
     headless_reason: Optional[str] = None    # PR-5: mandatory non-empty reason when allow_headless=True
+    # A2 (2026-08-26): the mirror image of allow_headless — an explicit opt-OUT
+    # back to the (now non-default) tmux lane. False (default) means "no opinion,
+    # accept whatever the policy default resolves to" — same shape as
+    # allow_headless=False always having meant "didn't ask", never "refused".
+    # True requires force_tmux_reason (validate() Rule 12b) and is only valid for
+    # provider=claude/auto, mirroring allow_headless's own Rule 12a exactly. Never
+    # both True at once (Rule 12c) — that is a contradiction, not a choice.
+    force_tmux: bool = False
+    force_tmux_reason: Optional[str] = None
     # OI-1214: a post-merge-verification dispatch measures the CURRENT checkout
     # (proof that a just-merged PR is actually live), so it is only meaningful
     # when the local main checkout is current. This is a typed boolean declared by
@@ -435,7 +454,12 @@ def validate(
             f"got {spec.deadline_seconds}",
         )
 
-    # Rule 12 — headless opt-in requires a non-empty reason (PR-5)
+    # Rule 12a — explicit headless opt-in requires a non-empty reason (PR-5).
+    # A2 (2026-08-26): headless is now the DEFAULT claude lane, so this no longer
+    # gates ACCESS — it gates the audit-trail statement "I explicitly chose this"
+    # for the pre-flip specs (and any future caller) that still set allow_headless
+    # =True by name. Requiring a reason for silence (the default) would be
+    # nonsense; requiring one for a stated choice is still the point.
     if spec.allow_headless:
         reason = (spec.headless_reason or "").strip()
         if not reason:
@@ -451,6 +475,34 @@ def validate(
                 f"allow_headless is only valid for provider=claude, got provider={spec.provider.value!r}; "
                 "headless is a claude-only lane",
             )
+
+    # Rule 12b — explicit tmux opt-out requires a non-empty reason (A2). Mirrors
+    # Rule 12a exactly: since claude_headless is now the silent default, CHOOSING
+    # tmux instead is the deviation that must leave an audit trail, not the other
+    # way around.
+    if spec.force_tmux:
+        reason = (spec.force_tmux_reason or "").strip()
+        if not reason:
+            return Reject(
+                "force-tmux-reason-required",
+                "force_tmux=True requires a non-empty force_tmux_reason explaining "
+                "the explicit tmux-lane opt-out; set force_tmux_reason to a human-readable justification",
+            )
+        if spec.provider not in (Provider.CLAUDE, Provider.AUTO):
+            return Reject(
+                "force-tmux-claude-only",
+                f"force_tmux is only valid for provider=claude, got provider={spec.provider.value!r}; "
+                "force_tmux only overrides the claude lane's default",
+            )
+
+    # Rule 12c — the two explicit choices are mutually exclusive. A spec cannot
+    # simultaneously declare "I want headless" and "I want tmux instead".
+    if spec.allow_headless and spec.force_tmux:
+        return Reject(
+            "conflicting-lane-choice",
+            "allow_headless and force_tmux cannot both be set — choose exactly one "
+            "explicit lane, or leave both unset to accept the default",
+        )
 
     # Rule 13 — track_id format (presence + format only; existence against the tracks
     # DB is deferred to dispatch_cli's door validation, which has DB access — mirrors

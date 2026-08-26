@@ -245,6 +245,10 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
+        # A2: unrelated to lane choice; pin tmux to keep exercising the mocked
+        # dispatch_cli._execute_claude path below.
+        "force_tmux": True,
+        "force_tmux_reason": "test fixture pins the tmux lane",
     }
     spec_file_evil = bundle_dir / "dispatch-spec-evil.json"
     spec_file_evil.write_text(json.dumps(spec_dict), encoding="utf-8")
@@ -274,6 +278,10 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
+        # A2: this test explicitly asserts the tmux lane below (plan_arg.lane),
+        # so pin it explicitly rather than relying on the (now headless) default.
+        "force_tmux": True,
+        "force_tmux_reason": "test fixture pins the tmux lane",
     }
     spec_file_clean = bundle_dir / "dispatch-spec-clean.json"
     spec_file_clean.write_text(json.dumps(spec_dict2), encoding="utf-8")
@@ -417,7 +425,12 @@ def test_claude_routes_to_tmux_with_permit(mock_snapshot, tmp_path):
     """
     mock_snapshot.return_value = _clean_snapshot()
     instruction_file = _make_instruction(tmp_path)
-    spec_file = _make_spec_file(tmp_path, provider="claude")
+    # A2: this test specifically exercises the tmux dispatch path, so force it
+    # explicitly — a plain claude spec now defaults to claude_headless instead.
+    spec_file = _make_spec_file(
+        tmp_path, provider="claude",
+        extra={"force_tmux": True, "force_tmux_reason": "test fixture pins the tmux lane"},
+    )
 
     # Part A: valid permit → TmuxInteractiveDispatch.dispatch called
     mock_dispatch_result = MagicMock()
@@ -726,11 +739,21 @@ def _make_bundle_spec(
     provider: str = "claude",
     target_slot: str = "T0",
     model: str | None = None,
+    force_tmux: bool = False,
 ) -> tuple[Path, Path]:
     """Build a promoted bundle under <tmp>/vnx-data with the given instruction.
 
     Returns (data_dir, spec_file). spec_file + instruction live inside the bundle so
     the staging-binding check passes and only the edge under test can reject.
+
+    ``force_tmux`` (A2, 2026-08-26): claude_headless is now the DEFAULT claude
+    lane (dispatch_plan.resolve_claude_lane), so a plain claude spec built here
+    with no explicit lane choice now resolves to claude_headless — a real,
+    unmocked code path (run_envelope_headless_plan) that tries an actual
+    worktree. Callers whose test intent is unrelated to the lane choice itself
+    (SDK-scan, track-id, model-pin routing, worker-claude-override, ...) and
+    that mock ``dispatch_cli._execute_claude`` (the tmux-lane entry point) must
+    pass force_tmux=True to keep exercising that already-mocked path.
     """
     data_dir = tmp_path / "vnx-data"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -759,6 +782,8 @@ def _make_bundle_spec(
         "model": model,
         "deadline_seconds": 3600,
         "isolation": "worktree",
+        "force_tmux": bool(force_tmux),
+        "force_tmux_reason": "test fixture pins the tmux lane" if force_tmux else None,
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
@@ -784,6 +809,7 @@ def test_sdk_block_is_whitespace_aware(tmp_path, monkeypatch, evil_line):
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text=f"# Dispatch\n\n{evil_line}\n",
+        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -801,6 +827,7 @@ def test_clean_import_mentioning_anthropic_word_not_blocked(tmp_path, monkeypatc
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Dispatch\n\nDocument the anthropic routing policy clearly.\n",
+        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -1024,6 +1051,7 @@ def test_dispatch_gate_codex_deep_forms_proceed(form_id, snippet, tmp_path, monk
         instruction_text=f"# Dispatch\n\n{snippet}\n",
         staging_id=f"20260615-codex-{form_id.replace('_', '-')}",
         dispatch_id=f"20260615-codex-{form_id.replace('_', '-')}",
+        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -1150,6 +1178,7 @@ def test_sdk_instruction_proceeds_warn_not_block(tmp_path, monkeypatch):
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Task\n\nimport anthropic\nclient = anthropic.Anthropic()\n",
+        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -1166,6 +1195,7 @@ def test_sdk_instruction_url_mention_proceeds(tmp_path, monkeypatch):
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Task\n\nSee https://anthropic.com/docs for the routing policy.\n",
+        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -1676,6 +1706,10 @@ def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, mo
         "model": "opus",
         "deadline_seconds": 3600,
         "isolation": "worktree",
+        # A2: this test explicitly asserts the tmux lane below; pin it rather
+        # than relying on the (now headless) default.
+        "force_tmux": True,
+        "force_tmux_reason": "test fixture pins the tmux lane",
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
@@ -1716,6 +1750,7 @@ def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monk
         provider="claude",
         target_slot="T1",
         model="sonnet",
+        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -1803,6 +1838,7 @@ def test_t0_floor_semantics_coerces_explicit_model_to_opus(tmp_path, monkeypatch
         provider="claude",
         target_slot="T0",
         model="sonnet",
+        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -1882,8 +1918,9 @@ def test_headless_empty_reason_rejected(mock_snapshot, tmp_path, capsys):
     assert "headless-reason-required" in err
 
 
-def test_default_claude_still_routes_tmux(tmp_path, monkeypatch):
-    """allow_headless absent/false → claude_tmux_subscription (unchanged default behavior)."""
+def test_default_claude_now_routes_headless(tmp_path, monkeypatch):
+    """A2 (2026-08-26): allow_headless/force_tmux both absent → claude_headless,
+    the NEW default. Was test_default_claude_still_routes_tmux pre-flip."""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260615-staging-default-tmux"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -1912,20 +1949,21 @@ def test_default_claude_still_routes_tmux(tmp_path, monkeypatch):
     spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
 
     with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
-        with patch("dispatch_cli._execute_claude_headless") as mock_headless:
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
             rc = run_dispatch(spec_file)
 
     assert rc == 0
-    mock_tmux.assert_called_once()
-    mock_headless.assert_not_called()
-    plan_arg = mock_tmux.call_args[0][0]
-    assert plan_arg.lane == "claude_tmux_subscription"
+    mock_headless.assert_called_once()
+    mock_tmux.assert_not_called()
+    plan_arg = mock_headless.call_args[0][0]
+    assert plan_arg.lane == "claude_headless"
 
 
 def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
-    """VNX_AUTO_ROUTE=1 + VNX_ADAPTER=subprocess env vars have no effect through the door.
-    Without allow_headless=true in the spec, the plan is always claude_tmux_subscription.
-    """
+    """VNX_AUTO_ROUTE=1 + VNX_ADAPTER=subprocess env vars have no effect through the
+    door — lane resolution reads only the spec's allow_headless/force_tmux fields,
+    never ambient env. A2 (2026-08-26): without either field set, the plan is now
+    claude_headless (the new default), not claude_tmux_subscription."""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260615-legacy-env-probe"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -1956,14 +1994,14 @@ def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
     spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
 
     with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
-        with patch("dispatch_cli._execute_claude_headless") as mock_headless:
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
             rc = run_dispatch(spec_file)
 
     assert rc == 0
-    mock_tmux.assert_called_once()
-    mock_headless.assert_not_called()
-    plan_arg = mock_tmux.call_args[0][0]
-    assert plan_arg.lane == "claude_tmux_subscription"
+    mock_headless.assert_called_once()
+    mock_tmux.assert_not_called()
+    plan_arg = mock_headless.call_args[0][0]
+    assert plan_arg.lane == "claude_headless"
 
 
 # ---------------------------------------------------------------------------
@@ -2005,7 +2043,12 @@ class TestHeadlessIsolationGuard:
         """The tmux lane's isolation is structurally verified elsewhere — no warning."""
         from dispatch_cli import _headless_isolation_guard
 
-        spec_file = _make_spec_file(tmp_path, provider="claude")
+        # A2: force the tmux lane explicitly — a plain claude spec now defaults
+        # to claude_headless instead.
+        spec_file = _make_spec_file(
+            tmp_path, provider="claude",
+            extra={"force_tmux": True, "force_tmux_reason": "test fixture pins the tmux lane"},
+        )
         spec = load_spec(spec_file)
         vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
         plan = compile_plan(vspec, _clean_snapshot())
@@ -2044,9 +2087,14 @@ class TestHeadlessIsolationGuard:
 
     @patch("dispatch_cli.build_runtime_snapshot")
     def test_dry_run_default_claude_has_no_isolation_warning(self, mock_snapshot, tmp_path, capsys):
-        """Regression pin: a normal (tmux-lane) dry-run must NOT print the OI-1158 warning."""
+        """Regression pin: a tmux-lane dry-run must NOT print the OI-1158 warning.
+        A2: claude_headless is now the default, so the tmux lane must be forced
+        explicitly to still exercise this path."""
         mock_snapshot.return_value = _clean_snapshot()
-        spec_file = _make_spec_file(tmp_path, provider="claude")
+        spec_file = _make_spec_file(
+            tmp_path, provider="claude",
+            extra={"force_tmux": True, "force_tmux_reason": "test fixture pins the tmux lane"},
+        )
 
         rc = run_dispatch(spec_file, dry_run=True)
 
@@ -2099,6 +2147,7 @@ class TestHeadlessIsolationGuard:
             staging_id="20260812-staging-oi1158-tmux",
             dispatch_id="20260812-oi1158-tmux",
             target_slot="T0",
+            force_tmux=True,  # A2: force tmux explicitly; this test is tmux-specific
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -2594,6 +2643,10 @@ class TestTrackIdEndToEnd:
             "deadline_seconds": 3600,
             "isolation": "worktree",
             "track_id": "track-linkage-enforcement",
+            # A2: unrelated to lane choice; pin tmux to keep exercising the
+            # mocked dispatch_cli._execute_claude path below.
+            "force_tmux": True,
+            "force_tmux_reason": "test fixture pins the tmux lane",
         }
         spec_file = bundle_dir / "dispatch-spec.json"
         spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
@@ -2747,6 +2800,10 @@ class TestTrackIdEndToEnd:
             "deadline_seconds": 3600,
             "isolation": "worktree",
             "tags": ["no-track:exploratory spike"],
+            # A2: unrelated to lane choice; pin tmux to keep exercising the
+            # mocked dispatch_cli._execute_claude path below.
+            "force_tmux": True,
+            "force_tmux_reason": "test fixture pins the tmux lane",
         }
         spec_file = bundle_dir / "dispatch-spec.json"
         spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
@@ -2785,6 +2842,7 @@ def test_worker_claude_override_routes_build_worker_to_claude_tmux(tmp_path, mon
         dispatch_id="20260723-escape-hatch-apply",
         provider="claude",
         target_slot="T1",
+        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -2832,6 +2890,7 @@ def test_worker_claude_override_honors_requested_claude_model(tmp_path, monkeypa
         provider="claude",
         target_slot="T2",
         model="opus",
+        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -2977,6 +3036,7 @@ def test_worker_claude_override_env_does_not_leak_into_t0_or_kimi(tmp_path, monk
         dispatch_id="20260723-override-t0",
         provider="claude",
         target_slot="T0",
+        force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -3095,6 +3155,7 @@ class TestPersistRouteDecision:
             staging_id="20260804-staging-oi849",
             dispatch_id="20260804-oi849-integration",
             target_slot="T0",
+            force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -3225,6 +3286,7 @@ class TestRegisterDispatchCreated:
             staging_id="20260810-staging-oi1120",
             dispatch_id="20260810-oi1120-integration",
             target_slot="T0",
+            force_tmux=True,  # this test's docstring asserts the tmux lane specifically
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -3248,6 +3310,7 @@ class TestRegisterDispatchCreated:
             staging_id="20260810-staging-oi1120-fail",
             dispatch_id="20260810-oi1120-write-fail",
             target_slot="T0",
+            force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -3425,6 +3488,7 @@ class TestSmartRouterPreValidate:
             dispatch_id="20260802-oi962-t0",
             provider="auto",
             target_slot="T0",
+            force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -3471,6 +3535,7 @@ class TestSmartRouterPreValidate:
             dispatch_id="20260810-oi1050-mid",
             provider="auto",
             target_slot="T1",
+            force_tmux=True,  # this test explicitly asserts the tmux lane below
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")

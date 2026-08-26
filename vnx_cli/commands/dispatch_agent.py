@@ -366,6 +366,46 @@ def vnx_dispatch_agent(args) -> int:
             )
             return 1
 
+    # A2 (2026-08-26): --force-tmux / --force-tmux-reason passthrough — the
+    # mirror-image explicit opt-OUT back to the (now non-default) tmux lane.
+    # Same validation shape as --allow-headless above, plus the two flags are
+    # mutually exclusive (the door's validate() Rule 12c rejects both set, but
+    # failing fast here means a caller never even reaches staging).
+    force_tmux = getattr(args, "force_tmux", False)
+    force_tmux_reason = getattr(args, "force_tmux_reason", None)
+    if force_tmux:
+        if allow_headless:
+            print(
+                "Error: --allow-headless and --force-tmux are mutually exclusive — "
+                "choose exactly one explicit lane, or pass neither to accept the "
+                "default (claude_headless).",
+                file=sys.stderr,
+            )
+            return 1
+        if not (force_tmux_reason or "").strip():
+            print(
+                "Error: --force-tmux requires --force-tmux-reason (a human-readable "
+                "justification for the tmux-lane opt-out).",
+                file=sys.stderr,
+            )
+            return 1
+        if provider != "claude":
+            print(
+                f"Error: --force-tmux is only valid for the claude lane, got "
+                f"provider {provider!r} (resolved from --model {model!r}).",
+                file=sys.stderr,
+            )
+            return 1
+        if not single_entry_enabled():
+            print(
+                "Error: --force-tmux requires the single-entry dispatch door "
+                "(VNX_DISPATCH_LEGACY=1 / VNX_SINGLE_ENTRY_DISPATCH=0 disables it). "
+                "The legacy dispatch lane has no lane-choice knob at all. Unset "
+                "VNX_DISPATCH_LEGACY / VNX_SINGLE_ENTRY_DISPATCH to use the door.",
+                file=sys.stderr,
+            )
+            return 1
+
     # OI-1390: --base-ref / --work-ref / --pr-id passthrough — a consumer fix-forward onto an
     # existing PR branch. Unset (None) preserves exactly the current behavior (stage_spec_bundle's
     # own defaults: base_ref="origin/main", pr_id/work_ref=None, a fresh dispatch/<id> branch).
@@ -428,6 +468,8 @@ def vnx_dispatch_agent(args) -> int:
         deadline_seconds=deadline_seconds,
         allow_headless=allow_headless,
         headless_reason=headless_reason,
+        force_tmux=force_tmux,
+        force_tmux_reason=force_tmux_reason,
         base_ref=base_ref,
         work_ref=work_ref,
         pr_id=pr_id,

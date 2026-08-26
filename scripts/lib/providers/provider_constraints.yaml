@@ -208,14 +208,28 @@ constraints:
       cited was never carried out by Anthropic. Operator ratified 2026-08-04.
       Downgraded from blocking to warn to match routing_policy.yaml's
       lane_safety.headless_block (both gates cover the same lane; they move
-      together). USABLE, NOT YET GOVERNED: two measured gaps from 2026-08-05
-      remain open regardless of billing — the lane ignores isolation=worktree
-      (worktree created then reaped while the worker branches in the MAIN
-      checkout, leaving real work uncommitted there) and the fail-closed
-      report gate did not bite on a report missing all four mandatory
-      headings. VNX_OVERRIDE_CLAUDE_HEADLESS=1 still marks an explicit
-      per-dispatch opt-in for audit visibility even though the route no
-      longer blocks.
+      together). UPDATED 2026-08-26 (A2, dispatch-20260826-alpha-a2-headless-
+      default): the two 2026-08-05 gaps this entry used to cite are CLOSED, not
+      open. Verified directly against main 7f93f681, not taken on the doc's
+      word: isolation — run_envelope_headless_plan() calls
+      create_dispatch_worktree(), passes cwd=wt_path to the adapter, and aborts
+      hard ("no shared-checkout fallback") if worktree creation fails (PR
+      #1416, main 9f32ae84, 2026-08-08). report-gate — _govern() emits the
+      report BEFORE the receipt so a missing/invalid report cannot produce a
+      status=success receipt (PR #1420, main c28b7ac4, 2026-08-09). Tests:
+      `pytest tests/test_headless_worktree_isolation.py` 6 passed;
+      `pytest tests/ -k HeadlessIsolationGuard` 7 passed. claude_headless is now
+      the DEFAULT claude lane (dispatch_plan.resolve_claude_lane) — this warn
+      fires on every headless dispatch, default or explicit, precisely because
+      the lane choice must stay visible in the audit trail even though it no
+      longer needs gating. VNX_OVERRIDE_CLAUDE_HEADLESS=1 still marks an
+      explicit per-dispatch opt-in for audit visibility even though the route
+      no longer blocks. Separately, and NOT resolved by the above: OI-1158
+      still holds — the door itself (dispatch_plan.py) never structurally
+      verifies isolation; the guarantee lives entirely in
+      dispatch_envelope.py -> dispatch_worktree_isolation.py, a path the door
+      does not inspect. That is a different, still-true claim about what the
+      DOOR knows, not about what the LANE does.
     enforcement: code_warn
     audit_severity: warn
     override_allowed: true

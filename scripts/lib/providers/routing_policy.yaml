@@ -83,15 +83,14 @@ lane_safety:
   # max, scope user:inference) confirms claude -p still runs on the Max
   # subscription, same as the tmux lane. Operator ratified 2026-08-04.
   #
-  # USABLE, NOT GOVERNED. Opening the billing block does not close two
-  # measured governance gaps (2026-08-05), both still live:
-  #   1. The lane ignores isolation=worktree — the door creates a worktree,
-  #      but the worker operates in the MAIN checkout and branches there, and
-  #      the worktree is reaped while the real work sits uncommitted in the
-  #      main repo.
-  #   2. The fail-closed report gate did not bite on a report missing all
-  #      four mandatory headings.
-  # Treat headless as usable-but-not-yet-governed until those gaps close.
+  # UPDATED 2026-08-26 (A2): the two 2026-08-05 governance gaps this comment
+  # used to cite (isolation=worktree ignored; fail-closed report gate not
+  # biting) are CLOSED — verified against main 7f93f681, PR #1416 (isolation,
+  # main 9f32ae84, 2026-08-08) and PR #1420 (report-gate, main c28b7ac4,
+  # 2026-08-09). claude_headless is now the DEFAULT claude lane
+  # (dispatch_plan.resolve_claude_lane); see the claude-headless entry in
+  # provider_constraints.yaml for the full measurement and test evidence —
+  # not duplicated here to avoid the two texts drifting apart again.
   #
   # enabled: false opens the lane by default; set enabled: true to re-block.
   # override_env is kept wired (VNX_OVERRIDE_CLAUDE_HEADLESS) so that reversal
