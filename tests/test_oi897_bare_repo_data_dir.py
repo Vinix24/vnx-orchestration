@@ -91,7 +91,15 @@ def central_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key in ("VNX_PROJECT_ID", "VNX_OPERATOR_ID", "VNX_DATA_DIR",
                 "VNX_STATE_DIR", "VNX_DISPATCH_DIR", "VNX_LOGS_DIR",
                 "VNX_DATA_DIR_EXPLICIT", "VNX_HOME", "PROJECT_ROOT",
-                "VNX_PROJECT_ROOT", "VNX_BIN"):
+                "VNX_PROJECT_ROOT", "VNX_BIN",
+                # VNX_DATA_HOME outranks the Path.home()-based default this
+                # fixture exists to exercise (_resolve_state_root priority 2
+                # beats priority 3) -- conftest.py's autouse pin sets it for
+                # every test to keep the suite off the real ~/.vnx-data, so
+                # it must be unset here the same way the other ambient
+                # overrides above are, or resolution never reaches the HOME
+                # fallback this fixture pins.
+                "VNX_DATA_HOME"):
         monkeypatch.delenv(key, raising=False)
     return home
 
@@ -130,7 +138,12 @@ def _run_horizon_list(repo: Path, home: Path) -> subprocess.CompletedProcess:
     for key in ("VNX_PROJECT_ID", "VNX_OPERATOR_ID", "VNX_DATA_DIR",
                 "VNX_STATE_DIR", "VNX_DISPATCH_DIR", "VNX_LOGS_DIR",
                 "VNX_DATA_DIR_EXPLICIT", "VNX_HOME", "PROJECT_ROOT",
-                "VNX_PROJECT_ROOT", "VNX_BIN"):
+                "VNX_PROJECT_ROOT", "VNX_BIN",
+                # see central_home's matching comment: must drop the
+                # account-wide pin too, or the subprocess inherits it from
+                # the parent test process's os.environ and never reaches the
+                # HOME-based central default this subprocess is meant to hit.
+                "VNX_DATA_HOME"):
         env.pop(key, None)
     env["HOME"] = str(home)
     env["PYTHONPATH"] = str(ROOT)
