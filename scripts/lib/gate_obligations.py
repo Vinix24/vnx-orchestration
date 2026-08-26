@@ -187,14 +187,25 @@ def register_obligation(
     for numeric pr_ids, so alphanumeric labels (PR-HYG-1) would otherwise be
     unfindable at merge time.
 
-    ``gate_requirement_resolution`` (OI-1462): a snapshot of the gate-requirement
-    config flags (e.g. ``{"VNX_CI_GATE_REQUIRED": True}``) as THIS process —
-    the eiser — resolved them at registration time. The fulfiller process runs
-    later, in a different environment, and may resolve the same flags
-    differently; :func:`check_gate_requirement_mismatch` compares the two.
-    None (the default) when the caller has no resolution to stamp — a record
-    written before this field existed, or by a caller that never captured
-    one, carries no resolution info; that is UNKNOWN, never "no requirement".
+    ``gate_requirement_resolution`` (OI-1462): a snapshot of what THIS
+    process — the eiser — resolved for the gate-requirement config flags at
+    registration time. The fulfiller process runs later, in a different
+    environment, and may resolve the same flags differently;
+    :func:`check_gate_requirement_mismatch` compares the two. Shape (when
+    the caller attempted a capture):
+    ``{"status": "captured", "flags": {"VNX_CI_GATE_REQUIRED": True}, "error": None}``
+    on success, or ``{"status": "failed", "flags": None, "error": "<reason>"}``
+    when the capture itself raised. THREE distinct states, never collapsed
+    to two (OI-1462 residu — a Codex-gate finding on this very obligation
+    mechanism): ``None`` (the default) means the caller never attempted a
+    capture at all — UNKNOWN, never "no requirement"; ``status="failed"``
+    means it tried and the read itself broke — a FAULT, distinguishable from
+    both "unknown" and "captured false"; ``status="captured"`` means the
+    snapshot is trustworthy. Collapsing "failed" into ``None`` (as an earlier
+    version of this fix did) makes a broken flag-read at the eiser
+    indistinguishable from "nobody ever asked" — and blinds
+    :func:`check_gate_requirement_mismatch` to precisely the OI-1462 failure
+    mode: the read that breaks.
     """
     gate = (gate or "").strip()
     dispatch_id = (dispatch_id or "").strip()
@@ -242,24 +253,51 @@ def check_gate_requirement_mismatch(
     the vervuller run in different processes / environments and can resolve
     the SAME config flag through ``config_runtime.get_bool`` differently).
 
-    Returns None when there is nothing to compare — the obligation predates
-    :data:`register_obligation`'s ``gate_requirement_resolution`` field, or
-    never had ``flag`` stamped, or the two sides agree. An absent resolution
-    is UNKNOWN, never "no requirement": this deliberately never manufactures
-    a mismatch (or a match) out of missing data.
+    Three input states, THREE different answers — never collapsed to two:
 
-    Returns a mismatch dict — never a bare bool — so the caller has concrete
-    values to log and persist instead of a silent skip.
+      1. No resolution was ever captured (``gate_requirement_resolution`` is
+         absent/not a dict, or its ``status`` field is missing/unrecognised):
+         returns None. UNKNOWN, never "no requirement" — this never
+         manufactures a mismatch (or a match) out of missing data.
+      2. The writer's OWN capture attempt failed (``status == "failed"``):
+         returns a ``"kind": "writer_capture_failed"`` finding. This is
+         DISTINCT from case 1 — the writer tried and its own flag-read broke,
+         which is exactly the OI-1462 failure mode this function exists to
+         surface, not silence. No value comparison is possible (there is
+         nothing trustworthy to compare against), but the finding itself is
+         not nothing: it says the obligation's requirement was never
+         reliably established.
+      3. The writer captured a real value (``status == "captured"``) and it
+         either matches the reader's (returns None — genuine agreement) or
+         diverges (returns a ``"kind": "value_mismatch"`` finding with both
+         values).
+
+    Returns a dict — never a bare bool — so the caller has concrete detail to
+    log and persist instead of a silent skip, for either finding kind.
     """
     resolution = record.get("gate_requirement_resolution")
-    if not isinstance(resolution, dict) or flag not in resolution:
+    if not isinstance(resolution, dict):
         return None
-    writer_value = bool(resolution[flag])
+    status = resolution.get("status")
+    if status == "failed":
+        return {
+            "flag": flag,
+            "kind": "writer_capture_failed",
+            "writer_error": resolution.get("error"),
+            "detected_at": _utc_now_iso(),
+        }
+    if status != "captured":
+        return None
+    flags = resolution.get("flags")
+    if not isinstance(flags, dict) or flag not in flags:
+        return None
+    writer_value = bool(flags[flag])
     reader_value = bool(reader_value)
     if writer_value == reader_value:
         return None
     return {
         "flag": flag,
+        "kind": "value_mismatch",
         "writer_value": writer_value,
         "reader_value": reader_value,
         "detected_at": _utc_now_iso(),

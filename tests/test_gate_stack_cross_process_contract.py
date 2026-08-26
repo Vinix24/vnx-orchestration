@@ -79,8 +79,13 @@ LIB_DIR = SCRIPTS_DIR / "lib"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(LIB_DIR))
 
-import config_registry as cr  # noqa: E402
-import config_store_db as cs  # noqa: E402
+# config_registry / config_store_db are imported lazily, inside the
+# functions that use them (below) -- they live under scripts/lib, which is
+# only on sys.path after the inserts above, so a module-level import here
+# would need a `# noqa: E402` suppression the repo's Lint Patterns gate
+# rejects. Not a workaround: this is the same lazy-import convention used
+# throughout scripts/lib itself (e.g. dispatch_cli.py's `import config_runtime`
+# inside functions rather than at module scope).
 
 FLAG = "VNX_CI_GATE_REQUIRED"
 PID = "gatecontracttest"
@@ -163,6 +168,8 @@ def _seed_state_dir(tmp_path: Path, value: str, *, project_id: str = PID) -> Pat
     """Build a REAL runtime_coordination.db carrying an explicit operator
     override for VNX_CI_GATE_REQUIRED, via the same config_store_db API the
     dashboard uses -- never hand-written SQL."""
+    import config_store_db as cs
+
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(state_dir / "runtime_coordination.db")
@@ -219,6 +226,8 @@ def test_cross_process_flag_divergence_when_vervuller_cannot_see_the_db(tmp_path
     ``~/.vnx-data/<project>`` store, and not whatever ``.vnx-data`` may have
     accumulated next to the real checkout this test file itself lives in.
     """
+    import config_registry as cr
+
     assert cr.CONFIG_REGISTRY[FLAG].default == "1", (
         "this test's whole premise is an override that diverges from the "
         "registry default -- if the default ever flips back to '0' this "
@@ -312,6 +321,8 @@ def test_cross_process_flag_agreement_when_vervuller_finds_store_via_canonical_r
         f"tmp_path -- a test must never write an operator override into a "
         f"real, shared store; got {resolved_state_dir} (tmp_path={tmp_path})"
     )
+    import config_store_db as cs
+
     resolved_state_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(resolved_state_dir / "runtime_coordination.db")
     try:

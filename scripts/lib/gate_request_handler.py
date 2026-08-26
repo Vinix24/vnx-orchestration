@@ -66,10 +66,16 @@ class GateRequestHandlerMixin:
         """OI-1462: compare THIS process's (the vervuller's) own resolution of
         ``VNX_CI_GATE_REQUIRED`` against what the obligation's writer (the
         eiser, running earlier in a possibly different environment) stamped
-        at registration time. A mismatch is a benoemde condition — logged
-        loudly and persisted onto the obligation record — never a silent
-        skip, since the whole defect class is two processes disagreeing on
-        the same flag with nothing noticing.
+        at registration time. A finding is a benoemde condition — logged
+        loudly, ledgered (ADR-005: an NDJSON event before the obligation
+        record mutation, never only the mutation), and persisted onto the
+        obligation record — never a silent skip, since the whole defect
+        class is two processes disagreeing on the same flag with nothing
+        noticing. Two distinct finding kinds
+        (``gate_obligations.check_gate_requirement_mismatch``):
+        ``value_mismatch`` (both sides captured a value, and they differ) and
+        ``writer_capture_failed`` (the eiser's OWN flag-read broke — a fault,
+        not a value to compare against).
 
         Best-effort: dispatch_id may be blank (non-obligation call sites),
         the obligation may not exist yet, or bookkeeping may fail — none of
@@ -84,6 +90,8 @@ class GateRequestHandlerMixin:
                 obligation_path,
                 update_obligation,
             )
+            from review_gate_manager import emit_governance_receipt
+
             path = obligation_path(self.state_dir, dispatch_id)
             if not path.exists():
                 return
@@ -94,14 +102,36 @@ class GateRequestHandlerMixin:
             )
             if mismatch is None:
                 return
-            logger.warning(
-                "gate_request_handler: cross-process gate-requirement mismatch "
-                "for dispatch=%s flag=%s writer=%s reader=%s -- the eiser and "
-                "the vervuller resolved VNX_CI_GATE_REQUIRED differently",
-                dispatch_id, mismatch["flag"], mismatch["writer_value"], mismatch["reader_value"],
+            if mismatch["kind"] == "writer_capture_failed":
+                logger.warning(
+                    "gate_request_handler: dispatch=%s flag=%s -- the eiser's "
+                    "OWN gate-requirement capture FAILED at registration time "
+                    "(%s); this obligation's requirement was never reliably "
+                    "established and cannot be cross-checked",
+                    dispatch_id, mismatch["flag"], mismatch["writer_error"],
+                )
+            else:
+                logger.warning(
+                    "gate_request_handler: cross-process gate-requirement mismatch "
+                    "for dispatch=%s flag=%s writer=%s reader=%s -- the eiser and "
+                    "the vervuller resolved VNX_CI_GATE_REQUIRED differently",
+                    dispatch_id, mismatch["flag"], mismatch["writer_value"], mismatch["reader_value"],
+                )
+            # ADR-005: the ledger is canonical, before any other durable
+            # mutation -- emit the NDJSON event first, then mutate the
+            # obligation record, so an operator tailing t0_receipts.ndjson
+            # sees this finding without having to know to go read obligation
+            # JSON files.
+            emit_governance_receipt(
+                "gate_requirement_mismatch",
+                receipt_kind="review_gate",
+                status="mismatch",
+                dispatch_id=dispatch_id,
+                gate="ci_gate",
+                **mismatch,
             )
             update_obligation(path, gate_requirement_mismatch=mismatch)
-        except Exception as exc:  # noqa: BLE001 — mismatch detection must never block a gate request
+        except Exception as exc:  # vnx-silent-except: mismatch detection is diagnostic tooling on the read path -- it must never block or fail an actual gate request; failures here are logged at debug with dispatch_id + reason so they stay visible without risking the gate itself
             logger.debug(
                 "gate_request_handler: ci_gate requirement-mismatch check skipped for dispatch=%s: %s",
                 dispatch_id, exc,
