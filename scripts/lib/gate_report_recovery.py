@@ -28,8 +28,21 @@ path DERIVATION (guessing the companion's name from the dispatch_id) finds
 exactly one of these four and misses the other three. This module searches on
 PROPERTIES instead: a candidate is a ``.md`` file under ``unified_reports/``
 that (1) carries a ```json``` fence with a real ``verdict`` key, (2) mentions
-this dispatch's PR number in its filename, (3) has an mtime inside the run's own
-time window, and (4) is not the gate's own report file.
+this dispatch's PR number — in its filename OR its body text, (3) has an mtime
+inside the run's own time window, and (4) is not the gate's own report file.
+
+(c) OI-recovery-venster follow-up, measured 26-08 on PR #1684: that four-sample
+set was NOT representative of every companion-naming shape — none of them was
+named after a dispatch-id with no PR token at all. Real evidence:
+``20260824-alpha-a5-config-reader-fallback_report.md`` carries a clean pass
+verdict for PR 1684, written 11s before the gate's own report (well inside the
+recovery window), but its FILENAME contains no "1684" anywhere — the filename-
+only check on point (2) above dropped it, surfacing ``recovery_empty`` on
+evidence that was sitting right there. Point (2) now also matches the PR token
+inside the file's own body text (real reports spell it "PR 1684" — literal
+"PR" + space + number, e.g. a markdown H1 like ``# PR 1684 — ...``), using the
+SAME token pattern as the filename check (see ``_pr_token_pattern``) so
+neither check can drift stricter or looser than the other.
 
 Fail-closed on ambiguity (>=2 candidates): two gates racing on the same PR at
 the same time is a real scenario, and the mtime-window heuristic alone cannot
@@ -158,10 +171,25 @@ def _extract_verdict_block(text: str) -> dict:
 
 
 def _pr_token_pattern(pr_id: str) -> "re.Pattern[str]":
-    """Match "pr<N>" or "pr-<N>" (case-insensitive) as a filename substring, not
-    followed by another digit — matches all four measured companion filenames
-    (see module docstring) without matching e.g. pr16720 for pr=1672."""
-    return re.compile(rf"(?i)\bpr-?{re.escape(str(pr_id).strip())}(?!\d)")
+    """Match "pr<N>", "pr-<N>", "pr <N>", or "pr#<N>" (case-insensitive) as a
+    substring, not followed by another digit — matches all four measured
+    companion filenames (see module docstring) without matching e.g. pr16720
+    for pr=1672, AND matches real report prose, which spells the same
+    identity as "PR <N>" with a literal space (measured on
+    20260824-alpha-a5-config-reader-fallback_report.md: ``# PR 1684 — ...``).
+    The hash/whitespace separators are not themselves measured on a real
+    companion — they are included defensively for the same "PR#<N>"/"PR
+    <N>" prose conventions GitHub itself uses — but adding them was verified
+    (26-08, dispatch-20260826-beta3-b addendum) to add ZERO extra content
+    matches over the bare space case across all ten PRs with review-gate
+    activity in the live store (1674-1684, 1688-1689; 808 verdict-bearing
+    reports) — surgical, not a floodgate. The bare number alone is still
+    never enough: "pr" must prefix it.
+
+    Used for BOTH the filename check and the body-text check in
+    ``find_recovery_candidate`` — one pattern, so neither can accept a token
+    the other would refuse."""
+    return re.compile(rf"(?i)\bpr[-\s#]?{re.escape(str(pr_id).strip())}(?!\d)")
 
 
 def find_recovery_candidate(
@@ -179,9 +207,17 @@ def find_recovery_candidate(
       1. carries a parseable verdict block — either the gate's own ```json```
          fence or the plan-reviewer role's ```vnx-plan-verdict``` fence
          (translated; see ``extract_relabeled_verdict``),
-      2. mentions *pr_id* in its filename (a "pr<N>"/"pr-<N>" token),
+      2. mentions *pr_id* — a "pr<N>"/"pr-<N>"/"pr <N>" token — in its
+         FILENAME **or** its body text (a companion is sometimes named after
+         its own dispatch-id, carrying no PR number at all in the name; see
+         module docstring, measured on PR #1684),
       3. has an mtime in the inclusive window [*window_start*, *window_end*], and
       4. is not *exclude_name* (the gate's own report for this exact dispatch).
+
+    Widening point 2 to the body text makes 2+ candidates strictly MORE likely
+    (any report mentioning the PR at all is now in scope, not just ones named
+    after it) — that is correct, not a regression: the fail-closed ambiguity
+    check below still refuses to guess between them.
 
     Returns ``None`` on zero matches (absence of evidence — not an error).
     Raises ``AmbiguousRecoveryCandidates`` on 2+ matches (fail-closed).
@@ -198,8 +234,6 @@ def find_recovery_candidate(
             continue
         if path.name == exclude_name:
             continue
-        if not pattern.search(path.name):
-            continue
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -209,6 +243,8 @@ def find_recovery_candidate(
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
+            continue
+        if not pattern.search(path.name) and not pattern.search(text):
             continue
         verdict = _extract_verdict_block(text) or extract_relabeled_verdict(text)
         if not verdict:

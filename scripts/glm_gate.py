@@ -252,12 +252,19 @@ def _frontmatter_run_outcome(report_text: str) -> "tuple[bool | None, object, ob
     return False, exit_code, output_tokens
 
 
-def _parse_reprocess_window_start(dispatch_id: str, *, pr: str) -> "float | None":
-    """Extract the original dispatch's start time (unix seconds) from its own
-    dispatch_id, which this gate always constructs as
+def _parse_dispatch_window_start(dispatch_id: str, *, pr: str) -> "float | None":
+    """Extract a dispatch's start time (unix seconds, whole-second floor) from
+    its own dispatch_id, which this gate always constructs as
     ``f"glm-gate-pr{pr}-{int(time.time())}"``. Returns None when *dispatch_id*
     does not match that exact shape for *pr* — refuse rather than guess a
-    recovery time window."""
+    recovery time window.
+
+    Used for BOTH the live-dispatch recovery window (the timestamp this exact
+    dispatch_id was just built with, moments earlier in the same run — see
+    ``main()``'s non-reprocess branch) and the ``--reprocess`` window (an
+    externally-supplied, possibly-malformed dispatch_id, where the None return
+    above is the real refusal path). Reusing the same parser for both means
+    the two windows can never derive their start bound differently."""
     prefix = f"glm-gate-pr{pr}-"
     if not dispatch_id.startswith(prefix):
         return None
@@ -508,7 +515,7 @@ def main(argv: "list[str] | None" = None) -> int:
             return 1
         report_text = report_path_obj.read_text(encoding="utf-8")
         dispatch_error = ""
-        window_start = _parse_reprocess_window_start(dispatch_id, pr=args.pr)
+        window_start = _parse_dispatch_window_start(dispatch_id, pr=args.pr)
         if window_start is None:
             print(
                 f"glm_gate: --reprocess: dispatch_id={dispatch_id!r} does not match the "
@@ -548,7 +555,6 @@ def main(argv: "list[str] | None" = None) -> int:
         dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout, role="review-gate")
         prompt = _build_prompt(diff, args.pr)
 
-        wall_start = time.time()
         start = time.monotonic()
         report_text = ""
         dispatch_error = ""
@@ -567,7 +573,35 @@ def main(argv: "list[str] | None" = None) -> int:
         duration = time.monotonic() - start
 
         report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
-        window_start = wall_start
+        # (a) OI-recovery-venster: reuse dispatch_id's OWN embedded
+        # int(time.time()) floor (set moments earlier when dispatch_id was
+        # constructed above) instead of a fresh sub-second time.time() read.
+        # Measured 26-08 as a real CI flake
+        # (test_search_recovers_verdict_from_companion[kimi], same commit
+        # 7a4d4a93: pass then fail) — red on the Linux CI runner, green
+        # locally on macOS. Likely cause (T0 measurement, 26-08, 8/8 writes
+        # sub-millisecond AFTER time.time() on APFS, zero truncated): Linux
+        # stamps file mtimes from a COARSE clock
+        # (ktime_get_coarse_real_ts64, refreshed once per timer tick) while
+        # time.time() reads the fine vDSO clock — a file written a fraction
+        # of a millisecond after a time.time() read can land ONE TICK
+        # EARLIER than that reading. This is clock SKEW between two
+        # differently-grained sources, not filesystem truncation to whole
+        # seconds — APFS shows no truncation at all, yet the same skew
+        # windowing logic must still hold there. The fix does not depend on
+        # diagnosing the skew precisely: floor(t) is a full second below the
+        # real construction instant, comfortably larger than any millisecond-
+        # scale tick skew, and lowering window_start can only ever ADMIT
+        # more files, never exclude ones the old (higher) bound would have
+        # included — so this closes the race regardless of the exact
+        # mechanism.
+        #
+        # Cannot be None here: dispatch_id was just constructed above (this
+        # exact branch, this exact args.pr, this exact shape) — the None
+        # path only matters for --reprocess, where dispatch_id is externally
+        # supplied. That guarantee depends on the construction ~130 lines up
+        # staying in this exact shape; not enforced at this call site.
+        window_start = _parse_dispatch_window_start(dispatch_id, pr=args.pr)
         window_end = report_path_obj.stat().st_mtime if report_path_obj.is_file() else time.time()
 
     recovered_path: "Path | None" = None

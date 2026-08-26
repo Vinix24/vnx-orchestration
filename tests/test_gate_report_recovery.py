@@ -438,3 +438,207 @@ def test_search_recognizes_a_companion_with_the_relabeled_fence(tmp_path):
     assert candidate is not None
     assert candidate.path == companion
     assert candidate.verdict["verdict"] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# (c) dispatch-20260826-beta3-b: a companion named after its own dispatch-id
+# (no PR token anywhere in the filename) must still be found via its BODY
+# text. Real evidence, measured 26-08:
+# ``20260824-alpha-a5-config-reader-fallback_report.md`` carries a clean pass
+# verdict for PR 1684, written 11s before the gate's own report (inside the
+# recovery window), but its filename contains no "1684" at all — the
+# filename-only check dropped this exact evidence, surfacing
+# ``recovery_empty`` on a pass verdict that was sitting right there. The real
+# body spells the PR identity as "PR 1684" (a literal space, not a dash),
+# verbatim from the measured file's own H1.
+# ---------------------------------------------------------------------------
+
+_REAL_PR1684_BODY_PREFIX = (
+    "# PR 1684 — config_runtime state-dir fallback + loud fail-soft (OI-1461)\n\n"
+    "**Dispatch-ID**: 20260824-alpha-a5-config-reader-fallback (OI-1461)\n\n"
+    "## Summary\n\n"
+    "Code-review gate verdict for PR 1684. The diff adds a canonical-resolver "
+    "fallback.\n\n"
+)
+
+
+def test_companion_named_by_dispatch_id_with_pr_token_only_in_body_is_found(tmp_path):
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+    now = time.time()
+    companion = _write(
+        reports_dir / "20260824-alpha-a5-config-reader-fallback_report.md",
+        _REAL_PR1684_BODY_PREFIX + _VERDICT_BODY,
+        mtime=now - 11,
+    )
+    gate_report_name = "glm-gate-pr1684-999999.md"
+    _write(reports_dir / gate_report_name, "Reviewed in prose, no fence.\n", mtime=now)
+
+    candidate = find_recovery_candidate(
+        reports_dir, pr_id="1684", exclude_name=gate_report_name,
+        window_start=now - 60, window_end=now,
+    )
+
+    assert candidate is not None, (
+        "a companion named after its own dispatch-id, with the PR token only "
+        "in the body text, must still be found — this is the exact PR #1684 "
+        "shape that recovery_empty dropped before this fix"
+    )
+    assert candidate.path == companion
+    assert candidate.verdict["verdict"] == "pass"
+
+
+def test_bare_number_in_body_without_pr_prefix_does_not_match(tmp_path):
+    """A companion that merely mentions the bare number (e.g. a line
+    reference) must NOT become a candidate — only a "pr"-prefixed token
+    counts in the body, exactly as it already does in the filename."""
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+    now = time.time()
+    body = "Line 1684 of the diff changed. Nothing else here.\n\n" + _VERDICT_BODY
+    _write(reports_dir / "some-other-dispatch-id_report.md", body, mtime=now - 10)
+    gate_report_name = "glm-gate-pr1684-999999.md"
+    _write(reports_dir / gate_report_name, "Reviewed in prose, no fence.\n", mtime=now)
+
+    candidate = find_recovery_candidate(
+        reports_dir, pr_id="1684", exclude_name=gate_report_name,
+        window_start=now - 60, window_end=now,
+    )
+    assert candidate is None
+
+
+def test_pr_token_in_body_does_not_match_a_longer_number(tmp_path):
+    """pr_id="1684" must not match body text mentioning PR 16840 — same
+    trailing-digit boundary rule as the filename check."""
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+    now = time.time()
+    body = "# PR 16840 — unrelated change\n\n" + _VERDICT_BODY
+    _write(reports_dir / "some-other-dispatch-id_report.md", body, mtime=now - 10)
+    gate_report_name = "glm-gate-pr1684-999999.md"
+    _write(reports_dir / gate_report_name, "Reviewed in prose, no fence.\n", mtime=now)
+
+    candidate = find_recovery_candidate(
+        reports_dir, pr_id="1684", exclude_name=gate_report_name,
+        window_start=now - 60, window_end=now,
+    )
+    assert candidate is None
+
+
+def test_two_candidates_matched_via_body_text_still_raises_ambiguous(tmp_path):
+    """Widening point 2 to body text makes 2+ candidates MORE likely — that
+    is correct, not a regression: the fail-closed ambiguity check must still
+    refuse to guess between them."""
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+    now = time.time()
+    a = _write(
+        reports_dir / "dispatch-a_report.md",
+        "# PR 1684 — first companion\n\n" + _VERDICT_BODY, mtime=now - 20,
+    )
+    b = _write(
+        reports_dir / "dispatch-b_report.md",
+        "# PR 1684 — second companion\n\n" + _VERDICT_BODY, mtime=now - 5,
+    )
+    gate_report_name = "glm-gate-pr1684-999999.md"
+    _write(reports_dir / gate_report_name, "Reviewed in prose, no fence.\n", mtime=now)
+
+    with pytest.raises(AmbiguousRecoveryCandidates) as excinfo:
+        find_recovery_candidate(
+            reports_dir, pr_id="1684", exclude_name=gate_report_name,
+            window_start=now - 60, window_end=now,
+        )
+    assert set(excinfo.value.candidates) == {a, b}
+
+
+# ---------------------------------------------------------------------------
+# T0 addendum (26-08, dispatch-20260826-beta3-b): a test that only proves
+# content-matching finds the companion file IN ISOLATION proves the wrong
+# thing — the live PR #1684 store also holds a SECOND glm-gate run for the
+# same PR (a later retry) whose FILENAME matches the "pr1684" token and which
+# carries its own valid pass verdict. An unbounded search (no window, no
+# exclude_name) finds BOTH that name-match decoy and the content-match
+# companion and raises AmbiguousRecoveryCandidates — measured live 26-08
+# against the real store. It is the run's own recovery window (not the
+# content-vs-name distinction) that resolves this down to exactly the one
+# candidate that matters. These two tests exercise the FULL chain — name
+# filter, content filter, exclude_name, and the mtime window — together, with
+# the real measured numbers, instead of each property in isolation.
+# ---------------------------------------------------------------------------
+
+# Real values, read 26-08 from the live store
+# (~/.vnx-data/vnx-dev/unified_reports/), read-only:
+_REAL_PR1684_DISPATCH_ID = "glm-gate-pr1684-1787550833"
+_REAL_PR1684_WINDOW_START = 1787550833.0  # dispatch_id's own embedded floor
+_REAL_PR1684_OWN_REPORT_MTIME = 1787551030.278105
+_REAL_PR1684_COMPANION_MTIME = 1787551019.4603355
+# glm-gate-pr1684-1787552314.md: a LATER retry for the same PR — matches by
+# NAME ("pr1684"), carries its own valid pass verdict, but landed long after
+# this dispatch's own recovery window had already closed.
+_REAL_PR1684_LATER_RETRY_MTIME = 1787552730.9582276
+
+
+def test_real_pr1684_window_plus_exclude_resolves_the_name_match_decoy(tmp_path):
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+
+    own_report_name = f"{_REAL_PR1684_DISPATCH_ID}.md"
+    _write(reports_dir / own_report_name, "Reviewed in prose, no fence.\n", mtime=_REAL_PR1684_OWN_REPORT_MTIME)
+    companion = _write(
+        reports_dir / "20260824-alpha-a5-config-reader-fallback_report.md",
+        _REAL_PR1684_BODY_PREFIX + _VERDICT_BODY,
+        mtime=_REAL_PR1684_COMPANION_MTIME,
+    )
+    _write(
+        reports_dir / "glm-gate-pr1684-1787552314.md",
+        _VERDICT_BODY,
+        mtime=_REAL_PR1684_LATER_RETRY_MTIME,
+    )
+
+    # Unbounded: both the later-retry decoy (name match) and the companion
+    # (content match) qualify — ambiguous, exactly as measured live.
+    with pytest.raises(AmbiguousRecoveryCandidates) as excinfo:
+        find_recovery_candidate(
+            reports_dir, pr_id="1684", exclude_name="__none__.md",
+            window_start=0, window_end=float("inf"),
+        )
+    assert len(excinfo.value.candidates) == 2
+
+    # The REAL call: this dispatch's own window + its own exclude_name.
+    # Resolves to exactly the one candidate inside the window — the window,
+    # not the content-vs-name distinction, is what saves this from ambiguity.
+    candidate = find_recovery_candidate(
+        reports_dir, pr_id="1684", exclude_name=own_report_name,
+        window_start=_REAL_PR1684_WINDOW_START, window_end=_REAL_PR1684_OWN_REPORT_MTIME,
+    )
+    assert candidate is not None
+    assert candidate.path == companion
+    assert candidate.verdict["verdict"] == "pass"
+
+
+def test_name_match_and_content_match_both_inside_window_still_ambiguous(tmp_path):
+    """The fail-closed property must survive widening point 2 to body text:
+    a NAME-matching candidate and a CONTENT-matching candidate that both fall
+    INSIDE the same recovery window are still 2 candidates — refuse, never
+    guess which one is real."""
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+    now = time.time()
+
+    name_match = _write(
+        reports_dir / "pr-1684-glm-gate-review.md", _VERDICT_BODY, mtime=now - 15,
+    )
+    content_match = _write(
+        reports_dir / "some-dispatch-id_report.md",
+        "# PR 1684 — unrelated companion\n\n" + _VERDICT_BODY,
+        mtime=now - 10,
+    )
+    gate_report_name = "glm-gate-pr1684-999999.md"
+    _write(reports_dir / gate_report_name, "Reviewed in prose, no fence.\n", mtime=now)
+
+    with pytest.raises(AmbiguousRecoveryCandidates) as excinfo:
+        find_recovery_candidate(
+            reports_dir, pr_id="1684", exclude_name=gate_report_name,
+            window_start=now - 60, window_end=now,
+        )
+    assert set(excinfo.value.candidates) == {name_match, content_match}

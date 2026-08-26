@@ -519,3 +519,69 @@ def test_reprocess_malformed_dispatch_id_refuses(module, gate_name, dispatch_pre
         "--pr", "777", "--reprocess", bad_id, "--data-dir", str(data_dir),
     ])
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# (a) dispatch-20260826-beta3-b: closes the race between a sub-second
+# wall-clock window_start and a companion mtime landing at or below that
+# same second's floor. Measured as a real CI flake:
+# test_search_recovers_verdict_from_companion[kimi] passed and failed on the
+# SAME commit (7a4d4a93) across two runs — red on the Linux CI runner, green
+# locally on macOS. NOT filesystem truncation to whole seconds (T0 measured
+# 26-08: 8/8 writes on APFS land sub-millisecond AFTER their time.time()
+# reading, zero truncated). Likely cause: Linux stamps file mtimes from a
+# COARSE clock (ktime_get_coarse_real_ts64, refreshed once per timer tick)
+# while time.time() reads the fine vDSO clock — a file written a fraction of
+# a millisecond after that reading can land one tick EARLIER. See the fix's
+# own comment at glm_gate.py/kimi_gate.py's window_start assignment for the
+# full reasoning; the fix does not depend on diagnosing the skew precisely,
+# since lowering window_start can only ever ADMIT more files, never exclude
+# ones the old (higher) bound would have included.
+#
+# This test does NOT reproduce that exact skew — it is a CONSTRUCTED
+# lower-bound scenario that pins the property the fix guarantees:
+# time.time() is pinned to a value with a large fractional part (.99) for
+# the whole test; dispatch_id embeds int(pinned), and the companion's mtime
+# is set to that SAME whole-second floor (simulating a companion that landed
+# at or before the floor, however that happened in reality). Under the OLD
+# wall_start-based window_start (== the pinned .99 value), this mtime is <
+# window_start and would be wrongly excluded; under the fix (window_start ==
+# dispatch_id's own embedded floor) it is included.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module,gate_name,dispatch_prefix", _GATES)
+def test_live_window_start_survives_a_companion_mtime_at_the_second_floor(
+    module, gate_name, dispatch_prefix, tmp_path, monkeypatch,
+):
+    data_dir = tmp_path / "data"
+    pinned_now = 1700000000.99
+    second_floor = float(int(pinned_now))  # dispatch_id's own embedded floor
+
+    monkeypatch.setattr(time, "time", lambda: pinned_now)
+    monkeypatch.setattr(module, "_get_diff", lambda pr_arg, diff_file: _FAKE_DIFF)
+    monkeypatch.setattr(module, "get_pr_head_branch", lambda pr_number: "feature/x")
+    monkeypatch.setattr(module, "get_pr_head_sha", lambda pr_number: "deadbeefcafe")
+
+    def _make(*_a, **_k):
+        def _dispatch(provider, model_arg, instruction, dispatch_id):
+            companion_path = _write(data_dir, "pr-777-second-pit", _REAL_PASS_REPORT)
+            _touch(companion_path, second_floor)  # lands AT the whole-second floor
+            primary_path = _write(data_dir, dispatch_id, _NO_FENCE_REPORT)
+            _touch(primary_path, second_floor + 5)
+            return _NO_FENCE_REPORT
+        return _dispatch
+
+    monkeypatch.setattr(module, "_make_default_dispatcher", _make)
+    rc = module.main(["--pr", "777", "--data-dir", str(data_dir)])
+    out = data_dir / "state" / "review_gates" / "results" / f"pr-777-{gate_name}.json"
+    record = json.loads(out.read_text(encoding="utf-8"))
+
+    assert record["reason"] == "recovered_verdict", (
+        "a companion whose mtime lands at the whole-second floor of the "
+        "dispatch's own start instant must still be recovered — this is "
+        "exactly the race a sub-second wall-clock window_start used to lose "
+        f"(got reason={record['reason']!r})"
+    )
+    assert record["status"] == "pass"
+    assert rc == 0
