@@ -58,15 +58,19 @@ and every one of those verdicts was permanently unable to close a PR.
 never a second hasher). ``report_path`` points at the governed dispatch's own
 unified report, already on disk by the time the dispatcher call returns.
 
-An ``unavailable`` result carries NEITHER field, and this is more subtle than
-it looks (OI-1435): ``has_complete_evidence`` only checks whether the two
-fields are non-empty — it does not check whether a verdict exists at all. An
-``unavailable`` result (``is_terminal=False``) that carried non-empty
-``contract_hash``/``report_path`` would pass ``has_complete_evidence`` while
-carrying no judgement whatsoever; the separation between "evidence exists"
-and "a verdict exists" holds today only because callers check ``is_terminal``
-first. Leaving both fields empty on every non-terminal status keeps that
-separation intact regardless of check order in any future caller.
+An ``unavailable`` result carries an empty ``contract_hash`` always, and (as
+of OI-1477) a POPULATED ``report_path`` — pointing at this gate's own report,
+which is what actually carries the provider's failure text (a 402/403 body,
+an outage message) when there is no lane log to lift it from instead. This
+does not weaken the OI-1435 guarantee: ``gate_status.has_complete_evidence``
+checks ``gate_status.is_terminal()`` BEFORE it ever looks at
+``contract_hash``/``report_path``, and ``is_terminal`` only admits
+pass/fail/not_executable — never ``unavailable``. A populated ``report_path``
+on an unavailable record therefore still cannot pass ``has_complete_evidence``
+(nor ``closure_verifier``'s merge check, which checks ``gate_is_terminal``
+first for the identical reason); only ``contract_hash`` being empty was ever
+load-bearing for that separation, and it stays empty on every non-terminal
+status.
 
 Model: GLM-5.2 only (``deprecated-glm-models``, provider_constraints.yaml,
 operator directive 2026-08-03). GLM-4.5, GLM-4.6, base GLM-5, and GLM-5.1 are
@@ -462,11 +466,12 @@ def main(argv: "list[str] | None" = None) -> int:
     test_run = bool(args.diff_file)
     branch = "" if test_run else get_pr_head_branch(pr_number)
     commit_sha = "" if test_run else get_pr_head_sha(pr_number)
-    # Informative only (OI-1435 follow-up): points a human at the governed
-    # dispatch's own unified report even on a non-terminal ``unavailable``
-    # result, where ``report_path`` is deliberately left empty so
-    # has_complete_evidence/is_terminal are never fooled into treating an
-    # outage as a decided verdict. This field is never read by either check.
+    # Points at the governed dispatch's own unified report regardless of
+    # outcome. OI-1477: this SAME string is also what ``report_path`` gets
+    # set to on a non-terminal ``unavailable`` result (see the OI-1178/
+    # OI-1435/OI-1477 block below) — never read by has_complete_evidence/
+    # is_terminal either way, since those gate on status, not on which
+    # fields happen to be populated.
     report_path_informational = str(base_data_dir / "unified_reports" / f"{dispatch_id}.md")
 
     requests_dir = base_data_dir / "state" / "review_gates" / "requests"
@@ -747,11 +752,27 @@ def main(argv: "list[str] | None" = None) -> int:
     # OI-1178 / OI-1435: a terminal verdict must carry the same evidence pair
     # codex_gate/kimi_gate stamp — contract_hash (gate_artifacts' single
     # canonical hasher) + report_path. An unavailable result (no readable
-    # verdict, or the dispatch itself failed) is deliberately left with
-    # neither field: has_complete_evidence only checks non-emptiness, not
-    # whether a verdict exists, so a filled-in unavailable record would pass
-    # the evidence check while carrying no judgement (OI-1435) — leaving both
-    # empty here is what keeps OI-1142's outage/verdict separation intact.
+    # verdict, or the dispatch itself failed) leaves contract_hash empty —
+    # THAT is what keeps OI-1142's outage/verdict separation intact, because
+    # gate_status.has_complete_evidence checks gate_status.is_terminal()
+    # BEFORE it ever looks at contract_hash/report_path, and "unavailable" is
+    # never terminal (gate_status.is_terminal only admits pass/fail/
+    # not_executable). A filled-in report_path on an unavailable record
+    # therefore still cannot pass has_complete_evidence or the merge-time
+    # evidence check (closure_verifier.check_merge_readiness) — both refuse
+    # on is_terminal()/gate_is_terminal() first, contract_hash empty or not.
+    #
+    # OI-1477: report_path used to be left empty here too (both fields
+    # blanked "for symmetry" with contract_hash), which broke the ONE case
+    # this evidence trail exists for: a real provider outage, where the
+    # report text under report_path_informational is the only place the
+    # failure reason (e.g. an OpenRouter 402) can be read from. The report
+    # file at report_path_informational is already on disk by this point
+    # (governance_emit.emit_unified_report ran inside the dispatcher call
+    # above, live or --reprocess) — populating report_path here lets
+    # gate_request_handler._read_lane_log_or_report_text find it directly
+    # off the result record instead of needing to re-derive the same path
+    # from dispatch_id as a second fallback.
     if status in {"pass", "fail"}:
         report_path = str(recovered_path) if recovered_path is not None else str(report_path_obj)
         if prompt is not None:
@@ -768,7 +789,7 @@ def main(argv: "list[str] | None" = None) -> int:
             )
     else:
         contract_hash = ""
-        report_path = ""
+        report_path = report_path_informational
 
     record = {
         "gate": "glm_gate",
@@ -784,11 +805,14 @@ def main(argv: "list[str] | None" = None) -> int:
         "summary": _status_summary(status, blocking, reason),
         "contract_hash": contract_hash,
         "report_path": report_path,
-        # Informative only — NEVER read by has_complete_evidence/is_terminal.
-        # Always the governed dispatch's own unified report path, even when
-        # ``report_path`` above is deliberately left empty on a non-terminal
-        # ``unavailable`` status, so a human can still find the real review
-        # text (OI-1435 follow-up).
+        # Kept alongside ``report_path`` for backward compatibility with any
+        # reader keyed on this field name specifically — NEVER read by
+        # has_complete_evidence/is_terminal. As of OI-1477 this is the same
+        # value as ``report_path`` on an unavailable result (see above); the
+        # two only diverge on a terminal "recovered_verdict" result, where
+        # ``report_path`` points at the companion report the verdict was
+        # actually recovered from instead of this gate's own (fence-less)
+        # report.
         "report_path_informational": report_path_informational,
         "provider": "glm-harness",
         "model": args.model,

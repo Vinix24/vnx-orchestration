@@ -83,8 +83,14 @@ own execution path calls), never a second hashing method. ``report_path``
 points at the governed dispatch's own unified report
 (``<data_dir>/unified_reports/<dispatch_id>.md``), already written to disk
 by the time the dispatcher call returns. An ``unavailable`` result (OI-1142)
-carries neither: it is not terminal and must never look like complete
-evidence.
+always carries an empty ``contract_hash`` — it is not terminal and must
+never look like complete evidence, and ``gate_status.has_complete_evidence``
+checks ``gate_status.is_terminal()`` before it ever looks at either field, so
+that stays true regardless. As of OI-1477 ``report_path`` IS populated on an
+unavailable result (pointing at this gate's own report, the one place a
+provider failure's real text — a 403 body, a quota message — can be read
+from when no lane log exists) — that does not weaken the guarantee above,
+since ``is_terminal`` never admits ``unavailable`` in the first place.
 """
 from __future__ import annotations
 
@@ -440,11 +446,12 @@ def main(argv: "list[str] | None" = None) -> int:
     test_run = bool(args.diff_file)
     branch = "" if test_run else get_pr_head_branch(pr_number)
     commit_sha = "" if test_run else get_pr_head_sha(pr_number)
-    # Informative only (OI-1178 follow-up): points a human at the governed
-    # dispatch's own unified report even on a non-terminal ``unavailable``
-    # result, where ``report_path`` is deliberately left empty so
-    # has_complete_evidence/is_terminal are never fooled into treating an
-    # outage as a decided verdict. This field is never read by either check.
+    # Points at the governed dispatch's own unified report regardless of
+    # outcome. OI-1477: this SAME string is also what ``report_path`` gets
+    # set to on a non-terminal ``unavailable`` result (see the OI-1178/
+    # OI-1477 block below) — never read by has_complete_evidence/is_terminal
+    # either way, since those gate on status, not on which fields happen to
+    # be populated.
     report_path_informational = str(base_data_dir / "unified_reports" / f"{dispatch_id}.md")
 
     requests_dir = base_data_dir / "state" / "review_gates" / "requests"
@@ -713,9 +720,27 @@ def main(argv: "list[str] | None" = None) -> int:
     # OI-1178 (DLv2): a terminal verdict must carry the same evidence pair
     # codex_gate/gemini_review stamp — contract_hash (gate_artifacts' single
     # canonical hasher) + report_path. An unavailable result (no readable
-    # verdict, or the dispatch itself failed) is deliberately left with
-    # neither field: OI-1142's outage/verdict separation must not be bypassed
-    # by a record that merely LOOKS complete.
+    # verdict, or the dispatch itself failed) leaves contract_hash empty —
+    # THAT is what keeps OI-1142's outage/verdict separation intact, because
+    # gate_status.has_complete_evidence checks gate_status.is_terminal()
+    # BEFORE it ever looks at contract_hash/report_path, and "unavailable" is
+    # never terminal (gate_status.is_terminal only admits pass/fail/
+    # not_executable). A filled-in report_path on an unavailable record
+    # therefore still cannot pass has_complete_evidence or the merge-time
+    # evidence check (closure_verifier.check_merge_readiness) — both refuse
+    # on is_terminal()/gate_is_terminal() first, contract_hash empty or not.
+    #
+    # OI-1477: report_path used to be left empty here too (both fields
+    # blanked "for symmetry" with contract_hash), which broke the ONE case
+    # this evidence trail exists for: a real provider outage, where the
+    # report text under report_path_informational is the only place the
+    # failure reason (e.g. a kimi 403) can be read from. The report file at
+    # report_path_informational is already on disk by this point
+    # (governance_emit.emit_unified_report ran inside the dispatcher call
+    # above, live or --reprocess) — populating report_path here lets
+    # gate_request_handler._read_lane_log_or_report_text find it directly
+    # off the result record instead of needing to re-derive the same path
+    # from dispatch_id as a second fallback.
     if status in {"pass", "fail"}:
         report_path = str(recovered_path) if recovered_path is not None else str(report_path_obj)
         if prompt is not None:
@@ -731,7 +756,7 @@ def main(argv: "list[str] | None" = None) -> int:
             )
     else:
         contract_hash = ""
-        report_path = ""
+        report_path = report_path_informational
 
     record = {
         "gate": "kimi_gate",
@@ -747,11 +772,14 @@ def main(argv: "list[str] | None" = None) -> int:
         "summary": _status_summary(status, blocking, reason),
         "contract_hash": contract_hash,
         "report_path": report_path,
-        # Informative only — NEVER read by has_complete_evidence/is_terminal.
-        # Always the governed dispatch's own unified report path, even when
-        # ``report_path`` above is deliberately left empty on a non-terminal
-        # ``unavailable`` status, so a human can still find the real review
-        # text.
+        # Kept alongside ``report_path`` for backward compatibility with any
+        # reader keyed on this field name specifically — NEVER read by
+        # has_complete_evidence/is_terminal. As of OI-1477 this is the same
+        # value as ``report_path`` on an unavailable result (see above); the
+        # two only diverge on a terminal "recovered_verdict" result, where
+        # ``report_path`` points at the companion report the verdict was
+        # actually recovered from instead of this gate's own (fence-less)
+        # report.
         "report_path_informational": report_path_informational,
         "provider": "kimi",
         "model": args.model,

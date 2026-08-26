@@ -448,32 +448,62 @@ class GateRequestHandlerMixin:
         26-08): the per-dispatch lane log first (the SAME source the #1683
         lift already reads via ``governance_emit._read_lane_log_text``), then
         the gate's own REPORT file at ``result['report_path']`` when no lane
-        log exists for this dispatch_id at all.
+        log exists for this dispatch_id at all, then (OI-1477) the SAME
+        report path DERIVED from ``result['dispatch_id']`` when
+        ``report_path`` itself is empty.
 
-        Root cause this covers: the #1683 lift only ever reads the lane log.
-        When a provider error lands in the gate's own report instead (no
-        lane log for that dispatch), the marker never reaches
-        residual_risk/reason_detail/summary -- even though the SAME
-        classifier on the report's raw text finds it correctly. Measured:
-        glm-gate-pr1691-1787754901 had NO lane log at all, but its 9345-byte
-        report carried the real 402 ``openrouter_credits`` body.
+        Root cause the report-path source covers (#1683/BETA3-E1): the
+        lane-log lift only ever reads the lane log. When a provider error
+        lands in the gate's own report instead (no lane log for that
+        dispatch), the marker never reaches residual_risk/reason_detail/
+        summary -- even though the SAME classifier on the report's raw text
+        finds it correctly. Measured: glm-gate-pr1691-1787754901 had NO lane
+        log at all, but its 9345-byte report carried the real 402
+        ``openrouter_credits`` body.
 
-        Returns "" on any missing dispatch_id/report_path, missing/empty
-        file, or an unresolvable data dir -- a failed lookup must never
-        raise out of a classification decision, and never fabricates text
-        from nothing. An UNREADABLE report (exists, but ``OSError`` on read)
-        is logged with its path (BETA3-E1b fix-forward) rather than
+        Root cause the derived-path source covers (OI-1477): a result
+        record whose ``report_path`` field is itself empty -- measured on
+        pr-1696-glm_gate.json (``reason=dispatch_error``, ``report_path=''``)
+        -- read as ``no_response`` even though the report existed on disk
+        (``unified_reports/glm-gate-pr1696-1787774904.md``, 9354 bytes,
+        carrying a real OpenRouter 402) and this SAME classifier reads
+        ``lane_exhausted`` off its text without trouble. The precondition
+        for a fallback to matter is exactly the failure path where evidence
+        is scarcest, so ``report_path`` being unpopulated on that path
+        (glm_gate.py/kimi_gate.py did not fill it before OI-1477; other
+        gates or older records may still not) must not end the search --
+        ``dispatch_id`` is still real on those records, and the report lives
+        at the SAME predictable location every gate writes to -- built via
+        ``report_path.canonical_report_path``, the fleet's own SSOT for this
+        exact "where does this dispatch_id's report live" question, never a
+        second hand-rolled format string. This is the one GUARD (as opposed
+        to path construction) OI-1477 spec calls for reusing verbatim rather
+        than reinventing: derive, then run the exact same
+        ``_resolve_report_path`` escape check the populated-``report_path``
+        source already uses two lines below, never a second path-safety
+        mechanism -- ``canonical_report_path`` returns an UNRESOLVED path, so
+        a ``dispatch_id`` crafted with ``../`` segments is caught there, not
+        trusted just because it came from the SSOT.
+
+        Returns "" on any missing dispatch_id/report_path (both sources),
+        missing/empty file, or an unresolvable data dir -- a failed lookup
+        must never raise out of a classification decision, and never
+        fabricates text from nothing. An UNREADABLE report (exists, but
+        ``OSError`` on read) is logged with its path and which source
+        produced it (BETA3-E1b fix-forward, extended OI-1477) rather than
         swallowed indistinguishably from "no report exists" -- the classifier
         two frames up falls back to ``no_response`` either way, but an
         operator reading logs must be able to tell "nothing to read" apart
         from "a read failed", or a broken report-fallback source looks
         identical to a real absence of exhaustion evidence.
 
-        ``report_path`` is on-disk STATE (a result record), not trusted
-        input, so it is resolved via ``_resolve_report_path`` and refused if
-        it would read outside the reports dir -- the SAME defense-in-depth
-        shape ``governance_emit._resolve_lane_log_path`` already applies to
-        the lane-log source two lines above.
+        Both ``report_path`` and the derived path are on-disk STATE (a
+        result record, or a string built from one of its fields), not
+        trusted input, so both are resolved via the SAME
+        ``_resolve_report_path`` and refused if they would read outside the
+        reports dir -- the SAME defense-in-depth shape
+        ``governance_emit._resolve_lane_log_path`` already applies to the
+        lane-log source two lines above.
         """
         try:
             data_dir = Path(self.paths["VNX_DATA_DIR"])
@@ -487,24 +517,40 @@ class GateRequestHandlerMixin:
             if lane_text:
                 return lane_text
 
+        if data_dir is None:
+            return ""
+
         report_path = result.get("report_path") or ""
-        if report_path and data_dir is not None:
-            report_file = _resolve_report_path(report_path, data_dir)
-            if report_file is None:
+        source = "report_path"
+        if not report_path and dispatch_id:
+            # report_path.py is the fleet's SSOT for "where does this
+            # dispatch_id's report live" -- never hand-roll the format string
+            # a second time (its own module docstring calls this out by
+            # name). Still passed through _resolve_report_path below, the
+            # SAME escape guard the populated-report_path source already
+            # uses: canonical_report_path builds an UNRESOLVED path, so a
+            # dispatch_id crafted with ``../`` segments must still be caught
+            # here, not trusted just because it came from the SSOT.
+            from report_path import canonical_report_path
+            report_path = str(canonical_report_path(dispatch_id, data_dir))
+            source = "derived from dispatch_id"
+        if not report_path:
+            return ""
+
+        report_file = _resolve_report_path(report_path, data_dir)
+        if report_file is None:
+            return ""
+        try:
+            if not report_file.is_file():
                 return ""
-            try:
-                if not report_file.is_file():
-                    return ""
-                text = report_file.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                logger.warning(
-                    "gate_request_handler: report read failed dispatch=%s path=%s: %s",
-                    dispatch_id or "<unknown>", report_file, exc,
-                )
-                return ""
-            if text.strip():
-                return text
-        return ""
+            text = report_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.warning(
+                "gate_request_handler: report read failed dispatch=%s path=%s (source=%s): %s",
+                dispatch_id or "<unknown>", report_file, source, exc,
+            )
+            return ""
+        return text if text.strip() else ""
 
     def _stamp_takeover_annotations(
         self,

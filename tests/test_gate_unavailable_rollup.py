@@ -76,6 +76,18 @@ def test_has_complete_evidence_false_on_nonterminal_record_even_with_full_eviden
     assert has_complete_evidence(record) is False
 
 
+def test_has_complete_evidence_false_on_unavailable_with_populated_report_path_empty_hash():
+    """OI-1477: glm_gate.py/kimi_gate.py now populate ``report_path`` on the
+    failure path too (see their OI-1178/OI-1435/OI-1477 evidence block),
+    while ``contract_hash`` stays empty -- that is the exact shape those
+    writers now produce. This must never be readable as complete evidence:
+    is_terminal() is checked before contract_hash/report_path are ever
+    consulted, and "unavailable" is never terminal, so a populated
+    report_path alone must not tip this to True."""
+    record = {"status": "unavailable", "contract_hash": "", "report_path": "/tmp/glm-gate-pr1696-1787774904.md"}
+    assert has_complete_evidence(record) is False
+
+
 @pytest.mark.parametrize("status", ["pending", "running", "queued", "requested"])
 def test_has_complete_evidence_false_on_inflight_status_with_full_evidence(status):
     record = {"status": status, "contract_hash": "abc123", "report_path": "/tmp/r.md"}

@@ -912,6 +912,251 @@ def test_report_fallback_absent_empty_unreadable_are_distinguishable(manager_env
 
 
 # ---------------------------------------------------------------------------
+# OI-1477 (dispatch 20260826-beta3-g-oi1477-rapportpad-terugval): "de
+# rapport-terugval kan het rapport niet vinden". Measured on main (26-08,
+# AFTER #1695/299a96d4 merged the takeover chain) on a failure that arose
+# AFTER that merge -- not a historical record:
+#
+#   state/review_gates/results/pr-1696-glm_gate.json, sha cfcd8d31...
+#     status=unavailable reason=dispatch_error contract_hash='' report_path=''
+#     dispatch_id='glm-gate-pr1696-1787774904'
+#
+# The report exists (unified_reports/glm-gate-pr1696-1787774904.md, 9354
+# bytes, GEMETEN, carries a real OpenRouter 402: "requires more credits" /
+# "openrouter_credits") and the SAME classifier reads lane_exhausted off its
+# text without trouble -- but with report_path='' and no lane log,
+# _read_lane_log_or_report_text (pre-fix) had nothing to resolve, so this
+# real outage classified no_response and the takeover chain never fired.
+#
+# Two fixes, not mutually exclusive:
+#   Spoor 1 (glm_gate.py/kimi_gate.py): report_path is now populated on the
+#     failure path too (contract_hash stays empty -- has_complete_evidence
+#     still refuses via is_terminal(), see test_gate_unavailable_rollup.py's
+#     new OI-1477 case).
+#   Spoor 2 (this file's real target, gate_request_handler.py): the
+#     report-fallback now ALSO derives the report path from dispatch_id when
+#     report_path itself is empty -- robust against records already on disk
+#     before Spoor 1 shipped, using the SAME _resolve_report_path escape
+#     guard the report_path source already uses, never a second guard.
+# ---------------------------------------------------------------------------
+
+# Verbatim (status/reason/contract_hash/report_path/dispatch_id/commit_sha)
+# from state/review_gates/results/pr-1696-glm_gate.json as measured 26-08,
+# sha256 103e0c76...834386. report_path IS empty here -- this is the actual
+# record the bug was measured on, predating the Spoor 1 fix that would now
+# populate it at write time.
+_PR1696_REAL_GLM_RESULT = {
+    "gate": "glm_gate",
+    "pr_id": "1696",
+    "pr_number": 1696,
+    "test_run": False,
+    "status": "unavailable",
+    "reason": "dispatch_error",
+    "duration_seconds": 611.487,
+    "summary": "glm gate: UNAVAILABLE (provider outage/no verdict — NOT a review fail)",
+    "contract_hash": "",
+    "report_path": "",
+    "report_path_informational": (
+        "/Users/vincentvandeth/.vnx-data/vnx-dev/unified_reports/glm-gate-pr1696-1787774904.md"
+    ),
+    "provider": "glm-harness",
+    "model": "glm-5.2",
+    "dispatch_id": "glm-gate-pr1696-1787774904",
+    "blocking_findings": [],
+    "advisory_findings": [],
+    "required_reruns": [],
+    "residual_risk": (
+        "glm's own report frontmatter stamps this run as failed "
+        "(exit_code=1, token_usage.output=5846) — provider-side outage, not "
+        "a review outcome"
+    ),
+    "failure_reason": "",
+    "recorded_at": "2026-08-26T20:18:37Z",
+    "evidence_source": "live",
+    "branch": "dispatch/20260826-beta3-f-uitval-overschrijft-verdict-niet",
+    "commit_sha": "cfcd8d3181e18452949bc2130149ffc40018eb62",
+}
+
+# Trimmed but real excerpt of unified_reports/glm-gate-pr1696-1787774904.md
+# (9354 bytes on disk -- this keeps the real frontmatter + the real opening/
+# closing of the ## Response body, dropping only the ~30 repeated
+# previous_errors entries the raw OpenRouter body carries; the marker text
+# itself is verbatim).
+_PR1696_REAL_GLM_REPORT_EXCERPT = (
+    "---\n"
+    "schema_version: 1\n"
+    "dispatch_id: glm-gate-pr1696-1787774904\n"
+    "provider: glm-harness\n"
+    "sub_provider: zai\n"
+    "model: glm-5.2\n"
+    "exit_code: 1\n"
+    "token_usage:\n"
+    "  input: 32586\n"
+    "  output: 5846\n"
+    "---\n\n"
+    "# Dispatch glm-gate-pr1696-1787774904\n\n"
+    "**Dispatch-ID**: glm-gate-pr1696-1787774904\n"
+    "**Model**: glm-5.2\n"
+    "**Provider**: glm-harness\n\n"
+    "## Response\n\n"
+    "API Error: 500 Error calling litellm.acompletion for non-Anthropic model: "
+    "litellm.APIError: APIError: OpenrouterException - "
+    '{"error":{"message":"This request requires more credits, or fewer '
+    "max_tokens. You requested up to 32000 tokens, but can only afford "
+    "10699. To increase, visit https://openrouter.ai/settings/credits and "
+    'add more credits","code":402,"metadata":{"limit_source":'
+    '"openrouter_credits","remedy_hint":"Add credits at '
+    "https://openrouter.ai/settings/credits, or lower max_tokens / prompt "
+    'size to fit your remaining balance."}}}. This is a server-side issue, '
+    "usually temporary — try again in a moment. If it persists, check your "
+    "inference gateway (localhost:4141).\n"
+)
+
+
+def test_pr1696_real_glm_record_classifies_no_response_when_no_report_on_disk(manager_env, monkeypatch):
+    """BEFORE any report exists at the derived path: the record as measured
+    (report_path='', no lane log, dispatch_id populated) with nothing on
+    disk for that dispatch_id must stay no_response -- the derivation must
+    never fabricate a marker, only find real evidence that is actually
+    there."""
+    monkeypatch.chdir(manager_env["project_root"])
+    manager = _make_manager()
+    assert manager._classify_review_seat_failure(_PR1696_REAL_GLM_RESULT) == "no_response"
+
+
+def test_pr1696_real_glm_record_classifies_lane_exhausted_via_derived_dispatch_id_path(
+    manager_env, monkeypatch,
+):
+    """THE real record from the measurement, run through the fixed code: the
+    gate's own report is written to the predictable unified_reports/
+    <dispatch_id>.md location (matching the measured evidence exactly -- no
+    lane log, report_path field left empty, dispatch_id populated). Before
+    this dispatch's fix classified no_response; the fix derives the path
+    from dispatch_id and reads lane_exhausted."""
+    monkeypatch.chdir(manager_env["project_root"])
+    dispatch_id = _PR1696_REAL_GLM_RESULT["dispatch_id"]
+    report_file = manager_env["reports_dir"] / f"{dispatch_id}.md"
+    report_file.write_text(_PR1696_REAL_GLM_REPORT_EXCERPT, encoding="utf-8")
+    lane_log = manager_env["data_dir"] / "logs" / "conversations" / f"{dispatch_id}.log"
+    assert not lane_log.exists(), "measured baseline: no lane log exists for this dispatch"
+
+    manager = _make_manager()
+    result = manager._classify_review_seat_failure(_PR1696_REAL_GLM_RESULT)
+    print(f"OI-1477 real pr-1696-glm_gate.json (report_path='') classifies as: {result!r}")
+    assert result == "lane_exhausted", (
+        f"expected lane_exhausted on the real pr-1696 record via the derived "
+        f"dispatch_id path, got {result!r}"
+    )
+
+
+def test_pr1696_real_glm_record_rolls_to_deepseek_named_skip(manager_env, monkeypatch):
+    """The takeover chain itself must fire on the real record: glm_gate's
+    chain successor is deepseek_gate (codex_gate -> kimi_gate -> glm_gate ->
+    deepseek_gate) -- same named-skip shape as
+    test_glm_exhausted_real_record_rolls_to_deepseek_named_skip's pr-1691
+    fixture above, proven here on the pr-1696 record whose report_path field
+    is empty (the derivation-fallback case), not pre-populated."""
+    monkeypatch.chdir(manager_env["project_root"])
+    pr_number = 1696
+
+    report_file = manager_env["reports_dir"] / f"{_PR1696_REAL_GLM_RESULT['dispatch_id']}.md"
+    report_file.write_text(_PR1696_REAL_GLM_REPORT_EXCERPT, encoding="utf-8")
+    # report_path is deliberately NOT set on the written result record --
+    # matching the exact measured shape (report_path='') so the takeover
+    # walk is exercised through the dispatch_id-derivation path, not the
+    # already-covered populated-report_path path.
+    _write_result(manager_env["results_dir"], pr_number, "glm_gate", _PR1696_REAL_GLM_RESULT)
+
+    manager = _make_manager()
+    with _patch_governance_receipt():
+        result = manager.request_reviews(
+            pr_number=pr_number,
+            branch="dispatch/20260826-beta3-f-uitval-overschrijft-verdict-niet",
+            review_stack=["glm_gate"],
+            risk_class="medium",
+            changed_files=["scripts/glm_gate.py"],
+            mode="per_pr",
+            dispatch_id="beta3-g-oi1477-real-record-takeover-test",
+        )
+
+    seat = result["requested"][0]
+    print(f"OI-1477 real pr-1696-glm_gate.json takeover: {seat['gate']!r} (from {seat.get('takeover_from')!r})")
+    assert seat["gate"] == "deepseek_gate"
+    assert seat["status"] == "not_executable"
+    assert seat["reason"] == "gate_runner_missing"
+    assert seat["takeover_from"] == "glm_gate"
+    assert "openrouter_credits" in seat["failure_reason"] or "more credits" in seat["failure_reason"], (
+        f"expected the actual 402 detail embedded in failure_reason: {seat['failure_reason']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OI-1477 -- discrimination must not regress: the SAME generic-error text
+# from the per-provider table above (measured 26-08 on #1692/#1694, "API
+# Error: Content block not found") must still classify no_response, not
+# lane_exhausted, on this exact same code path (report_path empty, derived
+# from dispatch_id). A too-broad derivation-fallback that started matching
+# ANY report content, not just real exhaustion markers, would silently pass
+# every OTHER test in this file while breaking discrimination specifically
+# on the derived-path source.
+# ---------------------------------------------------------------------------
+
+
+def test_pr1477_content_block_not_found_still_not_lane_exhausted_via_derived_path(manager_env, monkeypatch):
+    monkeypatch.chdir(manager_env["project_root"])
+    dispatch_id = "glm-gate-pr9601-1787999999"
+    report_file = manager_env["reports_dir"] / f"{dispatch_id}.md"
+    report_file.write_text(_GENERIC_PROVIDER_ERROR_TEXT["glm"], encoding="utf-8")
+
+    record = {
+        "gate": "glm_gate", "pr_number": 9601, "status": "unavailable",
+        "reason": "dispatch_error", "dispatch_id": dispatch_id, "report_path": "",
+    }
+    manager = _make_manager()
+    result = manager._classify_review_seat_failure(record)
+    print(f"OI-1477 discrimination re-check ('Content block not found' via derived path): {result!r}")
+    assert result == "no_response", (
+        f"a generic provider error must still discriminate away from lane_exhausted "
+        f"via the derived-path source too, got {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# OI-1477 -- the derived path reuses the SAME _resolve_report_path escape
+# guard the report_path field source already uses (BETA3-E1b), never a
+# second guard. dispatch_id is on-disk STATE (a prior result record's
+# field), not trusted input.
+# ---------------------------------------------------------------------------
+
+
+def test_derived_dispatch_id_path_escape_is_refused(manager_env, monkeypatch, caplog):
+    """A dispatch_id crafted so the derived unified_reports/<dispatch_id>.md
+    path climbs OUTSIDE unified_reports/ must be refused, exactly like an
+    out-of-bounds report_path already is -- proven by planting real
+    exhaustion-marker content at the escape target and confirming it is
+    never read."""
+    monkeypatch.chdir(manager_env["project_root"])
+    outside_file = manager_env["data_dir"] / "escape-outside-reports.md"
+    outside_file.write_text(_PR1691_REAL_402_REPORT_EXCERPT, encoding="utf-8")
+
+    record = {
+        "dispatch_id": "../escape-outside-reports", "report_path": "",
+        "status": "unavailable", "reason": "dispatch_error",
+    }
+    manager = _make_manager()
+
+    with caplog.at_level("WARNING"):
+        caplog.clear()
+        text = manager._read_lane_log_or_report_text(record)
+
+    assert text == "", "a derived path escaping unified_reports/ must never be read"
+    assert "escaped" in caplog.text, "the refusal must be logged, citing the escape"
+    assert manager._classify_review_seat_failure(record) == "no_response", (
+        "a refused derived path must never let a real exhaustion marker reach the classifier"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helper: patch emit_governance_receipt for the duration of a `with` block,
 # same target the other review-gate test modules patch.
 # ---------------------------------------------------------------------------
