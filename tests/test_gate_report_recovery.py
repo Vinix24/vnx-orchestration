@@ -549,3 +549,96 @@ def test_two_candidates_matched_via_body_text_still_raises_ambiguous(tmp_path):
             window_start=now - 60, window_end=now,
         )
     assert set(excinfo.value.candidates) == {a, b}
+
+
+# ---------------------------------------------------------------------------
+# T0 addendum (26-08, dispatch-20260826-beta3-b): a test that only proves
+# content-matching finds the companion file IN ISOLATION proves the wrong
+# thing — the live PR #1684 store also holds a SECOND glm-gate run for the
+# same PR (a later retry) whose FILENAME matches the "pr1684" token and which
+# carries its own valid pass verdict. An unbounded search (no window, no
+# exclude_name) finds BOTH that name-match decoy and the content-match
+# companion and raises AmbiguousRecoveryCandidates — measured live 26-08
+# against the real store. It is the run's own recovery window (not the
+# content-vs-name distinction) that resolves this down to exactly the one
+# candidate that matters. These two tests exercise the FULL chain — name
+# filter, content filter, exclude_name, and the mtime window — together, with
+# the real measured numbers, instead of each property in isolation.
+# ---------------------------------------------------------------------------
+
+# Real values, read 26-08 from the live store
+# (~/.vnx-data/vnx-dev/unified_reports/), read-only:
+_REAL_PR1684_DISPATCH_ID = "glm-gate-pr1684-1787550833"
+_REAL_PR1684_WINDOW_START = 1787550833.0  # dispatch_id's own embedded floor
+_REAL_PR1684_OWN_REPORT_MTIME = 1787551030.278105
+_REAL_PR1684_COMPANION_MTIME = 1787551019.4603355
+# glm-gate-pr1684-1787552314.md: a LATER retry for the same PR — matches by
+# NAME ("pr1684"), carries its own valid pass verdict, but landed long after
+# this dispatch's own recovery window had already closed.
+_REAL_PR1684_LATER_RETRY_MTIME = 1787552730.9582276
+
+
+def test_real_pr1684_window_plus_exclude_resolves_the_name_match_decoy(tmp_path):
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+
+    own_report_name = f"{_REAL_PR1684_DISPATCH_ID}.md"
+    _write(reports_dir / own_report_name, "Reviewed in prose, no fence.\n", mtime=_REAL_PR1684_OWN_REPORT_MTIME)
+    companion = _write(
+        reports_dir / "20260824-alpha-a5-config-reader-fallback_report.md",
+        _REAL_PR1684_BODY_PREFIX + _VERDICT_BODY,
+        mtime=_REAL_PR1684_COMPANION_MTIME,
+    )
+    _write(
+        reports_dir / "glm-gate-pr1684-1787552314.md",
+        _VERDICT_BODY,
+        mtime=_REAL_PR1684_LATER_RETRY_MTIME,
+    )
+
+    # Unbounded: both the later-retry decoy (name match) and the companion
+    # (content match) qualify — ambiguous, exactly as measured live.
+    with pytest.raises(AmbiguousRecoveryCandidates) as excinfo:
+        find_recovery_candidate(
+            reports_dir, pr_id="1684", exclude_name="__none__.md",
+            window_start=0, window_end=float("inf"),
+        )
+    assert len(excinfo.value.candidates) == 2
+
+    # The REAL call: this dispatch's own window + its own exclude_name.
+    # Resolves to exactly the one candidate inside the window — the window,
+    # not the content-vs-name distinction, is what saves this from ambiguity.
+    candidate = find_recovery_candidate(
+        reports_dir, pr_id="1684", exclude_name=own_report_name,
+        window_start=_REAL_PR1684_WINDOW_START, window_end=_REAL_PR1684_OWN_REPORT_MTIME,
+    )
+    assert candidate is not None
+    assert candidate.path == companion
+    assert candidate.verdict["verdict"] == "pass"
+
+
+def test_name_match_and_content_match_both_inside_window_still_ambiguous(tmp_path):
+    """The fail-closed property must survive widening point 2 to body text:
+    a NAME-matching candidate and a CONTENT-matching candidate that both fall
+    INSIDE the same recovery window are still 2 candidates — refuse, never
+    guess which one is real."""
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir()
+    now = time.time()
+
+    name_match = _write(
+        reports_dir / "pr-1684-glm-gate-review.md", _VERDICT_BODY, mtime=now - 15,
+    )
+    content_match = _write(
+        reports_dir / "some-dispatch-id_report.md",
+        "# PR 1684 — unrelated companion\n\n" + _VERDICT_BODY,
+        mtime=now - 10,
+    )
+    gate_report_name = "glm-gate-pr1684-999999.md"
+    _write(reports_dir / gate_report_name, "Reviewed in prose, no fence.\n", mtime=now)
+
+    with pytest.raises(AmbiguousRecoveryCandidates) as excinfo:
+        find_recovery_candidate(
+            reports_dir, pr_id="1684", exclude_name=gate_report_name,
+            window_start=now - 60, window_end=now,
+        )
+    assert set(excinfo.value.candidates) == {name_match, content_match}

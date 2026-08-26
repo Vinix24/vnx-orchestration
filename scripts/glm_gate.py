@@ -575,15 +575,32 @@ def main(argv: "list[str] | None" = None) -> int:
         report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
         # (a) OI-recovery-venster: reuse dispatch_id's OWN embedded
         # int(time.time()) floor (set moments earlier when dispatch_id was
-        # constructed above) instead of a fresh sub-second time.time() read. A
-        # fresh read races the filesystem's mtime resolution: a companion
-        # written a few ms later can get an mtime the filesystem TRUNCATES to
-        # whole seconds, landing numerically before a sub-second window_start
-        # even though it was written after in real time — measured as a CI
-        # flake (test_search_recovers_verdict_from_companion[kimi], same
-        # commit 7a4d4a93: pass then fail). floor(t) <= any later real write's
-        # stored mtime regardless of either clock's precision, which closes
-        # the race without adding an unexplained tolerance constant.
+        # constructed above) instead of a fresh sub-second time.time() read.
+        # Measured 26-08 as a real CI flake
+        # (test_search_recovers_verdict_from_companion[kimi], same commit
+        # 7a4d4a93: pass then fail) — red on the Linux CI runner, green
+        # locally on macOS. Likely cause (T0 measurement, 26-08, 8/8 writes
+        # sub-millisecond AFTER time.time() on APFS, zero truncated): Linux
+        # stamps file mtimes from a COARSE clock
+        # (ktime_get_coarse_real_ts64, refreshed once per timer tick) while
+        # time.time() reads the fine vDSO clock — a file written a fraction
+        # of a millisecond after a time.time() read can land ONE TICK
+        # EARLIER than that reading. This is clock SKEW between two
+        # differently-grained sources, not filesystem truncation to whole
+        # seconds — APFS shows no truncation at all, yet the same skew
+        # windowing logic must still hold there. The fix does not depend on
+        # diagnosing the skew precisely: floor(t) is a full second below the
+        # real construction instant, comfortably larger than any millisecond-
+        # scale tick skew, and lowering window_start can only ever ADMIT
+        # more files, never exclude ones the old (higher) bound would have
+        # included — so this closes the race regardless of the exact
+        # mechanism.
+        #
+        # Cannot be None here: dispatch_id was just constructed above (this
+        # exact branch, this exact args.pr, this exact shape) — the None
+        # path only matters for --reprocess, where dispatch_id is externally
+        # supplied. That guarantee depends on the construction ~130 lines up
+        # staying in this exact shape; not enforced at this call site.
         window_start = _parse_dispatch_window_start(dispatch_id, pr=args.pr)
         window_end = report_path_obj.stat().st_mtime if report_path_obj.is_file() else time.time()
 

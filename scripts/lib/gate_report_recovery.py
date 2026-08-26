@@ -171,16 +171,25 @@ def _extract_verdict_block(text: str) -> dict:
 
 
 def _pr_token_pattern(pr_id: str) -> "re.Pattern[str]":
-    """Match "pr<N>", "pr-<N>", or "pr <N>" (case-insensitive) as a substring,
-    not followed by another digit — matches all four measured companion
-    filenames (see module docstring) without matching e.g. pr16720 for
-    pr=1672, AND matches real report prose, which spells the same identity as
-    "PR <N>" with a literal space (measured on
+    """Match "pr<N>", "pr-<N>", "pr <N>", or "pr#<N>" (case-insensitive) as a
+    substring, not followed by another digit — matches all four measured
+    companion filenames (see module docstring) without matching e.g. pr16720
+    for pr=1672, AND matches real report prose, which spells the same
+    identity as "PR <N>" with a literal space (measured on
     20260824-alpha-a5-config-reader-fallback_report.md: ``# PR 1684 — ...``).
+    The hash/whitespace separators are not themselves measured on a real
+    companion — they are included defensively for the same "PR#<N>"/"PR
+    <N>" prose conventions GitHub itself uses — but adding them was verified
+    (26-08, dispatch-20260826-beta3-b addendum) to add ZERO extra content
+    matches over the bare space case across all ten PRs with review-gate
+    activity in the live store (1674-1684, 1688-1689; 808 verdict-bearing
+    reports) — surgical, not a floodgate. The bare number alone is still
+    never enough: "pr" must prefix it.
+
     Used for BOTH the filename check and the body-text check in
     ``find_recovery_candidate`` — one pattern, so neither can accept a token
     the other would refuse."""
-    return re.compile(rf"(?i)\bpr[ -]?{re.escape(str(pr_id).strip())}(?!\d)")
+    return re.compile(rf"(?i)\bpr[-\s#]?{re.escape(str(pr_id).strip())}(?!\d)")
 
 
 def find_recovery_candidate(

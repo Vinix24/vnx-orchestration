@@ -523,34 +523,40 @@ def test_reprocess_malformed_dispatch_id_refuses(module, gate_name, dispatch_pre
 
 # ---------------------------------------------------------------------------
 # (a) dispatch-20260826-beta3-b: closes the race between a sub-second
-# wall-clock window_start and a companion mtime the filesystem TRUNCATED to
-# whole seconds. Measured as a real CI flake:
+# wall-clock window_start and a companion mtime landing at or below that
+# same second's floor. Measured as a real CI flake:
 # test_search_recovers_verdict_from_companion[kimi] passed and failed on the
-# SAME commit (7a4d4a93) across two runs. The old code used a fresh
-# `wall_start = time.time()` as window_start; a companion written a few ms
-# later can get an mtime the filesystem truncates DOWN to the whole second,
-# landing numerically before a sub-second window_start even though it was
-# written after in real time.
+# SAME commit (7a4d4a93) across two runs — red on the Linux CI runner, green
+# locally on macOS. NOT filesystem truncation to whole seconds (T0 measured
+# 26-08: 8/8 writes on APFS land sub-millisecond AFTER their time.time()
+# reading, zero truncated). Likely cause: Linux stamps file mtimes from a
+# COARSE clock (ktime_get_coarse_real_ts64, refreshed once per timer tick)
+# while time.time() reads the fine vDSO clock — a file written a fraction of
+# a millisecond after that reading can land one tick EARLIER. See the fix's
+# own comment at glm_gate.py/kimi_gate.py's window_start assignment for the
+# full reasoning; the fix does not depend on diagnosing the skew precisely,
+# since lowering window_start can only ever ADMIT more files, never exclude
+# ones the old (higher) bound would have included.
 #
-# Deterministic reproduction (no reliance on real-world timing/filesystem
-# quirks, which may not even reproduce on every machine): time.time() is
-# pinned to a value with a large fractional part (.99) for the whole test.
-# dispatch_id embeds int(pinned) — the exact floor a truncating filesystem
-# would also produce for a write landing in the same second. The companion's
-# mtime is explicitly set to that SAME floor value, simulating truncation.
-# Under the OLD wall_start-based window_start (== the pinned .99 value), this
-# mtime is < window_start and would be wrongly excluded; under the fix
-# (window_start == dispatch_id's own embedded floor) it is included.
+# This test does NOT reproduce that exact skew — it is a CONSTRUCTED
+# lower-bound scenario that pins the property the fix guarantees:
+# time.time() is pinned to a value with a large fractional part (.99) for
+# the whole test; dispatch_id embeds int(pinned), and the companion's mtime
+# is set to that SAME whole-second floor (simulating a companion that landed
+# at or before the floor, however that happened in reality). Under the OLD
+# wall_start-based window_start (== the pinned .99 value), this mtime is <
+# window_start and would be wrongly excluded; under the fix (window_start ==
+# dispatch_id's own embedded floor) it is included.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("module,gate_name,dispatch_prefix", _GATES)
-def test_live_window_start_survives_filesystem_truncated_companion_mtime(
+def test_live_window_start_survives_a_companion_mtime_at_the_second_floor(
     module, gate_name, dispatch_prefix, tmp_path, monkeypatch,
 ):
     data_dir = tmp_path / "data"
     pinned_now = 1700000000.99
-    truncated_floor = float(int(pinned_now))  # what a truncating filesystem would store
+    second_floor = float(int(pinned_now))  # dispatch_id's own embedded floor
 
     monkeypatch.setattr(time, "time", lambda: pinned_now)
     monkeypatch.setattr(module, "_get_diff", lambda pr_arg, diff_file: _FAKE_DIFF)
@@ -560,9 +566,9 @@ def test_live_window_start_survives_filesystem_truncated_companion_mtime(
     def _make(*_a, **_k):
         def _dispatch(provider, model_arg, instruction, dispatch_id):
             companion_path = _write(data_dir, "pr-777-second-pit", _REAL_PASS_REPORT)
-            _touch(companion_path, truncated_floor)  # simulate mtime truncation
+            _touch(companion_path, second_floor)  # lands AT the whole-second floor
             primary_path = _write(data_dir, dispatch_id, _NO_FENCE_REPORT)
-            _touch(primary_path, truncated_floor + 5)
+            _touch(primary_path, second_floor + 5)
             return _NO_FENCE_REPORT
         return _dispatch
 
@@ -572,8 +578,8 @@ def test_live_window_start_survives_filesystem_truncated_companion_mtime(
     record = json.loads(out.read_text(encoding="utf-8"))
 
     assert record["reason"] == "recovered_verdict", (
-        "a companion whose mtime was truncated to the whole-second floor of "
-        "the dispatch's own start instant must still be recovered — this is "
+        "a companion whose mtime lands at the whole-second floor of the "
+        "dispatch's own start instant must still be recovered — this is "
         "exactly the race a sub-second wall-clock window_start used to lose "
         f"(got reason={record['reason']!r})"
     )
