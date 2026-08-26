@@ -37,6 +37,17 @@ runner fulfils them:
      exists (or whose existence gh could not determine) leaves the obligation
      ``pending`` exactly as before — a live dispatch must never be closed on
      ambiguous evidence.
+  7. OI-1388 residu: a retirement (6) or an unresolvable-timeout escalation
+     (5) can be about to book a dispatch as never-reviewed when it was in
+     fact gated — the branch was cleaned up, or the environment broke, only
+     AFTER a gate already ran. Before either terminal write, the runner
+     looks for an existing ``review_gates/results`` record matching the same
+     ``dispatch_id`` + ``gate`` that carries complete evidence (non-empty
+     ``contract_hash`` and ``report_path``, and the report file still on
+     disk — the same bar ``closure_verifier`` enforces). Found, that record
+     IS the discriminator: the obligation is booked ``fulfilled``
+     (``reason=fulfilled_by_existing_evidence``), never retired or escalated
+     over evidence that was there all along.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -66,6 +77,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from gate_obligations import (  # noqa: E402
+    NO_GATE_KEY,
     REASON_NO_PR_BRANCH_GONE,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
@@ -80,6 +92,7 @@ from gate_obligations import (  # noqa: E402
 from gate_status import (  # noqa: E402
     PASS_STATES as _GATE_RESULT_PASS_STATES,
     UNAVAILABLE_STATES as _GATE_RESULT_UNAVAILABLE_STATES,
+    has_complete_evidence,
 )
 
 _LOG = logging.getLogger("gate_obligation_runner")
@@ -599,12 +612,236 @@ def _record_loud_not_executable(
     )
 
 
-def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> Dict[str, Any]:
+def _index_gate_results(
+    state_dir: Path,
+) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
+    """Index ``review_gates/results`` records by ``(dispatch_id, gate)``.
+
+    Built once per :func:`run` call so the OI-1388 evidence discriminator
+    (defect 1) costs O(results) instead of O(obligations * results). A
+    malformed/unreadable result file is skipped, never raised — the same
+    tolerance :func:`fulfill_obligation` already applies when it reads a
+    result file's status back after invoking a gate.
+    """
+    results_dir = Path(state_dir) / "review_gates" / "results"
+    index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]] = {}
+    if not results_dir.is_dir():
+        return index
+    for entry in sorted(results_dir.glob("*.json")):
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        dispatch_id = str(record.get("dispatch_id") or "")
+        gate = str(record.get("gate") or "")
+        if not dispatch_id or not gate:
+            continue
+        index.setdefault((dispatch_id, gate), []).append((entry, record))
+    return index
+
+
+def _fulfilling_result(
+    index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    dispatch_id: str,
+    gate: str,
+) -> Optional[Tuple[Path, Dict[str, Any]]]:
+    """Return the (path, record) of a complete-evidence result for ``(dispatch_id, gate)``.
+
+    OI-1388 defect 1: a terminal retirement/escalation must never overwrite
+    evidence that a gate already produced. "Complete evidence" mirrors
+    ``gate_status.has_complete_evidence`` (non-empty ``contract_hash`` AND
+    ``report_path`` — the same bar ``closure_verifier`` enforces at merge
+    time) plus an on-disk check that the report file the record points to
+    still exists. Three distinct non-evidence states are all rejected here: a
+    result that is entirely absent (empty index bucket), one whose evidence
+    fields are empty strings (fails ``has_complete_evidence``), and one whose
+    ``report_path`` points at a file that no longer exists.
+    """
+    for entry, record in index.get((dispatch_id, gate), []):
+        if not has_complete_evidence(record):
+            continue
+        if not Path(str(record.get("report_path"))).exists():
+            continue
+        return entry, record
+    return None
+
+
+def _terminal_evidence_contradictions(
+    obligations: List[Tuple[Path, Dict[str, Any]]],
+    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+) -> List[Dict[str, Any]]:
+    """Report ALREADY-terminal obligations whose evidence contradicts them.
+
+    Read-only diagnostic (OI-1388 residu — measured live on both
+    ~/.vnx-data/vnx-dev and ~/.vnx-data/mission-control 2026-08-26): a
+    retirement/escalation booked before this dispatch's fix landed can have
+    left an obligation ``retired``/``not_executable`` even though a
+    complete-evidence gate result already existed for the same dispatch_id +
+    gate. This never rewrites those records — flipping a terminal status
+    back is its own write action with its own risk — it only surfaces them
+    so a human can decide.
+
+    Only ``STATUS_RETIRED``/``STATUS_NOT_EXECUTABLE`` are checked: those are
+    the two statuses this dispatch's fix intercepts pre-write. A ``no_gate``
+    obligation (``gate == NO_GATE_KEY``) never had a gate to review it, so it
+    is excluded — there is no dispatch_id+gate result to contradict it.
+    """
+    contradictions: List[Dict[str, Any]] = []
+    for path, record in obligations:
+        status = record.get("status")
+        if status not in (STATUS_RETIRED, STATUS_NOT_EXECUTABLE):
+            continue
+        gate = str(record.get("gate") or "")
+        if not gate or gate == NO_GATE_KEY:
+            continue
+        dispatch_id = str(record.get("dispatch_id") or path.stem)
+        evidence = _fulfilling_result(result_index, dispatch_id, gate)
+        if evidence is None:
+            continue
+        evidence_path, _evidence_record = evidence
+        reason = record.get("reason")
+        contradictions.append(
+            {
+                "dispatch_id": dispatch_id,
+                "gate": gate,
+                "obligation_status": status,
+                "obligation_reason": reason,
+                # OI-1388 residu (T0 addendum): a MISSING reason (None) is
+                # distinct from an EMPTY string and from a KNOWN reason
+                # value — never collapse the three into one bucket.
+                "obligation_reason_bucket": (
+                    "missing" if reason is None
+                    else "empty" if reason == ""
+                    else "known"
+                ),
+                "obligation_path": str(path),
+                "evidence_result_path": str(evidence_path),
+            }
+        )
+    return contradictions
+
+
+def _pre_execution_decision(
+    dispatch_id: str,
+    gate: str,
+    resolution: PrResolution,
+    attempts: int,
+    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+) -> Dict[str, Any]:
+    """Decide what happens to an obligation before any gate is actually run.
+
+    Shared by the real run (:func:`fulfill_obligation`, which then acts on
+    the decision) and the dry run (:func:`_dry_run_outcome`, which only
+    reports it) so the two paths can never diverge into two decision trees
+    (OI-1388 defect 2). Every input here is already read-only-derivable: PR
+    resolution and the branch-existence check both happen inside
+    :func:`resolve_pr_number` via read-only ``gh`` calls (safe in a dry run),
+    and the evidence lookup is a local file read.
+
+    Returns ``{"kind": ..., ...}`` where ``kind`` is one of:
+      - ``unresolvable``        — env fault, stays retryable (below threshold)
+      - ``escalate``            — env fault, past threshold: terminal escalation
+      - ``stay_pending``        — genuine wait (branch alive / undetermined)
+      - ``retire``              — dead dispatch, no rescuing evidence
+      - ``fulfill_by_evidence`` — OI-1388 defect 1: a complete-evidence result
+        already exists for this dispatch_id + gate; carried as
+        ``decision["evidence"] = (path, record)``
+      - ``attempt_gate``        — PR resolved: the caller must actually run
+        the gate to learn the outcome (only the real run does this)
+    """
+    if resolution.status == RESOLUTION_UNRESOLVABLE:
+        evidence = _fulfilling_result(result_index, dispatch_id, gate)
+        if evidence is not None:
+            return {"kind": "fulfill_by_evidence", "evidence": evidence}
+        if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
+            return {"kind": "escalate"}
+        return {"kind": "unresolvable"}
+
+    if resolution.status == RESOLUTION_AWAITING:
+        if resolution.branch_exists is False:
+            evidence = _fulfilling_result(result_index, dispatch_id, gate)
+            if evidence is not None:
+                return {"kind": "fulfill_by_evidence", "evidence": evidence}
+            return {"kind": "retire"}
+        return {"kind": "stay_pending"}
+
+    return {"kind": "attempt_gate"}
+
+
+_DRY_RUN_ACTION_LABELS: Dict[str, str] = {
+    "unresolvable": "would_stay_unresolvable",
+    "escalate": "would_escalate_not_executable",
+    "fulfill_by_evidence": "would_stamp",
+    "retire": "would_retire",
+    "stay_pending": "would_stay_pending",
+    "attempt_gate": "would_fulfill",
+}
+
+
+def _dry_run_outcome(
+    state_dir: Path,
+    path: Path,
+    record: Dict[str, Any],
+    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+) -> Dict[str, Any]:
+    """Report the action a real run would take for one obligation — never writes.
+
+    OI-1388 defect 2: runs the exact pre-execution decision
+    :func:`fulfill_obligation` would (PR resolution + branch check via
+    :func:`resolve_pr_number`, then :func:`_pre_execution_decision`) so the
+    summary's retirements/rescues are the real forecast, not a uniform
+    "would_fulfill" guess. ``attempt_gate`` is the one decision this cannot
+    carry further without actually invoking the gate — not a read-only
+    action a dry run may take — so it is reported as an attempt, not an
+    outcome.
+    """
+    dispatch_id = str(record.get("dispatch_id") or path.stem)
+    gate = str(record.get("gate") or "")
+    if not gate:
+        return {
+            "dispatch_id": dispatch_id,
+            "gate": gate,
+            "action": "would_error",
+            "detail": "obligation has no gate",
+        }
+
+    attempts = int(record.get("attempts") or 0) + 1
+    resolution = resolve_pr_number(state_dir, record)
+    decision = _pre_execution_decision(dispatch_id, gate, resolution, attempts, result_index)
+    outcome: Dict[str, Any] = {
+        "dispatch_id": dispatch_id,
+        "gate": gate,
+        "action": _DRY_RUN_ACTION_LABELS[decision["kind"]],
+    }
+    if decision["kind"] == "fulfill_by_evidence":
+        evidence_path, _evidence_record = decision["evidence"]
+        outcome["detail"] = f"would be rescued by the OI-1388 evidence discriminator ({evidence_path})"
+        outcome["result_path"] = str(evidence_path)
+    elif decision["kind"] == "retire":
+        outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
+    elif decision["kind"] in ("unresolvable", "escalate"):
+        outcome["detail"] = resolution.reason
+    return outcome
+
+
+def fulfill_obligation(
+    state_dir: Path,
+    path: Path,
+    record: Dict[str, Any],
+    *,
+    result_index: Optional[Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]] = None,
+) -> Dict[str, Any]:
     """Attempt fulfilment of one pending obligation.
 
     Returns a per-obligation outcome dict. Never raises: every failure mode
     is either recorded loudly (gate unreachable → not_executable records) or
     leaves the obligation pending for the freshness monitor to flag.
+
+    ``result_index`` (see :func:`_index_gate_results`) lets :func:`run` build
+    the OI-1388 evidence index once per call instead of once per obligation;
+    a direct caller (tests) may omit it and one is built on demand.
     """
     state_dir = Path(state_dir)
     dispatch_id = str(record.get("dispatch_id") or path.stem)
@@ -619,12 +856,44 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
         outcome["detail"] = "obligation has no gate"
         return outcome
 
+    if result_index is None:
+        result_index = _index_gate_results(state_dir)
+
     attempts = int(record.get("attempts") or 0) + 1
     now = utc_now_iso()
 
     resolution = resolve_pr_number(state_dir, record)
+    decision = _pre_execution_decision(dispatch_id, gate, resolution, attempts, result_index)
 
-    if resolution.status == RESOLUTION_UNRESOLVABLE:
+    if decision["kind"] == "fulfill_by_evidence":
+        # OI-1388 defect 1: a gate already produced complete evidence for
+        # this dispatch+gate — book it fulfilled, never retired/escalated as
+        # unreviewed, regardless of why the retirement/escalation path was
+        # about to fire.
+        evidence_path, evidence_record = decision["evidence"]
+        updated = update_obligation(
+            path,
+            status=STATUS_FULFILLED,
+            pr_number=evidence_record.get("pr_number") or record.get("pr_number"),
+            branch=evidence_record.get("branch") or record.get("branch"),
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=now,
+            result_path=str(evidence_path),
+            reason="fulfilled_by_existing_evidence",
+            reason_detail=(
+                f"{gate} already produced a complete-evidence result for "
+                f"dispatch {dispatch_id} ({evidence_path}) — OI-1388 defect 1: "
+                "a dispatch a gate already reviewed must never be retired or "
+                "escalated as unreviewed"
+            ),
+        )
+        outcome["action"] = STATUS_FULFILLED
+        outcome["detail"] = "rescued by the OI-1388 evidence discriminator — a gate had already reviewed this dispatch"
+        outcome["result_path"] = updated.get("result_path")
+        return outcome
+
+    if decision["kind"] in ("unresolvable", "escalate"):
         # The environment is wrong (repo unattributable, gh unusable): a fault,
         # not a wait. Record it in a state distinct from ``pending`` so a
         # misconfigured obligation can never masquerade as "not yet". It stays
@@ -640,7 +909,7 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
         )
         outcome["action"] = "unresolvable"
         outcome["detail"] = resolution.reason
-        if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
+        if decision["kind"] == "escalate":
             update_obligation(
                 path,
                 status=STATUS_NOT_EXECUTABLE,
@@ -659,30 +928,31 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
             outcome["action"] = "not_executable"
         return outcome
 
-    if resolution.status == RESOLUTION_AWAITING:
-        if resolution.branch_exists is False:
-            # OI-1388: the dispatch never produced a PR AND its head branch is
-            # gone from origin — nothing will ever gate this obligation.
-            # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
-            branch_name = f"dispatch/{dispatch_id}"
-            update_obligation(
-                path,
-                status=STATUS_RETIRED,
-                branch=branch_name,
-                attempts=attempts,
-                last_attempt_at=now,
-                resolved_at=now,
-                reason=REASON_NO_PR_BRANCH_GONE,
-                reason_detail=(
-                    f"dispatch {dispatch_id} never produced a PR and its head "
-                    f"branch {branch_name} no longer exists on "
-                    f"{resolution.owner_repo or 'the resolved repo'} — nothing "
-                    f"left for {gate} to guard"
-                ),
-            )
-            outcome["action"] = STATUS_RETIRED
-            outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
-            return outcome
+    if decision["kind"] == "retire":
+        # OI-1388: the dispatch never produced a PR AND its head branch is
+        # gone from origin — nothing will ever gate this obligation.
+        # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
+        branch_name = f"dispatch/{dispatch_id}"
+        update_obligation(
+            path,
+            status=STATUS_RETIRED,
+            branch=branch_name,
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=now,
+            reason=REASON_NO_PR_BRANCH_GONE,
+            reason_detail=(
+                f"dispatch {dispatch_id} never produced a PR and its head "
+                f"branch {branch_name} no longer exists on "
+                f"{resolution.owner_repo or 'the resolved repo'} — nothing "
+                f"left for {gate} to guard"
+            ),
+        )
+        outcome["action"] = STATUS_RETIRED
+        outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
+        return outcome
+
+    if decision["kind"] == "stay_pending":
         # The repo resolves and gh works, but no PR exists yet for the head
         # branch, and the branch is still there (or its existence could not be
         # determined) — a genuine wait: stays pending for the freshness
@@ -696,6 +966,7 @@ def fulfill_obligation(state_dir: Path, path: Path, record: Dict[str, Any]) -> D
         outcome["detail"] = "no PR resolvable yet — stays pending for the freshness monitor"
         return outcome
 
+    # decision["kind"] == "attempt_gate": a PR is resolved — actually run it.
     pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
 
@@ -923,23 +1194,31 @@ def run(
         for path, record in obligations
         if _in_scope(path, record, since=since, dispatch_prefix=dispatch_prefix)
     ]
+    # OI-1388 defect 2: built once per run, not per obligation, and shared by
+    # both the write path and the dry-run path — the same index feeds the
+    # same decision tree (_pre_execution_decision) either way, so the two
+    # paths can never diverge.
+    result_index = _index_gate_results(state_dir)
     for path, record in scoped:
         if record.get("status", STATUS_PENDING) in TERMINAL_STATUSES:
             continue
         if not write:
-            outcomes.append(
-                {
-                    "dispatch_id": record.get("dispatch_id") or path.stem,
-                    "gate": record.get("gate"),
-                    "action": "would_fulfill",
-                }
-            )
-            pending_after += 1
+            outcome = _dry_run_outcome(state_dir, path, record, result_index)
+            outcomes.append(outcome)
+            if outcome["action"] in ("would_stay_pending", "would_stay_unresolvable", "would_fulfill"):
+                pending_after += 1
             continue
-        outcome = fulfill_obligation(state_dir, path, record)
+        outcome = fulfill_obligation(state_dir, path, record, result_index=result_index)
         outcomes.append(outcome)
         if outcome["action"] in ("pending", "unresolvable"):
             pending_after += 1
+    action_counts: Dict[str, int] = {}
+    for outcome in outcomes:
+        action_counts[outcome.get("action", "")] = action_counts.get(outcome.get("action", ""), 0) + 1
+    # Read-only diagnostic over the FULL (unscoped) store — a --since/
+    # --dispatch-prefix slice must not hide an already-burned record outside
+    # it. Never rewrites anything (see _terminal_evidence_contradictions).
+    contradictions = _terminal_evidence_contradictions(obligations, result_index)
     return {
         "state_dir": str(state_dir),
         "timestamp": utc_now_iso(),
@@ -952,6 +1231,9 @@ def run(
         "unresolvable_after": sum(
             1 for o in outcomes if o.get("action") == "unresolvable"
         ),
+        "action_counts": action_counts,
+        "terminal_evidence_contradictions": contradictions,
+        "terminal_evidence_contradiction_count": len(contradictions),
     }
 
 
@@ -1044,6 +1326,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"obligations={summary['obligations_seen']} "
             f"pending_after={summary['pending_after']}"
         )
+        action_counts = summary.get("action_counts") or {}
+        if action_counts:
+            breakdown = " ".join(
+                f"{action}={count}" for action, count in sorted(action_counts.items())
+            )
+            print(f"action_counts: {breakdown}")
+        contradictions = summary.get("terminal_evidence_contradictions") or []
+        if contradictions:
+            print(
+                f"terminal_evidence_contradictions={len(contradictions)} "
+                "(already-terminal, evidence says otherwise — NOT auto-fixed, review manually)"
+            )
+            for c in contradictions:
+                print(
+                    f"  {c['dispatch_id']} gate={c['gate']} status={c['obligation_status']} "
+                    f"reason={c['obligation_reason']!r} ({c['obligation_reason_bucket']}) "
+                    f"evidence={c['evidence_result_path']}"
+                )
 
     if summary.get("error"):
         return 20
