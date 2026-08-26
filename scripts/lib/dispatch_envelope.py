@@ -108,16 +108,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _is_dispatch_branch_ref(base_ref: str) -> bool:
-    """Return True when *base_ref* names a dispatch branch on origin.
-
-    A dispatch branch has the form ``origin/dispatch/<id>``.  When the
-    dispatch's base_ref is a dispatch branch, the lane must NOT create a
-    second auto-PR alongside the existing one (OI-1115).
-    """
-    return base_ref.startswith("origin/dispatch/")
-
-
 def _enforce_push_pr(
     *,
     dispatch_id: str,
@@ -644,6 +634,7 @@ def run_envelope_plan(
     # capture runs BEFORE the worker so a force-push during the run is detectable.
     _target_branch = _dispatch_branch_name(plan.dispatch_id)
     _target_remote_head: Optional[str] = None
+    from pr_enforcement import is_dispatch_branch_ref  # noqa: PLC0415
     try:
         from pr_enforcement import _get_remote_head  # noqa: PLC0415
         _target_remote_head = _get_remote_head(branch=_target_branch, repo_root=_consumer_project_root)
@@ -651,7 +642,7 @@ def run_envelope_plan(
         _target_remote_head = None
 
     # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
-    _skip_pr = _is_dispatch_branch_ref(_base_ref)
+    _skip_pr = is_dispatch_branch_ref(_base_ref)
 
     _phantom_diff: Optional[str] = None
     try:
@@ -868,6 +859,7 @@ def run_envelope_headless_plan(
     # HEAD — target_remote_head stays None and containment is skipped.
     _target_branch = _dispatch_branch_name(plan.dispatch_id)
     _target_remote_head: Optional[str] = None
+    from pr_enforcement import is_dispatch_branch_ref  # noqa: PLC0415
     try:
         from pr_enforcement import _get_remote_head  # noqa: PLC0415
         _target_remote_head = _get_remote_head(branch=_target_branch, repo_root=_consumer_project_root)
@@ -875,7 +867,7 @@ def run_envelope_headless_plan(
         _target_remote_head = None
 
     # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
-    _skip_pr = _is_dispatch_branch_ref(_base_ref)
+    _skip_pr = is_dispatch_branch_ref(_base_ref)
 
     _phantom_diff: Optional[str] = None
     try:

@@ -1398,7 +1398,8 @@ class TmuxInteractiveDispatch:
 
         ``skip_pr`` (OI-1115, A3 parity fix): the caller derives this from
         ``pr_enforcement.is_dispatch_branch_ref(base_ref)`` — the SAME predicate
-        the envelope lanes already used via ``dispatch_envelope._is_dispatch_branch_ref``.
+        the envelope lanes use (both call sites in ``dispatch_envelope`` import it
+        from ``pr_enforcement`` too; the module never keeps its own copy).
         Before A3 this lane never computed or passed ``skip_pr`` at all, so
         ``enforce_pr_exists``'s default (``False``) always won: a dispatch built
         on an existing ``origin/dispatch/<id>`` branch got a duplicate second PR
@@ -2937,7 +2938,7 @@ class TmuxInteractiveDispatch:
                     )
 
         # ── OI-1115 (A3 parity fix): skip_pr derived from base_ref, exactly like
-        # dispatch_envelope._is_dispatch_branch_ref/_skip_pr — the shared predicate
+        # dispatch_envelope._enforce_push_pr's own _skip_pr — the shared predicate
         # lives in pr_enforcement.is_dispatch_branch_ref so both lanes read the
         # same rule. Computed unconditionally (base_ref is always known, worktree
         # or not) so it is ready for the _enforce_pr_exists call further down.
