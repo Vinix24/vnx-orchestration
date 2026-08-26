@@ -20,6 +20,27 @@ residual_risk/reason_detail/summary and the classifier read no_response on
 a real exhaustion. ``_scan_seat_failure_text`` (gate_request_handler.py)
 fixes this: SAME classifier, extended read order (record fields -> lane log
 -> report), never a second marker list.
+
+BETA3-E1c fix-forward (PR #1695, 26-08 afternoon): the codex quota markers
+this file's own ``_REAL_EXHAUSTION_TEXT["codex"]`` fixture below was built
+on (``insufficient_quota`` / ``exceeded your current quota``) were
+AANGENOMEN on the OpenAI-API 429 JSON shape -- no live codex_gate
+exhaustion record existed yet when 61ebb567 added them. Hours later codex
+genuinely ran out (pr-1696-codex_gate.json, also pr-1691/1692-codex_gate.json
+today, identical text): the codex CLI writes its OWN prose, not the OpenAI
+API JSON body -- "You've hit your usage limit...", two words off kimi's
+already-covered "reached your usage limit" ("hit" vs "reached"). Measured
+against 3405a296 (pre-fix, this branch): none of the 11 markers then in
+``governance_emit._LANE_EXHAUSTED_MARKERS`` matched this text, and
+``_classify_review_seat_failure`` returned ``no_response`` -- reached via
+``_scan_seat_failure_text``'s no-match tail, which always collapses to
+``no_response`` regardless of what ``_classify_lane_log_text`` privately
+labelled the text internally (see ``test_pr1696_real_codex_exhaustion_...``
+below for the corrected-vs-dispatch-premise note). A new "hit your usage
+limit" marker closes the gap; see ``_PR1696_REAL_CODEX_RECORD`` below for
+the verbatim record and ``test_no_structural_signal_discriminates_...`` for
+the point-3 investigation into a marker-free signal (finding: none exists
+in the current schema).
 """
 from __future__ import annotations
 
@@ -121,9 +142,16 @@ def _write_result(results_dir: Path, pr_number: int, gate: str, payload: dict) -
 # ---------------------------------------------------------------------------
 
 _REAL_EXHAUSTION_TEXT = {
-    # OpenAI/codex 429 quota -- documented API error shape (type/code
-    # "insufficient_quota"), no live-store record exists for codex yet
-    # (measured 26-08: codex ran clean on PR 1693/1689 today).
+    # AANGENOMEN: OpenAI/codex 429 quota -- documented API error shape
+    # (type/code "insufficient_quota"). STALE as of 26-08 afternoon: this
+    # was written when "codex ran clean on PR 1693/1689 today" was still
+    # true, before codex genuinely ran out hours later (pr-1696-codex_gate.json,
+    # BETA3-E1c) with different, CLI-prose wording ("You've hit your usage
+    # limit..."), never this JSON shape. Kept here deliberately -- a second,
+    # still-plausible form of the same provider's exhaustion is realistic,
+    # and this text still correctly classifies lane_exhausted via the
+    # "insufficient_quota" marker. The GEMETEN counterpart is
+    # ``_PR1696_REAL_CODEX_RECORD`` further down this file.
     "codex": (
         "governed codex dispatch failed: Error code: 429 - {'error': "
         "{'message': 'You exceeded your current quota, please check your "
@@ -267,6 +295,192 @@ def test_pr1691_real_glm_exhaustion_classifies_lane_exhausted_via_report_fallbac
 
     manager = _make_manager()
     assert manager._classify_review_seat_failure(record) == "lane_exhausted"
+
+
+# ---------------------------------------------------------------------------
+# BETA3-E1c fix-forward (PR #1695, 26-08 afternoon) -- the codex marker was
+# GEMETEN, not AANGENOMEN. Verbatim from
+# state/review_gates/results/pr-1696-codex_gate.json (identical text also
+# recorded on pr-1691/1692-codex_gate.json the same afternoon).
+# ---------------------------------------------------------------------------
+
+_PR1696_REAL_CODEX_RECORD = {
+    "gate": "codex_gate",
+    "pr_id": "1696",
+    "pr_number": 1696,
+    "status": "unavailable",
+    "reason": "exit_nonzero",
+    "reason_detail": (
+        "Subprocess exited with code 1: You've hit your usage limit. Upgrade "
+        "to Pro (https://chatgpt.com/explore/pro), visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits or "
+        "try again at 8:53 PM."
+    ),
+    "duration_seconds": 4.162857542047277,
+    "partial_output_lines": 4,
+    "runner_pid": 67702,
+    "killed_at": "2026-08-26T18:01:55Z",
+    "summary": (
+        "codex_gate UNAVAILABLE (gate did not run — exit_nonzero: "
+        "Subprocess exited with code 1: You've hit your usage limit. Upgrade "
+        "to Pro (https://chatgpt.com/explore/pro), visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits or "
+        "try again at 8:53 PM.) — NOT a review fail"
+    ),
+    "contract_hash": "",
+    "report_path": "",
+    "blocking_findings": [],
+    "advisory_findings": [],
+    "required_reruns": ["codex_gate"],
+    "residual_risk": "Gate exit_nonzero. Re-run required.",
+    "recorded_at": "2026-08-26T18:01:55Z",
+    "branch": "dispatch/20260826-beta3-f-uitval-overschrijft-verdict-niet",
+    "commit_sha": "ed3bdd97caf88094a4854067beed38594dc03d59",
+}
+
+
+def test_pr1696_real_codex_exhaustion_classifies_lane_exhausted():
+    """GEMETEN 26-08: pr-1696-codex_gate.json is codex's own CLI prose for a
+    genuine usage-limit exhaustion, not the OpenAI-API JSON 429 shape the
+    pre-fix markers were AANGENOMEN on.
+
+    Correction against this dispatch's own premise: the dispatch instruction
+    for this fix-forward claimed the pre-fix classification was
+    'unreadable_verdict'. Measured directly against this exact record on
+    3405a296 (pre-fix, before ``hit your usage limit`` was added): the
+    result was actually 'no_response', not 'unreadable_verdict'. Reason:
+    status='unavailable' + reason='exit_nonzero' skips straight past the
+    'parse_error'/'no_verdict' branches in
+    ``GateRequestHandlerMixin._classify_review_seat_failure`` into
+    ``_scan_seat_failure_text``, whose no-match tail always returns
+    ``('no_response', ...)`` -- even though
+    ``governance_emit._classify_lane_log_text`` privately labels a no-match
+    'unreadable_verdict' internally, that label never survives
+    ``_scan_seat_failure_text``'s collapse to lane_exhausted/no_response.
+    Both states mean "no takeover", so the dispatch's core finding (the
+    chain never fired) was correct even though its state label was not.
+
+    AFTER the "hit your usage limit" marker: lane_exhausted.
+    """
+    from gate_request_handler import GateRequestHandlerMixin
+    result = GateRequestHandlerMixin._classify_review_seat_failure(None, _PR1696_REAL_CODEX_RECORD)
+    assert result == "lane_exhausted", (
+        f"expected lane_exhausted on the real codex usage-limit record, got {result!r}"
+    )
+
+
+def test_codex_exhausted_real_record_rolls_to_kimi_gate(manager_env, monkeypatch):
+    """GEMETEN 26-08: with the real pr-1696 codex usage-limit record on
+    disk, request_reviews for codex_gate must walk the takeover chain
+    (BETA3-E1's codex_gate -> kimi_gate hop) to kimi_gate, carrying the real
+    usage-limit detail into the annotation -- proving the chain fires on
+    genuine production data, not just on the AANGENOMEN 429 fixture.
+    """
+    monkeypatch.chdir(manager_env["project_root"])
+    pr_number = 1696
+    _write_result(manager_env["results_dir"], pr_number, "codex_gate", _PR1696_REAL_CODEX_RECORD)
+
+    manager = _make_manager()
+    with _patch_governance_receipt():
+        result = manager.request_reviews(
+            pr_number=pr_number,
+            branch="dispatch/20260826-beta3-f-uitval-overschrijft-verdict-niet",
+            review_stack=["codex_gate"],
+            risk_class="medium",
+            changed_files=["scripts/foo.py"],
+            mode="per_pr",
+            dispatch_id="beta3-e1c-codex-real-takeover-test",
+        )
+
+    seat = result["requested"][0]
+    assert seat["gate"] == "kimi_gate", f"expected the walk to land on kimi_gate, got {seat['gate']!r}"
+    assert seat["takeover_from"] == "codex_gate"
+    assert "usage limit" in seat["failure_reason"].lower(), (
+        f"expected the actual usage-limit detail embedded in failure_reason: {seat['failure_reason']!r}"
+    )
+
+    on_disk_path = manager_env["requests_dir"] / f"pr-{pr_number}-kimi_gate.json"
+    assert on_disk_path.exists()
+    on_disk = json.loads(on_disk_path.read_text())
+    assert on_disk["takeover_from"] == "codex_gate"
+
+
+# ---------------------------------------------------------------------------
+# BETA3-E1c point 3 -- is there a structural signal (status code, reason
+# enum, provider identity) that discriminates a REAL exhaustion from a
+# GENERIC provider error, independent of prose? Investigated against the
+# four real failure records named in the dispatch:
+#
+#   pr-1691-glm_gate.json    real OpenRouter 402 exhaustion    reason="dispatch_error"
+#   pr-1692-glm_gate.json    generic "Content block not found" reason="dispatch_error"
+#   pr-1694-glm_gate.json    generic "Content block not found" reason="dispatch_error"
+#   pr-1696-codex_gate.json  real codex usage-limit exhaustion reason="exit_nonzero"
+#
+# (pr-1691/1692/1694-glm_gate.json have since been overwritten on the live
+# store by later gate reruns on other PRs today -- their measured content is
+# what this file's own _PR1691_RESULT/_PR1691_REAL_402_REPORT_EXCERPT and
+# _GENERIC_PROVIDER_ERROR_TEXT fixtures already captured from the BETA3-E1
+# measurement, so the case comparison below reuses those, not a re-read of
+# the now-drifted live store.)
+#
+# FINDING: no structural signal exists in the current schema. Two separate
+# dispatch mechanisms record gate failures, and `reason` is a HOW-was-the-
+# failure-detected bucket in BOTH, never a WHY:
+#   - governed-API-dispatch (glm_gate.py/kimi_gate.py): reason="dispatch_error"
+#     is set for EVERY governed-dispatch exception (glm_gate.py:565-583) and
+#     EVERY frontmatter run_failed=True (glm_gate.py:606-608), regardless of
+#     whether the underlying cause was a 402 quota body or an unrelated API
+#     error. A real exhaustion and a generic error are indistinguishable at
+#     this field.
+#   - subprocess-kill runner (codex_gate/ci_gate/gemini_review via
+#     scripts/lib/gate_recorder.py's shared EXECUTION_FAILURE_REASONS
+#     frozenset: exit_nonzero/timeout/subprocess_error/network_error/
+#     auth_error/...): reason="exit_nonzero" is the SAME value
+#     scripts/lib/gate_executor.py:210 assigns to an entirely unrelated
+#     ci_gate `gh pr checks` subprocess failure -- proving it is shared
+#     infra plumbing, not a provider-specific or exhaustion-specific signal.
+# No record in either mechanism carries a separate numeric HTTP status or
+# error-code field; the 402/403/429/"usage limit" detail lives ONLY inside
+# reason_detail/residual_risk/summary prose. A "provider" field exists but
+# only on some PASS records (glm's own governed dispatch stamps it on
+# success -- see pr-1696-glm_gate.json), never reliably on a failure record,
+# so it cannot serve as a discriminator either.
+#
+# NOTHING INVENTED: no structural signal is asserted here beyond what these
+# two tests lock down as actually measured. The marker list remains the
+# only viable signal until a gate runner is changed to capture the
+# provider's HTTP status/error code as its own field.
+# ---------------------------------------------------------------------------
+
+def test_reason_field_does_not_discriminate_glm_exhaustion_from_generic_error():
+    """governed-API-dispatch mechanism: a real 402 exhaustion (GEMETEN,
+    pr-1691) and a generic "Content block not found" error (GEMETEN,
+    pr-1692/1694) record the IDENTICAL reason -- proving `reason` alone
+    cannot pre-filter ahead of (or replace) the marker-text scan.
+    """
+    real_exhaustion_case = next(
+        r for p, c, r, _e in PROVIDER_CASES if p == "glm" and c == "real_exhaustion"
+    )
+    generic_error_case = next(
+        r for p, c, r, _e in PROVIDER_CASES if p == "glm" and c == "generic_provider_error"
+    )
+    assert real_exhaustion_case["reason"] == generic_error_case["reason"] == "dispatch_error"
+    assert _PR1691_RESULT["reason"] == "dispatch_error", "the actual live pr-1691 record, same reason"
+
+
+def test_reason_field_is_shared_infra_not_a_codex_specific_exhaustion_signal():
+    """subprocess-kill mechanism: codex's real usage-limit exhaustion
+    (GEMETEN, pr-1696) uses reason='exit_nonzero' -- the same enum value
+    ci_gate's unrelated `gh pr checks` subprocess failure uses
+    (scripts/lib/gate_executor.py:210), proving it is a how-was-it-detected
+    bucket shared across every gate on this runner, not a why.
+    """
+    from gate_recorder import EXECUTION_FAILURE_REASONS
+    assert _PR1696_REAL_CODEX_RECORD["reason"] == "exit_nonzero"
+    assert _PR1696_REAL_CODEX_RECORD["reason"] in EXECUTION_FAILURE_REASONS, (
+        "exit_nonzero is one value in a shared execution-failure enum, not a "
+        "codex- or exhaustion-specific marker"
+    )
 
 
 # ---------------------------------------------------------------------------

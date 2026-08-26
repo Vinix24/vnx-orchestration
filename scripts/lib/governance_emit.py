@@ -419,27 +419,41 @@ _LANE_LOG_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _LANE_LOG_DISPLAY_MAX_CHARS = 4000
 _LANE_LOG_READ_MAX_BYTES = 2_000_000
 
-# Reason-label markers actually observed in raw provider bodies (22-08
-# measurement) for a permanent billing/quota rejection. Matched narrowly on
-# the provider's own distinguishing phrase/type label — never on a generic
-# parser-side "msg" field. kimi's raw 403 body rides in the SAME log line as
-# an unrelated JSON-decode-failure message (the CLI's own drainer trying and
-# failing to parse the non-JSON error text as an event); a classifier keyed
-# on that "msg=" text would read the parse failure and call this
-# `unreadable_verdict` instead of `lane_exhausted`. Scanning the whole raw
-# text for the provider's own label/phrase side-steps that trap entirely.
+# Reason-label markers for a permanent billing/quota rejection. Matched
+# narrowly on the provider's own distinguishing phrase/type label — never on
+# a generic parser-side "msg" field. kimi's raw 403 body rides in the SAME
+# log line as an unrelated JSON-decode-failure message (the CLI's own
+# drainer trying and failing to parse the non-JSON error text as an event);
+# a classifier keyed on that "msg=" text would read the parse failure and
+# call this `unreadable_verdict` instead of `lane_exhausted`. Scanning the
+# whole raw text for the provider's own label/phrase side-steps that trap
+# entirely.
+#
+# GEMETEN vs AANGENOMEN (BETA3-E1c, 26-08): each marker below is tagged with
+# where its wording came from. GEMETEN = matched against an actual on-disk
+# gate-result record. AANGENOMEN = modeled on a provider's documented API
+# error shape because no live record existed to measure against at the time
+# it was added. The distinction matters: the two codex markers added 26-08
+# morning (61ebb567) were AANGENOMEN on the OpenAI API's JSON 429 shape and
+# missed codex's own CLI prose that arrived hours later on
+# pr-1696/1691/1692-codex_gate.json ("You've hit your usage limit...") — a
+# two-word difference from kimi's already-GEMETEN "reached your usage limit"
+# below ("hit" vs "reached"). A marker list built on assumption fails open,
+# and silently: `_classify_lane_log_text` returns `unreadable_verdict` (not
+# an exception), which reads exactly like a normal parse-miss.
 _LANE_EXHAUSTED_MARKERS = (
-    "access_terminated_error",              # kimi 403
-    "insufficient balance",                 # deepseek 402
-    "insufficient_balance",
-    "insufficient credits",
-    "requires more credits",                # glm/openrouter 402-in-500
-    "add more credits",
-    "openrouter_credits",
-    "usage limit for this billing cycle",   # kimi 403 prose
-    "reached your usage limit",
-    "insufficient_quota",                   # codex/openai 429 quota (error `type`/`code`)
-    "exceeded your current quota",          # codex/openai quota prose
+    "access_terminated_error",              # GEMETEN: kimi 403, OI-1433 22-08 (20/20 empty-response kimi records carried this in their raw body)
+    "insufficient balance",                 # AANGENOMEN: deepseek 402 documented API error shape — deepseek_gate has no runner yet (gate_runner_missing), so no live record can exist to measure against
+    "insufficient_balance",                 # AANGENOMEN: idem
+    "insufficient credits",                 # AANGENOMEN: generic OpenRouter/credit-exhaustion phrasing family, geen specifiek live record gevonden
+    "requires more credits",                # GEMETEN: glm/openrouter 402, pr-1691-glm_gate.json real record 26-08 (see _PR1691_REAL_402_REPORT_EXCERPT in tests/test_beta3_e1_review_gate_chain.py)
+    "add more credits",                     # AANGENOMEN: generic OpenRouter/credit-exhaustion phrasing family, geen specifiek live record gevonden
+    "openrouter_credits",                   # GEMETEN: glm/openrouter 402, pr-1691-glm_gate.json real record 26-08 (metadata.limit_source field)
+    "usage limit for this billing cycle",   # GEMETEN: kimi 403 prose, OI-1433 22-08
+    "reached your usage limit",             # GEMETEN: kimi 403 prose, OI-1433 22-08
+    "insufficient_quota",                   # AANGENOMEN: codex/openai 429 quota (error `type`/`code`), OpenAI API JSON-vorm — geen live codex-record bestond op 26-08 ochtend (61ebb567)
+    "exceeded your current quota",          # AANGENOMEN: codex/openai quota prose, idem
+    "hit your usage limit",                 # GEMETEN: codex CLI-prose, pr-1696-codex_gate.json (ook pr-1691/1692-codex_gate.json, identieke tekst) 26-08 — "Subprocess exited with code 1: You've hit your usage limit..."
 )
 
 
