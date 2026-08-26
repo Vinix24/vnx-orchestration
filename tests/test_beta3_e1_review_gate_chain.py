@@ -580,6 +580,124 @@ def test_codex_gate_added_with_kimi_gate_as_first_fallback():
 
 
 # ---------------------------------------------------------------------------
+# BETA3-E1b fix-forward (codex-poort, PR #1695, contract_hash a554cbbe33f5d102
+# on 4d010b23) -- three blocking findings on
+# ``gate_request_handler._read_lane_log_or_report_text``:
+#
+#   1. PATH-TRAVERSAL in the report fallback: ``result["report_path"]`` is
+#      on-disk STATE (a prior gate's result record), not trusted input, and
+#      the fallback read it with a bare ``Path(report_path)`` -- no escape
+#      check at all, unlike the lane-log source two lines above it
+#      (``governance_emit._resolve_lane_log_path``, which the codex-poort
+#      itself calls "defense in depth"). ``_resolve_report_path`` closes
+#      this the same way: resolve, then ``relative_to`` the reports dir, or
+#      refuse.
+#   2. A silent ``except OSError: pass`` collapsed "the report was
+#      unreadable" into the same silent no-op as "there was nothing to
+#      read" -- the exact toestand-1/2/3 conflation this whole cluster
+#      exists to stop. The read failure is now logged with its path.
+# ---------------------------------------------------------------------------
+
+def test_report_path_absolute_escape_is_refused(manager_env, monkeypatch, tmp_path, caplog):
+    """An absolute report_path pointing OUTSIDE unified_reports/ must be
+    refused -- even though the file exists and its real content (the exact
+    PR-1691 402 excerpt) would otherwise classify as lane_exhausted. Proves
+    the guard, not just its absence of a crash: the classifier must land on
+    no_response, since a path-traversal read must never smuggle a real
+    exhaustion marker in through an out-of-bounds file.
+    """
+    monkeypatch.chdir(manager_env["project_root"])
+    outside_file = tmp_path / "outside" / "not-a-report.md"
+    outside_file.parent.mkdir(parents=True, exist_ok=True)
+    outside_file.write_text(_PR1691_REAL_402_REPORT_EXCERPT, encoding="utf-8")
+
+    record = dict(_PR1691_RESULT, report_path=str(outside_file))
+    manager = _make_manager()
+
+    with caplog.at_level("WARNING"):
+        caplog.clear()
+        text = manager._read_lane_log_or_report_text(record)
+
+    assert text == "", "a report_path outside unified_reports/ must never be read"
+    assert "escaped" in caplog.text, "the refusal must be logged, citing the escape"
+    assert manager._classify_review_seat_failure(record) == "no_response", (
+        "a refused report_path must never let the real 402 marker reach the classifier"
+    )
+
+
+def test_report_path_relative_traversal_is_refused(manager_env, monkeypatch, tmp_path, caplog):
+    """Same guard, the classic ``../`` traversal shape: a relative
+    report_path resolves against cwd (``project_root``, one level below
+    ``tmp_path``), so climbing out with ``../`` reaches a real file this
+    test controls -- proving the guard is not merely "absolute paths only".
+    """
+    monkeypatch.chdir(manager_env["project_root"])
+    secret_file = tmp_path / "secret-outside.md"
+    secret_file.write_text(_PR1691_REAL_402_REPORT_EXCERPT, encoding="utf-8")
+
+    record = dict(_PR1691_RESULT, report_path="../secret-outside.md")
+    manager = _make_manager()
+
+    with caplog.at_level("WARNING"):
+        caplog.clear()
+        text = manager._read_lane_log_or_report_text(record)
+
+    assert text == "", "a relative ../ report_path escaping unified_reports/ must never be read"
+    assert "escaped" in caplog.text
+
+
+def test_report_fallback_absent_empty_unreadable_are_distinguishable(manager_env, monkeypatch, caplog):
+    """The three read states the report fallback can hit -- bestand
+    afwezig, bestand leeg, bestand onleesbaar -- must each be independently
+    reachable, and only the unreadable case may log a warning. Collapsing
+    an OSError into silence (the pre-fix ``except OSError: pass``) makes
+    "the report was corrupt/permission-denied" indistinguishable from "no
+    report exists yet" -- exactly the toestand conflation this cluster
+    exists to stop.
+    """
+    monkeypatch.chdir(manager_env["project_root"])
+    manager = _make_manager()
+    dispatch_id = "beta3-e1b-readstate-test"
+    report_file = manager_env["reports_dir"] / f"{dispatch_id}.md"
+    record = {"dispatch_id": dispatch_id, "report_path": str(report_file)}
+
+    # 1. Absent -- no file at all.
+    with caplog.at_level("WARNING"):
+        caplog.clear()
+        text = manager._read_lane_log_or_report_text(record)
+    assert text == ""
+    assert caplog.text == "", "an absent report must not log a warning"
+
+    # 2. Empty -- file exists, whitespace-only content.
+    report_file.write_text("   \n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        caplog.clear()
+        text = manager._read_lane_log_or_report_text(record)
+    assert text == ""
+    assert caplog.text == "", "an empty report must not log a warning"
+
+    # 3. Unreadable -- file exists with real content, but the read itself
+    # raises OSError (permission denied / disk error / etc, simulated).
+    report_file.write_text(_PR1691_REAL_402_REPORT_EXCERPT, encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def _raise_on_report_file(self, *args, **kwargs):
+        if self == report_file:
+            raise OSError("permission denied (simulated)")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_on_report_file)
+    with caplog.at_level("WARNING"):
+        caplog.clear()
+        text = manager._read_lane_log_or_report_text(record)
+    assert text == "", "a read failure must still return '' -- never raise out of classification"
+    assert str(report_file) in caplog.text and dispatch_id in caplog.text, (
+        "an unreadable report MUST log its path and dispatch_id, distinguishing "
+        "it from the silent absent/empty cases above"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helper: patch emit_governance_receipt for the duration of a `with` block,
 # same target the other review-gate test modules patch.
 # ---------------------------------------------------------------------------

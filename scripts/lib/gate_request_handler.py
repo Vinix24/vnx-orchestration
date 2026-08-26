@@ -145,6 +145,37 @@ def _build_review_gate_takeover_chain() -> Dict[str, str]:
     return chain
 
 
+def _resolve_report_path(report_path: str, data_dir: Path) -> Optional[Path]:
+    """Path-safe resolve of a gate result record's ``report_path`` field.
+
+    Mirrors ``governance_emit._resolve_lane_log_path``'s defense-in-depth
+    shape (that function's docstring calls it out by name): ``report_path``
+    comes from a result record on disk -- state, not trusted input -- so a
+    ``relative_to`` escape check against the reports dir runs before any
+    read. An unconstrained ``report_path`` could point anywhere the process
+    can read; the sibling lane-log reader two functions above already gets
+    this right, this one previously did not. Returns None (refuse, no read)
+    on anything unsafe or unresolvable -- a bad lookup must never block
+    classification, only skip the report-fallback source.
+    """
+    if not report_path:
+        return None
+    reports_dir = (Path(data_dir) / "unified_reports").resolve()
+    try:
+        candidate = Path(report_path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    try:
+        candidate.relative_to(reports_dir)
+    except ValueError:
+        logger.warning(
+            "gate_request_handler: report-path read refused -- path %s escaped %s",
+            candidate, reports_dir,
+        )
+        return None
+    return candidate
+
+
 def _scan_seat_failure_text(result: Dict[str, Any], manager: "Optional[GateRequestHandlerMixin]") -> "tuple[str, str]":
     """Scan every available raw-text source for the provider's own
     exhaustion marker via ``governance_emit._classify_lane_log_text`` --
@@ -427,32 +458,52 @@ class GateRequestHandlerMixin:
         glm-gate-pr1691-1787754901 had NO lane log at all, but its 9345-byte
         report carried the real 402 ``openrouter_credits`` body.
 
-        Returns "" on any missing dispatch_id/report_path, missing/unreadable
+        Returns "" on any missing dispatch_id/report_path, missing/empty
         file, or an unresolvable data dir -- a failed lookup must never
         raise out of a classification decision, and never fabricates text
-        from nothing.
+        from nothing. An UNREADABLE report (exists, but ``OSError`` on read)
+        is logged with its path (BETA3-E1b fix-forward) rather than
+        swallowed indistinguishably from "no report exists" -- the classifier
+        two frames up falls back to ``no_response`` either way, but an
+        operator reading logs must be able to tell "nothing to read" apart
+        from "a read failed", or a broken report-fallback source looks
+        identical to a real absence of exhaustion evidence.
+
+        ``report_path`` is on-disk STATE (a result record), not trusted
+        input, so it is resolved via ``_resolve_report_path`` and refused if
+        it would read outside the reports dir -- the SAME defense-in-depth
+        shape ``governance_emit._resolve_lane_log_path`` already applies to
+        the lane-log source two lines above.
         """
+        try:
+            data_dir = Path(self.paths["VNX_DATA_DIR"])
+        except (AttributeError, KeyError, TypeError):
+            data_dir = None
+
         dispatch_id = str(result.get("dispatch_id") or "")
-        if dispatch_id:
-            try:
-                data_dir = Path(self.paths["VNX_DATA_DIR"])
-            except (AttributeError, KeyError, TypeError):
-                data_dir = None
-            if data_dir is not None:
-                from governance_emit import _read_lane_log_text
-                lane_text = _read_lane_log_text(dispatch_id, data_dir)
-                if lane_text:
-                    return lane_text
+        if dispatch_id and data_dir is not None:
+            from governance_emit import _read_lane_log_text
+            lane_text = _read_lane_log_text(dispatch_id, data_dir)
+            if lane_text:
+                return lane_text
+
         report_path = result.get("report_path") or ""
-        if report_path:
+        if report_path and data_dir is not None:
+            report_file = _resolve_report_path(report_path, data_dir)
+            if report_file is None:
+                return ""
             try:
-                report_file = Path(report_path)
-                if report_file.is_file():
-                    text = report_file.read_text(encoding="utf-8", errors="replace")
-                    if text.strip():
-                        return text
-            except OSError:
-                pass
+                if not report_file.is_file():
+                    return ""
+                text = report_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                logger.warning(
+                    "gate_request_handler: report read failed dispatch=%s path=%s: %s",
+                    dispatch_id or "<unknown>", report_file, exc,
+                )
+                return ""
+            if text.strip():
+                return text
         return ""
 
     def _stamp_takeover_annotations(
@@ -826,7 +877,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("gemini_review", pr_number), payload)
         return payload
 
     def _build_gemini_contract_payload(
@@ -1144,7 +1195,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("codex_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("codex_gate", pr_number), payload)
         return payload
 
     def _request_kimi(
@@ -1180,7 +1231,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("kimi_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("kimi_gate", pr_number), payload)
         return payload
 
     def _request_glm(
@@ -1233,7 +1284,7 @@ class GateRequestHandlerMixin:
                 reason=reason, reason_detail=reason_detail,
                 binary_name="glm_gate.py",
             )
-        self._request_path("glm_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("glm_gate", pr_number), payload)
         return payload
 
     def _request_deepseek(
@@ -1288,7 +1339,7 @@ class GateRequestHandlerMixin:
                 reason=reason, reason_detail=reason_detail,
                 binary_name="deepseek_gate.py",
             )
-        self._request_path("deepseek_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("deepseek_gate", pr_number), payload)
         return payload
 
     def _apply_claude_github_configured_state(
@@ -1343,7 +1394,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if configured:
             self._apply_claude_github_configured_state(payload, pr_number)
-        self._request_path("claude_github_optional", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("claude_github_optional", pr_number), payload)
         return payload
 
     def _request_ci_gate(
@@ -1380,7 +1431,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("ci_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("ci_gate", pr_number), payload)
         return payload
 
     def _build_ci_gate_contract_payload(
