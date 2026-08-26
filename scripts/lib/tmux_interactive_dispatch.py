@@ -1381,6 +1381,8 @@ class TmuxInteractiveDispatch:
         label: str,
         worktree_handle: "WorktreeHandle",
         worktree_state: str,
+        skip_pr: bool = False,
+        target_remote_head: "str | None" = None,
     ) -> "PrEnforcementResult":
         """Lane-context adapter over pr_enforcement.enforce_pr_exists (lane-fix B).
 
@@ -1393,6 +1395,21 @@ class TmuxInteractiveDispatch:
         one via gh_pr_ensure when it does not. Emits an audit event either way; a
         creation failure is ALSO recorded as a receipt-visible corrective receipt by
         pr_enforcement itself.
+
+        ``skip_pr`` (OI-1115, A3 parity fix): the caller derives this from
+        ``pr_enforcement.is_dispatch_branch_ref(base_ref)`` — the SAME predicate
+        the envelope lanes already used via ``dispatch_envelope._is_dispatch_branch_ref``.
+        Before A3 this lane never computed or passed ``skip_pr`` at all, so
+        ``enforce_pr_exists``'s default (``False``) always won: a dispatch built
+        on an existing ``origin/dispatch/<id>`` branch got a duplicate second PR
+        every time (measured 26-08: #1685/#1686/#1687, all three closed by hand).
+
+        ``target_remote_head`` (OI-1113, A3 parity fix): the remote HEAD of the
+        branch captured by the caller BEFORE the worker ran. Passed through so
+        ``enforce_pr_exists`` can verify containment after push — a force-push
+        that dropped commits is refused loudly instead of silently accepted.
+        This lane previously never passed it, so the OI-1113 containment check
+        never ran here even though the envelope lanes always had it.
 
         Never raises: mirrors the fail-open contract of the phantom-guard hook —
         an internal error here must not crash a real, successful dispatch.
@@ -1453,6 +1470,10 @@ class TmuxInteractiveDispatch:
                 # and ignores branch/worktree_state entirely — see its
                 # docstring and _enforce_pr_exists_for_work_ref.
                 work_ref=os.environ.get("VNX_WORK_REF") or None,
+                # OI-1115 / OI-1113 (A3 parity fix): both derived by the caller
+                # and simply threaded through here — see this method's docstring.
+                skip_pr=skip_pr,
+                target_remote_head=target_remote_head,
             )
         except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
             logger.error(
@@ -2915,6 +2936,31 @@ class TmuxInteractiveDispatch:
                         exc,
                     )
 
+        # ── OI-1115 (A3 parity fix): skip_pr derived from base_ref, exactly like
+        # dispatch_envelope._is_dispatch_branch_ref/_skip_pr — the shared predicate
+        # lives in pr_enforcement.is_dispatch_branch_ref so both lanes read the
+        # same rule. Computed unconditionally (base_ref is always known, worktree
+        # or not) so it is ready for the _enforce_pr_exists call further down.
+        from pr_enforcement import is_dispatch_branch_ref  # noqa: PLC0415
+        _skip_pr = is_dispatch_branch_ref(base_ref)
+
+        # ── OI-1113 parity fix: capture the remote HEAD of the target branch
+        # BEFORE the worker runs, mirroring dispatch_envelope._enforce_push_pr's
+        # pre-measurement — so a force-push during the run is detectable via
+        # enforce_pr_exists's containment check. For a new branch (first
+        # dispatch), there is no remote HEAD yet — stays None and the
+        # containment check is skipped downstream, same as the envelope lanes.
+        # Best-effort: a lookup failure degrades to None, never blocks dispatch.
+        _target_remote_head: "str | None" = None
+        if worktree_handle is not None:
+            try:
+                from pr_enforcement import _get_remote_head  # noqa: PLC0415
+                _target_remote_head = _get_remote_head(
+                    branch=worktree_handle.branch, repo_root=self._project_root,
+                )
+            except Exception:  # noqa: BLE001 — best-effort; None -> containment skipped
+                _target_remote_head = None
+
         # Per-dispatch hook signal dir: the SessionStart / UserPromptSubmit / Stop
         # hooks (guarded by VNX_TMUX_SIGNAL_DIR + VNX_DISPATCH_ID) drop sentinels
         # here. Best-effort: if mkdtemp fails the lane silently degrades to the
@@ -3665,6 +3711,8 @@ class TmuxInteractiveDispatch:
                     label=label,
                     worktree_handle=worktree_handle,
                     worktree_state=_wt_classification[0],
+                    skip_pr=_skip_pr,
+                    target_remote_head=_target_remote_head,
                 )
                 if not autopr_result.ok:
                     worker_succeeded = False

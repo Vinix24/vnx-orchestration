@@ -109,6 +109,25 @@ class PrEnforcementResult:
     reason: Optional[str] = None
 
 
+def is_dispatch_branch_ref(base_ref: "Optional[str]") -> bool:
+    """Return True when *base_ref* names an existing dispatch branch on origin.
+
+    A dispatch branch has the form ``origin/dispatch/<id>``. When a dispatch's
+    base_ref is a dispatch branch, the dispatch is building ON TOP OF an
+    existing dispatch branch (e.g. a rebase/fix-forward) — the PR for that
+    branch already exists, and creating a second one is a duplicate
+    destination (OI-1115).
+
+    This is the single shared predicate ``skip_pr`` is derived from. It was
+    previously reimplemented per-lane as ``dispatch_envelope._is_dispatch_branch_ref``
+    (envelope lanes only); the A3 fix wires the tmux-spawn lane to the same
+    rule via this function so the two can never independently drift the way
+    OI-1115 itself did (dispatch_envelope wired it, tmux never did — three
+    duplicate PRs on 26-08 were the measured result).
+    """
+    return (base_ref or "").startswith("origin/dispatch/")
+
+
 def _normalize_work_ref(work_ref: "Optional[str]") -> "Optional[str]":
     """Strip common ref prefixes from a work_ref so it names a bare branch.
 
