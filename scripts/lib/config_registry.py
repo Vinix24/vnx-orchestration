@@ -120,6 +120,18 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "kimi_gate,glm_gate — without editing review_gate_manager.py. ci_gate is appended "
         "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
+        "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
+        "codex_gate,kimi_gate,glm_gate,deepseek_gate", "gate",
+        "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision). On "
+        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate is a "
+        "legal end-link that is skipped with a named reason until its runner ships (E2). "
+        "ABSENT (no env/DB override) falls back to this literal default string. An EXPLICIT "
+        "empty value ('') means NO takeover chain at all -- distinct from absent. Any name "
+        "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "
+        "Must match gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN verbatim "
+        "(pinned by test_beta3_e1_review_gate_chain.py).", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,

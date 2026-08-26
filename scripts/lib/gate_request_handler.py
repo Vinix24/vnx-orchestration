@@ -32,18 +32,192 @@ from claude_github_receipt import (
 logger = logging.getLogger(__name__)
 
 
-# Fixed fallback order for review-gate takeover (review-gate-provider-agnostic
-# plan, deliverable 5). This is an OPERATOR DECISION recorded 22-08, not a
-# measured defect-recall ranking: on 22-08 glm_gate and kimi_gate gave
-# OPPOSITE verdicts on the identical diff/contract_hash -- glm FAIL with a
-# blocking finding, kimi PASS with zero findings -- so there is no measured
-# basis for which reader is the better fallback, only that a working reader
-# beats an unfilled seat. The measured variant (ordered by defect-recall) is
-# a follow-up track (plan open question 1); this mapping stays a choice under
-# uncertainty until that lands.
-_REVIEW_GATE_TAKEOVER_ORDER: Dict[str, str] = {
-    "kimi_gate": "glm_gate",
-}
+
+class ReviewGateTakeoverConfigError(ValueError):
+    """The configured review-gate takeover chain is malformed: an unknown
+    gate name, or a gate repeated (which would build a cycle in what must
+    stay a simple linear chain). Raised at READ time -- never discovered
+    later as an infinite walk, nor silently dropped into a partial chain.
+    """
+
+
+# Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision,
+# dispatch 20260826-beta3-e1-overname-keten-en-uitputtingstoets): codex_gate
+# -> kimi_gate -> glm_gate -> deepseek_gate. This SUPERSEDES the single-hop
+# dict a prior deliverable shipped, but PRESERVES that hop's own decision
+# unchanged: kimi_gate -> glm_gate is still the same pairing the 22-08
+# operator decision made (see the historical rationale this replaces, below)
+# -- it is now just one link inside a longer, explicitly configured chain
+# rather than the whole chain.
+#
+# Historical rationale for kimi_gate -> glm_gate (22-08, unchanged by this
+# dispatch): on 22-08 glm_gate and kimi_gate gave OPPOSITE verdicts on the
+# identical diff/contract_hash -- glm FAIL with a blocking finding, kimi PASS
+# with zero findings -- so there is no measured basis for which reader is the
+# better fallback, only that a working reader beats an unfilled seat. The
+# measured variant (ordered by defect-recall) is a follow-up track (plan open
+# question 1); this mapping stays a choice under uncertainty until that
+# lands.
+#
+# deepseek_gate is a legal END-LINK even though its runner does not exist yet
+# (a separate dispatch, E2, ships it): walking onto it always resolves
+# not_executable/gate_runner_missing (see `_request_deepseek`) -- a named
+# skip, never a further hop, since it is deliberately absent from the chain
+# it would otherwise continue into.
+_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,glm_gate,deepseek_gate"
+
+
+def _known_takeover_gate_names() -> "frozenset[str]":
+    """Gate names the takeover-chain CONFIG may legally name: the closed
+    ``Gate`` enum (dispatch_spec.py) PLUS ``deepseek_gate`` -- a real future
+    chain member (E2 ships its runner + its own Gate enum member) that is
+    deliberately NOT added to the Gate enum here. Adding it there without a
+    matching gate_request_handler dispatch branch AND
+    closure_verifier._GATE_HANDLERS entry would trip
+    test_closure_verifier_gate_enum_drift.py (OI-1094) -- this local addition
+    is the narrower, correct scope until E2 lands the real member.
+    """
+    from dispatch_spec import Gate
+    return frozenset(Gate._value2member_map_) | {"deepseek_gate"}
+
+
+def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
+    """Parse a comma-separated ORDERED gate list into a {gate: next_gate}
+    successor map. An empty (post-strip) ``raw`` means NO takeover chain at
+    all -- returns ``{}`` -- the operator's explicit choice, distinct from an
+    absent config falling back to the built-in default (see
+    ``_build_review_gate_takeover_chain``).
+
+    Never returns a partial/best-effort map: an unknown gate name, or a gate
+    named more than once (the only way a strictly linear list can cycle back
+    on itself), raises ``ReviewGateTakeoverConfigError`` naming the offending
+    value.
+    """
+    names = [item.strip() for item in raw.split(",") if item.strip()]
+    if not names:
+        return {}
+    known = _known_takeover_gate_names()
+    seen: "set[str]" = set()
+    for name in names:
+        if name not in known:
+            raise ReviewGateTakeoverConfigError(
+                f"VNX_REVIEW_GATE_TAKEOVER_CHAIN names an unknown gate {name!r} "
+                f"(full chain: {raw!r}); known gates: {', '.join(sorted(known))}"
+            )
+        if name in seen:
+            raise ReviewGateTakeoverConfigError(
+                f"VNX_REVIEW_GATE_TAKEOVER_CHAIN contains a cycle: {name!r} appears more than "
+                f"once in {raw!r} -- a gate may take over for at most one predecessor"
+            )
+        seen.add(name)
+    return {names[i]: names[i + 1] for i in range(len(names) - 1)}
+
+
+def _build_review_gate_takeover_chain() -> Dict[str, str]:
+    """Resolve the operator's review-gate takeover chain from config
+    (BETA3-E1, 26-08), never a hardcoded dict. Reads through
+    ``config_runtime.get`` -- the SAME canonical-resolver + DB-override
+    precedence ``review_gate_manager._build_default_review_stack`` already
+    uses for ``VNX_DEFAULT_REVIEW_STACK``, and the one the OI-1462
+    cross-process contract test (PR #1694) pins -- never a raw
+    ``os.environ`` read that could silently disagree with what this same
+    module's ``_ci_gate_available`` resolves two lines away.
+
+    Resolved FRESH on every call (unlike ``DEFAULT_REVIEW_STACK``, which
+    caches at module-import time): a takeover decision is made per gate per
+    review request, so a config edit takes effect on the very next request
+    instead of needing a process restart.
+
+    Logs, at each resolution, whether the active chain came from an operator
+    override or the built-in default -- comparing the resolved string
+    against ``_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`` verbatim, the same
+    provenance technique ``config_registry.all_effective`` already uses
+    (``is_default = value == entry.default``).
+    """
+    import config_runtime
+    raw = config_runtime.get("VNX_REVIEW_GATE_TAKEOVER_CHAIN") or ""
+    chain = _parse_review_gate_takeover_chain(raw)
+    source = "standaard (registry default)" if raw == _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN else "operator-configuratie"
+    logger.info(
+        "gate_request_handler: review-gate takeover chain actief -- bron=%s waarde=%r keten=%r",
+        source, raw, chain,
+    )
+    return chain
+
+
+def _resolve_report_path(report_path: str, data_dir: Path) -> Optional[Path]:
+    """Path-safe resolve of a gate result record's ``report_path`` field.
+
+    Mirrors ``governance_emit._resolve_lane_log_path``'s defense-in-depth
+    shape (that function's docstring calls it out by name): ``report_path``
+    comes from a result record on disk -- state, not trusted input -- so a
+    ``relative_to`` escape check against the reports dir runs before any
+    read. An unconstrained ``report_path`` could point anywhere the process
+    can read; the sibling lane-log reader two functions above already gets
+    this right, this one previously did not. Returns None (refuse, no read)
+    on anything unsafe or unresolvable -- a bad lookup must never block
+    classification, only skip the report-fallback source.
+    """
+    if not report_path:
+        return None
+    reports_dir = (Path(data_dir) / "unified_reports").resolve()
+    try:
+        candidate = Path(report_path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    try:
+        candidate.relative_to(reports_dir)
+    except ValueError:
+        logger.warning(
+            "gate_request_handler: report-path read refused -- path %s escaped %s",
+            candidate, reports_dir,
+        )
+        return None
+    return candidate
+
+
+def _scan_seat_failure_text(result: Dict[str, Any], manager: "Optional[GateRequestHandlerMixin]") -> "tuple[str, str]":
+    """Scan every available raw-text source for the provider's own
+    exhaustion marker via ``governance_emit._classify_lane_log_text`` --
+    NEVER a second, hand-rolled marker list. Tries, in order: the JSON
+    result record's own ``residual_risk``/``reason_detail``/``summary``
+    fields (populated when the #1683 lane-log lift already ran), then --
+    only when ``manager`` is not None, since the file lookup needs
+    ``manager.paths`` to resolve a data dir -- ``manager._read_lane_log_or_report_text``
+    (lane log, then the gate's own report; BETA3-E1 fix-forward).
+
+    A MODULE-LEVEL function, not a method: ``_classify_review_seat_failure``
+    is called unbound (``self=None``) by
+    ``tests/test_oi1452_lane_log_lift_provider_failed_detail.py``, so the
+    file-fallback half must be a plain, optional argument rather than
+    something that blows up on a None receiver.
+
+    Returns ``(state, detail)`` where ``state`` is ``'lane_exhausted'`` or
+    ``'no_response'``, and ``detail`` is a bounded, marker-anchored snippet
+    when ``state == 'lane_exhausted'`` (never the full multi-KB source) --
+    the SAME text ``_dispatch_review_seat`` embeds into its takeover
+    annotation, so the annotation PRESERVES the actual failure text rather
+    than only referencing whichever record it came from (a takeover
+    overwriting the source record must never erase the reason it was
+    granted on). Never raises: a missing/unreadable file source is silently
+    skipped, not a classification failure.
+    """
+    field_text = " ".join(
+        str(result.get(key, "")) for key in ("residual_risk", "reason_detail", "summary")
+    ).strip()
+    if field_text:
+        state, snippet = _classify_lane_log_text(field_text)
+        if state == "lane_exhausted":
+            return "lane_exhausted", snippet or field_text
+
+    if manager is not None:
+        file_text = manager._read_lane_log_or_report_text(result)
+        if file_text:
+            state, snippet = _classify_lane_log_text(file_text)
+            if state == "lane_exhausted":
+                return "lane_exhausted", snippet or file_text
+
+    return "no_response", (field_text or "no detail recorded")
 
 
 class GateRequestHandlerMixin:
@@ -149,6 +323,12 @@ class GateRequestHandlerMixin:
     def _glm_gate_available(self) -> bool:
         return self._glm_gate_runner_path().exists()
 
+    def _deepseek_gate_runner_path(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "deepseek_gate.py"
+
+    def _deepseek_gate_available(self) -> bool:
+        return self._deepseek_gate_runner_path().exists()
+
     def _dispatch_one_review(
         self,
         gate: str,
@@ -189,6 +369,8 @@ class GateRequestHandlerMixin:
             return self._request_kimi(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if gate == "glm_gate":
             return self._request_glm(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate == "deepseek_gate":
+            return self._request_deepseek(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         return {"gate": gate, "status": "blocked", "reason": "unknown_review_gate"}
 
     def _read_existing_gate_result(self, gate: str, pr_number: Optional[int]) -> Optional[Dict[str, Any]]:
@@ -249,20 +431,80 @@ class GateRequestHandlerMixin:
             return "unreadable_verdict"
         if reason == "no_verdict":
             return "no_response"
-        # reason == "dispatch_error" (or an unrecognised reason): scan the
-        # RAW detail text for the provider's own exhaustion marker via the
-        # SAME classifier deliverable 0 built for the lane-log lift -- never
-        # a second hand-rolled marker scan, and never keyed on a parser-side
-        # msg field. Measured: 29 kimi cases carry
+        # reason == "dispatch_error" (or an unrecognised reason): scan for
+        # the provider's own exhaustion marker via _scan_seat_failure_text --
+        # the SAME classifier deliverable 0 built for the lane-log lift,
+        # extended (BETA3-E1) to also try the gate's own report when no lane
+        # log carries it. Never a second hand-rolled marker scan, and never
+        # keyed on a parser-side msg field. Measured: 29 kimi cases carry
         # msg='Expecting value: line 1' beside raw='Error code: 403'; a
         # msg-keyed check reads toestand 2 while the raw body says toestand 1.
-        detail_text = " ".join(
-            str(result.get(key, "")) for key in ("residual_risk", "reason_detail", "summary")
-        ).strip()
-        if not detail_text:
-            return "no_response"
-        state, _snippet = _classify_lane_log_text(detail_text)
-        return "lane_exhausted" if state == "lane_exhausted" else "no_response"
+        state, _detail = _scan_seat_failure_text(result, self)
+        return state
+
+    def _read_lane_log_or_report_text(self, result: Dict[str, Any]) -> str:
+        """Best-effort raw-text read backing the exhaustion-marker fallback
+        scan (BETA3-E1 fix-forward, T0 live finding glm-gate-pr1691-1787754901,
+        26-08): the per-dispatch lane log first (the SAME source the #1683
+        lift already reads via ``governance_emit._read_lane_log_text``), then
+        the gate's own REPORT file at ``result['report_path']`` when no lane
+        log exists for this dispatch_id at all.
+
+        Root cause this covers: the #1683 lift only ever reads the lane log.
+        When a provider error lands in the gate's own report instead (no
+        lane log for that dispatch), the marker never reaches
+        residual_risk/reason_detail/summary -- even though the SAME
+        classifier on the report's raw text finds it correctly. Measured:
+        glm-gate-pr1691-1787754901 had NO lane log at all, but its 9345-byte
+        report carried the real 402 ``openrouter_credits`` body.
+
+        Returns "" on any missing dispatch_id/report_path, missing/empty
+        file, or an unresolvable data dir -- a failed lookup must never
+        raise out of a classification decision, and never fabricates text
+        from nothing. An UNREADABLE report (exists, but ``OSError`` on read)
+        is logged with its path (BETA3-E1b fix-forward) rather than
+        swallowed indistinguishably from "no report exists" -- the classifier
+        two frames up falls back to ``no_response`` either way, but an
+        operator reading logs must be able to tell "nothing to read" apart
+        from "a read failed", or a broken report-fallback source looks
+        identical to a real absence of exhaustion evidence.
+
+        ``report_path`` is on-disk STATE (a result record), not trusted
+        input, so it is resolved via ``_resolve_report_path`` and refused if
+        it would read outside the reports dir -- the SAME defense-in-depth
+        shape ``governance_emit._resolve_lane_log_path`` already applies to
+        the lane-log source two lines above.
+        """
+        try:
+            data_dir = Path(self.paths["VNX_DATA_DIR"])
+        except (AttributeError, KeyError, TypeError):
+            data_dir = None
+
+        dispatch_id = str(result.get("dispatch_id") or "")
+        if dispatch_id and data_dir is not None:
+            from governance_emit import _read_lane_log_text
+            lane_text = _read_lane_log_text(dispatch_id, data_dir)
+            if lane_text:
+                return lane_text
+
+        report_path = result.get("report_path") or ""
+        if report_path and data_dir is not None:
+            report_file = _resolve_report_path(report_path, data_dir)
+            if report_file is None:
+                return ""
+            try:
+                if not report_file.is_file():
+                    return ""
+                text = report_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                logger.warning(
+                    "gate_request_handler: report read failed dispatch=%s path=%s: %s",
+                    dispatch_id or "<unknown>", report_file, exc,
+                )
+                return ""
+            if text.strip():
+                return text
+        return ""
 
     def _stamp_takeover_annotations(
         self,
@@ -273,6 +515,7 @@ class GateRequestHandlerMixin:
         failure_reason: str,
         takeover_reason: str,
         takeover_source_status: str,
+        takeover_path: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Annotate a fallback gate's payload with takeover provenance and
         persist it into whichever on-disk record(s) ``_dispatch_one_review``
@@ -287,6 +530,14 @@ class GateRequestHandlerMixin:
         OI-1415) -- never a one-off field name a generic receipt reader would
         not recognise.
 
+        ``takeover_path`` (BETA3-E1): the FULL sequence of hops the seat took
+        to reach this gate -- one entry per exhausted predecessor, in order
+        -- so a reader sees "codex_gate exhausted, kimi_gate exhausted, glm_gate
+        decided" instead of only the last jump. Defaults to a single-entry
+        list built from the other (single-hop) arguments when the caller has
+        no multi-hop path to report, so the field is NEVER absent on a
+        takeover record.
+
         Both writes go through ``atomic_write_json`` (temp file in the same
         directory + ``os.replace``), never a bare ``write_text``. These are
         EVIDENCE files: a torn write here passes the existence check a reader
@@ -297,12 +548,20 @@ class GateRequestHandlerMixin:
         evidence record is not.
         """
         gate = payload.get("gate", "")
+        if takeover_path is None:
+            takeover_path = [{
+                "gate": takeover_from,
+                "reason": takeover_reason,
+                "detail": failure_reason,
+                "status": takeover_source_status,
+            }]
         annotations = {
             "failure_reason": failure_reason,
             "takeover": True,
             "takeover_from": takeover_from,
             "takeover_reason": takeover_reason,
             "takeover_source_status": takeover_source_status,
+            "takeover_path": takeover_path,
         }
         payload.update(annotations)
 
@@ -322,6 +581,52 @@ class GateRequestHandlerMixin:
                     atomic_write_json(result_file, result_payload)
         return payload
 
+    def _chain_exhausted_path(self, gate: str, pr_number: int) -> Path:
+        return self.results_dir / f"pr-{pr_number}-{gate}-chain-exhausted.json"
+
+    def _chain_exhausted_result(
+        self,
+        *,
+        gate: str,
+        pr_number: int,
+        branch: str,
+        dispatch_id: str,
+        path: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Named terminal end-state (BETA3-E1): the takeover chain starting
+        from ``gate`` walked every configured hop and every one of them was
+        ``lane_exhausted``, with no further successor configured. Written to
+        its OWN file (``*-chain-exhausted.json``) -- it never overwrites any
+        individual gate's own request/result record, and it is NEVER a
+        silent re-dispatch of ``gate`` itself, which ``path`` already proves
+        dead.
+        """
+        from review_gate_manager import _utc_now
+
+        failure_reason = " -- ".join(
+            f"{hop['gate']} unavailable ({hop['reason']}): {hop['detail']}" for hop in path
+        ) + " -- takeover chain exhausted, no live reader remains"
+        now = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": gate,
+            "pr_number": pr_number,
+            "branch": branch,
+            "status": "chain_exhausted",
+            "reason": "takeover_chain_exhausted",
+            "reason_detail": failure_reason,
+            "failure_reason": failure_reason,
+            "takeover": True,
+            "takeover_from": gate,
+            "takeover_path": path,
+            "summary": f"review-gate takeover chain exhausted starting from {gate}: {failure_reason}",
+            "requested_at": now,
+            "resolved_at": now,
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        atomic_write_json(self._chain_exhausted_path(gate, pr_number), payload)
+        return payload
+
     def _dispatch_review_seat(
         self,
         gate: str,
@@ -331,58 +636,112 @@ class GateRequestHandlerMixin:
         changed_files: List[str],
         mode: str,
         dispatch_id: str,
+        chain: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """Dispatch one review-stack seat, taking over to the configured
-        fallback gate when the seat's last recorded result was toestand 1
-        (exhaustion with body). Overname happens on REQUEST-time -- decided
-        here, before issuing a new request -- never on attest-time (rewriting
-        an already-attested final verdict), since that would let evidence
+        """Dispatch one review-stack seat, walking the configured takeover
+        CHAIN (BETA3-E1) forward while every candidate's own last-recorded
+        result is ``lane_exhausted``, then dispatching the first candidate
+        that is not. Overname happens on REQUEST-time -- decided here,
+        before issuing a new request -- never on attest-time (rewriting an
+        already-attested final verdict), since that would let evidence
         change owners after the fact.
 
-        This is DELIBERATELY two rounds, not one: the decision reads the
-        LAST SAVED result, so a seat only gets filled on the request AFTER
-        the one that recorded its failure. A synchronous refusal (binary
-        missing) and an asynchronous one (quota 403 surfacing mid-execution)
-        would otherwise need two different in-round semantics to take over
-        immediately -- one round of latency is the price of a single,
-        uniform rule instead of two. Do not "fix" this into an in-round
-        takeover: the first round after a quota-death yields an
-        undecided/refused seat, the second round fills it, and that is the
-        intended behaviour, not a bug.
+        CHAIN WALK: starting at ``gate``, each candidate's own last result is
+        read via ``_read_existing_gate_result``. A candidate with no prior
+        result yet, or a non-``lane_exhausted`` one (``unreadable_verdict`` /
+        ``no_response`` abstain -- never take over), STOPS the walk there and
+        that candidate is (re-)dispatched live. A ``lane_exhausted``
+        candidate is recorded into ``path`` and the walk continues to
+        ``chain.get(current)``. This means a hop through an
+        ALREADY-PROVEN-dead gate (one whose own exhaustion was recorded in
+        an earlier round) costs no extra round, but a NEWLY-discovered dead
+        gate still needs its own round before the NEXT hop can act on it --
+        the two-round latency documented below is per NEW gate along the
+        path, not per round of ``request_reviews``. This is a deliberate
+        choice (dispatch 20260826-beta3-e1, plan open question "per ronde
+        een stap of binnen een ronde door?"): it lets an already-known-dead
+        multi-hop chain resolve in ONE round instead of needing N rounds to
+        walk N already-recorded hops, while still respecting the two-round
+        rule for any hop that has not yet been proven dead by an actual
+        dispatch attempt.
+
+        This is DELIBERATELY (at minimum) two rounds per NEW hop, not one:
+        the decision reads the LAST SAVED result, so a seat only gets filled
+        on the request AFTER the one that recorded its failure. A
+        synchronous refusal (binary missing) and an asynchronous one (quota
+        403 surfacing mid-execution) would otherwise need two different
+        in-round semantics to take over immediately -- one round of latency
+        is the price of a single, uniform rule instead of two. Do not "fix"
+        this into an in-round takeover for a brand-new hop: the first round
+        after a quota-death yields an undecided/refused seat, the second
+        round fills it, and that is the intended behaviour, not a bug.
+
+        If the chain runs out (no ``chain.get(current)``) while ``current``
+        is still ``lane_exhausted``, that is a NAMED terminal end-state
+        (``_chain_exhausted_result``) -- never a silent fallback to
+        re-dispatching the originally-requested ``gate``.
         """
-        existing_result = self._read_existing_gate_result(gate, pr_number)
-        fallback_gate = _REVIEW_GATE_TAKEOVER_ORDER.get(gate)
-        if existing_result is None or fallback_gate is None:
+        if chain is None:
+            chain = _build_review_gate_takeover_chain()
+
+        if gate not in chain:
+            # This gate has no configured successor at all -- either the
+            # chain is empty (operator explicitly disabled takeover) or this
+            # particular gate was never wired into it. Dispatch normally,
+            # exactly as a gate with no takeover mechanism always has --
+            # NEVER a chain_exhausted terminal state for a gate that was
+            # never part of a configured chain to begin with (that state is
+            # reserved for a chain that WAS entered and then ran out).
             return self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
 
-        seat_state = self._classify_review_seat_failure(existing_result)
-        if seat_state != "lane_exhausted":
-            return self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        path: List[Dict[str, Any]] = []
+        current = gate
+        while True:
+            existing_result = self._read_existing_gate_result(current, pr_number)
+            if existing_result is None:
+                break
+            seat_state = self._classify_review_seat_failure(existing_result)
+            if seat_state != "lane_exhausted":
+                break
+            # B3: the takeover annotation is a MANDATORY, never-empty field --
+            # an empty reason here would make this a silent refusal, not a
+            # documented overname. The detail is the ACTUAL marker-anchored
+            # snippet _scan_seat_failure_text found (lane log or report),
+            # embedded here as a value -- never a pointer back to
+            # existing_result -- so a later overwrite of that gate's own
+            # result record (a separate, known issue T0 tracks independently)
+            # cannot erase the reason this hop was recorded on.
+            hop_reason = existing_result.get("reason", "unknown_reason")
+            _hop_state, hop_detail = _scan_seat_failure_text(existing_result, self)
+            path.append({
+                "gate": current,
+                "reason": hop_reason,
+                "detail": hop_detail,
+                "status": existing_result.get("status", ""),
+            })
+            next_gate = chain.get(current)
+            if next_gate is None:
+                return self._chain_exhausted_result(
+                    gate=gate, pr_number=pr_number, branch=branch, dispatch_id=dispatch_id, path=path,
+                )
+            current = next_gate
 
-        payload = self._dispatch_one_review(
-            fallback_gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id,
-        )
-        failed_reason = existing_result.get("reason", "unknown_reason")
-        failed_detail = (
-            existing_result.get("reason_detail")
-            or existing_result.get("residual_risk")
-            or existing_result.get("summary")
-            or "no detail recorded"
-        )
-        # B3: the takeover annotation is a MANDATORY, never-empty field -- an
-        # empty reason here would make this a silent refusal, not a
-        # documented overname.
-        failure_reason = (
-            f"{gate} unavailable ({failed_reason}): {failed_detail} -- "
-            f"{fallback_gate} substituted as reader"
-        )
+        payload = self._dispatch_one_review(current, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if not path:
+            return payload
+
+        failure_reason = " -- ".join(
+            f"{hop['gate']} unavailable ({hop['reason']}): {hop['detail']}" for hop in path
+        ) + f" -- {current} substituted as reader"
+        last_hop = path[-1]
         return self._stamp_takeover_annotations(
             payload,
             pr_number=pr_number,
-            takeover_from=gate,
+            takeover_from=last_hop["gate"],
             failure_reason=failure_reason,
-            takeover_reason=failed_reason,
-            takeover_source_status=existing_result.get("status", ""),
+            takeover_reason=last_hop["reason"],
+            takeover_source_status=last_hop["status"],
+            takeover_path=path,
         )
 
     def request_reviews(
@@ -408,8 +767,16 @@ class GateRequestHandlerMixin:
             review_stack_list = _profile_stack if _profile_stack is not None else list(DEFAULT_REVIEW_STACK)
         requested: List[Dict[str, Any]] = []
 
+        # Resolved ONCE per request_reviews() call (not per gate in the
+        # stack): every seat in this stack takes over against the SAME
+        # operator-configured chain, and a single log line per PR-review
+        # cycle is enough operator visibility without repeating it per gate.
+        chain = _build_review_gate_takeover_chain()
+
         for gate in review_stack_list:
-            payload = self._dispatch_review_seat(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+            payload = self._dispatch_review_seat(
+                gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id, chain=chain,
+            )
             requested.append(payload)
             receipt_fields: Dict[str, Any] = {}
             if payload.get("takeover"):
@@ -510,7 +877,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("gemini_review", pr_number), payload)
         return payload
 
     def _build_gemini_contract_payload(
@@ -828,7 +1195,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("codex_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("codex_gate", pr_number), payload)
         return payload
 
     def _request_kimi(
@@ -864,7 +1231,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("kimi_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("kimi_gate", pr_number), payload)
         return payload
 
     def _request_glm(
@@ -917,7 +1284,62 @@ class GateRequestHandlerMixin:
                 reason=reason, reason_detail=reason_detail,
                 binary_name="glm_gate.py",
             )
-        self._request_path("glm_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("glm_gate", pr_number), payload)
+        return payload
+
+    def _request_deepseek(
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        """deepseek_gate is a legal review-gate-takeover-CHAIN link (BETA3-E1,
+        26-08 operator decision) whose runner ships in a separate dispatch
+        (E2) — it is deliberately NOT a ``dispatch_spec.Gate`` enum member
+        yet (see ``_known_takeover_gate_names``). Until E2 lands this always
+        refuses, mirroring ``_request_glm``'s own pre-runner refusal branch:
+        a reason distinct from ``unknown_review_gate`` so an operator can
+        tell "not a real gate" apart from "real gate, runner not implemented
+        yet" — the chain's own named-skip requirement.
+        """
+        from review_gate_manager import _utc_now
+
+        available = self._deepseek_gate_available()
+        requested_at = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": "deepseek_gate",
+            "status": "requested" if available else "not_executable",
+            "provider": "deepseek",
+            "branch": branch,
+            "pr_number": pr_number,
+            "review_mode": mode,
+            "risk_class": risk_class,
+            "changed_files": changed_files,
+            "requested_at": requested_at,
+            "commit_sha": get_pr_head_sha(pr_number),
+            "report_path": self._build_report_path(
+                gate="deepseek_gate",
+                requested_at=requested_at,
+                pr_number=pr_number,
+            ) if available else "",
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        if not available:
+            reason = "gate_runner_missing"
+            reason_detail = "scripts/deepseek_gate.py does not exist yet — ships in dispatch E2"
+            payload["reason"] = reason
+            payload["reason_detail"] = reason_detail
+            payload["resolved_at"] = payload["requested_at"]
+            self._write_not_executable_result(
+                gate="deepseek_gate", pr_number=pr_number, pr_id="",
+                reason=reason, reason_detail=reason_detail,
+                dispatch_id=dispatch_id,
+            )
+            self._write_skip_rationale(
+                gate="deepseek_gate", pr_id=str(pr_number),
+                reason=reason, reason_detail=reason_detail,
+                binary_name="deepseek_gate.py",
+            )
+        atomic_write_json(self._request_path("deepseek_gate", pr_number), payload)
         return payload
 
     def _apply_claude_github_configured_state(
@@ -972,7 +1394,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if configured:
             self._apply_claude_github_configured_state(payload, pr_number)
-        self._request_path("claude_github_optional", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("claude_github_optional", pr_number), payload)
         return payload
 
     def _request_ci_gate(
@@ -1009,7 +1431,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        self._request_path("ci_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_json(self._request_path("ci_gate", pr_number), payload)
         return payload
 
     def _build_ci_gate_contract_payload(
