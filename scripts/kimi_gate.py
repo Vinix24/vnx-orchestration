@@ -104,6 +104,7 @@ from plan_gate_panel import _make_default_dispatcher, _resolve_data_dir  # gover
 from gate_recorder import (
     get_pr_head_branch,
     get_pr_head_sha,
+    persist_request,
     record_terminal_result,
     stamp_request_identity,
 )
@@ -418,6 +419,55 @@ def main(argv: "list[str] | None" = None) -> int:
     data_dir = args.data_dir or None
     base_data_dir = _resolve_data_dir(data_dir)
 
+    pr_number = int(args.pr) if str(args.pr).isdigit() else None
+    # dispatch_id must exist before the request record below AND before the
+    # if/else that follows (both --reprocess and a live run need the SAME
+    # dispatch_id their downstream code uses — see the (now-redundant)
+    # reassignments removed from both arms below this block).
+    dispatch_id = args.reprocess if args.reprocess else f"kimi-gate-pr{args.pr}-{int(time.time())}"
+    # Offline runs read the diff from a file (--diff-file) and are NOT tied to
+    # a live GitHub PR — branch/commit_sha are computed once, here, and reused
+    # for both the request record below and the result record's identity
+    # stamp further down, so a real ``gh pr view`` lookup never runs twice for
+    # the same run.
+    test_run = bool(args.diff_file)
+    branch = "" if test_run else get_pr_head_branch(pr_number)
+    commit_sha = "" if test_run else get_pr_head_sha(pr_number)
+    # Informative only (OI-1178 follow-up): points a human at the governed
+    # dispatch's own unified report even on a non-terminal ``unavailable``
+    # result, where ``report_path`` is deliberately left empty so
+    # has_complete_evidence/is_terminal are never fooled into treating an
+    # outage as a decided verdict. This field is never read by either check.
+    report_path_informational = str(base_data_dir / "unified_reports" / f"{dispatch_id}.md")
+
+    requests_dir = base_data_dir / "state" / "review_gates" / "requests"
+    request_payload = {
+        "gate": "kimi_gate",
+        "status": "requested",
+        "provider": "kimi",
+        "branch": branch,
+        "pr_number": pr_number,
+        "commit_sha": commit_sha,
+        "report_path": report_path_informational,
+        "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "dispatch_id": dispatch_id,
+        "test_run": test_run,
+    }
+    # Defect 4 (23-08 poort-schrijft-stil-niets dispatch): a request record
+    # must exist BEFORE the gate ever dispatches — a record written only
+    # after the run proves nothing was "requested" first. Same on-disk shape
+    # (pr-<N>-<gate>.json under state/review_gates/requests/) as
+    # ci_gate/codex_gate's own request writers
+    # (gate_request_handler._request_ci_gate/_request_codex via
+    # gate_recorder.persist_request) so a generic reader of the requests dir
+    # sees no difference between this and any other gate's request.
+    try:
+        requests_dir.mkdir(parents=True, exist_ok=True)
+        persist_request(requests_dir, "kimi_gate", request_payload, pr_number=pr_number, pr_id="")
+    except OSError as exc:
+        print(f"kimi_gate: FAILED to write request record: {exc}", file=sys.stderr)
+        return 1
+
     if args.reprocess:
         # Deel 3 (dispatch-20260823-beta2-j): re-run the SAME parse/recover/
         # record pipeline below against a dispatch that already ran, without a
@@ -427,7 +477,7 @@ def main(argv: "list[str] | None" = None) -> int:
         # record) is unchanged code, so a recovered verdict here was produced
         # by the gate itself, on the run's own commit, in the run's own
         # contract shape — not prose-to-verdict promotion of a new source.
-        dispatch_id = args.reprocess
+        # dispatch_id is already resolved above (shared with the request record).
         report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
         if not report_path_obj.is_file():
             print(
@@ -455,7 +505,7 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"kimi_gate: no diff for PR {args.pr}", file=sys.stderr)
             return 1
 
-        dispatch_id = f"kimi-gate-pr{args.pr}-{int(time.time())}"
+        # dispatch_id is already resolved above (shared with the request record).
         # role="review-gate" (dispatch-20260823-beta2-j): see glm_gate.py's
         # own comment at the identical call site. The default role
         # "plan-reviewer" carries agents/plan-reviewer/CLAUDE.md, written for
@@ -652,17 +702,23 @@ def main(argv: "list[str] | None" = None) -> int:
     record = {
         "gate": "kimi_gate",
         "pr_id": str(args.pr),
-        "pr_number": int(args.pr) if str(args.pr).isdigit() else None,
+        "pr_number": pr_number,
         # Offline runs read the diff from a file (--diff-file) and are NOT tied
         # to a live GitHub PR; they must never count as gate evidence. The
         # closure verifier refuses records with test_run: true.
-        "test_run": bool(args.diff_file),
+        "test_run": test_run,
         "status": status,
         "reason": reason,
         "duration_seconds": round(duration, 3),
         "summary": _status_summary(status, blocking, reason),
         "contract_hash": contract_hash,
         "report_path": report_path,
+        # Informative only — NEVER read by has_complete_evidence/is_terminal.
+        # Always the governed dispatch's own unified report path, even when
+        # ``report_path`` above is deliberately left empty on a non-terminal
+        # ``unavailable`` status, so a human can still find the real review
+        # text.
+        "report_path_informational": report_path_informational,
         "provider": "kimi",
         "model": args.model,
         "dispatch_id": dispatch_id,
@@ -697,24 +753,36 @@ def main(argv: "list[str] | None" = None) -> int:
     # A4: stamp branch + commit_sha through the shared writer so the merge
     # door can join a kimi_gate result on the PR head (GitHub), not the local
     # checkout HEAD. Offline runs (--diff-file) are not tied to a live PR and
-    # legitimately carry neither.
+    # legitimately carry neither. Reuses the SAME branch/commit_sha resolved
+    # once above (for the request record) instead of a second gh lookup.
     stamp_request_identity(
         record,
         {
             "gate": record["gate"],
             "pr_id": record["pr_id"],
-            "branch": "" if record["test_run"] else get_pr_head_branch(record["pr_number"]),
-            "commit_sha": "" if record["test_run"] else get_pr_head_sha(record["pr_number"]),
+            "branch": branch,
+            "commit_sha": commit_sha,
         },
     )
 
-    if data_dir:
-        results_dir = Path(data_dir) / "state" / "review_gates" / "results"
-        out = results_dir / f"pr-{args.pr}-kimi_gate.json"
+    # Unconditional, and resolved from the SAME base_data_dir the report path
+    # above is built from (never the raw, possibly-empty ``data_dir`` CLI
+    # value) — a poort run with no explicit --data-dir must still land its
+    # result where the merge door and closure verifier can find it (this
+    # guard used to check the raw arg, so an omitted --data-dir silently
+    # skipped this entire block on a fully successful, fully-billed run).
+    results_dir = base_data_dir / "state" / "review_gates" / "results"
+    out = results_dir / f"pr-{args.pr}-kimi_gate.json"
+    try:
         record_terminal_result(
             gate="kimi_gate", pr_id=record["pr_id"], result_path=out, payload=record,
         )
-        print(f"kimi_gate: wrote {out}", file=sys.stderr)
+    except (OSError, ValueError) as exc:
+        # A poort that cannot persist its own evidence must fail LOUDLY, not
+        # burn the dispatch cost and exit 0 with nothing on disk.
+        print(f"kimi_gate: FAILED to write result record to {out}: {exc}", file=sys.stderr)
+        return 1
+    print(f"kimi_gate: wrote {out}", file=sys.stderr)
 
     if args.json:
         print(json.dumps(record, indent=2))
