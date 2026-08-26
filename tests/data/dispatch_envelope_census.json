@@ -2,17 +2,31 @@
   "couplings": [
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 843,
+      "line": 933,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 846,
+      "line": 936,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_door_row.py",
+      "line": 538,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_door_row.py",
+      "line": 543,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
