@@ -113,6 +113,16 @@ def _make_bundle(
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
+        # A2 (2026-08-26): these are door tests (dispatch row creation, target_slot,
+        # gate obligations) — they don't exercise lane behavior, and they run in a
+        # tmp_path that is NOT a real git repo. Since claude_headless became the
+        # default lane, an unpinned claude spec now hits
+        # dispatch_envelope.run_envelope_headless_plan's create_dispatch_worktree,
+        # which correctly hard-aborts on a non-git cwd (the PR #1416 isolation
+        # guarantee — never soften that). Pin to the tmux lane explicitly via the
+        # opt-out these tests actually need.
+        "force_tmux": True,
+        "force_tmux_reason": "door test asserts row/obligation state, not lane behavior; tmp_path is not a real git repo",
     }
     if track_id is not None:
         spec["track_id"] = track_id
@@ -391,3 +401,59 @@ def test_oi943_target_slot_survives_through_door(tmp_path, monkeypatch):
     assert row["target_slot"] == "T0", (
         "OI-943: target_slot must survive the full door path"
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. A2-ff contract (2026-08-26): an UNPINNED claude spec through the door in a
+#    non-git directory MUST fail with the isolation abort. This is PR #1416's
+#    isolation guarantee (create_dispatch_worktree hard-aborts rather than
+#    silently falling back to a shared, unisolated checkout) — not a bug to be
+#    softened. Every other test in this file pins force_tmux=True precisely
+#    because they assert door/row/obligation behavior, not lane behavior; this
+#    test is the one place that intentionally leaves the spec unpinned so the
+#    isolation contract itself stays pinned and cannot regress silently.
+# ---------------------------------------------------------------------------
+
+def test_unpinned_claude_spec_in_non_git_dir_fails_with_isolation_abort(tmp_path, monkeypatch, caplog):
+    data_dir = tmp_path / "vnx-data"
+    bundle_dir = data_dir / "dispatches" / "pending" / "20260826-staging-unpinned-abort"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    instruction = bundle_dir / "instruction.md"
+    instruction.write_text("Do something useful.", encoding="utf-8")
+    spec = {
+        "schema_version": 1,
+        "project_id": "vnx-dev",
+        "dispatch_id": "20260826-unpinned-lane-abort",
+        "staging_id": "20260826-staging-unpinned-abort",
+        "instruction_file": str(instruction),
+        "role": "backend-developer",
+        "target_slot": "T0",
+        "gate": "codex_gate",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+        # Deliberately NO force_tmux / allow_headless — this is the case every
+        # other test in this file pins away. tmp_path is NOT a git repo, so the
+        # default claude_headless lane's create_dispatch_worktree must hard-abort.
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        with caplog.at_level("ERROR"):
+            rc = run_dispatch(spec_file)
+
+    assert rc != 0, (
+        "an unpinned claude spec routed through the non-git tmp_path must fail — "
+        "a silent success here would mean the headless lane stopped requiring "
+        "isolation, which is exactly the PR #1416 guarantee this test protects"
+    )
+    assert any(
+        "isolation required but worktree creation failed" in r.message
+        and "no shared-checkout fallback" in r.message
+        for r in caplog.records
+    ), "the failure must be the isolation abort specifically, not some other rejection"
