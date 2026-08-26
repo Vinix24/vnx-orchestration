@@ -43,15 +43,88 @@ from gate_status import has_complete_evidence, is_pass
 @pytest.mark.parametrize(
     "result,expected",
     [
-        ({"contract_hash": "abc", "report_path": "/tmp/r.md"}, True),
-        ({"contract_hash": "", "report_path": "/tmp/r.md"}, False),
-        ({"contract_hash": "abc", "report_path": ""}, False),
-        ({"contract_hash": "abc", "report_path": None}, False),
+        # OI-1435: has_complete_evidence now also requires is_terminal, so
+        # every case here carries a terminal status="pass" — the intent of
+        # this table is to pin the contract_hash/report_path requirement in
+        # isolation from terminality (covered separately below).
+        ({"status": "pass", "contract_hash": "abc", "report_path": "/tmp/r.md"}, True),
+        ({"status": "pass", "contract_hash": "", "report_path": "/tmp/r.md"}, False),
+        ({"status": "pass", "contract_hash": "abc", "report_path": ""}, False),
+        ({"status": "pass", "contract_hash": "abc", "report_path": None}, False),
+        ({"status": "pass"}, False),
         ({}, False),
     ],
 )
 def test_has_complete_evidence_requires_hash_and_path(result, expected):
     assert has_complete_evidence(result) is expected
+
+
+# ---------------------------------------------------------------------------
+# has_complete_evidence: terminality is enforced BY THE FUNCTION (OI-1435)
+# ---------------------------------------------------------------------------
+
+
+def test_has_complete_evidence_false_on_nonterminal_record_even_with_full_evidence():
+    """The invariant hangs off the function, not off caller call-order.
+
+    A caller that invokes has_complete_evidence WITHOUT ever calling
+    is_terminal first must still get the correct answer: an unavailable
+    (non-terminal) record with both evidence fields fully populated must
+    never read as complete evidence.
+    """
+    record = {"status": "unavailable", "contract_hash": "abc123", "report_path": "/tmp/r.md"}
+    assert has_complete_evidence(record) is False
+
+
+@pytest.mark.parametrize("status", ["pending", "running", "queued", "requested"])
+def test_has_complete_evidence_false_on_inflight_status_with_full_evidence(status):
+    record = {"status": status, "contract_hash": "abc123", "report_path": "/tmp/r.md"}
+    assert has_complete_evidence(record) is False
+
+
+@pytest.mark.parametrize("status", ["pass", "completed", "failed", "not_executable"])
+def test_has_complete_evidence_true_on_terminal_status_with_full_evidence(status):
+    record = {"status": status, "contract_hash": "abc123", "report_path": "/tmp/r.md"}
+    assert has_complete_evidence(record) is True
+
+
+# ---------------------------------------------------------------------------
+# has_complete_evidence: three buckets — absent, empty, sentinel (OI-1435)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        # bucket 1: field ABSENT entirely
+        {"status": "pass", "report_path": "/tmp/r.md"},
+        # bucket 2: field present but EMPTY/whitespace
+        {"status": "pass", "contract_hash": "   ", "report_path": "/tmp/r.md"},
+        # bucket 3: field carries a SENTINEL placeholder, not a real value
+        {"status": "pass", "contract_hash": "unknown", "report_path": "/tmp/r.md"},
+        {"status": "pass", "contract_hash": "None", "report_path": "/tmp/r.md"},
+        {"status": "pass", "contract_hash": "null", "report_path": "/tmp/r.md"},
+    ],
+)
+def test_has_complete_evidence_false_on_contract_hash_absent_empty_or_sentinel(result):
+    assert has_complete_evidence(result) is False
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        # bucket 1: field ABSENT entirely
+        {"status": "pass", "contract_hash": "abc123"},
+        # bucket 2: field present but EMPTY/whitespace
+        {"status": "pass", "contract_hash": "abc123", "report_path": " "},
+        # bucket 3: field carries a SENTINEL placeholder, not a real value
+        {"status": "pass", "contract_hash": "abc123", "report_path": "unknown"},
+        {"status": "pass", "contract_hash": "abc123", "report_path": "NONE"},
+        {"status": "pass", "contract_hash": "abc123", "report_path": "NULL"},
+    ],
+)
+def test_has_complete_evidence_false_on_report_path_absent_empty_or_sentinel(result):
+    assert has_complete_evidence(result) is False
 
 
 # ---------------------------------------------------------------------------

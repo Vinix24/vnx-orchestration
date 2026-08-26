@@ -114,23 +114,59 @@ def canonical_status(result: Dict[str, Any]) -> str:
     return status
 
 
-def has_complete_evidence(result: Dict[str, Any]) -> bool:
-    """True when a gate result carries a complete evidence trail (OI-1178).
+# OI-1435: sentinel placeholders a non-normalising writer can slip into a
+# string field instead of leaving it truly absent/empty. A bare non-empty
+# check lets these straight through; they must count as "no evidence" too.
+_EVIDENCE_SENTINEL_VALUES = frozenset({"unknown", "none", "null"})
 
-    A gate that actually ran and produced a verdict materializes BOTH a
-    non-empty ``contract_hash`` (the hashed contract it judged) and a
-    non-empty ``report_path`` (the on-disk report of its findings). An
-    infra failure booked by ``gate_recorder.record_failure`` carries
+
+def _is_populated_evidence_field(value: Any) -> bool:
+    """True when ``value`` is a real, populated evidence-field string.
+
+    Collapses three distinct non-values to False: the field is absent or
+    the wrong type, the field is present but blank/whitespace-only, and the
+    field carries a placeholder sentinel (``"unknown"``/``"none"``/``"null"``
+    as literal text) rather than a real value.
+    """
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return stripped.lower() not in _EVIDENCE_SENTINEL_VALUES
+
+
+def has_complete_evidence(result: Dict[str, Any]) -> bool:
+    """True when a gate result is terminal AND carries a complete evidence
+    trail (OI-1178, hardened OI-1435).
+
+    Requires ALL of: (1) :func:`is_terminal` — a decided pass/fail/
+    not_executable outcome, never ``unavailable`` or an in-flight status;
+    (2) ``contract_hash`` is a real, populated value; (3) ``report_path`` is
+    a real, populated value. "Real, populated" (2 and 3) is
+    :func:`_is_populated_evidence_field` — absent, blank, and
+    sentinel-placeholder are three different non-values, all False here.
+
+    OI-1435: before this fix, an ``unavailable`` record carrying non-empty
+    ``contract_hash``/``report_path`` (e.g. stale values echoed forward from
+    a prior attempt) read as complete evidence — True on a record with no
+    decided verdict. That separation used to depend entirely on every
+    caller remembering to call :func:`is_terminal` before this function; the
+    terminality check now lives INSIDE the function so the invariant holds
+    regardless of call order — a caller that already checks ``is_terminal``
+    first is now redundant, not wrong.
+
+    An infra failure booked by ``gate_recorder.record_failure`` carries
     neither: ``report_path`` is always "" and ``contract_hash`` echoes
     whatever the never-executed request carried, typically "". Requiring
-    BOTH non-empty separates "a gate ran and decided" from "the gate never
-    ran" — the latter must never be summed up as a PASS.
+    BOTH non-empty (on top of terminality) separates "a gate ran and
+    decided" from "the gate never ran" — the latter must never be summed up
+    as a PASS.
     """
-    contract_hash = result.get("contract_hash")
-    report_path = result.get("report_path")
-    return (
-        isinstance(contract_hash, str) and bool(contract_hash.strip())
-        and isinstance(report_path, str) and bool(report_path.strip())
+    if not is_terminal(result):
+        return False
+    return _is_populated_evidence_field(result.get("contract_hash")) and _is_populated_evidence_field(
+        result.get("report_path")
     )
 
 
