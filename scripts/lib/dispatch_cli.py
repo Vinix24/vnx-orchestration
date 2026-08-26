@@ -1200,6 +1200,19 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
                 ),
             )
             return
+        # OI-1462: stamp what THIS process (the eiser) resolved for the
+        # gate-requirement flags at registration time, so a fulfiller running
+        # later in a different environment can be checked against it
+        # (gate_obligations.check_gate_requirement_mismatch) instead of the
+        # two sides silently disagreeing. Best-effort: a config_runtime import
+        # failure here must never block obligation registration itself.
+        try:
+            import config_runtime
+            gate_requirement_resolution = {
+                "VNX_CI_GATE_REQUIRED": config_runtime.get_bool("VNX_CI_GATE_REQUIRED"),
+            }
+        except Exception:  # noqa: BLE001 — resolution snapshot is best-effort
+            gate_requirement_resolution = None
         register_obligation(
             state_dir,
             dispatch_id=spec.dispatch_id,
@@ -1207,6 +1220,7 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
             project_id=spec.project_id,
             pr_number=pr_number_from_pr_id(spec.pr_id),
             pr_id=spec.pr_id,
+            gate_requirement_resolution=gate_requirement_resolution,
         )
     except Exception as exc:  # noqa: BLE001 — door bookkeeping must never raise
         logger.debug("[dispatch_cli] gate obligation register skipped: %s", exc)

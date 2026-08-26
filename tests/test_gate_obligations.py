@@ -48,6 +48,7 @@ from gate_obligations import (
     STATUS_RETIRED,
     STATUS_UNRESOLVABLE,
     TERMINAL_STATUSES,
+    check_gate_requirement_mismatch,
     obligation_path,
     pr_number_from_pr_id,
     register_obligation,
@@ -195,6 +196,36 @@ def test_door_registers_obligation_for_declared_gate(tmp_path, monkeypatch):
     assert record["dispatch_id"] == "20260731-oi876-declared-gate"
 
 
+def test_door_stamps_gate_requirement_resolution_on_registration(tmp_path, monkeypatch):
+    """OI-1462: the door (the eiser) must snapshot its OWN resolution of
+    VNX_CI_GATE_REQUIRED into the obligation record at registration time, so
+    a fulfiller running later in a different environment can be checked
+    against it (gate_obligations.check_gate_requirement_mismatch)."""
+    import config_runtime
+
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260826-staging-oi1462-resolution",
+        dispatch_id="20260826-oi1462-resolution",
+        gate="ci_gate",
+    )
+    _make_state_dir(tmp_path)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    real_get_bool = config_runtime.get_bool
+    monkeypatch.setattr(
+        config_runtime, "get_bool",
+        lambda key: True if key == "VNX_CI_GATE_REQUIRED" else real_get_bool(key),
+    )
+
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        rc = run_dispatch(spec_file)
+    assert rc == 0
+
+    record = _read_obligation(data_dir / "state", "20260826-oi1462-resolution")
+    assert record["gate_requirement_resolution"] == {"VNX_CI_GATE_REQUIRED": True}
+
+
 def test_door_without_declared_gate_derives_obligation(tmp_path, monkeypatch):
     """Punt 7 (gate-weight-by-variant): a silent spec now derives a gate.
 
@@ -275,6 +306,63 @@ def test_register_obligation_never_resets_fulfilled(tmp_path):
     assert _read_obligation(state_dir, "d-1")["status"] == STATUS_FULFILLED, (
         "a retry/fix-forward must never reset a fulfilled obligation to pending"
     )
+
+
+# ---------------------------------------------------------------------------
+# OI-1462: gate_requirement_resolution stamp + cross-process mismatch check.
+# ---------------------------------------------------------------------------
+
+
+def test_register_obligation_stamps_gate_requirement_resolution(tmp_path):
+    state_dir = _make_state_dir(tmp_path)
+    path = register_obligation(
+        state_dir, dispatch_id="d-resolution", gate="ci_gate", project_id="vnx-dev",
+        gate_requirement_resolution={"VNX_CI_GATE_REQUIRED": True},
+    )
+    record = _read_obligation(state_dir, "d-resolution")
+    assert record["gate_requirement_resolution"] == {"VNX_CI_GATE_REQUIRED": True}
+
+
+def test_register_obligation_without_resolution_defaults_to_none(tmp_path):
+    """A caller that never captures a resolution (or an old codepath) must
+    stamp None, never fabricate a value -- absent is UNKNOWN, not "off"."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(state_dir, dispatch_id="d-no-resolution", gate="codex_gate")
+    record = _read_obligation(state_dir, "d-no-resolution")
+    assert record["gate_requirement_resolution"] is None
+
+
+def test_check_gate_requirement_mismatch_flags_divergence():
+    record = {"gate_requirement_resolution": {"VNX_CI_GATE_REQUIRED": True}}
+    mismatch = check_gate_requirement_mismatch(
+        record, flag="VNX_CI_GATE_REQUIRED", reader_value=False,
+    )
+    assert mismatch == {
+        "flag": "VNX_CI_GATE_REQUIRED",
+        "writer_value": True,
+        "reader_value": False,
+        "detected_at": mismatch["detected_at"],
+    }
+
+
+def test_check_gate_requirement_mismatch_agrees_when_values_match():
+    record = {"gate_requirement_resolution": {"VNX_CI_GATE_REQUIRED": True}}
+    assert check_gate_requirement_mismatch(
+        record, flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    ) is None
+
+
+def test_check_gate_requirement_mismatch_absent_resolution_is_unknown_not_mismatch():
+    """A record predating this field (or one whose resolution never captured
+    this flag) must read as UNKNOWN -- never as a manufactured mismatch and
+    never as a false agreement."""
+    assert check_gate_requirement_mismatch(
+        {}, flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    ) is None
+    assert check_gate_requirement_mismatch(
+        {"gate_requirement_resolution": {"OTHER_FLAG": True}},
+        flag="VNX_CI_GATE_REQUIRED", reader_value=True,
+    ) is None
 
 
 def test_pr_number_from_pr_id_shapes():

@@ -844,6 +844,62 @@ def test_request_ci_gate_with_contract_creates_contract_file(gate_env, monkeypat
     assert stored["gate"] == "ci_gate"
 
 
+def test_request_ci_gate_stamps_requirement_mismatch_onto_obligation(gate_env, monkeypatch):
+    """OI-1462: when the vervuller's own resolution of VNX_CI_GATE_REQUIRED
+    disagrees with what the obligation's writer (the eiser) stamped at
+    registration time, that mismatch must land on the obligation record --
+    never a silent skip."""
+    import review_gate_manager as rgm
+    from gate_obligations import obligation_path, register_obligation
+
+    state_dir = gate_env["state_dir"]
+    dispatch_id = "20260826-oi1462-mismatch"
+    register_obligation(
+        state_dir, dispatch_id=dispatch_id, gate="ci_gate", project_id="vnx-dev",
+        gate_requirement_resolution={"VNX_CI_GATE_REQUIRED": True},
+    )
+
+    manager = rgm.ReviewGateManager()
+    monkeypatch.setattr("config_runtime.get_bool", lambda key: False)
+
+    with patch("gate_request_handler.shutil.which", return_value="/usr/bin/gh"):
+        manager._request_ci_gate(
+            pr_number=999, branch="feat/test", risk_class="medium",
+            changed_files=[], mode="per_pr", dispatch_id=dispatch_id,
+        )
+
+    record = json.loads(obligation_path(state_dir, dispatch_id).read_text())
+    mismatch = record["gate_requirement_mismatch"]
+    assert mismatch["flag"] == "VNX_CI_GATE_REQUIRED"
+    assert mismatch["writer_value"] is True
+    assert mismatch["reader_value"] is False
+
+
+def test_request_ci_gate_no_mismatch_when_resolutions_agree(gate_env, monkeypatch):
+    """Control case: when both sides agree, no mismatch field is written."""
+    import review_gate_manager as rgm
+    from gate_obligations import obligation_path, register_obligation
+
+    state_dir = gate_env["state_dir"]
+    dispatch_id = "20260826-oi1462-agree"
+    register_obligation(
+        state_dir, dispatch_id=dispatch_id, gate="ci_gate", project_id="vnx-dev",
+        gate_requirement_resolution={"VNX_CI_GATE_REQUIRED": False},
+    )
+
+    manager = rgm.ReviewGateManager()
+    monkeypatch.setattr("config_runtime.get_bool", lambda key: False)
+
+    with patch("gate_request_handler.shutil.which", return_value="/usr/bin/gh"):
+        manager._request_ci_gate(
+            pr_number=998, branch="feat/test", risk_class="medium",
+            changed_files=[], mode="per_pr", dispatch_id=dispatch_id,
+        )
+
+    record = json.loads(obligation_path(state_dir, dispatch_id).read_text())
+    assert "gate_requirement_mismatch" not in record
+
+
 def test_ci_gate_contract_result_discoverable_by_find_gate_result(gate_env):
     """Finding 2: ci_gate result written with pr_id='PR-73' is found by _find_gate_result('ci_gate','PR-73',...)."""
     import closure_verifier as cv

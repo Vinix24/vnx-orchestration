@@ -7,6 +7,7 @@ Methods handle creating gate request payloads for Gemini, Codex, and Claude GitH
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -27,6 +28,8 @@ from claude_github_receipt import (
     STATE_BLOCKED,
     STATE_COMPLETED,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Fixed fallback order for review-gate takeover (review-gate-provider-agnostic
@@ -58,6 +61,51 @@ class GateRequestHandlerMixin:
     def _ci_gate_available(self) -> bool:
         import config_runtime
         return config_runtime.get_bool("VNX_CI_GATE_REQUIRED") and shutil.which("gh") is not None
+
+    def _check_ci_gate_requirement_mismatch(self, dispatch_id: str) -> None:
+        """OI-1462: compare THIS process's (the vervuller's) own resolution of
+        ``VNX_CI_GATE_REQUIRED`` against what the obligation's writer (the
+        eiser, running earlier in a possibly different environment) stamped
+        at registration time. A mismatch is a benoemde condition — logged
+        loudly and persisted onto the obligation record — never a silent
+        skip, since the whole defect class is two processes disagreeing on
+        the same flag with nothing noticing.
+
+        Best-effort: dispatch_id may be blank (non-obligation call sites),
+        the obligation may not exist yet, or bookkeeping may fail — none of
+        that may ever break an actual gate request.
+        """
+        if not dispatch_id:
+            return
+        try:
+            import config_runtime
+            from gate_obligations import (
+                check_gate_requirement_mismatch,
+                obligation_path,
+                update_obligation,
+            )
+            path = obligation_path(self.state_dir, dispatch_id)
+            if not path.exists():
+                return
+            record = json.loads(path.read_text(encoding="utf-8"))
+            mismatch = check_gate_requirement_mismatch(
+                record, flag="VNX_CI_GATE_REQUIRED",
+                reader_value=config_runtime.get_bool("VNX_CI_GATE_REQUIRED"),
+            )
+            if mismatch is None:
+                return
+            logger.warning(
+                "gate_request_handler: cross-process gate-requirement mismatch "
+                "for dispatch=%s flag=%s writer=%s reader=%s -- the eiser and "
+                "the vervuller resolved VNX_CI_GATE_REQUIRED differently",
+                dispatch_id, mismatch["flag"], mismatch["writer_value"], mismatch["reader_value"],
+            )
+            update_obligation(path, gate_requirement_mismatch=mismatch)
+        except Exception as exc:  # noqa: BLE001 — mismatch detection must never block a gate request
+            logger.debug(
+                "gate_request_handler: ci_gate requirement-mismatch check skipped for dispatch=%s: %s",
+                dispatch_id, exc,
+            )
 
     def _kimi_gate_runner_path(self) -> Path:
         return Path(__file__).resolve().parent.parent / "kimi_gate.py"
@@ -904,6 +952,7 @@ class GateRequestHandlerMixin:
         from review_gate_manager import _utc_now
 
         available = self._ci_gate_available()
+        self._check_ci_gate_requirement_mismatch(dispatch_id)
         requested_at = _utc_now()
         payload: Dict[str, Any] = {
             "gate": "ci_gate",

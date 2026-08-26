@@ -171,6 +171,7 @@ def register_obligation(
     pr_number: Optional[int] = None,
     pr_id: Optional[str] = None,
     branch: Optional[str] = None,
+    gate_requirement_resolution: Optional[Dict[str, Any]] = None,
 ) -> Optional[Path]:
     """Register the review-gate obligation for a door-accepted dispatch.
 
@@ -185,6 +186,15 @@ def register_obligation(
     gate uses to find a PR's declared gate: ``pr_number`` is only derivable
     for numeric pr_ids, so alphanumeric labels (PR-HYG-1) would otherwise be
     unfindable at merge time.
+
+    ``gate_requirement_resolution`` (OI-1462): a snapshot of the gate-requirement
+    config flags (e.g. ``{"VNX_CI_GATE_REQUIRED": True}``) as THIS process —
+    the eiser — resolved them at registration time. The fulfiller process runs
+    later, in a different environment, and may resolve the same flags
+    differently; :func:`check_gate_requirement_mismatch` compares the two.
+    None (the default) when the caller has no resolution to stamp — a record
+    written before this field existed, or by a caller that never captured
+    one, carries no resolution info; that is UNKNOWN, never "no requirement".
     """
     gate = (gate or "").strip()
     dispatch_id = (dispatch_id or "").strip()
@@ -212,6 +222,7 @@ def register_obligation(
             "result_path": None,
             "reason": None,
             "reason_detail": None,
+            "gate_requirement_resolution": gate_requirement_resolution,
         }
         _atomic_write_json(path, record)
         return path
@@ -221,6 +232,38 @@ def register_obligation(
             dispatch_id, gate, exc,
         )
         return None
+
+
+def check_gate_requirement_mismatch(
+    record: Dict[str, Any], *, flag: str, reader_value: bool,
+) -> Optional[Dict[str, Any]]:
+    """Compare a fulfiller's own resolution of ``flag`` against the value the
+    obligation's writer stamped at registration time (OI-1462: the eiser and
+    the vervuller run in different processes / environments and can resolve
+    the SAME config flag through ``config_runtime.get_bool`` differently).
+
+    Returns None when there is nothing to compare — the obligation predates
+    :data:`register_obligation`'s ``gate_requirement_resolution`` field, or
+    never had ``flag`` stamped, or the two sides agree. An absent resolution
+    is UNKNOWN, never "no requirement": this deliberately never manufactures
+    a mismatch (or a match) out of missing data.
+
+    Returns a mismatch dict — never a bare bool — so the caller has concrete
+    values to log and persist instead of a silent skip.
+    """
+    resolution = record.get("gate_requirement_resolution")
+    if not isinstance(resolution, dict) or flag not in resolution:
+        return None
+    writer_value = bool(resolution[flag])
+    reader_value = bool(reader_value)
+    if writer_value == reader_value:
+        return None
+    return {
+        "flag": flag,
+        "writer_value": writer_value,
+        "reader_value": reader_value,
+        "detected_at": _utc_now_iso(),
+    }
 
 
 def register_no_gate_obligation(
@@ -345,6 +388,7 @@ __all__ = [
     "pr_number_from_pr_id",
     "register_obligation",
     "register_no_gate_obligation",
+    "check_gate_requirement_mismatch",
     "iter_obligations",
     "update_obligation",
 ]
