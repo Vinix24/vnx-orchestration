@@ -474,19 +474,42 @@ def test_reprocess_stale_commit_sha_refuses(module, gate_name, dispatch_prefix, 
 
 
 @pytest.mark.parametrize("module,gate_name,dispatch_prefix", _GATES)
-def test_reprocess_no_identity_anchor_refuses_when_result_slot_superseded(
-    module, gate_name, dispatch_prefix, tmp_path, monkeypatch,
+def test_reprocess_refuses_to_overwrite_superseded_terminal_record(
+    module, gate_name, dispatch_prefix, tmp_path, monkeypatch, capsys,
 ):
-    """A LATER dispatch for the same PR overwrote pr-<N>-<gate>.json before
-    this EARLIER dispatch_id was ever reprocessed — there is no addressable
-    historical commit_sha for THIS exact dispatch_id left on disk."""
+    """A LATER dispatch for the same PR overwrote pr-<N>-<gate>.json with a
+    real, terminal ``pass`` before this EARLIER dispatch_id was ever
+    reprocessed — there is no addressable historical commit_sha for THIS
+    exact dispatch_id left on disk, so --reprocess still computes its OWN
+    verdict as ``reason="reprocess_no_identity_anchor"`` /
+    ``status="unavailable"``.
+
+    Before the OI-1469/OI-1470 fix (gate_recorder.write_result_guarded /
+    ``_check_overwrite_guard``), this test asserted the OPPOSITE of what
+    should happen: that this refused reprocess OVERWRITES the on-disk
+    pr-777-<gate>.json, replacing the existing terminal ``status="pass"``
+    with ``status="unavailable"``. That old assertion codified the defect
+    rather than a requirement — a later dispatch's inability to verify ITS
+    OWN identity must never erase a DIFFERENT, already-decided verdict
+    sitting in the same shared results slot. Exactly this shape of write (a
+    non-terminal/outage status erasing a real terminal one) happened for
+    real FIVE times in one day (2026-08-26), across two providers (glm,
+    codex) and four independent writers — glm_gate's own live run via an
+    OpenRouter 402, glm_gate's own ``--reprocess`` refusal,
+    gate_obligation_runner (twice, one of those AFTER this exact defect
+    class had already been named, filed, and communicated), and codex_gate
+    on a usage-limit exit. The guard now refuses that specific write: the
+    refusal (``rc == 1``) still stands, but the EXISTING terminal record on
+    disk must survive completely unchanged — not merely "not literally
+    unavailable"."""
     data_dir = tmp_path / "data"
     earlier_id = f"{dispatch_prefix}-pr777-1700000000"
     later_id = f"{dispatch_prefix}-pr777-1700000999"
     _write(data_dir, earlier_id, _REAL_PASS_REPORT)
     results_dir = data_dir / "state" / "review_gates" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-    (results_dir / f"pr-777-{gate_name}.json").write_text(
+    out = results_dir / f"pr-777-{gate_name}.json"
+    out.write_text(
         json.dumps({
             "gate": gate_name, "pr_id": "777", "dispatch_id": later_id,
             "commit_sha": "somesha", "status": "pass",
@@ -499,10 +522,51 @@ def test_reprocess_no_identity_anchor_refuses_when_result_slot_superseded(
     rc = module.main(["--pr", "777", "--reprocess", earlier_id, "--data-dir", str(data_dir)])
 
     assert rc == 1
-    out = results_dir / f"pr-777-{gate_name}.json"
+    # The refusal itself is reported (gate_recorder's overwrite-guard log
+    # line, propagated through the gate's own stderr message) — the reason
+    # is not silently swallowed, only the disk write is blocked.
+    captured = capsys.readouterr()
+    assert "refusing to overwrite" in captured.err
+    assert "status='pass'" in captured.err
+    assert "status='unavailable'" in captured.err
     record = json.loads(out.read_text(encoding="utf-8"))
+    # The EXISTING terminal record must be untouched on every identity
+    # field, not just "status didn't become unavailable".
+    assert record["status"] == "pass"
+    assert record["dispatch_id"] == later_id
+    assert record["commit_sha"] == "somesha"
+
+
+@pytest.mark.parametrize("module,gate_name,dispatch_prefix", _GATES)
+def test_reprocess_no_identity_anchor_writes_when_slot_is_empty(
+    module, gate_name, dispatch_prefix, tmp_path, monkeypatch, capsys,
+):
+    """Companion to the guard-refusal test above: when NOTHING occupies the
+    pr-<N>-<gate>.json slot yet, there is no terminal verdict to protect, so
+    --reprocess's own ``reason="reprocess_no_identity_anchor"`` /
+    ``status="unavailable"`` verdict must land on disk normally. Without
+    this case, a passing guard-refusal test alone cannot distinguish "the
+    write is correctly guarded" from "the write is silently broken for
+    everyone" — the guard must only ever protect an EXISTING terminal
+    result, never freeze the slot shut."""
+    data_dir = tmp_path / "data"
+    dispatch_id = f"{dispatch_prefix}-pr777-1700000000"
+    _write(data_dir, dispatch_id, _REAL_PASS_REPORT)
+    # Deliberately no results file/dir at all — an EMPTY slot, not a
+    # superseded one.
+    monkeypatch.setattr(module, "get_pr_head_branch", lambda pr_number: "feature/x")
+    monkeypatch.setattr(module, "get_pr_head_sha", lambda pr_number: "somesha")
+
+    rc = module.main(["--pr", "777", "--reprocess", dispatch_id, "--data-dir", str(data_dir)])
+    out = data_dir / "state" / "review_gates" / "results" / f"pr-777-{gate_name}.json"
+    record = json.loads(out.read_text(encoding="utf-8"))
+
+    assert rc == 1
     assert record["status"] == "unavailable"
     assert record["reason"] == "reprocess_no_identity_anchor"
+    assert record["evidence_source"] == "reprocessed"
+    captured = capsys.readouterr()
+    assert "reprocess_no_identity_anchor" in captured.out
 
 
 @pytest.mark.parametrize("module,gate_name,dispatch_prefix", _GATES)

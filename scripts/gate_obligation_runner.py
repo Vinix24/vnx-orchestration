@@ -1164,6 +1164,30 @@ def fulfill_obligation(
         except (OSError, json.JSONDecodeError) as exc:
             _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
 
+        # OI-1469: "provider_not_installed" means the required CLI binary was
+        # missing from THIS RUNNER's own process environment (e.g. a
+        # launchd/cron PATH that never sourced it) at the moment the shared
+        # gate engine checked ``shutil.which`` — a fact about the runner, not
+        # about the PR. Booking it in results/ would let a merge-blocking
+        # evidence trail be polluted by whichever process happened to run
+        # last without the binary on PATH (measured live: PR #1694). Remove
+        # the record this fulfilment attempt just caused the engine to write
+        # for exactly that reason — the obligation still stays pending below
+        # with a named reason, so a later run from a properly configured
+        # environment can still fulfil it and write a real result.
+        if result_status == STATUS_NOT_EXECUTABLE and result_reason == "provider_not_installed":
+            try:
+                if result_file.exists():
+                    result_file.unlink()
+                    _LOG.warning(
+                        "gate_obligation_runner: removed provider_not_installed "
+                        "result for pr=%s gate=%s — provider availability is an "
+                        "environment fact, not PR evidence (OI-1469)",
+                        pr_number, gate,
+                    )
+            except OSError as exc:
+                _LOG.debug("could not remove provider_not_installed result for pr-%s-%s: %s", pr_number, gate, exc)
+
         if result_status in _TEMPORARY_RESULT_STATUSES:
             temp_reason = "gate_run_in_progress"
             temp_detail = (

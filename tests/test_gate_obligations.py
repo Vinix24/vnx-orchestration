@@ -38,8 +38,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
 import gate_obligation_runner as runner
+import governance_receipts
 import producer_freshness
 from dispatch_cli import run_dispatch
+from gate_report_generator import GateReportGeneratorMixin
 from gate_obligations import (
     NO_GATE_KEY,
     REASON_NO_PR_BRANCH_GONE,
@@ -118,9 +120,19 @@ def _read_obligation(state_dir: Path, dispatch_id: str) -> dict:
     return json.loads(obligation_path(state_dir, dispatch_id).read_text(encoding="utf-8"))
 
 
-class _FakeManager:
+class _FakeManager(GateReportGeneratorMixin):
     """Stands in for ReviewGateManager: writes the request+result records the
     real manager's request_and_execute produces, without running any gate.
+
+    The not_executable result path routes through the REAL
+    ``GateReportGeneratorMixin._write_not_executable_result`` (mixed in
+    above) instead of a bare write. That method is the actual OI-1469/
+    OI-1470/OI-1471 request-time guard fix: a fake that clobbers a slot
+    unconditionally would prove nothing about whether the guard the
+    production writer now goes through actually holds. Other statuses
+    ("completed", "pass", "running", "unavailable") are synthetic
+    scaffolding for the runner's own classification logic and are not
+    produced by any single guarded writer, so they keep the plain write.
 
     ``result_status``/``result_reason`` let a test control what the gate
     RESULT record reports (e.g. ``status="not_executable", reason=
@@ -145,6 +157,10 @@ class _FakeManager:
     def _result_path(self, gate: str, pr_number: int) -> Path:
         return self.state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
 
+    def _contract_result_path(self, gate: str, pr_id: str) -> Path:
+        slug = pr_id.lower().replace("-", "")
+        return self.state_dir / "review_gates" / "results" / f"{slug}-{gate}-contract.json"
+
     def request_and_execute(self, *, pr_number, branch, review_stack, risk_class,
                             changed_files, mode, dispatch_id=""):
         self.calls.append(
@@ -157,6 +173,14 @@ class _FakeManager:
                 json.dumps({"gate": gate, "pr_number": pr_number, "status": "completed"}),
                 encoding="utf-8",
             )
+            if self.result_status == "not_executable":
+                reason = self.result_reason or "unknown_reason"
+                self._write_not_executable_result(
+                    gate=gate, pr_number=pr_number, pr_id="",
+                    reason=reason, reason_detail=reason,
+                    dispatch_id=dispatch_id,
+                )
+                continue
             result_payload = {"gate": gate, "pr_number": pr_number, "status": self.result_status}
             if self.result_reason is not None:
                 result_payload["reason"] = self.result_reason
@@ -174,6 +198,10 @@ def _patch_manager(monkeypatch, manager: "_FakeManager") -> None:
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
+    # _write_not_executable_result (mixed into _FakeManager, real production
+    # code) imports _utc_now from review_gate_manager -- this module is
+    # monkeypatched out for the whole test, so the stand-in must carry it too.
+    fake_rgm._utc_now = governance_receipts.utc_now_iso
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
 
 
@@ -788,6 +816,84 @@ def test_runner_leaves_pending_on_provider_disabled_result(tmp_path, monkeypatch
     assert record["reason"] == "gate_parked"
     assert "parked" in record["reason_detail"]
     assert "not broken" in record["reason_detail"]
+
+
+def test_runner_removes_provider_not_installed_result_record(tmp_path, monkeypatch):
+    """OI-1469: provider availability is a fact about THIS RUNNER's own
+    process environment (launchd/cron PATH), never about the PR. Measured
+    live against PR #1694: the engine wrote status=not_executable,
+    reason=provider_not_installed, contract_hash='' into results/ as if it
+    were PR evidence. The obligation must stay pending with a named reason
+    (unchanged OI-1400 behavior) AND no such record may survive on disk —
+    a subsequent closure/producer-freshness reader must not see a
+    not_executable "verdict" that is really just a missing binary on this
+    one runner's PATH."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260826-oi1469-not-installed", gate="codex_gate",
+        project_id="vnx-dev", pr_number=1694,
+    )
+    manager = _FakeManager(
+        state_dir, result_status="not_executable", result_reason="provider_not_installed",
+    )
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 1
+    record = _read_obligation(state_dir, "20260826-oi1469-not-installed")
+    assert record["status"] == STATUS_PENDING
+    assert record["attempts"] == 1
+    assert record["reason"] == "gate_parked"
+
+    result_file = manager._result_path("codex_gate", 1694)
+    assert not result_file.exists(), (
+        "provider_not_installed must never survive as a gate result record — "
+        "it is an environment fact about this runner, not PR evidence (OI-1469)"
+    )
+
+
+def test_runner_leaves_pre_existing_pass_untouched_on_provider_not_installed(tmp_path, monkeypatch):
+    """OI-1469/OI-1470 composition: if the slot already carries a real,
+    evidenced pass, gate_recorder's overwrite guard (OI-1470/OI-1471)
+    refuses the provider_not_installed write outright — the file on disk is
+    still the original pass, so this runner's own cleanup step must find
+    nothing matching provider_not_installed to remove, and the obligation
+    must report fulfilled off the real, untouched evidence.
+
+    ``request_and_execute`` runs unmodified here -- no wrapper that
+    manufactures the "unchanged" outcome the assertions below check for.
+    ``_FakeManager``'s not_executable path already routes through the real
+    ``_write_not_executable_result`` (see its class docstring), so this test
+    exercises the actual guard, not a stand-in for it. Before OI-1469/
+    OI-1470/OI-1471 (gate_report_generator._write_not_executable_result
+    routed through gate_recorder.write_result_guarded), this test failed:
+    the bare write clobbered the pass. A wrapper that read-back-and-restored
+    the file around the call made the assertions pass regardless of whether
+    the guard existed at all -- the test proved nothing."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260826-oi1469-protected-pass", gate="codex_gate",
+        project_id="vnx-dev", pr_number=1695,
+    )
+    manager = _FakeManager(state_dir, result_status="not_executable", result_reason="provider_not_installed")
+    result_file = manager._result_path("codex_gate", 1695)
+    result_file.parent.mkdir(parents=True, exist_ok=True)
+    existing_pass = {
+        "gate": "codex_gate", "pr_number": 1695, "status": "pass",
+        "contract_hash": "abc123", "report_path": "/tmp/report.md",
+        "dispatch_id": "codex-gate-pr1695-1",
+    }
+    result_file.write_text(json.dumps(existing_pass), encoding="utf-8")
+
+    _patch_manager(monkeypatch, manager)
+
+    summary = runner.run(state_dir)
+
+    assert summary["pending_after"] == 0
+    record = _read_obligation(state_dir, "20260826-oi1469-protected-pass")
+    assert record["status"] == STATUS_FULFILLED
+    assert json.loads(result_file.read_text(encoding="utf-8")) == existing_pass
 
 
 def test_runner_leaves_pending_on_running_result(tmp_path, monkeypatch):
