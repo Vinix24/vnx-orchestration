@@ -503,3 +503,98 @@ def test_an_any_app_requirement_is_satisfied_by_any_producer(graph):
         graph,
     )
     assert state.state == cc.STATE_PASSED
+
+
+# ---------------------------------------------------------------------------
+# Legacy commit statuses — the other half of the namespace
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "state,expected_status,expected_conclusion",
+    [
+        ("success", "completed", "success"),
+        ("failure", "completed", "failure"),
+        ("error", "completed", "failure"),
+        ("pending", "in_progress", None),
+    ],
+)
+def test_commit_statuses_map_onto_the_check_run_vocabulary(
+    monkeypatch, tmp_path, state, expected_status, expected_conclusion
+):
+    monkeypatch.setattr(
+        cc, "_gh_json", lambda *a, **k: {"statuses": [{"context": "legacy ci", "state": state}]}
+    )
+    [entry] = cc.fetch_commit_statuses(tmp_path, "a" * 40)
+    assert entry["name"] == "legacy ci"
+    assert entry["status"] == expected_status
+    assert entry["conclusion"] == expected_conclusion
+
+
+def test_an_unrecognised_status_state_holds_the_verdict_rather_than_deciding_it(
+    monkeypatch, tmp_path
+):
+    """A future state value must not silently pass or fail."""
+    monkeypatch.setattr(
+        cc, "_gh_json", lambda *a, **k: {"statuses": [{"context": "x", "state": "warped"}]}
+    )
+    [entry] = cc.fetch_commit_statuses(tmp_path, "a" * 40)
+    assert entry["status"] == "in_progress" and entry["conclusion"] is None
+
+
+def test_only_the_newest_status_per_context_counts(monkeypatch, tmp_path):
+    """GitHub lists the history newest-first; a superseded older state is not
+    what branch protection evaluates."""
+    monkeypatch.setattr(
+        cc, "_gh_json",
+        lambda *a, **k: {"statuses": [
+            {"context": "legacy ci", "state": "success"},
+            {"context": "legacy ci", "state": "failure"},
+        ]},
+    )
+    entries = cc.fetch_commit_statuses(tmp_path, "a" * 40)
+    assert len(entries) == 1 and entries[0]["conclusion"] == "success"
+
+
+def test_a_required_context_satisfied_by_a_status_is_not_reported_as_missing(graph):
+    """Branch protection's legacy `contexts[]` can be satisfied by a commit
+    STATUS rather than a check run. Reading only check runs left such a
+    context permanently unseen, blocking a PR on evidence that was there all
+    along. Found by codex_gate on this PR.
+    """
+    status_evidence = {"name": "legacy ci", "status": "completed", "conclusion": "success"}
+    [state] = cc.classify_contexts(
+        [cc.RequiredCheck("legacy ci", None)], [status_evidence], [_run()], graph
+    )
+    assert state.state == cc.STATE_PASSED
+
+
+def test_commit_statuses_refuse_a_non_mapping_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(cc, "_gh_json", lambda *a, **k: [1, 2, 3])
+    with pytest.raises(cc.CIContextsError):
+        cc.fetch_commit_statuses(tmp_path, "a" * 40)
+
+
+def test_evaluate_commit_consults_both_evidence_sources(monkeypatch, tmp_path):
+    """The wiring itself, not just the fetcher. A required context satisfied
+    only by a commit status must come back `passed` from the top-level entry
+    point — dropping the status source from evaluate_commit is a one-line
+    regression that every fetcher-level test would survive.
+    """
+    workflows = _write_workflow(tmp_path, "vnx-ci.yml", _GRAPH_BODY)
+    monkeypatch.setattr(
+        cc, "fetch_required_checks",
+        lambda *a, **k: [cc.RequiredCheck("Profile A", None), cc.RequiredCheck("legacy ci", None)],
+    )
+    monkeypatch.setattr(cc, "fetch_check_runs", lambda *a, **k: [_check("Profile A")])
+    monkeypatch.setattr(
+        cc, "fetch_commit_statuses",
+        lambda *a, **k: [{"name": "legacy ci", "status": "completed", "conclusion": "success"}],
+    )
+    monkeypatch.setattr(cc, "fetch_workflow_runs", lambda *a, **k: [_run()])
+
+    states = cc.evaluate_commit(tmp_path, "a" * 40, workflows_dir=workflows)
+    assert {s.context: s.state for s in states} == {
+        "Profile A": cc.STATE_PASSED,
+        "legacy ci": cc.STATE_PASSED,
+    }

@@ -673,6 +673,66 @@ def fetch_check_runs(project_root: Path, head_sha: str, timeout: int = 20) -> Li
     return runs
 
 
+#: Commit-status states mapped onto the check-run vocabulary the classifier
+#: already speaks. GitHub's two mechanisms are separate APIs but branch
+#: protection treats their contexts as one namespace, so the classifier must
+#: too — otherwise a required context satisfied by a STATUS reads as absent.
+_STATUS_STATE_TO_CONCLUSION = {
+    "success": ("completed", "success"),
+    "failure": ("completed", "failure"),
+    "error": ("completed", "failure"),
+    "pending": ("in_progress", None),
+}
+
+
+def fetch_commit_statuses(project_root: Path, head_sha: str, timeout: int = 20) -> List[Dict[str, Any]]:
+    """Legacy commit statuses on ``head_sha``, in check-run shape.
+
+    Branch protection's legacy ``contexts[]`` can be satisfied by a commit
+    STATUS (the Statuses API) rather than a check run (the Checks API) — a
+    non-Actions CI, or anything posting through ``POST /statuses``. Reading
+    only check runs leaves such a context permanently unseen, so a PR whose
+    required context genuinely passed would be blocked forever on evidence
+    that was there all along.
+
+    Only the most recent status per context is returned: GitHub's combined
+    endpoint lists the history newest-first, and an older superseded state is
+    not what branch protection evaluates.
+
+    An unrecognised state maps to a non-terminal status rather than to a
+    conclusion, so a future state value holds the verdict at "running" instead
+    of silently passing or failing.
+    """
+    payload = _gh_json(
+        ["api", f"repos/{{owner}}/{{repo}}/commits/{head_sha}/status?per_page=100"],
+        project_root,
+        timeout,
+    )
+    if not isinstance(payload, dict):
+        raise CIContextsError(f"commit status payload is {type(payload).__name__}, expected a mapping")
+    seen: Set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for status in payload.get("statuses") or []:
+        if not isinstance(status, dict):
+            continue
+        context = status.get("context")
+        if not isinstance(context, str) or not context or context in seen:
+            continue
+        seen.add(context)
+        state, conclusion = _STATUS_STATE_TO_CONCLUSION.get(
+            (status.get("state") or "").lower(), ("in_progress", None)
+        )
+        entry: Dict[str, Any] = {"name": context, "status": state, "conclusion": conclusion}
+        # A status has no Checks-API app object unless GitHub supplies one; an
+        # app-bound requirement is a `checks[]` entry, which only check runs
+        # satisfy, so leaving this absent is the correct answer rather than a
+        # gap.
+        if isinstance(status.get("app"), dict):
+            entry["app"] = status["app"]
+        out.append(entry)
+    return out
+
+
 def fetch_workflow_runs(project_root: Path, head_sha: str, timeout: int = 20) -> List[Dict[str, Any]]:
     """The workflow runs on ``head_sha``, with id/name/status/conclusion."""
     payload = _gh_json(
@@ -727,7 +787,9 @@ def evaluate_commit(
         else fetch_required_checks(root, branch, timeout)
     )
     graph = parse_workflow_graph(workflows_dir or (root / ".github" / "workflows"))
-    check_runs = fetch_check_runs(root, head_sha, timeout)
+    check_runs = fetch_check_runs(root, head_sha, timeout) + fetch_commit_statuses(
+        root, head_sha, timeout
+    )
     workflow_runs = fetch_workflow_runs(root, head_sha, timeout)
 
     first = classify_contexts(contexts, check_runs, workflow_runs, graph)
