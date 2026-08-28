@@ -162,6 +162,14 @@ def _classify_findings(
     return blocking, advisory
 
 
+def _cleanup_orphan_report(report_file: Path) -> None:
+    """Best-effort removal of a report whose result record never landed."""
+    try:
+        report_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _write_result_record(
     results_dir: Path,
     gate: str,
@@ -170,30 +178,54 @@ def _write_result_record(
     result_payload: Dict[str, Any],
     report_file: Path,
 ) -> Optional[str]:
-    """Write result JSON; return error detail string on failure, else None."""
-    try:
-        if pr_id:
-            result_file = results_dir / f"{pr_id.lower().replace('-', '')}-{gate}-contract.json"
-        elif pr_number is not None:
-            result_file = results_dir / f"pr-{pr_number}-{gate}.json"
-        else:
-            raise ValueError("pr_number or pr_id required")
+    """Write result JSON through the overwrite guard; error detail or None.
 
-        result_json = json.dumps(result_payload, indent=2)
-        json.loads(result_json)  # verify valid JSON (GATE-12 step 5)
-        result_file.write_text(result_json, encoding="utf-8")
+    OI-1472: this was the last PRODUCTION writer of a
+    ``review_gates/results/`` record still calling ``write_text`` directly,
+    so the OI-1469/OI-1470 overwrite guard did not cover it. That matters
+    even though the payload this writer builds — a decided verdict WITH
+    ``contract_hash`` and ``report_path`` — is one the guard normally admits:
+
+    1. A bare ``write_text`` is not atomic. A crash or a full disk mid-write
+       leaves a torn file, which is exactly the unreadable-but-present shape
+       ``gate_recorder._check_overwrite_guard`` refuses on. This writer could
+       manufacture the corruption the guard exists to detect.
+       :func:`gate_recorder.write_result_guarded` writes tmp + ``os.replace``.
+    2. It also bypassed the read side, so it would overwrite a torn record
+       left by something else instead of refusing to guess what it had been.
+
+    A guard refusal is NOT an I/O failure and is reported as its own detail
+    string. It deliberately does NOT orphan-clean the report: the
+    pre-existing record stays on disk still pointing at its own report, and
+    the fresh report is kept as evidence of what the refused run said.
+    Deleting it would repeat the evidence loss this guard was built to stop.
+    """
+    result_file = gate_recorder.result_file_path(results_dir, gate, pr_number, pr_id)
+    try:
+        if result_file is None:
+            raise ValueError("pr_number or pr_id required")
+        json.loads(json.dumps(result_payload, indent=2))  # verify valid JSON (GATE-12 step 5)
+        _payload_on_disk, written = gate_recorder.write_result_guarded(
+            result_file, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        try:
-            report_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _cleanup_orphan_report(report_file)
         return f"Failed to write result record: {exc}"
 
+    if not written:
+        logger.warning(
+            "gate_artifacts: result write REFUSED by the overwrite guard "
+            "gate=%s pr=%s path=%s -- keeping the fresh report at %s as "
+            "evidence of the refused run (OI-1472)",
+            gate, pr_id or pr_number, result_file, report_file,
+        )
+        return (
+            "Result write refused by the overwrite guard: an existing decided, "
+            "evidenced verdict for this gate would have been downgraded"
+        )
+
     if not result_file.exists():
-        try:
-            report_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _cleanup_orphan_report(report_file)
         return "Result file missing after write"
     return None
 

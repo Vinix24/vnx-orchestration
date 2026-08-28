@@ -287,9 +287,12 @@ def _check_overwrite_guard(
         # distinct states. An unreadable-but-present file must never read as
         # "nothing there" -- that fails the guard OPEN on exactly the shape a
         # non-atomic writer (blocking-1's raw ``write_text`` before this fix,
-        # and every writer still listed unguarded in the dispatch report) can
+        # and the two writers OI-1472 later routed through the guard) can
         # produce: a torn write over what may have been a decided, evidenced
-        # verdict. Refuse rather than guess.
+        # verdict. Refuse rather than guess. Since OI-1472 no production
+        # writer left in this tree can create that shape itself -- they all
+        # write tmp+replace via write_result_guarded -- but a crash, a full
+        # disk, or a foreign writer still can.
         logger.warning(
             "gate_recorder: REFUSING to overwrite unreadable existing result "
             "gate=%s pr=%s path=%s -- the file exists but could not be "
@@ -346,10 +349,32 @@ def write_result_guarded(
 ) -> Tuple[Dict[str, Any], bool]:
     """Write a gate result unless it would downgrade an existing terminal one.
 
-    Shared low-level write primitive (OI-1469/OI-1470): every writer of
-    ``results/pr-<N>-<gate>.json`` that is not required to raise on refusal
-    (see :func:`record_terminal_result` for the raising variant) should
-    route through this so the overwrite guard applies by construction.
+    Shared low-level write primitive (OI-1469/OI-1470). Every writer of a
+    ``review_gates/results/`` record that is not required to raise on
+    refusal (see :func:`record_terminal_result` for the raising variant)
+    routes through this, so the overwrite guard applies by construction.
+
+    That sentence was a recommendation until OI-1472 and is now a fact
+    about this tree — a claim worth stating only because it is checkable.
+    The complete set of production writers, all guarded:
+
+    ==========================================  ==========================
+    writer                                      variant
+    ==========================================  ==========================
+    ``record_terminal_result``                  raises on refusal
+    ``record_not_executable``                   via this function
+    ``record_failure`` (and its thin wrapper
+    ``record_failure_simple``)                  via this function
+    ``gate_report_generator``
+    ``._write_not_executable_result``           via this function
+    ``gate_report_generator``
+    ``._write_failure_result``                  via this function
+    ``gate_artifacts._write_result_record``     via this function
+    ==========================================  ==========================
+
+    A new writer that calls ``write_text`` on a results path instead is
+    outside that table and outside the guard; ``tests/
+    test_oi1472_residual_guard_writers.py`` fails when one appears.
     Returns ``(payload_on_disk, written)`` — the new payload and ``True`` on
     success, or the unchanged existing payload and ``False`` when refused.
     On a refusal caused by an unreadable/corrupt existing file (the
