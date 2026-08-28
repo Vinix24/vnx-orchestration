@@ -698,3 +698,40 @@ def test_the_lock_actually_serialises_two_holders(tmp_path):
         t.join()
     assert overlapped == [], "the lock let two holders into the critical section"
     assert sorted(order) == ["A", "B"], "both holders must eventually run"
+
+
+def test_a_pr_file_reaches_its_own_module_in_full(repo):
+    """A PR file that calls a helper defined beside it referenced nothing at
+    all under an import-only analysis: an empty-but-provable reference set, and
+    an ALLOW on a stale verdict when an intervening commit changed that helper.
+    Found by codex_gate on this PR.
+    """
+    root, base = repo
+    (root / "scripts" / "selfref.py").write_text(
+        "def helper(x):\n    return x + 1\n\n\ndef run(x):\n    return helper(x)\n"
+    )
+    head = _commit(root, "a file that only calls itself")
+    result = gr.referenced_symbols(root, head, ["scripts/selfref.py"])
+    assert result.provable
+    assert ("selfref", gr.WHOLE_MODULE) in result.symbols
+    assert gr.find_blocking_symbols({("selfref", "helper")}, result) == [("selfref", "helper")]
+
+
+def test_a_commit_changing_the_same_file_the_pr_edits_refuses(repo):
+    """End-to-end: the PR edits scripts/consumer.py and so does main."""
+    root, base = repo
+    _git(root, "checkout", "-q", "-b", "feature", base)
+    old_head = base
+    _git(root, "checkout", "-q", "main")
+    path = root / "scripts" / "consumer.py"
+    path.write_text(path.read_text().replace("return helper(x)", "return helper(x) * 2"))
+    _commit(root, "main touches the same file")
+    _git(root, "checkout", "-q", "-B", "feature2", "main")
+    tip = _git(root, "rev-parse", "HEAD").strip()
+
+    decision = gr.can_reanchor(
+        root, old_sha=old_head, new_sha=tip, pr_files=["scripts/consumer.py"],
+        old_contract_hash="h1", new_contract_hash="h1", base_ref="main",
+    )
+    assert not decision.allowed
+    assert ("consumer", "run") in decision.blocking_symbols

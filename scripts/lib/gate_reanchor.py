@@ -20,21 +20,26 @@ So the condition has two halves, and BOTH must hold:
   (b) no commit between the old and the new merge-base touches a symbol this
       PR's own files reach.
 
-(b) is what this module computes. Measured with THIS code over 153 ordered PR
-pairs from 2026-08-26/28, both columns from one run over identical rows:
+(b) is what this module computes. Measured with THIS code over 171 ordered PR
+pairs from 2026-08-26/28, both columns from ONE run over identical rows —
+comparing two semantics across two row sets would show a difference that is
+partly just the row choice:
 
   import depth        allowed         allowed
                       (permissive)    (fail-closed, shipped)
-  direct (default)        88%             76%
-  +1 hop                  76%             68%
-  +2 hops                 71%             64%
-  full closure            63%             57%
+  direct (default)        87%             75%
+  +1 hop                  77%             70%
+  +2 hops                 73%             66%
+  full closure            65%             60%
 
 The right-hand column is what ships. Refusing everything the analysis cannot
 model costs 12 points at the default depth and still re-anchors three quarters
-of the re-gates that were actually paid for. Every one of those refusals came
-from a dynamic import or ``getattr`` in the PR's own files — five of eighteen
-PRs, seven occurrences.
+of the re-gates that were actually paid for. Every refusal it adds comes from
+a dynamic import or ``getattr`` in the PR's own files.
+
+The answer to OI-1471 is therefore neither "it cannot be done" nor "it is
+free": three quarters can be re-anchored, one quarter has to be re-bought,
+and which is which is decided by evidence rather than by a rule of thumb.
 
 The whole sweep took 8.1 seconds including building the 713-module import
 graph from scratch, so (b) is affordable — the outcome the OI left open.
@@ -347,6 +352,16 @@ def referenced_symbols(project_root: Path, ref: str, files: Iterable[str]) -> Re
         except SyntaxError as exc:
             unmodelled.append(f"{path} does not parse at {ref[:12]}: {exc}")
             continue
+
+        # The file's OWN module is reached in full. A PR file that calls a
+        # helper defined beside it referenced nothing at all under an
+        # import-only analysis, so an intervening commit changing that same
+        # helper produced an empty-but-provable reference set and an ALLOW on a
+        # stale verdict. Enumerating which subset of its own file a file "uses"
+        # buys no safety here: the PR is EDITING that module, so a commit in
+        # the range touching it is exactly what must block.
+        out.add((Path(path).stem, WHOLE_MODULE))
+        referenced_modules.add(Path(path).stem)
 
         alias_to_module: Dict[str, str] = {}
         for node in ast.walk(tree):
