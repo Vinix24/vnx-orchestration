@@ -46,7 +46,7 @@ TIER_UNIVERSAL: FrozenSet[str] = frozenset({
 })
 
 TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
-    "staging-list", "promote", "queue-status", "gate-check", "suggest",
+    "staging-list", "promote", "queue-status", "gate-check", "pr-ready", "suggest",
     "cost-report", "analyze-sessions", "intelligence-export",
     "intelligence-import", "init-feature", "bootstrap-skills",
     "bootstrap-terminals", "bootstrap-hooks", "regen-settings", "regen-worker-permissions",
