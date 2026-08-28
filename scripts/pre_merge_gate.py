@@ -48,6 +48,7 @@ from quality_advisory import (
 )
 from cqs_calculator import calculate_cqs
 from gate_findings_bridge import record_gate_finding, resolve_gate_finding
+from required_contexts_gate import check_required_contexts
 
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
@@ -1322,6 +1323,14 @@ def run_gate_checks(
             ))
     else:
         checks.append(check_ci_workflow(project_root, workflow_name=ci_workflow_name))
+
+    # #1691/#1701: what EXISTS on the head is a different question from what
+    # branch protection REQUIRES, and only the second one can see a context
+    # that was never created. Meaningful only for a resolved PR head — a local
+    # working copy has no protected-branch contract to compare against, so the
+    # check is omitted rather than answered with a guess.
+    if pr_head is not None and pr_head.head_ref:
+        checks.append(check_required_contexts(project_root, head_sha=pr_head.head_ref))
 
     if not skip_pytest:
         checks.append(check_pytest(project_root))

@@ -211,6 +211,18 @@ class TestRunGateChecksPRHead:
                 "net_line_deletion_warn": False, "file_deletion_warn": False,
             },
         )
+        # required_contexts runs only for a resolved PR head, which the tests
+        # in this class supply. Stubbed so orchestration tests stay hermetic:
+        # the real check shells out to `gh api .../branches/main/protection`,
+        # and measuring this suite showed exactly one such live call escaping
+        # per run. Its own coverage is in test_pre_merge_gate_required_contexts.py.
+        monkeypatch.setattr(
+            pre_merge_gate, "check_required_contexts",
+            lambda project_root, **kw: {
+                "check": "required_contexts", "status": "GO", "detail": "stub",
+                "contexts": [], "summary": None,
+            },
+        )
 
     def test_without_pr_head_measures_head(self, state_dir, dispatch_dir, tmp_path, monkeypatch):
         captured = {}
@@ -274,6 +286,18 @@ class TestRunGateChecksCIHead:
                 "check": "net_deletion", "status": "GO", "detail": "stub",
                 "deleted_count": 0, "deleted_files": [], "net_line_deletion": 0,
                 "net_line_deletion_warn": False, "file_deletion_warn": False,
+            },
+        )
+        # required_contexts runs only for a resolved PR head, which the tests
+        # in this class supply. Stubbed so orchestration tests stay hermetic:
+        # the real check shells out to `gh api .../branches/main/protection`,
+        # and measuring this suite showed exactly one such live call escaping
+        # per run. Its own coverage is in test_pre_merge_gate_required_contexts.py.
+        monkeypatch.setattr(
+            pre_merge_gate, "check_required_contexts",
+            lambda project_root, **kw: {
+                "check": "required_contexts", "status": "GO", "detail": "stub",
+                "contexts": [], "summary": None,
             },
         )
 
