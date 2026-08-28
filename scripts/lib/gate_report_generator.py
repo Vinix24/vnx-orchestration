@@ -6,9 +6,6 @@ Methods handle writing result records and NDJSON audit entries.
 
 from __future__ import annotations
 
-import json
-import os
-import shutil
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -87,36 +84,31 @@ class GateReportGeneratorMixin:
         pr_id: str,
         reason: str,
         reason_detail: str,
-        binary_name: str,
     ) -> None:
-        """Append a skip-rationale record to the NDJSON audit trail (GATE-9)."""
-        from review_gate_manager import _utc_now
+        """Append a skip-rationale record to the NDJSON audit trail (GATE-9).
 
-        env_flags = {
-            "gemini_review": "VNX_GEMINI_REVIEW_ENABLED",
-            "codex_gate": "VNX_CODEX_HEADLESS_ENABLED",
-            "claude_github_optional": "VNX_CLAUDE_GITHUB_REVIEW_ENABLED",
-            "ci_gate": "VNX_CI_GATE_REQUIRED",
-        }
-        env_var = env_flags.get(gate, "")
-        record = {
-            "event_type": "gate_skip_rationale",
-            "gate": gate,
-            "pr_id": pr_id,
-            "reason": reason,
-            "reason_detail": reason_detail,
-            "provider_check": {
-                "binary_name": binary_name,
-                "binary_found": shutil.which(binary_name) is not None,
-                "env_flag": env_var,
-                "env_value": os.environ.get(env_var, ""),
-            },
-            "compensating_action": "Manual review or operator override required.",
-            "timestamp": _utc_now(),
-        }
-        audit_path = self.state_dir / "gate_execution_audit.ndjson"
-        with open(audit_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        Delegates to :func:`gate_recorder.write_skip_rationale` — the ONE
+        writer of this record shape (OI-1490). This method used to build its
+        own ``record`` dict, with its own copy of the gate->env-flag map and
+        its own raw ``shutil.which(binary_name)`` on a caller-supplied name,
+        appending to the SAME ``gate_execution_audit.ndjson`` as
+        gate_recorder. Two writers of one event_type in one file is how the
+        shapes drift: this copy's env map had already lost ``wiring_gate``,
+        and once gate_recorder learned ``provider_kind`` the same file would
+        have carried two shapes of ``provider_check`` — with the records
+        still doing the invented-binary lookup being exactly the ones a
+        reader filtering on ``provider_kind`` would not see.
+
+        ``binary_name`` is gone from the signature rather than accepted and
+        ignored: the name now comes from the single registry
+        (``gate_recorder.GATE_PROVIDERS``), so a caller can no longer pass a
+        name nobody ever shipped.
+        """
+        from gate_recorder import write_skip_rationale  # noqa: PLC0415
+
+        write_skip_rationale(
+            self.state_dir, gate, pr_id=pr_id, reason=reason, reason_detail=reason_detail,
+        )
 
     def _write_failure_result(
         self,

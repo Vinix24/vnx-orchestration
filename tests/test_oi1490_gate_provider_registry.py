@@ -32,6 +32,7 @@ on THAT path both gates were equally dead. The bug was never kimi-specific.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -229,3 +230,100 @@ def test_shipped_script_runners_are_on_disk():
     for gate in ("kimi_gate", "glm_gate"):
         _kind, name = _rec.GATE_PROVIDERS[gate]
         assert (VNX_ROOT / name).exists(), f"{gate} names a runner that is not on disk: {name}"
+
+
+# ---------------------------------------------------------------------------
+# 5. One writer per record shape
+# ---------------------------------------------------------------------------
+
+# Every module that may append a gate_skip_rationale record. The invariant is
+# that exactly ONE of them builds the record; the rest delegate.
+_AUDIT_WRITER_MODULES = (
+    "scripts/lib/gate_recorder.py",
+    "scripts/lib/gate_report_generator.py",
+    "scripts/lib/gate_request_handler.py",
+    "scripts/gate_runner.py",
+    "scripts/lib/gate_executor.py",
+    "scripts/lib/gate_artifacts.py",
+)
+
+
+def test_only_one_place_builds_a_provider_check_block():
+    """Two writers of one event_type in one file is how shapes drift.
+
+    gate_report_generator._write_skip_rationale used to build its own record
+    for the SAME gate_execution_audit.ndjson, with its own copy of the
+    gate->env-flag map (already missing wiring_gate) and its own raw
+    shutil.which on a caller-supplied name. Once gate_recorder learned
+    provider_kind, that file would have carried two shapes — and the records
+    still doing the invented-binary lookup would be exactly the ones a reader
+    filtering on provider_kind never sees.
+
+    Third time this shape appeared in one day: OI-1472 (writers bypassing the
+    result-slot guard), OI-1486 (writers sharing a fixed tmp name), this one.
+    Each time a second writer nobody counted, because the first one was right.
+    """
+    # A BUILDER is a line that opens a dict literal for the key —
+    # `"provider_check": {`. Matching the bare word instead would flag every
+    # docstring that names it, including this file's own. Found by getting it
+    # wrong first: the initial filter skipped any line starting with a quote,
+    # which is exactly what the real builder line starts with, so it reported
+    # zero builders on a tree that has one.
+    builder_re = re.compile(r'^"provider_check"\s*:\s*\{')
+    builders = []
+    for rel in _AUDIT_WRITER_MODULES:
+        path = VNX_ROOT / rel
+        if not path.exists():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if builder_re.match(line.strip()):
+                builders.append(f"{rel}:{lineno}: {line.strip()[:90]}")
+
+    assert len(builders) == 1, (
+        "exactly one place may construct a provider_check block — the rest must "
+        "delegate to gate_recorder.write_skip_rationale (OI-1490). Found:\n  "
+        + "\n  ".join(builders)
+    )
+    assert builders[0].startswith("scripts/lib/gate_recorder.py"), (
+        f"the one builder must be gate_recorder, found: {builders[0]}"
+    )
+
+
+def test_the_delegating_writer_produces_the_registry_shape(tmp_path, monkeypatch):
+    """Drives the REAL mixin method, not a reimplementation of it."""
+    from gate_report_generator import GateReportGeneratorMixin
+
+    class _Manager(GateReportGeneratorMixin):
+        def __init__(self, state_dir):
+            self.state_dir = state_dir
+
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path))
+    _Manager(tmp_path)._write_skip_rationale(
+        gate="glm_gate", pr_id="42",
+        reason="gate_runner_missing", reason_detail="not shipped",
+    )
+
+    record = json.loads(
+        (tmp_path / "gate_execution_audit.ndjson").read_text().strip().splitlines()[-1]
+    )
+    check = record["provider_check"]
+
+    assert check["provider_kind"] == "script_runner", (
+        "the delegating writer must produce the SAME shape as the direct one, "
+        "or one file carries two shapes of one event_type"
+    )
+    assert check["binary_name"] == "scripts/glm_gate.py"
+    assert check["binary_found"] is True
+
+
+def test_the_gate_env_flag_map_exists_once():
+    """The copy in gate_report_generator had already drifted: four gates where
+    gate_recorder had five, missing wiring_gate. A second copy of a lookup
+    table is a second answer waiting to happen."""
+    generator_src = (VNX_ROOT / "scripts" / "lib" / "gate_report_generator.py").read_text()
+
+    assert "VNX_WIRING_GATE_REQUIRED" not in generator_src
+    assert "VNX_GEMINI_REVIEW_ENABLED" not in generator_src, (
+        "gate->env-flag mapping belongs in gate_recorder._GATE_ENV_FLAGS only"
+    )
+    assert "wiring_gate" in _rec._GATE_ENV_FLAGS

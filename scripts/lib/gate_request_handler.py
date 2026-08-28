@@ -906,7 +906,6 @@ class GateRequestHandlerMixin:
         self._write_skip_rationale(
             gate=gate, pr_id=pr_id or str(pr_number),
             reason=reason, reason_detail=detail,
-            binary_name=binary_name,
         )
 
     def _request_gemini(
@@ -1355,7 +1354,6 @@ class GateRequestHandlerMixin:
             self._write_skip_rationale(
                 gate="glm_gate", pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,
-                binary_name="glm_gate.py",
             )
         atomic_write_json(self._request_path("glm_gate", pr_number), payload)
         return payload
@@ -1410,7 +1408,6 @@ class GateRequestHandlerMixin:
             self._write_skip_rationale(
                 gate="deepseek_gate", pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,
-                binary_name="deepseek_gate.py",
             )
         atomic_write_json(self._request_path("deepseek_gate", pr_number), payload)
         return payload
