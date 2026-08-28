@@ -352,6 +352,9 @@ Gate commands (pre-merge verification):
   pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
                         current head, and what closing each gap costs
                         (exit 0 ready, 1 not ready, 2 unmeasurable)
+  gate-reanchor --pr <N> --gate <G>
+                        Move an existing gate verdict onto the PR's current head when
+                        the reviewed input is provably identical (read-only; --apply writes)
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
 Planning commands (strategic-layer read surface):
@@ -2571,6 +2574,9 @@ main() {
       ;;
     pr-ready)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_ready.py" "$@"
+      ;;
+    gate-reanchor)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"
