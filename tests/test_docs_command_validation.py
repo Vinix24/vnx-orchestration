@@ -52,7 +52,9 @@ def _extract_readme_commands(readme_path: Path) -> set:
 # Necessary but NOT sufficient — see _extract_bin_vnx_commands (OI-1482).
 _BRANCH_RE = re.compile(r"^\s+([a-z][a-z0-9_-]*)\)")
 # `<<DELIM`, `<<'DELIM'`, `<<"DELIM"`, and the `<<-` indented variant.
-_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# Group 1 is the `-` (present only for the tab-stripping form), group 3 the
+# delimiter word.
+_HEREDOC_RE = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 _CASE_OPEN_RE = re.compile(r"(^|\s|;)case\s.*\sin\s*$")
 _ESAC_RE = re.compile(r"^\s*esac\b")
 
@@ -86,17 +88,39 @@ def _extract_bin_vnx_commands(vnx_path: Path) -> set:
     ``regen-worker-permissions``, a real branch whose body is long — the
     fix would have quietly deleted a genuine command from the check.
 
+    Heredoc TERMINATION follows bash exactly, because a terminator matched too
+    eagerly leaves heredoc mode early and lets the phantom back in through a
+    side door. Measured against bash itself, all four shapes:
+
+    ==================  ==========================  ==============
+    opener              terminator line             terminates?
+    ==================  ==========================  ==============
+    ``<<DELIM``         ``"  DELIM"`` (spaces)      no
+    ``<<DELIM``         ``"DELIM "`` (trailing)     no
+    ``<<-DELIM``        ``"\tDELIM"`` (tabs)        YES
+    ``<<-DELIM``        ``"  DELIM"`` (spaces)      no
+    ==================  ==========================  ==============
+
+    So: the plain form needs the delimiter ALONE on the line, and the ``<<-``
+    form strips leading TABS only — never spaces, and never trailing
+    whitespace in either form. A ``line.strip()`` comparison gets all four
+    wrong in the unsafe direction. Erring the other way is contained: an
+    unrecognised terminator swallows the rest of the file, which
+    ``test_the_real_bin_vnx_yields_a_non_trivial_set`` catches.
+
     This stays a small state machine and must never grow into a bash parser,
     the same discipline ``scripts/commands/t0_role_audit.sh`` states for its
     own frontmatter check.
     """
     commands = set()
     heredoc_delim = None
+    heredoc_strips_tabs = False
     case_depth = 0
 
     for line in vnx_path.read_text().splitlines():
         if heredoc_delim is not None:
-            if line.strip() == heredoc_delim:
+            candidate = line.lstrip("\t") if heredoc_strips_tabs else line
+            if candidate == heredoc_delim:
                 heredoc_delim = None
             continue
 
@@ -104,7 +128,8 @@ def _extract_bin_vnx_commands(vnx_path: Path) -> set:
         if not stripped.startswith("#"):
             opened = _HEREDOC_RE.search(line)
             if opened:
-                heredoc_delim = opened.group(2)
+                heredoc_strips_tabs = opened.group(1) == "-"
+                heredoc_delim = opened.group(3)
                 continue
 
         if _CASE_OPEN_RE.search(line):
@@ -291,18 +316,51 @@ HELP
         assert _extract_bin_vnx_commands(vnx) == {"outer", "inner", "sibling"}
 
     def test_unquoted_and_indented_heredocs_are_both_skipped(self, tmp_path):
-        vnx = self._write(tmp_path, """
-  case "$cmd" in
-    real)
-      cat <<USAGE
-    unquoted) not a branch
-USAGE
-      cat <<-'INDENTED'
-    dashed) also not a branch
-	INDENTED
-      ;;
-  esac
-""")
+        vnx = self._write(tmp_path, "\n".join([
+            '  case "$cmd" in',
+            "    real)",
+            "      cat <<USAGE",
+            "    unquoted) not a branch",
+            "USAGE",
+            "      cat <<-'INDENTED'",
+            "    dashed) also not a branch",
+            "\tINDENTED",
+            "      ;;",
+            "  esac",
+        ]))
+
+        assert _extract_bin_vnx_commands(vnx) == {"real"}
+
+    def test_heredoc_termination_follows_bash_exactly(self, tmp_path):
+        """A terminator matched too eagerly is a side door for the phantom.
+
+        Heredoc-awareness is the condition that does the work here, so a
+        ``line.strip()`` comparison — which closes on space-indented and on
+        trailing-whitespace lines that bash does NOT accept — would leave
+        heredoc mode early and put label-shaped prose back in the result.
+        Every row below was measured against bash itself, not recalled:
+
+            <<DELIM   + "  DELIM"    -> body continues   (spaces)
+            <<DELIM   + "DELIM "     -> body continues   (trailing space)
+            <<-DELIM  + "\tDELIM"    -> TERMINATES       (tabs stripped)
+            <<-DELIM  + "  DELIM"    -> body continues   (spaces never count)
+        """
+        vnx = self._write(tmp_path, "\n".join([
+            '  case "$cmd" in',
+            "    real)",
+            "      cat <<USAGE",
+            "  USAGE",                       # space-indented: bash does NOT close
+            "    space_phantom) still heredoc body",
+            "USAGE ",                        # trailing space: bash does NOT close
+            "    trailing_phantom) still heredoc body",
+            "USAGE",                         # bare: closes
+            "      cat <<-DASHED",
+            "  DASHED",                      # spaces, even for <<-: does NOT close
+            "    dash_space_phantom) still heredoc body",
+            "\tDASHED",                      # tabs, for <<-: closes
+            "      ;;",
+            "  esac",
+        ]))
 
         assert _extract_bin_vnx_commands(vnx) == {"real"}
 
