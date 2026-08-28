@@ -183,6 +183,15 @@ class Readiness:
         reasons = []
         if self.contexts_error:
             reasons.append(f"required contexts: {self.contexts_error}")
+        elif not self.contexts:
+            # An empty required-context set is a misconfiguration, not a pass.
+            # The renderer already said so; without this the verdict said READY
+            # and the command exited 0 on a set nobody measured — the report
+            # contradicting itself, which is the exact defect class this
+            # command exists to surface on other people's evidence.
+            reasons.append(
+                "required contexts: branch protection lists none, so nothing was verified"
+            )
         if self.gates_error:
             reasons.append(f"review gates: {self.gates_error}")
         reasons += [

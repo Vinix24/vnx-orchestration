@@ -339,3 +339,22 @@ def test_an_off_the_door_gate_removes_the_declare_and_run_cost():
         pr.GateEvidence(gate="glm_gate", verdict="GO", message="ok", declared=False)
     ]
     assert not any("declare and run a review gate" in c for c in report.costs())
+
+
+def test_an_empty_required_context_set_is_unmeasurable_not_ready():
+    """The renderer already called this UNMEASURABLE. The verdict said READY,
+    so the command exited 0 on a set nobody measured — the report
+    contradicting itself, which is the defect class this command exists to
+    surface on other people's evidence. Found by codex_gate on this PR.
+    """
+    report = _ready_report(contexts=[])
+    assert report.verdict == pr.VERDICT_UNMEASURABLE
+    assert any("lists none" in r for r in report.unmeasurable_reasons)
+    assert pr_ready._EXIT_BY_VERDICT[report.verdict] == pr_ready.EXIT_UNMEASURABLE
+
+
+def test_the_verdict_and_the_rendered_ci_line_never_disagree():
+    """Both halves must reach the same conclusion about an empty set."""
+    report = _ready_report(contexts=[])
+    assert "UNMEASURABLE" in pr_ready._context_line(report)
+    assert report.verdict == pr.VERDICT_UNMEASURABLE
