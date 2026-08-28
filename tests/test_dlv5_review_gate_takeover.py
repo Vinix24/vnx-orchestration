@@ -312,6 +312,25 @@ class TestMarkGateUnavailableStampsCanonicalFailureReason:
         reason_detail   'kimi_gate.py binary not found in PATH'
         failure_reason  ABSENT
 
+    OI-1490 (28-08) changed the reason VALUE without touching this test's
+    subject. That probe's label was itself the bug: 'kimi_gate.py' is not a
+    binary and never was, so the PATH lookup could only fail and the seat
+    could only be booked 'provider_not_installed' -- an environment complaint
+    for a routing fact. ``_classify_unavailable`` now resolves the provider
+    from ``gate_recorder.GATE_PROVIDERS``; a script-runner gate reaching it
+    means its own availability check (the runner FILE, which this test forces
+    to False) already said no, so the honest label is 'gate_runner_missing'.
+    The same probe today reads:
+
+        status          'not_executable'
+        reason          'gate_runner_missing'
+        reason_detail   'scripts/kimi_gate.py does not exist -- ...'
+        failure_reason  == reason_detail   (what this test is actually about)
+
+    What is asserted below is unchanged in substance: a refused seat stamps
+    the canonical ``failure_reason``, with the SAME text as the lane-own
+    ``reason_detail``, in the request record AND the result record.
+
     RED-on-branch proof (recorded before the fix landed):
 
         pytest tests/test_dlv5_review_gate_takeover.py::TestMarkGateUnavailableStampsCanonicalFailureReason::test_kimi_not_executable_first_round_stamps_failure_reason -x
@@ -344,7 +363,10 @@ class TestMarkGateUnavailableStampsCanonicalFailureReason:
         seat = result["requested"][0]
         assert seat["gate"] == "kimi_gate"
         assert seat["status"] == "not_executable"
-        assert seat["reason"] == "provider_not_installed"
+        assert seat["reason"] == "gate_runner_missing", (
+            "OI-1490: a script-runner gate whose runner file is absent is not a "
+            "missing PATH binary; see test_oi1490_gate_provider_registry"
+        )
 
         assert seat.get("failure_reason") is not None, (
             "failure_reason must be present on a refused seat's request record, "

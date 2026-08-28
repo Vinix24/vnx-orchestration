@@ -231,8 +231,52 @@ class GateResultParserMixin:
             required_reruns=payload["required_reruns"],
         )
 
-    def _classify_unavailable(self, gate: str, binary_name: str) -> tuple:
-        """Return (reason_code, reason_detail) for an unavailable gate provider (GATE-4)."""
+    def _classify_unavailable(self, gate: str) -> tuple:
+        """Return (reason_code, reason_detail) for an unavailable gate provider (GATE-4).
+
+        The provider name comes from ``gate_recorder.GATE_PROVIDERS``, never
+        from the caller (OI-1490). This used to take a ``binary_name``
+        argument and run a raw ``shutil.which`` on it, and the request-time
+        kimi path passed ``"kimi_gate.py"`` — a name that is not a binary and
+        never was, so the lookup could only fail and the gate could only be
+        booked ``provider_not_installed``. Same fabrication as
+        ``gate_runner``'s, on the other of the two paths; fixing one and
+        leaving the other is a promise the code does not keep.
+
+        Three answers, matching gate_runner's:
+
+        * unregistered gate -> ``unsupported_gate_type``; a routing bug, not an
+          environment complaint.
+        * script-runner gate -> ``gate_runner_missing``. Reaching here means
+          the caller's own availability check (``_kimi_gate_available`` and
+          friends, which test for the runner FILE) already said no, so the
+          runner is absent — never a PATH question.
+        * PATH-binary gate -> the env-flag / which-lookup logic below,
+          unchanged, on the registry's name.
+        """
+        from gate_recorder import (  # noqa: PLC0415
+            GATE_PROVIDER_SCRIPT_RUNNER, resolve_gate_provider,
+        )
+
+        provider = resolve_gate_provider(gate)
+        if provider is None:
+            return (
+                "unsupported_gate_type",
+                f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a PATH "
+                f"binary or a script runner; no binary name is guessed from the gate name",
+            )
+        provider_kind, binary_name = provider
+        if provider_kind == GATE_PROVIDER_SCRIPT_RUNNER:
+            return (
+                "gate_runner_missing",
+                f"{binary_name} does not exist — {gate} is a script runner and its "
+                f"runner is not on disk; this is not a PATH lookup",
+            )
+
+        # NOTE: this per-gate (env_var, default) map is NOT the same data as
+        # gate_recorder._GATE_ENV_FLAGS — it carries a DEFAULT per gate, which
+        # that one does not. Left in place deliberately rather than half-merged
+        # into a shape that loses the defaults.
         env_flags = {
             "gemini_review": ("VNX_GEMINI_REVIEW_ENABLED", "1"),
             "codex_gate": ("VNX_CODEX_HEADLESS_ENABLED", "1"),

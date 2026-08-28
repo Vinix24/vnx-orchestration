@@ -859,7 +859,6 @@ class GateRequestHandlerMixin:
         payload: Dict[str, Any],
         *,
         gate: str,
-        binary_name: str,
         pr_number: Optional[int],
         pr_id: str,
         contract_hash: str = "",
@@ -873,7 +872,7 @@ class GateRequestHandlerMixin:
         never allowed to go quiet even when the guard blocks the write it
         would otherwise cause (OI-1469/OI-1470/OI-1471).
         """
-        reason, detail = self._classify_unavailable(gate, binary_name)
+        reason, detail = self._classify_unavailable(gate)
         payload["reason"] = reason
         payload["reason_detail"] = detail
         # OI-1415 (same fix as #1666 for phantom_guard/pr_enforcement): stamp
@@ -906,7 +905,6 @@ class GateRequestHandlerMixin:
         self._write_skip_rationale(
             gate=gate, pr_id=pr_id or str(pr_number),
             reason=reason, reason_detail=detail,
-            binary_name=binary_name,
         )
 
     def _request_gemini(
@@ -938,7 +936,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
-                payload, gate="gemini_review", binary_name="gemini",
+                payload, gate="gemini_review",
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
@@ -978,7 +976,7 @@ class GateRequestHandlerMixin:
         }
         if not available:
             self._mark_gate_unavailable(
-                payload, gate="gemini_review", binary_name="gemini",
+                payload, gate="gemini_review",
                 pr_number=None, pr_id=contract.pr_id,
                 contract_hash=contract.content_hash,
                 dispatch_id=dispatch_id,
@@ -1256,7 +1254,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
-                payload, gate="codex_gate", binary_name="codex",
+                payload, gate="codex_gate",
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
@@ -1292,7 +1290,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
-                payload, gate="kimi_gate", binary_name="kimi_gate.py",
+                payload, gate="kimi_gate",
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
@@ -1355,7 +1353,6 @@ class GateRequestHandlerMixin:
             self._write_skip_rationale(
                 gate="glm_gate", pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,
-                binary_name="glm_gate.py",
             )
         atomic_write_json(self._request_path("glm_gate", pr_number), payload)
         return payload
@@ -1410,7 +1407,6 @@ class GateRequestHandlerMixin:
             self._write_skip_rationale(
                 gate="deepseek_gate", pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,
-                binary_name="deepseek_gate.py",
             )
         atomic_write_json(self._request_path("deepseek_gate", pr_number), payload)
         return payload
@@ -1500,7 +1496,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
-                payload, gate="ci_gate", binary_name="gh",
+                payload, gate="ci_gate",
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
@@ -1538,7 +1534,7 @@ class GateRequestHandlerMixin:
         }
         if not available:
             self._mark_gate_unavailable(
-                payload, gate="ci_gate", binary_name="gh",
+                payload, gate="ci_gate",
                 pr_number=pr_number, pr_id=contract.pr_id,
                 contract_hash=contract.content_hash,
                 dispatch_id=dispatch_id,

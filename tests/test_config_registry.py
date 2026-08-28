@@ -449,18 +449,42 @@ def test_read_site_sweep_instrument_finds_known_hits_for_ci_gate_required():
     """Sanity-check the sweep itself (OI-1385 dispatch requirement): a sweep
     that returns zero for a flag with KNOWN production read-sites means the
     instrument is broken, not that the flag is unwired. A nul-telling is
-    first a meetfout."""
+    first a meetfout.
+
+    Shape changed in OI-1490 and the reason matters more than the change.
+    This used to pin the five files the dispatch cited BY NAME, which made it
+    red on any legitimate refactor that removed one — and it did: delegating
+    ``gate_report_generator._write_skip_rationale`` to gate_recorder removed
+    that file's PRIVATE copy of the gate->env-flag map (four gates where
+    gate_recorder's has five), so it no longer names any gate env flag. That
+    duplicate map was the defect; the test called its removal a regression.
+
+    Shortening the list would only postpone the problem: five becomes four,
+    then two, and a list of two passes while measuring nothing. So this is now
+    a vacuum guard — non-empty, a floor, and the sites that are there BY
+    CONSTRUCTION rather than by history: a flag has to be READ somewhere to
+    have any effect, and these two are where it is read.
+    """
     hits = _production_read_sites("VNX_CI_GATE_REQUIRED")
+
     assert hits, "sweep instrument broken: VNX_CI_GATE_REQUIRED has known production read-sites"
-    # the 5 read-sites the dispatch cited by name
+    assert len(hits) >= 5, (
+        f"only {len(hits)} read-sites found for a flag that had 7 — either the sweep "
+        f"instrument is degraded or the flag is being quietly unwired: {hits}"
+    )
+    # Behavioural readers: both call config_runtime.get_bool on this flag and
+    # branch on the answer. If the flag still does anything at all, these are
+    # in the result; if they are not, the sweep is not seeing production code.
     for expected in (
         "scripts/review_gate_manager.py",
         "scripts/lib/gate_request_handler.py",
-        "scripts/lib/gate_report_generator.py",
-        "scripts/lib/gate_recorder.py",
-        "scripts/lib/gate_result_parser.py",
     ):
-        assert expected in hits, f"sweep missed known read-site {expected}"
+        assert expected in hits, f"sweep missed behavioural read-site {expected}"
+
+    assert "scripts/lib/gate_report_generator.py" not in hits, (
+        "gate_report_generator must not regrow a private gate->env-flag map; "
+        "gate_recorder._GATE_ENV_FLAGS is the only copy (OI-1490)"
+    )
 
 
 def test_governance_enforced_read_site_wired_matches_measured_usage():

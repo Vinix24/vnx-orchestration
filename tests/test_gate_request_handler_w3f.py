@@ -357,7 +357,6 @@ class TestMarkGateUnavailableDispatchId:
         manager._mark_gate_unavailable(
             payload,
             gate="gemini_review",
-            binary_name="gemini",
             pr_number=30,
             pr_id="",
             dispatch_id=dispatch_id,
