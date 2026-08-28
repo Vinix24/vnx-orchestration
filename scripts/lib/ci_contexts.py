@@ -87,14 +87,24 @@ PASSING_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 COMPLETED_STATUS = "completed"
 
 
+#: GitHub's sentinel in ``checks[].app_id`` for "any app may set this status"
+#: (the branch-protection API's explicit allow-any value). It is an int, so a
+#: naive ``isinstance(app_id, int)`` keeps it as if it named a real producer —
+#: and then NO run matches it, turning every any-app required check into a
+#: false ``unverified``. It has to be normalised to "no binding" at the edge.
+ANY_APP_ID = -1
+
+
 class RequiredCheck(NamedTuple):
     """One required status check, with the app binding branch protection gave it.
 
     GitHub's newer ``checks[]`` shape carries ``app_id``; the legacy
-    ``contexts[]`` list does not. When an ``app_id`` is present the requirement
-    is "a check with THIS name FROM THIS app" — matching on the name alone
-    would let a same-named check from any other app satisfy it. ``app_id`` is
-    None for a legacy entry, which means the name is genuinely all branch
+    ``contexts[]`` list does not. When an ``app_id`` names a real app the
+    requirement is "a check with THIS name FROM THIS app" — matching on the
+    name alone would let a same-named check from any other app satisfy it.
+
+    ``app_id`` is None for a legacy entry AND for GitHub's explicit
+    :data:`ANY_APP_ID` sentinel: both mean the name is genuinely all branch
     protection asks for.
     """
 
@@ -631,7 +641,11 @@ def fetch_required_checks(
         if not isinstance(name, str) or not name:
             continue
         app_id = check.get("app_id")
-        bound[name] = app_id if isinstance(app_id, int) else None
+        # ANY_APP_ID is an int and would otherwise survive as a concrete
+        # producer that nothing can ever match.
+        bound[name] = (
+            app_id if isinstance(app_id, int) and app_id != ANY_APP_ID else None
+        )
     return [RequiredCheck(name, bound[name]) for name in sorted(bound)]
 
 

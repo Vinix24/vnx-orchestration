@@ -471,3 +471,35 @@ def test_gh_failure_raises_rather_than_returning_an_empty_list(tmp_path):
     with pytest.raises(cc.CIContextsError) as excinfo:
         cc._gh_json(["api", "repos/{owner}/{repo}/nope"], tmp_path, timeout=10)
     assert "failed" in str(excinfo.value) or "not available" in str(excinfo.value)
+
+
+def test_the_any_app_sentinel_is_normalised_to_no_binding(monkeypatch, tmp_path):
+    """GitHub's branch-protection API uses app_id -1 for "any app may set this
+    status". It is an int, so a naive isinstance check keeps it as if it named
+    a real producer — and then NO run matches it, turning every any-app
+    required check into a false `unverified`.
+    """
+    payload = {
+        "required_status_checks": {
+            "contexts": [],
+            "checks": [
+                {"context": "any app", "app_id": cc.ANY_APP_ID},
+                {"context": "bound", "app_id": 15368},
+            ],
+        }
+    }
+    monkeypatch.setattr(cc, "_gh_json", lambda *a, **k: payload)
+    assert cc.fetch_required_checks(tmp_path) == [
+        cc.RequiredCheck("any app", None),
+        cc.RequiredCheck("bound", 15368),
+    ]
+
+
+def test_an_any_app_requirement_is_satisfied_by_any_producer(graph):
+    [state] = cc.classify_contexts(
+        [cc.RequiredCheck("Profile A", None)],
+        [_app_check("Profile A", 777)],
+        [_run()],
+        graph,
+    )
+    assert state.state == cc.STATE_PASSED
