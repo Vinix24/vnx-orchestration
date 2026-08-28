@@ -29,9 +29,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -149,6 +151,55 @@ def build_reanchored_payload(
     return payload
 
 
+@contextmanager
+def exclusive_result_lock(result_path: Path):
+    """Hold an exclusive lock over one result slot for a whole read-check-write.
+
+    ``gate_recorder`` has no lock anywhere: ``_write_result_atomic`` is atomic
+    per WRITE (tmp + replace), but the read in ``_check_overwrite_guard`` and
+    the write that follows are two separate operations with a window between
+    them. Measured with two threads that both read the record on the old sha
+    before either wrote: both cleared the overwrite guard.
+
+    Everything the re-anchor decides — is this record terminal, is its hash
+    still equal, has the head moved — is read BEFORE the write. Without this
+    lock two concurrent ``--apply`` runs both decide against the same old sha
+    and both act on it.
+    """
+    lock_path = result_path.with_suffix(".reanchor.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def compare_and_swap_guard(result_path: Path, expected_old_sha: str) -> None:
+    """Refuse when the record moved between the decision and the write.
+
+    The lock above keeps two of THIS command apart. This check keeps it honest
+    against every other writer of the same slot — the live gate, --reprocess,
+    the obligation runner — none of which take that lock. Re-reading under the
+    lock and confirming the record still sits on the commit the decision was
+    made against turns the write into a compare-and-swap instead of a
+    last-writer-wins.
+    """
+    if not result_path.is_file():
+        raise ValueError(
+            f"{result_path} disappeared between the decision and the write — refusing"
+        )
+    current = json.loads(result_path.read_text(encoding="utf-8"))
+    observed = (current or {}).get("commit_sha", "")
+    if observed != expected_old_sha:
+        raise ValueError(
+            f"{result_path} moved from {expected_old_sha[:12]} to {observed[:12] or '(none)'} "
+            "while this re-anchor was deciding — another writer got there first, so the "
+            "decision was made against a record that no longer exists"
+        )
+
+
 def emit_reanchor_event(
     *, gate: str, pr_number: int, record: Dict[str, Any], new_sha: str, decision,
 ) -> Path:
@@ -264,13 +315,16 @@ def main(argv: Optional[list] = None) -> int:
     payload = build_reanchored_payload(
         record, new_sha=new_sha, new_branch=new_branch, decision=decision,
     )
+    result_path = results_dir / f"pr-{args.pr}-{args.gate}.json"
     try:
-        written = record_terminal_result(
-            gate=args.gate,
-            pr_id=str(args.pr),
-            result_path=results_dir / f"pr-{args.pr}-{args.gate}.json",
-            payload=payload,
-        )
+        with exclusive_result_lock(result_path):
+            compare_and_swap_guard(result_path, record.get("commit_sha", ""))
+            written = record_terminal_result(
+                gate=args.gate,
+                pr_id=str(args.pr),
+                result_path=result_path,
+                payload=payload,
+            )
     except (OSError, ValueError, ResultOverwriteRefused) as exc:
         print(f"gate-reanchor: the guarded write refused: {exc}", file=sys.stderr)
         return EXIT_WRITE_FAILED

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -631,3 +632,69 @@ def test_cannot_prove_beats_a_clean_symbol_analysis():
     reference = gr.ReferenceSet(symbols=set(), unmodelled=("importlib in x.py",))
     assert not reference.provable
     assert gr.find_blocking_symbols({("lib_a", "helper")}, reference) == []
+
+
+# ---------------------------------------------------------------------------
+# The read-check-write window
+# ---------------------------------------------------------------------------
+
+
+def _seed_result(tmp_path: Path, sha: str) -> Path:
+    path = tmp_path / "pr-9-glm_gate.json"
+    path.write_text(json.dumps({
+        "gate": "glm_gate", "pr_id": "9", "status": "pass", "contract_hash": "h1",
+        "report_path": "/r.md", "dispatch_id": "glm-gate-pr9-1", "commit_sha": sha,
+    }))
+    return path
+
+
+def test_the_swap_guard_passes_when_the_record_has_not_moved(tmp_path):
+    path = _seed_result(tmp_path, "a" * 40)
+    cli.compare_and_swap_guard(path, "a" * 40)  # must not raise
+
+
+def test_the_swap_guard_refuses_when_another_writer_got_there_first(tmp_path):
+    """gate_recorder takes no lock anywhere: the read in _check_overwrite_guard
+    and the write that follows are two operations with a window between them.
+    Measured with two threads that both read the record on the old sha before
+    either wrote — both cleared the overwrite guard. Re-reading under the lock
+    turns the write into a compare-and-swap.
+    """
+    path = _seed_result(tmp_path, "b" * 40)
+    with pytest.raises(ValueError) as excinfo:
+        cli.compare_and_swap_guard(path, "a" * 40)
+    assert "while this re-anchor was deciding" in str(excinfo.value)
+
+
+def test_the_swap_guard_refuses_a_record_that_vanished(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        cli.compare_and_swap_guard(tmp_path / "gone.json", "a" * 40)
+    assert "disappeared" in str(excinfo.value)
+
+
+def test_the_lock_actually_serialises_two_holders(tmp_path):
+    """Two threads entering the same lock must not overlap. Without the lock
+    both decide against the same old sha and both act on it."""
+    import threading
+
+    path = _seed_result(tmp_path, "a" * 40)
+    order = []
+    inside = threading.Lock()
+    overlapped = []
+
+    def hold(tag):
+        with cli.exclusive_result_lock(path):
+            if not inside.acquire(blocking=False):
+                overlapped.append(tag)
+            else:
+                order.append(tag)
+                time.sleep(0.05)
+                inside.release()
+
+    threads = [threading.Thread(target=hold, args=(t,)) for t in ("A", "B")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert overlapped == [], "the lock let two holders into the critical section"
+    assert sorted(order) == ["A", "B"], "both holders must eventually run"
