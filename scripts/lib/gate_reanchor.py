@@ -233,21 +233,54 @@ def referenced_symbols(project_root: Path, ref: str, files: Iterable[str]) -> Se
     for path in files:
         if not path.endswith(".py"):
             continue
+        # Absent at this ref is a legitimate, complete answer: the PR DELETED
+        # the file, so it contributes no references. Distinguished from
+        # unreadable by asking git directly rather than by reading stderr —
+        # `pr_files` comes from `gh pr view --json files`, which lists deleted
+        # paths too, so collapsing the two would refuse every PR that removes
+        # a file.
         try:
-            source = _git(project_root, "show", f"{ref}:{path}")
+            _git(project_root, "cat-file", "-e", f"{ref}:{path}")
         except ReanchorError:
             continue
+        # Present but unreadable is the opposite case, and fail-CLOSED:
+        # skipping it under-approximates the reference set and then treats the
+        # remainder as complete, producing an ALLOW on evidence nobody
+        # gathered — the one direction this module must never fail in.
+        try:
+            source = _git(project_root, "show", f"{ref}:{path}")
+        except ReanchorError as exc:
+            raise ReanchorError(
+                f"{path} exists at {ref[:12]} but could not be read, so the PR's reference "
+                f"set is incomplete and nothing can be proven: {exc}"
+            ) from exc
         try:
             tree = ast.parse(source)
-        except SyntaxError:
-            continue
+        except SyntaxError as exc:
+            raise ReanchorError(
+                f"{path} does not parse at {ref[:12]}, so its references are unknown: {exc}"
+            ) from exc
+
         alias_to_module: Dict[str, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
                 module = node.module.split(".")[-1]
                 out.add((module, MODULE_LEVEL))
                 for alias in node.names:
+                    if alias.name == "*":
+                        # A star-import binds the PR to EVERY name in the
+                        # module, so nothing narrower than the whole module
+                        # can be claimed about what it uses.
+                        out.add((module, WHOLE_MODULE))
+                        continue
                     out.add((module, alias.name))
+                    # `from pkg import mod` followed by `mod.fn()`: the
+                    # imported name may itself be a module. Mapping it to
+                    # itself makes `mod.fn` resolve to ("mod", "fn") below.
+                    # Over-approximation is the safe direction — a class
+                    # imported the same way yields a (Class, method) pair that
+                    # matches no module, which is noise, never a false ALLOW.
+                    alias_to_module.setdefault(alias.asname or alias.name, alias.name)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     module = alias.name.split(".")[-1]
@@ -327,10 +360,11 @@ def find_blocking_symbols(
          table or decorator (``<module>``), or a module that is gone or
          unparseable (``*``), changes behaviour for everyone importing it,
          whichever symbol they use. Blocks.
-      3. **Reached only indirectly.** ``indirect_modules`` are modules the PR
-         does not import but can reach through the import graph. Which symbol
-         of those the PR actually depends on is not knowable from its own
-         source, so ANY change in one of them blocks.
+      3. **Reached only indirectly, or star-imported.** ``indirect_modules``
+         are modules the PR does not import but can reach through the import
+         graph; a ``from x import *`` adds ``x`` to the same set. In neither
+         case is it knowable from the PR's own source WHICH symbol it depends
+         on, so ANY change in one of them blocks.
 
     Keeping 1 apart from 3 is what makes the direct-depth rule symbol-precise.
     Folding them together — as an earlier draft of this function did, by
@@ -340,8 +374,14 @@ def find_blocking_symbols(
     the exact-overlap line changed no test result, because nothing could
     reach it.
     """
-    indirect = indirect_modules or set()
+    indirect = set(indirect_modules or set())
     referenced_modules = {m for m, _ in referenced}
+    # A star-import is recorded as (module, "*") on the REFERENCED side. It
+    # says "this PR may use any name in that module", which is the same
+    # information-free position as an indirectly-reached module — so it gets
+    # the same coarse treatment rather than falling through the exact-symbol
+    # match and matching nothing.
+    indirect |= {m for m, s in referenced if s == WHOLE_MODULE}
     blocking: Set[Symbol] = set(changed & referenced)
     for module, symbol in changed:
         if module in indirect:

@@ -43,7 +43,9 @@ for _p in (str(SCRIPT_DIR / "lib"), str(SCRIPT_DIR)):
 
 import gate_reanchor  # noqa: E402
 from gate_artifacts import _compute_contract_hash  # noqa: E402  canonical hasher, never a second one
+from gate_register_emit import register_path  # noqa: E402  one resolver, not a second copy
 from gate_status import has_complete_evidence, is_terminal  # noqa: E402
+import state_writer  # noqa: E402
 from vnx_paths import ensure_env  # noqa: E402
 
 EXIT_OK = 0
@@ -147,6 +149,42 @@ def build_reanchored_payload(
     return payload
 
 
+def emit_reanchor_event(
+    *, gate: str, pr_number: int, record: Dict[str, Any], new_sha: str, decision,
+) -> Path:
+    """Append the re-anchor to dispatch_register.ndjson (ADR-005).
+
+    A re-anchor is a gate outcome — one of the ledger's named classes — and it
+    is the one gate outcome nobody paid a model for. Writing the result record
+    without a register line would leave a state mutation with no line in the
+    ledger, which is the whole defect this cluster is about.
+
+    Reuses ``gate_register_emit.register_path`` and ``state_writer.append_locked``:
+    the same resolver and the same locked append every other gate line goes
+    through, never a second ledger invented for this one writer.
+
+    Raises on failure rather than swallowing it. The result record is already
+    on disk and carries its own provenance, so the state is not corrupt — but
+    a missing ledger line has to be said out loud, not logged and forgotten.
+    """
+    path = register_path()
+    state_writer.append_locked(path, {
+        "timestamp": _utc_now_iso(),
+        "event": "gate_reanchored",
+        "gate": gate,
+        "pr_number": pr_number,
+        "dispatch_id": record.get("dispatch_id", ""),
+        "status": record.get("status", ""),
+        "contract_hash": record.get("contract_hash", ""),
+        "from_commit_sha": record.get("commit_sha", ""),
+        "to_commit_sha": new_sha,
+        "commits_in_range": decision.commits_in_range,
+        "depth": decision.depth,
+        "reason": decision.reason,
+    })
+    return path
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="gate_reanchor_cli.py",
@@ -237,8 +275,23 @@ def main(argv: Optional[list] = None) -> int:
         print(f"gate-reanchor: the guarded write refused: {exc}", file=sys.stderr)
         return EXIT_WRITE_FAILED
 
+    try:
+        register = emit_reanchor_event(
+            gate=args.gate, pr_number=args.pr, record=record,
+            new_sha=new_sha, decision=decision,
+        )
+    except (OSError, ValueError) as exc:
+        print(
+            f"gate-reanchor: the record was written to {written} but the register line "
+            f"failed: {exc}. The verdict carries its own provenance, so the state is "
+            "sound — the LEDGER is now incomplete and needs the line adding by hand.",
+            file=sys.stderr,
+        )
+        return EXIT_WRITE_FAILED
+
     payload_out["applied"] = True
     payload_out["result_path"] = str(written)
+    payload_out["register_path"] = str(register)
     if args.json:
         print(json.dumps(payload_out, indent=2))
     else:

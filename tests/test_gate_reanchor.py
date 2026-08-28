@@ -134,9 +134,51 @@ def test_referenced_symbols_captures_module_attribute_access(repo):
     assert ("lib_a", "helper") in referenced
 
 
-def test_referenced_symbols_skips_a_file_that_is_not_in_the_tree(repo):
+def test_a_file_the_pr_deleted_contributes_no_references(repo):
+    """`gh pr view --json files` lists deleted paths too. Absent at this ref is
+    a complete answer, not a gap — refusing on it would refuse every PR that
+    removes a file."""
     root, base = repo
     assert gr.referenced_symbols(root, base, ["scripts/does_not_exist.py"]) == set()
+
+
+def test_an_unparseable_file_refuses_instead_of_shrinking_the_reference_set(repo):
+    """Present but unreadable is the opposite case. Skipping it silently
+    under-approximates what the PR reaches and then treats the remainder as
+    complete — an ALLOW on evidence nobody gathered. Found by codex_gate."""
+    root, base = repo
+    (root / "scripts" / "broken.py").write_text("def f(:\n    pass\n")
+    head = _commit(root, "add an unparseable file")
+    with pytest.raises(gr.ReanchorError) as excinfo:
+        gr.referenced_symbols(root, head, ["scripts/broken.py"])
+    assert "does not parse" in str(excinfo.value)
+
+
+def test_a_star_import_binds_the_pr_to_the_whole_module(repo):
+    """`from x import *` says "any name in x". Recording it as the literal
+    symbol `*` matched nothing on the changed side, so a changed symbol in a
+    star-imported module slipped through. Found by codex_gate."""
+    root, base = repo
+    (root / "scripts" / "star.py").write_text("from lib_a import *\n\n\ndef run(x):\n    return helper(x)\n")
+    head = _commit(root, "add a star importer")
+    referenced = gr.referenced_symbols(root, head, ["scripts/star.py"])
+    assert ("lib_a", gr.WHOLE_MODULE) in referenced
+    assert gr.find_blocking_symbols({("lib_a", "untouched")}, referenced) == [
+        ("lib_a", "untouched")
+    ]
+
+
+def test_a_module_imported_by_name_still_resolves_its_attributes(repo):
+    """`from pkg import mod; mod.fn()` recorded (pkg, mod) and never mapped
+    `mod` to its own module, so changes to mod.fn were invisible. Found by
+    codex_gate."""
+    root, base = repo
+    (root / "scripts" / "pkgstyle.py").write_text(
+        "from lib import lib_a\n\n\ndef run(x):\n    return lib_a.helper(x)\n"
+    )
+    head = _commit(root, "add a package-style importer")
+    referenced = gr.referenced_symbols(root, head, ["scripts/pkgstyle.py"])
+    assert ("lib_a", "helper") in referenced
 
 
 # ---------------------------------------------------------------------------
@@ -426,3 +468,65 @@ def test_a_deletion_only_change_refuses_the_re_anchor_end_to_end(repo):
     )
     assert not decision.allowed
     assert ("lib_a", "helper") in decision.blocking_symbols
+
+
+# ---------------------------------------------------------------------------
+# The ADR-005 ledger line
+# ---------------------------------------------------------------------------
+
+
+def test_a_reanchor_appends_a_register_line(tmp_path, monkeypatch):
+    """A re-anchor is a gate outcome — one of ADR-005's named ledger classes —
+    and it is the one gate outcome nobody paid a model for. Writing the result
+    record with no register line would leave a state mutation with no trace,
+    which is the defect this whole cluster is about.
+    """
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path))
+    record = {
+        "gate": "glm_gate", "status": "pass", "contract_hash": "h1",
+        "report_path": "/r.md", "dispatch_id": "glm-gate-pr9-1", "commit_sha": "a" * 40,
+    }
+    decision = gr.ReanchorDecision(
+        allowed=True, reason="identical hash", contract_hash_matches=True,
+        commits_in_range=3, depth=gr.DEPTH_DIRECT,
+    )
+    path = cli.emit_reanchor_event(
+        gate="glm_gate", pr_number=9, record=record, new_sha="b" * 40, decision=decision,
+    )
+    assert path == tmp_path / "dispatch_register.ndjson"
+    lines = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    assert len(lines) == 1
+    entry = lines[0]
+    assert entry["event"] == "gate_reanchored"
+    assert entry["gate"] == "glm_gate"
+    assert entry["pr_number"] == 9
+    assert entry["dispatch_id"] == "glm-gate-pr9-1"
+    assert entry["from_commit_sha"] == "a" * 40
+    assert entry["to_commit_sha"] == "b" * 40
+    assert entry["commits_in_range"] == 3
+    assert entry["reason"] == "identical hash"
+
+
+def test_the_register_line_goes_to_the_same_resolver_every_other_gate_line_uses(tmp_path, monkeypatch):
+    """One resolver, not a second ledger invented for this writer."""
+    import gate_register_emit
+
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path))
+    assert gate_register_emit.register_path() == tmp_path / "dispatch_register.ndjson"
+    assert gate_register_emit._resolve_register_path() == gate_register_emit.register_path()
+
+
+def test_a_failing_register_write_is_reported_not_swallowed(tmp_path, monkeypatch):
+    """The result is already on disk and carries its own provenance, so the
+    state is sound — but a missing ledger line has to be said out loud."""
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path))
+
+    def _boom(path, record):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli.state_writer, "append_locked", _boom)
+    with pytest.raises(OSError):
+        cli.emit_reanchor_event(
+            gate="glm_gate", pr_number=9, record={}, new_sha="b" * 40,
+            decision=gr.ReanchorDecision(allowed=True, reason="r"),
+        )
