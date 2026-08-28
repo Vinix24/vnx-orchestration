@@ -1750,12 +1750,13 @@ Commands:
 
   drift [--json] [--write-state] [--project-dir DIR]
                              Measure how far every registered project is behind the
-                             canonical role, on three independent axes: CONTENT (a
+                             canonical role, on three independent axes. CONTENT is a
                              diff against the canon, never a search for a known
-                             sentence), REACH (does any session actually load it —
-                             OI-1480), and STARTUP (can the role's Mandatory Startup
-                             step complete at all — OI-1481). Read-only; exits 1 when
-                             the fleet is behind. Reports, never propagates.
+                             phrase. REACH asks whether any session actually loads
+                             that file at all, per OI-1480. STARTUP asks whether the
+                             role's own Mandatory Startup step can complete, per
+                             OI-1481. Read-only, and exits 1 when the fleet is
+                             behind. Reports; never propagates.
 HELP
   else
     err "[role] unknown subcommand: $sub (try 'vnx role --help')"

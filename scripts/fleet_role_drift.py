@@ -45,6 +45,28 @@ Read-only by default. ``--write-state`` is opt-in for exactly the reason this
 tool exists to catch: a measurement that writes to the live store is itself a
 write, and an unasked-for write is how evidence gets overwritten.
 
+**Why the opt-in write emits no NDJSON ledger event** (codex advisory on
+#1704, answered rather than deferred). ADR-005 makes the ledger canonical for
+four named classes: dispatch lifecycle events, receipts, gate outcomes, and
+lease/heartbeat transitions. A component health beacon is none of those — the
+"heartbeat" in that list is the runtime_coordination lease row, not a
+``health/<component>.json`` file. Measured on 53973d6a: of the ELEVEN
+``HealthBeacon(...)`` call sites in this tree, ZERO pair the beacon with a
+ledger event. The one that a proximity grep flags,
+``producer_freshness.write_heartbeat``, sits ~10 lines below an unrelated
+function that appends ``producer_freshness_finding`` records; the beacon
+itself emits nothing. The beacon file IS the audit carrier for component
+health here, and adding a second trail only in this tool would make this tool
+the outlier rather than close a gap.
+
+What the advisory is right about, and what the boundary therefore is: a
+beacon is CURRENT-VERDICT state, replaced on every run, so it carries no
+history — you can read that the fleet is behind today, not that it was also
+behind yesterday. That is a deliberate limit of this surface, not an
+oversight. A fleet-drift TIMELINE is a different artefact with a different
+owner, and it belongs in the ledger the day someone needs to answer "how long
+has seocrawler-v2 been unreachable" rather than "is it unreachable now".
+
 Exit codes:
     0  every measured project is current on every axis
     1  at least one project is behind on at least one axis
