@@ -54,7 +54,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Set
 
 import yaml
 
@@ -85,6 +85,21 @@ PASSING_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 
 #: A workflow run or check run in any status other than this is still alive.
 COMPLETED_STATUS = "completed"
+
+
+class RequiredCheck(NamedTuple):
+    """One required status check, with the app binding branch protection gave it.
+
+    GitHub's newer ``checks[]`` shape carries ``app_id``; the legacy
+    ``contexts[]`` list does not. When an ``app_id`` is present the requirement
+    is "a check with THIS name FROM THIS app" — matching on the name alone
+    would let a same-named check from any other app satisfy it. ``app_id`` is
+    None for a legacy entry, which means the name is genuinely all branch
+    protection asks for.
+    """
+
+    context: str
+    app_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +282,26 @@ def _index_check_runs(check_runs: Iterable[Mapping[str, Any]]) -> Dict[str, List
     return indexed
 
 
+def _split_by_app(
+    runs: Sequence[Mapping[str, Any]], app_id: Optional[int]
+) -> tuple:
+    """Split check runs into those the requirement accepts and those it does not.
+
+    With no app binding every same-named run counts, which is exactly what the
+    legacy ``contexts[]`` shape asks for. With a binding, only runs whose
+    ``app.id`` matches count — a run missing the ``app`` object does NOT match,
+    since an unidentifiable producer cannot be shown to be the required one.
+    """
+    if app_id is None:
+        return list(runs), []
+    matching, foreign = [], []
+    for run in runs:
+        app = run.get("app")
+        observed = app.get("id") if isinstance(app, dict) else None
+        (matching if observed == app_id else foreign).append(run)
+    return matching, foreign
+
+
 def _classify_present(context: str, runs: Sequence[Mapping[str, Any]], node: Optional[JobNode]) -> ContextState:
     """Classify a context that HAS at least one check run on the commit.
 
@@ -444,7 +479,7 @@ def _classify_absent(
 
 
 def classify_contexts(
-    required_contexts: Iterable[str],
+    required_contexts: Iterable[Any],
     check_runs: Iterable[Mapping[str, Any]],
     workflow_runs: Iterable[Mapping[str, Any]],
     graph: WorkflowGraph,
@@ -464,9 +499,28 @@ def classify_contexts(
     indexed = _index_check_runs(check_runs)
 
     states: List[ContextState] = []
-    for context in required_contexts:
+    for required in required_contexts:
+        check = required if isinstance(required, RequiredCheck) else RequiredCheck(str(required))
+        context = check.context
         node = graph.by_context.get(context)
-        present = indexed.get(context)
+        named = indexed.get(context) or []
+        present, wrong_app = _split_by_app(named, check.app_id)
+        if wrong_app and not present:
+            states.append(
+                ContextState(
+                    context=context,
+                    state=STATE_UNVERIFIED,
+                    detail=(
+                        f"{len(wrong_app)} check run(s) named {context!r} exist on this commit "
+                        f"but none is from the required app (app_id={check.app_id}) — branch "
+                        "protection would not accept them, and matching on the name alone "
+                        "would turn a foreign check into a green light"
+                    ),
+                    workflow_name=node.workflow_name if node else None,
+                    job_key=node.job_key if node else None,
+                )
+            )
+            continue
         if present:
             states.append(_classify_present(context, present, node))
             continue
@@ -545,14 +599,19 @@ def _gh_json(args: Sequence[str], project_root: Path, timeout: int) -> Any:
         raise CIContextsError(f"gh {' '.join(args)} returned unparseable JSON: {exc}") from exc
 
 
-def fetch_required_contexts(project_root: Path, branch: str = "main", timeout: int = 20) -> List[str]:
-    """The branch-protection required contexts — what SHOULD exist.
+def fetch_required_checks(
+    project_root: Path, branch: str = "main", timeout: int = 20
+) -> List[RequiredCheck]:
+    """The branch-protection required checks — what SHOULD exist, with app bindings.
 
-    Reads both shapes GitHub has shipped (``contexts`` and ``checks[].context``)
-    and returns their union, sorted. An empty result is returned as-is and is
-    NOT a pass: a caller that finds no required contexts on a branch it
-    believes is protected is looking at a misconfiguration, and this function
-    refuses to paper over it by inventing a default list.
+    Reads both shapes GitHub has shipped. ``checks[]`` carries ``app_id`` and
+    wins over a same-named legacy ``contexts[]`` entry, because dropping the
+    app binding would widen the requirement rather than narrow it.
+
+    An empty result is returned as-is and is NOT a pass: a caller that finds no
+    required checks on a branch it believes is protected is looking at a
+    misconfiguration, and this function refuses to paper over it by inventing
+    a default list.
     """
     payload = _gh_json(
         ["api", f"repos/{{owner}}/{{repo}}/branches/{branch}/protection"], project_root, timeout
@@ -560,17 +619,36 @@ def fetch_required_contexts(project_root: Path, branch: str = "main", timeout: i
     if not isinstance(payload, dict):
         raise CIContextsError(f"branch protection payload is {type(payload).__name__}, expected a mapping")
     required = payload.get("required_status_checks") or {}
-    contexts: Set[str] = set(required.get("contexts") or [])
+
+    bound: Dict[str, Optional[int]] = {}
+    for name in required.get("contexts") or []:
+        if isinstance(name, str) and name:
+            bound.setdefault(name, None)
     for check in required.get("checks") or []:
-        if isinstance(check, dict) and isinstance(check.get("context"), str) and check["context"]:
-            contexts.add(check["context"])
-    return sorted(contexts)
+        if not isinstance(check, dict):
+            continue
+        name = check.get("context")
+        if not isinstance(name, str) or not name:
+            continue
+        app_id = check.get("app_id")
+        bound[name] = app_id if isinstance(app_id, int) else None
+    return [RequiredCheck(name, bound[name]) for name in sorted(bound)]
 
 
 def fetch_check_runs(project_root: Path, head_sha: str, timeout: int = 20) -> List[Dict[str, Any]]:
     """The check runs that DO exist on ``head_sha``."""
+    # --slurp is required, not decorative: this endpoint returns an OBJECT, and
+    # `gh api --paginate` emits one document per page. Measured on a 16-run
+    # commit at per_page=5 — four pages, and json.loads fails with "Extra data"
+    # at char 15511. --slurp wraps the pages in an outer array instead, which is
+    # the shape the loop below already expects.
     payload = _gh_json(
-        ["api", f"repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs?per_page=100", "--paginate"],
+        [
+            "api",
+            f"repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs?per_page=100",
+            "--paginate",
+            "--slurp",
+        ],
         project_root,
         timeout,
     )
@@ -612,7 +690,7 @@ def evaluate_commit(
     branch: str = "main",
     workflows_dir: Optional[Path] = None,
     timeout: int = 20,
-    required_contexts: Optional[Sequence[str]] = None,
+    required_contexts: Optional[Sequence[Any]] = None,
 ) -> List[ContextState]:
     """Classify the protected branch's required contexts against ``head_sha``.
 
@@ -629,7 +707,11 @@ def evaluate_commit(
     wording, never the verdict.
     """
     root = Path(project_root)
-    contexts = list(required_contexts) if required_contexts is not None else fetch_required_contexts(root, branch, timeout)
+    contexts = (
+        list(required_contexts)
+        if required_contexts is not None
+        else fetch_required_checks(root, branch, timeout)
+    )
     graph = parse_workflow_graph(workflows_dir or (root / ".github" / "workflows"))
     check_runs = fetch_check_runs(root, head_sha, timeout)
     workflow_runs = fetch_workflow_runs(root, head_sha, timeout)

@@ -350,21 +350,121 @@ def test_summarise_counts_each_state_separately(graph):
     assert summary["by_state"]["Profile B"] == cc.STATE_NEVER_CREATED
 
 
-def test_required_contexts_unions_both_github_shapes(monkeypatch, tmp_path):
+def test_required_checks_unions_both_github_shapes(monkeypatch, tmp_path):
     payload = {
         "required_status_checks": {
             "contexts": ["legacy only", "shared"],
-            "checks": [{"context": "shared"}, {"context": "checks only"}, {"no_context": 1}],
+            "checks": [
+                {"context": "shared", "app_id": 15368},
+                {"context": "checks only", "app_id": 15368},
+                {"no_context": 1},
+            ],
         }
     }
     monkeypatch.setattr(cc, "_gh_json", lambda *a, **k: payload)
-    assert cc.fetch_required_contexts(tmp_path) == ["checks only", "legacy only", "shared"]
+    assert cc.fetch_required_checks(tmp_path) == [
+        cc.RequiredCheck("checks only", 15368),
+        cc.RequiredCheck("legacy only", None),
+        cc.RequiredCheck("shared", 15368),
+    ]
 
 
-def test_required_contexts_refuses_a_non_mapping_payload(monkeypatch, tmp_path):
+def test_the_app_bound_shape_wins_over_the_legacy_name_only_entry(monkeypatch, tmp_path):
+    """Dropping the app binding would WIDEN the requirement, not narrow it."""
+    payload = {
+        "required_status_checks": {
+            "contexts": ["shared"],
+            "checks": [{"context": "shared", "app_id": 42}],
+        }
+    }
+    monkeypatch.setattr(cc, "_gh_json", lambda *a, **k: payload)
+    assert cc.fetch_required_checks(tmp_path) == [cc.RequiredCheck("shared", 42)]
+
+
+def test_required_checks_refuses_a_non_mapping_payload(monkeypatch, tmp_path):
     monkeypatch.setattr(cc, "_gh_json", lambda *a, **k: ["not", "a", "mapping"])
     with pytest.raises(cc.CIContextsError):
-        cc.fetch_required_contexts(tmp_path)
+        cc.fetch_required_checks(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The app binding branch protection actually enforces
+# ---------------------------------------------------------------------------
+
+
+def _app_check(name, app_id, conclusion="success"):
+    return {"name": name, "status": "completed", "conclusion": conclusion, "app": {"id": app_id}}
+
+
+def test_a_check_from_the_required_app_satisfies_the_requirement(graph):
+    [state] = cc.classify_contexts(
+        [cc.RequiredCheck("Profile A", 15368)], [_app_check("Profile A", 15368)], [_run()], graph
+    )
+    assert state.state == cc.STATE_PASSED
+
+
+def test_a_same_named_check_from_another_app_is_never_a_pass(graph):
+    """Branch protection would not accept it. Matching on the name alone turns
+    a foreign check into a green light."""
+    [state] = cc.classify_contexts(
+        [cc.RequiredCheck("Profile A", 15368)], [_app_check("Profile A", 999)], [_run()], graph
+    )
+    assert state.state == cc.STATE_UNVERIFIED
+    assert state.blocking is True
+    assert "none is from the required app" in state.detail
+
+
+def test_a_check_run_with_no_app_object_does_not_satisfy_a_binding(graph):
+    """An unidentifiable producer cannot be shown to be the required one."""
+    [state] = cc.classify_contexts(
+        [cc.RequiredCheck("Profile A", 15368)], [_check("Profile A")], [_run()], graph
+    )
+    assert state.state == cc.STATE_UNVERIFIED
+
+
+def test_without_a_binding_any_app_satisfies_the_legacy_requirement(graph):
+    [state] = cc.classify_contexts(
+        [cc.RequiredCheck("Profile A", None)], [_app_check("Profile A", 999)], [_run()], graph
+    )
+    assert state.state == cc.STATE_PASSED
+
+
+def test_a_bound_context_with_only_foreign_runs_is_not_reported_as_never_created(graph):
+    """The distinction matters for the cost line: a foreign check is a
+    configuration problem, not a workflow that has to be re-run."""
+    [state] = cc.classify_contexts(
+        [cc.RequiredCheck("Profile A", 15368)], [_app_check("Profile A", 999)], [], graph
+    )
+    assert state.state != cc.STATE_NEVER_CREATED
+
+
+def test_a_bare_string_requirement_still_works_as_an_unbound_check(graph):
+    [state] = cc.classify_contexts(["Profile A"], [_check("Profile A")], [_run()], graph)
+    assert state.state == cc.STATE_PASSED
+
+
+# ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
+
+
+def test_check_runs_are_fetched_with_slurp(monkeypatch, tmp_path):
+    """`gh api --paginate` emits one document per page for an OBJECT response.
+    Measured on a 16-run commit at per_page=5: four pages, and json.loads fails
+    with "Extra data" at char 15511. Without --slurp this check blocks every
+    PR whose commit has more than 100 check runs, for no real reason.
+    """
+    captured = {}
+
+    def fake(args, project_root, timeout):
+        captured["args"] = list(args)
+        return [{"check_runs": [{"name": "a"}]}, {"check_runs": [{"name": "b"}]}]
+
+    monkeypatch.setattr(cc, "_gh_json", fake)
+    runs = cc.fetch_check_runs(tmp_path, "a" * 40)
+    assert "--slurp" in captured["args"]
+    assert "--paginate" in captured["args"]
+    assert [r["name"] for r in runs] == ["a", "b"], "every page must be flattened, not just the first"
 
 
 def test_gh_failure_raises_rather_than_returning_an_empty_list(tmp_path):
