@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import List
@@ -61,6 +62,53 @@ _EXIT_BY_VERDICT = {
     VERDICT_NOT_READY: EXIT_NOT_READY,
     VERDICT_UNMEASURABLE: EXIT_UNMEASURABLE,
 }
+
+
+class StateDirMismatch(RuntimeError):
+    """The PR facts and the gate evidence would come from different projects."""
+
+
+def resolve_state_dir(project_root: Path, explicit: str | None) -> Path:
+    """Bind the gate-evidence store to the project the PR facts come from.
+
+    The PR facts, the required contexts and the CI runs are all resolved
+    against ``project_root``. The gate obligations and result records were
+    resolved against whatever the AMBIENT environment pointed at. Running from
+    a different directory, or with a VNX_* variable inherited from another
+    project, silently read one project's gate evidence into another project's
+    verdict — a wrong READY or NOT READY with nothing to show it happened.
+
+    An explicit ``--state-dir`` always wins; that is the operator's override
+    for a deliberate cross-project read. Otherwise the two must agree, and a
+    disagreement is refused rather than resolved: guessing which of the two
+    the operator meant is exactly the silent choice this check exists to stop.
+    """
+    if explicit:
+        return Path(explicit)
+    paths = ensure_env()
+    resolved_root = Path(paths["PROJECT_ROOT"]).resolve()
+    asked = _git_toplevel(project_root) or Path(project_root).resolve()
+    if resolved_root != asked:
+        raise StateDirMismatch(
+            f"the PR facts would come from {asked} but the gate evidence from the store "
+            f"of {resolved_root} ({paths['VNX_STATE_DIR']}). Run from the project, or pass "
+            "--state-dir to say which store you mean."
+        )
+    return Path(paths["VNX_STATE_DIR"])
+
+
+def _git_toplevel(path: Path) -> Path | None:
+    """The git root containing ``path``, or None when it is not a repository."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return Path(proc.stdout.strip()).resolve()
 
 
 def _context_line(report: Readiness) -> str:
@@ -160,6 +208,11 @@ def main(argv: List[str] | None = None) -> int:
         help="branch whose protection defines the required contexts (default: main)",
     )
     parser.add_argument("--project-root", default=None, help="project root (default: cwd)")
+    parser.add_argument(
+        "--state-dir", default=None,
+        help="explicit VNX state dir; required when --project-root names a project "
+             "other than the one the ambient environment resolves to",
+    )
     parser.add_argument("--timeout", type=int, default=20, help="per-gh-call timeout in seconds")
     args = parser.parse_args(argv)
 
@@ -170,7 +223,11 @@ def main(argv: List[str] | None = None) -> int:
         return EXIT_BAD_INPUT
 
     project_root = Path(args.project_root) if args.project_root else Path.cwd()
-    state_dir = Path(ensure_env()["VNX_STATE_DIR"])
+    try:
+        state_dir = resolve_state_dir(project_root, args.state_dir)
+    except StateDirMismatch as exc:
+        print(f"pr-ready: {exc}", file=sys.stderr)
+        return EXIT_BAD_INPUT
 
     reports = []
     worst = EXIT_READY

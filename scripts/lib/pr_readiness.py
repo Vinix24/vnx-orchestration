@@ -195,6 +195,11 @@ class Readiness:
         if self.gates_error:
             reasons.append(f"review gates: {self.gates_error}")
         reasons += [
+            f"{c.context}: {c.detail}"
+            for c in self.contexts
+            if c.state == ci_contexts.STATE_UNVERIFIED
+        ]
+        reasons += [
             f"{g.gate}: {g.message}" for g in self.gates if g.verdict == VERDICT_UNMEASURABLE
         ]
         return reasons

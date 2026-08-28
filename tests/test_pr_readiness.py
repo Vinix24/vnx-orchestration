@@ -358,3 +358,70 @@ def test_the_verdict_and_the_rendered_ci_line_never_disagree():
     report = _ready_report(contexts=[])
     assert "UNMEASURABLE" in pr_ready._context_line(report)
     assert report.verdict == pr.VERDICT_UNMEASURABLE
+
+
+# ---------------------------------------------------------------------------
+# The two stores must be the same project's
+# ---------------------------------------------------------------------------
+
+
+def test_an_explicit_state_dir_always_wins(tmp_path):
+    """The operator's override for a deliberate cross-project read."""
+    assert pr_ready.resolve_state_dir(tmp_path, str(tmp_path / "s")) == tmp_path / "s"
+
+
+def test_a_state_dir_from_another_project_is_refused(monkeypatch, tmp_path):
+    """The PR facts, the required contexts and the CI runs resolve against
+    --project-root; the gate evidence resolved against whatever the ambient
+    environment pointed at. Reading one project's gate evidence into another
+    project's verdict is a wrong READY with nothing to show it happened.
+    Found by codex_gate on this PR.
+    """
+    monkeypatch.setattr(
+        pr_ready, "ensure_env",
+        lambda: {"PROJECT_ROOT": str(tmp_path / "project-a"), "VNX_STATE_DIR": str(tmp_path / "a")},
+    )
+    monkeypatch.setattr(pr_ready, "_git_toplevel", lambda p: tmp_path / "project-b")
+    with pytest.raises(pr_ready.StateDirMismatch) as excinfo:
+        pr_ready.resolve_state_dir(tmp_path / "project-b", None)
+    assert "project-a" in str(excinfo.value) and "project-b" in str(excinfo.value)
+
+
+def test_agreeing_roots_use_the_ambient_state_dir(monkeypatch, tmp_path):
+    root = tmp_path / "project"
+    monkeypatch.setattr(
+        pr_ready, "ensure_env",
+        lambda: {"PROJECT_ROOT": str(root), "VNX_STATE_DIR": str(tmp_path / "state")},
+    )
+    monkeypatch.setattr(pr_ready, "_git_toplevel", lambda p: root)
+    assert pr_ready.resolve_state_dir(root, None) == tmp_path / "state"
+
+
+def test_main_refuses_a_cross_project_invocation(monkeypatch, tmp_path, capsys):
+    def _boom(project_root, explicit):
+        raise pr_ready.StateDirMismatch("two different projects")
+
+    monkeypatch.setattr(pr_ready, "resolve_state_dir", _boom)
+    assert pr_ready.main(["1705"]) == pr_ready.EXIT_BAD_INPUT
+    assert "two different projects" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# An unverified context is unmeasurable, not merely blocking
+# ---------------------------------------------------------------------------
+
+
+def test_an_unverified_context_makes_the_verdict_unmeasurable():
+    """It fell through to blockers and reported NOT READY (exit 1). But
+    `unverified` is precisely "could not tell", which is exit 2 — the whole
+    reason the third bucket exists. Found by codex_gate on this PR.
+    """
+    report = _ready_report(
+        contexts=[
+            _ctx("Profile A", ci_contexts.STATE_PASSED),
+            _ctx("Some App Check", ci_contexts.STATE_UNVERIFIED),
+        ]
+    )
+    assert report.verdict == pr.VERDICT_UNMEASURABLE
+    assert any("Some App Check" in r for r in report.unmeasurable_reasons)
+    assert pr_ready._EXIT_BY_VERDICT[report.verdict] == pr_ready.EXIT_UNMEASURABLE
