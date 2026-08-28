@@ -327,3 +327,80 @@ def test_the_gate_env_flag_map_exists_once():
         "gate->env-flag mapping belongs in gate_recorder._GATE_ENV_FLAGS only"
     )
     assert "wiring_gate" in _rec._GATE_ENV_FLAGS
+
+
+# ---------------------------------------------------------------------------
+# 6. The SECOND path — request time (kimi advisory on a8141931)
+# ---------------------------------------------------------------------------
+
+# GateRunner is the run-time path. gate_request_handler._mark_gate_unavailable
+# -> GateResultParserMixin._classify_unavailable is the REQUEST-time one, and
+# it ran the same raw shutil.which on a caller-supplied name. Fixing one path
+# and leaving the other is a promise the code does not keep — the same thing
+# write_result_guarded's docstring was corrected for earlier the same day.
+
+
+def _classify(gate: str):
+    from gate_result_parser import GateResultParserMixin
+
+    class _P(GateResultParserMixin):
+        pass
+
+    return _P()._classify_unavailable(gate)
+
+
+def test_request_time_kimi_is_not_a_missing_binary():
+    """The caller passed binary_name="kimi_gate.py" — not a binary, never was,
+    so the lookup could only fail and the gate could only be booked
+    provider_not_installed."""
+    reason, detail = _classify("kimi_gate")
+
+    assert reason != "provider_not_installed"
+    assert reason == "gate_runner_missing"
+    assert "scripts/kimi_gate.py" in detail
+    assert "not a PATH lookup" in detail
+
+
+def test_request_time_unregistered_gate_is_a_routing_bug():
+    reason, detail = _classify("verzonnen_gate")
+
+    assert reason == "gate_not_registered"
+    assert "not found in PATH" not in detail
+
+
+def test_request_time_path_binary_gate_keeps_its_behaviour(monkeypatch):
+    import gate_result_parser
+
+    monkeypatch.setattr(gate_result_parser.shutil, "which", lambda _b: None)
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+
+    reason, detail = _classify("codex_gate")
+
+    assert reason == "provider_not_installed"
+    assert detail == "codex binary not found in PATH", (
+        "the name must come from the registry, not from a caller"
+    )
+
+
+def test_no_caller_can_supply_a_provider_name_any_more():
+    """The whole class of bug: a name handed in by the caller that nobody ever
+    shipped. Both entry points now read the registry, so there is no parameter
+    left to hand one through."""
+    import inspect
+
+    from gate_request_handler import GateRequestHandlerMixin
+    from gate_result_parser import GateResultParserMixin
+
+    for cls, method in (
+        (GateRequestHandlerMixin, "_mark_gate_unavailable"),
+        (GateResultParserMixin, "_classify_unavailable"),
+    ):
+        params = inspect.signature(getattr(cls, method)).parameters
+        assert "binary_name" not in params, (
+            f"{cls.__name__}.{method} still accepts a caller-supplied provider name"
+        )
+
+    handler_src = (VNX_ROOT / "scripts" / "lib" / "gate_request_handler.py").read_text()
+    assert "binary_name" not in handler_src, (
+        "no call site may pass a provider name; the registry is the only source"
+    )
