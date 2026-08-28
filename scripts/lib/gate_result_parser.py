@@ -245,7 +245,7 @@ class GateResultParserMixin:
 
         Three answers, matching gate_runner's:
 
-        * unregistered gate -> ``gate_not_registered``; a routing bug, not an
+        * unregistered gate -> ``unsupported_gate_type``; a routing bug, not an
           environment complaint.
         * script-runner gate -> ``gate_runner_missing``. Reaching here means
           the caller's own availability check (``_kimi_gate_available`` and
@@ -261,7 +261,7 @@ class GateResultParserMixin:
         provider = resolve_gate_provider(gate)
         if provider is None:
             return (
-                "gate_not_registered",
+                "unsupported_gate_type",
                 f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a PATH "
                 f"binary or a script runner; no binary name is guessed from the gate name",
             )

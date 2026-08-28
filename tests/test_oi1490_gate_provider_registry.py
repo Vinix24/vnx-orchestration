@@ -125,7 +125,7 @@ def test_the_invented_binary_name_is_gone_from_the_audit_trail(gate_dirs):
 def test_an_unregistered_gate_says_so_instead_of_inventing_a_binary(gate_dirs):
     result = _run(gate_dirs, "verzonnen_gate")
 
-    assert result["reason"] == "gate_not_registered"
+    assert result["reason"] == "unsupported_gate_type"
     assert "not found in PATH" not in result["reason_detail"], (
         "an unregistered gate is a routing bug, not an environment complaint"
     )
@@ -176,7 +176,7 @@ def test_the_new_reasons_are_permanent_not_a_bounded_wait():
     assert "gate_not_subprocess_routable" not in temporary, (
         "no amount of waiting turns a script runner into a PATH binary"
     )
-    assert "gate_not_registered" not in temporary
+    assert "unsupported_gate_type" not in temporary
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ def test_request_time_kimi_is_not_a_missing_binary():
 def test_request_time_unregistered_gate_is_a_routing_bug():
     reason, detail = _classify("verzonnen_gate")
 
-    assert reason == "gate_not_registered"
+    assert reason == "unsupported_gate_type"
     assert "not found in PATH" not in detail
 
 

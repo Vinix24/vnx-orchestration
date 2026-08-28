@@ -169,7 +169,7 @@ class GateRunner:
             if provider is None:
                 return _rec.record_not_executable(
                     gate=gate, pr_number=pr_number, pr_id=pr_id,
-                    reason="gate_not_registered",
+                    reason="unsupported_gate_type",
                     reason_detail=(
                         f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
                         f"PATH binary or a script runner; this runner will not guess a "

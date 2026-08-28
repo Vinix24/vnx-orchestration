@@ -110,6 +110,14 @@ A gate is `not_executable` when the system can determine at request time or pre-
 | `runner_not_available` | No gate runner script or process is available to execute | Any |
 | `unsupported_gate_type` | Gate type is not recognized by the runner | Any |
 | `contract_missing` | Review contract could not be generated (no changed files, no FEATURE_PLAN) | Any |
+| `gate_runner_missing` | The gate is registered as a script runner but its runner file is not on disk | Script-runner gates |
+| `gate_not_subprocess_routable` | The runner exists, but this executor cannot drive it: the gate is a script with its own contract/dispatch/result lifecycle, not a CLI to feed a prompt | Script-runner gates |
+
+`gate_runner_missing` is the name the code emits for the `runner_not_available`
+condition above; both appear here because the emitted string is what a reader
+greps for. `unsupported_gate_type` is emitted when a gate is absent from
+`gate_recorder.GATE_PROVIDERS` — the runner never guesses a binary name from the
+gate's own name (OI-1490).
 
 ### 3.3 Not_Executable Record
 
