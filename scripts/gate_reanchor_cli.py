@@ -209,7 +209,7 @@ def main(argv: Optional[list] = None) -> int:
             print(json.dumps(payload_out, indent=2))
         else:
             print(f"REFUSED  #{args.pr} {args.gate}: {decision.reason}")
-            print(f"         the gate has to run — this is not a saving that was available")
+            print("         the gate has to run — this is not a saving that was available")
         return EXIT_REFUSED
 
     if not args.apply:

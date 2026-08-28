@@ -340,26 +340,14 @@ def find_blocking_symbols(
     return sorted(blocking)
 
 
-def can_reanchor(
-    project_root: Path,
-    *,
-    old_sha: str,
-    new_sha: str,
-    pr_files: Sequence[str],
-    old_contract_hash: str,
-    new_contract_hash: str,
-    base_ref: str = "origin/main",
-    depth: int = DEPTH_DEFAULT,
-) -> ReanchorDecision:
-    """May the verdict recorded for ``old_sha`` be re-anchored on ``new_sha``?
+def _check_hash_precondition(
+    *, old_sha: str, new_sha: str,
+    old_contract_hash: str, new_contract_hash: str, depth: int,
+) -> Optional[ReanchorDecision]:
+    """Condition (a) plus the trivial no-op case, or None to carry on.
 
-    Both halves of the OI-1471 condition, in the order that costs least: the
-    hash comparison is free and settles most refusals, so the import analysis
-    only runs when the hashes already agree.
-
-    Refuses on every unestablished fact — an empty hash on either side, an
-    unresolvable merge-base (a rebased-away commit whose objects are gone), an
-    unparseable diff hunk. Absence of evidence is a re-buy.
+    Split out because it is free — no git, no parsing — and settles most
+    refusals, so :func:`can_reanchor` runs it before touching the repository.
     """
     if not old_contract_hash or not new_contract_hash:
         return ReanchorDecision(
@@ -385,6 +373,37 @@ def can_reanchor(
             reason="old and new commit are the same — there is nothing to re-anchor",
             contract_hash_matches=True, old_sha=old_sha, new_sha=new_sha, depth=depth,
         )
+    return None
+
+
+def can_reanchor(
+    project_root: Path,
+    *,
+    old_sha: str,
+    new_sha: str,
+    pr_files: Sequence[str],
+    old_contract_hash: str,
+    new_contract_hash: str,
+    base_ref: str = "origin/main",
+    depth: int = DEPTH_DEFAULT,
+) -> ReanchorDecision:
+    """May the verdict recorded for ``old_sha`` be re-anchored on ``new_sha``?
+
+    Both halves of the OI-1471 condition, in the order that costs least: the
+    hash comparison is free and settles most refusals, so the import analysis
+    only runs when the hashes already agree.
+
+    Refuses on every unestablished fact — an empty hash on either side, an
+    unresolvable merge-base (a rebased-away commit whose objects are gone), an
+    unparseable diff hunk. Absence of evidence is a re-buy.
+    """
+    refusal = _check_hash_precondition(
+        old_sha=old_sha, new_sha=new_sha,
+        old_contract_hash=old_contract_hash, new_contract_hash=new_contract_hash,
+        depth=depth,
+    )
+    if refusal is not None:
+        return refusal
 
     try:
         old_base = merge_base(project_root, base_ref, old_sha)
