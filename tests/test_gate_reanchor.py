@@ -368,3 +368,61 @@ def test_the_reanchored_payload_does_not_mutate_the_record_it_came_from():
     cli.build_reanchored_payload(record, new_sha="b" * 40, new_branch="n", decision=decision)
     assert record["commit_sha"] == "a" * 40
     assert record["evidence_source"] == "live"
+
+
+# ---------------------------------------------------------------------------
+# Deletion-only hunks
+# ---------------------------------------------------------------------------
+
+
+def test_a_deletion_only_hunk_still_marks_the_function_as_changed(repo):
+    """`@@ -a,b +c,0 @@` has an EMPTY post-image span.
+
+    Reading it literally records no touched line, so a commit that deletes a
+    guard out of a function this PR calls would register as "nothing changed"
+    and allow a re-anchor that must be refused. Found by codex_gate on this
+    very PR.
+    """
+    root, base = repo
+    path = root / "scripts" / "lib" / "lib_a.py"
+    path.write_text(
+        "CONSTANT = 1\n\n\ndef helper(x):\n    if x < 0:\n        raise ValueError(x)\n"
+        "    return x + 1\n\n\ndef untouched(x):\n    return x\n"
+    )
+    with_guard = _commit(root, "add a guard to helper")
+    path.write_text(
+        "CONSTANT = 1\n\n\ndef helper(x):\n    return x + 1\n\n\ndef untouched(x):\n    return x\n"
+    )
+    without_guard = _commit(root, "delete the guard")
+
+    raw = _git(root, "diff", "--unified=0", with_guard, without_guard)
+    assert "+4,0" in raw or ",0 @@" in raw, f"expected a deletion-only hunk, got:\n{raw}"
+
+    assert gr.changed_symbols(root, with_guard, without_guard) == {("lib_a", "helper")}
+
+
+def test_a_deletion_only_change_refuses_the_re_anchor_end_to_end(repo):
+    """The same case through can_reanchor: identical hash, deleted guard."""
+    root, base = repo
+    path = root / "scripts" / "lib" / "lib_a.py"
+    path.write_text(
+        "CONSTANT = 1\n\n\ndef helper(x):\n    if x < 0:\n        raise ValueError(x)\n"
+        "    return x + 1\n\n\ndef untouched(x):\n    return x\n"
+    )
+    guarded = _commit(root, "add a guard")
+    _git(root, "checkout", "-q", "-b", "feature", guarded)
+    old_head = guarded
+    _git(root, "checkout", "-q", "main")
+    path.write_text(
+        "CONSTANT = 1\n\n\ndef helper(x):\n    return x + 1\n\n\ndef untouched(x):\n    return x\n"
+    )
+    _commit(root, "delete the guard")
+    _git(root, "checkout", "-q", "-B", "feature2", "main")
+    tip = _git(root, "rev-parse", "HEAD").strip()
+
+    decision = gr.can_reanchor(
+        root, old_sha=old_head, new_sha=tip, pr_files=["scripts/consumer.py"],
+        old_contract_hash="h1", new_contract_hash="h1", base_ref="main",
+    )
+    assert not decision.allowed
+    assert ("lib_a", "helper") in decision.blocking_symbols

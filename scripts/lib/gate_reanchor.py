@@ -154,6 +154,17 @@ def _changed_line_numbers(project_root: Path, commit: str, path: str) -> Set[int
         except (IndexError, ValueError):
             # An unparseable hunk header must not silently narrow the range.
             raise ReanchorError(f"unparseable diff hunk header in {commit[:12]} {path}: {line!r}")
+        if count == 0:
+            # A deletion-only hunk has a `+N,0` post-image span, so
+            # range(N, N+0) is EMPTY and the change would register as touching
+            # nothing at all — a commit that deletes a guard out of a function
+            # this PR calls would then read as "nothing changed" and allow a
+            # re-anchor that must be refused. Git's convention for `+N,0` is
+            # that the removed content sat after post-image line N, so both N
+            # and N+1 are marked: whichever scope enclosed the deletion
+            # contains one of them.
+            lines.update({max(start, 1), start + 1})
+            continue
         lines.update(range(start, start + count))
     return lines
 
