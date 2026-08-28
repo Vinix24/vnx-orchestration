@@ -182,50 +182,28 @@ def _run_ci_gate(
 
 
 def _norm_pr_id(pr_id: str) -> str:
-    """Normalize an internal PR id for obligation matching.
+    """Deprecated alias for ``gate_obligations.normalise_pr_id``.
 
-    "PR-879", "pr879" and "879" all normalize to "879"; "PR-HYG-1" to "HYG-1".
-    The door stores the raw spec pr_id on the obligation; the merge gate joins
-    that against the GitHub PR number, which may differ in case, hyphen and the
-    "PR" prefix, so comparison goes through this normalization.
+    Kept as a name so existing imports and tests keep resolving; the logic
+    lives in gate_obligations, which the readiness report reads from too.
     """
-    s = (pr_id or "").strip().upper()
-    if s.startswith("PR-"):
-        return s[3:]
-    # Bare "PR<digits>" (e.g. "pr879") — strip the prefix only when it is
-    # followed by a digit, so alphanumeric labels like "PR-HYG-1" (handled
-    # above) and words that merely start with "PR" are never mangled.
-    if s.startswith("PR") and len(s) > 2 and s[2].isdigit():
-        return s[2:]
-    return s
+    from gate_obligations import normalise_pr_id
+
+    return normalise_pr_id(pr_id)
 
 
 def _resolve_declared_gate(pr_number: int, *, state_dir: Path) -> str:
     """Resolve a PR's declared review gate from its door obligation.
 
-    The obligation the dispatch door writes (``scripts/lib/gate_obligations.py``)
-    carries the declared gate. The merge-time join key is the GitHub PR number:
-    the runner stamps ``pr_number`` on the obligation it fulfils, and a numeric
-    pr_id ("PR-1584" / "1584" / "pr1584") normalizes to the same number.
-    Returns the gate name, or "" when no obligation declares one — the merge
-    gate treats "" as a refusal, never a pass.
+    Delegates the join to ``gate_obligations.declared_gates_for_pr`` and keeps
+    this function's own contract unchanged: the LAST declared gate wins, and
+    an unreadable obligation store degrades to "" (a refusal at the merge
+    gate) rather than raising into the merge path.
     """
     try:
-        from gate_obligations import NO_GATE_KEY, iter_obligations
+        from gate_obligations import declared_gates_for_pr
 
-        num = str(pr_number)
-        num_forms = {_norm_pr_id(num), _norm_pr_id(f"PR-{num}")}
-        matches = []
-        for _path, record in iter_obligations(state_dir):
-            rec_num = record.get("pr_number")
-            matched = rec_num is not None and str(rec_num) == num
-            if not matched:
-                matched = _norm_pr_id(str(record.get("pr_id") or "")) in num_forms
-            if not matched:
-                continue
-            gate = (record.get("gate") or "").strip()
-            if gate and gate != NO_GATE_KEY:
-                matches.append(gate)
+        matches = declared_gates_for_pr(state_dir, pr_number)
         if matches:
             return matches[-1]
     except (ValueError, OSError) as exc:

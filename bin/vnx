@@ -349,6 +349,9 @@ Permission relay (detached-worker prompt governance):
 
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
+  pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
+                        current head, and what closing each gap costs
+                        (exit 0 ready, 1 not ready, 2 unmeasurable)
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
 Planning commands (strategic-layer read surface):
@@ -2565,6 +2568,9 @@ main() {
       ;;
     gate-check)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pre_merge_gate.py" "$@"
+      ;;
+    pr-ready)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_ready.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"

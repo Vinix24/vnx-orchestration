@@ -140,6 +140,56 @@ def pr_number_from_pr_id(pr_id: Optional[str]) -> Optional[int]:
         return None
 
 
+def normalise_pr_id(pr_id: str) -> str:
+    """Normalise an internal PR id for obligation matching.
+
+    "PR-879", "pr879" and "879" all normalise to "879"; "PR-HYG-1" to "HYG-1".
+    The door stores the raw spec pr_id on the obligation; every consumer joins
+    that against the GitHub PR number, which may differ in case, hyphen and the
+    "PR" prefix.
+
+    Promoted here from ``pr_merge._norm_pr_id`` so the merge gate and the
+    readiness report answer "which gate does this PR owe" from ONE
+    implementation — a second copy is exactly how the two would start
+    disagreeing about a PR's obligations.
+    """
+    s = (pr_id or "").strip().upper()
+    if s.startswith("PR-"):
+        return s[3:]
+    if len(s) > 2 and s.startswith("PR") and s[2].isdigit():
+        return s[2:]
+    return s
+
+
+def declared_gates_for_pr(state_dir: Path, pr_number: int) -> list:
+    """Every review gate declared for ``pr_number``, oldest obligation first.
+
+    Joins on the GitHub PR number the runner stamps on the obligation, falling
+    back to the normalised spec ``pr_id`` for records the runner never touched.
+    The ``__no_gate__`` sentinel and blank gates are excluded: they declare an
+    explicit absence, not an obligation.
+
+    Raises ValueError (via :func:`iter_obligations`) when an obligation file is
+    unreadable. That is deliberate — an obligation nobody can read is the
+    silent-evidence failure this whole mechanism exists to expose, so a caller
+    reports it rather than reading it as "this PR owes nothing".
+    """
+    num = str(pr_number)
+    num_forms = {normalise_pr_id(num), normalise_pr_id(f"PR-{num}")}
+    gates = []
+    for _path, record in iter_obligations(state_dir):
+        rec_num = record.get("pr_number")
+        matched = rec_num is not None and str(rec_num) == num
+        if not matched:
+            matched = normalise_pr_id(str(record.get("pr_id") or "")) in num_forms
+        if not matched:
+            continue
+        gate = (record.get("gate") or "").strip()
+        if gate and gate != NO_GATE_KEY:
+            gates.append(gate)
+    return gates
+
+
 def _utc_now_iso() -> str:
     # Stdlib-only on purpose: this module is imported by the dispatch door,
     # which must never fail on a transitive scripts/-side import chain.

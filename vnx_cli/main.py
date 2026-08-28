@@ -1454,6 +1454,13 @@ def _register_gate_check_subparser(subparsers: argparse.Action) -> None:
     register_gate_check_subparser(subparsers)
 
 
+def _register_pr_ready_subparser(subparsers: argparse.Action) -> None:
+    """`vnx pr-ready` — merge readiness (scripts/pr_ready.py), exposed on the
+    pip CLI so a consumer repo without `bin/` gets the same command."""
+    from vnx_cli.commands.pr_ready import register_pr_ready_subparser
+    register_pr_ready_subparser(subparsers)
+
+
 def _register_worktree_release_subparser(subparsers: argparse.Action) -> None:
     """`vnx worktree-release` — same engine as the fabric repo's `bin/vnx
     worktree-release` (scripts/lib/worktree_release.py), exposed on the pip
@@ -1548,6 +1555,9 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
     elif args.command == "gate-check":
         from vnx_cli.commands.gate_check import vnx_gate_check
         sys.exit(vnx_gate_check(args))
+    elif args.command == "pr-ready":
+        from vnx_cli.commands.pr_ready import vnx_pr_ready
+        sys.exit(vnx_pr_ready(args))
 
     elif args.command == "worktree-release":
         from vnx_cli.commands.worktree import vnx_worktree_release
@@ -1597,6 +1607,7 @@ def main() -> None:
     _register_objective_subparser(subparsers)
     _register_deliverable_subparser(subparsers)
     _register_gate_check_subparser(subparsers)
+    _register_pr_ready_subparser(subparsers)
     _register_worktree_release_subparser(subparsers)
 
     args = parser.parse_args()
