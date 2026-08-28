@@ -45,12 +45,14 @@ _REVIEWER_VERDICT_TEMPLATE = (
     "```\n"
 )
 
-# Gate type → CLI binary mapping
-GATE_BINARIES: Dict[str, str] = {
-    "gemini_review": "gemini",
-    "codex_gate": "codex",
-    "claude_github_optional": "gh",
-}
+# Gate type → CLI binary mapping.
+#
+# Derived from the single registry in gate_recorder (OI-1490) so this can no
+# longer drift from it: this copy carried 3 gates while gate_recorder's carried
+# 5, and neither carried kimi_gate or glm_gate. Only PATH-binary gates appear
+# here — a script-runner gate has no binary and must not be looked up as if it
+# did. Kept as a module-level name because tests and readers expect it.
+GATE_BINARIES: Dict[str, str] = dict(_rec._GATE_BINARIES)
 
 # Gate type → CLI args for review execution
 GATE_CLI_ARGS: Dict[str, List[str]] = {
@@ -151,20 +153,82 @@ class GateRunner:
 
         requested -> executing -> completed|failed
         """
-        binary = GATE_BINARIES.get(gate)
+        provider = _rec.resolve_gate_provider(gate)
         using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
 
         if not using_vertex:
-            if not binary or shutil.which(binary) is None:
+            # OI-1490: three outcomes, not one. Before this, an unregistered
+            # gate and a script-runner gate both collapsed into "binary not
+            # found in PATH" — a name this runner had just invented from the
+            # gate's own name. Each now says what is actually true, and the
+            # two new reasons are PERMANENT: neither is in
+            # gate_obligation_runner._TEMPORARY_NOT_EXECUTABLE_REASONS,
+            # because no amount of waiting installs a binary that was never a
+            # binary. `provider_not_installed` stays temporary and stays
+            # correct for the gates it actually describes.
+            if provider is None:
                 return _rec.record_not_executable(
                     gate=gate, pr_number=pr_number, pr_id=pr_id,
-                    reason="provider_not_installed",
-                    reason_detail=f"{binary or gate} binary not found in PATH",
+                    reason="gate_not_registered",
+                    reason_detail=(
+                        f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
+                        f"PATH binary or a script runner; this runner will not guess a "
+                        f"binary name from the gate name"
+                    ),
                     request_payload=request_payload,
                     requests_dir=self._requests_dir,
                     results_dir=self._results_dir,
                     state_dir=self._state_dir,
                 )
+            kind, provider_name = provider
+            if kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
+                pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
+                # Not-shipped and not-routable are different answers and the
+                # reader acts differently on each. deepseek_gate is registered
+                # but scripts/deepseek_gate.py does not exist yet, which
+                # gate_request_handler already books as `gate_runner_missing`
+                # — reuse that code here rather than mint a second name for
+                # the same fact.
+                if not (_rec._repo_root() / provider_name).exists():
+                    return _rec.record_not_executable(
+                        gate=gate, pr_number=pr_number, pr_id=pr_id,
+                        reason="gate_runner_missing",
+                        reason_detail=(
+                            f"{provider_name} does not exist yet — {gate} is registered "
+                            f"as a script runner but its runner has not shipped"
+                        ),
+                        request_payload=request_payload,
+                        requests_dir=self._requests_dir,
+                        results_dir=self._results_dir,
+                        state_dir=self._state_dir,
+                    )
+                return _rec.record_not_executable(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    reason="gate_not_subprocess_routable",
+                    reason_detail=(
+                        f"{gate} is a script runner ({provider_name}) with its own "
+                        f"contract, dispatch and result-writing lifecycle; it is not a "
+                        f"CLI this runner can drive with a prompt. Run it directly: "
+                        f"python3 {provider_name} --pr {pr_ref}"
+                    ),
+                    request_payload=request_payload,
+                    requests_dir=self._requests_dir,
+                    results_dir=self._results_dir,
+                    state_dir=self._state_dir,
+                )
+            binary = provider_name
+            if shutil.which(binary) is None:
+                return _rec.record_not_executable(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    reason="provider_not_installed",
+                    reason_detail=f"{binary} binary not found in PATH",
+                    request_payload=request_payload,
+                    requests_dir=self._requests_dir,
+                    results_dir=self._results_dir,
+                    state_dir=self._state_dir,
+                )
+        else:
+            binary = GATE_BINARIES.get(gate, "")
 
         prompt = self._resolve_prompt(gate, request_payload, using_vertex)
         if prompt and "prompt" not in request_payload:

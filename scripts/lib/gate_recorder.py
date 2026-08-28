@@ -26,13 +26,59 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
     "wiring_gate": "VNX_WIRING_GATE_REQUIRED",
 }
 
-_GATE_BINARIES: Dict[str, str] = {
-    "gemini_review": "gemini",
-    "codex_gate": "codex",
-    "claude_github_optional": "gh",
-    "ci_gate": "gh",
-    "wiring_gate": "gh",
+# How each gate's provider is actually reached. Two KINDS, kept apart because
+# their failure modes are different and collapsing them is OI-1490.
+#
+# PATH_BINARY   the gate drives a CLI that must be on PATH, with a prompt on
+#               stdin (gate_runner._build_gate_cmd builds `[binary] + args`).
+# SCRIPT_RUNNER the gate IS a repo script with its own lifecycle — it builds
+#               its own contract, dispatches, parses the verdict and writes
+#               its own result record. There is no PATH binary to look for,
+#               and there never will be.
+#
+# Before OI-1490 there was no second kind: a gate absent from the mapping fell
+# back to its own NAME as a binary, so `shutil.which("kimi_gate")` failed and
+# the gate was booked `provider_not_installed`. Measured in
+# gate_execution_audit.ndjson: `binary=kimi_gate found=False` (2026-08-28) and
+# six identical `binary=glm_gate found=False` records (2026-08-26). That label
+# is wrong three times over — the binary is not missing, it never existed; the
+# real runner (scripts/kimi_gate.py) was present the whole time; and
+# `provider_not_installed` sits in gate_obligation_runner's
+# _TEMPORARY_NOT_EXECUTABLE_REASONS ("installable tomorrow"), so the
+# obligation burns bounded retries waiting for an environment change that
+# cannot happen.
+GATE_PROVIDER_PATH_BINARY = "path_binary"
+GATE_PROVIDER_SCRIPT_RUNNER = "script_runner"
+
+GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
+    "gemini_review": (GATE_PROVIDER_PATH_BINARY, "gemini"),
+    "codex_gate": (GATE_PROVIDER_PATH_BINARY, "codex"),
+    "claude_github_optional": (GATE_PROVIDER_PATH_BINARY, "gh"),
+    "ci_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
+    "wiring_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
+    "kimi_gate": (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/kimi_gate.py"),
+    "glm_gate": (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/glm_gate.py"),
+    "deepseek_gate": (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/deepseek_gate.py"),
 }
+
+# Backward-compatible view: only the gates that really do resolve to a PATH
+# binary. Deriving it means the two can no longer drift apart, which is how
+# gate_runner.GATE_BINARIES (3 entries) and this one (5) disagreed for months.
+_GATE_BINARIES: Dict[str, str] = {
+    gate: name for gate, (kind, name) in GATE_PROVIDERS.items()
+    if kind == GATE_PROVIDER_PATH_BINARY
+}
+
+
+def resolve_gate_provider(gate: str) -> Optional[Tuple[str, str]]:
+    """Return ``(kind, name)`` for a gate, or ``None`` when unregistered.
+
+    ``None`` is deliberately distinguishable from both kinds: an unknown gate
+    is a routing bug and must never be reported as a missing binary. There is
+    no fall back to the gate's own name — constructing a binary name nobody
+    ever shipped is the OI-1490 defect itself, not a convenience.
+    """
+    return GATE_PROVIDERS.get(gate)
 
 # Infrastructure/execution failures — NOT semantic gate verdicts.
 # gate_failed means "gate completed with blocking findings"; only emit it for reasons
@@ -94,6 +140,11 @@ def persist_request(
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _repo_root() -> Path:
+    """Repo root for resolving a script-runner path (scripts/lib -> repo)."""
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def write_skip_rationale(
     state_dir: Path,
     gate: str,
@@ -101,8 +152,25 @@ def write_skip_rationale(
     reason: str,
     reason_detail: str,
 ) -> None:
-    """Append skip-rationale record to NDJSON audit trail (GATE-9)."""
-    binary = _GATE_BINARIES.get(gate, gate)
+    """Append skip-rationale record to NDJSON audit trail (GATE-9).
+
+    ``provider_check`` reports what was actually checked, per gate KIND
+    (OI-1490). A script-runner gate gets an existence check on its runner
+    file and never a PATH lookup: ``shutil.which("kimi_gate")`` answers a
+    question nobody asked and its ``False`` was read for two days as "the
+    provider is missing" while scripts/kimi_gate.py sat on disk. An
+    unregistered gate says so in ``provider_kind`` rather than inventing a
+    binary name from the gate's own name.
+    """
+    provider = resolve_gate_provider(gate)
+    if provider is None:
+        kind, name, found = "unregistered", "", False
+    elif provider[0] == GATE_PROVIDER_SCRIPT_RUNNER:
+        kind, name = provider
+        found = (_repo_root() / name).exists()
+    else:
+        kind, name = provider
+        found = shutil.which(name) is not None
     env_var = _GATE_ENV_FLAGS.get(gate, "")
     record = {
         "event_type": "gate_skip_rationale",
@@ -111,8 +179,9 @@ def write_skip_rationale(
         "reason": reason,
         "reason_detail": reason_detail,
         "provider_check": {
-            "binary_name": binary,
-            "binary_found": shutil.which(binary) is not None,
+            "provider_kind": kind,
+            "binary_name": name,
+            "binary_found": found,
             "env_flag": env_var,
             "env_value": os.environ.get(env_var, ""),
         },
