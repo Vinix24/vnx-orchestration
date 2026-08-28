@@ -31,6 +31,7 @@ on THAT path both gates were equally dead. The bug was never kimi-specific.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -382,9 +383,12 @@ def test_request_time_path_binary_gate_keeps_its_behaviour(monkeypatch):
     )
 
 
-def test_no_caller_can_supply_a_provider_name_any_more():
+_REGISTRY_ONLY_METHODS = ("_mark_gate_unavailable", "_classify_unavailable")
+
+
+def test_neither_entry_point_accepts_a_provider_name():
     """The whole class of bug: a name handed in by the caller that nobody ever
-    shipped. Both entry points now read the registry, so there is no parameter
+    shipped. Both entry points read the registry, so there is no parameter
     left to hand one through."""
     import inspect
 
@@ -400,7 +404,43 @@ def test_no_caller_can_supply_a_provider_name_any_more():
             f"{cls.__name__}.{method} still accepts a caller-supplied provider name"
         )
 
-    handler_src = (VNX_ROOT / "scripts" / "lib" / "gate_request_handler.py").read_text()
-    assert "binary_name" not in handler_src, (
-        "no call site may pass a provider name; the registry is the only source"
+
+def test_no_caller_anywhere_passes_a_provider_name():
+    """Every call site in the tree, not just the file the parameter lived in.
+
+    The first version of this guard asserted the string was absent from
+    gate_request_handler.py. It went green while a caller in
+    tests/test_gate_request_handler_w3f.py still passed
+    ``binary_name="gemini"`` — a TypeError on a keyword-only signature, caught
+    by the kimi gate rather than by the guard written to catch exactly it. The
+    source was covered and the callers were not.
+
+    That is the fifth appearance of this shape in one day (OI-1472, OI-1486,
+    the duplicate provider_check block, the half-migrated
+    _classify_unavailable, and now the guard itself), so this one walks the
+    AST of every module instead of one file's text: a keyword argument is a
+    keyword argument no matter how the call is wrapped, and a mention in prose
+    or a dict key is not a call at all.
+    """
+    offenders = []
+    for root in ("scripts", "tests"):
+        for path in sorted((VNX_ROOT / root).rglob("*.py")):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                if name not in _REGISTRY_ONLY_METHODS:
+                    continue
+                for kw in node.keywords:
+                    if kw.arg == "binary_name":
+                        rel = path.relative_to(VNX_ROOT)
+                        offenders.append(f"{rel}:{node.lineno}: {name}(... binary_name=...)")
+
+    assert offenders == [], (
+        "these call sites still hand a provider name to a method that reads the "
+        "registry (OI-1490); drop the argument:\n  " + "\n  ".join(offenders)
     )
