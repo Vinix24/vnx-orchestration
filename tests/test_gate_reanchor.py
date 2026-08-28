@@ -119,7 +119,7 @@ def test_a_deleted_module_makes_the_whole_module_suspect(repo):
 
 def test_referenced_symbols_captures_a_from_import_and_its_module(repo):
     root, base = repo
-    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"])
+    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"]).symbols
     assert ("lib_a", "helper") in referenced
     assert ("lib_a", gr.MODULE_LEVEL) in referenced
 
@@ -130,7 +130,7 @@ def test_referenced_symbols_captures_module_attribute_access(repo):
         "import lib_a\n\n\ndef run(x):\n    return lib_a.helper(x)\n"
     )
     head = _commit(root, "switch to module import")
-    referenced = gr.referenced_symbols(root, head, ["scripts/consumer.py"])
+    referenced = gr.referenced_symbols(root, head, ["scripts/consumer.py"]).symbols
     assert ("lib_a", "helper") in referenced
 
 
@@ -139,19 +139,21 @@ def test_a_file_the_pr_deleted_contributes_no_references(repo):
     a complete answer, not a gap — refusing on it would refuse every PR that
     removes a file."""
     root, base = repo
-    assert gr.referenced_symbols(root, base, ["scripts/does_not_exist.py"]) == set()
+    result = gr.referenced_symbols(root, base, ["scripts/does_not_exist.py"])
+    assert result.symbols == set()
+    assert result.provable, "a deleted file is a complete answer, not a gap"
 
 
-def test_an_unparseable_file_refuses_instead_of_shrinking_the_reference_set(repo):
-    """Present but unreadable is the opposite case. Skipping it silently
+def test_an_unparseable_file_is_cannot_prove_not_an_empty_reference_set(repo):
+    """Present but unreadable is the opposite of deleted. Skipping it silently
     under-approximates what the PR reaches and then treats the remainder as
     complete — an ALLOW on evidence nobody gathered. Found by codex_gate."""
     root, base = repo
     (root / "scripts" / "broken.py").write_text("def f(:\n    pass\n")
     head = _commit(root, "add an unparseable file")
-    with pytest.raises(gr.ReanchorError) as excinfo:
-        gr.referenced_symbols(root, head, ["scripts/broken.py"])
-    assert "does not parse" in str(excinfo.value)
+    result = gr.referenced_symbols(root, head, ["scripts/broken.py"])
+    assert not result.provable
+    assert "does not parse" in result.unmodelled[0]
 
 
 def test_a_star_import_binds_the_pr_to_the_whole_module(repo):
@@ -161,7 +163,7 @@ def test_a_star_import_binds_the_pr_to_the_whole_module(repo):
     root, base = repo
     (root / "scripts" / "star.py").write_text("from lib_a import *\n\n\ndef run(x):\n    return helper(x)\n")
     head = _commit(root, "add a star importer")
-    referenced = gr.referenced_symbols(root, head, ["scripts/star.py"])
+    referenced = gr.referenced_symbols(root, head, ["scripts/star.py"]).symbols
     assert ("lib_a", gr.WHOLE_MODULE) in referenced
     assert gr.find_blocking_symbols({("lib_a", "untouched")}, referenced) == [
         ("lib_a", "untouched")
@@ -177,7 +179,7 @@ def test_a_module_imported_by_name_still_resolves_its_attributes(repo):
         "from lib import lib_a\n\n\ndef run(x):\n    return lib_a.helper(x)\n"
     )
     head = _commit(root, "add a package-style importer")
-    referenced = gr.referenced_symbols(root, head, ["scripts/pkgstyle.py"])
+    referenced = gr.referenced_symbols(root, head, ["scripts/pkgstyle.py"]).symbols
     assert ("lib_a", "helper") in referenced
 
 
@@ -190,7 +192,7 @@ def test_a_directly_imported_changed_symbol_blocks(repo):
     """The #1688/#1692 shape, in miniature. No indirect modules involved."""
     root, base = repo
     changed = {("lib_a", "helper")}
-    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"])
+    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"]).symbols
     assert gr.find_blocking_symbols(changed, referenced) == [("lib_a", "helper")]
 
 
@@ -201,7 +203,7 @@ def test_a_changed_sibling_in_an_imported_module_does_not_block(repo):
     branch load-bearing."""
     root, base = repo
     changed = {("lib_a", "untouched")}
-    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"])
+    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"]).symbols
     assert gr.find_blocking_symbols(changed, referenced) == []
 
 
@@ -210,21 +212,21 @@ def test_the_same_sibling_blocks_once_the_module_is_only_reached_indirectly(repo
     knowable from its own source, so any change there blocks."""
     root, base = repo
     changed = {("lib_a", "untouched")}
-    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"])
+    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"]).symbols
     assert gr.find_blocking_symbols(changed, referenced, {"lib_a"}) == [("lib_a", "untouched")]
 
 
 def test_a_changed_symbol_the_pr_does_not_reach_does_not_block(repo):
     root, base = repo
     changed = {("lib_a", "helper")}
-    referenced = gr.referenced_symbols(root, base, ["scripts/unrelated.py"])
+    referenced = gr.referenced_symbols(root, base, ["scripts/unrelated.py"]).symbols
     assert gr.find_blocking_symbols(changed, referenced) == []
 
 
 def test_a_module_level_change_blocks_anyone_importing_that_module(repo):
     root, base = repo
     changed = {("lib_a", gr.MODULE_LEVEL)}
-    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"])
+    referenced = gr.referenced_symbols(root, base, ["scripts/consumer.py"]).symbols
     assert gr.find_blocking_symbols(changed, referenced) == [("lib_a", gr.MODULE_LEVEL)]
 
 
@@ -232,7 +234,8 @@ def test_reachability_is_what_separates_direct_from_transitive(repo):
     """lib_b imports lib_a; a PR touching only lib_b reaches lib_a at depth 1."""
     root, base = repo
     graph = gr.build_import_graph(root, base)
-    assert graph["lib_b"] == {"lib_a"}
+    assert graph.edges["lib_b"] == {"lib_a"}
+    assert graph.unresolved == frozenset()
     direct = gr.reachable_modules({"lib_b"}, graph, gr.DEPTH_DIRECT)
     full = gr.reachable_modules({"lib_b"}, graph, gr.DEPTH_FULL)
     assert direct == {"lib_b"}
@@ -530,3 +533,101 @@ def test_a_failing_register_write_is_reported_not_swallowed(tmp_path, monkeypatc
             gate="glm_gate", pr_number=9, record={}, new_sha="b" * 40,
             decision=gr.ReanchorDecision(allowed=True, reason="r"),
         )
+
+
+# ---------------------------------------------------------------------------
+# cannot_prove — one principle, every unmodelled construct
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import importlib\n\n\ndef run(n):\n    return importlib.import_module(n)\n",
+        "def run(m, n):\n    return getattr(m, n)\n",
+        "def run(n):\n    return __import__(n)\n",
+    ],
+)
+def test_a_dynamic_import_or_lookup_is_cannot_prove(repo, body):
+    """A dynamic import or getattr can reach a name no static walk sees, so
+    the reference set cannot be enumerated. Reporting the smaller set would be
+    indistinguishable from having enumerated it completely."""
+    root, base = repo
+    (root / "scripts" / "dyn.py").write_text(body)
+    head = _commit(root, "add a dynamic reference")
+    result = gr.referenced_symbols(root, head, ["scripts/dyn.py"])
+    assert not result.provable
+    assert "dynamic import" in result.unmodelled[0]
+
+
+def test_a_re_export_resolves_to_the_module_that_really_defines_it(repo):
+    """The quietest hole: the PR writes `from lib_b import helper`, the symbol
+    really lives in lib_a. A commit changing lib_a.helper records
+    (lib_a, helper); without resolution the PR only references
+    (lib_b, helper) and nothing matches — a silent ALLOW on a changed symbol
+    the PR calls.
+    """
+    root, base = repo
+    (root / "scripts" / "reexport.py").write_text(
+        "from lib_b import helper\n\n\ndef run(x):\n    return helper(x)\n"
+    )
+    head = _commit(root, "import a re-exported symbol")
+    result = gr.referenced_symbols(root, head, ["scripts/reexport.py"])
+    assert ("lib_b", "helper") in result.symbols
+    assert ("lib_a", "helper") in result.symbols, "the re-export must resolve one level"
+    assert gr.find_blocking_symbols({("lib_a", "helper")}, result) == [("lib_a", "helper")]
+
+
+def test_an_unresolvable_module_in_the_closure_refuses_the_re_anchor(repo, monkeypatch):
+    """A closure with a hole in it proves nothing about what lies beyond the
+    hole. Dropping such a module silently truncated the closure, so a
+    DEPTH_FULL run could allow without having proved condition (b) at all."""
+    root, base = repo
+    _git(root, "checkout", "-q", "-b", "feature", base)
+    old_head = base
+    _git(root, "checkout", "-q", "main")
+    _change_helper(root)
+    _git(root, "checkout", "-q", "-B", "feature2", "main")
+    tip = _git(root, "rev-parse", "HEAD").strip()
+
+    real = gr.build_import_graph
+
+    def _blind(project_root, ref):
+        graph = real(project_root, ref)
+        return gr.ImportGraph(edges=graph.edges, unresolved=frozenset({"lib_a"}))
+
+    monkeypatch.setattr(gr, "build_import_graph", _blind)
+    decision = gr.can_reanchor(
+        root, old_sha=old_head, new_sha=tip, pr_files=["scripts/consumer.py"],
+        old_contract_hash="h1", new_contract_hash="h1", base_ref="main",
+        depth=gr.DEPTH_FULL,
+    )
+    assert not decision.allowed
+    assert "cannot prove condition (b)" in decision.reason
+    assert "lib_a" in decision.reason
+
+
+def test_an_unparseable_pr_file_refuses_the_re_anchor_end_to_end(repo):
+    root, base = repo
+    _git(root, "checkout", "-q", "-b", "feature", base)
+    old_head = base
+    _git(root, "checkout", "-q", "main")
+    (root / "scripts" / "broken.py").write_text("def f(:\n    pass\n")
+    _commit(root, "unparseable file on main")
+    _git(root, "checkout", "-q", "-B", "feature2", "main")
+    tip = _git(root, "rev-parse", "HEAD").strip()
+
+    decision = gr.can_reanchor(
+        root, old_sha=old_head, new_sha=tip, pr_files=["scripts/broken.py"],
+        old_contract_hash="h1", new_contract_hash="h1", base_ref="main",
+    )
+    assert not decision.allowed
+    assert "cannot prove condition (b)" in decision.reason
+
+
+def test_cannot_prove_beats_a_clean_symbol_analysis():
+    """The ordering matters: an unprovable reference set must refuse even when
+    the symbols it DID find happen not to overlap."""
+    reference = gr.ReferenceSet(symbols=set(), unmodelled=("importlib in x.py",))
+    assert not reference.provable
+    assert gr.find_blocking_symbols({("lib_a", "helper")}, reference) == []

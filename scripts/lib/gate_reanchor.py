@@ -20,14 +20,21 @@ So the condition has two halves, and BOTH must hold:
   (b) no commit between the old and the new merge-base touches a symbol this
       PR's own files reach.
 
-(b) is what this module computes. Measured with THIS code over 120 ordered PR
-pairs from 2026-08-26, the busiest measured day on this repo:
+(b) is what this module computes. Measured with THIS code over 153 ordered PR
+pairs from 2026-08-26/28, both columns from one run over identical rows:
 
-  import depth        allowed   refused
-  direct (default)        87%       13%
-  +1 hop                  74%       26%
-  +2 hops                 69%       31%
-  full closure            58%       42%
+  import depth        allowed         allowed
+                      (permissive)    (fail-closed, shipped)
+  direct (default)        88%             76%
+  +1 hop                  76%             68%
+  +2 hops                 71%             64%
+  full closure            63%             57%
+
+The right-hand column is what ships. Refusing everything the analysis cannot
+model costs 12 points at the default depth and still re-anchors three quarters
+of the re-gates that were actually paid for. Every one of those refusals came
+from a dynamic import or ``getattr`` in the PR's own files — five of eighteen
+PRs, seven occurrences.
 
 The whole sweep took 8.1 seconds including building the 713-module import
 graph from scratch, so (b) is affordable — the outcome the OI left open.
@@ -35,8 +42,21 @@ graph from scratch, so (b) is affordable — the outcome the OI left open.
 Which row to stand on is a real decision, and the measurement settles it in
 an unobvious direction: see :data:`DEPTH_DEFAULT`.
 
-Every failure to establish an answer refuses. A re-anchor that cannot prove
-both halves is a re-buy, never a shrug.
+ONE PRINCIPLE RUNS THROUGH ALL OF IT. Condition (b) is a PROOF: *no* commit in
+the range touches *any* symbol this PR reaches. A proof cannot rest on an
+incomplete analysis, and a static Python import analysis is never complete —
+star-imports, ``importlib``, ``getattr``, re-exports, unreadable files. Working
+that list down one entry at a time only ever produces the next entry.
+
+So every construct the analysis does not model yields ``cannot_prove``, and
+``cannot_prove`` refuses. Never "no reference found". The difference is the
+whole safety argument: "I did not find a reference" and "I could not tell"
+are the same output from a silent ``except: continue``, and only one of them
+is a proof.
+
+The price is refusing more often, and so re-buying a gate more often. That is
+the correct direction to fail in: paying twice costs money, re-anchoring
+wrongly costs the validity of the audit trail.
 """
 
 from __future__ import annotations
@@ -45,7 +65,7 @@ import ast
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 #: (module_stem, symbol). ``"<module>"`` is the module's own top level —
 #: constants, dispatch tables, decorators — which a diff can change without
@@ -83,6 +103,30 @@ DEPTH_DEFAULT = DEPTH_DIRECT
 
 class ReanchorError(RuntimeError):
     """A git fact needed for the decision could not be established."""
+
+
+#: Python constructs this analysis deliberately does not model. Each one is
+#: detected and reported as ``cannot_prove`` rather than resolved: a partial
+#: resolution would be indistinguishable from a complete one at the call site.
+_DYNAMIC_IMPORT_NAMES = frozenset({"import_module", "__import__", "getattr"})
+
+
+@dataclass(frozen=True)
+class ReferenceSet:
+    """What a PR reaches, plus what could not be established about it.
+
+    ``unmodelled`` is the whole point. A reference analysis that returns only
+    the symbols it found is indistinguishable from one that found nothing
+    because it could not look, and :func:`can_reanchor` needs to tell those
+    apart to make its refusal honest.
+    """
+
+    symbols: Set[Symbol] = field(default_factory=set)
+    unmodelled: Sequence[str] = field(default_factory=tuple)
+
+    @property
+    def provable(self) -> bool:
+        return not self.unmodelled
 
 
 @dataclass(frozen=True)
@@ -217,88 +261,164 @@ def changed_symbols(project_root: Path, old_base: str, new_base: str) -> Set[Sym
     return out
 
 
-def referenced_symbols(project_root: Path, ref: str, files: Iterable[str]) -> Set[Symbol]:
-    """Qualified symbols the PR's own files import or reach through.
+def _module_source(project_root: Path, ref: str, module: str, tree_files: Dict[str, str]) -> Optional[str]:
+    """Source of ``module`` at ``ref``, or None when this repo has no such module."""
+    path = tree_files.get(module)
+    if path is None:
+        return None
+    return _git(project_root, "show", f"{ref}:{path}")
+
+
+def _tree_modules(project_root: Path, ref: str) -> Dict[str, str]:
+    """module_stem -> path, for the non-test Python files in the tree at ``ref``."""
+    out: Dict[str, str] = {}
+    for path in _git(project_root, "ls-tree", "-r", "--name-only", ref).split():
+        if path.endswith(".py") and not path.startswith("tests/"):
+            out.setdefault(Path(path).stem, path)
+    return out
+
+
+def _scan_module_bindings(source: str) -> Dict[str, str]:
+    """name -> origin module, for names a module RE-EXPORTS via ``from x import name``.
+
+    A re-export is the quietest hole in this whole analysis. The PR writes
+    ``from vnx_paths import ensure_env``; the function actually lives in
+    another module and is merely re-bound there. A commit changing the real
+    definition records ``(origin, ensure_env)``, the PR references
+    ``(vnx_paths, ensure_env)``, and nothing matches — a silent ALLOW on a
+    changed symbol the PR calls. One level of resolution closes it.
+    """
+    bindings: Dict[str, str] = {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return bindings
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            origin = node.module.split(".")[-1]
+            for alias in node.names:
+                if alias.name != "*":
+                    bindings.setdefault(alias.asname or alias.name, origin)
+    return bindings
+
+
+def referenced_symbols(project_root: Path, ref: str, files: Iterable[str]) -> ReferenceSet:
+    """Qualified symbols the PR's own files reach, plus what could not be modelled.
 
     ``from x import a`` yields ``("x", "a")`` and ``("x", "<module>")`` — the
     second because importing from a module also binds you to its top level.
-    ``import x`` plus ``x.y`` yields ``("x", "y")``.
+    ``import x`` plus ``x.y`` yields ``("x", "y")``. ``from x import *`` yields
+    ``("x", "*")``, which :func:`find_blocking_symbols` treats as "any change
+    in x blocks" — the honest position, since a star-import says nothing about
+    which name is used.
 
-    Bare-name matching was measured and rejected: it refused 40% of the same
-    120 pairs, and most of those refusals were the name ``main``, which nearly
-    every script in this repo both defines and calls. Qualifying by module
-    took the refusal rate to 13% without losing the #1688/#1692 counterexample.
+    Bare-name matching was measured and rejected: it refused 40% of 120 real
+    PR pairs, and most of those were the name ``main``, which nearly every
+    script here both defines and calls. Qualifying by module took the refusal
+    rate to 13% without losing the #1688/#1692 counterexample.
+
+    Three things produce ``cannot_prove`` rather than a smaller symbol set:
+    a PR file that is present but unreadable or unparseable, a dynamic import
+    or ``getattr`` (which can reach a name no static walk will see), and a
+    module whose own source cannot be read while resolving its re-exports.
+    A file the PR DELETED is not one of them — absence at this ref is a
+    complete answer, and refusing on it would refuse every PR that removes a
+    file.
     """
     out: Set[Symbol] = set()
+    unmodelled: List[str] = []
+    tree_files = _tree_modules(project_root, ref)
+    referenced_modules: Set[str] = set()
+
     for path in files:
         if not path.endswith(".py"):
             continue
-        # Absent at this ref is a legitimate, complete answer: the PR DELETED
-        # the file, so it contributes no references. Distinguished from
-        # unreadable by asking git directly rather than by reading stderr —
-        # `pr_files` comes from `gh pr view --json files`, which lists deleted
-        # paths too, so collapsing the two would refuse every PR that removes
-        # a file.
         try:
             _git(project_root, "cat-file", "-e", f"{ref}:{path}")
         except ReanchorError:
-            continue
-        # Present but unreadable is the opposite case, and fail-CLOSED:
-        # skipping it under-approximates the reference set and then treats the
-        # remainder as complete, producing an ALLOW on evidence nobody
-        # gathered — the one direction this module must never fail in.
+            continue  # deleted by this PR: no references to gather
         try:
             source = _git(project_root, "show", f"{ref}:{path}")
         except ReanchorError as exc:
-            raise ReanchorError(
-                f"{path} exists at {ref[:12]} but could not be read, so the PR's reference "
-                f"set is incomplete and nothing can be proven: {exc}"
-            ) from exc
+            unmodelled.append(f"{path} exists at {ref[:12]} but could not be read: {exc}")
+            continue
         try:
             tree = ast.parse(source)
         except SyntaxError as exc:
-            raise ReanchorError(
-                f"{path} does not parse at {ref[:12]}, so its references are unknown: {exc}"
-            ) from exc
+            unmodelled.append(f"{path} does not parse at {ref[:12]}: {exc}")
+            continue
 
         alias_to_module: Dict[str, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
                 module = node.module.split(".")[-1]
                 out.add((module, MODULE_LEVEL))
+                referenced_modules.add(module)
                 for alias in node.names:
                     if alias.name == "*":
-                        # A star-import binds the PR to EVERY name in the
-                        # module, so nothing narrower than the whole module
-                        # can be claimed about what it uses.
                         out.add((module, WHOLE_MODULE))
                         continue
                     out.add((module, alias.name))
-                    # `from pkg import mod` followed by `mod.fn()`: the
-                    # imported name may itself be a module. Mapping it to
-                    # itself makes `mod.fn` resolve to ("mod", "fn") below.
-                    # Over-approximation is the safe direction — a class
-                    # imported the same way yields a (Class, method) pair that
-                    # matches no module, which is noise, never a false ALLOW.
                     alias_to_module.setdefault(alias.asname or alias.name, alias.name)
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     module = alias.name.split(".")[-1]
                     alias_to_module[alias.asname or module] = module
+                    referenced_modules.add(module)
                     out.add((module, MODULE_LEVEL))
+            elif isinstance(node, ast.Name) and node.id in _DYNAMIC_IMPORT_NAMES:
+                unmodelled.append(
+                    f"{path} uses {node.id!r}: a dynamic import or attribute lookup can reach "
+                    "a symbol no static walk sees, so this PR's references cannot be enumerated"
+                )
+            elif isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_IMPORT_NAMES:
+                unmodelled.append(
+                    f"{path} uses {node.attr!r}: a dynamic import or attribute lookup can reach "
+                    "a symbol no static walk sees, so this PR's references cannot be enumerated"
+                )
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
                 module = alias_to_module.get(node.value.id)
                 if module:
                     out.add((module, node.attr))
-    return out
+                    referenced_modules.add(module)
+
+    # Resolve one level of re-export for every module the PR imports from.
+    for module in sorted(referenced_modules):
+        try:
+            source = _module_source(project_root, ref, module, tree_files)
+        except ReanchorError as exc:
+            unmodelled.append(f"module {module!r} could not be read at {ref[:12]}: {exc}")
+            continue
+        if source is None:
+            continue  # stdlib or third-party: no commit in this range changed it
+        bindings = _scan_module_bindings(source)
+        for name, origin in bindings.items():
+            if (module, name) in out:
+                out.add((origin, name))
+                out.add((origin, MODULE_LEVEL))
+
+    return ReferenceSet(symbols=out, unmodelled=tuple(dict.fromkeys(unmodelled)))
 
 
-def build_import_graph(project_root: Path, ref: str) -> Dict[str, Set[str]]:
+@dataclass(frozen=True)
+class ImportGraph:
+    """The repo's import edges, plus the modules whose edges are UNKNOWN."""
+
+    edges: Mapping[str, Set[str]] = field(default_factory=dict)
+    unresolved: FrozenSet[str] = frozenset()
+
+
+def build_import_graph(project_root: Path, ref: str) -> ImportGraph:
     """module_stem -> directly imported module_stems, over the repo at ``ref``.
 
-    Only modules that exist in the tree are edges: a stdlib or third-party
+    Only modules that exist in the tree become edges: a stdlib or third-party
     import is not something a commit in this range can have changed.
+
+    A module that cannot be read or parsed goes into ``unresolved`` rather
+    than being skipped. Its edges are unknown, not absent, and a caller
+    walking the closure has to know the difference.
     """
     paths = [
         p for p in _git(project_root, "ls-tree", "-r", "--name-only", ref).split()
@@ -306,11 +426,18 @@ def build_import_graph(project_root: Path, ref: str) -> Dict[str, Set[str]]:
     ]
     known = {Path(p).stem for p in paths}
     graph: Dict[str, Set[str]] = {}
+    unresolved: Set[str] = set()
     for path in paths:
         try:
             source = _git(project_root, "show", f"{ref}:{path}")
             tree = ast.parse(source)
         except (ReanchorError, SyntaxError):
+            # Its edges are UNKNOWN, not absent. Dropping it silently truncated
+            # the closure, so a DEPTH_FULL run could allow a re-anchor without
+            # having proved condition (b) at all — the same fail-open shape as
+            # the deletion-only hunk and the swallowed PR-file read.
+            unresolved.add(Path(path).stem)
+            graph.setdefault(Path(path).stem, set())
             continue
         deps: Set[str] = set()
         for node in ast.walk(tree):
@@ -324,11 +451,11 @@ def build_import_graph(project_root: Path, ref: str) -> Dict[str, Set[str]]:
                     if module in known:
                         deps.add(module)
         graph.setdefault(Path(path).stem, set()).update(deps)
-    return graph
+    return ImportGraph(edges=graph, unresolved=frozenset(unresolved))
 
 
 def reachable_modules(
-    modules: Iterable[str], graph: Dict[str, Set[str]], depth: int = DEPTH_DEFAULT
+    modules: Iterable[str], graph: ImportGraph, depth: int = DEPTH_DEFAULT
 ) -> Set[str]:
     """Modules reachable from ``modules`` within ``depth`` import hops."""
     seen = set(modules)
@@ -337,7 +464,7 @@ def reachable_modules(
     while frontier and (depth == DEPTH_FULL or hops < depth):
         nxt: Set[str] = set()
         for module in frontier:
-            nxt |= graph.get(module, set()) - seen
+            nxt |= set(graph.edges.get(module, set())) - seen
         seen |= nxt
         frontier = nxt
         hops += 1
@@ -346,7 +473,7 @@ def reachable_modules(
 
 def find_blocking_symbols(
     changed: Set[Symbol],
-    referenced: Set[Symbol],
+    referenced,
     indirect_modules: Optional[Set[str]] = None,
 ) -> List[Symbol]:
     """Changed symbols this PR reaches — the reason a re-anchor is refused.
@@ -374,6 +501,7 @@ def find_blocking_symbols(
     the exact-overlap line changed no test result, because nothing could
     reach it.
     """
+    referenced = referenced.symbols if isinstance(referenced, ReferenceSet) else referenced
     indirect = set(indirect_modules or set())
     referenced_modules = {m for m, _ in referenced}
     # A star-import is recorded as (module, "*") on the REFERENCED side. It
@@ -476,12 +604,14 @@ def can_reanchor(
 
     try:
         changed = changed_symbols(project_root, old_base, new_base)
-        referenced = referenced_symbols(project_root, new_sha, pr_files)
+        reference_set = referenced_symbols(project_root, new_sha, pr_files)
         # At DEPTH_DIRECT the closure is the input set, so the graph is never
         # consulted. Building it anyway cost 6.8s of a 7.3s decision — measured
         # on the #1691 replay — for a value that is discarded.
         graph = (
-            {} if depth == DEPTH_DIRECT else build_import_graph(project_root, new_sha)
+            ImportGraph()
+            if depth == DEPTH_DIRECT
+            else build_import_graph(project_root, new_sha)
         )
         commits = len(_git(project_root, "rev-list", f"{old_base}..{new_base}").split())
     except (ReanchorError, subprocess.TimeoutExpired) as exc:
@@ -492,12 +622,38 @@ def can_reanchor(
             old_merge_base=old_base, new_merge_base=new_base, depth=depth,
         )
 
-    direct_modules = {m for m, _ in referenced}
+    direct_modules = {m for m, _ in reference_set.symbols}
     # Only the modules reached BEYOND the direct imports get the coarse
     # treatment; the direct ones stay symbol-precise. At DEPTH_DIRECT this set
     # is empty by construction.
-    indirect_modules = reachable_modules(direct_modules, graph, depth) - direct_modules
-    blocking = find_blocking_symbols(changed, referenced, indirect_modules)
+    reachable = reachable_modules(direct_modules, graph, depth)
+    indirect_modules = reachable - direct_modules
+
+    # cannot_prove, in both its forms. Either the PR's own references could not
+    # be enumerated, or a module inside the closure has unknown edges — and a
+    # closure with a hole in it proves nothing about what lies beyond the hole.
+    unprovable = list(reference_set.unmodelled)
+    blind = sorted(reachable & set(graph.unresolved))
+    if blind:
+        unprovable.append(
+            "the import closure passes through "
+            + ", ".join(blind[:5])
+            + ", whose own imports could not be read — everything beyond them is unknown"
+        )
+    if unprovable:
+        return ReanchorDecision(
+            allowed=False,
+            reason=(
+                "cannot prove condition (b): "
+                + "; ".join(unprovable[:3])
+                + (f" (+{len(unprovable) - 3} more)" if len(unprovable) > 3 else "")
+            ),
+            contract_hash_matches=True, old_sha=old_sha, new_sha=new_sha,
+            old_merge_base=old_base, new_merge_base=new_base,
+            commits_in_range=commits, depth=depth,
+        )
+
+    blocking = find_blocking_symbols(changed, reference_set.symbols, indirect_modules)
     if blocking:
         named = ", ".join(f"{m}.{s}" for m, s in blocking[:5])
         more = f" (+{len(blocking) - 5} more)" if len(blocking) > 5 else ""
