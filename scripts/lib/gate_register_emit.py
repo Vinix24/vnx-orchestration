@@ -19,14 +19,25 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 
 
-def _resolve_register_path() -> Path:
-    """Resolve dispatch_register.ndjson path using env vars only (no git subprocess)."""
+def register_path() -> Path:
+    """Resolve dispatch_register.ndjson path using env vars only (no git subprocess).
+
+    Public because it is not codex-specific: any writer that has to append a
+    gate-lifecycle line to the register needs the same resolution, and a
+    second copy of this fallback chain is how two writers start disagreeing
+    about which ledger they are appending to.
+    """
     state_dir_env = os.environ.get("VNX_STATE_DIR")
     if state_dir_env:
         return Path(state_dir_env) / "dispatch_register.ndjson"
     if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
         return Path(os.environ["VNX_DATA_DIR"]) / "state" / "dispatch_register.ndjson"
     return _REPO_ROOT / ".vnx-data" / "state" / "dispatch_register.ndjson"
+
+
+def _resolve_register_path() -> Path:
+    """Deprecated alias for :func:`register_path`, kept for existing callers."""
+    return register_path()
 
 
 def emit_codex_gate_to_register(
