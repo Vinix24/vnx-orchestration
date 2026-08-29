@@ -5,6 +5,12 @@ state_writer.py, worker_permission_relay.py, tmux_interactive_dispatch.py,
 intelligence_dashboard.py) and the fcntl.flock NDJSON append used in
 governance_emit.py.
 
+The scratch file here is a ``tempfile.mkstemp`` name, unique to the writer.
+That is the point of it, and the reason a caller must not hand-roll
+``path.with_suffix(".tmp")`` instead: that name is a function of the
+DESTINATION, so every concurrent writer of one path picks the same scratch
+file. See :func:`slot_lock` for what atomicity alone still does not buy.
+
 ADR-005: ledger-first write ordering — appenders raise on OSError, never
 silently drop events.
 
@@ -22,12 +28,45 @@ import os
 import re
 import stat
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+
+
+@contextmanager
+def slot_lock(path: Path) -> Iterator[None]:
+    """Hold one path's exclusive lock across a read-check-write sequence.
+
+    :func:`atomic_write_text` makes a write indivisible: a reader never sees
+    half a record. It does NOT order two writers, and it cannot, because by
+    the time either writes, both have already decided to. A caller that reads
+    a file, decides something from what it read, and only then writes needs
+    the lock to span all three steps — otherwise two callers read the same
+    state, both reach the same decision, and both write, the check having
+    ruled out nothing (OI-1486).
+
+    The lock is a sibling ``.<name>.lock`` file rather than the target itself,
+    so it survives the target being replaced by rename mid-sequence — locking
+    the target would leave each writer holding a lock on a file that is no
+    longer at that path.
+
+    ``flock`` is advisory: it holds between callers that take it, and it holds
+    equally between threads of one process and between processes, because the
+    lock belongs to the open file description and each caller opens its own.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.parent / f".{path.name}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
