@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,10 +38,21 @@ from providers import provider_registry
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# The date this dispatch was authored, not date.today(): a freshness check
-# tied to the system clock goes red on its own the day it turns 91 days old,
-# which is a time bomb, not a regression guard (OI-1334 lesson).
-_REFERENCE_DATE = date(2026, 8, 18)
+# The date this check was last authored, not date.today(): a freshness check tied
+# to the system clock goes red on its own the day it turns 91 days old, which is a
+# time bomb, not a regression guard (OI-1334 lesson).
+#
+# INVARIANT (OI-1354): this date must never be EARLIER than the newest
+# price_checked_at in the tier map. A rung dated after it scores a negative age,
+# which passes "<= 90 days" forever — a silent, permanent exemption from the
+# freshness rule. TestNoTierPriceIsFutureDated pins that. Recording a fresher price
+# therefore means advancing this date in the same commit, deliberately, which is the
+# point: the reference moves by a decision, never by the calendar.
+#
+# Advanced 2026-08-18 -> 2026-08-29: tier-mid (claude/sonnet-5) was re-checked
+# 2026-08-19 and scored -1 against the old reference. Re-measured at the new date,
+# the oldest rung is 29 days; nothing is stale.
+_REFERENCE_DATE = date(2026, 8, 29)
 _MAX_PRICE_AGE_DAYS = 90
 
 
@@ -337,3 +348,133 @@ class TestPriceProvenanceSplitIsPinned:
     def test_the_split_covers_every_model(self):
         assert _UNVERIFIED | _VERIFIED == set(_PINNED_PRICES)
         assert not (_UNVERIFIED & _VERIFIED)
+
+
+# ---------------------------------------------------------------------------
+# OI-1354: the frozen reference date guards the FORM, not the living clock
+#
+# TestTierMapPricesAreFresh above compares against _REFERENCE_DATE, frozen at the
+# date the check was authored. That choice is right: a freshness assertion tied to
+# date.today() turns red on its own the morning a price crosses 91 days, which is a
+# time bomb rather than a regression guard (OI-1334).
+#
+# The cost of freezing it is that the check describes a moment that has passed. The
+# world keeps moving and nothing says so. OI-1349 is the proof: it was filed claiming
+# gpt-5.5 was 93 days stale and the other six rungs 15-18 days old. Re-measured
+# 2026-08-29, gpt-5.5 sits at 12 days (re-checked 2026-08-17) and NO rung exceeds 90.
+# The finding was true when written and no one could see it stop being true.
+#
+# So: keep the frozen assertion, and make the living clock visible without letting it
+# fail CI. Staleness is reported as a warning; the mechanism that computes it is
+# tested against fixed dates, so the reporter itself can fail.
+#
+# Also closed here: a price_checked_at in the FUTURE relative to the comparison date
+# yields a negative age, which passes "<= 90 days" forever. Today tier-mid
+# (claude/sonnet-5, checked 2026-08-19) already scores -1 against the frozen
+# reference. Left alone, a far-future date is a permanent, silent exemption from the
+# freshness rule.
+# ---------------------------------------------------------------------------
+
+import warnings as _warnings
+
+
+def tier_price_ages(as_of: date) -> dict[str, int]:
+    """Age in days of each tier_map rung's price_checked_at, relative to `as_of`.
+
+    A rung with no recorded date is omitted — that absence is a separate failure,
+    already asserted by TestTierMapPricesAreFresh. Negative values are returned as-is
+    so a future-dated price is visible as the anomaly it is rather than being clamped
+    into a comfortable-looking small number.
+    """
+    ages: dict[str, int] = {}
+    for tier in _ALL_TIERS:
+        route = _TIER_MAP[tier]
+        model = _resolve_tier_model(route.provider, route.model)
+        checked = getattr(model, "price_checked_at", "")
+        if not checked:
+            continue
+        ages[tier] = (as_of - date.fromisoformat(checked)).days
+    return ages
+
+
+def stale_tiers(as_of: date, max_age_days: int = _MAX_PRICE_AGE_DAYS) -> dict[str, int]:
+    """Rungs whose price is older than the freshness window at `as_of`."""
+    return {t: a for t, a in tier_price_ages(as_of).items() if a > max_age_days}
+
+
+def future_dated_tiers(as_of: date) -> dict[str, int]:
+    """Rungs whose price_checked_at lies after `as_of` — a negative age.
+
+    These pass every "<= max_age" assertion no matter how far in the future they sit,
+    so a typo'd or deliberately forward-dated year exempts a price from the freshness
+    rule permanently and silently.
+    """
+    return {t: a for t, a in tier_price_ages(as_of).items() if a < 0}
+
+
+class TestStalenessReporterWorks:
+    """The reporter is the thing that must be trustworthy, so it is tested against
+    fixed dates. These CAN fail; the live report below deliberately cannot."""
+
+    def test_ages_are_measured_from_the_given_date(self):
+        early = tier_price_ages(date(2026, 8, 18))
+        later = tier_price_ages(date(2026, 9, 18))
+        assert early, "no tier carries a price_checked_at — the fixture is broken"
+        assert set(early) == set(later)
+        for tier in early:
+            assert later[tier] - early[tier] == 31
+
+    def test_a_far_future_date_makes_every_rung_stale(self):
+        far = date(2031, 1, 1)
+        assert set(stale_tiers(far)) == set(tier_price_ages(far))
+
+    def test_nothing_is_stale_at_its_own_check_date(self):
+        for tier, age in tier_price_ages(date(2026, 8, 18)).items():
+            if age >= 0:
+                assert tier not in stale_tiers(date(2026, 8, 18) - timedelta(days=age))
+
+    def test_future_dated_detection_triggers_on_a_negative_age(self):
+        very_early = date(2020, 1, 1)
+        assert set(future_dated_tiers(very_early)) == set(tier_price_ages(very_early))
+        assert future_dated_tiers(date(2031, 1, 1)) == {}
+
+
+class TestNoTierPriceIsFutureDated:
+    """A future date is not freshness, it is an exemption. This one DOES fail."""
+
+    def test_no_rung_is_dated_after_the_reference(self):
+        future = future_dated_tiers(_REFERENCE_DATE)
+        assert not future, (
+            f"tier prices dated after {_REFERENCE_DATE.isoformat()}: {future}. "
+            "A negative age passes every '<= 90 days' check forever, so a forward-dated "
+            "price_checked_at silently exempts that rung from the freshness rule. "
+            "Either the date is a typo, or _REFERENCE_DATE needs advancing in the same "
+            "commit that recorded the newer check."
+        )
+
+
+class TestLivePriceStalenessIsVisible:
+    """Reports today's staleness WITHOUT failing. Never assert here — the whole point
+    of the frozen reference above is that CI must not go red on the calendar."""
+
+    def test_report_live_staleness_as_a_warning(self):
+        today = date.today()
+        stale = stale_tiers(today)
+        future = future_dated_tiers(today)
+        if stale:
+            _warnings.warn(
+                "price freshness (informational, not a failure): "
+                + ", ".join(
+                    f"{tier} is {age} days old" for tier, age in sorted(stale.items())
+                )
+                + f" — older than {_MAX_PRICE_AGE_DAYS} days as of {today.isoformat()}. "
+                "Re-check at source and advance _REFERENCE_DATE in the same commit.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if future:
+            _warnings.warn(
+                f"price_checked_at in the future as of {today.isoformat()}: {future}",
+                UserWarning,
+                stacklevel=2,
+            )
