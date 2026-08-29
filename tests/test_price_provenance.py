@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 import sys
+import warnings as _warnings
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -375,7 +376,6 @@ class TestPriceProvenanceSplitIsPinned:
 # freshness rule.
 # ---------------------------------------------------------------------------
 
-import warnings as _warnings
 
 
 def tier_price_ages(as_of: date) -> dict[str, int]:
@@ -429,9 +429,12 @@ class TestStalenessReporterWorks:
         assert set(stale_tiers(far)) == set(tier_price_ages(far))
 
     def test_nothing_is_stale_at_its_own_check_date(self):
-        for tier, age in tier_price_ages(date(2026, 8, 18)).items():
+        """Uses _REFERENCE_DATE, not a literal. A hardcoded date here would drift away
+        from the constant the moment the reference advances — which is the exact defect
+        class this file exists to catch, reproduced inside its own test."""
+        for tier, age in tier_price_ages(_REFERENCE_DATE).items():
             if age >= 0:
-                assert tier not in stale_tiers(date(2026, 8, 18) - timedelta(days=age))
+                assert tier not in stale_tiers(_REFERENCE_DATE - timedelta(days=age))
 
     def test_future_dated_detection_triggers_on_a_negative_age(self):
         very_early = date(2020, 1, 1)
