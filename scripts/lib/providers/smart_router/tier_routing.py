@@ -51,6 +51,7 @@ that pins the separation.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,8 @@ from providers.provider_registry import (
 )
 
 from .cost_tier import TIER_HIGH
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,169 @@ def escalate_tier(
     )
 
 
+
+# ---------------------------------------------------------------------------
+# "A safety net, never an escalation" — with a price attached (OI-1360)
+#
+# The sentence above appears twice: in this module's docstring and in
+# wave7_models.yaml:453. Until now nothing measured it, so it described an
+# intention rather than a property. It is enforceable once "escalation" is given a
+# price, and it has one: escalate_tier climbs to the next rung in escalation_order.
+# A fallback that costs MORE than that rung is, literally, dearer than the
+# escalation it is not supposed to be.
+# ---------------------------------------------------------------------------
+
+
+def _output_cost(provider_enum: str, model_key: str) -> Optional[float]:
+    """Output $/Mtok for a (dispatch enum, model key) pair, or None when unknown.
+
+    ``provider`` on a tier route is the dispatch enum ("claude"), not the registry
+    section key ("anthropic") — walk the sections by dispatch_enum, the same way
+    provider_registry._output_cost_for does for the primary.
+    """
+    from providers.provider_registry import load  # noqa: PLC0415
+
+    # An empty enum is not a provider. Without this guard `provider_enum=None`
+    # matches every section that HAS no dispatch_enum (zai, moonshot, google, the
+    # bare deepseek section) because None == None, and an unroutable section would
+    # answer a routing question.
+    if not provider_enum:
+        return None
+    for cfg in load().values():
+        if cfg.dispatch_enum == provider_enum:
+            entry = cfg.models.get(model_key)
+            if entry is not None:
+                return entry.cost_output_per_mtok
+    return None
+
+
+def fallback_cost_ceiling(tier: str) -> Optional[float]:
+    """The most a fallback on ``tier`` may cost before it stops being a safety net.
+
+    For a tier ON the escalation ladder, the ceiling is the next rung up: that is
+    exactly what escalating would have cost, so anything dearer makes falling back
+    the more expensive of the two.
+
+    For a tier OUTSIDE escalation_order (kimi-k3, gpt-5.5 — dispatchable rungs that
+    are never climb destinations) there is no next rung, so the ceiling is the tier's
+    own primary: a safety net may not cost more than the thing it stands in for.
+
+    Returns None when the ceiling cannot be resolved (top of the ladder with no
+    primary price) — an unknown ceiling constrains nothing and must not be treated
+    as zero.
+    """
+    nxt = next_tier(tier)
+    if nxt is not None:
+        spec = _TIER_MAP.get(nxt)
+        return _output_cost(spec.provider, spec.model) if spec else None
+    spec = _TIER_MAP.get(tier)
+    return _output_cost(spec.provider, spec.model) if spec else None
+
+
+@dataclass(frozen=True)
+class EscalatingFallback:
+    """A fallback step that costs more than the escalation it must not be."""
+
+    tier: str
+    provider: str
+    model: str
+    cost: float
+    ceiling: float
+
+    @property
+    def factor(self) -> float:
+        return self.cost / self.ceiling if self.ceiling else float("inf")
+
+    def __str__(self) -> str:  # pragma: no cover — formatting only
+        return (
+            f"{self.tier} -> {self.provider}/{self.model} at {self.cost:.2f}/Mtok, "
+            f"ceiling {self.ceiling:.2f} (x{self.factor:.1f})"
+        )
+
+
+def escalating_fallbacks(tier_map: Optional[dict] = None) -> tuple:
+    """Every fallback step in the map that breaches its tier's cost ceiling.
+
+    Empty means the promise holds. Anything in it is a step where an availability
+    fallback silently costs more than a quality escalation would.
+    """
+    tmap = _TIER_MAP if tier_map is None else tier_map
+    out = []
+    for tier, spec in tmap.items():
+        ceiling = fallback_cost_ceiling(tier)
+        if ceiling is None:
+            continue
+        for step in spec.fallback:
+            cost = _output_cost(step.provider, step.model)
+            if cost is not None and cost > ceiling:
+                out.append(
+                    EscalatingFallback(
+                        tier=tier, provider=step.provider, model=step.model,
+                        cost=cost, ceiling=ceiling,
+                    )
+                )
+    return tuple(out)
+
+
+def over_cap_fallbacks(tier_map: Optional[dict] = None) -> tuple:
+    """Breaches above MAX_FALLBACK_ESCALATION_FACTOR — the fleet gap.
+
+    Distinct from ``escalating_fallbacks``: that one reports every step dearer than
+    its ceiling (the raw measurement). This one reports the subset the bounded
+    promise does NOT cover — where the fleet has no compliant lane and the design is
+    knowingly broken rather than merely stretched.
+    """
+    return tuple(
+        v
+        for v in escalating_fallbacks(tier_map)
+        if v.factor > MAX_FALLBACK_ESCALATION_FACTOR
+    )
+
+
+#: The most a fallback may exceed its ceiling and still count as a safety net.
+#:
+#: The literal promise — never dearer than escalating, i.e. factor 1.0 — cannot be
+#: met by this fleet, and stating it anyway is a promise that reads well and routes
+#: nothing. Measured 2026-08-29: tier-zero's ceiling is 0.87/Mtok, and the cheapest
+#: lane that is a different provider (a same-provider net does not survive the outage
+#: it exists for) AND actually routable is kimi_cli/kimi-k2-7 at 2.50 — factor 2.87.
+#: Below that, the cheapest rung has no net at all except local_gemma, a 4B local
+#: model scoring 0.40 on complex_reasoning.
+#:
+#: "Routable" is load-bearing and was got wrong once: a registry section with
+#: dispatch_enum=None (zai, moonshot, google, the bare deepseek section) can never be
+#: reached by tier routing, because _output_cost resolves by dispatch_enum. An earlier
+#: version of this derivation named glm-5.2 at 2.42 as the binding candidate and
+#: arrived at 2.78. glm is in the zai section, which has no dispatch_enum — so it was
+#: never a candidate, and the floor was understated. It also makes the OI-1506 glm
+#: mispricing (2.42 registered against 3.74 at source) irrelevant to this bound.
+#:
+#: So 3.0 is the smallest round bound under which every rung can still HAVE a
+#: different-provider net. Derived from the fleet, not chosen to fit the map: it
+#: still rejects two of the five breaches present today, both on tier-zero. Raising
+#: it to admit those two is exactly the move this constant exists to prevent —
+#: adjusting the promise until the map passes.
+#:
+#: tier-low -> gpt-5.5 sits at precisely 3.0, ON the bound rather than under it.
+#: That is fragile by construction: a one-cent gpt-5.5 rise makes it a gap.
+MAX_FALLBACK_ESCALATION_FACTOR = 3.0
+
+#: Marker appended to a route reason when the lane actually walked to costs more
+#: than its ceiling. The dispatch is NOT blocked — availability still wins over cost
+#: when the primary is down — but the receipt says so, instead of recording a 17x
+#: price rise as an ordinary fallback.
+ESCALATING_FALLBACK_MARKER = "escalating-fallback"
+
+#: Stronger marker for a step above MAX_FALLBACK_ESCALATION_FACTOR: not a bounded
+#: escalation but a fleet gap, walked because nothing compliant exists.
+#:
+#: Deliberately NOT a superstring of ESCALATING_FALLBACK_MARKER. It was
+#: "escalating-fallback-over-cap", which contains the milder marker, so
+#: `MILD in reason` was true for an over-cap route and an assertion meant to
+#: distinguish the two passed on either. A marker whose presence cannot be tested
+#: without also matching its sibling is not a marker, it is a prefix.
+OVER_CAP_FALLBACK_MARKER = "fallback-over-cap"
+
 def _route_from_spec(
     spec: TierRouteSpec,
     fallback: Optional[TierRoute],
@@ -268,6 +434,43 @@ def _fallback_reason(route: TierRoute, skipped: list[str]) -> str:
     return f"{'; '.join(skipped)}; using {route.provider}"
 
 
+def _annotated_fallback_reason(route: TierRoute, skipped: list[str]) -> str:
+    """The fallback reason, plus a marker when the lane walked to is an escalation.
+
+    The dispatch still proceeds: when the primary lane is down, getting the work done
+    beats getting it done cheaply. But a fallback that costs 53x the primary is not
+    the safety net the design promises, and the receipt should not record it as an
+    ordinary one. Fail-open — a price the registry cannot resolve annotates nothing.
+    """
+    base = _fallback_reason(route, skipped)
+    try:
+        ceiling = fallback_cost_ceiling(route.tier)
+        cost = _output_cost(route.provider, route.model)
+        if ceiling is not None and cost is not None and cost > ceiling:
+            factor = cost / ceiling if ceiling else float("inf")
+            marker = (
+                OVER_CAP_FALLBACK_MARKER
+                if factor > MAX_FALLBACK_ESCALATION_FACTOR
+                else ESCALATING_FALLBACK_MARKER
+            )
+            return (
+                f"{base}; {marker}: {cost:.2f}/Mtok vs ceiling {ceiling:.2f} "
+                f"(x{factor:.1f}, cap x{MAX_FALLBACK_ESCALATION_FACTOR:.1f})"
+            )
+    except Exception as exc:
+        # Never fatal: the annotation is observability, the route is the product.
+        # WARNING, not debug: debug is silent at the default level, so claiming "not
+        # silent" while logging at debug would have been the same blindness in a
+        # different place. A cost lookup that keeps failing here means receipts quietly
+        # stop showing escalating fallbacks, which is exactly what must not go unseen.
+        logger.warning(
+            "tier_routing: could not annotate fallback reason for tier=%s "
+            "provider=%s model=%s: %s",
+            route.tier, route.provider, route.model, exc,
+        )
+    return base
+
+
 def _walk_chain(
     route: TierRoute,
     env: dict,
@@ -301,7 +504,7 @@ def _walk_chain(
         if ok:
             if skipped:
                 return dataclasses.replace(
-                    current, reason=_fallback_reason(current, skipped),
+                    current, reason=_annotated_fallback_reason(current, skipped),
                 )
             return current
         skipped.append(f"{current.provider} unavailable ({reason})")
@@ -311,7 +514,7 @@ def _walk_chain(
     # still returned (the door must never receive None) — but with the
     # accumulated skipped-reason attached, never as a silent reason=None that
     # would read as a clean, available route.
-    return dataclasses.replace(last, reason=_fallback_reason(last, skipped))
+    return dataclasses.replace(last, reason=_annotated_fallback_reason(last, skipped))
 
 
 def resolve_tier_route(
