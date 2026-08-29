@@ -231,6 +231,110 @@ def escalate_tier(
     )
 
 
+
+# ---------------------------------------------------------------------------
+# "A safety net, never an escalation" — with a price attached (OI-1360)
+#
+# The sentence above appears twice: in this module's docstring and in
+# wave7_models.yaml:453. Until now nothing measured it, so it described an
+# intention rather than a property. It is enforceable once "escalation" is given a
+# price, and it has one: escalate_tier climbs to the next rung in escalation_order.
+# A fallback that costs MORE than that rung is, literally, dearer than the
+# escalation it is not supposed to be.
+# ---------------------------------------------------------------------------
+
+
+def _output_cost(provider_enum: str, model_key: str) -> Optional[float]:
+    """Output $/Mtok for a (dispatch enum, model key) pair, or None when unknown.
+
+    ``provider`` on a tier route is the dispatch enum ("claude"), not the registry
+    section key ("anthropic") — walk the sections by dispatch_enum, the same way
+    provider_registry._output_cost_for does for the primary.
+    """
+    from providers.provider_registry import load  # noqa: PLC0415
+
+    for cfg in load().values():
+        if cfg.dispatch_enum == provider_enum:
+            entry = cfg.models.get(model_key)
+            if entry is not None:
+                return entry.cost_output_per_mtok
+    return None
+
+
+def fallback_cost_ceiling(tier: str) -> Optional[float]:
+    """The most a fallback on ``tier`` may cost before it stops being a safety net.
+
+    For a tier ON the escalation ladder, the ceiling is the next rung up: that is
+    exactly what escalating would have cost, so anything dearer makes falling back
+    the more expensive of the two.
+
+    For a tier OUTSIDE escalation_order (kimi-k3, gpt-5.5 — dispatchable rungs that
+    are never climb destinations) there is no next rung, so the ceiling is the tier's
+    own primary: a safety net may not cost more than the thing it stands in for.
+
+    Returns None when the ceiling cannot be resolved (top of the ladder with no
+    primary price) — an unknown ceiling constrains nothing and must not be treated
+    as zero.
+    """
+    nxt = next_tier(tier)
+    if nxt is not None:
+        spec = _TIER_MAP.get(nxt)
+        return _output_cost(spec.provider, spec.model) if spec else None
+    spec = _TIER_MAP.get(tier)
+    return _output_cost(spec.provider, spec.model) if spec else None
+
+
+@dataclass(frozen=True)
+class EscalatingFallback:
+    """A fallback step that costs more than the escalation it must not be."""
+
+    tier: str
+    provider: str
+    model: str
+    cost: float
+    ceiling: float
+
+    @property
+    def factor(self) -> float:
+        return self.cost / self.ceiling if self.ceiling else float("inf")
+
+    def __str__(self) -> str:  # pragma: no cover — formatting only
+        return (
+            f"{self.tier} -> {self.provider}/{self.model} at {self.cost:.2f}/Mtok, "
+            f"ceiling {self.ceiling:.2f} (x{self.factor:.1f})"
+        )
+
+
+def escalating_fallbacks(tier_map: Optional[dict] = None) -> tuple:
+    """Every fallback step in the map that breaches its tier's cost ceiling.
+
+    Empty means the promise holds. Anything in it is a step where an availability
+    fallback silently costs more than a quality escalation would.
+    """
+    tmap = _TIER_MAP if tier_map is None else tier_map
+    out = []
+    for tier, spec in tmap.items():
+        ceiling = fallback_cost_ceiling(tier)
+        if ceiling is None:
+            continue
+        for step in spec.fallback:
+            cost = _output_cost(step.provider, step.model)
+            if cost is not None and cost > ceiling:
+                out.append(
+                    EscalatingFallback(
+                        tier=tier, provider=step.provider, model=step.model,
+                        cost=cost, ceiling=ceiling,
+                    )
+                )
+    return tuple(out)
+
+
+#: Marker appended to a route reason when the lane actually walked to is an
+#: escalating fallback. The dispatch is NOT blocked — availability still wins over
+#: cost when the primary is down — but the receipt says so, instead of recording a
+#: 53x price rise as an ordinary fallback.
+ESCALATING_FALLBACK_MARKER = "escalating-fallback"
+
 def _route_from_spec(
     spec: TierRouteSpec,
     fallback: Optional[TierRoute],
@@ -268,6 +372,28 @@ def _fallback_reason(route: TierRoute, skipped: list[str]) -> str:
     return f"{'; '.join(skipped)}; using {route.provider}"
 
 
+def _annotated_fallback_reason(route: TierRoute, skipped: list[str]) -> str:
+    """The fallback reason, plus a marker when the lane walked to is an escalation.
+
+    The dispatch still proceeds: when the primary lane is down, getting the work done
+    beats getting it done cheaply. But a fallback that costs 53x the primary is not
+    the safety net the design promises, and the receipt should not record it as an
+    ordinary one. Fail-open — a price the registry cannot resolve annotates nothing.
+    """
+    base = _fallback_reason(route, skipped)
+    try:
+        ceiling = fallback_cost_ceiling(route.tier)
+        cost = _output_cost(route.provider, route.model)
+        if ceiling is not None and cost is not None and cost > ceiling:
+            return (
+                f"{base}; {ESCALATING_FALLBACK_MARKER}: "
+                f"{cost:.2f}/Mtok vs ceiling {ceiling:.2f}"
+            )
+    except Exception:  # noqa: BLE001 — annotation must never break routing
+        pass
+    return base
+
+
 def _walk_chain(
     route: TierRoute,
     env: dict,
@@ -301,7 +427,7 @@ def _walk_chain(
         if ok:
             if skipped:
                 return dataclasses.replace(
-                    current, reason=_fallback_reason(current, skipped),
+                    current, reason=_annotated_fallback_reason(current, skipped),
                 )
             return current
         skipped.append(f"{current.provider} unavailable ({reason})")
@@ -311,7 +437,7 @@ def _walk_chain(
     # still returned (the door must never receive None) — but with the
     # accumulated skipped-reason attached, never as a silent reason=None that
     # would read as a clean, available route.
-    return dataclasses.replace(last, reason=_fallback_reason(last, skipped))
+    return dataclasses.replace(last, reason=_annotated_fallback_reason(last, skipped))
 
 
 def resolve_tier_route(

@@ -333,3 +333,125 @@ def test_quality_escalation_climbs_where_fallback_stays(monkeypatch):
     assert esc.tier_from == TIER_LOW
     assert esc.tier_to == TIER_MID
     assert esc.parent_dispatch == "d-rejected"
+
+
+# ---------------------------------------------------------------------------
+# OI-1360: the safety net must not cost more than the escalation it is not
+#
+# This file's own docstring has claimed "a safety net, never an escalation" since it
+# was written, and pinned only the ladder's monotonicity. Nothing measured the
+# fallback chains, so the sentence described an intention.
+#
+# It is measurable once "escalation" is given a price: escalate_tier climbs to the
+# next rung in escalation_order, so a fallback dearer than that rung is literally
+# more expensive than the escalation it is not supposed to be.
+#
+# Measured on main 17de88de, FIVE steps breach it — including one on the kimi-k3 rung
+# that OI-1360 does not mention. They are recorded below rather than silently fixed:
+# repairing them means changing what production routes to when a lane goes down, and
+# for tier-zero there is no compliant option at all except local_gemma (every other
+# different-provider lane costs more than the ceiling by construction). That is an
+# operator decision, not a mechanical edit. What this PR removes is the ability for a
+# SIXTH one to appear unnoticed.
+# ---------------------------------------------------------------------------
+
+from providers.smart_router import tier_routing as _tr
+
+#: The five breaches present on 2026-08-29, each (tier, provider, model).
+#: Shrinking this set is the fix; growing it must be a deliberate, argued act.
+_RECORDED_ESCALATING_FALLBACKS = {
+    ("tier-zero", "kimi", "kimi-k3"),
+    ("tier-zero", "codex", "gpt-5.5"),
+    ("tier-low", "kimi", "kimi-k3"),
+    ("tier-low", "codex", "gpt-5.5"),
+    ("kimi-k3", "codex", "gpt-5.5"),
+}
+
+
+def _as_keys(violations) -> set:
+    return {(v.tier, v.provider, v.model) for v in violations}
+
+
+def test_ceiling_on_the_ladder_is_the_next_rung_up():
+    """A tier that can escalate is bounded by what escalating would have cost."""
+    for tier in (TIER_ZERO, TIER_LOW):
+        nxt = next_tier(tier)
+        assert nxt is not None
+        spec = _tr._TIER_MAP[nxt]
+        assert _tr.fallback_cost_ceiling(tier) == _tr._output_cost(spec.provider, spec.model)
+
+
+def test_ceiling_off_the_ladder_is_the_tier_s_own_primary():
+    """kimi-k3 is dispatchable and fallback-eligible but never a climb destination,
+    so there is no 'next rung'. Its net may not cost more than what it replaces."""
+    assert next_tier("kimi-k3") is None
+    spec = _tr._TIER_MAP["kimi-k3"]
+    assert _tr.fallback_cost_ceiling("kimi-k3") == _tr._output_cost(spec.provider, spec.model)
+
+
+def test_the_check_discriminates(monkeypatch):
+    """The guard must be able to say both yes and no — a check that cannot fail is
+    not a check."""
+    monkeypatch.setattr(_tr, "_output_cost", lambda _p, _m: 1.0)
+    assert _tr.escalating_fallbacks() == (), "uniform prices cannot breach a ceiling"
+
+    def _pricey(provider, model):
+        return 1000.0 if provider in ("kimi", "codex") else 1.0
+
+    monkeypatch.setattr(_tr, "_output_cost", _pricey)
+    assert _tr.escalating_fallbacks(), "an expensive fallback must be reported"
+
+
+def test_no_new_escalating_fallback_appeared():
+    """Red the moment a sixth breach is added, or an existing one is repaired without
+    recording it here."""
+    live = _as_keys(_tr.escalating_fallbacks())
+    added = live - _RECORDED_ESCALATING_FALLBACKS
+    removed = _RECORDED_ESCALATING_FALLBACKS - live
+    assert not added, (
+        f"new escalating fallback(s): {sorted(added)}. A fallback dearer than one rung "
+        "up is not a safety net — it is the escalation the design says it must never be."
+    )
+    assert not removed, (
+        f"escalating fallback(s) repaired: {sorted(removed)} — good. Remove them from "
+        "_RECORDED_ESCALATING_FALLBACKS in the same commit so the set keeps shrinking."
+    )
+
+
+def test_the_recorded_breaches_are_real_and_quantified():
+    """Guards against the exemption list outliving the thing it exempts."""
+    by_key = {(v.tier, v.provider, v.model): v for v in _tr.escalating_fallbacks()}
+    assert set(by_key) == _RECORDED_ESCALATING_FALLBACKS
+    for key, v in by_key.items():
+        assert v.cost > v.ceiling, f"{key} is recorded as a breach but does not breach"
+        assert v.factor > 1.0
+
+
+def test_walking_to_an_escalating_fallback_is_marked_in_the_reason(monkeypatch):
+    """The dispatch still proceeds — availability beats cost when the primary is down —
+    but the receipt must not record a 17x price rise as an ordinary fallback."""
+    monkeypatch.setattr(
+        _tr, "lane_available", lambda *a, **k: (True, None), raising=False
+    )
+
+    import providers.smart_router.availability as _av
+
+    def _only_last_available(provider, **_kw):
+        return (provider == "codex", "forced unavailable")
+
+    monkeypatch.setattr(_av, "lane_available", _only_last_available)
+
+    route = resolve_tier_route(TIER_ZERO, {})
+    assert route.provider == "codex"
+    assert route.reason and _tr.ESCALATING_FALLBACK_MARKER in route.reason
+
+
+def test_a_non_escalating_fallback_is_not_marked(monkeypatch):
+    """The marker must mean something — it may not appear on every fallback."""
+    import providers.smart_router.availability as _av
+
+    monkeypatch.setattr(_av, "lane_available", lambda p, **k: (p == "codex", "down"))
+    monkeypatch.setattr(_tr, "_output_cost", lambda _p, _m: 1.0)
+
+    route = resolve_tier_route(TIER_ZERO, {})
+    assert route.reason and _tr.ESCALATING_FALLBACK_MARKER not in route.reason
