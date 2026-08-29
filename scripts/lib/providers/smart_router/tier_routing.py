@@ -389,7 +389,13 @@ ESCALATING_FALLBACK_MARKER = "escalating-fallback"
 
 #: Stronger marker for a step above MAX_FALLBACK_ESCALATION_FACTOR: not a bounded
 #: escalation but a fleet gap, walked because nothing compliant exists.
-OVER_CAP_FALLBACK_MARKER = "escalating-fallback-over-cap"
+#:
+#: Deliberately NOT a superstring of ESCALATING_FALLBACK_MARKER. It was
+#: "escalating-fallback-over-cap", which contains the milder marker, so
+#: `MILD in reason` was true for an over-cap route and an assertion meant to
+#: distinguish the two passed on either. A marker whose presence cannot be tested
+#: without also matching its sibling is not a marker, it is a prefix.
+OVER_CAP_FALLBACK_MARKER = "fallback-over-cap"
 
 def _route_from_spec(
     spec: TierRouteSpec,
@@ -453,9 +459,11 @@ def _annotated_fallback_reason(route: TierRoute, skipped: list[str]) -> str:
             )
     except Exception as exc:
         # Never fatal: the annotation is observability, the route is the product.
-        # But not silent either — a cost lookup that keeps failing here means the
-        # receipt stops showing escalating fallbacks, and nobody would notice.
-        logger.debug(
+        # WARNING, not debug: debug is silent at the default level, so claiming "not
+        # silent" while logging at debug would have been the same blindness in a
+        # different place. A cost lookup that keeps failing here means receipts quietly
+        # stop showing escalating fallbacks, which is exactly what must not go unseen.
+        logger.warning(
             "tier_routing: could not annotate fallback reason for tier=%s "
             "provider=%s model=%s: %s",
             route.tier, route.provider, route.model, exc,

@@ -443,7 +443,11 @@ def test_walking_to_an_escalating_fallback_is_marked_in_the_reason(monkeypatch):
 
     route = resolve_tier_route(TIER_ZERO, {})
     assert route.provider == "codex"
-    assert route.reason and _tr.ESCALATING_FALLBACK_MARKER in route.reason
+    # tier-zero -> gpt-5.5 is x34.5, i.e. OVER the cap, so this must carry the
+    # stronger marker. Asserting the milder one here used to pass purely because
+    # the over-cap string contained it.
+    assert route.reason and _tr.OVER_CAP_FALLBACK_MARKER in route.reason
+    assert _tr.ESCALATING_FALLBACK_MARKER not in route.reason
 
 
 def test_a_non_escalating_fallback_is_not_marked(monkeypatch):
@@ -565,3 +569,13 @@ def test_unroutable_sections_cannot_set_the_floor():
                 f"{name}/{model_key} priced through an enum lookup with no enum — "
                 "None == None would let an unroutable section answer a routing question"
             )
+
+
+def test_the_two_markers_are_not_substrings_of_each_other():
+    """Otherwise `MILD in reason` is true for an over-cap route and any test meant to
+    tell them apart passes on both — the right answer by the wrong mechanism."""
+    mild = _tr.ESCALATING_FALLBACK_MARKER
+    over = _tr.OVER_CAP_FALLBACK_MARKER
+    assert mild != over
+    assert mild not in over, f"{over!r} contains {mild!r}"
+    assert over not in mild, f"{mild!r} contains {over!r}"
