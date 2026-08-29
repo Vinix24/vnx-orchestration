@@ -409,6 +409,36 @@ def _write_result_atomic(result_path: Path, payload: Dict[str, Any]) -> None:
     tmp.replace(result_path)
 
 
+def annotate_refused_write(
+    payload_on_disk: Dict[str, Any],
+    attempted: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Mark a returned record as one THIS call did not write (OI-1488).
+
+    :func:`write_result_guarded` reports the true on-disk state when it
+    refuses, and that stays: a caller has to be able to see that its write did
+    not land (OI-1469/OI-1470). What was missing is any sign that the record it
+    got back is about something else.
+
+    Measured on PR #1705: a request for a verdict on ``1425faa1`` came back
+    with the complete record of ``109181d2`` — findings, duration,
+    ``recorded_at``, every field populated. Nothing marked it as another
+    commit's. That instance was conservative because the preserved verdict was
+    a FAIL; the mechanism is symmetric, and a preserved PASS reads as a clean
+    review of code that is no longer there.
+
+    This annotation is the signal, not the protection. The protection is the
+    sha binding in ``gate_executor._execute_requested_gates``: a flag only
+    helps a caller that reads it, and the harm here happens in a caller that
+    reads ``status`` and ``contract_hash``.
+    """
+    annotated = dict(payload_on_disk)
+    annotated["write_refused"] = True
+    annotated["attempted_status"] = attempted.get("status", "")
+    annotated["attempted_commit_sha"] = attempted.get("commit_sha", "")
+    return annotated
+
+
 def write_result_guarded(
     result_path: Path,
     payload: Dict[str, Any],
@@ -546,8 +576,12 @@ def record_not_executable(
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
-        result_payload, _written = write_result_guarded(
+        payload_on_disk, written = write_result_guarded(
             rf, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        )
+        result_payload = (
+            payload_on_disk if written
+            else annotate_refused_write(payload_on_disk, result_payload)
         )
 
     write_skip_rationale(
@@ -618,8 +652,12 @@ def record_failure(
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     written = True
     if rf:
-        failure_payload, written = write_result_guarded(
+        payload_on_disk, written = write_result_guarded(
             rf, failure_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        )
+        failure_payload = (
+            payload_on_disk if written
+            else annotate_refused_write(payload_on_disk, failure_payload)
         )
 
     # Emit gate_failed for codex_gate only when the gate itself reported a verdict
