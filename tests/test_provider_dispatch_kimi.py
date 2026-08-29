@@ -338,20 +338,29 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
         absent model to the registry's K3 default at 3.00/15.00. _compute_kimi_cost had
         its own rule and charged kimi-default's 0.60/2.50 instead — every kimi dispatch
         without an explicit model was under-reported by a factor 5.8."""
+        import os
+        from unittest.mock import patch
+
         import provider_dispatch as pd
         from providers import provider_registry as _reg
 
-        cfg = _reg.load().get("kimi_cli")
-        ran = cfg.models[pd._kimi_resolve_requested_key(None)]
-        expected = round(ran.cost_input_per_mtok + ran.cost_output_per_mtok, 8)
+        # _kimi_resolve_requested_key consults VNX_KIMI_MODEL. Leaning on that var
+        # being absent makes the test depend on the operator's shell; pin it empty.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_KIMI_MODEL", None)
+            cfg = _reg.load().get("kimi_cli")
+            ran = cfg.models[pd._kimi_resolve_requested_key(None)]
+            expected = round(ran.cost_input_per_mtok + ran.cost_output_per_mtok, 8)
 
-        wrong = cfg.models["kimi-default"]
-        wrong_price = round(wrong.cost_input_per_mtok + wrong.cost_output_per_mtok, 8)
-        self.assertNotEqual(expected, wrong_price, "fixture no longer discriminates")
+            wrong = cfg.models["kimi-default"]
+            wrong_price = round(wrong.cost_input_per_mtok + wrong.cost_output_per_mtok, 8)
+            self.assertNotEqual(expected, wrong_price, "fixture no longer discriminates")
 
-        for placeholder in ("", None, "default", "sonnet", "kimi", "kimi_cli"):
-            with self.subTest(model=placeholder):
-                self.assertEqual(pd._compute_kimi_cost(placeholder, self.ONE_MTOK), expected)
+            for placeholder in ("", None, "default", "sonnet", "kimi", "kimi_cli"):
+                with self.subTest(model=placeholder):
+                    self.assertEqual(
+                        pd._compute_kimi_cost(placeholder, self.ONE_MTOK), expected
+                    )
 
     def test_pricing_key_agrees_with_the_canonical_resolver(self):
         """The pricing handler and the spawn seam must never disagree about which model
