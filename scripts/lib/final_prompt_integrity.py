@@ -312,6 +312,41 @@ def _default_bundle_dir(data_dir: "str | Path", dispatch_id: str) -> Path:
     return Path(data_dir) / "dispatches" / "pending" / dispatch_id
 
 
+def final_prompt_sha_for_dispatch(
+    dispatch_id: str,
+    data_dir: "str | Path",
+) -> str:
+    """The sha of the prompt a dispatch actually sent, or "" if unrecoverable.
+
+    Read from the bundle rather than from a spec field: a gate dispatch bundle
+    contains ``final_prompt.md`` but no ``dispatch-spec.json``, so the value
+    :func:`persist_final_prompt` would have stamped was never written anywhere
+    for gate runs. The prompt itself is on disk, so the sha is recoverable
+    without adding a capture step.
+
+    Never raises. A missing bundle, an unreadable file or an empty dispatch id
+    all yield "", because a gate result must not fail to be recorded over a
+    provenance field that could not be resolved. An empty string means "not
+    recovered", never "no prompt" -- callers must not stamp it.
+    """
+    if not dispatch_id:
+        return ""
+    for candidate in (
+        _default_bundle_dir(data_dir, dispatch_id),
+        Path(data_dir) / "dispatches" / "completed" / dispatch_id,
+        Path(data_dir) / "dispatches" / "failed" / dispatch_id,
+    ):
+        prompt_file = candidate / "final_prompt.md"
+        try:
+            if prompt_file.is_file():
+                return compute_sha256(prompt_file.read_text(encoding="utf-8"))
+        except OSError as exc:
+            logger.debug(
+                "final_prompt_integrity: could not read %s: %s", prompt_file, exc,
+            )
+    return ""
+
+
 def record_final_prompt_integrity(
     *,
     dispatch_id: str,

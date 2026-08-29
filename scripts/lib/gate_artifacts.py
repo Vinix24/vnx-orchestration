@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from governance_receipts import utc_now_iso
 import gate_recorder
+from final_prompt_integrity import final_prompt_sha_for_dispatch
 from codex_parser import parse_codex_findings
 
 logger = logging.getLogger(__name__)
@@ -329,6 +330,22 @@ def materialize_artifacts(
         "duration_seconds": duration_seconds,
         "recorded_at": now,
     }
+    # OI-1443: pin the prompt this run actually sent. Two glm_gate runs on the
+    # same commit differed by 227 input tokens (26829 against 27056) and there
+    # was no way to ask what was different about them, because the record names
+    # the commit and the contract but not the thing the model was handed. The
+    # contract_hash covers the review CONTRACT; it does not cover the assembled
+    # prompt, which is where injected context and skill bodies land.
+    #
+    # results_dir is <data_dir>/state/review_gates/results, so the data dir is
+    # three levels up. Derived from the explicit parameter rather than from an
+    # ambient resolver so a test or a migration can point this anywhere.
+    if real_dispatch_id:
+        prompt_sha = final_prompt_sha_for_dispatch(
+            real_dispatch_id, results_dir.parents[2],
+        )
+        if prompt_sha:
+            result_payload["final_prompt_sha256"] = prompt_sha
     gate_recorder.stamp_request_identity(result_payload, request_payload)
     if real_dispatch_id:
         result_payload["dispatch_id"] = real_dispatch_id
