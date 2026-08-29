@@ -417,3 +417,108 @@ def test_headless_blocked_defaults_env_to_os_environ(monkeypatch: pytest.MonkeyP
     assert is_claude_headless_blocked(lane_safety) is True
     monkeypatch.setenv("VNX_OVERRIDE_CLAUDE_HEADLESS", "1")
     assert is_claude_headless_blocked(lane_safety) is False
+
+
+# ---------------------------------------------------------------------------
+# The dormant fallback axis (OI-1347 / OI-1499)
+#
+# routing_policy.yaml's `fallback_chain` is DECLARATIVE. It is parsed into
+# RoutingDecision.fallback_chain and then read by nobody in production: the only
+# readers anywhere are tests. The one caller of decide_lane
+# (subprocess_dispatch._maybe_route_cheap_lane) sits behind
+# VNX_ROUTING_POLICY_ENABLED, which is unset, and explicitly refuses to consult
+# fallback_chain for non-Claude lanes.
+#
+# The live fallback axis is elsewhere: wave7_models.yaml routing.tier_map, walked
+# by smart_router.tier_routing.resolve_tier_route.
+#
+# That split is the hazard. A fix aimed at "the fallback chain" naturally lands on
+# this file, because this is the one that says fallback_chain in it — and then has
+# no effect, while the axis that actually routes is untouched. These tests pin the
+# dormancy so the next such fix trips a red test instead of shipping a no-op.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_SRC_ROOTS = ("scripts", "vnx_cli", "bin")
+_REPO_ROOT = _POLICY_PATH.parents[3]
+# Where the field is legitimately defined/populated rather than consumed.
+_FALLBACK_CHAIN_OWNERS = {"scripts/lib/routing_policy.py"}
+
+
+def _production_fallback_chain_readers() -> list[str]:
+    """Source locations that READ a resolved `.fallback_chain`, outside its owner.
+
+    Assignments (`fallback_chain=`) and the dataclass field declaration are
+    population, not consumption, and are excluded.
+    """
+    hits: list[str] = []
+    pattern = _re.compile(r"\.fallback_chain\b")
+    for root in _SRC_ROOTS:
+        base = _REPO_ROOT / root
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(_REPO_ROOT).as_posix()
+            if rel in _FALLBACK_CHAIN_OWNERS:
+                continue
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+            ):
+                if pattern.search(line) and "fallback_chain=" not in line:
+                    hits.append(f"{rel}:{lineno}: {line.strip()}")
+    return hits
+
+
+def test_fallback_chain_has_no_production_reader():
+    """If this goes red you are wiring the DORMANT fallback axis.
+
+    Before adding a reader, reconcile it with the live axis
+    (wave7_models.yaml routing.tier_map, walked by resolve_tier_route) — the two
+    describe fallback differently and have never been reconciled. Wiring this one
+    without that reconciliation gives the fleet two disagreeing fallback engines.
+    """
+    readers = _production_fallback_chain_readers()
+    assert readers == [], (
+        "routing_policy.yaml's fallback_chain gained a production reader:\n  "
+        + "\n  ".join(readers)
+        + "\n\nThe live fallback axis is wave7_models.yaml routing.tier_map "
+        "(smart_router.tier_routing.resolve_tier_route). Reconcile the two before "
+        "wiring this one, then update this test with the decision."
+    )
+
+
+def test_kimi_has_an_empty_chain_by_design():
+    """`kimi: []` is a deliberate fail-loud choice (worker-provider-kimi-flip,
+    2026-07-23), NOT "kimi was removed as a destination". A kimi-lane failure on a
+    build worker must fail loud rather than silently re-route onto the Claude
+    subscription. Pinned so the intent is not re-read as an accidental gap."""
+    policy = load_routing_policy(_POLICY_PATH)
+    assert policy["fallback_chain"]["kimi"] == []
+
+
+def test_no_lane_falls_back_to_kimi():
+    """Pins the post-OI-940 state: codex replaced kimi as the vangnet for the
+    litellm chains. The block's own comment claimed the opposite for weeks."""
+    policy = load_routing_policy(_POLICY_PATH)
+    with_kimi = {
+        lane: chain
+        for lane, chain in policy["fallback_chain"].items()
+        if any("kimi" in str(step) for step in chain)
+    }
+    assert with_kimi == {}, (
+        f"a lane now falls back to kimi: {with_kimi}. If that is intended, update "
+        "the comment above fallback_chain in routing_policy.yaml in the same commit "
+        "— a stale comment there is what OI-1347 tripped over."
+    )
+
+
+def test_no_moonshot_lane_is_configured():
+    """kimi-via-cli-only blocks litellm:moonshot routing, and no moonshot key is
+    configured. The block's comment claimed such entries were "kept for reference"
+    long after they were gone."""
+    policy = load_routing_policy(_POLICY_PATH)
+    moonshot = [lane for lane in policy["fallback_chain"] if "moonshot" in lane]
+    assert moonshot == []
