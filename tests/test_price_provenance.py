@@ -194,3 +194,146 @@ class TestMalformedPriceCheckedAtFailsLoud:
         assert "price_checked_at" in message, (
             f"error for a bad price_checked_at must name the field — got: {message!r}"
         )
+
+# ---------------------------------------------------------------------------
+# OI-1335: prices must not be inherited
+#
+# The registry already carries an honesty field per model — price_source. Today
+# 19 of 24 models set it to "unverified: registry-authored", i.e. someone typed
+# the number. That marker is enforced to be PRESENT (TestEveryModelCarriesPriceProvenance
+# above) and its date is validated for FORMAT, but nothing anywhere reads its VALUE.
+# An unverified price therefore reaches cost_usd indistinguishable from a sourced one.
+#
+# These tests do not change that behaviour. They pin it, which is the part that was
+# missing: a price that silently changes — the classic way a version bump inherits
+# the previous model's number — now names itself in a red test, and a new unverified
+# price cannot be added without a deliberate edit here.
+#
+# Deliberately NOT done in this PR: correcting the prices that look wrong. Verifying
+# a price at source is not possible right now (the OpenRouter key is expired, OI-1500)
+# and inventing one from memory is the exact failure mode this cluster is about.
+# The suspects are named in the PR body and left marked unverified.
+# ---------------------------------------------------------------------------
+
+#: Every price in the registry, pinned. (provider, model) -> (input, output) per MTok.
+#: Changing a price means editing this table in the same commit, with a source.
+_PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
+    ("anthropic", "opus"): (15.0, 75.0),
+    ("anthropic", "opus-4-8"): (5.0, 25.0),
+    ("anthropic", "opus-4-6"): (5.0, 25.0),
+    ("anthropic", "sonnet"): (3.0, 15.0),
+    ("anthropic", "haiku"): (1.0, 5.0),
+    ("anthropic", "sonnet-5"): (2.0, 10.0),
+    ("anthropic", "opus-5"): (5.0, 25.0),
+    ("anthropic", "fable-5"): (10.0, 50.0),
+    ("openai", "gpt-5.5"): (5.0, 30.0),
+    ("openai", "gpt-5.4"): (1.25, 10.0),
+    ("google", "gemini-2.5-pro"): (1.25, 5.0),
+    ("deepseek", "deepseek-v4-pro"): (0.435, 0.87),
+    ("deepseek", "deepseek-v4-flash"): (0.14, 0.28),
+    ("deepseek_harness", "deepseek-v4-pro"): (0.435, 0.87),
+    ("deepseek_harness", "deepseek-v4-flash"): (0.14, 0.28),
+    ("deepseek_harness", "deepseek-v4-pro-default"): (0.435, 0.87),
+    ("moonshot", "kimi-k2-0905-default"): (0.6, 2.5),
+    ("moonshot", "kimi-k2-6"): (0.95, 4.0),
+    ("zai", "glm-5.2"): (0.76, 2.42),
+    ("local_gemma", "gemma-4b-local"): (0.0, 0.0),
+    ("kimi_cli", "kimi-k3"): (3.0, 15.0),
+    ("kimi_cli", "kimi-k2-7"): (0.6, 2.5),
+    ("kimi_cli", "kimi-default"): (0.6, 2.5),
+    ("kimi_cli", "kimi-k2-6"): (0.95, 4.0),
+}
+
+#: Models whose price_source starts with "unverified" — a self-declared guess.
+_UNVERIFIED: set[tuple[str, str]] = {
+    ("anthropic", "opus"),
+    ("anthropic", "sonnet"),
+    ("anthropic", "haiku"),
+    ("anthropic", "opus-5"),
+    ("anthropic", "fable-5"),
+    ("openai", "gpt-5.4"),
+    ("google", "gemini-2.5-pro"),
+    ("deepseek", "deepseek-v4-pro"),
+    ("deepseek", "deepseek-v4-flash"),
+    ("deepseek_harness", "deepseek-v4-pro"),
+    ("deepseek_harness", "deepseek-v4-flash"),
+    ("deepseek_harness", "deepseek-v4-pro-default"),
+    ("moonshot", "kimi-k2-0905-default"),
+    ("moonshot", "kimi-k2-6"),
+    ("zai", "glm-5.2"),
+    ("local_gemma", "gemma-4b-local"),
+    ("kimi_cli", "kimi-k2-7"),
+    ("kimi_cli", "kimi-default"),
+    ("kimi_cli", "kimi-k2-6"),
+}
+
+#: Models that cite a real source.
+_VERIFIED: set[tuple[str, str]] = {
+    ("anthropic", "opus-4-8"),
+    ("anthropic", "opus-4-6"),
+    ("anthropic", "sonnet-5"),
+    ("openai", "gpt-5.5"),
+    ("kimi_cli", "kimi-k3"),
+}
+
+
+class TestPricesArePinned:
+    """A price cannot move without this table moving with it."""
+
+    def test_every_registry_model_is_pinned(self):
+        registry = _load_real_registry()
+        live = {
+            (p, m) for p, cfg in registry.items() for m in cfg.models
+        }
+        assert live == set(_PINNED_PRICES), (
+            "the registry's model set changed.\n"
+            f"  added:   {sorted(live - set(_PINNED_PRICES))}\n"
+            f"  removed: {sorted(set(_PINNED_PRICES) - live)}\n"
+            "Update _PINNED_PRICES, _UNVERIFIED/_VERIFIED in the same commit."
+        )
+
+    def test_no_price_changed_without_updating_the_pin(self):
+        registry = _load_real_registry()
+        drifted = []
+        for (prov, model), (want_in, want_out) in _PINNED_PRICES.items():
+            entry = registry[prov].models[model]
+            got = (entry.cost_input_per_mtok, entry.cost_output_per_mtok)
+            if got != (want_in, want_out):
+                drifted.append(f"{prov}/{model}: pinned {(want_in, want_out)} -> now {got}")
+        assert not drifted, (
+            "a price moved without the pin moving with it:\n  "
+            + "\n  ".join(drifted)
+            + "\n\nIf the new price is correct, update _PINNED_PRICES AND set a real "
+            "price_source/price_checked_at. A version bump that carries the previous "
+            "model's number forward is exactly what this guard exists to catch (OI-1335)."
+        )
+
+
+class TestPriceProvenanceSplitIsPinned:
+    """Which prices are guesses is itself governed state."""
+
+    def test_unverified_set_has_not_grown(self):
+        registry = _load_real_registry()
+        live_unverified = {
+            (p, m)
+            for p, cfg in registry.items()
+            for m, entry in cfg.models.items()
+            if str(getattr(entry, "price_source", "")).startswith("unverified")
+        }
+        added = live_unverified - _UNVERIFIED
+        assert not added, (
+            f"new unverified prices: {sorted(added)}. Adding a self-declared guess to "
+            "the registry is a decision, not an oversight — record it here explicitly."
+        )
+
+    def test_verified_prices_did_not_quietly_become_guesses(self):
+        registry = _load_real_registry()
+        for prov, model in sorted(_VERIFIED):
+            src = str(getattr(registry[prov].models[model], "price_source", ""))
+            assert src and not src.startswith("unverified"), (
+                f"{prov}/{model} was sourced and now reads {src!r}"
+            )
+
+    def test_the_split_covers_every_model(self):
+        assert _UNVERIFIED | _VERIFIED == set(_PINNED_PRICES)
+        assert not (_UNVERIFIED & _VERIFIED)
