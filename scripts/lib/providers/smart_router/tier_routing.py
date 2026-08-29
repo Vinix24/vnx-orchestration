@@ -51,6 +51,7 @@ that pins the separation.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,8 @@ from providers.provider_registry import (
 )
 
 from .cost_tier import TIER_HIGH
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -434,8 +437,15 @@ def _annotated_fallback_reason(route: TierRoute, skipped: list[str]) -> str:
                 f"{base}; {marker}: {cost:.2f}/Mtok vs ceiling {ceiling:.2f} "
                 f"(x{factor:.1f}, cap x{MAX_FALLBACK_ESCALATION_FACTOR:.1f})"
             )
-    except Exception:  # noqa: BLE001 — annotation must never break routing
-        pass
+    except Exception as exc:
+        # Never fatal: the annotation is observability, the route is the product.
+        # But not silent either — a cost lookup that keeps failing here means the
+        # receipt stops showing escalating fallbacks, and nobody would notice.
+        logger.debug(
+            "tier_routing: could not annotate fallback reason for tier=%s "
+            "provider=%s model=%s: %s",
+            route.tier, route.provider, route.model, exc,
+        )
     return base
 
 
