@@ -27,6 +27,7 @@ appears outside the enumerated set.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -218,22 +219,26 @@ def test_a_torn_write_cannot_reach_the_live_record(results_dir, tmp_path, monkey
 
     A bare ``write_text`` that dies mid-write leaves the LIVE record torn —
     manufacturing exactly the unreadable-but-present shape the guard refuses
-    on, from the writer the guard was supposed to protect. tmp + ``os.replace``
-    can only tear the temp file.
+    on, from the writer the guard was supposed to protect. A scratch file plus
+    ``os.replace`` can only tear the scratch file.
+
+    The failure is injected at ``os.fsync`` because that is where a full disk
+    is usually reported, and because it is inside the real write path. It used
+    to be injected by monkeypatching ``Path.write_text``, which stopped
+    intersecting that path when OI-1486 moved the scratch write to a
+    ``mkstemp`` handle — the assertions below held, but nothing was failing
+    any more and the test was passing on an empty run. The behaviour under
+    test is unchanged; only the seam moved.
     """
     slot = results_dir / "pr-1691-codex_gate.json"
     slot.write_text(json.dumps(DECIDED_AND_EVIDENCED), encoding="utf-8")
     report = tmp_path / "report.md"
     report.write_text("# report\n", encoding="utf-8")
 
-    real_write_text = Path.write_text
-
-    def dying_write_text(self, data, *args, **kwargs):
-        """Write the first 20 bytes, then die — a full disk or a SIGKILL."""
-        real_write_text(self, data[:20], *args, **kwargs)
+    def dying_fsync(fd):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(Path, "write_text", dying_write_text)
+    monkeypatch.setattr(os, "fsync", dying_fsync)
     err = gate_artifacts._write_result_record(
         results_dir, "codex_gate", 1691, "", _result_payload(), report,
     )
@@ -243,6 +248,9 @@ def test_a_torn_write_cannot_reach_the_live_record(results_dir, tmp_path, monkey
     assert json.loads(slot.read_text(encoding="utf-8")) == DECIDED_AND_EVIDENCED, (
         "the live record must be untouched by a write that died halfway; a raw "
         "write_text would have truncated it to 20 bytes of JSON"
+    )
+    assert list(results_dir.glob("*.tmp")) == [], (
+        "a died write must not leave its scratch file behind"
     )
 
 

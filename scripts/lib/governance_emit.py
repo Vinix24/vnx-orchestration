@@ -13,7 +13,10 @@ lock-file, hash-chain-stamping, validated append primitive Path 2
 Hard rules (PRD provider-governance-unification):
   - Provider field MUST match _PROVIDER_RE — raises ValueError on mismatch.
   - Receipt write MUST NOT silently fail — raises RuntimeError on write/validation failure.
-  - Unified report uses tmp + os.replace for atomic write.
+  - Unified report is written via atomic_io.atomic_write_text, whose scratch
+    file is unique per writer. A scratch name derived from the destination
+    (the old `report_path.with_suffix('.md.tmp')`) is shared by every
+    concurrent writer of that report — see atomic_io (OI-1486).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+from atomic_io import atomic_write_text
 from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.idempotency import (
     _cache_file_for,
@@ -790,15 +794,9 @@ def emit_unified_report(
     else:
         content = body
 
-    tmp_path = report_path.with_suffix(".md.tmp")
     try:
-        tmp_path.write_text(content, encoding="utf-8")
-        os.replace(tmp_path, report_path)
+        atomic_write_text(report_path, content)
     except OSError as exc:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise RuntimeError(
             f"governance_emit: unified report write failed for dispatch={dispatch_id}: {exc}"
         ) from exc

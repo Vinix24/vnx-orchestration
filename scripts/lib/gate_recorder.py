@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
+from atomic_io import atomic_write_json, slot_lock
 from governance_receipts import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -403,10 +404,24 @@ def _check_overwrite_guard(
 
 
 def _write_result_atomic(result_path: Path, payload: Dict[str, Any]) -> None:
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = result_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(result_path)
+    """Write one result record through the shared atomic-write helper.
+
+    Callers must already hold :func:`atomic_io.slot_lock` for ``result_path``
+    — both guarded entry points below do. This is the write half of that
+    critical section, not a standalone atomic write: on its own it guarantees
+    only that a reader never sees a partial record.
+
+    Until OI-1486 this derived its scratch file as
+    ``result_path.with_suffix(".json.tmp")``: one name for every concurrent
+    writer of the slot, because the name came from the destination and
+    nothing else. Two writers then shared one scratch file — the second
+    overwrote the first's bytes, the first renamed those bytes into place
+    while reporting its own payload as landed, and the second renamed a path
+    the first had already consumed and died on FileNotFoundError. The record
+    on disk matched neither writer's account of what it had written.
+    ``atomic_io`` gives each writer its own ``mkstemp`` scratch file.
+    """
+    atomic_write_json(result_path, payload)
 
 
 def write_result_guarded(
@@ -452,13 +467,14 @@ def write_result_guarded(
     internal :data:`_CORRUPT_RESULT` sentinel), which is NOT what is on disk;
     ``written is False`` is what tells the caller the write did not land.
     """
-    try:
-        _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_ref)
-    except ResultOverwriteRefused:
-        existing = _read_existing_result(result_path)
-        on_disk = existing if isinstance(existing, dict) else {}
-        return on_disk or payload, False
-    _write_result_atomic(result_path, payload)
+    with slot_lock(result_path):
+        try:
+            _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_ref)
+        except ResultOverwriteRefused:
+            existing = _read_existing_result(result_path)
+            on_disk = existing if isinstance(existing, dict) else {}
+            return on_disk or payload, False
+        _write_result_atomic(result_path, payload)
     return payload, True
 
 
@@ -501,8 +517,9 @@ def record_terminal_result(
             f"({payload.get('status')!r}) but no producer identity "
             f"(dispatch_id) — refusing to write unauthenticated gate evidence"
         )
-    _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
-    _write_result_atomic(result_path, payload)
+    with slot_lock(result_path):
+        _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
+        _write_result_atomic(result_path, payload)
     return result_path
 
 
