@@ -175,3 +175,47 @@ def test_ci_gate_refuses_the_same_input(monkeypatch):
 
     assert gate["verdict"] == "NO-GO"
     assert "niet toetsbaar" in gate["message"]
+
+
+def test_a_contract_without_a_branch_is_not_treated_as_unresolvable(tmp_path):
+    """glm_gate advisory on 5480324a.
+
+    ``ReviewContract.branch`` defaults to "" and one live contract in this store
+    carries that default. A contract that never had a branch is "no constraint";
+    a merge door that asked ``gh`` and got nothing is "I tried and failed".
+    Same empty string, opposite meanings, so the caller has to say which — the
+    closure verifier's internal sites pass ``or None``, the merge door passes
+    what it got.
+
+    Without this, tightening the matcher would have made every result for such
+    a contract unverifiable, in a code path the merge fix was not about.
+    """
+    import json
+
+    import closure_verifier
+    from review_contract import ReviewContract
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    report = tmp_path / "r.md"
+    report.write_text("# gate\n\nNo blocking findings.\n", encoding="utf-8")
+    (results_dir / "pr-77-kimi_gate.json").write_text(json.dumps({
+        "gate": "kimi_gate", "pr_id": "77", "status": "pass",
+        "branch": "feature/whatever", "commit_sha": HEAD_SHA,
+        "contract_hash": "abc123", "report_path": str(report),
+        "blocking_findings": [], "advisory_findings": [],
+    }), encoding="utf-8")
+
+    contract = ReviewContract(
+        pr_id="77", branch="", risk_class="medium",
+        review_stack=["kimi_gate"], changed_files=[], content_hash="e" * 16,
+    )
+
+    found = closure_verifier._find_gate_result(
+        "kimi_gate", contract.pr_id, results_dir, branch=contract.branch or None,
+    )
+    assert found is not None, (
+        "a contract with no branch rejected a valid result — the default empty "
+        "string was read as an unresolvable constraint"
+    )
+    assert found["status"] == "pass"
