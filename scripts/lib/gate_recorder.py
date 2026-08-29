@@ -627,7 +627,18 @@ def record_failure(
         "recorded_at": now,
     }
     if extra:
-        reserved = {"status", "reason", "reason_detail", "gate", "pr_id", "pr_number"}
+        # Identity and verdict are the record's own. So is the evidence trio:
+        # `report_path`, `contract_hash` and `required_reruns` are what
+        # gate_status.has_complete_evidence reads to decide whether a terminal
+        # record is DECIDED, so a caller able to set them through `extra` could
+        # dress a failure record as evidenced without a report existing. The
+        # degenerate-run path deliberately passes its report under a separate
+        # key (`degenerate_report_path`) for exactly this reason: an
+        # `unavailable` record must not claim a report as gate evidence.
+        reserved = {
+            "status", "reason", "reason_detail", "gate", "pr_id", "pr_number",
+            "report_path", "contract_hash", "required_reruns",
+        }
         failure_payload.update(
             {k: v for k, v in extra.items() if k not in reserved}
         )

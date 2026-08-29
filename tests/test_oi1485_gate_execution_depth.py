@@ -270,9 +270,16 @@ def test_a_message_alias_is_not_an_investigative_action(alias):
     )
 
 
-@pytest.mark.parametrize("work_type", ["command_execution", "file_change", "web_search"])
-def test_the_measured_work_types_all_count(work_type):
-    """The three that actually occur in this store, plus command_execution."""
+@pytest.mark.parametrize("work_type", [
+    # The three that actually occur in this store (measured over 348 reports),
+    "command_execution", "file_change", "web_search",
+    # plus the two carried for codex versions this store has not seen. Listed
+    # in the set but unexercised, they were a claim rather than a behaviour --
+    # a typo in either would have gone unnoticed until a run depended on it.
+    "mcp_tool_call", "patch_apply",
+])
+def test_every_declared_work_type_counts(work_type):
+    """Every member of the investigative set, not only the observed ones."""
     from gate_depth import is_degenerate, measure_execution_depth
 
     stream = "\n".join([
@@ -311,3 +318,49 @@ def test_an_unknown_item_type_suspends_the_judgement_and_is_named():
         "cannot tell a clean zero from an unmeasured one"
     )
     assert is_degenerate(depth) is False
+
+
+def test_extra_cannot_dress_a_failure_record_as_evidenced(tmp_path):
+    """glm_gate advisory on 7fa96753.
+
+    `has_complete_evidence` reads report_path + contract_hash to decide whether
+    a terminal record is DECIDED. A caller able to set those through `extra`
+    could hand an `unavailable` record the shape of a real verdict without any
+    report existing. Identity and verdict were already reserved; the evidence
+    trio is the same class of field and was not.
+    """
+    from gate_recorder import record_failure
+
+    requests = tmp_path / "requests"
+    results = tmp_path / "results"
+    for d in (requests, results):
+        d.mkdir(parents=True, exist_ok=True)
+
+    payload = record_failure(
+        gate="codex_gate", pr_number=1485, pr_id="",
+        result={
+            "reason": "gate_execution_degenerate", "reason_detail": "0 actions",
+            "duration_seconds": 14.0, "partial_output_lines": 4, "runner_pid": 1,
+        },
+        request_payload={"gate": "codex_gate", "pr_number": 1485,
+                         "commit_sha": "c" * 40, "branch": "fix/x"},
+        requests_dir=requests, results_dir=results,
+        extra={
+            "execution_depth": {"parsed": True, "investigative_actions": 0},
+            "report_path": "/tmp/forged-report.md",
+            "contract_hash": "forged",
+            "required_reruns": [],
+        },
+    )
+
+    assert payload["report_path"] == "", (
+        "a caller set report_path through extra — an unavailable record now "
+        "claims a report as gate evidence"
+    )
+    assert payload["contract_hash"] != "forged"
+    assert payload["required_reruns"] == ["codex_gate"], (
+        "required_reruns was overwritten, so the run would never be bought again"
+    )
+    assert payload["execution_depth"]["investigative_actions"] == 0, (
+        "the non-reserved key that extra exists for must still get through"
+    )
