@@ -1354,6 +1354,12 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResul
     Fail-open for the classifier and other unexpected errors — but fail-loud for
     registry drift (ADR-036 §2): a RegistryLookupError (unknown provider/model)
     propagates so the door rejects instead of silently falling back to CLAUDE.
+
+    ``dispatch_id`` is passed through so the router's decision ledger (OI-1494)
+    can tie a record back to the dispatch it describes, and so the staging
+    canary buckets on the dispatch's stable identity rather than on its content.
+    This is the router's only production call site: a decision made here that is
+    not written down is not observable anywhere else.
     """
     try:
         from providers.smart_router.door_routing import resolve_door_route  # noqa: PLC0415
@@ -1371,6 +1377,7 @@ def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResul
             target_slot=spec.target_slot,
             instruction_text=instruction_text,
             file_paths=file_paths,
+            dispatch_id=spec.dispatch_id,
         )
     except RegistryLookupError:
         # ADR-036 §2: unknown provider/model is drift, not a routing bug — the
