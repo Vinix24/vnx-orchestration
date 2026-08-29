@@ -552,6 +552,39 @@ def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str,
         return None
 
 
+def _kimi_entry_from_cli_arg(cfg: Any, model: Optional[str]) -> Optional[Any]:
+    """Reverse-map a kimi CLI ARG form back to its registry entry.
+
+    The envelope lane does not stamp the registry key. ``envelope_adapters_provider``
+    resolves the spawn model through ``_kimi_resolve_cli_model_arg`` and stamps
+    ``adapter_result.model`` with the CLI arg (e.g. "kimi-code/k3"); ``envelope_govern``
+    then hands exactly that string to the cost path. So the cost path receives a form
+    the registry keys never match.
+
+    This is a lookup, not a guess: each registry entry carries its own
+    ``cli_model_arg``, so the mapping comes from the registry itself. Exact match only.
+    Two entries sharing one CLI arg is registry drift, and is reported as a miss rather
+    than resolved by picking one — the whole point of OI-1361 is not to let iteration
+    order decide a price.
+    """
+    raw = (model or "").strip()
+    if not raw:
+        return None
+    matches = [
+        (key, entry)
+        for key, entry in cfg.models.items()
+        if getattr(entry, "cli_model_arg", None) == raw
+    ]
+    if len(matches) > 1:
+        logger.warning(
+            "_kimi_entry_from_cli_arg: cli_model_arg=%s maps to %d registry keys (%s) "
+            "— ambiguous, refusing to pick one",
+            raw, len(matches), ", ".join(k for k, _ in matches),
+        )
+        return None
+    return matches[0][1] if matches else None
+
+
 def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Optional[float]:
     """Compute cost via wave7_models.yaml kimi_cli section for kimi provider.
 
@@ -581,6 +614,14 @@ def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Opt
     "kimi-default", "kimi_cli") all resolve through that shared path. Note this is why
     the old guess looked harmless: for "default"/"sonnet" the first-entry fallback
     happened to land on kimi-k3, which was the right answer for the wrong reason.
+
+    One caller does not speak registry keys at all: the envelope lane stamps
+    ``adapter_result.model`` with the CLI ARG ("kimi-code/k3"), which
+    ``envelope_govern`` forwards here. ``_kimi_entry_from_cli_arg`` reverse-maps that
+    through the registry's own ``cli_model_arg`` field. Removing the guess without
+    this step would have blacked out cost on the whole envelope door — the guess was
+    masking a second, independent gap, and priced "kimi-code/kimi-for-coding" as K3
+    (18.00) when the model that ran was K2-7 (3.10).
     """
     if not token_usage or token_usage.get("unavailable") or (
         token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0
@@ -594,6 +635,9 @@ def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Opt
             return None
         target_key = _kimi_resolve_requested_key(model)
         entry = _resolve_registry_model_entry(cfg, "kimi_cli", target_key)
+        if entry is None:
+            # The envelope lane hands us the CLI arg form, not a registry key.
+            entry = _kimi_entry_from_cli_arg(cfg, model)
         if entry is None:
             logger.warning(
                 "_compute_kimi_cost: no match for model=%s (registry_key=kimi_cli, "

@@ -256,9 +256,6 @@ class TestComputeKimiCost(unittest.TestCase):
         self.assertIsNone(pd._compute_cost("kimi", "kimi-default", usage))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
     """OI-1361: an unknown kimi model must yield None, never a fabricated price.
@@ -398,3 +395,50 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
         joined = "\n".join(captured.output)
         self.assertIn("kimi-k9-does-not-exist", joined)
         self.assertIn("not a fabricated price", joined)
+
+    def test_cli_arg_form_prices_the_model_that_ran(self):
+        """The envelope lane stamps adapter_result.model with the CLI ARG, not a
+        registry key (envelope_adapters_provider -> envelope_govern -> _compute_cost).
+
+        On main the first-entry guess made "kimi-code/k3" come out right by accident
+        and "kimi-code/kimi-for-coding" come out 5.8x too high (18.00 for a model that
+        costs 3.10). Both now resolve through the registry's own cli_model_arg field."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        priced = 0
+        for key, entry in cfg.models.items():
+            arg = getattr(entry, "cli_model_arg", None)
+            if not arg:
+                continue
+            expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
+            with self.subTest(cli_arg=arg, registry_key=key):
+                self.assertEqual(pd._compute_kimi_cost(arg, self.ONE_MTOK), expected)
+            priced += 1
+        self.assertGreaterEqual(priced, 2, "fixture expects at least two mapped CLI args")
+
+    def test_cli_arg_form_that_maps_to_nothing_is_still_a_miss(self):
+        import provider_dispatch as pd
+
+        self.assertIsNone(pd._compute_kimi_cost("kimi-code/not-a-real-arg", self.ONE_MTOK))
+
+    def test_ambiguous_cli_arg_refuses_to_pick(self):
+        """Two registry entries sharing one CLI arg is drift. Picking one would put
+        iteration order back in charge of a price, which is the defect being closed."""
+        import copy
+
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = copy.deepcopy(_reg.load().get("kimi_cli"))
+        keys = [k for k, m in cfg.models.items() if getattr(m, "cli_model_arg", None)]
+        self.assertGreaterEqual(len(keys), 2)
+        shared = cfg.models[keys[0]].cli_model_arg
+        object.__setattr__(cfg.models[keys[1]], "cli_model_arg", shared)
+
+        self.assertIsNone(pd._kimi_entry_from_cli_arg(cfg, shared))
+
+
+if __name__ == "__main__":
+    unittest.main()
