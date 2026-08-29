@@ -247,6 +247,34 @@ def _validate_test_claims(claims: Dict[str, Any], project_root: Path) -> List[Ch
     return results
 
 
+def _matches_required_field(supplied: Optional[str], actual: Optional[str]) -> bool:
+    """Three answers for a caller-supplied match constraint, not two (OI-1318).
+
+    ``if head_sha:`` collapsed two different callers into one behaviour. A
+    caller that does not pass a sha is saying "I am not scoping by sha". A
+    caller that passes an EMPTY sha is saying something else entirely: it tried
+    to resolve the PR head and could not. Under the truthy test both took the
+    branch that skips the check, so a merge door that failed to determine the
+    head silently dropped its own head-sha requirement and accepted any result
+    for the PR — including one recorded against a commit that is no longer
+    there.
+
+    * ``None``  — not required; every record passes this constraint.
+    * ``""``    — required but unresolvable; NO record passes. An unverifiable
+                  state is a refusal, which is what the sibling CI gate already
+                  does when ``gh`` gives it no head.
+    * a value   — the record must carry exactly that value.
+
+    An absent field on the record fails a non-``None`` constraint: a result
+    without a ``commit_sha`` is stale evidence, not a wildcard.
+    """
+    if supplied is None:
+        return True
+    if supplied == "":
+        return False
+    return (actual or "") == supplied
+
+
 def _find_gate_result(
     gate: str,
     pr_id: str,
@@ -288,14 +316,12 @@ def _find_gate_result(
                 return False
         # ADR-005: branch must be present and match when caller supplies one.
         # A branch-less result is stale evidence from a prior feature.
-        if branch:
-            if (data.get("branch") or "") != branch:
-                return False
+        if not _matches_required_field(branch, data.get("branch")):
+            return False
         # OI-1307: head sha must be present and match when caller supplies one —
         # same strictness as branch (a result without commit_sha is stale).
-        if head_sha:
-            if (data.get("commit_sha") or "") != head_sha:
-                return False
+        if not _matches_required_field(head_sha, data.get("commit_sha")):
+            return False
         return True
 
     pr_slug = pr_id.lower().replace("-", "")

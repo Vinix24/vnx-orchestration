@@ -284,7 +284,8 @@ class TestRunReviewGate:
     def test_no_go_when_no_declared_gate(self, monkeypatch):
         monkeypatch.setattr(
             pr_merge, "_query_pr",
-            lambda n: {"title": "add a thing", "headRefName": "feature/x"},
+            lambda n: {"title": "add a thing", "headRefName": "feature/x",
+                      "headRefOid": "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4"},
         )
         monkeypatch.setattr(pr_merge, "_resolve_declared_gate", lambda pr_number, state_dir=None: "")
         gate, _ = pr_merge._run_review_gate(5)
@@ -296,7 +297,8 @@ class TestRunReviewGate:
         # key is the bare GitHub PR number, not the title.
         monkeypatch.setattr(
             pr_merge, "_query_pr",
-            lambda n: {"title": "no internal label here", "headRefName": "feature/x"},
+            lambda n: {"title": "no internal label here", "headRefName": "feature/x",
+                       "headRefOid": "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4"},
         )
         monkeypatch.setattr(pr_merge, "ensure_env", lambda: {"VNX_STATE_DIR": str(tmp_path)})
         monkeypatch.setattr(pr_merge, "_resolve_declared_gate", lambda pr_number, state_dir=None: "codex_gate")
@@ -324,13 +326,41 @@ class TestRunReviewGate:
             "pr_id": "5",
             "gate": "codex_gate",
             "branch": "feature/x",
-            "head_sha": "",  # mocked PR data carries no headRefOid
+            # OI-1318: this used to assert head_sha="" with the note "mocked PR
+            # data carries no headRefOid". That empty string was the defect
+            # written down as an expectation: downstream it read as "no sha
+            # constraint", so the one path that could not resolve its head was
+            # the path that stopped requiring one. The door now refuses before
+            # delegating, and a delegation carries a real head.
+            "head_sha": "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4",
         }
+
+    def test_override_does_not_bypass_an_undeterminable_head(self, monkeypatch):
+        """OI-1318, and a deliberate narrowing of the override.
+
+        The escape hatch skips the EVIDENCE check; it does not make an
+        unmergeable state mergeable. With no head there is nothing to merge
+        against — ``_do_merge`` cannot pass ``--match-head-commit`` either — so
+        the refusal comes first, exactly as it already does in the sibling
+        ``_run_ci_gate``, which returns NO-GO on an empty head before its own
+        override reaches the check. Symmetry between the two gates is the whole
+        point of OI-1318, and it has to hold on this path too or the asymmetry
+        simply moves.
+        """
+        monkeypatch.setattr(
+            pr_merge, "_query_pr",
+            lambda n: {"title": "PR-42 add a thing", "headRefName": "feature/x",
+                       "headRefOid": ""},
+        )
+        gate, _ = pr_merge._run_review_gate(5, override_reason="hotfix: verified by hand")
+        assert gate["verdict"] == "NO-GO"
+        assert "niet toetsbaar" in gate["message"]
 
     def test_override_empty_reason_refused(self, monkeypatch):
         monkeypatch.setattr(
             pr_merge, "_query_pr",
-            lambda n: {"title": "PR-42 add a thing", "headRefName": "feature/x"},
+            lambda n: {"title": "PR-42 add a thing", "headRefName": "feature/x",
+                      "headRefOid": "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4"},
         )
         gate, _ = pr_merge._run_review_gate(5, override_reason="   ")
         assert gate["verdict"] == "NO-GO"
@@ -340,7 +370,8 @@ class TestRunReviewGate:
     def test_override_nonempty_reason_goes(self, monkeypatch):
         monkeypatch.setattr(
             pr_merge, "_query_pr",
-            lambda n: {"title": "PR-42 add a thing", "headRefName": "feature/x"},
+            lambda n: {"title": "PR-42 add a thing", "headRefName": "feature/x",
+                      "headRefOid": "6c925a1b2ee8b0cded8728d4f2c792fcf64be4d4"},
         )
         gate, _ = pr_merge._run_review_gate(5, override_reason="hotfix: re-verified by hand")
         assert gate["verdict"] == "GO"

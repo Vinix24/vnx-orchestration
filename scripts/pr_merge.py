@@ -248,6 +248,23 @@ def _run_review_gate(
         }, pr_data
     branch = pr_data.get("headRefName") or ""
     head_sha = pr_data.get("headRefOid") or ""
+    if not head_sha or not branch:
+        # OI-1318: the sibling CI gate refuses here and this one did not. It
+        # carried on with empty strings into check_review_gate_for_merge, whose
+        # matcher then read "" as "no constraint" and accepted any result for
+        # the PR — so the one path that could not establish which commit it was
+        # merging was also the path that stopped asking. Same refusal, same
+        # words, as _run_ci_gate.
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"PR-head (sha/branch) kon niet worden bepaald voor #{pr_number}: "
+                "review-gate-check niet toetsbaar"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": None,
+        }, pr_data
 
     # ── Escape hatch (same resolution + semantics as the CI gate) ─────────
     reason = _resolve_override_reason(override_reason)
