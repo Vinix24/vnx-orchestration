@@ -247,6 +247,42 @@ def _validate_test_claims(claims: Dict[str, Any], project_root: Path) -> List[Ch
     return results
 
 
+def _matches_required_field(supplied: Optional[str], actual: Optional[str]) -> bool:
+    """Three answers for a caller-supplied match constraint, not two (OI-1318).
+
+    ``if head_sha:`` collapsed two different callers into one behaviour. A
+    caller that does not pass a sha is saying "I am not scoping by sha". A
+    caller that passes an EMPTY sha is saying something else entirely: it tried
+    to resolve the PR head and could not. Under the truthy test both took the
+    branch that skips the check, so a merge door that failed to determine the
+    head silently dropped its own head-sha requirement and accepted any result
+    for the PR — including one recorded against a commit that is no longer
+    there.
+
+    * ``None``  — not required; every record passes this constraint.
+    * ``""``    — required but unresolvable; NO record passes. An unverifiable
+                  state is a refusal, which is what the sibling CI gate already
+                  does when ``gh`` gives it no head.
+    * a value   — the record must carry exactly that value.
+
+    The distinction lives in what the CALLER meant, so callers have to say it.
+    ``ReviewContract.branch`` defaults to ``""`` and one live contract in this
+    store carries that default: a contract that never had a branch is "no
+    constraint", not "I tried to resolve one and failed". The closure
+    verifier's internal call sites therefore pass ``contract.branch or None``,
+    while the merge door passes the empty string it actually got from ``gh``
+    (glm_gate advisory on 5480324a).
+
+    An absent field on the record fails a non-``None`` constraint: a result
+    without a ``commit_sha`` is stale evidence, not a wildcard.
+    """
+    if supplied is None:
+        return True
+    if supplied == "":
+        return False
+    return (actual or "") == supplied
+
+
 def _find_gate_result(
     gate: str,
     pr_id: str,
@@ -288,14 +324,12 @@ def _find_gate_result(
                 return False
         # ADR-005: branch must be present and match when caller supplies one.
         # A branch-less result is stale evidence from a prior feature.
-        if branch:
-            if (data.get("branch") or "") != branch:
-                return False
+        if not _matches_required_field(branch, data.get("branch")):
+            return False
         # OI-1307: head sha must be present and match when caller supplies one —
         # same strictness as branch (a result without commit_sha is stale).
-        if head_sha:
-            if (data.get("commit_sha") or "") != head_sha:
-                return False
+        if not _matches_required_field(head_sha, data.get("commit_sha")):
+            return False
         return True
 
     pr_slug = pr_id.lower().replace("-", "")
@@ -849,7 +883,9 @@ def _check_contract_hashes(contract: ReviewContract, results_dir: Path) -> List[
     for gate in contract.review_stack:
         if gate not in _KNOWN_GATES:
             continue
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
+        result = _find_gate_result(
+            gate, contract.pr_id, results_dir, branch=contract.branch or None,
+        )
         if result and contract.content_hash:
             result_hash = result.get("contract_hash") or result.get("content_hash") or ""
             if result_hash and result_hash != contract.content_hash:
@@ -868,7 +904,9 @@ def _check_report_paths(contract: ReviewContract, results_dir: Path) -> List[Che
     for gate in contract.review_stack:
         if gate not in _KNOWN_GATES:
             continue
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
+        result = _find_gate_result(
+            gate, contract.pr_id, results_dir, branch=contract.branch or None,
+        )
         if result is not None and gate_is_terminal(result):
             report_path = result.get("report_path", "")
             if not report_path:
@@ -929,7 +967,9 @@ def _validate_review_evidence(
         return checks
 
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
+        result = _find_gate_result(
+            gate, contract.pr_id, results_dir, branch=contract.branch or None,
+        )
         checks.append(_check_single_gate(gate, contract, result, results_dir, branch))
 
     checks.extend(_check_contract_hashes(contract, results_dir))
@@ -1150,7 +1190,9 @@ def _detect_gate_report_contradictions(
     for gate in contract.review_stack:
         if gate not in _KNOWN_GATES:
             continue
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
+        result = _find_gate_result(
+            gate, contract.pr_id, results_dir, branch=contract.branch or None,
+        )
         if result is None:
             continue
 
