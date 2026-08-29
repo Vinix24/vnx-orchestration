@@ -256,6 +256,12 @@ def _output_cost(provider_enum: str, model_key: str) -> Optional[float]:
     """
     from providers.provider_registry import load  # noqa: PLC0415
 
+    # An empty enum is not a provider. Without this guard `provider_enum=None`
+    # matches every section that HAS no dispatch_enum (zai, moonshot, google, the
+    # bare deepseek section) because None == None, and an unroutable section would
+    # answer a routing question.
+    if not provider_enum:
+        return None
     for cfg in load().values():
         if cfg.dispatch_enum == provider_enum:
             entry = cfg.models.get(model_key)
@@ -352,10 +358,18 @@ def over_cap_fallbacks(tier_map: Optional[dict] = None) -> tuple:
 #: The literal promise — never dearer than escalating, i.e. factor 1.0 — cannot be
 #: met by this fleet, and stating it anyway is a promise that reads well and routes
 #: nothing. Measured 2026-08-29: tier-zero's ceiling is 0.87/Mtok, and the cheapest
-#: lane that is BOTH a different provider (a same-provider net does not survive the
-#: outage it exists for) AND dispatchable is glm-5.2 at 2.42 — factor 2.78. Below
-#: that, the cheapest rung has no net at all except local_gemma, a 4B local model
-#: scoring 0.40 on complex_reasoning.
+#: lane that is a different provider (a same-provider net does not survive the outage
+#: it exists for) AND actually routable is kimi_cli/kimi-k2-7 at 2.50 — factor 2.87.
+#: Below that, the cheapest rung has no net at all except local_gemma, a 4B local
+#: model scoring 0.40 on complex_reasoning.
+#:
+#: "Routable" is load-bearing and was got wrong once: a registry section with
+#: dispatch_enum=None (zai, moonshot, google, the bare deepseek section) can never be
+#: reached by tier routing, because _output_cost resolves by dispatch_enum. An earlier
+#: version of this derivation named glm-5.2 at 2.42 as the binding candidate and
+#: arrived at 2.78. glm is in the zai section, which has no dispatch_enum — so it was
+#: never a candidate, and the floor was understated. It also makes the OI-1506 glm
+#: mispricing (2.42 registered against 3.74 at source) irrelevant to this bound.
 #:
 #: So 3.0 is the smallest round bound under which every rung can still HAVE a
 #: different-provider net. Derived from the fleet, not chosen to fit the map: it

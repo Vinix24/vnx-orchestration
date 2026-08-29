@@ -493,10 +493,16 @@ def test_the_cap_is_not_below_what_the_fleet_can_offer():
     ceiling = _tr.fallback_cost_ceiling(TIER_ZERO)
     from providers.provider_registry import load
 
+    # dispatch_enum is None means the section is unreachable by tier routing at all
+    # (_output_cost resolves by dispatch_enum), so those models cannot be anyone's
+    # safety net and must not set the floor. Leaving them in understated it: glm-5.2
+    # (zai, no dispatch_enum) gave 2.78 where the real floor is 2.87.
     cheapest = min(
         m.cost_output_per_mtok
         for name, cfg in load().items()
-        if cfg.dispatch_enum != spec.provider and name != "local_gemma"
+        if cfg.dispatch_enum is not None
+        and cfg.dispatch_enum != spec.provider
+        and name != "local_gemma"
         for m in cfg.models.values()
         if getattr(m, "dispatch_allowed", True)
     )
@@ -542,3 +548,20 @@ def test_a_bounded_escalation_gets_the_milder_marker(monkeypatch):
     assert route.provider == "codex"
     assert _tr.ESCALATING_FALLBACK_MARKER in route.reason
     assert _tr.OVER_CAP_FALLBACK_MARKER not in route.reason
+
+
+def test_unroutable_sections_cannot_set_the_floor():
+    """A section with dispatch_enum=None is unreachable by tier routing, so its prices
+    must not enter the derivation. Pinned because leaving them in silently understated
+    the floor (2.78 instead of 2.87) by leaning on glm-5.2, which cannot be routed to."""
+    from providers.provider_registry import load
+
+    registry = load()
+    unroutable = {name for name, cfg in registry.items() if cfg.dispatch_enum is None}
+    assert unroutable, "fixture expects at least one unroutable section"
+    for name in sorted(unroutable):
+        for model_key in registry[name].models:
+            assert _tr._output_cost(None, model_key) is None, (
+                f"{name}/{model_key} priced through an enum lookup with no enum — "
+                "None == None would let an unroutable section answer a routing question"
+            )
