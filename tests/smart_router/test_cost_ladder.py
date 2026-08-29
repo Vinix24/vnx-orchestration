@@ -455,3 +455,90 @@ def test_a_non_escalating_fallback_is_not_marked(monkeypatch):
 
     route = resolve_tier_route(TIER_ZERO, {})
     assert route.reason and _tr.ESCALATING_FALLBACK_MARKER not in route.reason
+
+
+# ---------------------------------------------------------------------------
+# The bounded promise (OI-1360, option B)
+#
+# "Never an escalation" — factor 1.0 — cannot be met by this fleet, so stating it
+# is a promise that reads well and routes nothing. MAX_FALLBACK_ESCALATION_FACTOR
+# replaces it with a bound that IS meetable, derived from the fleet rather than
+# chosen to fit the map: 3.0 is the smallest round bound under which every rung can
+# still have a different-provider net at all.
+#
+# The point of the bound is that it still REJECTS things. It rejects two of the five
+# breaches present today, both on tier-zero, and those two stay visible as a fleet
+# gap rather than dissolving into the rewritten promise.
+# ---------------------------------------------------------------------------
+
+#: Breaches ABOVE the bound: not a stretched safety net but a place where the fleet
+#: has no compliant lane. Shrinking this is the fix; growing it is a regression.
+_FLEET_GAP = {
+    ("tier-zero", "kimi", "kimi-k3"),
+    ("tier-zero", "codex", "gpt-5.5"),
+}
+
+
+def test_the_cap_still_rejects_something():
+    """A bound that admits everything is not a bound. If this ever goes empty because
+    the cap was raised rather than the map repaired, the promise was adjusted until
+    it fitted — the exact move the constant exists to prevent."""
+    assert _as_keys(_tr.over_cap_fallbacks()) == _FLEET_GAP
+
+
+def test_the_cap_is_not_below_what_the_fleet_can_offer():
+    """Derivation, pinned: below this factor tier-zero has no different-provider net
+    at all except local_gemma. Recomputed from the registry, not restated."""
+    spec = _tr._TIER_MAP[TIER_ZERO]
+    ceiling = _tr.fallback_cost_ceiling(TIER_ZERO)
+    from providers.provider_registry import load
+
+    cheapest = min(
+        m.cost_output_per_mtok
+        for name, cfg in load().items()
+        if cfg.dispatch_enum != spec.provider and name != "local_gemma"
+        for m in cfg.models.values()
+        if getattr(m, "dispatch_allowed", True)
+    )
+    required = cheapest / ceiling
+    assert _tr.MAX_FALLBACK_ESCALATION_FACTOR >= required, (
+        f"the cap (x{_tr.MAX_FALLBACK_ESCALATION_FACTOR}) is below the x{required:.2f} "
+        "that tier-zero needs for any different-provider fallback to exist. A cap that "
+        "low leaves the cheapest rung with no safety net at all."
+    )
+
+
+def test_the_bounded_breaches_are_actually_bounded():
+    """Everything not in the fleet gap must sit at or under the cap — otherwise the
+    split between 'stretched' and 'broken' is fiction."""
+    for v in _tr.escalating_fallbacks():
+        if (v.tier, v.provider, v.model) in _FLEET_GAP:
+            continue
+        assert v.factor <= _tr.MAX_FALLBACK_ESCALATION_FACTOR, f"{v} exceeds the cap"
+
+
+def test_over_cap_is_a_strict_subset_of_escalating():
+    over = set(_as_keys(_tr.over_cap_fallbacks()))
+    allv = set(_as_keys(_tr.escalating_fallbacks()))
+    assert over < allv, "the fleet gap must be a proper subset of all breaches"
+
+
+def test_walking_over_the_cap_gets_the_stronger_marker(monkeypatch):
+    """A x34.5 step and a x1.5 step must not read the same in a receipt."""
+    import providers.smart_router.availability as _av
+
+    monkeypatch.setattr(_av, "lane_available", lambda p, **k: (p == "codex", "down"))
+    route = resolve_tier_route(TIER_ZERO, {})
+    assert route.provider == "codex"
+    assert _tr.OVER_CAP_FALLBACK_MARKER in route.reason
+    assert "cap x3.0" in route.reason
+
+
+def test_a_bounded_escalation_gets_the_milder_marker(monkeypatch):
+    import providers.smart_router.availability as _av
+
+    monkeypatch.setattr(_av, "lane_available", lambda p, **k: (p == "codex", "down"))
+    route = resolve_tier_route("kimi-k3", {})
+    assert route.provider == "codex"
+    assert _tr.ESCALATING_FALLBACK_MARKER in route.reason
+    assert _tr.OVER_CAP_FALLBACK_MARKER not in route.reason

@@ -329,11 +329,50 @@ def escalating_fallbacks(tier_map: Optional[dict] = None) -> tuple:
     return tuple(out)
 
 
-#: Marker appended to a route reason when the lane actually walked to is an
-#: escalating fallback. The dispatch is NOT blocked — availability still wins over
-#: cost when the primary is down — but the receipt says so, instead of recording a
-#: 53x price rise as an ordinary fallback.
+def over_cap_fallbacks(tier_map: Optional[dict] = None) -> tuple:
+    """Breaches above MAX_FALLBACK_ESCALATION_FACTOR — the fleet gap.
+
+    Distinct from ``escalating_fallbacks``: that one reports every step dearer than
+    its ceiling (the raw measurement). This one reports the subset the bounded
+    promise does NOT cover — where the fleet has no compliant lane and the design is
+    knowingly broken rather than merely stretched.
+    """
+    return tuple(
+        v
+        for v in escalating_fallbacks(tier_map)
+        if v.factor > MAX_FALLBACK_ESCALATION_FACTOR
+    )
+
+
+#: The most a fallback may exceed its ceiling and still count as a safety net.
+#:
+#: The literal promise — never dearer than escalating, i.e. factor 1.0 — cannot be
+#: met by this fleet, and stating it anyway is a promise that reads well and routes
+#: nothing. Measured 2026-08-29: tier-zero's ceiling is 0.87/Mtok, and the cheapest
+#: lane that is BOTH a different provider (a same-provider net does not survive the
+#: outage it exists for) AND dispatchable is glm-5.2 at 2.42 — factor 2.78. Below
+#: that, the cheapest rung has no net at all except local_gemma, a 4B local model
+#: scoring 0.40 on complex_reasoning.
+#:
+#: So 3.0 is the smallest round bound under which every rung can still HAVE a
+#: different-provider net. Derived from the fleet, not chosen to fit the map: it
+#: still rejects two of the five breaches present today, both on tier-zero. Raising
+#: it to admit those two is exactly the move this constant exists to prevent —
+#: adjusting the promise until the map passes.
+#:
+#: tier-low -> gpt-5.5 sits at precisely 3.0, ON the bound rather than under it.
+#: That is fragile by construction: a one-cent gpt-5.5 rise makes it a gap.
+MAX_FALLBACK_ESCALATION_FACTOR = 3.0
+
+#: Marker appended to a route reason when the lane actually walked to costs more
+#: than its ceiling. The dispatch is NOT blocked — availability still wins over cost
+#: when the primary is down — but the receipt says so, instead of recording a 17x
+#: price rise as an ordinary fallback.
 ESCALATING_FALLBACK_MARKER = "escalating-fallback"
+
+#: Stronger marker for a step above MAX_FALLBACK_ESCALATION_FACTOR: not a bounded
+#: escalation but a fleet gap, walked because nothing compliant exists.
+OVER_CAP_FALLBACK_MARKER = "escalating-fallback-over-cap"
 
 def _route_from_spec(
     spec: TierRouteSpec,
@@ -385,9 +424,15 @@ def _annotated_fallback_reason(route: TierRoute, skipped: list[str]) -> str:
         ceiling = fallback_cost_ceiling(route.tier)
         cost = _output_cost(route.provider, route.model)
         if ceiling is not None and cost is not None and cost > ceiling:
+            factor = cost / ceiling if ceiling else float("inf")
+            marker = (
+                OVER_CAP_FALLBACK_MARKER
+                if factor > MAX_FALLBACK_ESCALATION_FACTOR
+                else ESCALATING_FALLBACK_MARKER
+            )
             return (
-                f"{base}; {ESCALATING_FALLBACK_MARKER}: "
-                f"{cost:.2f}/Mtok vs ceiling {ceiling:.2f}"
+                f"{base}; {marker}: {cost:.2f}/Mtok vs ceiling {ceiling:.2f} "
+                f"(x{factor:.1f}, cap x{MAX_FALLBACK_ESCALATION_FACTOR:.1f})"
             )
     except Exception:  # noqa: BLE001 — annotation must never break routing
         pass
