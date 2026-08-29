@@ -562,18 +562,26 @@ def _kimi_entry_from_cli_arg(cfg: Any, model: Optional[str]) -> Optional[Any]:
     the registry keys never match.
 
     This is a lookup, not a guess: each registry entry carries its own
-    ``cli_model_arg``, so the mapping comes from the registry itself. Exact match only.
+    ``cli_model_arg``, so the mapping comes from the registry itself. Comparison is
+    case-insensitive, matching ``_kimi_resolve_cli_model_arg``'s own reverse scan —
+    a case variant that resolves at spawn must not miss at cost.
+
+    It deliberately does NOT skip ``dispatch_allowed=false`` entries, where the spawn
+    side does. Those are different questions: spawn asks "may this run", cost asks
+    "what did the thing that already ran charge". Refusing to price a receipt because
+    the model has since been disabled would lose real spend.
+
     Two entries sharing one CLI arg is registry drift, and is reported as a miss rather
     than resolved by picking one — the whole point of OI-1361 is not to let iteration
     order decide a price.
     """
-    raw = (model or "").strip()
+    raw = (model or "").strip().lower()
     if not raw:
         return None
     matches = [
         (key, entry)
         for key, entry in cfg.models.items()
-        if getattr(entry, "cli_model_arg", None) == raw
+        if str(getattr(entry, "cli_model_arg", None) or "").lower() == raw
     ]
     if len(matches) > 1:
         logger.warning(
@@ -636,13 +644,19 @@ def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Opt
         target_key = _kimi_resolve_requested_key(model)
         entry = _resolve_registry_model_entry(cfg, "kimi_cli", target_key)
         if entry is None:
-            # The envelope lane hands us the CLI arg form, not a registry key.
-            entry = _kimi_entry_from_cli_arg(cfg, model)
+            # The envelope lane hands us the CLI arg form, not a registry key. It can
+            # arrive either raw (adapter_result.model) or already carried through the
+            # canonical resolver (VNX_KIMI_MODEL set in CLI-arg form, no explicit -m,
+            # so target_key IS the CLI arg). Try both.
+            entry = _kimi_entry_from_cli_arg(cfg, target_key) or _kimi_entry_from_cli_arg(
+                cfg, model
+            )
         if entry is None:
             logger.warning(
-                "_compute_kimi_cost: no match for model=%s (registry_key=kimi_cli, "
-                "%d models in section) — miss, not a fabricated price",
-                target_key, len(cfg.models),
+                "_compute_kimi_cost: no match for model=%r (resolved key %r, "
+                "registry_key=kimi_cli, %d models in section) — miss, not a "
+                "fabricated price",
+                model, target_key, len(cfg.models),
             )
             return None
         cost_in = (token_usage.get("input", 0) / 1_000_000) * entry.cost_input_per_mtok

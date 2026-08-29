@@ -440,5 +440,63 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
         self.assertIsNone(pd._kimi_entry_from_cli_arg(cfg, shared))
 
 
+    def test_cli_arg_arriving_via_the_env_override_is_priced(self):
+        """VNX_KIMI_MODEL can itself hold the CLI-arg form. With no explicit -m the
+        canonical resolver returns it unchanged, so the CLI-arg reverse map has to be
+        tried on the RESOLVED key too, not only on the raw argument."""
+        import os
+        from unittest.mock import patch
+
+        import provider_dispatch as pd
+
+        with patch.dict(os.environ, {"VNX_KIMI_MODEL": "kimi-code/k3"}):
+            self.assertEqual(pd._kimi_resolve_requested_key(None), "kimi-code/k3")
+            expected = pd._compute_kimi_cost("kimi-k3", self.ONE_MTOK)
+            self.assertEqual(pd._compute_kimi_cost(None, self.ONE_MTOK), expected)
+
+    def test_cli_arg_match_is_case_insensitive_like_the_spawn_side(self):
+        """_kimi_resolve_cli_model_arg compares cli_model_arg case-insensitively. A
+        case variant that resolves at spawn must not miss at cost."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        arg = next(
+            m.cli_model_arg for m in cfg.models.values() if getattr(m, "cli_model_arg", None)
+        )
+        self.assertEqual(
+            pd._compute_kimi_cost(arg.upper(), self.ONE_MTOK),
+            pd._compute_kimi_cost(arg, self.ONE_MTOK),
+        )
+
+    def test_disabled_models_are_still_priceable(self):
+        """Spawn asks "may this run"; cost asks "what did the thing that already ran
+        charge". A model disabled after the fact must still price, or real spend is
+        lost from the ledger."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        disabled = [
+            (k, m) for k, m in cfg.models.items() if not getattr(m, "dispatch_allowed", True)
+        ]
+        self.assertTrue(disabled, "fixture expects at least one disabled kimi model")
+        for key, entry in disabled:
+            expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
+            with self.subTest(model=key):
+                self.assertEqual(pd._compute_kimi_cost(key, self.ONE_MTOK), expected)
+
+    def test_the_miss_warning_names_the_raw_input_too(self):
+        """The forensic value of the miss log is the string that actually arrived, not
+        only what it resolved to."""
+        import logging
+
+        import provider_dispatch as pd
+
+        with self.assertLogs("provider_dispatch", level=logging.WARNING) as captured:
+            pd._compute_kimi_cost("kimi-code/not-a-real-arg", self.ONE_MTOK)
+        self.assertIn("kimi-code/not-a-real-arg", "\n".join(captured.output))
+
+
 if __name__ == "__main__":
     unittest.main()
