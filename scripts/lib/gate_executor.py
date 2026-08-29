@@ -315,8 +315,12 @@ class GateExecutorMixin:
             # OI-1469/OI-1470: refuse a write that would downgrade an existing
             # terminal, evidenced result (e.g. a stale "running" re-check must
             # never overwrite an already-decided pass/fail).
-            result_payload, _written = _rec.write_result_guarded(
+            payload_on_disk, written = _rec.write_result_guarded(
                 rf, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+            )
+            result_payload = (
+                payload_on_disk if written
+                else _rec.annotate_refused_write(payload_on_disk, result_payload)
             )
 
         # When checks are still running, reset request to "requested" so it
@@ -358,7 +362,22 @@ class GateExecutorMixin:
         gates: List[Dict[str, Any]] = []
         has_required_failure = False
 
+        import gate_recorder as _rec
         from gate_status import has_complete_evidence, is_pass
+
+        # OI-1488: a result record is evidence about the commit it names, and
+        # nothing had been checking that this is the commit being merged. The
+        # overwrite guard preserves a decided verdict rather than let a later,
+        # less-decided write replace it (OI-1469/OI-1470) -- correct, and it
+        # means a run on a NEW head can come back holding the OLD head's
+        # record, complete and valid-looking, with no field that reads as
+        # wrong. Measured on PR #1705: a request about 1425faa1 answered with
+        # the full record of 109181d2. All seven headless-review invariants
+        # hold on such a record; every one of them is satisfied by a verdict
+        # about a different commit.
+        #
+        # Fetched once per call, not per gate: it is a gh round-trip.
+        head_sha = _rec.get_pr_head_sha(pr_number)
 
         for req in request_result.get("requested", []):
             gate_name = req.get("gate", "")
@@ -376,6 +395,20 @@ class GateExecutorMixin:
                 # or report_path; either missing means "did not run", which must
                 # never sum up to a PASS (OI-1178).
                 decided_pass = bool(passed) and has_complete_evidence(exec_result)
+                result_sha = str(exec_result.get("commit_sha") or "")
+                sha_binding = _classify_sha_binding(head_sha, result_sha)
+                if sha_binding == "mismatch":
+                    # Evidence about another commit is not evidence about this
+                    # one. Never the reverse: an unknown sha on either side is
+                    # an unmeasured binding, not a mismatch, and must not
+                    # downgrade a gate that is otherwise decided -- that is the
+                    # difference between "we checked and it is wrong" and "we
+                    # could not check".
+                    decided_pass = False
+                    pass_reason = (
+                        f"result records commit {result_sha[:8]} but the PR head "
+                        f"is {head_sha[:8]} — this verdict is about other code"
+                    )
                 gates.append({
                     "gate": gate_name,
                     "request_status": req_status,
@@ -384,6 +417,10 @@ class GateExecutorMixin:
                     "pass_reason": pass_reason,
                     "report_path": exec_result.get("report_path", ""),
                     "contract_hash": exec_result.get("contract_hash", ""),
+                    "sha_binding": sha_binding,
+                    "head_sha": head_sha,
+                    "result_commit_sha": result_sha,
+                    "write_refused": bool(exec_result.get("write_refused")),
                     "detail": exec_result,
                 })
                 required = req.get("required", True)
@@ -458,6 +495,21 @@ class GateExecutorMixin:
         for path in sorted(self.requests_dir.glob(f"pr-{pr_number}-*.json")):
             requests.append(json.loads(path.read_text(encoding="utf-8")))
         return {"pr_number": pr_number, "requests": requests, "results": results}
+
+
+def _classify_sha_binding(head_sha: str, result_sha: str) -> str:
+    """Three answers, not two: ``match``, ``mismatch``, ``unknown``.
+
+    ``unknown`` is not a polite ``mismatch``. Either sha can be absent for
+    reasons that say nothing about the code under review -- ``gh`` unreachable,
+    a gate whose writer never stamped identity, an offline run. Folding that
+    into ``mismatch`` would fail every gate the moment GitHub is briefly
+    unavailable; folding it into ``match`` would restore the hole this check
+    closes. It is its own state and callers get told which one it is.
+    """
+    if not head_sha or not result_sha:
+        return "unknown"
+    return "match" if head_sha == result_sha else "mismatch"
 
 
 def _ci_gate_summary(
