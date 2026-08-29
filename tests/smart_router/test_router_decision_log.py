@@ -265,3 +265,43 @@ def test_shadow_computation_failure_still_records_and_still_declines(tmp_path, m
     assert len(records) == 1
     assert records[0]["would_route"] is None
     assert "registry drift in the shadow path" in records[0]["compute_error"]
+
+
+# ---------------------------------------------------------------------------
+# The third outcome: a refusal that raises is still a decision
+# ---------------------------------------------------------------------------
+
+def test_registry_drift_is_recorded_and_still_raises(tmp_path, monkeypatch):
+    """ADR-036 §2 drift must keep failing loud — and must not be the one outcome the
+    ledger cannot show. It is the only outcome that actually stops a dispatch."""
+    import providers.smart_router.tier_routing as tr
+    from providers.provider_registry import RegistryLookupError
+
+    _enable_every_tier(monkeypatch)
+
+    def _drifted(tier, env=None, **_kw):
+        return tr.TierRoute(
+            tier=tier,
+            provider="a-provider-the-enum-never-heard-of",
+            model="some-model",
+            lane="some-lane",
+        )
+
+    monkeypatch.setattr(tr, "resolve_tier_route", _drifted)
+
+    with pytest.raises(RegistryLookupError):
+        _route_once(tmp_path)
+
+    records = _records(tmp_path)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["raised"] is True
+    assert rec["applied"] is False
+    assert rec["would_route"] is None
+    assert "a-provider-the-enum-never-heard-of" in rec["compute_error"]
+
+
+def test_a_normal_decline_is_not_marked_as_raised(tmp_path):
+    """Guard against the raised flag becoming decorative."""
+    _route_once(tmp_path)
+    assert _records(tmp_path)[0]["raised"] is False

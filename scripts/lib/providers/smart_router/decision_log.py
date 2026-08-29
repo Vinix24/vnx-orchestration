@@ -88,6 +88,7 @@ def record_router_decision(
     target_slot: str,
     dispatch_id: Optional[str] = None,
     compute_error: Optional[str] = None,
+    raised: bool = False,
     state_dir: "str | Path | None" = None,
     env: Optional[dict] = None,
     ts: Optional[str] = None,
@@ -98,6 +99,11 @@ def record_router_decision(
     ``would_route``, False means it computed the route and followed the legacy lane
     anyway. ``compute_error`` is set when the route could not be computed at all — an
     observation failure, which is recorded rather than raised.
+
+    ``raised`` marks the third outcome: the door refused the dispatch outright
+    (ADR-036 §2 registry drift). That is fail-loud by design and stays fail-loud, but
+    it is still a decision and belongs in the trail — otherwise the one outcome that
+    actually stops a dispatch is the one the ledger cannot show.
 
     Never raises. A ledger that cannot be written is an observability problem; a dispatch
     that dies because of one is an outage.
@@ -115,8 +121,11 @@ def record_router_decision(
             "decline_reason": decline_reason,
             "would_route": would_route,
             "compute_error": compute_error,
+            "raised": raised,
             "note": (
-                "OBSERVED — the router computed this route and acted on it"
+                "OBSERVED — the door refused the dispatch (fail-loud registry drift)"
+                if raised
+                else "OBSERVED — the router computed this route and acted on it"
                 if applied
                 else "OBSERVED — the router computed this route and did NOT act on it"
             ),

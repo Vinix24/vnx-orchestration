@@ -155,9 +155,11 @@ def resolve_door_route(
     the computed provider/model/lane even when the route is not applied.
 
     Every outcome is appended to the router-decision ledger (OI-1494) before it
-    is returned. The decision itself is made by ``_decide`` — this wrapper is the
+    leaves this function — the applied ones, the declined ones, and the refusals
+    that raise. The decision itself is made by ``_decide``; this wrapper is the
     single exit point, so a branch added to ``_decide`` later cannot skip the
-    ledger. Recording is fail-open and never changes the returned result.
+    ledger. Recording is fail-open and never changes the returned result, nor the
+    exception raised.
 
     Raises RegistryLookupError when the classifier succeeded but produced a
     provider/model the registry does not know (ADR-036 §2 fail-loud) — the
@@ -177,19 +179,37 @@ def resolve_door_route(
         state_dir: Project state dir, used for the availability/cooldown read and
             for the ledger. Defaults to the resolved project state dir.
     """
-    result, compute_error = _decide(
-        spec_provider=spec_provider,
-        spec_model=spec_model,
-        target_slot=target_slot,
-        instruction_text=instruction_text,
-        file_paths=file_paths,
-        loc_estimate=loc_estimate,
-        env=env,
-        dispatch_id=dispatch_id,
-        state_dir=state_dir,
-    )
-
     from .decision_log import record_router_decision  # noqa: PLC0415
+
+    try:
+        result, compute_error = _decide(
+            spec_provider=spec_provider,
+            spec_model=spec_model,
+            target_slot=target_slot,
+            instruction_text=instruction_text,
+            file_paths=file_paths,
+            loc_estimate=loc_estimate,
+            env=env,
+            dispatch_id=dispatch_id,
+            state_dir=state_dir,
+        )
+    except Exception as exc:
+        # Registry drift raises here and must keep raising (ADR-036 §2) — but a
+        # refusal is the one outcome that actually stops a dispatch, so it is the
+        # last thing the ledger may be blind to. Record, then re-raise unchanged.
+        record_router_decision(
+            tier=None,
+            applied=False,
+            decline_reason=None,
+            would_route=None,
+            target_slot=target_slot,
+            dispatch_id=dispatch_id,
+            compute_error=f"{type(exc).__name__}: {exc}",
+            raised=True,
+            state_dir=state_dir,
+            env=env,
+        )
+        raise
 
     record_router_decision(
         tier=result.tier,
