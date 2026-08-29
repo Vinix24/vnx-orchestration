@@ -92,6 +92,11 @@ def test_concurrent_writers_never_report_a_write_that_did_not_land(tmp_path):
         t.start()
     for t in threads:
         t.join(timeout=60)
+    assert not any(t.is_alive() for t in threads), (
+        "a writer thread was still running after the join timeout — the lock "
+        "this test exercises can deadlock, and a join that only times out "
+        "reports that as success"
+    )
 
     assert not errors, (
         "a concurrent writer raised instead of writing: "
@@ -176,8 +181,15 @@ def test_overwrite_guard_holds_under_two_concurrent_writers(tmp_path):
             t.start()
         for t in threads:
             t.join(timeout=60)
+        stuck = [t for t in threads if t.is_alive()]
     finally:
         gate_recorder._read_existing_result = real_read
+
+    assert not stuck, (
+        "a writer thread was still running after the join timeout — two "
+        "writers contending for one slot lock is exactly the shape that "
+        "deadlocks, and a bare join would let that pass"
+    )
 
     assert not errors, f"a writer raised: {[repr(e) for e in errors]}"
 
