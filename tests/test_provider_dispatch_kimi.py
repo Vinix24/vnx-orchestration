@@ -258,3 +258,143 @@ class TestComputeKimiCost(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
+    """OI-1361: an unknown kimi model must yield None, never a fabricated price.
+
+    ``_compute_kimi_cost`` ended on ``next(iter(cfg.models.values()), None)``, so any
+    model name the registry does not know inherited the price of whichever entry
+    happened to sit FIRST in the kimi_cli section — today ``kimi-k3`` at 3.00 in /
+    15.00 out. That invented number was then written to the receipt as a confirmed
+    ``cost_usd``, indistinguishable from a real one.
+
+    The sibling lookup ``_load_pricing_from_registry`` had exactly this construction
+    removed in PR #1609 (OI-1355) and now logs "miss, not a fabricated price". This is
+    the same fix in the handler that was left behind.
+    """
+
+    #: One MTok in and one MTok out, so cost_usd equals the per-MTok prices summed.
+    ONE_MTOK = {"input": 1_000_000, "output": 1_000_000, "cache_hit": 0}
+
+    def test_unknown_model_returns_none_instead_of_the_first_entry_price(self):
+        import provider_dispatch as pd
+
+        # kimi-k3 is first in the section (3.00 + 15.00), so the old guess was 18.0.
+        self.assertIsNone(pd._compute_kimi_cost("kimi-k9-does-not-exist", self.ONE_MTOK))
+
+    def test_unknown_model_is_not_priced_as_any_registry_entry(self):
+        """Stronger than the previous test: the miss must not equal ANY known price,
+        so a future reordering of the section cannot make this test pass by accident."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        every_price = {
+            round(m.cost_input_per_mtok + m.cost_output_per_mtok, 8)
+            for m in cfg.models.values()
+        }
+        cost = pd._compute_kimi_cost("totally-not-a-kimi-model", self.ONE_MTOK)
+        self.assertIsNone(cost)
+        self.assertNotIn(cost, every_price)
+
+    def test_known_models_keep_pricing_exactly(self):
+        """Every registry key that names a real model prices as itself.
+
+        Keys that the canonical resolver treats as a bare ALIAS are skipped and covered
+        by test_alias_key_prices_as_the_model_it_aliases below — asserting an alias
+        prices as its own registry row would be asserting the bug."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        for key, entry in cfg.models.items():
+            if pd._kimi_resolve_requested_key(key) != key:
+                continue  # alias, not a selectable model
+            expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
+            with self.subTest(model=key):
+                self.assertEqual(pd._compute_kimi_cost(key, self.ONE_MTOK), expected)
+
+    def test_alias_key_prices_as_the_model_it_aliases(self):
+        """"kimi-default" is a bare alias for the K3 default (_KIMI_BARE_ALIASES), and
+        ALSO exists as its own registry row at a different price. A dispatch naming it
+        runs on K3, so it must be priced as K3 — the same-named row is unreachable.
+
+        The unreachable row itself is a registry-hygiene problem, not a pricing one; it
+        is reported separately rather than silently deleted here."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        self.assertIn("kimi-default", cfg.models, "fixture assumes the shadowed row exists")
+
+        aliased_to = cfg.models[pd._kimi_resolve_requested_key("kimi-default")]
+        expected = round(aliased_to.cost_input_per_mtok + aliased_to.cost_output_per_mtok, 8)
+        self.assertEqual(pd._compute_kimi_cost("kimi-default", self.ONE_MTOK), expected)
+
+    def test_absent_model_is_priced_as_the_model_that_actually_runs(self):
+        """An absent model name must be priced as the model the spawn seam will really
+        use, not as the "kimi-default" registry entry.
+
+        This is the expensive half of OI-1361. _kimi_resolve_requested_key (shared by
+        the spawn seam, governance labeling and the constraint pre-flight) resolves an
+        absent model to the registry's K3 default at 3.00/15.00. _compute_kimi_cost had
+        its own rule and charged kimi-default's 0.60/2.50 instead — every kimi dispatch
+        without an explicit model was under-reported by a factor 5.8."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        ran = cfg.models[pd._kimi_resolve_requested_key(None)]
+        expected = round(ran.cost_input_per_mtok + ran.cost_output_per_mtok, 8)
+
+        wrong = cfg.models["kimi-default"]
+        wrong_price = round(wrong.cost_input_per_mtok + wrong.cost_output_per_mtok, 8)
+        self.assertNotEqual(expected, wrong_price, "fixture no longer discriminates")
+
+        for placeholder in ("", None, "default", "sonnet", "kimi", "kimi_cli"):
+            with self.subTest(model=placeholder):
+                self.assertEqual(pd._compute_kimi_cost(placeholder, self.ONE_MTOK), expected)
+
+    def test_pricing_key_agrees_with_the_canonical_resolver(self):
+        """The pricing handler and the spawn seam must never disagree about which model
+        a dispatch is. Two independent resolvers for one question is the defect."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        cfg = _reg.load().get("kimi_cli")
+        for raw in ("", None, "default", "sonnet", "kimi", "kimi-default", "kimi_cli",
+                    "kimi-k3", "kimi-k2-6", "kimi-k2-7"):
+            key = pd._kimi_resolve_requested_key(raw)
+            entry = cfg.models.get(key)
+            if entry is None:
+                continue
+            expected = round(entry.cost_input_per_mtok + entry.cost_output_per_mtok, 8)
+            with self.subTest(model=raw, resolved=key):
+                self.assertEqual(pd._compute_kimi_cost(raw, self.ONE_MTOK), expected)
+
+    def test_dated_suffix_resolves_to_its_base_model(self):
+        """A real dated model id must still resolve — refusing to guess is not the same
+        as refusing to resolve.
+
+        Deliberately uses a suffix of kimi-k2-6, NOT of kimi-k3. A kimi-k3 suffix would
+        pass on the broken code too, because the first-entry guess happens to BE kimi-k3
+        — the same correct answer reached by the wrong mechanism. Pinning a non-first
+        model makes the test discriminate."""
+        import provider_dispatch as pd
+        from providers import provider_registry as _reg
+
+        k26 = _reg.load().get("kimi_cli").models["kimi-k2-6"]
+        expected = round(k26.cost_input_per_mtok + k26.cost_output_per_mtok, 8)
+        self.assertEqual(pd._compute_kimi_cost("kimi-k2-6-20260901", self.ONE_MTOK), expected)
+
+    def test_miss_is_logged_as_a_miss(self):
+        import logging
+
+        import provider_dispatch as pd
+
+        with self.assertLogs("provider_dispatch", level=logging.WARNING) as captured:
+            pd._compute_kimi_cost("kimi-k9-does-not-exist", self.ONE_MTOK)
+        joined = "\n".join(captured.output)
+        self.assertIn("kimi-k9-does-not-exist", joined)
+        self.assertIn("not a fabricated price", joined)

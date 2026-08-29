@@ -553,7 +553,35 @@ def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str,
 
 
 def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Optional[float]:
-    """Compute cost via wave7_models.yaml kimi_cli section for kimi provider."""
+    """Compute cost via wave7_models.yaml kimi_cli section for kimi provider.
+
+    A model the registry does not know returns None — never a price (OI-1361). This
+    used to end on ``next(iter(cfg.models.values()), None)``, so an unknown model name
+    inherited whichever entry happened to sit FIRST in the kimi_cli section (today
+    kimi-k3 at 3.00 in / 15.00 out), and that invented number reached the receipt as a
+    confirmed ``cost_usd``, indistinguishable from a measured one.
+
+    Resolution now goes through ``_resolve_registry_model_entry``, the same
+    deterministic, iteration-order-independent lookup the sibling
+    ``_load_pricing_from_registry`` has used since OI-1355 / PR #1609. Both pricing
+    handlers therefore resolve identically and cannot drift apart again — the
+    asymmetry was the whole defect: the guess was removed from one handler and left
+    standing in the other.
+
+    The model key comes from ``_kimi_resolve_requested_key`` — the SAME resolver the
+    spawn seam, governance labeling and the constraint pre-flight already share — so
+    the price is now computed for the model that actually ran. It previously used its
+    own ad-hoc rule (``(model or "").strip() or "kimi-default"``), which disagreed with
+    the canonical resolver on seven of ten real inputs. The worst case was an absent
+    model: the dispatch RUNS on the registry's K3 default (3.00 in / 15.00 out) and was
+    PRICED as kimi-default (0.60 / 2.50) — a factor 5.8 under-report on every kimi
+    dispatch that did not name a model explicitly.
+
+    The CLI placeholders ("default", "sonnet", "") and the bare aliases ("kimi",
+    "kimi-default", "kimi_cli") all resolve through that shared path. Note this is why
+    the old guess looked harmless: for "default"/"sonnet" the first-entry fallback
+    happened to land on kimi-k3, which was the right answer for the wrong reason.
+    """
     if not token_usage or token_usage.get("unavailable") or (
         token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0
     ):
@@ -564,9 +592,14 @@ def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, Any]) -> Opt
         cfg = registry.get("kimi_cli")
         if cfg is None or not cfg.models:
             return None
-        target_key = (model or "").strip() or "kimi-default"
-        entry = cfg.models.get(target_key) or next(iter(cfg.models.values()), None)
+        target_key = _kimi_resolve_requested_key(model)
+        entry = _resolve_registry_model_entry(cfg, "kimi_cli", target_key)
         if entry is None:
+            logger.warning(
+                "_compute_kimi_cost: no match for model=%s (registry_key=kimi_cli, "
+                "%d models in section) — miss, not a fabricated price",
+                target_key, len(cfg.models),
+            )
             return None
         cost_in = (token_usage.get("input", 0) / 1_000_000) * entry.cost_input_per_mtok
         cost_out = (token_usage.get("output", 0) / 1_000_000) * entry.cost_output_per_mtok
