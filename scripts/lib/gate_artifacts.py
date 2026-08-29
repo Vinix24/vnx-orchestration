@@ -9,10 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from governance_receipts import utc_now_iso
+import gate_depth
 import gate_recorder
 from codex_parser import parse_codex_findings
 
@@ -309,6 +311,41 @@ def materialize_artifacts(
             **_fail, reason=content_err[0], reason_detail=content_err[1],
         )
 
+    # OI-1485: what the run DID, beside what it concluded. Measured from the
+    # same stream the report already embeds, so this adds no new capture path
+    # — the numbers were on disk all along and simply never reached the record
+    # anyone merges on.
+    depth = gate_depth.measure_execution_depth(stdout)
+
+    # A run that reached a verdict without a single investigative action is an
+    # absence of evidence, not a clean review. It books `unavailable` and lands
+    # in required_reruns so it is bought again, rather than passing every
+    # invariant and being read as a PASS. The report stays on disk: it is the
+    # evidence of what the refused run said, and deleting it would repeat the
+    # evidence loss the overwrite guard exists to prevent.
+    if gate_depth.is_degenerate(depth):
+        logger.warning(
+            "gate_artifacts: REFUSING a degenerate %s run pr=%s — %s",
+            gate, pr_id or pr_number, gate_depth.degenerate_detail(depth),
+        )
+        return gate_recorder.record_failure(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            result={
+                "reason": "gate_execution_degenerate",
+                "reason_detail": gate_depth.degenerate_detail(depth),
+                "duration_seconds": duration_seconds,
+                "partial_output_lines": len(stdout.splitlines()),
+                "runner_pid": os.getpid(),
+            },
+            request_payload=request_payload,
+            requests_dir=requests_dir,
+            results_dir=results_dir,
+            extra={
+                "execution_depth": depth.to_dict(),
+                "degenerate_report_path": str(report_file),
+            },
+        )
+
     contract_hash = _compute_contract_hash(request_payload, gate)
     now = utc_now_iso()
 
@@ -327,6 +364,7 @@ def materialize_artifacts(
         "required_reruns": [],
         "residual_risk": residual_risk,
         "duration_seconds": duration_seconds,
+        "execution_depth": depth.to_dict(),
         "recorded_at": now,
     }
     gate_recorder.stamp_request_identity(result_payload, request_payload)

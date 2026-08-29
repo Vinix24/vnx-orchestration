@@ -99,6 +99,12 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     "network_error", "auth_error",
     # Vertex REST path (gemini_review) API failures (OI-1178)
     "vertex_api_error",
+    # The gate ran to completion and investigated nothing (OI-1485). Absence
+    # of evidence, exactly like a timeout: the PR was never actually reviewed,
+    # so this must book `unavailable` and be re-bought, never `failed` (which
+    # would read as a rejected PR) and never `completed` (which would read as
+    # a clean review).
+    "gate_execution_degenerate",
 })
 
 
@@ -585,6 +591,7 @@ def record_failure(
     request_payload: Dict[str, Any],
     requests_dir: Path,
     results_dir: Path,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Record a failed gate execution (timeout/stall/error).
 
@@ -595,6 +602,12 @@ def record_failure(
     verdict failure (the gate ran and found a blockade) still books
     ``failed``, but that path flows through
     :func:`gate_artifacts.materialize_artifacts`, not here.
+
+    ``extra`` merges into the record before it is written, for the evidence
+    that explains the refusal. A record saying a run was rejected as
+    degenerate without the counts behind that word is an assertion the next
+    reader cannot check (OI-1485). Reserved keys are not overridable: the
+    status and the reason are the record's own, not a caller's to restate.
     """
     now = utc_now_iso()
     reason = result["reason"]
@@ -630,6 +643,22 @@ def record_failure(
         "residual_risk": f"Gate {reason}. Re-run required.",
         "recorded_at": now,
     }
+    if extra:
+        # Identity and verdict are the record's own. So is the evidence trio:
+        # `report_path`, `contract_hash` and `required_reruns` are what
+        # gate_status.has_complete_evidence reads to decide whether a terminal
+        # record is DECIDED, so a caller able to set them through `extra` could
+        # dress a failure record as evidenced without a report existing. The
+        # degenerate-run path deliberately passes its report under a separate
+        # key (`degenerate_report_path`) for exactly this reason: an
+        # `unavailable` record must not claim a report as gate evidence.
+        reserved = {
+            "status", "reason", "reason_detail", "gate", "pr_id", "pr_number",
+            "report_path", "contract_hash", "required_reruns",
+        }
+        failure_payload.update(
+            {k: v for k, v in extra.items() if k not in reserved}
+        )
     stamp_request_identity(failure_payload, request_payload)
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
