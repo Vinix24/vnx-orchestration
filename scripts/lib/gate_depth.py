@@ -48,11 +48,35 @@ logger = logging.getLogger(__name__)
 # least one action" needs no tuning and rejects only the degenerate shape.
 MIN_INVESTIGATIVE_ACTIONS = 1
 
-# item.completed types that are the model talking rather than the model
-# working. Everything else counts as an investigative action, so a new tool
-# type in the stream counts on the day it appears instead of the day someone
-# remembers to add it here.
-_NON_INVESTIGATIVE_ITEM_TYPES = frozenset({"agent_message", "reasoning", "todo_list"})
+# Item types are classified from two explicit sets, with a third bucket for
+# anything in neither. An earlier version listed only the message types and
+# counted EVERYTHING else as investigative, so that a new tool type would count
+# on the day it appeared. That reasoning is right for tools and exactly wrong
+# for messages: a message alias this module does not know — codex also emits
+# `assistant_message` and `output_text` in some versions — would have been
+# counted as work, and a run that took zero tools while emitting one would have
+# cleared the floor. The permissive default has to sit where being wrong is
+# safe, and for a degeneracy check that is nowhere.
+#
+# Measured across 348 headless reports in this store: `command_execution`
+# (3854), `agent_message` (736), `file_change` (56), `web_search` (8). Nothing
+# else appears, so the sets below are the observed vocabulary plus the aliases
+# codex is known to emit elsewhere.
+_INVESTIGATIVE_ITEM_TYPES = frozenset({
+    "command_execution",
+    "file_change",
+    "web_search",
+    "mcp_tool_call",
+    "patch_apply",
+})
+_MESSAGE_ITEM_TYPES = frozenset({
+    "agent_message",
+    "assistant_message",
+    "output_text",
+    "reasoning",
+    "todo_list",
+    "error",
+})
 
 # Commands whose point is to get file content in front of the model.
 _FILE_READ_RE = re.compile(r"\b(sed|cat|head|tail|less|rg|grep|awk|find|ls)\b")
@@ -78,6 +102,7 @@ class ExecutionDepth:
     agent_messages: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    unrecognised_item_types: tuple = ()
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -96,6 +121,7 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
 
     recognised = False
     investigative = shell = reads = messages = 0
+    unrecognised: set = set()
     input_tokens = output_tokens = 0
     seen_items: set = set()
 
@@ -124,8 +150,11 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
             if item_id is not None:
                 seen_items.add(item_id)
             item_type = item.get("type")
-            if item_type in _NON_INVESTIGATIVE_ITEM_TYPES:
+            if item_type in _MESSAGE_ITEM_TYPES:
                 messages += 1
+                continue
+            if item_type not in _INVESTIGATIVE_ITEM_TYPES:
+                unrecognised.add(str(item_type))
                 continue
             investigative += 1
             if item_type == "command_execution":
@@ -149,6 +178,7 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
         agent_messages=messages,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        unrecognised_item_types=tuple(sorted(unrecognised)),
     )
 
 
@@ -161,6 +191,12 @@ def is_degenerate(depth: ExecutionDepth) -> bool:
     lane become measurable first.
     """
     if not depth.parsed:
+        return False
+    if depth.unrecognised_item_types:
+        # The stream carried an item type this module cannot classify, so the
+        # action count is a floor and not a measurement. Refusing on it would
+        # be refusing on something not measured, which is the one thing this
+        # check must never do.
         return False
     return depth.investigative_actions < MIN_INVESTIGATIVE_ACTIONS
 

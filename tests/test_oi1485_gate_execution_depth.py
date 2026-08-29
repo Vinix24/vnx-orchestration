@@ -232,3 +232,82 @@ def test_a_truncated_stream_still_yields_what_arrived():
     assert depth.parsed is True
     assert depth.investigative_actions == 1
     assert depth.files_read == 1
+
+
+# --------------------------------------------------------------------------
+# Item-type classification. The permissive default has to sit where being
+# wrong is safe, and for a degeneracy check that is nowhere.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("alias", ["assistant_message", "output_text", "reasoning"])
+def test_a_message_alias_is_not_an_investigative_action(alias):
+    """kimi_gate blocking finding on baabcec4.
+
+    Classifying by "everything that is not a known message is work" reads an
+    unknown MESSAGE alias as work. A run that took zero tools while emitting
+    one would then clear the floor — the exact shape the floor exists to catch,
+    let through by the alias it happened not to know.
+    """
+    from gate_depth import is_degenerate, measure_execution_depth
+
+    stream = "\n".join([
+        json.dumps({"type": "thread.started"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "item.completed", "item": {
+            "id": "item_0", "type": alias, "text": "No blocking issues found."}}),
+        json.dumps({"type": "turn.completed",
+                    "usage": {"input_tokens": 18219, "output_tokens": 602}}),
+    ]) + "\n"
+
+    depth = measure_execution_depth(stream)
+    assert depth.investigative_actions == 0, (
+        f"{alias!r} counted as an investigative action"
+    )
+    assert depth.agent_messages == 1
+    assert depth.unrecognised_item_types == ()
+    assert is_degenerate(depth) is True, (
+        f"a zero-tool run emitting {alias!r} cleared the degeneracy floor"
+    )
+
+
+@pytest.mark.parametrize("work_type", ["command_execution", "file_change", "web_search"])
+def test_the_measured_work_types_all_count(work_type):
+    """The three that actually occur in this store, plus command_execution."""
+    from gate_depth import is_degenerate, measure_execution_depth
+
+    stream = "\n".join([
+        json.dumps({"type": "thread.started"}),
+        json.dumps({"type": "item.completed", "item": {
+            "id": "w", "type": work_type, "command": "sed -n '1,40p' x.py"}}),
+    ]) + "\n"
+
+    depth = measure_execution_depth(stream)
+    assert depth.investigative_actions == 1
+    assert depth.unrecognised_item_types == ()
+    assert is_degenerate(depth) is False
+
+
+def test_an_unknown_item_type_suspends_the_judgement_and_is_named():
+    """Neither bucket: the count becomes a floor, not a measurement.
+
+    Refusing on it would be refusing on something not measured — the one thing
+    this check must never do (the same rule that keeps stream-less lanes
+    working). Counting it as work would restore the hole. So it is recorded,
+    named, and the judgement is suspended.
+    """
+    from gate_depth import is_degenerate, measure_execution_depth
+
+    stream = "\n".join([
+        json.dumps({"type": "thread.started"}),
+        json.dumps({"type": "item.completed", "item": {
+            "id": "u", "type": "some_future_type", "detail": "?"}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 900}}),
+    ]) + "\n"
+
+    depth = measure_execution_depth(stream)
+    assert depth.investigative_actions == 0
+    assert depth.unrecognised_item_types == ("some_future_type",), (
+        "an unclassifiable item type vanished from the record — a reader "
+        "cannot tell a clean zero from an unmeasured one"
+    )
+    assert is_degenerate(depth) is False
