@@ -1129,6 +1129,67 @@ def verify_pr_closure(
     }
 
 
+# The producer line a gate report writes about itself. Accepts the bold-field
+# form the report contract requires (``**Model**: x``) and the bare/frontmatter
+# forms that also occur, because the point is to READ what the report claims,
+# not to police how it is written.
+_REPORT_MODEL_RE = re.compile(
+    r"(?im)^\s*[-*]?\s*\**\s*model\s*\**\s*[:=]\s*\**\s*([A-Za-z0-9._\-/]+)"
+)
+
+
+def _report_declared_model(report_content: str) -> str:
+    """The model the report says produced it, or "" when it does not say."""
+    match = _REPORT_MODEL_RE.search(report_content)
+    return match.group(1).strip() if match else ""
+
+
+def _detect_producer_identity_contradiction(
+    gate: str,
+    result: Dict[str, Any],
+    report_content: str,
+) -> Optional[CheckResult]:
+    """The record and its own report must name the same model (OI-1450).
+
+    Measured across the central store on 2026-08-29: of 48 gate result records
+    carrying a ``model``, **7 name a different model than the report they point
+    at** — every one of them ``kimi-k2-7-code`` in the record against
+    ``kimi-default`` in the report. Both are producer-identity claims about the
+    same run, and they cannot both be true.
+
+    That matters beyond tidiness, because producer identity is what
+    ``record_terminal_result`` refuses a terminal write without: a record whose
+    identity disagrees with its own evidence is not authenticated by it, it is
+    merely accompanied by it. Cost attribution, model-quality comparison and
+    "which model missed this" all read one of the two numbers and neither
+    knows the other exists.
+
+    Returns ``None`` when there is nothing to compare — no model on the record,
+    or no model line in the report. Silence about an unmeasurable pair is the
+    honest answer; asserting agreement would be inventing it.
+    """
+    record_model = str(result.get("model") or "").strip()
+    if not record_model:
+        return None
+    report_model = _report_declared_model(report_content)
+    if not report_model:
+        return None
+    if record_model == report_model:
+        return CheckResult(
+            f"producer_identity_{gate}",
+            "PASS",
+            f"{gate}: record and report agree on model={record_model}",
+        )
+    return CheckResult(
+        f"producer_identity_{gate}",
+        "FAIL",
+        f"{gate}: result record says model={record_model!r} but its own report "
+        f"says model={report_model!r} — two producer-identity claims about one "
+        f"run, and the record is not authenticated by evidence that disagrees "
+        f"with it",
+    )
+
+
 def _detect_gate_report_contradictions(
     contract: ReviewContract,
     results_dir: Path,
@@ -1162,6 +1223,20 @@ def _detect_gate_report_contradictions(
 
         report_path_str = result.get("report_path", "")
         if not report_path_str:
+            # A record that carries producer identity but points at no report
+            # is the shape that hid OI-1450: all seven contradicting records
+            # have report_path=None, so a detector keyed on report_path never
+            # looked at them. Silently skipping reads as "consistent" in a
+            # list of PASS lines. Say what is actually true instead.
+            if str(result.get("model") or "").strip():
+                checks.append(CheckResult(
+                    f"producer_identity_{gate}",
+                    "WARN",
+                    f"{gate}: result record claims model="
+                    f"{str(result.get('model')).strip()!r} but carries no "
+                    f"report_path — the claim cannot be checked against any "
+                    f"evidence",
+                ))
             continue
 
         report_path = Path(report_path_str)
@@ -1208,6 +1283,12 @@ def _detect_gate_report_contradictions(
                 "PASS",
                 f"{gate}: gate result and report content are consistent",
             ))
+
+        identity_check = _detect_producer_identity_contradiction(
+            gate, result, report_content,
+        )
+        if identity_check is not None:
+            checks.append(identity_check)
 
     return checks
 
