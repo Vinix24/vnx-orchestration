@@ -38,6 +38,29 @@ Efficiency: risk ≤ 0.3 + success + no blockers → fast path, skip deep verifi
 - **Receipt status:** `done`/`success`=review; `failed`/`failure`=REJECT+investigate; `unknown`=WAIT for finale (TTL 30 min, re-poll) — **`unknown` is NEVER `failure`**.
 - **Post-merge sequence (mandatory):** after `gh pr merge`, run `git pull --ff-only` then `vnx objective reconcile --project-id <pid>` to auto-close any track whose `pr_ref` points to the just-merged PR (advisory CHECK by default; add `--apply` to write).
 
+### 2.1 The governed merge contract (`scripts/pr_merge.py`)
+
+The canonical T0 merge path is not raw `gh pr merge` — it is `scripts/pr_merge.py`, which runs the gates above, executes the merge pinned to the approved head (`--match-head-commit`), and emits the binding `pr_merged` receipt. A merge is not done when GitHub says so; it is done when GitHub says so **and** the receipt landed. The CLI gives two signals for that, and they are not the same:
+
+- **`success`** means "the merge happened on GitHub." This is its original meaning and it keeps it; existing readers of `success` must not silently get a different answer (a deliberate choice in #1722, not an accident).
+- **`receipt_ok`** means "the binding `pr_merged` receipt landed in `t0_receipts.ndjson`." This is the verdict that the audit trail has its evidence.
+
+Three outcomes, three responses:
+
+| outcome | `success` | `receipt_ok` | CLI exit | what the operator does |
+|---|---|---|---|---|
+| merge happened + receipt landed | `True` | `True` | `0` | nothing — the merge and its proof are both recorded. |
+| merge happened + receipt did **not** land | `True` | `False` | non-zero | **do not re-merge.** The merge on GitHub is irreversible; only the proof is missing. Re-run `python3 scripts/pr_merge.py --pr <n>` after fixing the receipts file so the audit-trail evidence is captured. |
+| merge did not happen | `False` | `False` | non-zero | the PR is unchanged; diagnose the error and retry the merge from the top. |
+
+The middle row is the one that bites. A non-zero exit there is **not** "the merge failed" — the merge went through. Reading it as a failure and merging again operates on an already-merged PR, which is a no-op at best and a double-receipt / state corruption at worst. The error text on stderr says so explicitly, by design.
+
+`--dry-run` is the one exit-0 path that involves no merge and no receipt; it is not a fourth outcome, it skips both.
+
+The `dispatch_register.ndjson` register event is **best-effort**, not binding. Its `register_ok` flag is surfaced for visibility ("ok" / "warn-not-written") but never gates the exit code. Only the `t0_receipts.ndjson` receipt is binding. A doc that implies the register event is binding states it wrong.
+
+**Where this is enforced:** `merge_pr` returns the result dict; `main` maps the three rows to exit codes (`EXIT_OK` only on dry-run or `success and receipt_ok`, else `EXIT_ERROR`). The code is authoritative; this section describes intent.
+
 ## 3. PR size + iteration caps
 
 - Target **150–200 LOC** delta; **hard cap 300** (override `--allow-large-pr` or split via track_dependencies). Exceptions (no cap): auto-generated migration SQL, single-bug-class test surface, mechanical renames. Put the LOC budget in the dispatch instruction.
