@@ -331,8 +331,9 @@ ever wrote a non-zero value. `confidence_score DESC` was already the sole effect
 drop (`_INTELLIGENCE_BRIEF_SQL`, `scripts/build_t0_state.py:1009-1014`); the column no longer
 physically exists in `schemas/quality_intelligence.sql`. (Unrelated: `build_t0_state.py` also reads
 a `success_rate` key elsewhere, at line 1093 — that one comes from
-`DispatchParameterTracker.stats()` in `dispatch_tracker.db`, a different table entirely, and is
-untouched by this migration.)
+`DispatchParameterTracker.stats()` in `quality_intelligence.db`'s `dispatch_experiments` table
+(unified from the now-retired `dispatch_tracker.db` at V18 — `scripts/quality_db_init.py::_migrate_v18`),
+a different table entirely, and is untouched by this migration.)
 
 ---
 

@@ -9,9 +9,11 @@ tenancy stamper, and the CLI entrypoint), classifies every touched table as
 central-DB (shared) vs per-project, and exposes `verify_complete()` as a read-only
 fs<->git completeness oracle.
 
-Table classification (ADR-007): every table below lives in one of the three
-central VNX state DBs (quality_intelligence.db, runtime_coordination.db,
-dispatch_tracker.db) that schemas/migrations/*.sql exclusively evolves — see
+Table classification (ADR-007): every table below lives in one of the two
+central VNX state DBs (quality_intelligence.db, runtime_coordination.db —
+dispatch_tracker.db was unified into quality_intelligence.db's
+dispatch_experiments table at V18, scripts/quality_db_init.py::_migrate_v18,
+and is formally retired) that schemas/migrations/*.sql exclusively evolves — see
 docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md, which binds
 "every new central-DB table MUST be project_id-stamped at design time". Verified
 against the tree 2026-07-12: every CREATE TABLE in this surface carries

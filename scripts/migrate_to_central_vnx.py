@@ -77,6 +77,7 @@ from schema_versioning import (  # noqa: E402
     set_schema_version,
     check_schema_version,
 )
+from qi_db_health import count_tables as _qi_count_tables  # noqa: E402
 from scripts.lib.migrate_import import (  # noqa: E402
     ABORT_FLAG,
     AbortRequested,
@@ -189,8 +190,18 @@ class VerificationFailure(RuntimeError):
 # scripts.lib.migrate_schema at the top of this module.
 
 
-def confirm_apply(confirmation: Optional[str], no_prompt: bool = False) -> bool:
-    """Enforce the two-factor apply gate: phrase + TTY confirmation."""
+def confirm_apply(
+    confirmation: Optional[str], central_state: Path = CENTRAL_DATA_DIR, no_prompt: bool = False
+) -> bool:
+    """Enforce the two-factor apply gate: phrase + TTY confirmation.
+
+    ``central_state`` must be the resolved ``--central-state`` the run will
+    actually write to. Printing the hardcoded ``CENTRAL_DATA_DIR`` default
+    here regardless of what the operator passed lets a wrong ``--central-state``
+    (e.g. missing the ``state/`` segment) sail through confirmation with a
+    plausible-looking banner — the operator has nothing to catch the mistake
+    against (OI: absence-is-loud D5).
+    """
     if confirmation != CONFIRMATION_PHRASE:
         LOG.error("--apply requires --confirm %s", CONFIRMATION_PHRASE)
         return False
@@ -198,7 +209,7 @@ def confirm_apply(confirmation: Optional[str], no_prompt: bool = False) -> bool:
         return True
     try:
         sys.stdout.write(
-            f"About to MIGRATE 4 source projects into {CENTRAL_DATA_DIR}.\n"
+            f"About to MIGRATE 4 source projects into {central_state}.\n"
             "Type 'yes' to proceed, anything else to abort: "
         )
         sys.stdout.flush()
@@ -1830,7 +1841,7 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         LOG.info("default mode: invoking dry-run preflight (no writes)")
         return subprocess.call(cmd)
 
-    if not confirm_apply(args.confirm, no_prompt=args.no_prompt):
+    if not confirm_apply(args.confirm, central_state, no_prompt=args.no_prompt):
         return 1
 
     if args.dry_run_manifest is not None:
@@ -1913,12 +1924,32 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         _test_apply_cleanup()
         return 1
 
-    if not central_qi.exists():
+    _stub_created_qi = not central_qi.exists()
+    if _stub_created_qi:
         LOG.warning("central QI db missing; creating empty: %s", central_qi)
         sqlite3.connect(str(central_qi)).close()
-    if not central_rc.exists():
+    _stub_created_rc = not central_rc.exists()
+    if _stub_created_rc:
         LOG.warning("central RC db missing; creating empty: %s", central_rc)
         sqlite3.connect(str(central_rc)).close()
+
+    def _cleanup_unpopulated_stubs() -> None:
+        """Remove stub file(s) THIS run just created if bootstrap never populated them.
+
+        Without this, any failure between the lazy-create above and a
+        successful bootstrap — not just the three exception types this
+        block explicitly catches, but also Ctrl-C, an uncaught exception, or
+        --central-state pointed at a directory that was never a real state
+        dir to begin with — leaves a permanent 0-table decoy on disk. That
+        decoy later reads as "no data yet" to any reader that only checks
+        `.exists()`, instead of "wrong path" (OI: absence-is-loud D5). Only
+        stubs created by THIS invocation are touched; a pre-existing DB
+        (even a still-partial one from a prior run) is never deleted here.
+        """
+        for created, path in ((_stub_created_qi, central_qi), (_stub_created_rc, central_rc)):
+            if created and _qi_count_tables(path) == 0:
+                path.unlink()
+                LOG.warning("removed unpopulated stub created this run: %s", path)
 
     pre_snapshot = _snapshot_central(central_qi, central_rc)
     try:
@@ -1982,6 +2013,12 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
         _test_apply_cleanup()
         return 3
+    finally:
+        # Runs on every exit from the block above — success, the three
+        # explicitly-handled exception types, AND anything else (Ctrl-C,
+        # an unanticipated exception) that this dispatch's exception list
+        # doesn't happen to name. See _cleanup_unpopulated_stubs docstring.
+        _cleanup_unpopulated_stubs()
 
     if args.reset_idempotency:
         cleared = reset_idempotency_state(central_qi, central_rc)
