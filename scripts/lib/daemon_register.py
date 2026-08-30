@@ -30,6 +30,28 @@ liveness genuinely cannot be measured (psutil unavailable, or process
 enumeration itself raised), not a silent default toward either of the other
 two. Conflating "could not check" with "not running" would be exactly the
 kind of loud-but-wrong claim this dispatch exists to prevent.
+
+This module has three distinct ways of failing to produce a register, and
+each gets its own loud handling instead of being lumped together (D2b):
+
+  1. **The source is gone** — ``start_all()`` itself cannot be found in the
+     supervisor script (missing function, renamed, file moved).
+     ``read_daemon_register()`` raises ``ValueError``.
+  2. **The source exists but the parse finds nothing** — ``start_all()`` is
+     there, but zero ``start_process`` lines matched (e.g. the shell switched
+     from double to single quotes and the regex silently stopped matching).
+     This is NOT the same as an intentionally empty register: it is a failed
+     parse wearing an empty register's clothes. ``read_daemon_register()``
+     raises ``ValueError`` here too — a structurally-found-but-semantically-
+     empty result is exactly as untrustworthy as a missing function, and
+     collapsing it into "zero daemons expected" is the bug this dispatch
+     closes (a real register going from nine entries to zero, silently,
+     reported ``overall: "ok"``).
+  3. **The measurement itself cannot run** — process enumeration raises, or
+     psutil is unavailable. ``measure_daemon_liveness()`` returns
+     ``overall: "unknown"`` via ``_all_unknown()`` rather than raising,
+     because by this point a caller already has a real register and wants a
+     best-effort answer, not an exception.
 """
 from __future__ import annotations
 
@@ -73,16 +95,30 @@ class DaemonSpec:
 
 
 def _default_supervisor_script() -> Path:
-    root = project_root.resolve_project_root(__file__)
+    # No __file__ anchor (central-mode path gate, shape 3a): a central install
+    # runs this module from the read-only keystone checkout, so anchoring on
+    # __file__ would resolve the keystone's supervisor script, not the
+    # project's. CWD-first resolution matches every caller of this default —
+    # build_t0_state.py and generate_daemon_liveness_md.py both run with the
+    # project checkout as CWD.
+    root = project_root.resolve_project_root()
     return root / _SUPERVISOR_RELATIVE_PATH
 
 
 def read_daemon_register(supervisor_script: Optional[Path] = None) -> Tuple[DaemonSpec, ...]:
     """Parse ``start_all()`` in ``vnx_supervisor_simple.sh`` into daemon specs.
 
-    Raises ``ValueError`` if the file is unreadable or ``start_all()`` cannot
-    be found — callers that need a best-effort/non-raising read (e.g.
-    ``measure_daemon_liveness``) catch this themselves.
+    Raises ``ValueError`` if the file is unreadable, ``start_all()`` cannot be
+    found, OR ``start_all()`` is found but parses to zero entries — the third
+    failure mode (see module docstring): a structural change to the shell
+    (e.g. a quote-style edit that the ``start_process`` regex no longer
+    matches) can silently turn a real, populated register into an empty one
+    without raising anything on its own. An empty parse result is
+    indistinguishable from "this project runs no daemons" unless it is
+    treated as a failure — so it is. Callers that need a best-effort/
+    non-raising read (e.g. ``measure_daemon_liveness``) catch ``ValueError``
+    themselves; they do not receive a legitimately-empty register through
+    this path.
     """
     path = Path(supervisor_script) if supervisor_script else _default_supervisor_script()
     text = path.read_text(encoding="utf-8")
@@ -135,6 +171,13 @@ def read_daemon_register(supervisor_script: Optional[Path] = None) -> Tuple[Daem
             entry["scripts"].append(script)
         if if_depth > 0:
             entry["conditional"] = True
+
+    if not specs:
+        raise ValueError(
+            f"start_all() found in {path} but yielded zero start_process "
+            "entries — a failed parse (e.g. a quote-style change the regex "
+            "no longer matches), not an empty register"
+        )
 
     return tuple(
         DaemonSpec(
