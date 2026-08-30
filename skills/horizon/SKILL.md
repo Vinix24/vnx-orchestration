@@ -75,8 +75,18 @@ a diverse-family panel BEFORE any implementation, sized to the plan's governance
   (docs, reversible) up to 3 (core / irreversible); a new feature
   (`task_class 01_code_generation`) gets the full 5 seats regardless of paths. The exact
   ladder lives in `docs/core/HORIZON_PLANNING.md`; do not copy it here (a second copy drifts
-  the moment the ladder changes). A flaked/undispatched lane ABSTAINS (non-scoring, #910);
-  liveness-quorum = min(2, panel size), so one flake never forces REVISE. Operational
+  the moment the ladder changes). A lane lands in one of THREE outcomes, not
+  two-plus-abstain (#910, OI-1519): it SCORES (a real, parseable verdict), it ABSTAINS
+  (the model answered but its verdict JSON would not parse — retried once, then
+  non-scoring), or it is NO-VERDICT (timeout, governance-synthesized report, or no
+  report file — a third branch the runner reports by name as `no-verdict
+  (timeout/no-report)`, NEVER folded into the abstains and never to be read as
+  "probably in order": an unmeasured lane is not an implicit OK). The general
+  deliberation panel's coverage tally enforces the same three-branch rule by
+  reconciling every seat's dispatch-id against the t0 receipt ledger — the ledger wins
+  over the seat's self-reported `exit_code`, and the divergence itself is reported
+  (OI-1519; see the `/panel` skill). liveness-quorum = min(2, panel size), so one
+  flake never forces REVISE. Operational
   preconditions for the heavier seats: the glm litellm proxy on :4141, `DEEPSEEK_API_KEY`,
   kimi + codex CLIs.
 - **Run it**: `vnx horizon plan-gate run <track> --doc <plan.md> --project-id <pid>`. The

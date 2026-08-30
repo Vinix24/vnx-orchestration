@@ -4,6 +4,7 @@ Uses a FAKE dispatcher (records calls) so no live provider is hit."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -18,6 +19,21 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import deliberation_panel as dp  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_ledger(monkeypatch, tmp_path):
+    """Hermeticity (OI-1519): without an explicit ``receipts_path``, run_deliberation
+    resolves the machine's REAL receipt ledger — which on a dev machine exists and
+    knows none of these tests' random dispatch-ids, flipping every seat to
+    'unmeasured'. Pin the default resolution to a path that never exists so the
+    pre-ledger tests exercise the legacy fallback exactly as before. Tests of the
+    ledger path itself override this per-test."""
+    monkeypatch.setattr(
+        dp, "_default_receipts_path",
+        lambda: tmp_path / "no-ledger-here" / "t0_receipts.ndjson",
+        raising=False,  # pre-fix the function does not exist yet; setting it is harmless
+    )
 
 
 class _Recorder:
@@ -791,3 +807,318 @@ class TestMinSeatsFloorWithOutcomeBasedCounting:
         assert res.synthesis_refused_reason == ""
         assert not res.degraded_synthesis
         assert res.synthesis
+
+
+def _append_receipt(ledger_path, record):
+    """Append one receipt to a tmp NDJSON ledger — mirrors the governed lane, which
+    writes a seat's receipt before the dispatcher returns its report."""
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    with ledger_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+class TestLedgerReconciliation:
+    """OI-1519: the panel's coverage tally must be reconciled against the receipt
+    LEDGER (t0_receipts.ndjson), not against the ``exit_code`` a seat writes about
+    ITSELF in its own report frontmatter. Measured live on dispatch
+    ``panel-sweep-diverge-0-a6421f`` (2026-08-30): the ledger says
+    ``status=timeout`` / ``verdict.decision=reject`` while the report frontmatter
+    says ``exit_code: 0`` — the pre-ledger tally counted that timed-out seat as a
+    PRESENT lens (4/5 reported, really 3 + a timeout).
+
+    Three branches, never two: ledger-says-failed → FAILED, ledger-says-success →
+    PRESENT, ledger-has-no-decisive-record (or no ledger at all) → UNMEASURED —
+    never silently counted as present on the seat's own say-so.
+    """
+
+    def test_ledger_timeout_beats_frontmatter_exit_code_zero(self, tmp_path, monkeypatch):
+        """The exact measured divergence, rebuilt: seat frontmatter claims
+        ``exit_code: 0``; the ledger says ``status=timeout, verdict.decision=reject``.
+        The ledger must win the count AND the divergence must be reported."""
+        ledger = tmp_path / "state" / "t0_receipts.ndjson"
+        # Resolve via the default-path hook (no receipts_path kwarg) so this test
+        # fails with a plain ASSERTION on the pre-fix tree, not a TypeError.
+        monkeypatch.setattr(dp, "_default_receipts_path", lambda: ledger, raising=False)
+
+        def dispatcher(provider, model, prompt, did):
+            if provider == "kimi" and "-diverge-" in did:
+                _append_receipt(ledger, {
+                    "dispatch_id": did, "status": "timeout",
+                    "verdict": {"decision": "reject"},
+                    "failure_reason": "deadline exceeded (source: openai-api) [600.1s]",
+                })
+                # the lie, exactly as measured: exit_code 0 over a wrapper-echo body
+                return _fake_report(did, provider, 0, REFUSAL_BODY)
+            _append_receipt(ledger, {
+                "dispatch_id": did, "status": "success",
+                "verdict": {"decision": "accept"},
+            })
+            return _fake_report(did, provider, 0, "real analysis, cites file:line")
+
+        res = dp.run_deliberation("sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3)
+
+        assert len(res.present_lenses) == 2, (
+            "a seat the ledger recorded as timeout/reject must NOT count as present "
+            "just because its own frontmatter says exit_code: 0"
+        )
+        assert len(res.failed_seats) == 1
+        assert res.failed_seats[0]["provider"] == "kimi"
+        assert "2/3" in res.coverage
+
+        # the divergence itself is the finding — visible on the result object
+        assert len(res.ledger_divergences) == 1
+        d = res.ledger_divergences[0]
+        assert d["provider"] == "kimi"
+        assert d["dispatch_id"]
+        assert d["frontmatter_outcome"] == "present"
+        assert d["ledger_outcome"] == "failed"
+        assert d["ledger_status"] == "timeout"
+        assert d["ledger_decision"] == "reject"
+
+        # ... and in the rendered report
+        report = res.to_report()
+        assert "timeout" in report
+        assert "reject" in report
+        assert "exit_code" in report
+        assert "SEAT FAILED" in report  # to_report agrees with the count
+
+    def test_ledger_success_counts_present(self, tmp_path):
+        """Branch 2: the ledger knows the dispatch-id and says success → PRESENT."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+
+        def dispatcher(provider, model, prompt, did):
+            _append_receipt(ledger, {"dispatch_id": did, "status": "success"})
+            return _fake_report(did, provider, 0, "real analysis")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert res.ledger_available is True
+        assert len(res.present_lenses) == 3
+        assert res.failed_seats == []
+        assert res.unmeasured_seats == []
+        assert res.ledger_divergences == []
+
+    def test_ledger_without_record_marks_seat_unmeasured_not_present(self, tmp_path):
+        """Branch 3a: the ledger EXISTS and is readable but has NO record of this
+        dispatch-id (e.g. receipt-processing lag) → the seat is UNMEASURED: not
+        counted as present (fail-closed), not counted as failed (no evidence of
+        failure), and visibly its own category."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+        _append_receipt(ledger, {"dispatch_id": "someone-else", "status": "success"})
+
+        def dispatcher(provider, model, prompt, did):
+            return _fake_report(did, provider, 0, "real-looking analysis")  # writes NO receipt
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert res.ledger_available is True
+        assert res.present_lenses == [], "an unconfirmed seat must not fail open to present"
+        assert res.failed_seats == [], "no evidence of failure either — this is its own branch"
+        assert len(res.unmeasured_seats) == 3
+        assert {s["provider"] for s in res.unmeasured_seats} == {"codex", "kimi", "claude"}
+        assert all(s["dispatch_id"] for s in res.unmeasured_seats)
+        assert "unmeasured" in res.coverage
+        report = res.to_report()
+        assert "UNMEASURED" in report
+        assert "unmeasured" in report.lower()
+
+    def test_indecisive_receipts_are_unmeasured(self, tmp_path):
+        """Branch 3b: the ledger knows the dispatch-id but every receipt is indecisive
+        (status=unknown, no reject/accept decision) → UNMEASURED, not present."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+
+        def dispatcher(provider, model, prompt, did):
+            if "-diverge-" in did:
+                _append_receipt(ledger, {
+                    "dispatch_id": did, "status": "unknown",
+                    "verdict": {"decision": "investigate"},
+                })
+            else:
+                _append_receipt(ledger, {"dispatch_id": did, "status": "success"})
+            return _fake_report(did, provider, 0, "real-looking analysis")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert res.present_lenses == []
+        assert len(res.unmeasured_seats) == 3
+
+    def test_absent_ledger_falls_back_to_legacy_measurement_visibly(self, tmp_path):
+        """Point 4: no ledger at all (fresh checkout) must not crash the panel. The
+        tally falls back to the pre-OI-1519 frontmatter measurement — but LOUDLY:
+        the result and report flag the coverage as unverified, never silently."""
+        ledger = tmp_path / "no-such-dir" / "t0_receipts.ndjson"  # never created
+
+        def dispatcher(provider, model, prompt, did):
+            if provider == "kimi" and "-diverge-" in did:
+                return _fake_report(did, provider, 1, REFUSAL_BODY)
+            return _fake_report(did, provider, 0, "real analysis")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert res.ledger_available is False
+        # legacy measurement still works — the panel keeps functioning
+        assert len(res.present_lenses) == 2
+        assert len(res.failed_seats) == 1
+        assert res.failed_seats[0]["provider"] == "kimi"
+        # ... but the missing measurement instrument is visible, not silent
+        report = res.to_report()
+        assert "ledger" in report.lower()
+        assert "unverified" in report.lower()
+
+    def test_unreadable_ledger_path_is_legacy_mode_not_a_crash(self, tmp_path):
+        """Negative path: a receipts_path that is a DIRECTORY (not a file) counts as
+        'ledger unavailable' → legacy fallback, never an exception."""
+        def dispatcher(provider, model, prompt, did):
+            return _fake_report(did, provider, 0, "real analysis")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=tmp_path,  # a directory — unreadable as an ndjson file
+        )
+        assert res.ledger_available is False
+        assert len(res.present_lenses) == 3
+
+    def test_multiple_receipts_success_and_unknown_resolve_present(self, tmp_path):
+        """Point 6, as measured: ``panel-architecture-diverge-1-094e47`` carries BOTH
+        a success and an unknown receipt. No failure record → PRESENT."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+
+        def dispatcher(provider, model, prompt, did):
+            _append_receipt(ledger, {
+                "dispatch_id": did, "status": "success",
+                "verdict": {"decision": "investigate"},
+            })
+            _append_receipt(ledger, {
+                "dispatch_id": did, "status": "unknown",
+                "verdict": {"decision": "investigate"},
+            })
+            return _fake_report(did, provider, 0, "real analysis")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert len(res.present_lenses) == 3
+        assert res.unmeasured_seats == []
+
+    def test_multiple_receipts_failure_beats_success(self, tmp_path):
+        """Point 6, fail-closed direction: when one dispatch-id carries BOTH a success
+        and a failure record, the failure wins — a success record never launders a
+        recorded failure."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+
+        def dispatcher(provider, model, prompt, did):
+            _append_receipt(ledger, {"dispatch_id": did, "status": "success"})
+            if provider == "kimi" and "-diverge-" in did:
+                _append_receipt(ledger, {
+                    "dispatch_id": did, "status": "timeout",
+                    "verdict": {"decision": "reject"},
+                })
+            return _fake_report(did, provider, 0, "real analysis")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert len(res.present_lenses) == 2
+        assert [s["provider"] for s in res.failed_seats] == ["kimi"]
+
+    def test_verdict_reject_is_the_secondary_failure_signal(self, tmp_path):
+        """Point 5: ``status`` is primary, ``verdict.decision`` secondary — a receipt
+        with a NON-decisive status but ``decision=reject`` still fails the seat."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+
+        def dispatcher(provider, model, prompt, did):
+            if provider == "kimi" and "-diverge-" in did:
+                _append_receipt(ledger, {
+                    "dispatch_id": did, "status": "unknown",
+                    "verdict": {"decision": "reject"},
+                })
+            else:
+                _append_receipt(ledger, {"dispatch_id": did, "status": "success"})
+            return _fake_report(did, provider, 0, "real analysis")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert len(res.present_lenses) == 2
+        assert [s["provider"] for s in res.failed_seats] == ["kimi"]
+
+    def test_dispatch_ids_carried_on_fan_out_entries(self, tmp_path):
+        """Reconciliation needs the dispatch-id: every fan-out entry must carry the
+        id its seat was dispatched under (pre-fix it was built and thrown away)."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+        seen = []
+
+        def dispatcher(provider, model, prompt, did):
+            seen.append(did)
+            _append_receipt(ledger, {"dispatch_id": did, "status": "success"})
+            return _fake_report(did, provider, 0, "ok")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        fan_out_ids = {fo.get("dispatch_id") for fo in res.fan_out}
+        assert None not in fan_out_ids
+        diverge_ids = {d for d in seen if "-diverge-" in d}
+        assert fan_out_ids == diverge_ids
+
+    def test_first_ok_reconciles_sequential_stages_against_the_ledger(self, tmp_path):
+        """The second place: _first_ok serves the contrarian/verify/synthesis stages
+        on the SAME _is_error that trusted the seat's own frontmatter. A stage seat
+        whose frontmatter lies (exit_code 0) but whose ledger record says
+        timeout/reject must be SKIPPED, and the divergence recorded."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+
+        def dispatcher(provider, model, prompt, did):
+            if "-contrarian-" in did and provider == "codex":
+                _append_receipt(ledger, {
+                    "dispatch_id": did, "status": "timeout",
+                    "verdict": {"decision": "reject"},
+                })
+                return _fake_report(did, provider, 0, "FAKE-CONTRARIAN wrapper echo")
+            _append_receipt(ledger, {"dispatch_id": did, "status": "success"})
+            return _fake_report(did, provider, 0, f"real-{provider}-output")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        # contrarian prefers codex first; codex's ledger record says failed, so the
+        # stage output must come from the NEXT seat, not codex's lying frontmatter
+        assert "FAKE-CONTRARIAN" not in res.contrarian
+        assert "real-" in res.contrarian
+        stage_divergences = [d for d in res.ledger_divergences if d["stage"] == "contrarian"]
+        assert len(stage_divergences) == 1
+        assert stage_divergences[0]["provider"] == "codex"
+
+    def test_unmeasured_stage_seat_falls_back_without_cascading(self, tmp_path):
+        """_first_ok with a ledger that knows nothing (lag window): an unmeasured
+        seat's real content is kept as the stage result rather than burning the
+        whole roster and collapsing to '[empty]' — but the seats are recorded as
+        unmeasured so the gap is visible."""
+        ledger = tmp_path / "t0_receipts.ndjson"
+        _append_receipt(ledger, {"dispatch_id": "someone-else", "status": "success"})
+
+        def dispatcher(provider, model, prompt, did):
+            return _fake_report(did, provider, 0, f"real-{provider}-output")
+
+        res = dp.run_deliberation(
+            "sweep", "q", dispatcher=dispatcher, roster=ROSTER, max_workers=3,
+            receipts_path=ledger,
+        )
+        assert "real-" in res.contrarian
+        assert "real-" in res.synthesis
+        stage_unmeasured = [m for m in res.seat_measurements
+                            if m["stage"] != "diverge" and m["outcome"] == "unmeasured"]
+        assert stage_unmeasured, "unmeasured stage seats must be recorded, not silently accepted"

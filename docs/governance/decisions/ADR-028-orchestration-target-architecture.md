@@ -73,6 +73,7 @@ Ratified under an explicit overnight operator mandate. The four open operator-de
 
 4. **Is panel coverage complete?**
    **Resolved: YES — no re-run needed.** deepseek + codex + kimi-r2 converge (high confidence); glm is dead for long synthesis (flaked empty twice, persistent). The draft's own conclusion, carried forward.
+   **Addendum (2026-08-30, OI-1519):** the resolution above records a 2026-07 panel run and stands as history. How a panel seat's coverage is COUNTED has since changed: the tally is reconciled against the t0 receipt ledger with three outcomes — present / failed / unmeasured — where the ledger wins over a seat's self-reported `exit_code` and any divergence is itself reported. See the `/panel` skill ("How seat coverage is counted") and `scripts/lib/deliberation_panel.py`.
 
 ### Ratification status
 Target architecture (§1–§7) and the migration sequence (§6) are **Accepted**. Adoption remains **gated per-phase**: each phase ships behind its own feature flag with a rollback, and Phases 2→4 (which touch the decision path) each require an explicit operator go/no-go at the transition, per the human-in-the-loop principle. Nothing here authorizes an autonomous execution bypass.
