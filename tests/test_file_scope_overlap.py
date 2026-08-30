@@ -190,7 +190,7 @@ def test_merge_pr_surfaces_overlap_warning(monkeypatch):
     monkeypatch.setattr(pr_merge, "_query_pr",
                         lambda pr: {"title": "fix: t", "headRefName": "dispatch/merging"})
     monkeypatch.setattr(pr_merge, "_do_merge", lambda pr, method, *a, **k: (True, ""))
-    monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **kw: {"append_status": "ok"})
+    monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **kw: {"append_status": "appended"})
     monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **kw: True)
     monkeypatch.setattr(
         fso, "warn_overlaps", lambda branch, **kw: [("other", ["shared.txt"])],
@@ -198,6 +198,7 @@ def test_merge_pr_surfaces_overlap_warning(monkeypatch):
 
     result = pr_merge.merge_pr(99, dispatch_id="d1")
     assert result["success"] is True
+    assert result["receipt_ok"] is True
     assert result["overlaps"] == [("other", ["shared.txt"])]
 
 
@@ -207,7 +208,7 @@ def test_merge_pr_overlap_check_failure_does_not_block(monkeypatch):
     monkeypatch.setattr(pr_merge, "_query_pr",
                         lambda pr: {"title": "fix: t", "headRefName": "dispatch/merging"})
     monkeypatch.setattr(pr_merge, "_do_merge", lambda pr, method, *a, **k: (True, ""))
-    monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **kw: {"append_status": "ok"})
+    monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **kw: {"append_status": "appended"})
     monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **kw: True)
 
     def _boom(branch, **kw):

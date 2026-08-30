@@ -23,6 +23,7 @@ coverage for the two new helpers (``_repo_auto_merge_allowed`` and
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -239,7 +240,8 @@ class TestExitCodeFollowsRealOutcome:
             pr_merge, "merge_pr",
             lambda **k: {
                 "success": False, "pr_number": 5, "dispatch_id": "", "merge_method": "squash",
-                "pr_title": "", "branch": "", "receipt_status": None, "register_ok": False,
+                "pr_title": "", "branch": "", "receipt_status": None, "receipt_ok": False,
+                "register_ok": False,
                 "error": "gh pr merge meldde succes voor #5, maar de PR staat nog op state=OPEN",
                 "dry_run": False, "overlaps": [],
             },
@@ -249,3 +251,216 @@ class TestExitCodeFollowsRealOutcome:
 
         assert rc == pr_merge.EXIT_ERROR
         assert "state=OPEN" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# OI-1518 — a merge whose receipt did NOT land must exit non-zero
+# ---------------------------------------------------------------------------
+#
+# Before this fix, `merge_pr` set result["success"] = True the moment
+# `_do_merge` succeeded, and the receipt-emit try/except only set
+# `receipt_status` + a WARN to stderr. `result["success"]` was never touched,
+# so `main()` returned EXIT_OK for a merge whose proof could not be written.
+#
+# Two failure shapes must both fail closed:
+#   1. `_emit_receipt` raises.
+#   2. `_emit_receipt` returns but `append_status` is not a recognized success
+#      value (incl. the key missing -> "unknown" default).
+# And the two success shapes must still pass so the test can detect an
+# over-tight fix: `appended` -> exit 0, `duplicate` -> exit 0.
+
+
+class TestReceiptEmissionFailClosed:
+    def _merge_succeeds(self, monkeypatch, vnx_env):
+        """Wire merge_pr so _do_merge succeeds; receipt behavior is set per-test."""
+        monkeypatch.setattr(pr_merge, "_query_pr", lambda n: {
+            "number": n, "title": "feat: x", "headRefName": "feature/x", "state": "MERGED",
+        })
+        monkeypatch.setattr(pr_merge, "_gh", lambda args, **k: _run(0))
+        monkeypatch.setattr(pr_merge, "_repo_auto_merge_allowed", lambda: True)
+        monkeypatch.setattr(pr_merge, "_pr_actually_merged", lambda n: (True, ""))
+        monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **k: True)
+        monkeypatch.setattr(pr_merge, "_lookup_dispatch_id_by_pr_number", lambda n: "")
+
+    def test_emit_raises_exits_nonzero_and_says_merge_happened(
+        self, vnx_env, monkeypatch, capsys,
+    ):
+        """Failure shape 1: _emit_receipt raises. Merge did happen; proof missing."""
+        self._merge_succeeds(monkeypatch, vnx_env)
+
+        def _boom(**kw):
+            raise RuntimeError("receipts file unwritable (simulated)")
+
+        monkeypatch.setattr(pr_merge, "_emit_receipt", _boom)
+
+        result = pr_merge.merge_pr(
+            pr_number=99999, receipts_file=str(vnx_env["receipts_path"]),
+        )
+
+        # success = "merge happened" -> still True (do not re-merge on a retry)
+        assert result["success"] is True
+        # receipt_ok = "binding proof landed" -> False
+        assert result["receipt_ok"] is False
+        assert "receipts file unwritable" in result["receipt_status"]
+
+        err = capsys.readouterr().err
+        # The text must make unmistakably clear the MERGE happened.
+        assert "merge happened" in err.lower() or "was merged" in err.lower()
+        # And that only the proof is missing, plus a re-run instruction.
+        assert "irreversible" in err.lower()
+        assert "99999" in err
+
+    def test_emit_returns_unrecognized_status_exits_nonzero(
+        self, vnx_env, monkeypatch, capsys,
+    ):
+        """Failure shape 2: append_status not recognized (the 'unknown' branch)."""
+        self._merge_succeeds(monkeypatch, vnx_env)
+        # Missing key entirely -> merge_pr defaults to "unknown".
+        monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **kw: {})
+
+        result = pr_merge.merge_pr(
+            pr_number=88888, receipts_file=str(vnx_env["receipts_path"]),
+        )
+
+        assert result["success"] is True
+        assert result["receipt_ok"] is False
+        assert result["receipt_status"] == "unknown"
+        err = capsys.readouterr().err
+        assert "irreversible" in err.lower()
+
+    def test_emit_returns_explicit_unknown_status_exits_nonzero(
+        self, vnx_env, monkeypatch,
+    ):
+        """A literal 'unknown' status is the same third branch — fail safe."""
+        self._merge_succeeds(monkeypatch, vnx_env)
+        monkeypatch.setattr(
+            pr_merge, "_emit_receipt", lambda **kw: {"append_status": "unknown"},
+        )
+
+        result = pr_merge.merge_pr(
+            pr_number=77777, receipts_file=str(vnx_env["receipts_path"]),
+        )
+
+        assert result["success"] is True
+        assert result["receipt_ok"] is False
+        assert result["receipt_status"] == "unknown"
+
+    def test_main_exits_nonzero_when_receipt_emit_raises(self, monkeypatch, capsys):
+        """End-to-end through main(): merge ok + receipt raise -> EXIT_ERROR."""
+        go = {"verdict": "GO", "message": "ok", "overridden": False, "override_reason": None}
+        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(go), {"headRefOid": "a" * 40}))
+        monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (dict(go), None))
+
+        def fake_merge(**k):
+            return {
+                "success": True, "pr_number": 5, "dispatch_id": "", "merge_method": "squash",
+                "pr_title": "", "branch": "", "receipt_status": "error: boom",
+                "receipt_ok": False, "register_ok": False,
+                "error": "", "dry_run": False, "overlaps": [],
+            }
+
+        monkeypatch.setattr(pr_merge, "merge_pr", fake_merge)
+
+        rc = pr_merge.main(["--pr", "5"])
+
+        assert rc == pr_merge.EXIT_ERROR
+        captured = capsys.readouterr()
+        # The output must distinguish "merge happened + proof missing" from a
+        # plain merge failure. It must NOT read as "the merge failed".
+        assert "WAS MERGED" in captured.err or "was merged" in captured.err.lower()
+
+    def test_appended_receipt_exits_zero(self, vnx_env, monkeypatch, capsys):
+        """Success shape: appended -> exit 0. Guards against an over-tight fix."""
+        self._merge_succeeds(monkeypatch, vnx_env)
+        monkeypatch.setattr(
+            pr_merge, "_emit_receipt", lambda **kw: {"append_status": "appended"},
+        )
+
+        result = pr_merge.merge_pr(
+            pr_number=5, receipts_file=str(vnx_env["receipts_path"]),
+        )
+
+        assert result["success"] is True
+        assert result["receipt_ok"] is True
+        assert result["receipt_status"] == "appended"
+
+    def test_duplicate_receipt_exits_zero(self, vnx_env, monkeypatch):
+        """Success shape: duplicate -> exit 0 (idempotent re-emit is not a fault)."""
+        self._merge_succeeds(monkeypatch, vnx_env)
+        monkeypatch.setattr(
+            pr_merge, "_emit_receipt", lambda **kw: {"append_status": "duplicate"},
+        )
+
+        result = pr_merge.merge_pr(
+            pr_number=6, receipts_file=str(vnx_env["receipts_path"]),
+        )
+
+        assert result["success"] is True
+        assert result["receipt_ok"] is True
+        assert result["receipt_status"] == "duplicate"
+
+    def test_main_exits_zero_when_receipt_landed(self, monkeypatch, capsys):
+        """End-to-end through main(): merge ok + receipt ok -> EXIT_OK."""
+        go = {"verdict": "GO", "message": "ok", "overridden": False, "override_reason": None}
+        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(go), {"headRefOid": "a" * 40}))
+        monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (dict(go), None))
+
+        def fake_merge(**k):
+            return {
+                "success": True, "pr_number": 5, "dispatch_id": "", "merge_method": "squash",
+                "pr_title": "", "branch": "", "receipt_status": "appended",
+                "receipt_ok": True, "register_ok": True,
+                "error": "", "dry_run": False, "overlaps": [],
+            }
+
+        monkeypatch.setattr(pr_merge, "merge_pr", fake_merge)
+
+        rc = pr_merge.main(["--pr", "5"])
+        assert rc == pr_merge.EXIT_OK
+
+    def test_dry_run_still_exits_zero_without_receipt(self, monkeypatch, capsys):
+        """--dry-run is unchanged: no merge, no receipt, exit 0."""
+        go = {"verdict": "GO", "message": "ok", "overridden": False, "override_reason": None}
+        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(go), {"headRefOid": "a" * 40}))
+        monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (dict(go), None))
+
+        def fake_merge(**k):
+            return {
+                "success": True, "pr_number": 5, "dispatch_id": "", "merge_method": "squash",
+                "pr_title": "", "branch": "", "receipt_status": None, "receipt_ok": False,
+                "register_ok": False,
+                "error": "dry_run: no merge executed", "dry_run": True, "overlaps": [],
+            }
+
+        monkeypatch.setattr(pr_merge, "merge_pr", fake_merge)
+
+        rc = pr_merge.main(["--pr", "5", "--dry-run"])
+        assert rc == pr_merge.EXIT_OK
+        assert "dry-run" in capsys.readouterr().out
+
+    def test_json_carries_receipt_ok_and_distinguishes_three_outcomes(
+        self, monkeypatch, capsys,
+    ):
+        """--json is machine-readable and carries the three outcomes distinctly."""
+        go = {"verdict": "GO", "message": "ok", "overridden": False, "override_reason": None}
+        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(go), {"headRefOid": "a" * 40}))
+        monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (dict(go), None))
+
+        def fake_merge(**k):
+            return {
+                "success": True, "pr_number": 5, "dispatch_id": "", "merge_method": "squash",
+                "pr_title": "", "branch": "", "receipt_status": "error: boom",
+                "receipt_ok": False, "register_ok": False,
+                "error": "", "dry_run": False, "overlaps": [],
+            }
+
+        monkeypatch.setattr(pr_merge, "merge_pr", fake_merge)
+
+        rc = pr_merge.main(["--pr", "5", "--json"])
+        assert rc == pr_merge.EXIT_ERROR
+        raw = capsys.readouterr().out
+        # main() prints gate lines before the JSON; take the last JSON object.
+        out = json.loads(raw[raw.index("{"):])
+        # merge happened but proof missing — both fields present and distinct.
+        assert out["success"] is True
+        assert out["receipt_ok"] is False
