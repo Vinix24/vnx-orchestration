@@ -100,6 +100,15 @@ REASON_PR_MERGED = "pr_merged"
 REASON_PR_CLOSED = "pr_closed"
 REASON_NO_PR_BRANCH_GONE = "no_pr_branch_gone"
 REASON_NO_PR_BRANCH_EXISTS = "no_pr_branch_exists"
+# OI-1532 (2026-08-30): a live dispatch holds an occupancy lock on an open file
+# description, and the kernel releases it the instant the holder exits
+# (scripts/lib/dispatch_worktree_isolation.py:502-520). The runner asks that
+# lock to split branch_exists=False ("gone" | "never pushed yet") into three
+# answers: gone AND dead, gone but still running, or gone and liveness
+# unmeasurable. These three reasons book exactly those branches — never the
+# silent default the old two-way ``False`` collapsed them into.
+REASON_NO_PR_BRANCH_GONE_LIVE = "no_pr_branch_gone_live"
+REASON_NO_PR_BRANCH_GONE_UNMEASURED = "no_pr_branch_gone_unmeasured"
 
 # Distinct sentinel gate key for explicit no-gate records (dispatch
 # 20260816-gate-never-skippable). Deliberately NOT a member of the Gate enum: a
@@ -469,6 +478,8 @@ __all__ = [
     "REASON_PR_CLOSED",
     "REASON_NO_PR_BRANCH_GONE",
     "REASON_NO_PR_BRANCH_EXISTS",
+    "REASON_NO_PR_BRANCH_GONE_LIVE",
+    "REASON_NO_PR_BRANCH_GONE_UNMEASURED",
     "TERMINAL_STATUSES",
     "NO_GATE_KEY",
     "obligations_dir",

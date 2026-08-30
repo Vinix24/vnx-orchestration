@@ -649,6 +649,12 @@ def test_runner_retires_obligation_when_dispatch_died_without_pr(tmp_path, monke
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
     monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
     monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    # OI-1532: a dead dispatch's occupancy lock is held by nobody — the kernel
+    # released it when the holder exited. Mock the liveness probe to False so
+    # the three-way branch reaches the unchanged "retire" outcome; without this
+    # the probe reads None (no lock file in the temp state dir) and the runner
+    # correctly stays pending rather than retiring on unmeasured liveness.
+    monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
 
     summary = runner.run(state_dir)
 
@@ -1462,6 +1468,8 @@ def test_runner_still_retires_when_no_evidence_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
     monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
     monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    # OI-1532: dead dispatch — occupancy lock held by nobody.
+    monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
 
     summary = runner.run(state_dir)
 
@@ -1647,6 +1655,10 @@ def test_evidence_discriminator_verdict_split(
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
     monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
     monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    # OI-1532: dead dispatch — occupancy lock held by nobody. The not_executable
+    # row falls through to retire (no usable evidence); the decided rows are
+    # rescued by evidence before the liveness branch is reached.
+    monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
     _write_result_record(
         state_dir, filename=f"pr-9750-{result_status}-codex_gate",
         dispatch_id=dispatch_id, gate="codex_gate", pr_number=9750,
@@ -1706,6 +1718,14 @@ def test_dry_run_and_real_run_choose_the_same_action(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
     monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
     monkeypatch.setattr(runner, "_branch_exists_on_github", branch_exists)
+    # OI-1532: the parity-retire dispatch is dead (branch gone, no live holder).
+    # parity-rescued is rescued by evidence before the liveness branch; the
+    # branch_exists mock already returns True for parity-pending so liveness is
+    # never probed there. Mock once for the one case that reaches the probe.
+    monkeypatch.setattr(
+        runner, "_dispatch_is_live",
+        lambda sd, did: False if did.endswith("parity-retire") else None,
+    )
 
     dry_summary = runner.run(dry_dir, write=False)
     real_summary = runner.run(real_dir, write=True)
@@ -1744,6 +1764,8 @@ def test_summary_reports_action_counts_breakdown(tmp_path, monkeypatch):
         runner, "_branch_exists_on_github",
         lambda did, owner_repo: did.endswith("counts-pending"),
     )
+    # OI-1532: counts-retire is a dead dispatch (branch gone, no live holder).
+    monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
 
     summary = runner.run(state_dir, write=False)
 

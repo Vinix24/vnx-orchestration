@@ -90,6 +90,46 @@ De derde producentgroep in de registry, `review_gate_obligations`
    cadans → stale-finding voor díé gate — een levende zuster-gate maskeert een
    dode niet meer (de les uit OI-881).
 
+## 1c. De verplichtingslevenscyclus — drie toestanden, twee grenzen (OI-1532)
+
+Een `awaiting`-obligatie (repo resolveert, `gh` werkt, geen PR) kent twee
+beslissingen die een CONTRACT zijn, niet een implementatiedetail:
+
+**Tak A — `branch_exists is False` is drieledig.** Dat ene signaal vouwt
+"branch bestond en is verwijderd" samen met "branch is nog nooit aangemaakt
+omdat de dispatch NOG DRAAIT". De discriminator die ze scheidt is de
+occupancy-lock van de dispatch
+(`<state_dir>/dispatch_worktree_claims/<safe_id>.occupancy`): een `fcntl.flock`
+op een open file description die de KERNEL vrijgeeft zodra de houder eindigt.
+Drie antwoorden, nooit een stille keuze voor een van de twee:
+
+| `dispatch_live` | Betekenis | Beslissing |
+|---|---|---|
+| `False` | dispatch dood, lock vrijgegeven | `retired` (`no_pr_branch_gone`) |
+| `True`  | dispatch draait nog, niet gepusht | `pending` (`no_pr_branch_gone_live`) — nooit retired |
+| `None`  | liveness niet vast te stellen | `pending` (`no_pr_branch_gone_unmeasured`) — niet retired, zichtbaar |
+
+De `None`-tak is een DERDE antwoord, geen stille default: een levende dispatch
+mag nooit op ambigu bewijs worden afgeboekt (OI-1388), en een onmeetbare wordt
+zichtbaar gemarkeerd zodat hij niet als normale wacht wordt weggelezen.
+
+**Tak B — `stay_pending` is begrensd.** Een echte wacht (branch bestaat of
+onduidelijk) probeert niet eeuwig opnieuw. Na
+`_STAY_PENDING_ESCALATION_ATTEMPTS` pogingen (== `_UNRESOLVABLE_ESCALATION_ATTEMPTS`,
+96 × 900s ≈ 24u — dezelfde constante als de twee andere begrensde takken,
+nooit een tweede grens ernaast) escaleert de wacht luid naar `not_executable`
+(`stay_pending_timeout`).
+
+**Waarom de monitor dit niet alleen oppakt.** De docstring bij de runner
+verwijst naar de producer-freshness-monitor als vangnet voor eeuwig wachtende
+verplichtingen. Dat vangnet werkt alleen op stores waar de monitor draait.
+Gemeten 30-08: op `mission-control` draait de monitor niet (geen heartbeat,
+geen NDJSON — de launchd-plist resolveert naar `vnx-dev`); op `vnx-dev` draait
+hij wel (10 findings, status stale). De 11 obligaties op 776 pogingen op
+mission-control hebben daarom acht dagen niets gealarmeerd. De grens in de
+runner is niet overbodig: hij is het vangnet dat werkt ongeacht of de monitor
+draait, en hij sluit de wachtlus die de monitor veronderstelt te vangen.
+
 ## 2. Exit-status-capture
 
 Twee capture-paden naar `<state_dir>/job_exits.ndjson`:
