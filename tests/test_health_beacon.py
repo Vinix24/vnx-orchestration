@@ -287,12 +287,15 @@ def test_beacon_summary_rolls_up_overall_state(tmp_path: Path) -> None:
     assert summary["counts"]["ok"] == 1
 
 
-def test_event_driven_beacon_never_stale(tmp_path: Path) -> None:
+def test_event_driven_beacon_within_backstop_still_trusts_ok(tmp_path: Path) -> None:
+    """An event-driven beacon well within the freshness backstop still
+    trusts a self-reported "ok" as-is — no interval to check age against,
+    but recent enough that "no news is good news" still applies."""
     health_dir = tmp_path / "health"
     health_dir.mkdir(parents=True)
     payload = {
         "component": "evented",
-        "last_run_ts": int(time.time() - 1_000_000),
+        "last_run_ts": int(time.time() - 3600),  # 1h old
         "last_run_iso": "2020-01-01T00:00:00Z",
         "status": "ok",
         "details": {},
@@ -302,6 +305,28 @@ def test_event_driven_beacon_never_stale(tmp_path: Path) -> None:
 
     result = all_beacons(tmp_path)
     assert result["evented"]["health"] == "ok"
+
+
+def test_event_driven_beacon_past_backstop_is_unknown_not_ok(tmp_path: Path) -> None:
+    """D3a gap 4: an event-driven beacon (no interval) that died mid-"ok"
+    used to stay "ok" forever — no age check applied to it at all. Past
+    _EVENT_DRIVEN_MAX_AGE_SECONDS (7 days) its self-reported "ok" can no
+    longer be trusted, so it becomes "unknown" — a distinct "I cannot
+    verify this beacon's freshness" outcome, never a favorable default."""
+    health_dir = tmp_path / "health"
+    health_dir.mkdir(parents=True)
+    payload = {
+        "component": "evented",
+        "last_run_ts": int(time.time() - 1_000_000),  # ~11.6 days — past the 7d backstop
+        "last_run_iso": "2020-01-01T00:00:00Z",
+        "status": "ok",
+        "details": {},
+        "expected_interval_seconds": None,
+    }
+    (health_dir / "evented.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = all_beacons(tmp_path)
+    assert result["evented"]["health"] == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -381,3 +406,143 @@ def test_event_driven_beacon_with_status_fail_is_fail(tmp_path: Path) -> None:
 
     result = all_beacons(tmp_path)
     assert result["evented_failer"]["health"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# D3a gap 1 — a self-reported non-"ok" status can never be judged more
+# favorably than what the component itself said.
+# ---------------------------------------------------------------------------
+
+def _write_raw_beacon(health_dir: Path, name: str, **overrides) -> None:
+    health_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "component": name,
+        "last_run_ts": int(time.time()),
+        "last_run_iso": "2020-01-01T00:00:00Z",
+        "status": "ok",
+        "details": {},
+        "expected_interval_seconds": 86400,
+    }
+    payload.update(overrides)
+    (health_dir / f"{name}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_self_reported_stale_status_is_honored_not_upgraded_to_ok(tmp_path: Path) -> None:
+    """The exact producer_freshness_monitor case: a fresh (well within its
+    interval), self-reported status="stale" beacon must classify as
+    health="stale", not "ok" — the old code only special-cased the literal
+    string "fail", so any other non-ok status (including "stale" itself)
+    fell through to "ok"."""
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(health_dir, "producer_freshness_monitor", status="stale")
+
+    result = all_beacons(tmp_path)
+    assert result["producer_freshness_monitor"]["health"] == "stale"
+
+
+def test_unrecognized_self_reported_status_falls_to_fail_not_ok(tmp_path: Path) -> None:
+    """A component that self-reports something this module has never seen
+    before ("degraded", "warn", ...) must fall to the unfavorable side —
+    never "ok"."""
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(health_dir, "flaky_thing", status="degraded")
+
+    result = all_beacons(tmp_path)
+    assert result["flaky_thing"]["health"] == "fail"
+
+
+def test_missing_status_field_falls_to_fail_not_ok(tmp_path: Path) -> None:
+    """A beacon payload with no status field at all (status=None) must not
+    default to "ok" — the writer told us nothing, which is not the same as
+    telling us it is fine."""
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(health_dir, "silent_on_status", status=None)
+
+    result = all_beacons(tmp_path)
+    assert result["silent_on_status"]["health"] == "fail"
+
+
+def test_self_reported_stale_on_event_driven_beacon_is_honored(tmp_path: Path) -> None:
+    """The same gap 1 fix applies to the event-driven (interval=None)
+    branch, within the freshness backstop — both branches must agree."""
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "evented_stale_reporter", status="stale",
+        expected_interval_seconds=None,
+    )
+
+    result = all_beacons(tmp_path)
+    assert result["evented_stale_reporter"]["health"] == "stale"
+
+
+# ---------------------------------------------------------------------------
+# D3a gap 2 — a component expected to write a beacon but never has is a
+# distinct, more suspect outcome ("absent") than one that wrote and went
+# stale. `expected=None` (the default) must be fully backward compatible.
+# ---------------------------------------------------------------------------
+
+def test_expected_none_is_backward_compatible(tmp_path: Path) -> None:
+    """Omitting `expected` entirely (the pre-D3a call shape every existing
+    consumer uses) must produce byte-for-byte the same output as before —
+    no synthetic entries appear."""
+    HealthBeacon(tmp_path, "present").heartbeat()
+    result = all_beacons(tmp_path)
+    assert set(result.keys()) == {"present"}
+
+
+def test_expected_component_with_no_beacon_is_absent(tmp_path: Path) -> None:
+    HealthBeacon(tmp_path, "present").heartbeat()
+    result = all_beacons(tmp_path, expected=["present", "never_wrote"])
+    assert result["present"]["health"] == "ok"
+    assert result["never_wrote"] == {"component": "never_wrote", "health": "absent"}
+
+
+def test_expected_with_no_health_dir_at_all_still_reports_absent(tmp_path: Path) -> None:
+    """A fresh checkout / brand-new data dir with no health/ directory yet
+    is the loudest absence case of all — every expected name must still
+    surface, not short-circuit to an empty result."""
+    result = all_beacons(tmp_path, expected=["never_ran"])
+    assert result == {"never_ran": {"component": "never_ran", "health": "absent"}}
+
+
+def test_expected_empty_sequence_adds_nothing(tmp_path: Path) -> None:
+    """An explicitly empty `expected` is a real, deliberate "expect
+    nothing" — distinct in intent from `None`, but the same output."""
+    HealthBeacon(tmp_path, "present").heartbeat()
+    result = all_beacons(tmp_path, expected=())
+    assert set(result.keys()) == {"present"}
+
+
+def test_beacon_summary_absent_flips_overall_to_fail(tmp_path: Path) -> None:
+    """D3a gap 2's own trap: adding a health value to `counts` without
+    teaching `overall` about it leaves the roll-up silently unchanged. An
+    absent expected component is at least as bad as a confirmed fail."""
+    HealthBeacon(tmp_path, "good").heartbeat()
+    summary = beacon_summary(tmp_path, expected=["good", "never_wrote"])
+    assert summary["counts"]["absent"] == 1
+    assert summary["overall"] == "fail"
+
+
+def test_beacon_summary_unknown_flips_overall_to_stale(tmp_path: Path) -> None:
+    """An event-driven beacon past the freshness backstop ("unknown") is
+    "can't verify", not "confirmed bad" — it joins the milder stale tier,
+    not the fail tier."""
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "long_dead",
+        status="ok", expected_interval_seconds=None,
+        last_run_ts=int(time.time() - 1_000_000),
+    )
+    summary = beacon_summary(tmp_path)
+    assert summary["counts"]["unknown"] == 1
+    assert summary["overall"] == "stale"
+
+
+def test_beacon_summary_counts_always_include_absent_and_unknown_keys(tmp_path: Path) -> None:
+    """Consumers should be able to rely on all six keys always being
+    present (at 0 when unused), matching the existing four-key convention."""
+    HealthBeacon(tmp_path, "good").heartbeat()
+    summary = beacon_summary(tmp_path)
+    assert summary["counts"] == {
+        "ok": 1, "stale": 0, "fail": 0, "corrupt": 0, "absent": 0, "unknown": 0,
+    }

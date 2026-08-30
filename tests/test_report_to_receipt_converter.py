@@ -1212,16 +1212,23 @@ class TestRejectionVisibility:
 
     def test_zero_receipts_scan_flips_health_beacon_to_fail(self, reports_dir, state_dir):
         """The scan's counts land on the existing HealthBeacon channel
-        (health/report_to_receipt_converter.json — health_beacon.py, the
-        same mechanism producer_freshness_monitor.py uses for its own
+        (<data_root>/health/report_to_receipt_converter.json — health_beacon.py,
+        the same mechanism producer_freshness_monitor.py uses for its own
         heartbeat) so a scan that attempted conversions but produced zero
-        receipts reads as unhealthy, not as a quiet no-op."""
+        receipts reads as unhealthy, not as a quiet no-op.
+
+        The beacon lands under state_dir.parent (the data root), NOT
+        state_dir itself (D3a gap 3: state_dir is $VNX_STATE_DIR, and every
+        reader — build_t0_state.py's _build_system_health chief among them —
+        resolves data_dir = state_dir.parent before calling
+        health_beacon.all_beacons())."""
         _write_report_without_model(reports_dir / "20260601-no-model-2.md", "20260601-no-model-2")
 
         scan_and_convert([reports_dir], state_dir)
 
-        beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
+        beacon_path = state_dir.parent / "health" / "report_to_receipt_converter.json"
         assert beacon_path.exists()
+        assert not (state_dir / "health" / "report_to_receipt_converter.json").exists()
         beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
         assert beacon["status"] == "fail"
         assert beacon["details"]["rejected_count"] == 1
@@ -1237,7 +1244,7 @@ class TestRejectionVisibility:
         assert stats.new_count == 1
         assert stats.rejected_count == 1
 
-        beacon_path = state_dir / "health" / "report_to_receipt_converter.json"
+        beacon_path = state_dir.parent / "health" / "report_to_receipt_converter.json"
         beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
         assert beacon["status"] == "ok"
 

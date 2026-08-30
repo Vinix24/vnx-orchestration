@@ -1394,12 +1394,23 @@ class ScanStats:
 def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     """Surface this scan's counts via the existing HealthBeacon channel.
 
-    Writes <state_dir>/health/report_to_receipt_converter.json — the same
-    mechanism producer_freshness_monitor.py uses for its own
-    health/producer_freshness_monitor.json heartbeat (scripts/lib/health_beacon.py),
-    auto-discovered by health_beacon.all_beacons() / beacon_summary() (consumed
-    by scripts/health_check.py, dashboard/api_health.py, vnx_cli subsystems).
+    Writes <state_dir.parent>/health/report_to_receipt_converter.json — the
+    same mechanism producer_freshness_monitor.py, ledger_health.py, and
+    cleanup_worker_exit.py all use for their own heartbeats
+    (scripts/lib/health_beacon.py), auto-discovered by
+    health_beacon.all_beacons() / beacon_summary() (consumed by
+    scripts/health_check.py, dashboard/api_health.py, vnx_cli subsystems).
     Reusing this channel means no new monitoring surface is invented (OI-998).
+
+    ``state_dir`` here is $VNX_STATE_DIR (<data_root>/state — it holds
+    t0_receipts.ndjson), NOT the data root HealthBeacon expects (D3a gap 3:
+    this was the one writer in the fleet that passed state_dir straight
+    through instead of its parent, landing its beacon at
+    <data_root>/state/health/ where nothing reads it — every reader that
+    resolves ``data_dir = state_dir.parent`` before calling all_beacons(),
+    build_t0_state.py's _build_system_health chief among them, only looks
+    at <data_root>/health/. cleanup_worker_exit.py's own call site already
+    does the ``.parent`` correctly; this one didn't).
 
     status="fail" specifically for the case this dispatch closes: reports
     were scanned this cycle (attempted_count > 0) but NONE resulted in a
@@ -1419,7 +1430,7 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
         status = "fail"
 
     beacon = HealthBeacon(
-        state_dir, _HEALTH_COMPONENT, expected_interval_seconds=_HEALTH_EXPECTED_INTERVAL_SECONDS,
+        state_dir.parent, _HEALTH_COMPONENT, expected_interval_seconds=_HEALTH_EXPECTED_INTERVAL_SECONDS,
     )
     beacon.heartbeat(  # best-effort: swallows OSError internally
         status=status,

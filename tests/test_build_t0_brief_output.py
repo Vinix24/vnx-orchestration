@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
+import beacon_register
 import daemon_register
 from build_t0_state import _state_to_brief, main
 
@@ -37,6 +38,20 @@ def _stub_daemon_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         daemon_register, "measure_daemon_liveness",
         lambda *_a, **_k: dict(_NEUTRAL_DAEMON_LIVENESS),
+    )
+
+
+# D3a4: the same tmp_path sandbox has no components on record with
+# beacon_register's static discovery either -- expected_component_names()
+# walks this repo's real HealthBeacon(...) call sites, which beacon_summary
+# then treats as components that owe a beacon but never wrote one, degrading
+# system_health.status / main()'s exit code just like daemon_liveness above.
+# Neutralize the same way: inject an empty expected-set so these tests stay
+# isolated from both live sources, not just one of them.
+def _stub_beacon_register(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        beacon_register, "expected_component_names",
+        lambda *_a, **_k: (),
     )
 
 
@@ -129,6 +144,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_beacon_register(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "brief"]):
             rc = main()
@@ -158,6 +174,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_beacon_register(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "brief"]):
             rc = main()
@@ -181,6 +198,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_beacon_register(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "state"]):
             rc = main()

@@ -81,20 +81,31 @@ class TestStatusCannotBeHealthierThanBeacon:
         }
         (health_dir / "stale_comp.json").write_text(_json.dumps(stale_payload), encoding="utf-8")
 
-        health = bts._build_system_health(state_dir, db_initialized=True)
+        # expected_beacon_components=() isolates from this repo's real
+        # beacon-writer register (D3a) the same way daemon_liveness is
+        # explicitly injected below to isolate from real daemon-process
+        # state — this test is about stale-beacon propagation, not absence.
+        health = bts._build_system_health(
+            state_dir, db_initialized=True, expected_beacon_components=(),
+        )
         assert health["beacon_health"]["overall"] == "stale"
         assert health["status"] != "healthy"
 
     def test_ok_beacon_allows_healthy_status(self, tmp_path: Path) -> None:
         # daemon_liveness is injected as neutral "ok" so this test isolates
         # beacon behavior instead of depending on which real daemons happen
-        # to be running on the machine executing the suite.
+        # to be running on the machine executing the suite. Same reasoning
+        # for expected_beacon_components=() (D3a): the real repo's 9
+        # beacon-writer names would otherwise show up as "absent" against
+        # this bare tmp_path and force overall to "fail".
         state_dir = _state_dir_with_terminal_marker(tmp_path)
         HealthBeacon(state_dir.parent, "good_comp", expected_interval_seconds=3600).heartbeat(
             status="ok", details={}
         )
         health = bts._build_system_health(
-            state_dir, db_initialized=True, daemon_liveness={"overall": "ok", "daemons": {}},
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            expected_beacon_components=(),
         )
         assert health["beacon_health"]["overall"] == "ok"
         assert health["status"] == "healthy"
@@ -113,6 +124,42 @@ class TestStatusCannotBeHealthierThanBeacon:
         assert health["status"] == "failed"
 
 
+class TestExpectedBeaconComponentsMonotonic:
+    """D3a gap 2: a component expected to write a beacon but never has is
+    the most suspect case of all -- invisible to a plain glob over what
+    exists in health/. expected_beacon_components is the injection point
+    (mirrors daemon_liveness's own test-isolation pattern above)."""
+
+    def test_missing_expected_beacon_component_is_absent_and_forbids_healthy_status(
+        self, tmp_path: Path,
+    ) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        # No beacon is ever written for "never_ran" -- only declared expected.
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            expected_beacon_components=("never_ran",),
+        )
+        bh = health["beacon_health"]
+        assert bh["beacons"]["never_ran"]["health"] == "absent"
+        assert bh["overall"] == "fail"
+        assert health["status"] != "healthy"
+
+    def test_real_register_runs_when_not_injected(self, tmp_path: Path) -> None:
+        """Default (no expected_beacon_components param) exercises the real
+        beacon_register discovery over this repo's scripts/ tree -- must not
+        raise, and t0_state_builder (this very module's own beacon name) is
+        always a real, statically-discoverable writer, so on a bare tmp_path
+        with no beacons written at all it is reported absent."""
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True, daemon_liveness={"overall": "ok", "daemons": {}},
+        )
+        bh = health["beacon_health"]
+        assert bh["beacons"]["t0_state_builder"]["health"] == "absent"
+        assert bh["overall"] == "fail"
+
+
 class TestDaemonLivenessMonotonic:
     def test_injected_daemon_fail_forbids_healthy_status(self, tmp_path: Path) -> None:
         state_dir = _state_dir_with_terminal_marker(tmp_path)
@@ -127,6 +174,10 @@ class TestDaemonLivenessMonotonic:
         assert health["status"] != "healthy"
 
     def test_injected_daemon_ok_allows_healthy_status(self, tmp_path: Path) -> None:
+        # expected_beacon_components=() isolates from this repo's real
+        # beacon-writer register (D3a) -- this test writes no beacon at all,
+        # so without the override every one of the real names would read
+        # "absent" and force status to "degraded".
         state_dir = _state_dir_with_terminal_marker(tmp_path)
         daemon_liveness = {
             "overall": "ok",
@@ -134,6 +185,7 @@ class TestDaemonLivenessMonotonic:
         }
         health = bts._build_system_health(
             state_dir, db_initialized=True, daemon_liveness=daemon_liveness,
+            expected_beacon_components=(),
         )
         assert health["status"] == "healthy"
 
@@ -144,6 +196,7 @@ class TestDaemonLivenessMonotonic:
         daemon_liveness = {"overall": "unknown", "daemons": {}, "reason": "psutil unavailable"}
         health = bts._build_system_health(
             state_dir, db_initialized=True, daemon_liveness=daemon_liveness,
+            expected_beacon_components=(),
         )
         assert health["status"] == "healthy"
 
