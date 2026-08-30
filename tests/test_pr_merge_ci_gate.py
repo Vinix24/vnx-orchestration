@@ -137,7 +137,8 @@ class TestMainGateWiring:
     def _ok_result(self):
         return {
             "success": True, "pr_number": 5, "dispatch_id": "", "merge_method": "squash",
-            "pr_title": "", "branch": "", "receipt_status": None, "register_ok": False,
+            "pr_title": "", "branch": "", "receipt_status": None, "receipt_ok": False,
+            "register_ok": False,
             "error": "", "dry_run": True, "overlaps": [],
         }
 

@@ -93,6 +93,18 @@ EXIT_ERROR = 1
 # Matches internal PR labels: pure numeric (PR-42) and alphanumeric (PR-HYG-1, PR-TMUX-3, PR-ROUTE-1).
 _PR_LABEL_RE = re.compile(r"\bPR-([A-Z0-9]+(?:-[A-Z0-9]+)*)\b", re.IGNORECASE)
 
+# OI-1518: AppendResult.status values that count as a BINDING receipt landed.
+# A grep of `AppendResult(` across the whole tree yields exactly two producers
+# (lib/append_receipt_internals/idempotency.py: "appended" + "duplicate";
+# lib/report_to_receipt_converter.py: "duplicate"). No third value exists, so
+# this is an allowlist, not a blocklist: any other value is refused. The
+# "unknown" default (a missing `append_status` key) is NOT a third value — it
+# means "this code could not read the outcome", which is its own third branch:
+# neither success nor a known fault, so it fails safe. Two failure shapes land
+# here together: _emit_receipt raising, and _emit_receipt returning a status
+# that is not recognized. Both must make the CLI exit non-zero.
+_RECEIPT_OK_STATUSES = frozenset({"appended", "duplicate"})
+
 
 def _extract_pr_id(subject: str) -> Optional[str]:
     """Extract internal PR-N/PR-LABEL from commit subject or PR title.
@@ -513,7 +525,12 @@ def merge_pr(
     callers that never ran a gate.
 
     Returns a dict with keys: success, pr_number, dispatch_id, merge_method,
-    pr_title, branch, receipt_status, register_ok, error.
+    pr_title, branch, receipt_status, receipt_ok, register_ok, error.
+
+    ``success`` means "the merge happened on GitHub" — it is NOT the CLI
+    verdict. A merge whose receipt could not be written has ``success=True``
+    but ``receipt_ok=False``, and the CLI exits non-zero (OI-1518). Use
+    ``receipt_ok`` to know whether the binding audit-trail evidence landed.
     """
     result: Dict[str, Any] = {
         "success": False,
@@ -523,6 +540,7 @@ def merge_pr(
         "pr_title": "",
         "branch": "",
         "receipt_status": None,
+        "receipt_ok": False,
         "register_ok": False,
         "error": "",
         "dry_run": dry_run,
@@ -570,7 +588,13 @@ def merge_pr(
         dispatch_id = _lookup_dispatch_id_by_pr_number(pr_number)
     result["dispatch_id"] = dispatch_id
 
-    # Emit receipt to t0_receipts.ndjson
+    # Emit receipt to t0_receipts.ndjson. OI-1518: the receipt is BINDING — a
+    # merge whose proof could not be written must NOT exit 0. Two failure
+    # shapes both land here: _emit_receipt raising (handled below), and
+    # _emit_receipt returning an `append_status` that is not a recognized
+    # success value (including a missing key -> "unknown" default). Both set
+    # receipt_ok=False so the CLI exits non-zero. The register event stays
+    # best-effort and is not touched.
     try:
         receipt = _emit_receipt(
             pr_number=pr_number,
@@ -582,10 +606,27 @@ def merge_pr(
             pr_id_resolution="" if pr_id else "unmatched",
             receipts_file=receipts_file,
         )
-        result["receipt_status"] = receipt.get("append_status", "unknown")
+        append_status = (receipt or {}).get("append_status", "unknown")
+        result["receipt_status"] = append_status
+        result["receipt_ok"] = append_status in _RECEIPT_OK_STATUSES
+        if not result["receipt_ok"]:
+            print(
+                f"FATAL: merge happened for PR #{pr_number} but the receipt did NOT "
+                f"land (append_status={append_status!r}). The merge on GitHub is "
+                f"irreversible. Re-run `python3 scripts/pr_merge.py --pr {pr_number}` "
+                f"after fixing the receipts file so the audit-trail evidence is captured.",
+                file=sys.stderr,
+            )
     except Exception as exc:
         result["receipt_status"] = f"error: {exc}"
-        print(f"WARN: receipt emit failed for PR #{pr_number}: {exc}", file=sys.stderr)
+        result["receipt_ok"] = False
+        print(
+            f"FATAL: merge happened for PR #{pr_number} but the receipt could NOT be "
+            f"written: {exc}. The merge on GitHub is irreversible. Re-run "
+            f"`python3 scripts/pr_merge.py --pr {pr_number}` after fixing the error "
+            f"so the audit-trail evidence is captured.",
+            file=sys.stderr,
+        )
 
     # Emit event to dispatch_register.ndjson (best-effort)
     result["register_ok"] = _emit_register_event(
@@ -672,16 +713,37 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.json:
         print(json.dumps(result, indent=2))
-    elif result["success"]:
-        dry_label = " (dry-run)" if args.dry_run else ""
-        print(f"OK: PR #{args.pr} merged{dry_label} via {method}")
-        if result.get("receipt_status") and not args.dry_run:
+    elif args.dry_run:
+        # dry-run: no merge, no receipt, exit 0 (unchanged behavior).
+        print(f"OK: PR #{args.pr} (dry-run) via {method}")
+    elif result["success"] and result["receipt_ok"]:
+        # merge gebeurd + receipt geland -> exit 0
+        print(f"OK: PR #{args.pr} merged via {method}")
+        if result.get("receipt_status"):
             print(f"    receipt: {result['receipt_status']}")
-            print(f"    register: {'ok' if result['register_ok'] else 'warn-not-written'}")
+        print(f"    register: {'ok' if result['register_ok'] else 'warn-not-written'}")
+    elif result["success"] and not result["receipt_ok"]:
+        # merge gebeurd + receipt NIET geland -> non-zero, tekst maakt
+        # onmiskenbaar duidelijk dat de merge wél is doorgegaan en alleen
+        # het bewijs ontbreekt (OI-1518). De FATAL-regel is al op stderr
+        # gezet in merge_pr(); hier de korte samenvatting op stdout.
+        print(
+            f"ERROR: PR #{args.pr} WAS MERGED but the receipt did not land "
+            f"(status={result.get('receipt_status')!r}). The merge is irreversible; "
+            f"only the audit-trail proof is missing. See stderr.",
+            file=sys.stderr,
+        )
     else:
+        # merge niet gebeurd -> non-zero, bestaande tekst
         print(f"ERROR: {result['error']}", file=sys.stderr)
 
-    return EXIT_OK if result["success"] else EXIT_ERROR
+    # CLI verdict (OI-1518): exit 0 only on dry-run, or on a merge whose
+    # binding receipt actually landed. A merge without proof is non-zero.
+    if args.dry_run:
+        return EXIT_OK
+    if result["success"] and result["receipt_ok"]:
+        return EXIT_OK
+    return EXIT_ERROR
 
 
 if __name__ == "__main__":
