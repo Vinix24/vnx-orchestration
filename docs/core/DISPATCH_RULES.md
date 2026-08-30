@@ -100,6 +100,20 @@ PR/gate work is routed through `vnx dispatch`, which selects the lane; the singl
 
 **Known gap (OI-188):** no lane reliably edits files under `.claude/skills/` — Claude treats the loaded skill dir as read-only. Edit skill files manually from T0/operator.
 
+### 5.1 The side-door audit gate — three states, an override, a fail switch
+
+`scripts/lib/dispatch_sidedoor_audit.py` (CI step "Side-door exhaustiveness audit" in `vnx-ci.yml`) scans for files that invoke a lane script as a delivery path and classifies each into THREE states, not two:
+
+- **(a) door-routed** — the invocation routes through the door (`dispatch_bridge.deliver_via_door`). Handled, no finding. `DOOR_ROUTED_CALLERS`.
+- **(b) known OPEN side door** — the file calls a lane directly (not through the door) and is tracked until closed. A loud finding, reported by name with `owner`, `closure`, and `tracking`. `OPEN_SIDE_DOORS` (structured records — a comment is NOT a closure condition).
+- **(c) unaudited** — a scanned caller in neither list. A NEW side door; the watcher FAILS.
+
+Override (house style of `VNX_OVERRIDE_WORKER_CLAUDE`): `VNX_OVERRIDE_SIDEDOOR=1` plus a non-empty `VNX_OVERRIDE_SIDEDOOR_REASON`. The flag is INERT without the reason — a flag with no reason never lets a bypass through (blocking refusal). It only ever softens a bucket-(b) fail, never an unaudited (c) caller.
+
+The bypass is recorded, not just allowed: each applied override appends one NDJSON record (timestamp, reason, path, owner, closure, tracking) to `<data-dir>/state/sidedoor_overrides.ndjson` (same tree as receipts and escalations). Count how often: `wc -l <data-dir>/state/sidedoor_overrides.ndjson`; read the fields back via `dispatch_sidedoor_audit.read_sidedoor_overrides(<path>)`.
+
+The fail switch is `FAIL_ON_OPEN_SIDEDOOR` in `dispatch_sidedoor_audit.py`. It is **OFF in this PR** (bucket (b) reports loudly but exits 0). **Deel 2 (route `plan_gate_panel.py` through the door) flips it ON in the same PR** that closes the open side door, so main never goes red between the two. A green watcher while `plan_gate_panel.py` is still under `OPEN_SIDE_DOORS` is a dated choice, not a property of the gate.
+
 ## 6. Concurrency — claude-tmux is subscription-session-capped (serialize, N-slot)
 
 `claude-tmux` runs on Claude **subscription** sessions, which have a concurrent-session cap **shared with every other Claude agent on the account** (production agents, other terminals). Exceeding it = the dispatch immediate-exits in ~0.1s (`rc=1`), NOT a code error.
