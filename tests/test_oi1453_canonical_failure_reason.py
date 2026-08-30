@@ -4,20 +4,23 @@
 for phantom_guard and pr_enforcement; gate result records never adopted it.
 
 Re-measured across the whole central store on 2026-08-30, three project stores,
-739 non-pass gate-result records:
+501 non-pass gate-result records (non-pass defined canonically as
+``gate_status.is_pass`` returning ``False``, which counts ``completed``/
+``approve`` as a pass and therefore excludes them from the non-pass set):
 
-    failure_reason filled:  4 of 739
+    failure_reason filled:  6 of 501
 
-    summary          790 filled (prose, often frontmatter-derived)
-    residual_risk    699 filled (prose, often frontmatter-derived)
-    reason           397 filled (a CLASSIFICATION: provider_not_installed 145,
-                                 claude_github_not_configured 63, exit_nonzero
-                                 60, provider_disabled 57, dispatch_error 6 ...)
-    reason_detail    270 filled (a CAUSE: "codex binary not found in PATH" 106,
-                                  "Subprocess exited with code 1" 59,
+    summary          392 filled (prose, often frontmatter-derived)
+    residual_risk    389 filled (prose, often frontmatter-derived)
+    reason           434 filled (a CLASSIFICATION: provider_not_installed 142,
+                                 claude_github_not_configured 109, exit_nonzero
+                                 104, provider_disabled 57, dispatch_error 6 ...)
+    reason_detail    311 filled (a CAUSE: "Subprocess exited with code 1" 103,
+                                  "gemini binary not found in PATH" 84,
+                                  "codex binary not found in PATH" 57,
                                   "VNX_CI_GATE_REQUIRED is set to 0" 57 ...)
-    blocking_findings  64 filled (a cause)
-    failure_reason     4 filled (the gap OI-1453 opens)
+    blocking_findings  66 filled (a cause)
+    failure_reason     6 filled (the gap OI-1453 opens)
 
 ``failure_reason`` carries a CAUSE, never a category, a summary, or a
 placeholder. The cause reaches it by one of three routes, and only those:
@@ -178,7 +181,7 @@ def test_residual_risk_alone_is_not_lifted_into_the_canonical_field():
     A field named "remaining risk" is where a 403 ends up, and it is the last
     place a generic reader looks. But a derivation that lifted it would also
     lift every frontmatter-derived sentence that merely resembles a cause
-    (measured 2026-08-30: 648 of 739 non-pass records carry ``residual_risk``
+    (measured 2026-08-30: 389 of 501 non-pass records carry ``residual_risk``
     prose). The real cause reaches the canonical field by a different route:
     the lane-log lift (OI-1452) stamps ``failure_reason`` directly in the
     report frontmatter when it found a real marker, so the ``existing``

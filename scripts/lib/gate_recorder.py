@@ -409,8 +409,10 @@ def _check_overwrite_guard(
         )
 
 
-# A CAUSE, not a category. Measured 2026-08-30 over 739 non-pass gate-result
-# records across every project store: ``reason_detail`` carries an actual
+# A CAUSE, not a category. Measured 2026-08-30 over 501 non-pass gate-result
+# records across every project store (non-pass defined canonically as
+# ``gate_status.is_pass`` returning False, which counts ``completed``/
+# ``approve`` as a pass): ``reason_detail`` carries an actual
 # cause ("codex binary not found in PATH", "Subprocess exited with code 1"),
 # ``reason`` carries a CLASSIFICATION ("provider_not_installed",
 # "dispatch_error", "exit_nonzero"), and ``residual_risk``/``summary`` carry

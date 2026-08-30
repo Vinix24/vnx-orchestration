@@ -403,8 +403,10 @@ at the one point every result record passes through on its way to disk
 (`gate_recorder._write_result_atomic`).
 
 The field carries a **cause**, never a category, a summary, or a placeholder.
-Measured 2026-08-30 over 739 non-pass gate-result records across every project
-store, the cause on a record lives under one of these names and only these:
+Measured 2026-08-30 over 501 non-pass gate-result records across every project
+store (non-pass defined canonically as `gate_status.is_pass` returning `False`,
+which counts `completed`/`approve` as a pass and therefore excludes them), the
+cause on a record lives under one of these names and only these:
 
 | field | what it is | route into `failure_reason` |
 |-------|-----------|------------------------------|
