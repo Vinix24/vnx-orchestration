@@ -1332,6 +1332,29 @@ def test_build_role_without_gate_is_refused_even_with_empty_paths(tmp_path, monk
 # ---------------------------------------------------------------------------
 
 
+# OI-1571 tak 3: _has_decided_evidence now requires a sha binding MATCH
+# before any evidence-discriminator test below counts as "found". This is
+# the shared head sha every _write_result_record call below stamps by
+# default, matched by the autouse _stub_pr_head_sha fixture just below it —
+# neither of these tests is about sha binding (that gets its own dedicated
+# coverage in test_gate_obligation_runner.py's TestTakeoverChainEvidence),
+# so both sides default to a fixed, matching sentinel rather than each test
+# individually mocking a gh call.
+_DEFAULT_TEST_HEAD_SHA = "deadbeef00" * 4
+
+
+@pytest.fixture(autouse=True)
+def _stub_pr_head_sha(monkeypatch):
+    """Hermetic default: no test in this file exercises real gh access, and
+    without this every attempt_gate/_fulfilling_result path would shell out
+    to ``gh pr view`` for a synthetic pr_number (OI-1571 tak 3 added this
+    call). Returns :data:`_DEFAULT_TEST_HEAD_SHA` for every pr_number,
+    matching the ``commit_sha`` :func:`_write_result_record` stamps by
+    default.
+    """
+    monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: _DEFAULT_TEST_HEAD_SHA)
+
+
 def _write_result_record(
     state_dir: Path,
     *,
@@ -1343,6 +1366,7 @@ def _write_result_record(
     contract_hash: str = "sha256:deadbeef",
     report_path: str | None = "__auto__",
     status: str = "pass",
+    commit_sha: str = _DEFAULT_TEST_HEAD_SHA,
 ) -> Path:
     """Write a ``review_gates/results/<filename>.json`` record.
 
@@ -1358,6 +1382,11 @@ def _write_result_record(
     "complete evidence" record for any verdict — pass, a decided fail
     (``failed``/``errored``/``blocked``), or ``not_executable`` — to pin the
     evidence discriminator's verdict-aware split.
+
+    ``commit_sha`` (OI-1571 tak 3, default :data:`_DEFAULT_TEST_HEAD_SHA`)
+    matches what the autouse ``_stub_pr_head_sha`` fixture returns for every
+    pr_number — pass a different value (or ``""``) to build a
+    mismatched/unverifiable record for a test that specifically wants one.
     """
     results_dir = Path(state_dir) / "review_gates" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1374,6 +1403,7 @@ def _write_result_record(
         "status": status,
         "contract_hash": contract_hash,
         "report_path": report_path or "",
+        "commit_sha": commit_sha,
     }
     path = results_dir / f"{filename}.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -1471,7 +1501,7 @@ def test_evidence_discriminator_missing_record_is_not_evidence(tmp_path):
     """Bucket 1 of 4: no result record at all for this dispatch_id+gate."""
     state_dir = _make_state_dir(tmp_path)
     index = runner._index_gate_results(state_dir)
-    assert runner._fulfilling_result(index, "no-such-dispatch", "codex_gate") is None
+    assert runner._fulfilling_result(index, "no-such-dispatch", "codex_gate")["kind"] == "absent"
 
 
 def test_evidence_discriminator_empty_contract_hash_is_not_evidence(tmp_path):
@@ -1482,7 +1512,7 @@ def test_evidence_discriminator_empty_contract_hash_is_not_evidence(tmp_path):
         gate="codex_gate", pr_number=1, contract_hash="",
     )
     index = runner._index_gate_results(state_dir)
-    assert runner._fulfilling_result(index, "d-empty-hash", "codex_gate") is None
+    assert runner._fulfilling_result(index, "d-empty-hash", "codex_gate")["kind"] == "absent"
 
 
 def test_evidence_discriminator_empty_report_path_is_not_evidence(tmp_path):
@@ -1493,7 +1523,7 @@ def test_evidence_discriminator_empty_report_path_is_not_evidence(tmp_path):
         gate="codex_gate", pr_number=2, report_path="",
     )
     index = runner._index_gate_results(state_dir)
-    assert runner._fulfilling_result(index, "d-empty-report", "codex_gate") is None
+    assert runner._fulfilling_result(index, "d-empty-report", "codex_gate")["kind"] == "absent"
 
 
 def test_evidence_discriminator_nonexistent_report_file_is_not_evidence(tmp_path):
@@ -1506,7 +1536,7 @@ def test_evidence_discriminator_nonexistent_report_file_is_not_evidence(tmp_path
         report_path=str(state_dir / "review_gates" / "reports" / "ghost.md"),
     )
     index = runner._index_gate_results(state_dir)
-    assert runner._fulfilling_result(index, "d-ghost-report", "codex_gate") is None
+    assert runner._fulfilling_result(index, "d-ghost-report", "codex_gate")["kind"] == "absent"
 
 
 def test_evidence_discriminator_finds_complete_evidence(tmp_path):
@@ -1518,9 +1548,9 @@ def test_evidence_discriminator_finds_complete_evidence(tmp_path):
         gate="codex_gate", pr_number=4,
     )
     index = runner._index_gate_results(state_dir)
-    found = runner._fulfilling_result(index, "d-complete", "codex_gate")
-    assert found is not None
-    found_path, found_record = found
+    lookup = runner._fulfilling_result(index, "d-complete", "codex_gate")
+    assert lookup["kind"] == "found"
+    found_path, found_record = lookup["entry"]
     assert found_path == result_path
     assert found_record["dispatch_id"] == "d-complete"
 
@@ -1547,7 +1577,7 @@ def test_evidence_discriminator_rejects_not_executable_even_with_complete_eviden
         gate="codex_gate", pr_number=5, status="not_executable",
     )
     index = runner._index_gate_results(state_dir)
-    assert runner._fulfilling_result(index, "d-not-executable", "codex_gate") is None
+    assert runner._fulfilling_result(index, "d-not-executable", "codex_gate")["kind"] == "absent"
 
 
 def test_evidence_discriminator_rejects_undecided_status_even_with_complete_evidence(tmp_path):
@@ -1561,7 +1591,7 @@ def test_evidence_discriminator_rejects_undecided_status_even_with_complete_evid
         gate="codex_gate", pr_number=6, status="unavailable",
     )
     index = runner._index_gate_results(state_dir)
-    assert runner._fulfilling_result(index, "d-undecided", "codex_gate") is None
+    assert runner._fulfilling_result(index, "d-undecided", "codex_gate")["kind"] == "absent"
 
 
 def test_evidence_discriminator_accepts_decided_fail_as_evidence(tmp_path):
@@ -1575,9 +1605,9 @@ def test_evidence_discriminator_accepts_decided_fail_as_evidence(tmp_path):
         gate="codex_gate", pr_number=7, status="failed",
     )
     index = runner._index_gate_results(state_dir)
-    found = runner._fulfilling_result(index, "d-decided-fail", "codex_gate")
-    assert found is not None
-    found_path, _found_record = found
+    lookup = runner._fulfilling_result(index, "d-decided-fail", "codex_gate")
+    assert lookup["kind"] == "found"
+    found_path, _found_record = lookup["entry"]
     assert found_path == result_path
 
 
@@ -1744,6 +1774,7 @@ def test_contradiction_flags_already_retired_obligation_with_reason_none(tmp_pat
     )
     result_path = _write_result_record(
         state_dir, filename="pr-1-codex_gate", dispatch_id="d-already-retired", gate="codex_gate",
+        pr_number=1,
     )
 
     summary = runner.run(state_dir, write=False)
@@ -1775,6 +1806,7 @@ def test_contradiction_flags_already_not_executable_obligation(tmp_path):
     )
     _write_result_record(
         state_dir, filename="pr-2-ci_gate", dispatch_id="d-already-not-exec", gate="ci_gate",
+        pr_number=2,
     )
 
     summary = runner.run(state_dir, write=True)
@@ -1802,6 +1834,7 @@ def test_contradiction_bucket_distinguishes_empty_from_missing_reason(tmp_path):
     )
     _write_result_record(
         state_dir, filename="pr-3-codex_gate", dispatch_id="d-empty-reason", gate="codex_gate",
+        pr_number=3,
     )
 
     summary = runner.run(state_dir, write=False)
@@ -1857,6 +1890,7 @@ def test_contradiction_scan_covers_full_store_not_just_scope(tmp_path):
     )
     _write_result_record(
         state_dir, filename="pr-5-codex_gate", dispatch_id="20260101-out-of-scope", gate="codex_gate",
+        pr_number=5,
     )
 
     summary = runner.run(state_dir, write=False, since="2026-08-01")

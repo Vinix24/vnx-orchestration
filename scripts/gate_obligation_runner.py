@@ -141,6 +141,7 @@ from gate_status import (  # noqa: E402
     has_complete_evidence,
     is_pass as _gate_is_pass,
 )
+from gate_executor import _classify_sha_binding  # noqa: E402
 
 _LOG = logging.getLogger("gate_obligation_runner")
 
@@ -196,6 +197,16 @@ _TEMPORARY_NOT_EXECUTABLE_REASONS = frozenset({
     "provider_not_installed",
 })
 _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
+
+# OI-1569 Klaar item 8: a genuine gate run measures 91-405s; a quota refusal
+# measures 3-15s; a silent stale-evidence fulfilment (the PR #1719/#1736
+# defect this dispatch fixes) measured 7s. None of duration_seconds (absent
+# on some lanes by design), recorded_at (cannot tell "just written" from
+# "written minutes ago" on its own), or the result file's mtime alone proves
+# which of these a booking is — together they can. 60s is comfortably above
+# the fastest real quota-refusal bucket and comfortably below the fastest
+# genuine-run bucket measured; see _flag_fast_fulfillment_if_evidence_predates_attempt.
+_FAST_FULFILLMENT_MTIME_THRESHOLD_SECONDS = 60
 
 # PR-resolution outcomes. The runner must tell "no PR yet" (a wait) apart from
 # "cannot resolve because the environment is wrong" (a fault) IN THE RECORD,
@@ -598,6 +609,62 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
 # ---------------------------------------------------------------------------
 
 
+def _get_pr_head_sha_for_gate(pr_number: Optional[int]) -> str:
+    """The PR's current GitHub head commit sha, for OI-1571 tak 3 sha-binding
+    checks (:func:`_has_decided_evidence`).
+
+    A thin wrapper around ``gate_recorder.get_pr_head_sha`` -- the SAME
+    canonical source ``gate_executor._execute_requested_gates`` already uses
+    for its own sha-binding check (OI-1307/B6: gh, never a local ``git
+    rev-parse HEAD``, which would answer for the runner's own checkout, not
+    the PR). A separate, module-level wrapper here (rather than a call
+    inline) so tests can monkeypatch this runner's own resolution
+    independently of gate_executor's identical call. Returns "" for a
+    missing/invalid pr_number -- :func:`gate_executor._classify_sha_binding`
+    already treats an empty sha on either side as ``unknown``, never a
+    ``mismatch``.
+    """
+    if not isinstance(pr_number, int) or pr_number <= 0:
+        return ""
+    from gate_recorder import get_pr_head_sha  # noqa: PLC0415
+
+    return get_pr_head_sha(pr_number)
+
+
+def _flag_fast_fulfillment_if_evidence_predates_attempt(
+    result_file: Path, gate: str, pr_number: int, dispatch_id: str,
+) -> Optional[str]:
+    """OI-1569 Klaar item 8: a fulfilment/failure booked from a result FILE
+    that was not actually touched by this attempt is not provably a fresh
+    run this cycle. A LOUD warning, never a new blocking mechanism — a
+    dispatch with no new commits can legitimately reuse an already-current
+    evidence file, and that must still fulfil — this only makes the shape
+    VISIBLE (log line + returned detail for the outcome) so a silent
+    stale-evidence fulfilment stays observable even if some future change
+    reopens the hole the sha check in :func:`fulfill_obligation` closes.
+
+    Returns None when the file is missing/unreadable or was touched
+    recently enough (age < :data:`_FAST_FULFILLMENT_MTIME_THRESHOLD_SECONDS`)
+    — the overwhelmingly common, unremarkable case.
+    """
+    try:
+        mtime = result_file.stat().st_mtime
+    except OSError:
+        return None
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    age_seconds = datetime.now(timezone.utc).timestamp() - mtime
+    if age_seconds < _FAST_FULFILLMENT_MTIME_THRESHOLD_SECONDS:
+        return None
+    detail = (
+        f"{gate} fulfilment for PR #{pr_number} (dispatch {dispatch_id}) used "
+        f"evidence whose file was last written {age_seconds:.0f}s before this "
+        "attempt resolved — not provably a fresh run this cycle (OI-1569 Klaar item 8)"
+    )
+    _LOG.warning("gate_obligation_runner: %s", detail)
+    return detail
+
+
 def _build_manager(state_dir: Path):
     """Construct a ReviewGateManager pinned to the runner's state dir.
 
@@ -689,9 +756,19 @@ def _index_gate_results(
     return index
 
 
-def _has_decided_evidence(record: Dict[str, Any]) -> bool:
-    """True when ``record`` is a DECIDED pass/fail gate verdict carrying a
-    complete, still-on-disk evidence trail.
+# OI-1571 tak 3: four outcomes for "is this record usable evidence", never
+# collapsed to a bare bool. A record can be structurally decided (complete
+# evidence, on-disk report, a real pass/fail verdict) and STILL not count —
+# because it is evidence about a DIFFERENT commit than the PR head, or
+# because whether it is current or not cannot even be determined.
+_EVIDENCE_NOT_DECIDED = "not_decided"
+_EVIDENCE_USABLE = "usable"
+_EVIDENCE_MISMATCH = "mismatch"
+_EVIDENCE_UNKNOWN_SHA = "unknown_sha"
+
+
+def _has_decided_evidence(record: Dict[str, Any], head_sha: str) -> Tuple[str, str]:
+    """Classify whether ``record`` is USABLE evidence for the PR at ``head_sha``.
 
     "Complete evidence" mirrors ``gate_status.has_complete_evidence``
     (non-empty ``contract_hash`` AND ``report_path`` — the same bar
@@ -702,55 +779,128 @@ def _has_decided_evidence(record: Dict[str, Any]) -> bool:
     any other status that is not a decided pass/fail (incomplete,
     ``unavailable``, or unrecognised) — only :func:`gate_status.is_pass`
     returning True, or a status in :data:`gate_status.FAIL_STATES`, counts.
+    Any of these gaps returns :data:`_EVIDENCE_NOT_DECIDED`.
+
+    OI-1571 tak 3: a record that clears every check above can still be
+    evidence about ANOTHER commit -- measured live on PR #1719 (a glm_gate
+    verdict from the day before, about a since-superseded head) and PR #1736
+    (a codex_gate verdict left on disk by an earlier dispatch against the
+    same PR, picked up unchanged by a later one). This function is the
+    single place that decides that, via
+    :func:`gate_executor._classify_sha_binding` -- the SAME function the
+    merge door and the fresh-execution path already use, never a second sha
+    comparison:
+
+      - ``match``    -> :data:`_EVIDENCE_USABLE`: the ONLY outcome a caller
+        may treat as found.
+      - ``mismatch`` -> :data:`_EVIDENCE_MISMATCH`: provably about a
+        different commit. A caller must reject it exactly as it would
+        reject "no evidence", but the returned detail names both shas so
+        whatever record documents the rejection can carry the reason.
+      - ``unknown``  -> :data:`_EVIDENCE_UNKNOWN_SHA`: the binding itself
+        could not be determined (``head_sha`` or the record's own
+        ``commit_sha`` is empty). A THIRD outcome, distinct from both
+        ``usable`` and ``mismatch`` -- a caller must suspend judgement
+        (never silently accept, never silently refuse) rather than guess
+        which of the two this unverifiable case actually is.
 
     Factored out of :func:`_fulfilling_result` (D2e) so the OI-1388
     evidence-index lookup and the takeover-chain walk
     (:func:`_find_takeover_successor_evidence`, which reads records fresh
     off disk rather than through an index) share exactly ONE "is this
     usable evidence" predicate instead of two that could silently drift
-    apart.
+    apart -- and, since D2e, the declared-gate gating check inside
+    :func:`fulfill_obligation` shares it too: a THIRD direct call site,
+    not just the two above.
     """
     if not has_complete_evidence(record):
-        return False
+        return _EVIDENCE_NOT_DECIDED, "incomplete evidence (contract_hash/report_path)"
     if not Path(str(record.get("report_path"))).exists():
-        return False
+        return _EVIDENCE_NOT_DECIDED, "report_path no longer exists on disk"
     status = _gate_canonical_status(record)
     if status == "not_executable":
-        return False
+        return _EVIDENCE_NOT_DECIDED, "not_executable is never evidence — the gate never ran"
     passed, _reason = _gate_is_pass(record)
-    return passed or status in _GATE_RESULT_FAIL_STATES
+    if not (passed or status in _GATE_RESULT_FAIL_STATES):
+        return _EVIDENCE_NOT_DECIDED, f"status {status!r} is not a decided pass/fail verdict"
+
+    result_sha = str(record.get("commit_sha") or "")
+    binding = _classify_sha_binding(head_sha, result_sha)
+    if binding == "match":
+        return _EVIDENCE_USABLE, "commit_sha matches the PR head"
+    if binding == "mismatch":
+        return _EVIDENCE_MISMATCH, (
+            f"result records commit {result_sha[:8] or '?'} but the PR head is "
+            f"{head_sha[:8] or '?'} — this verdict is about other code"
+        )
+    return _EVIDENCE_UNKNOWN_SHA, (
+        "sha binding unknown — head_sha or the record's commit_sha is missing; "
+        "cannot verify whether this evidence belongs to the current head"
+    )
 
 
 def _fulfilling_result(
     index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
     dispatch_id: str,
     gate: str,
-) -> Optional[Tuple[Path, Dict[str, Any]]]:
-    """Return the (path, record) of a complete-evidence, DECIDED result for
-    ``(dispatch_id, gate)`` — a gate that actually ran and reached a verdict.
+) -> Dict[str, Any]:
+    """Scan the ``(dispatch_id, gate)`` bucket for a complete-evidence,
+    DECIDED, sha-CURRENT result — a gate that actually ran, reached a
+    verdict, and is provably about the PR's current head.
 
     OI-1388 defect 1: a terminal retirement/escalation must never overwrite
-    evidence that a gate already produced. "Usable evidence" is
-    :func:`_has_decided_evidence` — four distinct non-evidence states are
-    rejected there: a result that is entirely absent (empty index bucket,
-    checked here), one whose evidence fields are empty strings, one whose
-    ``report_path`` points at a file that no longer exists, and one whose
-    verdict itself is not decided (BETA3-C2).
+    evidence that a gate already produced. OI-1571 tak 3 tightens "already
+    produced" to also mean "still about the current commit" — each
+    candidate's PR head is resolved fresh via
+    :func:`_get_pr_head_sha_for_gate` off the CANDIDATE record's own
+    ``pr_number`` (never the caller's obligation, which by construction
+    could not resolve one — that is exactly why this rescue path exists).
 
-    The caller determines PASS vs. FAIL on the returned record via
+    Returns a dict, never a bare ``Optional[Tuple]`` (OI-1571 tak 3: an
+    UNVERIFIABLE candidate must not collapse into "nothing found" — that
+    would silently retire/escalate over evidence that might still be
+    current):
+
+      - ``{"kind": "found", "entry": (path, record)}`` — sha-matching,
+        decided evidence. The only outcome a caller may fulfil/fail on.
+      - ``{"kind": "unverifiable", "entry": (path, record), "detail": ...}``
+        — decided evidence exists but its sha binding could not be
+        verified. A caller must suspend judgement, not retire/escalate.
+      - ``{"kind": "absent", "detail": Optional[str]}`` — nothing decided
+        and current was found. ``detail`` carries the reason for the first
+        MISMATCH seen (both shas), when one was, so a caller's
+        retire/escalate record can document why a candidate was rejected
+        rather than silently proceeding as if nothing existed at all.
+
+    The caller determines PASS vs. FAIL on a ``"found"`` entry via
     :func:`gate_status.is_pass` — this function only answers "does usable
     evidence exist", never "what should the obligation be stamped".
     """
+    unverifiable: Optional[Tuple[Path, Dict[str, Any], str]] = None
+    mismatch_detail: Optional[str] = None
     for entry, record in index.get((dispatch_id, gate), []):
-        if _has_decided_evidence(record):
-            return entry, record
-    return None
+        candidate_pr = record.get("pr_number")
+        head_sha = (
+            _get_pr_head_sha_for_gate(candidate_pr) if isinstance(candidate_pr, int) else ""
+        )
+        kind, detail = _has_decided_evidence(record, head_sha)
+        if kind == _EVIDENCE_USABLE:
+            return {"kind": "found", "entry": (entry, record)}
+        if kind == _EVIDENCE_UNKNOWN_SHA and unverifiable is None:
+            unverifiable = (entry, record, detail)
+        if kind == _EVIDENCE_MISMATCH and mismatch_detail is None:
+            mismatch_detail = detail
+    if unverifiable is not None:
+        entry, record, detail = unverifiable
+        return {"kind": "unverifiable", "entry": (entry, record), "detail": detail}
+    return {"kind": "absent", "detail": mismatch_detail}
 
 
 def _find_takeover_successor_evidence(
     manager: Any,
     declared_gate: str,
     pr_number: int,
+    head_sha: str,
 ) -> Optional[Tuple[str, Path, Dict[str, Any], List[str]]]:
     """D2e (dispatch 20260830-120000-d2e-takeover-keten-bewijs): walk the
     review-gate takeover chain FORWARD from ``declared_gate``, reading each
@@ -793,6 +943,15 @@ def _find_takeover_successor_evidence(
     separate dispatch, E2) walks off the end of ``chain`` here exactly the
     same way a chain that never produced any evidence at all does, and
     both correctly return ``None``.
+
+    OI-1571 tak 3: a successor's own record can ALSO be decided/complete
+    but about a different commit (the live PR #1719 case: a glm_gate PASS
+    from the day before) or sha-unverifiable. Both are rejected here via
+    :func:`_has_decided_evidence` exactly like an incomplete/undecided
+    record — the walk simply keeps going. The caller
+    (:func:`fulfill_obligation`) is the one that must not silently retire a
+    dispatch just because THIS walk found nothing usable; the walk itself
+    only ever answers "found" or "found nothing", same as before D2e.
     """
     from gate_request_handler import _build_review_gate_takeover_chain  # noqa: PLC0415
 
@@ -811,7 +970,8 @@ def _find_takeover_successor_evidence(
             continue
         if not isinstance(candidate_record, dict):
             continue
-        if not _has_decided_evidence(candidate_record):
+        kind, _detail = _has_decided_evidence(candidate_record, head_sha)
+        if kind != _EVIDENCE_USABLE:
             continue
         return current, candidate_path, candidate_record, hops
     return None
@@ -846,10 +1006,10 @@ def _terminal_evidence_contradictions(
         if not gate or gate == NO_GATE_KEY:
             continue
         dispatch_id = str(record.get("dispatch_id") or path.stem)
-        evidence = _fulfilling_result(result_index, dispatch_id, gate)
-        if evidence is None:
+        lookup = _fulfilling_result(result_index, dispatch_id, gate)
+        if lookup["kind"] != "found":
             continue
-        evidence_path, _evidence_record = evidence
+        evidence_path, _evidence_record = lookup["entry"]
         reason = record.get("reason")
         contradictions.append(
             {
@@ -916,12 +1076,16 @@ def _pre_execution_decision(
       - ``stay_pending``               — genuine wait (branch alive / undetermined)
       - ``retire``                     — dead dispatch, no rescuing evidence
       - ``fulfill_by_evidence``        — OI-1388 defect 1: a complete-evidence
-        DECIDED PASS already exists for this dispatch_id + gate; carried as
-        ``decision["evidence"] = (path, record)``
+        DECIDED PASS, sha-current with the PR head, already exists for this
+        dispatch_id + gate; carried as ``decision["evidence"] = (path, record)``
       - ``fulfill_by_failed_evidence`` — BETA3-C2: same rescue, but the
         existing evidence is a DECIDED FAIL — never booked as
         ``fulfill_by_evidence``, or the obligation would launder a rejection
         into a clean pass; also carries ``decision["evidence"]``
+      - ``sha_unverifiable``           — OI-1571 tak 3: a complete, decided
+        result exists but its sha binding to the PR head could not be
+        verified. NEITHER a rescue NOR a retire/escalate — a third outcome
+        that suspends judgement; carries ``decision["detail"]``
       - ``attempt_gate``               — PR resolved: the caller must actually
         run the gate to learn the outcome (only the real run does this)
 
@@ -929,22 +1093,30 @@ def _pre_execution_decision(
     evidence here — :func:`_fulfilling_result` rejects those itself, so a
     dispatch whose only "evidence" is a never-ran gate falls straight through
     to ``retire``/``escalate``/``unresolvable`` exactly as if no result
-    existed at all.
+    existed at all. A DECIDED result about a DIFFERENT commit (OI-1571 tak 3
+    ``mismatch``) is rejected the same way, but the retire/escalate decision
+    carries ``decision["mismatch_detail"]`` when one was seen, so whatever
+    record documents the retirement/escalation can also document why the
+    rejected evidence did not count.
     """
     if resolution.status == RESOLUTION_UNRESOLVABLE:
-        evidence = _fulfilling_result(result_index, dispatch_id, gate)
-        if evidence is not None:
-            return _evidence_decision(evidence)
+        lookup = _fulfilling_result(result_index, dispatch_id, gate)
+        if lookup["kind"] == "found":
+            return _evidence_decision(lookup["entry"])
+        if lookup["kind"] == "unverifiable":
+            return {"kind": "sha_unverifiable", "detail": lookup["detail"]}
         if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
-            return {"kind": "escalate"}
+            return {"kind": "escalate", "mismatch_detail": lookup.get("detail")}
         return {"kind": "unresolvable"}
 
     if resolution.status == RESOLUTION_AWAITING:
         if resolution.branch_exists is False:
-            evidence = _fulfilling_result(result_index, dispatch_id, gate)
-            if evidence is not None:
-                return _evidence_decision(evidence)
-            return {"kind": "retire"}
+            lookup = _fulfilling_result(result_index, dispatch_id, gate)
+            if lookup["kind"] == "found":
+                return _evidence_decision(lookup["entry"])
+            if lookup["kind"] == "unverifiable":
+                return {"kind": "sha_unverifiable", "detail": lookup["detail"]}
+            return {"kind": "retire", "mismatch_detail": lookup.get("detail")}
         return {"kind": "stay_pending"}
 
     return {"kind": "attempt_gate"}
@@ -955,6 +1127,7 @@ _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "escalate": "would_escalate_not_executable",
     "fulfill_by_evidence": "would_stamp",
     "fulfill_by_failed_evidence": "would_stamp_failed",
+    "sha_unverifiable": "would_stay_pending_sha_unverifiable",
     "retire": "would_retire",
     "stay_pending": "would_stay_pending",
     "attempt_gate": "would_fulfill",
@@ -1007,10 +1180,16 @@ def _dry_run_outcome(
             f"verdict — never a clean pass ({evidence_path})"
         )
         outcome["result_path"] = str(evidence_path)
+    elif decision["kind"] == "sha_unverifiable":
+        outcome["detail"] = decision.get("detail")
     elif decision["kind"] == "retire":
         outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
+        if decision.get("mismatch_detail"):
+            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     elif decision["kind"] in ("unresolvable", "escalate"):
         outcome["detail"] = resolution.reason
+        if decision.get("mismatch_detail"):
+            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     return outcome
 
 
@@ -1078,6 +1257,9 @@ def fulfill_obligation(
                 "a dispatch a gate already reviewed must never be retired or "
                 "escalated as unreviewed"
             ),
+            fulfilled_by=gate,
+            takeover_gate=None,
+            evidence_result_path=str(evidence_path),
         )
         outcome["action"] = STATUS_FULFILLED
         outcome["detail"] = (
@@ -1120,6 +1302,9 @@ def fulfill_obligation(
                 "BETA3-C2: the gate DID review this, so the obligation is "
                 "discharged, but a rejection must never be booked as fulfilled"
             ),
+            fulfilled_by=gate,
+            takeover_gate=None,
+            evidence_result_path=str(evidence_path),
         )
         outcome["action"] = STATUS_FAILED
         outcome["detail"] = (
@@ -1130,19 +1315,51 @@ def fulfill_obligation(
         outcome["result_path"] = updated.get("result_path")
         return outcome
 
+    if decision["kind"] == "sha_unverifiable":
+        # OI-1571 tak 3: a complete, decided result exists for this
+        # dispatch+gate, but whether it belongs to the PR's CURRENT head
+        # could not be verified (head_sha or the record's own commit_sha is
+        # missing). Neither the OI-1388 rescue (that requires a confirmed
+        # MATCH) nor a retire/escalate (that would silently discard evidence
+        # that might still be current) applies — a third outcome that
+        # suspends judgement and stays pending, loud about why, so the next
+        # run gets another chance to verify it.
+        update_obligation(
+            path,
+            status=STATUS_PENDING,
+            attempts=attempts,
+            last_attempt_at=now,
+            reason="sha_binding_unverifiable",
+            reason_detail=(
+                f"{gate} has existing complete evidence for dispatch "
+                f"{dispatch_id} but its sha binding to the PR head could not "
+                f"be verified ({decision.get('detail')}) — suspending "
+                "judgement (OI-1571 tak 3) rather than silently accepting or "
+                "discarding it; will re-check on the next run"
+            ),
+        )
+        outcome["detail"] = "existing evidence found but its sha binding is unverifiable"
+        return outcome
+
     if decision["kind"] in ("unresolvable", "escalate"):
         # The environment is wrong (repo unattributable, gh unusable): a fault,
         # not a wait. Record it in a state distinct from ``pending`` so a
         # misconfigured obligation can never masquerade as "not yet". It stays
         # retryable — the env may be fixed — until it crosses the escalation
         # threshold, where it becomes the loud terminal not_executable.
+        mismatch_note = (
+            f" A prior {gate} result exists for this dispatch but is about a "
+            f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
+            "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
+            if decision.get("mismatch_detail") else ""
+        )
         update_obligation(
             path,
             status=STATUS_UNRESOLVABLE,
             attempts=attempts,
             last_attempt_at=now,
             reason="unresolvable_repo",
-            reason_detail=resolution.reason,
+            reason_detail=f"{resolution.reason}{mismatch_note}",
         )
         outcome["action"] = "unresolvable"
         outcome["detail"] = resolution.reason
@@ -1159,7 +1376,7 @@ def fulfill_obligation(
                     f"environment is misconfigured: {resolution.reason}. Fix "
                     "the project attribution (VNX_PROJECT_ID / "
                     "~/.vnx/projects.json / the checkout's git origin remote) "
-                    "and reset this obligation to pending."
+                    f"and reset this obligation to pending.{mismatch_note}"
                 ),
             )
             outcome["action"] = "not_executable"
@@ -1170,6 +1387,12 @@ def fulfill_obligation(
         # gone from origin — nothing will ever gate this obligation.
         # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
         branch_name = f"dispatch/{dispatch_id}"
+        mismatch_note = (
+            f" A prior {gate} result exists for this dispatch but is about a "
+            f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
+            "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
+            if decision.get("mismatch_detail") else ""
+        )
         update_obligation(
             path,
             status=STATUS_RETIRED,
@@ -1182,7 +1405,7 @@ def fulfill_obligation(
                 f"dispatch {dispatch_id} never produced a PR and its head "
                 f"branch {branch_name} no longer exists on "
                 f"{resolution.owner_repo or 'the resolved repo'} — nothing "
-                f"left for {gate} to guard"
+                f"left for {gate} to guard.{mismatch_note}"
             ),
         )
         outcome["action"] = STATUS_RETIRED
@@ -1206,6 +1429,12 @@ def fulfill_obligation(
     # decision["kind"] == "attempt_gate": a PR is resolved — actually run it.
     pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
+    # OI-1571 tak 3: resolved ONCE for this attempt and reused for every sha
+    # check below (the declared gate's own record, the takeover walk, and
+    # the final terminal fallback) — never re-fetched per check, and never a
+    # second implementation of "what is the PR head" (gate_executor's own
+    # fresh-execution sha check uses the exact same source).
+    head_sha = _get_pr_head_sha_for_gate(pr_number)
 
     branch = (
         str(record.get("branch") or "").strip()
@@ -1257,9 +1486,22 @@ def fulfill_obligation(
         # verdict: when it is, the existing handling below books it exactly
         # as it does today, and a successor is never even looked at (D2e:
         # "bewijs bij de gedeclareerde poort zelf wordt gevonden zoals nu").
+        #
+        # OI-1571 tak 3: "decided" now also means sha-CURRENT. A stale-but-
+        # complete record left on disk by an EARLIER dispatch against the
+        # same PR (measured live, PR #1736: an older dispatch's codex_gate
+        # PASS survived untouched because this attempt's codex run never
+        # overwrote it) used to satisfy the old bool check and skip the
+        # takeover walk entirely — declared_kind/declared_detail are reused
+        # below, after the walk, so a MISMATCH/UNKNOWN_SHA declared record
+        # is never silently trusted by the unconditional fallback either.
+        declared_kind, declared_detail = (
+            _has_decided_evidence(result_data, head_sha) if result_data is not None
+            else (_EVIDENCE_NOT_DECIDED, "no result record on disk yet")
+        )
         takeover_hit = None
-        if not (result_data is not None and _has_decided_evidence(result_data)):
-            takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number)
+        if declared_kind != _EVIDENCE_USABLE:
+            takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number, head_sha)
 
         if takeover_hit is not None:
             successor_gate, successor_path, successor_record, hops = takeover_hit
@@ -1287,6 +1529,9 @@ def fulfill_obligation(
                 result_path=str(successor_path),
                 resolved_by_gate=successor_gate,
                 takeover_hops=hops,
+                fulfilled_by=successor_gate,
+                takeover_gate=successor_gate,
+                evidence_result_path=str(successor_path),
                 reason=reason,
                 reason_detail=reason_detail,
             )
@@ -1414,7 +1659,72 @@ def fulfill_obligation(
                 outcome["detail"] = escalation_detail
             return outcome
 
+        # OI-1571 tak 3: reached only when the declared gate's OWN on-disk
+        # record looks decided enough to fall straight through to the
+        # unconditional booking below (its status is a pass/known-terminal
+        # shape) -- but "looks decided" is not "is current". A MISMATCH or
+        # UNKNOWN_SHA declared_kind here means the takeover walk above ALSO
+        # found nothing usable (a match would have short-circuited via
+        # takeover_hit, or declared_kind itself would already be USABLE and
+        # skip this branch entirely) -- so this is the dead end: neither the
+        # declared gate's own evidence nor any successor's is provably about
+        # the current head. Never fall through to the unconditional
+        # STATUS_FULFILLED default on that basis (measured live, PR #1736: a
+        # stale codex_gate PASS from an earlier dispatch against the same PR
+        # booked fulfilled with zero takeover, zero rescue markers).
+        if declared_kind == _EVIDENCE_MISMATCH:
+            update_obligation(
+                path,
+                status=STATUS_PENDING,
+                pr_number=pr_number,
+                branch=branch,
+                attempts=attempts,
+                last_attempt_at=now,
+                request_path=str(manager._request_path(gate, pr_number)),
+                result_path=str(result_file),
+                reason="stale_evidence_sha_mismatch",
+                reason_detail=(
+                    f"{gate}'s own result for PR #{pr_number} is decided but "
+                    f"about a DIFFERENT commit than the PR head "
+                    f"({declared_detail}) and no takeover successor produced "
+                    "current evidence either — staying pending, never booking "
+                    "a verdict about other code (OI-1571 tak 3)"
+                ),
+            )
+            outcome["action"] = "pending"
+            outcome["detail"] = declared_detail
+            return outcome
+
+        if declared_kind == _EVIDENCE_UNKNOWN_SHA:
+            update_obligation(
+                path,
+                status=STATUS_PENDING,
+                pr_number=pr_number,
+                branch=branch,
+                attempts=attempts,
+                last_attempt_at=now,
+                request_path=str(manager._request_path(gate, pr_number)),
+                result_path=str(result_file),
+                reason="sha_binding_unverifiable",
+                reason_detail=(
+                    f"{gate}'s own result for PR #{pr_number} is decided but "
+                    f"its sha binding to the PR head could not be verified "
+                    f"({declared_detail}) and no takeover successor produced "
+                    "verifiable evidence either — suspending judgement "
+                    "(OI-1571 tak 3) rather than silently accepting or "
+                    "refusing it"
+                ),
+            )
+            outcome["action"] = "pending"
+            outcome["detail"] = declared_detail
+            return outcome
+
         terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
+        fast_fulfillment_warning = None
+        if terminal in (STATUS_FULFILLED, STATUS_FAILED):
+            fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
+                result_file, gate, pr_number, dispatch_id,
+            )
         updated = update_obligation(
             path,
             status=terminal,
@@ -1427,6 +1737,11 @@ def fulfill_obligation(
             result_path=str(result_file),
             reason=None if not result.get("has_required_failure") else "required_failure",
             reason_detail=None if terminal == STATUS_FULFILLED else f"result status: {result_status}",
+            fulfilled_by=gate if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None,
+            takeover_gate=None,
+            evidence_result_path=(
+                str(result_file) if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None
+            ),
         )
         # Mirror the status actually persisted to disk — never a hardcoded
         # "fulfilled" label, which would lie about a not_executable/failed
@@ -1436,6 +1751,8 @@ def fulfill_obligation(
         outcome["request_path"] = updated.get("request_path")
         outcome["result_path"] = updated.get("result_path")
         outcome["has_required_failure"] = bool(result.get("has_required_failure"))
+        if fast_fulfillment_warning:
+            outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
         return outcome
     except Exception as exc:  # noqa: BLE001 — a gate that cannot run is a loud registered outcome
         result_payload = _record_loud_not_executable(
@@ -1537,7 +1854,10 @@ def run(
         if not write:
             outcome = _dry_run_outcome(state_dir, path, record, result_index)
             outcomes.append(outcome)
-            if outcome["action"] in ("would_stay_pending", "would_stay_unresolvable", "would_fulfill"):
+            if outcome["action"] in (
+                "would_stay_pending", "would_stay_unresolvable", "would_fulfill",
+                "would_stay_pending_sha_unverifiable",
+            ):
                 pending_after += 1
             continue
         outcome = fulfill_obligation(state_dir, path, record, result_index=result_index)

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,6 +45,12 @@ VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+
+# OI-1569 tak 1+2: _classify_review_seat_failure now recency-gates a
+# lane_exhausted classification (TTL 3600s) -- the fixtures below must carry
+# a FRESH recorded_at, or this file's takeover assertions would start
+# exercising the recency branch instead of the takeover mechanism they test.
+_FRESH_RECORDED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @pytest.fixture
@@ -116,7 +123,7 @@ _KIMI_LANE_EXHAUSTED_RESULT = {
         "contact us via api-feedback@moonshot.cn', "
         "'type': 'access_terminated_error'}}"
     ),
-    "recorded_at": "2026-08-22T09:51:00Z",
+    "recorded_at": _FRESH_RECORDED_AT,
     "branch": "fix/takeover-test",
     "commit_sha": "a" * 40,
 }
