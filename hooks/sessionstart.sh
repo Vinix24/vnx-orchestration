@@ -76,17 +76,23 @@ case "$TERMINAL" in
     # Anchored on this hook's OWN file location (not $PWD), so resolution
     # doesn't depend on which terminal directory happened to be current.
     _VNX_STATE_DIR=""
+    _VNX_DATA_DIR=""
+    _VNX_PY=""
     _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || _HOOK_DIR=""
     if [ -n "$_HOOK_DIR" ] && [ -f "$_HOOK_DIR/../scripts/lib/vnx_paths.py" ]; then
       _VNX_PY="$_HOOK_DIR/../.venv/bin/python"
       [ -x "$_VNX_PY" ] || _VNX_PY="/opt/homebrew/opt/python@3.12/bin/python3.12"
       [ -x "$_VNX_PY" ] || _VNX_PY="python3"
-      _VNX_STATE_DIR="$("$_VNX_PY" -c "
+      _VNX_PATHS_OUT="$("$_VNX_PY" -c "
 import sys
 sys.path.insert(0, '$_HOOK_DIR/../scripts/lib')
 from vnx_paths import resolve_paths
-print(resolve_paths()['VNX_STATE_DIR'])
+p = resolve_paths()
+print(p['VNX_STATE_DIR'])
+print(p['VNX_DATA_DIR'])
 " 2>/dev/null || true)"
+      _VNX_STATE_DIR="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 1p)"
+      _VNX_DATA_DIR="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 2p)"
     fi
 
     if [ -n "$_VNX_STATE_DIR" ] && [ -d "$_VNX_STATE_DIR" ]; then
@@ -127,6 +133,54 @@ ${T0_OPEN_ITEMS:-No open items data}"
       T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: vnx_paths.py unreachable from here>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
     fi
 
+    # ── Beacon health digest (component heartbeats, D3b absence-is-loud) ──
+    # Measured 30-08: 9 component beacons, 7 not "ok" (2 fail, 5 stale), and
+    # none of the 5 existing readers of health_beacon.all_beacons()/
+    # beacon_summary() sit in a human's path without them opening something
+    # first — 2 live behind a dashboard, 2 behind a CLI, and the 5th
+    # (t0_state.json, via scripts/build_t0_state.py) sat frozen for 23 days.
+    # SessionStart is the one moment every session hits unprompted.
+    #
+    # Reuses the EXISTING scripts/health_check.py CLI (an existing
+    # all_beacons() caller) via subprocess instead of importing
+    # health_beacon here directly — the count of distinct call sites into
+    # all_beacons()/beacon_summary() must not grow for this PR (D3b
+    # dispatch). Reads live rather than through t0_state.json: that
+    # projection only refreshes via build_t0_state_hook.sh, which is gated
+    # on VNX_HOME (D1 poort B, unmerged as of this PR) — a live read here
+    # cannot inherit that staleness.
+    BEACON_SECTION=""
+    _HEALTH_CHECK_PY="$_HOOK_DIR/../scripts/health_check.py"
+    if [ -n "$_VNX_DATA_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_HEALTH_CHECK_PY" ]; then
+      _BEACON_JSON="$("$_VNX_PY" "$_HEALTH_CHECK_PY" --state-dir "$_VNX_DATA_DIR" --json 2>/dev/null || true)"
+      if [ -n "$_BEACON_JSON" ] && command -v jq &>/dev/null; then
+        _BEACON_PARSE_OK=$(echo "$_BEACON_JSON" | jq -e '.beacons | type == "object"' >/dev/null 2>&1 && echo yes || echo no)
+        if [ "$_BEACON_PARSE_OK" = "yes" ]; then
+          _BEACON_TOTAL=$(echo "$_BEACON_JSON" | jq '.beacons | length' 2>/dev/null || echo "0")
+          _BEACON_BAD=$(echo "$_BEACON_JSON" | jq -r '
+            [.beacons | to_entries[] | select(.value.health != "ok")]
+            | sort_by(if .value.health == "fail" then 0 elif .value.health == "corrupt" then 1 else 2 end)
+            | .[] | "  - [\(.value.health)] \(.key): last_run \(.value.last_run_iso // "unknown"), age \(.value.age_seconds // "unknown")s"
+          ' 2>/dev/null || true)
+          _BEACON_BAD_COUNT=$(echo "$_BEACON_BAD" | grep -c . || true)
+          if [ "$_BEACON_TOTAL" -eq 0 ] 2>/dev/null; then
+            BEACON_SECTION="Beacon health: 0 component beacons found under ${_VNX_DATA_DIR}/health — either nothing has run yet, or beacons are writing elsewhere. Cannot yet distinguish \"never ran\" from \"nothing to report\" (needs D3a's expected-vs-present register)."
+          elif [ "$_BEACON_BAD_COUNT" -gt 0 ] 2>/dev/null; then
+            BEACON_SECTION="Beacon health: ${_BEACON_TOTAL} components, ${_BEACON_BAD_COUNT} NOT ok
+$_BEACON_BAD"
+          else
+            BEACON_SECTION="Beacon health: ${_BEACON_TOTAL} components, all ok"
+          fi
+        else
+          BEACON_SECTION="BEACON HEALTH UNAVAILABLE this session (UNMEASURED, not zero) — health_check.py did not return a beacons object."
+        fi
+      else
+        BEACON_SECTION="BEACON HEALTH UNAVAILABLE this session (UNMEASURED, not zero) — health_check.py produced no output, or jq is missing."
+      fi
+    else
+      BEACON_SECTION="BEACON HEALTH UNAVAILABLE this session (UNMEASURED, not zero) — data dir unresolved or scripts/health_check.py missing."
+    fi
+
     # ── T0 Orchestrator playbook body (in-context injection) ────────────
     # t0-orchestrator is intentionally not model-invocable
     # (disable-model-invocation: true, A-4 hardening), so its content has to
@@ -155,6 +209,8 @@ Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consum
 Use /t0-orchestrator for orchestration decisions and receipt processing
 
 $T0_STATE_SECTION
+
+$BEACON_SECTION
 
 CRITICAL: After every completion receipt, check quality advisory + open items before proceeding.
 Skills must NOT use @ prefix in Role field. Skill registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer).${T0_SKILL_BODY:+

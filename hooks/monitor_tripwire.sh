@@ -14,6 +14,18 @@
 #
 # Runs at SessionStart (registered in .claude/settings.json), a path that
 # already executes every session. Always exits 0; never blocks a session.
+#
+# Relationship to the full beacon digest (D3b, absence-is-loud): T0 sessions
+# also get a "Beacon health" block from hooks/sessionstart.sh, covering ALL
+# component beacons (via scripts/health_check.py -> health_beacon.py). That
+# digest WILL show a stale producer_freshness_monitor beacon too, so on a T0
+# session the two overlap on this one component. That overlap is intentional,
+# not a duplicate to dedupe: this tripwire is the ONLY one of the two with no
+# Python dependency, so it is the one still standing if a Python breakage
+# (the OI-852 class of bug) takes down health_check.py itself. It also covers
+# every terminal (matcher ""), not just T0. Do not delete this file to
+# "consolidate" onto the Python digest — that would remove the one check that
+# survives the failure mode it exists to catch.
 set -u
 
 # Drain the hook payload from stdin.
