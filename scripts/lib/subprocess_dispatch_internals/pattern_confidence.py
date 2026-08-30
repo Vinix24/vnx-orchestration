@@ -20,7 +20,8 @@ def _capture_dispatch_parameters(
     role: str | None,
     repo_map: str | None,
 ) -> None:
-    """Capture DispatchParameters to dispatch_tracker.db. Never raises."""
+    """Capture DispatchParameters to quality_intelligence.db (dispatch_experiments
+    table — unified from the now-retired dispatch_tracker.db at V18). Never raises."""
     try:
         from dispatch_parameter_tracker import (
             DispatchParameterTracker,

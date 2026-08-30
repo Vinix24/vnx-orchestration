@@ -59,20 +59,37 @@ case "$TERMINAL" in
     # Gather live terminal states (best-effort, 2s timeout)
     T0_TERMINAL_STATES=""
     T0_OPEN_ITEMS=""
-    # Resolve VNX paths for state files
-    _VNX_STATE_DIR=""
-    for _candidate in ".vnx-data/state" ".claude/vnx-data/state"; do
-      _search="$PWD"
-      for _ in 1 2 3 4 5; do
-        if [ -d "$_search/$_candidate" ]; then
-          _VNX_STATE_DIR="$_search/$_candidate"
-          break 2
-        fi
-        _search="$(dirname "$_search")"
-      done
-    done
 
-    if [ -n "$_VNX_STATE_DIR" ]; then
+    # ── Resolve the CENTRAL state dir (ADR-026), same resolver as the runtime ──
+    # The old resolver only checked ".vnx-data/state" / ".claude/vnx-data/state"
+    # up to 5 levels above $PWD — both repo-local candidates. ADR-026 makes the
+    # per-project CENTRAL store (~/.vnx-data/<project_id>/state) canonical, so
+    # a checkout with no repo-local .vnx-data (the normal case since the
+    # central-store cutover) silently found nothing, and this hook injected a
+    # plausible-looking "No open items data" briefing while recent_receipts,
+    # tracks, pr_queue and strategic_state were actually just unreachable
+    # (fail-open). path_parity_check.sh (OI-852) and build_t0_state_hook.sh
+    # (OI-859) hit the identical repo-local-vs-central split-brain and both
+    # fixed it the same way: shell out to the canonical Python resolver
+    # (vnx_paths.resolve_paths), which stays worktree/CWD-agnostic and in
+    # lockstep with the runtime — never a second hand-rolled resolver.
+    # Anchored on this hook's OWN file location (not $PWD), so resolution
+    # doesn't depend on which terminal directory happened to be current.
+    _VNX_STATE_DIR=""
+    _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || _HOOK_DIR=""
+    if [ -n "$_HOOK_DIR" ] && [ -f "$_HOOK_DIR/../scripts/lib/vnx_paths.py" ]; then
+      _VNX_PY="$_HOOK_DIR/../.venv/bin/python"
+      [ -x "$_VNX_PY" ] || _VNX_PY="/opt/homebrew/opt/python@3.12/bin/python3.12"
+      [ -x "$_VNX_PY" ] || _VNX_PY="python3"
+      _VNX_STATE_DIR="$("$_VNX_PY" -c "
+import sys
+sys.path.insert(0, '$_HOOK_DIR/../scripts/lib')
+from vnx_paths import resolve_paths
+print(resolve_paths()['VNX_STATE_DIR'])
+" 2>/dev/null || true)"
+    fi
+
+    if [ -n "$_VNX_STATE_DIR" ] && [ -d "$_VNX_STATE_DIR" ]; then
       # Terminal states from shadow state files
       for _t in T1 T2 T3; do
         _sf="$_VNX_STATE_DIR/terminal_state_${_t}.json"
@@ -97,6 +114,17 @@ case "$TERMINAL" in
           fi
         fi
       fi
+
+      T0_STATE_SECTION="Terminals:
+$(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
+${T0_OPEN_ITEMS:-No open items data}"
+    else
+      # Not-found is a DIFFERENT state than found-but-empty (a genuinely
+      # measured zero). Say so explicitly instead of falling through to a
+      # "No open items data" default that would read as an ordinary quiet
+      # project instead of an unresolved store — the exact fail-open this
+      # fix closes.
+      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: vnx_paths.py unreachable from here>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
     fi
 
     # ── T0 Orchestrator playbook body (in-context injection) ────────────
@@ -126,9 +154,7 @@ Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
 Use /t0-orchestrator for orchestration decisions and receipt processing
 
-Terminals:
-$(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
-${T0_OPEN_ITEMS:-No open items data}
+$T0_STATE_SECTION
 
 CRITICAL: After every completion receipt, check quality advisory + open items before proceeding.
 Skills must NOT use @ prefix in Role field. Skill registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer).${T0_SKILL_BODY:+
