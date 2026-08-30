@@ -67,6 +67,24 @@ runner fulfils them:
      caller-side check drifts the moment a new call site is added) — the
      gate never ran, so there is no verdict to rescue anything with, no
      matter what its evidence fields contain.
+  9. OI-1532 (2026-08-30): item 6's ``branch_exists is False`` retirement folded
+     two states into one — "the branch existed and was deleted" (the dispatch
+     is dead) and "the branch was never pushed because the dispatch is STILL
+     RUNNING" (it is alive). Retiring on the second was caught live on
+     ``20260830-124500-sidedoor``: ``would_retire`` while the dispatch held an
+     occupancy lock (13 min runtime, held by pid 82207). The fix adds a THIRD
+     discriminator — the dispatch's occupancy lock
+     (``<state_dir>/dispatch_worktree_claims/<safe_id>.occupancy``, an
+     fcntl.flock on an open file description the kernel releases the instant
+     its holder exits) — so ``branch_exists is False`` splits three ways:
+     dead (retire, unchanged), alive (stay pending, never retired), and
+     liveness-unmeasurable (stay pending, visibly, never a silent default for
+     either). The genuine-wait branch (item 4) was also unbounded — it retried
+     forever with no escalation; measured on mission-control, 11 obligations
+     sat on 776 attempts (8+ days) with nothing alarming. It now escalates
+     loudly past the SAME threshold the other bounded branches use
+     (``_STAY_PENDING_ESCALATION_ATTEMPTS`` reuses
+     ``_UNRESOLVABLE_ESCALATION_ATTEMPTS`` — never a second, drift-prone bound).
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -80,6 +98,7 @@ Exit codes: 0 = no open obligations remain after this run;
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -98,6 +117,8 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
     REASON_NO_PR_BRANCH_GONE,
+    REASON_NO_PR_BRANCH_GONE_LIVE,
+    REASON_NO_PR_BRANCH_GONE_UNMEASURED,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
@@ -173,6 +194,20 @@ _TEMPORARY_NOT_EXECUTABLE_REASONS = frozenset({
 })
 _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
 
+# OI-1532: the ``stay_pending`` branch (a genuine wait for a PR the dispatch
+# could still produce, OR liveness-unmeasurable) used to retry FOREVER — no
+# attempt bound, no escalation. Measured live on mission-control 2026-08-30:
+# 11 obligations on 776 attempts, three on 779, one on 724 — at the 900s launchd
+# cadence that is over EIGHT DAYS of unbroken retrying with nothing alarming.
+# Reuse the SAME constant and the SAME mechanism as the two existing bounded
+# branches (``_UNRESOLVABLE_ESCALATION_ATTEMPTS`` on :854 and the temporary-
+# refusal escalation via ``_TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS`` on :1261) —
+# a SECOND bound that drifts out of step with these is the next defect. 96
+# attempts at 900s ≈ 24h, matching the producer-freshness cadence window; a wait
+# that exceeds a full day without producing a PR is no longer "not yet" but a
+# loud terminal ``not_executable`` so someone is forced to look.
+_STAY_PENDING_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
+
 # PR-resolution outcomes. The runner must tell "no PR yet" (a wait) apart from
 # "cannot resolve because the environment is wrong" (a fault) IN THE RECORD,
 # not only in a log line — a pending obligation that is actually misconfigured
@@ -190,6 +225,15 @@ class PrResolution:
     ``True``/``False`` when GitHub was actually queried, ``None`` when it
     could not be determined (or wasn't queried) — never treated as "gone"
     (OI-1388: an obligation must never be retired on ambiguous evidence).
+
+    ``dispatch_live`` (OI-1532) splits the ``branch_exists is False`` case in
+    two: a branch that is gone because the dispatch DIED (``False``) vs gone
+    because the dispatch is STILL RUNNING and has not pushed yet (``True``).
+    ``None`` means liveness could not be measured (no occupancy lock file, or
+    the probe failed) — a THIRD state the caller must not collapse into either
+    of the other two: retiring on ``None`` reintroduces the exact defect this
+    field exists to close. Only populated when ``status == RESOLUTION_AWAITING``
+    and ``branch_exists is False``; the other branches do not need it.
     """
 
     status: str
@@ -197,6 +241,7 @@ class PrResolution:
     owner_repo: Optional[str] = None
     reason: Optional[str] = None
     branch_exists: Optional[bool] = None
+    dispatch_live: Optional[bool] = None
 
 
 def utc_now_iso() -> str:
@@ -412,6 +457,124 @@ def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool
     return None
 
 
+# ---------------------------------------------------------------------------
+# OI-1532: is this dispatch still RUNNING?
+# ---------------------------------------------------------------------------
+#
+# ``_branch_exists_on_github`` returns ``False`` for two states this runner used
+# to fold into one: "the branch existed and was deleted" (the dispatch is dead)
+# and "the branch was never pushed because the dispatch is still in flight" (it
+# is alive). Retiring on the second is the defect this dispatch fixes.
+#
+# The discriminator that splits them is the occupancy lock
+# ``<state_dir>/dispatch_worktree_claims/<safe_id>.occupancy`` — an fcntl.flock
+# on an OPEN FILE DESCRIPTION whose holder the KERNEL releases the instant its
+# process exits (scripts/lib/dispatch_worktree_isolation.py:502-520). A
+# non-blocking flock against that file answers "is a live process still holding
+# this dispatch" hard, with no timer and no gh call.
+#
+# Three-valued on purpose (OI-1532, mirroring the three-valued
+# ``_branch_exists_on_github``): True (alive), False (dead), None (liveness
+# could not be measured — a THIRD answer, never a silent default for either of
+# the other two). ``None`` can mean the lock file does not exist at all (the
+# dispatch never created a worktree — e.g. a dry-run, a hand-registered
+# obligation, or a lane that does not use occupancy locks) OR that the probe
+# itself failed; the caller must treat both as "unmeasured" and choose the safe
+# side (do not retire), visibly.
+#
+# The lock is per-OPEN-FILE-DESCRIPTION, not per-process: a probe that takes the
+# lock in the same process that already holds it would measure itself. This
+# function opens its OWN file descriptor and asks for LOCK_SH | LOCK_NB, which a
+# holder's LOCK_EX blocks — it never re-enters the holder's own description, so
+# it is safe to call from any process, including the one that dispatched (a
+# dispatch's worker runs in a different process than this runner anyway).
+_DISPATCH_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
+_DISPATCH_MAX_SAFE_ID_LEN = 60
+
+
+def _sanitize_dispatch_id_local(dispatch_id: str) -> str:
+    """Mirror ``dispatch_worktree_isolation._sanitize_dispatch_id``.
+
+    The runner stays a lightweight stdlib script and must not import that
+    module (same contract as ``_owner_repo_from_remote_url`` mirroring
+    ``chain_origin_anchor``). The regex and length cap are copied verbatim so
+    the safe id this computes matches the one the isolation layer wrote the
+    occupancy lock under — a drift here would probe a non-existent file and
+    silently read ``None`` (unmeasured) for a dispatch that is in fact alive.
+    """
+    return _DISPATCH_UNSAFE_RE.sub("-", dispatch_id or "")[:_DISPATCH_MAX_SAFE_ID_LEN]
+
+
+def _occupancy_lock_path(state_dir: Path, dispatch_id: str) -> Path:
+    """Resolve the occupancy lock file for ``dispatch_id`` under ``state_dir``.
+
+    The claim registry lives at ``<data_dir>/state/dispatch_worktree_claims``
+    (ADR-026 SSOT, see ``dispatch_worktree_isolation._claim_dir``). The runner's
+    ``state_dir`` IS that ``<data_dir>/state``, so the lock file is
+    ``<state_dir>/dispatch_worktree_claims/<safe_id>.occupancy``.
+    """
+    safe_id = _sanitize_dispatch_id_local(dispatch_id)
+    return Path(state_dir) / "dispatch_worktree_claims" / f"{safe_id}.occupancy"
+
+
+def _dispatch_is_live(state_dir: Path, dispatch_id: str) -> Optional[bool]:
+    """Whether a live process is still holding the dispatch's worktree.
+
+    Returns ``True`` when another live process holds the occupancy lock (a
+    running dispatch that has not pushed its branch yet), ``False`` when the
+    lock file exists but no process holds it (the dispatch ended and its lock
+    was released, or the holder crashed and the kernel freed the lock), and
+    ``None`` when liveness could not be measured: the lock file does not exist
+    (no worktree was ever created for this dispatch) or the probe itself raised.
+
+    OI-1532: the caller must treat ``None`` as a THIRD state — "do not know" —
+    never as ``False`` ("dead"). Retiring on ``None`` would reintroduce the
+    exact defect retiring on ``branch_exists is False`` had for a live
+    dispatch. See :func:`_pre_execution_decision`.
+    """
+    lock_path = _occupancy_lock_path(state_dir, dispatch_id)
+    try:
+        # O_EXCL semantics do not apply here — the isolation layer creates the
+        # file with open(..., "a") before flock-ing it, so a missing file means
+        # no worktree was ever claimed for this dispatch. Do NOT create it: a
+        # probe that fabricates the lock file would mask a real "never created"
+        # state and could interfere with a dispatch that creates one later.
+        if not lock_path.exists():
+            return None
+        fh = open(lock_path, "a")
+    except OSError as exc:
+        _LOG.debug(
+            "occupancy probe could not open %s for %s: %s — treating as "
+            "unmeasured, not dead",
+            lock_path, dispatch_id, exc,
+        )
+        return None
+    try:
+        # LOCK_SH | LOCK_NB: a shared, non-blocking request. A holder's LOCK_EX
+        # blocks this (BlockingIOError => a live holder => True); success means
+        # no holder holds it (the dispatch is not running => False). We release
+        # immediately so this probe never interferes with a future holder.
+        try:
+            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        # We acquired the shared lock — no exclusive holder exists. Release it.
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return False
+    except OSError as exc:
+        _LOG.debug(
+            "occupancy probe flock failed for %s: %s — treating as "
+            "unmeasured, not dead",
+            lock_path, exc,
+        )
+        return None
+    finally:
+        try:
+            fh.close()
+        except OSError:
+            pass
+
+
 def _owner_repo_from_remote_url(url: str) -> Optional[str]:
     """Derive ``owner/repo`` from a GitHub remote URL (https or ssh form).
 
@@ -561,10 +724,21 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
     # also ask whether the dispatch could still produce one. A dead branch is
     # the one fact that answers that without a timer.
     branch_exists = _branch_exists_on_github(dispatch_id, owner_repo)
+    # OI-1532: ``branch_exists is False`` folds two states into one. Before
+    # retiring on it (the caller's temptation), split it with the occupancy
+    # lock: a live holder means the dispatch is still running and has simply
+    # not pushed yet. Probe only when the branch is gone — the other cases
+    # (exists / unknown) never reach the retire branch, so liveness adds no
+    # information there and probing it would be wasted work on every pending
+    # obligation that still has a branch.
+    dispatch_live: Optional[bool] = None
+    if branch_exists is False:
+        dispatch_live = _dispatch_is_live(state_dir, dispatch_id)
     return PrResolution(
         RESOLUTION_AWAITING,
         owner_repo=owner_repo,
         branch_exists=branch_exists,
+        dispatch_live=dispatch_live,
         reason=f"no PR yet for head branch dispatch/{dispatch_id}",
     )
 
@@ -829,8 +1003,17 @@ def _pre_execution_decision(
     Returns ``{"kind": ..., ...}`` where ``kind`` is one of:
       - ``unresolvable``               — env fault, stays retryable (below threshold)
       - ``escalate``                   — env fault, past threshold: terminal escalation
-      - ``stay_pending``               — genuine wait (branch alive / undetermined)
-      - ``retire``                     — dead dispatch, no rescuing evidence
+      - ``stay_pending``               — genuine wait (branch alive / liveness
+        unmeasured / branch-gone-but-live), below the stay-pending threshold
+      - ``escalate_stay_pending``      — OI-1532: a ``stay_pending`` that has
+        retried past the stay-pending threshold without producing a PR — the
+        unbounded wait is replaced by a loud terminal escalation, exactly as
+        the two other bounded branches already do
+      - ``retire``                     — dead dispatch (branch gone AND not
+        live), no rescuing evidence
+      - ``retire_live``                — OI-1532: branch gone but the dispatch
+        is still running — stays pending (NOT retired), carried distinctly so
+        the caller records WHY it stayed pending, not just that it did
       - ``fulfill_by_evidence``        — OI-1388 defect 1: a complete-evidence
         DECIDED PASS already exists for this dispatch_id + gate; carried as
         ``decision["evidence"] = (path, record)``
@@ -846,6 +1029,22 @@ def _pre_execution_decision(
     dispatch whose only "evidence" is a never-ran gate falls straight through
     to ``retire``/``escalate``/``unresolvable`` exactly as if no result
     existed at all.
+
+    OI-1532 — the AWAITING branch is THREE-valued on ``branch_exists is False``:
+      - ``dispatch_live is False`` -> the dispatch is dead and its branch is
+        gone: ``retire`` (the existing, correct behaviour).
+      - ``dispatch_live is True``  -> the dispatch is still RUNNING and has not
+        pushed yet: ``stay_pending``, never ``retire`` (the defect this fixes).
+      - ``dispatch_live is None``  -> liveness could not be measured: a THIRD
+        answer. Choosing ``retire`` here reintroduces the defect for a live
+        dispatch whose lock file is absent (e.g. a lane that does not use
+        occupancy locks); choosing ``stay_pending`` silently hides a genuinely
+        dead dispatch. The safe choice is to NOT retire (a live dispatch must
+        never be closed on ambiguous evidence, per the OI-1388 docstring) and
+        to record the liveness-unmeasured state VISIBLY so it is not mistaken
+        for a normal wait — carried as ``decision["liveness"] = "unmeasured"``
+        and routed through ``retire_unmeasured`` (which itself stays pending,
+        never retires).
     """
     if resolution.status == RESOLUTION_UNRESOLVABLE:
         evidence = _fulfilling_result(result_index, dispatch_id, gate)
@@ -856,11 +1055,37 @@ def _pre_execution_decision(
         return {"kind": "unresolvable"}
 
     if resolution.status == RESOLUTION_AWAITING:
+        # OI-1532: branch_exists is False folds "dead and deleted" together
+        # with "still running, not pushed yet". Split it with the occupancy
+        # lock before any retire decision — see PrResolution.dispatch_live.
         if resolution.branch_exists is False:
             evidence = _fulfilling_result(result_index, dispatch_id, gate)
             if evidence is not None:
                 return _evidence_decision(evidence)
+            if resolution.dispatch_live is True:
+                # The dispatch is still running — it has simply not pushed its
+                # branch yet. Retiring here is the defect this dispatch fixes
+                # (live on 20260830-124500-sidedoor). Stays pending, distinctly
+                # labelled so the recorded reason says "live, not pushed" and
+                # not a generic "no PR yet".
+                return {"kind": "retire_live"}
+            if resolution.dispatch_live is None:
+                # Liveness could not be measured — a THIRD state. Do not retire
+                # (a live dispatch must never be closed on ambiguous evidence),
+                # and carry the reason visibly so it is not mistaken for a
+                # normal wait. Stays pending under the same bound as below.
+                return {"kind": "retire_unmeasured", "liveness": "unmeasured"}
+            # dispatch_live is False: the dispatch ended and its branch is gone
+            # — nothing will ever gate this obligation. The existing, correct
+            # retirement, unchanged.
             return {"kind": "retire"}
+        # branch_exists is True (branch still there) or None (gh could not
+        # tell) — a genuine wait. OI-1532: this branch was unbounded; it now
+        # escalates loudly past the same threshold the other branches use, so
+        # a wait that never produces a PR cannot retry silently for eight days
+        # (measured on mission-control 2026-08-30).
+        if attempts >= _STAY_PENDING_ESCALATION_ATTEMPTS:
+            return {"kind": "escalate_stay_pending"}
         return {"kind": "stay_pending"}
 
     return {"kind": "attempt_gate"}
@@ -872,7 +1097,10 @@ _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "fulfill_by_evidence": "would_stamp",
     "fulfill_by_failed_evidence": "would_stamp_failed",
     "retire": "would_retire",
+    "retire_live": "would_stay_pending_live",
+    "retire_unmeasured": "would_stay_pending_unmeasured",
     "stay_pending": "would_stay_pending",
+    "escalate_stay_pending": "would_escalate_stay_pending",
     "attempt_gate": "would_fulfill",
 }
 
@@ -925,6 +1153,23 @@ def _dry_run_outcome(
         outcome["result_path"] = str(evidence_path)
     elif decision["kind"] == "retire":
         outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
+    elif decision["kind"] == "retire_live":
+        outcome["detail"] = (
+            "dispatch branch is gone on GitHub but the dispatch is still RUNNING "
+            "(occupancy lock held) — not pushed yet, NOT retired (OI-1532)"
+        )
+    elif decision["kind"] == "retire_unmeasured":
+        outcome["detail"] = (
+            "dispatch branch is gone on GitHub but liveness could not be measured "
+            "(no occupancy lock file or probe failed) — staying pending rather than "
+            "retiring on ambiguous evidence (OI-1532)"
+        )
+    elif decision["kind"] == "escalate_stay_pending":
+        outcome["detail"] = (
+            f"obligation has waited {attempts} attempts for a PR that never appeared "
+            f"(branch exists or undetermined) — escalating the unbounded wait to a "
+            f"loud terminal outcome (OI-1532)"
+        )
     elif decision["kind"] in ("unresolvable", "escalate"):
         outcome["detail"] = resolution.reason
     return outcome
@@ -1105,11 +1350,113 @@ def fulfill_obligation(
         outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
         return outcome
 
+    if decision["kind"] == "retire_live":
+        # OI-1532: the branch is gone on GitHub but the dispatch is still
+        # RUNNING (its occupancy lock is held by a live process). It has simply
+        # not pushed its branch yet. Retiring here was the defect this dispatch
+        # fixes (live on 20260830-124500-sidedoor, 13 min runtime, held by
+        # pid 82207). Stays pending — NEVER retired — with a named reason so
+        # the recorded state says "live, not pushed" and not a generic wait.
+        branch_name = f"dispatch/{dispatch_id}"
+        update_obligation(
+            path,
+            status=STATUS_PENDING,
+            branch=branch_name,
+            attempts=attempts,
+            last_attempt_at=now,
+            reason=REASON_NO_PR_BRANCH_GONE_LIVE,
+            reason_detail=(
+                f"dispatch {dispatch_id} has no PR yet and its head branch "
+                f"{branch_name} is not on GitHub, but the dispatch's occupancy "
+                f"lock is held by a live process — it is still running and has "
+                f"not pushed yet. Staying pending; a live dispatch must never be "
+                f"retired (OI-1532)."
+            ),
+        )
+        outcome["action"] = "pending"
+        outcome["detail"] = (
+            "dispatch still running (occupancy lock held) — not pushed yet, "
+            "NOT retired (OI-1532)"
+        )
+        return outcome
+
+    if decision["kind"] == "retire_unmeasured":
+        # OI-1532 third state: the branch is gone but liveness could not be
+        # measured (no occupancy lock file — the dispatch never created a
+        # worktree, a dry-run, a hand-registered obligation, or a lane without
+        # occupancy locks — or the flock probe itself failed). This is NOT
+        # "dead" and NOT "alive": it is a THIRD answer. Retiring would
+        # reintroduce the defect for a live dispatch whose lock file is absent;
+        # a silent stay_pending would hide a genuinely dead dispatch. The safe
+        # choice is to stay pending (never close on ambiguous evidence, per
+        # the OI-1388 docstring) and record the unmeasured state VISIBLY so
+        # the freshness monitor and any reader can tell it apart from a normal
+        # wait. Stays under the same bounded escalation as stay_pending below.
+        branch_name = f"dispatch/{dispatch_id}"
+        update_obligation(
+            path,
+            status=STATUS_PENDING,
+            branch=branch_name,
+            attempts=attempts,
+            last_attempt_at=now,
+            reason=REASON_NO_PR_BRANCH_GONE_UNMEASURED,
+            reason_detail=(
+                f"dispatch {dispatch_id} has no PR yet and its head branch "
+                f"{branch_name} is not on GitHub, and liveness could not be "
+                f"measured (no occupancy lock file at "
+                f"{_occupancy_lock_path(state_dir, dispatch_id)} or the probe "
+                f"failed). Staying pending rather than retiring on ambiguous "
+                f"evidence — a live dispatch must never be closed unmeasured "
+                f"(OI-1532)."
+            ),
+        )
+        outcome["action"] = "pending"
+        outcome["detail"] = (
+            "dispatch branch gone but liveness unmeasurable — staying pending "
+            "rather than retiring on ambiguous evidence (OI-1532)"
+        )
+        return outcome
+
+    if decision["kind"] == "escalate_stay_pending":
+        # OI-1532: the genuine-wait branch (branch exists / undetermined / live
+        # / unmeasured) used to retry FOREVER — no bound, no escalation.
+        # Measured on mission-control 2026-08-30: 11 obligations on 776
+        # attempts (8+ days) with nothing alarming. After the stay-pending
+        # threshold a wait that never produced a PR escalates to the SAME loud
+        # terminal not_executable the other bounded branches use, reusing the
+        # SAME constant — never a second, drift-prone bound.
+        update_obligation(
+            path,
+            status=STATUS_NOT_EXECUTABLE,
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=now,
+            reason="stay_pending_timeout",
+            reason_detail=(
+                f"obligation waited {attempts} attempts (≈ "
+                f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence) for "
+                f"a PR that never appeared, with the branch existing or "
+                f"undetermined. The unbounded wait is closed loudly: either "
+                f"the dispatch is stuck (its gate will never run) or it was "
+                f"never going to produce a PR. Reset to pending if the "
+                f"dispatch is known to be live (OI-1532)."
+            ),
+        )
+        outcome["action"] = "not_executable"
+        outcome["detail"] = (
+            f"obligation waited {attempts} attempts for a PR that never "
+            f"appeared — escalating the unbounded wait to a loud terminal "
+            f"outcome (OI-1532)"
+        )
+        return outcome
+
     if decision["kind"] == "stay_pending":
         # The repo resolves and gh works, but no PR exists yet for the head
         # branch, and the branch is still there (or its existence could not be
         # determined) — a genuine wait: stays pending for the freshness
-        # monitor, never closed on ambiguous evidence.
+        # monitor, never closed on ambiguous evidence. OI-1532: now bounded
+        # — past _STAY_PENDING_ESCALATION_ATTEMPTS the decision above
+        # escalates loudly instead of retrying forever.
         update_obligation(
             path,
             status=STATUS_PENDING,
@@ -1404,7 +1751,17 @@ def run(
         if not write:
             outcome = _dry_run_outcome(state_dir, path, record, result_index)
             outcomes.append(outcome)
-            if outcome["action"] in ("would_stay_pending", "would_stay_unresolvable", "would_fulfill"):
+            # OI-1532: retire_live and retire_unmeasured stay pending too
+            # (a live / unmeasured dispatch is never closed), so their dry-run
+            # labels count toward the pending backlog alongside the normal
+            # wait. escalate_stay_pending is terminal and does NOT count.
+            if outcome["action"] in (
+                "would_stay_pending",
+                "would_stay_pending_live",
+                "would_stay_pending_unmeasured",
+                "would_stay_unresolvable",
+                "would_fulfill",
+            ):
                 pending_after += 1
             continue
         outcome = fulfill_obligation(state_dir, path, record, result_index=result_index)
