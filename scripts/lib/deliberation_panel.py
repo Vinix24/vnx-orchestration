@@ -23,7 +23,10 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -132,18 +135,38 @@ class DeliberationResult:
     # refused, recorded here so to_report() renders it loudly, never silently.
     synthesis_refused_reason: str = ""   # non-empty => synthesis refused (coverage floor)
     degraded_synthesis: bool = False     # synthesis ran below the floor (--allow-degraded)
+    # Ledger reconciliation (OI-1519): per-seat measurement records ({provider, lens,
+    # stage, dispatch_id, outcome, source, frontmatter_*, ledger_*, divergent, reason}).
+    # The coverage tally is reconciled against the t0 receipt ledger, never taken from
+    # the exit_code a seat writes about ITSELF.
+    seat_measurements: List[Dict[str, Any]] = field(default_factory=list)
+    unmeasured_seats: List[Dict[str, str]] = field(default_factory=list)  # {provider, lens, dispatch_id, reason}
+    ledger_available: bool = True  # False => legacy frontmatter fallback (UNVERIFIED)
+
+    @property
+    def ledger_divergences(self) -> List[Dict[str, Any]]:
+        """Seats where the receipt ledger and the seat's own frontmatter DISAGREE on
+        the outcome. The divergence itself is the finding — a silent correction would
+        leave a panel that cannot be weighed (OI-1519)."""
+        return [m for m in self.seat_measurements if m.get("divergent")]
 
     @property
     def coverage(self) -> str:
         """Human-readable coverage summary, e.g. "3/5 lenses present; glm-harness
         (alternative-approaches lens) failed". A dead seat must never be rendered as if
-        it silently contributed to the panel (OI-810) — this is the explicit signal."""
+        it silently contributed to the panel (OI-810) — this is the explicit signal.
+        An UNMEASURED seat (ledger has no decisive record, OI-1519) is neither present
+        nor failed and is named as its own category."""
         total = len(self.fan_out)
         present = len(self.present_lenses)
-        if not self.failed_seats:
-            return f"{present}/{total} lenses present"
-        failed = ", ".join(f"{s['provider']} ({s['lens']})" for s in self.failed_seats)
-        return f"{present}/{total} lenses present; {failed} failed"
+        parts = [f"{present}/{total} lenses present"]
+        if self.failed_seats:
+            failed = ", ".join(f"{s['provider']} ({s['lens']})" for s in self.failed_seats)
+            parts.append(f"{failed} failed")
+        if self.unmeasured_seats:
+            unmeasured = ", ".join(f"{s['provider']} ({s['lens']})" for s in self.unmeasured_seats)
+            parts.append(f"{unmeasured} unmeasured (no decisive ledger record)")
+        return "; ".join(parts)
 
     @property
     def zero_seats_delivered(self) -> bool:
@@ -161,6 +184,17 @@ class DeliberationResult:
             f"\n**Question:** {self.question}\n",
             f"**Coverage:** {self.coverage}\n",
         ]
+        if not self.ledger_available:
+            lines.append(
+                "**Ledger:** receipt ledger UNAVAILABLE — coverage measured against the "
+                "seats' own report frontmatter only (UNVERIFIED, pre-OI-1519 fallback)\n"
+            )
+        if self.unmeasured_seats:
+            seats = ", ".join(f"{s['provider']} ({s['lens']})" for s in self.unmeasured_seats)
+            lines.append(
+                f"**Unmeasured seats:** {seats} — the receipt ledger has no decisive record; "
+                "counted as NEITHER present nor failed\n"
+            )
         if self.synthesis_refused_reason:
             lines.append(f"**Synthesis:** REFUSED — {self.synthesis_refused_reason}\n")
         if self.degraded_synthesis:
@@ -179,9 +213,37 @@ class DeliberationResult:
             "\n---\n## Divergent views (fan-out)\n",
         ]
         for fo in self.fan_out:
-            failed_tag = " — **[SEAT FAILED — no report]**" if _is_error(fo["text"]) else ""
+            # Use the RECONCILED outcome recorded at measurement time (OI-1519) — the
+            # tag must agree with the count. Hand-built results (no reconciliation ran)
+            # fall back to the legacy text check.
+            outcome = fo.get("seat_outcome")
+            if outcome is None:
+                outcome = SEAT_FAILED if _is_error(fo["text"]) else SEAT_PRESENT
+            if outcome == SEAT_FAILED:
+                failed_tag = " — **[SEAT FAILED — no report]**"
+            elif outcome == SEAT_UNMEASURED:
+                failed_tag = " — **[SEAT UNMEASURED — no decisive ledger record]**"
+            else:
+                failed_tag = ""
             lines.append(f"\n### {fo['provider']} — lens: {fo['lens']}{failed_tag}\n")
             lines.append(fo["text"] or "_(empty)_")
+        divergences = self.ledger_divergences
+        if divergences:
+            lines += [
+                "\n---\n## Ledger reconciliation — divergences\n",
+                "These seats' own report frontmatter and the receipt ledger DISAGREE on the "
+                "outcome. The ledger wins the count (OI-1519); the divergence itself is the "
+                "finding:\n",
+            ]
+            for d in divergences:
+                lens = f", lens: {d['lens']}" if d.get("lens") else ""
+                lines.append(
+                    f"- **{d['provider']}** ({d['stage']}{lens}, dispatch `{d['dispatch_id']}`): "
+                    f"frontmatter said {d['frontmatter_outcome']} "
+                    f"(exit_code={d['frontmatter_exit_code']}); ledger said {d['ledger_outcome']} "
+                    f"(status={d['ledger_status']}, verdict.decision={d['ledger_decision']}) "
+                    f"→ counted {d['outcome'].upper()}"
+                )
         return "\n".join(lines)
 
 
@@ -351,6 +413,7 @@ def run_deliberation(
     max_workers: int = 5,
     min_seats: Optional[int] = None,
     allow_degraded: bool = False,
+    receipts_path: Optional["Path | str"] = None,
 ) -> DeliberationResult:
     """Run the 4-stage deliberation. ``dispatcher(provider, model, prompt, dispatch_id)`` runs
     one panelist and returns its report text (governed lane). ``context`` is optional extra
@@ -363,7 +426,13 @@ def run_deliberation(
     ``None`` (the default) disables the floor entirely — callers that already bound coverage
     their own way stay unaffected. ``allow_degraded`` is the operator escape: with it True the
     synthesis proceeds below the floor, and ``result.degraded_synthesis`` marks that choice so
-    the report renders it, never silently."""
+    the report renders it, never silently.
+
+    ``receipts_path`` (OI-1519) points at the t0 receipt ledger (``t0_receipts.ndjson``)
+    each seat's dispatch-id is reconciled against. ``None`` resolves the canonical state
+    dir's ledger. When no ledger exists or can be read (fresh checkout), the tally falls
+    back to the pre-OI-1519 frontmatter measurement — flagged on the result
+    (``ledger_available=False``) and in the report, never silently."""
     spec = MODES.get(mode)
     if spec is None:
         raise ValueError(f"unknown mode {mode!r}; choose one of {sorted(MODES)}")
@@ -382,11 +451,17 @@ def run_deliberation(
             "(file:line for code, a named source for research). Give your strongest findings, "
             "then one thing you are UNSURE about. Terse."
         )
+        # OI-1519: the dispatch-id is CARRIED through — reconciliation against the
+        # receipt ledger is impossible when the id is built here and thrown away.
+        did = f"panel-{mode}-diverge-{idx}-{uuid.uuid4().hex[:6]}"
+        raised = False
         try:
-            text = dispatcher(provider, model, prompt, f"panel-{mode}-diverge-{idx}-{uuid.uuid4().hex[:6]}")
+            text = dispatcher(provider, model, prompt, did)
         except Exception as exc:  # noqa: BLE001 — a dead provider degrades the panel, never kills it
             text = f"[dispatch error: {exc!r}]"
-        return {"provider": provider, "lens": lens, "text": text or "[empty]"}
+            raised = True
+        return {"provider": provider, "lens": lens, "text": text or "[empty]",
+                "dispatch_id": did, "_raised": raised}
 
     with _cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(_one, i, p, m) for i, (p, m) in enumerate(roster)]
@@ -395,19 +470,61 @@ def run_deliberation(
     order = {p: i for i, (p, _) in enumerate(roster)}
     result.fan_out.sort(key=lambda fo: order.get(fo["provider"], 99))
 
-    # Coverage bookkeeping (OI-810): a failed/empty seat must never silently look like a
-    # contributing lens. Exclude it from what downstream stages see, and record it so the
-    # result/report say so explicitly.
-    present_fan_out = [fo for fo in result.fan_out if not _is_error(fo["text"])]
-    failed_fan_out = [fo for fo in result.fan_out if _is_error(fo["text"])]
+    # Coverage bookkeeping, reconciled against the receipt LEDGER (OI-1519) — the
+    # ledger is loaded AFTER the fan-out completes so the seats' receipts exist by
+    # the time we measure (the governed lane writes the receipt before the dispatcher
+    # returns). A seat's own frontmatter exit_code is the seat testifying about
+    # itself; the ledger is the independent record and WINS when the two disagree
+    # (the disagreement is reported, never silently corrected). A seat the ledger
+    # cannot give a decisive record for is UNMEASURED — its own branch, counted as
+    # neither present nor failed. When no ledger exists at all (fresh checkout) the
+    # tally falls back to the legacy frontmatter measurement so the panel keeps
+    # working — flagged via result.ledger_available, never silently.
+    ledger = _ReceiptLedger.load(receipts_path)
+    result.ledger_available = ledger is not None
+    fan_out_measurements = []
+    for fo in result.fan_out:
+        measurement = _measure_seat(
+            fo["provider"], fo["lens"], fo.get("dispatch_id", ""), fo["text"],
+            stage="diverge", ledger=ledger, raised=fo.pop("_raised", False),
+        )
+        fo["seat_outcome"] = measurement["outcome"]
+        fan_out_measurements.append(measurement)
+    result.seat_measurements.extend(fan_out_measurements)
+    present_fan_out = [fo for fo in result.fan_out if fo["seat_outcome"] == SEAT_PRESENT]
+    failed_fan_out = [fo for fo in result.fan_out if fo["seat_outcome"] == SEAT_FAILED]
+    unmeasured_fan_out = [fo for fo in result.fan_out if fo["seat_outcome"] == SEAT_UNMEASURED]
     result.present_lenses = [fo["lens"] for fo in present_fan_out]
-    result.failed_seats = [{"provider": fo["provider"], "lens": fo["lens"]} for fo in failed_fan_out]
+    result.failed_seats = [
+        {"provider": fo["provider"], "lens": fo["lens"], "dispatch_id": fo.get("dispatch_id", "")}
+        for fo in failed_fan_out
+    ]
+    result.unmeasured_seats = [
+        {"provider": m["provider"], "lens": m["lens"], "dispatch_id": m["dispatch_id"],
+         "reason": m["reason"]}
+        for m in fan_out_measurements if m["outcome"] == SEAT_UNMEASURED
+    ]
     if failed_fan_out:
         logger.warning(
             "panel: %d/%d seats produced no usable report (%s) — %s",
             len(failed_fan_out), len(result.fan_out),
             ", ".join(f"{fo['provider']} ({fo['lens']})" for fo in failed_fan_out),
             result.coverage,
+        )
+    if unmeasured_fan_out:
+        logger.warning(
+            "panel: %d/%d seats are UNMEASURED — the receipt ledger has no decisive "
+            "record (%s); counted as neither present nor failed — %s",
+            len(unmeasured_fan_out), len(result.fan_out),
+            ", ".join(f"{fo['provider']} ({fo['lens']})" for fo in unmeasured_fan_out),
+            result.coverage,
+        )
+    if result.ledger_divergences:
+        logger.warning(
+            "panel: %d seat(s) where the ledger DISAGREES with the seat's own frontmatter "
+            "(ledger wins): %s",
+            len(result.ledger_divergences),
+            ", ".join(f"{d['provider']} ({d['stage']})" for d in result.ledger_divergences),
         )
 
     # ── Coverage floor for the synthesis (OI-1154) ──────────────────────────
@@ -440,9 +557,10 @@ def run_deliberation(
     digest = _digest(present_fan_out)
     coverage_note = (
         f"PANEL COVERAGE: {result.coverage}. Reason only from the lenses that actually "
-        "responded — a failed seat contributed NOTHING; do not assume its perspective is "
-        "represented.\n"
-    ) if failed_fan_out else ""
+        "responded — a failed seat contributed NOTHING, and an unmeasured seat could not "
+        "be confirmed against the receipt ledger and is excluded; do not assume either "
+        "perspective is represented.\n"
+    ) if failed_fan_out or unmeasured_fan_out else ""
 
     # ── Stage 2: CONTRARIAN (one red-team seat — the strongest reasoner) ──────
     # Instruction FIRST, bounded distillate of stage 1 AFTER (OI-809) — a downstream
@@ -462,6 +580,7 @@ def run_deliberation(
     result.contrarian = _first_ok(
         dispatcher, _ordered_seats(roster, ("codex", "deepseek-harness", "claude")),
         contra_prompt, f"panel-{mode}-contrarian",
+        ledger=ledger, measure_sink=result.seat_measurements, stage="contrarian",
     )
 
     # ── Stage 3: VERIFY (adversarial factcheck of the top claims) ────────────
@@ -484,6 +603,7 @@ def run_deliberation(
     result.factcheck = _first_ok(
         dispatcher, _ordered_seats(roster, ("codex", "kimi", "claude")),
         verify_prompt, f"panel-{mode}-verify",
+        ledger=ledger, measure_sink=result.seat_measurements, stage="verify",
     )
 
     # ── Stage 4: SYNTHESIS (one cited report) ────────────────────────────────
@@ -506,6 +626,7 @@ def run_deliberation(
     result.synthesis = _first_ok(
         dispatcher, _ordered_seats(roster, ("claude", "codex", "kimi")),
         synth_prompt, f"panel-{mode}-synth",
+        ledger=ledger, measure_sink=result.seat_measurements, stage="synthesis",
     )
 
     return result
@@ -573,7 +694,12 @@ def _is_error(text: str) -> bool:
     check ONLY when no frontmatter is present (no report on disk, or a worker-authored
     report without frontmatter) — this is the pre-existing behaviour, not a regression: a
     report with no frontmatter carries no readable outcome, so it stays exactly as
-    permissive as it was before this fix."""
+    permissive as it was before this fix.
+
+    NOTE (OI-1519): this is the LEGACY measure — the seat testifying about itself. The
+    reconciled coverage tally goes through ``_measure_seat``, which lets the receipt
+    ledger overrule this answer (and reports the divergence). ``_is_error`` remains the
+    fallback when no ledger exists."""
     exit_code = _seat_exit_code(text)
     if exit_code is not None:
         return exit_code != 0
@@ -581,26 +707,270 @@ def _is_error(text: str) -> bool:
     return (not t) or t.startswith("[dispatch error") or t == "[empty]"
 
 
+# ── Ledger reconciliation (OI-1519) ──────────────────────────────────────────
+# A seat's coverage outcome is reconciled against the t0 receipt ledger
+# (t0_receipts.ndjson), never taken from the ``exit_code`` the seat writes about
+# ITSELF in its own report frontmatter. Measured live on dispatch
+# ``panel-sweep-diverge-0-a6421f`` (2026-08-30): ledger ``status=timeout`` /
+# ``verdict.decision=reject`` while the report frontmatter says ``exit_code: 0`` —
+# the frontmatter-only tally counted that timed-out seat as a PRESENT lens.
+#
+# The vocabulary is NOT hand-rolled here: it reuses the fabric's canonical,
+# measured sets from ``receipt_verdict`` (ADR-035 §3.1) — HARD_FAILURE_STATUSES
+# (failed/failure/error/blocked/timeout/contract_invalid) and SUCCESS_STATUSES
+# (done/success/complete/completed) — the same rule table that produced the
+# ``verdict.decision`` values in the ledger itself. ``status`` is the primary
+# signal, ``verdict.decision`` the secondary (consulted only when the status is
+# indecisive, e.g. "unknown"). Measured on the live ledger (28,592 receipts,
+# 2026-08-30): every frequent status literal lands in exactly one of the three
+# branches (success / hard-failure / indecisive), and verdict.decision carries
+# accept(15) / reject(3015) / investigate(7027).
+
+SEAT_PRESENT = "present"
+SEAT_FAILED = "failed"
+SEAT_UNMEASURED = "unmeasured"
+
+
+def _default_receipts_path() -> Optional[Path]:
+    """Default t0 receipt ledger location, via the canonical state-dir resolver (the
+    same resolution family the governed dispatch lane writes receipts under). Returns
+    None when the resolver itself is unavailable — the caller then measures in legacy
+    mode. Callers and tests that need a specific ledger pass ``receipts_path``
+    explicitly; ambient env-vars are deliberately NOT read here so tests stay
+    hermetic."""
+    try:
+        from vnx_paths import resolve_state_dir
+        return Path(resolve_state_dir()) / "t0_receipts.ndjson"
+    except Exception as exc:  # resolver failure = no known ledger → legacy mode
+        logger.debug("panel: could not resolve the default receipt ledger path: %r", exc)
+        return None
+
+
+class _ReceiptLedger:
+    """Per-dispatch-id lookup against the t0 receipt ledger (OI-1519).
+
+    ``lookup`` returns:
+      - a non-empty list  → the ledger KNOWS this dispatch-id (decisive or not),
+      - an empty list     → the ledger is readable but has NO record of it
+                            (an UNMEASURED seat — its own branch, never silently
+                            counted present),
+      - None              → the ledger could not be read right now (degrade to the
+                            legacy frontmatter measurement for this seat).
+    Results are cached per dispatch-id. Lookups go through
+    ``receipt_provenance.find_receipts_by_dispatch`` — the shared, tested NDJSON
+    reader — instead of parsing the ledger here.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._cache: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+
+    @classmethod
+    def load(cls, receipts_path: Optional["Path | str"]) -> Optional["_ReceiptLedger"]:
+        """Open the ledger once, after the seats completed (their receipts exist by
+        then). Returns None — legacy fallback mode — when no path resolves, the file
+        does not exist (fresh checkout), or it cannot be read."""
+        path = Path(receipts_path) if receipts_path is not None else _default_receipts_path()
+        if path is None:
+            return None
+        try:
+            if not path.is_file():
+                return None
+            with path.open("r", encoding="utf-8"):
+                pass  # readability probe only
+        except OSError as exc:
+            logger.debug("panel: receipt ledger %s unreadable: %r", path, exc)
+            return None
+        return cls(path)
+
+    def lookup(self, dispatch_id: str) -> Optional[List[Dict[str, Any]]]:
+        if not dispatch_id:
+            return []
+        if dispatch_id in self._cache:
+            return self._cache[dispatch_id]
+        receipts: Optional[List[Dict[str, Any]]]
+        try:
+            from receipt_provenance import find_receipts_by_dispatch
+            receipts = find_receipts_by_dispatch(self.path, dispatch_id)
+        except (ImportError, OSError, ValueError, TypeError) as exc:
+            logger.warning(
+                "panel: receipt ledger lookup failed for %s: %r — legacy fallback for this seat",
+                dispatch_id, exc,
+            )
+            receipts = None
+        self._cache[dispatch_id] = receipts
+        return receipts
+
+
+def _receipt_outcome(receipt: Dict[str, Any]) -> Optional[bool]:
+    """One receipt's answer: True = success, False = failure, None = indecisive.
+
+    ``status`` is the primary signal (canonical ADR-035 sets); ``verdict.decision``
+    the secondary, consulted only when the status is indecisive."""
+    status = str(receipt.get("status") or "").strip().lower()
+    if status in HARD_FAILURE_STATUSES:
+        return False
+    if status in SUCCESS_STATUSES:
+        return True
+    verdict = receipt.get("verdict")
+    decision = ""
+    if isinstance(verdict, dict):
+        decision = str(verdict.get("decision") or "").strip().lower()
+    if decision == "reject":
+        return False
+    if decision == "accept":
+        return True
+    return None
+
+
+def _ledger_outcome(receipts: List[Dict[str, Any]]) -> Optional[bool]:
+    """Reconcile possibly-multiple receipts for one dispatch-id (measured:
+    ``panel-architecture-diverge-1-094e47`` carries both ``success`` and
+    ``unknown``). Fail-closed on conflict: ANY failure record fails the seat — a
+    success record never launders a recorded failure. None = the ledger knows the
+    id but every receipt is indecisive."""
+    outcomes = [o for o in (_receipt_outcome(r) for r in receipts) if o is not None]
+    if not outcomes:
+        return None
+    if any(o is False for o in outcomes):
+        return False
+    return True
+
+
+def _receipt_decision_str(receipt: Dict[str, Any]) -> str:
+    verdict = receipt.get("verdict")
+    if isinstance(verdict, dict):
+        decision = str(verdict.get("decision") or "").strip().lower()
+        if decision:
+            return decision
+    return "<none>"
+
+
+def _measure_seat(
+    provider: str,
+    lens: str,
+    dispatch_id: str,
+    text: str,
+    *,
+    stage: str,
+    ledger: Optional[_ReceiptLedger],
+    raised: bool = False,
+) -> Dict[str, Any]:
+    """Reconcile one seat's outcome against the receipt ledger (OI-1519).
+
+    Three branches, never two:
+      1. the ledger knows this dispatch-id and says FAILURE → ``failed``
+      2. the ledger knows this dispatch-id and says SUCCESS → ``present``
+      3. the ledger has NO decisive record (unknown dispatch-id, indecisive
+         receipts) → ``unmeasured`` — its own branch, counted as neither present
+         nor failed, never a silent fail-open to present.
+
+    Two degradations are explicit, not silent: a dispatcher that RAISED is failed on
+    direct local evidence (no receipt will ever exist for it); a missing/unreadable
+    ledger falls back to the legacy frontmatter measurement (``source="legacy"``) so
+    the panel keeps working in a fresh checkout — flagged on the result via
+    ``ledger_available=False``.
+
+    When the ledger is decisive and DISAGREES with the seat's own frontmatter, the
+    ledger wins and ``divergent`` is set — the divergence itself is the finding and
+    must be reported, not silently corrected.
+    """
+    legacy_failed = _is_error(text)
+    record: Dict[str, Any] = {
+        "provider": provider,
+        "lens": lens,
+        "stage": stage,
+        "dispatch_id": dispatch_id,
+        "outcome": "",
+        "source": "",
+        "frontmatter_exit_code": _seat_exit_code(text),
+        "frontmatter_outcome": SEAT_FAILED if legacy_failed else SEAT_PRESENT,
+        "ledger_status": "",
+        "ledger_decision": "",
+        "ledger_outcome": "",
+        "divergent": False,
+        "reason": "",
+    }
+    if raised:
+        record.update(
+            outcome=SEAT_FAILED, source="local",
+            reason="dispatcher raised before the seat completed — local evidence",
+        )
+        return record
+    receipts = ledger.lookup(dispatch_id) if ledger is not None else None
+    if receipts is None:
+        record.update(
+            outcome=record["frontmatter_outcome"], source="legacy",
+            reason="receipt ledger unavailable/unreadable — frontmatter fallback (UNVERIFIED)",
+        )
+        return record
+    if receipts:
+        record["ledger_status"] = "+".join(sorted({
+            str(r.get("status") or "").strip().lower() or "<none>" for r in receipts
+        }))
+        record["ledger_decision"] = "+".join(sorted({_receipt_decision_str(r) for r in receipts}))
+    outcome = _ledger_outcome(receipts)
+    if outcome is None:
+        record.update(
+            outcome=SEAT_UNMEASURED, source="ledger",
+            reason=("ledger receipts are indecisive (no success/failure signal)"
+                    if receipts else "ledger has no receipt for this dispatch-id"),
+        )
+        return record
+    record.update(
+        outcome=SEAT_PRESENT if outcome else SEAT_FAILED,
+        source="ledger",
+        ledger_outcome=SEAT_PRESENT if outcome else SEAT_FAILED,
+        reason=("ledger records success for this dispatch-id" if outcome
+                else "ledger records a failure for this dispatch-id"),
+    )
+    record["divergent"] = record["outcome"] != record["frontmatter_outcome"]
+    return record
+
+
 def _first_ok(
     dispatcher: DispatcherFn,
     seats: List[Tuple[str, str]],
     prompt: str,
     did_prefix: str,
+    *,
+    ledger: Optional[_ReceiptLedger] = None,
+    measure_sink: Optional[List[Dict[str, Any]]] = None,
+    stage: str = "",
 ) -> str:
     """Try each seat in order until one returns a real (non-error) report. This keeps the
     critical sequential stages (contrarian / verify / synthesis) from collapsing the whole
-    panel when the first-choice provider is down (sales-copilot T0, 2026-07-10)."""
+    panel when the first-choice provider is down (sales-copilot T0, 2026-07-10).
+
+    OI-1519: the accept decision is reconciled against the receipt ledger with the
+    SAME ``_measure_seat`` the fan-out uses — these stages deliver the final verdict,
+    so the identical frontmatter-lie bug may not survive here. A ledger-failed seat is
+    skipped; an UNMEASURED seat (ledger has no decisive record, e.g. a receipt-lag
+    window) is kept as a last-resort fallback so a measurement gap cannot cascade
+    through the whole roster and collapse the stage to ``[empty]`` when real content
+    exists — and every measurement is recorded on the result via ``measure_sink`` so
+    the gap stays visible."""
     last = "[empty]"
+    unmeasured_fallback: Optional[str] = None
     for provider, model in seats:
+        did = f"{did_prefix}-{provider}-{uuid.uuid4().hex[:6]}"
+        raised = False
         try:
-            out = dispatcher(provider, model, prompt, f"{did_prefix}-{provider}-{uuid.uuid4().hex[:6]}")
+            out = dispatcher(provider, model, prompt, did)
         except Exception as exc:  # noqa: BLE001
-            last = f"[dispatch error {provider}: {exc!r}]"
-            continue
-        if not _is_error(out):
+            out = f"[dispatch error {provider}: {exc!r}]"
+            raised = True
+        measurement = _measure_seat(
+            provider, "", did, out, stage=stage or did_prefix, ledger=ledger, raised=raised,
+        )
+        if measure_sink is not None:
+            measure_sink.append(measurement)
+        if measurement["outcome"] == SEAT_PRESENT:
             return out
+        if measurement["outcome"] == SEAT_UNMEASURED and unmeasured_fallback is None and out:
+            unmeasured_fallback = out
         last = out or "[empty]"
-    return last
+    return unmeasured_fallback if unmeasured_fallback is not None else last
 
 
 __all__ = ["MODES", "DEFAULT_ROSTER", "ModeSpec", "DeliberationResult", "run_deliberation"]
