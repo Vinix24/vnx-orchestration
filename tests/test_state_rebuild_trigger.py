@@ -369,6 +369,66 @@ def test_task_failed_bypasses_throttle(tmp_path: Path) -> None:
 # Test 19: dispatch_promoted then task_complete within 30s → 2 Popen calls
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# D1 poort E: fire-and-forget Popen had no wait(), so "fired-successfully"
+# only ever meant Popen didn't raise — a rebuild that started and then
+# crashed left no trace anywhere. _reap_and_log_on_failure closes that gap
+# in a background thread without turning the throttle into a blocking call.
+# ---------------------------------------------------------------------------
+
+def test_reap_and_log_on_failure_appends_evidence_for_real_crash(tmp_path: Path) -> None:
+    state_dir = tmp_path / "data" / "state"
+    state_dir.mkdir(parents=True)
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(7)"])
+
+    srt._reap_and_log_on_failure(proc, state_dir)
+
+    log_path = state_dir.parent / "logs" / "build_t0_state.err"
+    assert log_path.is_file(), "a fired-and-failed rebuild must leave evidence"
+    content = log_path.read_text(encoding="utf-8")
+    assert "rc=7" in content
+    assert "=====" in content
+
+
+def test_reap_and_log_on_failure_writes_nothing_on_real_success(tmp_path: Path) -> None:
+    state_dir = tmp_path / "data" / "state"
+    state_dir.mkdir(parents=True)
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"])
+
+    srt._reap_and_log_on_failure(proc, state_dir)
+
+    log_path = state_dir.parent / "logs" / "build_t0_state.err"
+    assert not log_path.exists(), "a clean exit must not pollute the shared error log"
+
+
+def test_maybe_trigger_state_rebuild_reaper_logs_a_real_crash_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: fire a rebuild against a fake build_t0_state.py that
+    actually crashes, and confirm the background reaper appends evidence —
+    the third outcome (fired-and-failed) that used to not exist in the code."""
+    fake_repo = tmp_path / "fake_repo"
+    (fake_repo / "scripts").mkdir(parents=True)
+    (fake_repo / "scripts" / "build_t0_state.py").write_text(
+        "import sys\nsys.exit(9)\n", encoding="utf-8",
+    )
+    state_dir = tmp_path / "data" / "state"
+
+    monkeypatch.setattr(srt, "_REPO_ROOT", fake_repo)
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=state_dir):
+        result = srt.maybe_trigger_state_rebuild()
+
+    assert result is True
+
+    log_path = state_dir.parent / "logs" / "build_t0_state.err"
+    deadline = time.time() + 5
+    while time.time() < deadline and not log_path.exists():
+        time.sleep(0.05)
+
+    assert log_path.is_file(), "reaper must append evidence once the crashed child exits"
+    assert "rc=9" in log_path.read_text(encoding="utf-8")
+
+
 def test_promoted_then_complete_within_window_yields_two_rebuilds(tmp_path: Path) -> None:
     """dispatch_promoted (normal, fires) then task_complete (critical, bypasses) = 2 Popens."""
     base_time = int(time.time())
