@@ -63,6 +63,27 @@ De derde producentgroep in de registry, `review_gate_obligations`
    dan is dat een **luide, geregistreerde uitkomst**: request- én
    result-record met status `not_executable` plus skip-rationale-audit.
    Stilte is geen eindtoestand meer.
+   **D2e (30-08): de overname-keten telt mee als bewijs.** De review-gate
+   overname-keten (`codex_gate -> kimi_gate -> glm_gate -> deepseek_gate`,
+   `gate_request_handler._build_review_gate_takeover_chain`, BETA3-E1)
+   substitueert op aanvraag-tijd al een opvolger als lezer, maar schrijft
+   diens oordeel onder de OPVOLGER's eigen naam
+   (`pr-<n>-<opvolger>.json`) — nooit onder de gedeclareerde poort. Levend
+   bewijs, PR #1726: `pr-1726-codex_gate.json` bleef voorgoed een verouderd
+   `lane_exhausted`-record, terwijl `pr-1726-kimi_gate.json` het echte,
+   complete oordeel droeg — bewijs dat bestond, compleet was, en onvindbaar
+   voor de enige partij die ernaar zocht. Contract: is de gedeclareerde
+   poort zelf niet beslist met compleet bewijs, dan loopt de runner
+   DEZELFDE keten (nooit een tweede, losstaande kopie) langs, op zoek naar
+   de eerste opvolger met een beslist, compleet oordeel. Gevonden, dan
+   vervult/faalt de obligatie zoals altijd, maar het record draagt ook
+   `resolved_by_gate` (de opvolger die daadwerkelijk oordeelde — nooit
+   stilzwijgend toegeschreven aan de gedeclareerde poort) en
+   `takeover_hops` (de volledige wandeling). Onvolledig bewijs bij een
+   opvolger (leeg `contract_hash`/`report_path`, of een `report_path` naar
+   een verdwenen bestand) telt niet mee — een derde, zichtbare toestand,
+   nooit verward met "gevonden bij de gedeclareerde poort" of "gevonden via
+   overname".
 3. **De monitor toetst per sleutel.** De scanner groepeert obligaties op
    gate-naam: `last_seen` = de oudste nog-pendende declaratie (of, als alles
    vervuld is, de nieuwste resolutie). Een declaratie zonder resultaat binnen
