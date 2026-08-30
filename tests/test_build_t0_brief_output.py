@@ -20,7 +20,24 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
+import daemon_register
 from build_t0_state import _state_to_brief, main
+
+# D2: real daemon liveness measurement finds every daemon absent in a bare
+# pytest tmp_path sandbox (no VNX supervisor was ever started there), which
+# on its own now degrades system_health.status / main()'s exit code -- a
+# second nested-health gate alongside the pre-existing "seed a receipts file"
+# one these tests already work around. Neutralize it the same way: inject a
+# clean "ok" measurement so these tests stay focused on their own concern
+# (output format/version), not on daemon supervision.
+_NEUTRAL_DAEMON_LIVENESS = {"overall": "ok", "daemons": {}}
+
+
+def _stub_daemon_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        daemon_register, "measure_daemon_liveness",
+        lambda *_a, **_k: dict(_NEUTRAL_DAEMON_LIVENESS),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +128,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_STATE_DIR", state_dir)
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
+        _stub_daemon_liveness(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "brief"]):
             rc = main()
@@ -139,6 +157,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_STATE_DIR", state_dir)
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
+        _stub_daemon_liveness(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "brief"]):
             rc = main()
@@ -161,6 +180,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_STATE_DIR", state_dir)
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
+        _stub_daemon_liveness(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "state"]):
             rc = main()

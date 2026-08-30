@@ -89,6 +89,7 @@ _LIB_DIR = _SCRIPT_DIR / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+from health_status import worst_status  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
 try:
     from vnx_paths import resolve_central_data_dir  # noqa: E402
@@ -1759,6 +1760,7 @@ def _build_system_health(
     *,
     build_degraded: bool = False,
     db_health: str = "healthy",
+    daemon_liveness: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     uptime_seconds = 0
     panes_path = state_dir / "panes.json"
@@ -1794,6 +1796,30 @@ def _build_system_health(
     except Exception as exc:
         log.debug("beacon_summary failed (non-critical): %s", exc)
 
+    # R6.4 (D2): daemon-liveness is a second nested health signal, read the
+    # same best-effort way as beacon_health above. Callers (tests) may inject
+    # a precomputed result to avoid depending on real process state.
+    if daemon_liveness is None:
+        try:
+            from daemon_register import measure_daemon_liveness
+            daemon_liveness = measure_daemon_liveness()
+        except Exception as exc:  # vnx-silent-except: daemon-liveness read is best-effort, mirrors beacon_health above; a failure here must not break the session-start hot path
+            log.debug("measure_daemon_liveness failed (non-critical): %s", exc)
+
+    # R6.4 (D2): a summary can never report healthier than the worst thing it
+    # summarizes. Before this, `status` was computed once above (from
+    # db_health/build_degraded/artifact-presence) and never revisited, so
+    # `beacon_health.overall == "fail"` could sit right next to
+    # `status: "healthy"` in the same object -- a structurally possible
+    # outcome of the code, not a fluke (measured 2026-08-30 in production
+    # t0_state.json). Every nested health field added here must feed this
+    # aggregation, including daemon_liveness.
+    status = worst_status(
+        status,
+        beacon_health.get("overall") if beacon_health else None,
+        daemon_liveness.get("overall") if daemon_liveness else None,
+    )
+
     result: Dict[str, Any] = {
         "status": status,
         "db_initialized": db_initialized,
@@ -1801,6 +1827,8 @@ def _build_system_health(
     }
     if beacon_health is not None:
         result["beacon_health"] = beacon_health
+    if daemon_liveness is not None:
+        result["daemon_liveness"] = daemon_liveness
     return result
 
 
@@ -2465,6 +2493,7 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "warnings": [],
             "db_initialized": sh.get("db_initialized", False),
             "beacon_health": sh.get("beacon_health"),
+            "daemon_liveness": sh.get("daemon_liveness"),
         },
     }
 

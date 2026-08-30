@@ -13,9 +13,11 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from health_status import worst_status  # noqa: E402
 from vnx_paths import ensure_env  # noqa: E402
 
 
@@ -105,6 +107,58 @@ def _load_t0_state(state_dir: Path) -> dict:
         return {}
 
 
+def _parse_iso(ts: str) -> datetime | None:
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# ── Session-freshness refusal (D2) ─────────────────────────────────────
+#
+# T0 must refuse to orchestrate on a state older than the current session,
+# not silently brief against stale numbers (the exact D1 failure: t0_state.json
+# stalled 23 days because the SessionStart refresh hook stopped firing, and
+# nothing noticed). "Session start" is approximated by panes.json's mtime --
+# VNX_HYBRID_FINAL.sh (re)writes state_dir/panes.json on every launch (the
+# same file _build_system_health already reads for uptime_seconds), so a
+# generated_at OLDER than that means this session never refreshed the
+# projection. No panes.json (no live session, e.g. a headless dispatch) can't
+# prove staleness either way -- reported as not applicable rather than
+# guessed. The refusal itself piggybacks on dispatch_guard.sh's EXISTING
+# Check 1 (system_health.status degraded/failed -> WAIT/exit 2): folding
+# staleness into system_health.status here means the guard (out of this
+# worker's scripts/**-only write scope) needs no change to enforce it.
+
+def _state_freshness(t0: dict, state_dir: Path) -> dict:
+    generated_at = t0.get("generated_at")
+    panes_path = state_dir / "panes.json"
+    if not generated_at or not panes_path.exists():
+        return {"applicable": False, "stale": False}
+
+    gen_dt = _parse_iso(str(generated_at))
+    if gen_dt is None:
+        return {"applicable": False, "stale": False}
+
+    try:
+        session_started_at = datetime.fromtimestamp(panes_path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return {"applicable": False, "stale": False}
+
+    stale = gen_dt < session_started_at
+    return {
+        "applicable": True,
+        "stale": stale,
+        "generated_at": generated_at,
+        "session_started_at": session_started_at.isoformat().replace("+00:00", "Z"),
+    }
+
+
 # ── Dashboard sections ────────────────────────────────────────────────
 
 def _active_waves(waves: list[dict], n: int = 3) -> list[dict]:
@@ -173,7 +227,16 @@ def _print_decisions(cs: dict) -> None:
 
 # ── JSON output ───────────────────────────────────────────────────────
 
-def _build_json_output(cs: dict, t0: dict) -> dict:
+def _build_json_output(cs: dict, t0: dict, state_dir: Path) -> dict:
+    freshness = _state_freshness(t0, state_dir)
+    system_health = dict(t0.get("system_health", {}))
+    if freshness.get("stale"):
+        # "fail" here is the nested-signal severity floor (worst_status maps
+        # it to "degraded", one tier below "failed" reserved for db-level
+        # corruption) -- state built before this session started is a real,
+        # measured problem, not an unmeasured one.
+        system_health["status"] = worst_status(system_health.get("status", "healthy"), "fail")
+
     return {
         "schema": "vnx_status/1.0",
         "focus": cs.get("focus", ""),
@@ -182,7 +245,8 @@ def _build_json_output(cs: dict, t0: dict) -> dict:
         "terminals": t0.get("terminals", {}),
         "recent_decisions": cs.get("decisions", [])[:3],
         "queues": t0.get("queues", {}),
-        "system_health": t0.get("system_health", {}),
+        "system_health": system_health,
+        "state_freshness": freshness,
         "strategy_available": bool(cs),
         "t0_state_available": bool(t0),
     }
@@ -232,7 +296,7 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
     t0 = _load_t0_state(state_dir) if t0_ok else {}
 
     if args.emit_json:
-        print(json.dumps(_build_json_output(cs, t0), indent=2))
+        print(json.dumps(_build_json_output(cs, t0, state_dir), indent=2))
         return 0
 
     if not strategy_ok:
