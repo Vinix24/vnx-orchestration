@@ -25,6 +25,7 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
 import vnx_paths  # noqa: E402
 import gate_obligation_runner as runner  # noqa: E402
 from gate_obligations import (  # noqa: E402
+    STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
@@ -403,3 +404,208 @@ class TestOutcomeActionMirrorsRecordStatus:
         record = _read_obligation(state_dir, "20260823-oi1400r-control-pass")
         assert record["status"] == STATUS_FULFILLED
         assert outcome["action"] == STATUS_FULFILLED
+
+
+# ---------------------------------------------------------------------------
+# D2e (dispatch 20260830-120000-d2e-takeover-keten-bewijs) — the review-gate
+# takeover chain (codex_gate -> kimi_gate -> glm_gate -> deepseek_gate,
+# gate_request_handler._build_review_gate_takeover_chain) substitutes a
+# successor gate as the READER at request time, but writes that successor's
+# verdict under its OWN name (pr-<n>-<successor>.json), never under the
+# originally declared gate's. This runner used to read only
+# manager._result_path(<declared gate>, pr_number) -- live evidence, PR
+# #1726: pr-1726-codex_gate.json stayed a stale lane_exhausted record while
+# pr-1726-kimi_gate.json carried the real, complete-evidence verdict, and
+# the obligation declared against codex_gate never found it.
+# ---------------------------------------------------------------------------
+
+
+class _TakeoverFakeReviewGateManager:
+    """Writes real request records for the declared gate, but the RESULT
+    record for ``target_gate`` (defaulting to the declared gate itself when
+    ``None``) -- mirrors ``_dispatch_review_seat`` walking PAST an
+    already-exhausted declared gate without touching its own result file,
+    and dispatching the takeover successor instead.
+    """
+
+    def __init__(
+        self, state_dir: Path, *, target_gate: "str | None", status: str,
+        report_path: Path, contract_hash: str = "sha256:deadbeef",
+    ) -> None:
+        self.state_dir = Path(state_dir)
+        self.target_gate = target_gate
+        self.status = status
+        self.report_path = report_path
+        self.contract_hash = contract_hash
+        self.calls = []
+
+    def _request_path(self, gate: str, pr_number: int) -> Path:
+        return self.state_dir / "review_gates" / "requests" / f"pr-{pr_number}-{gate}.json"
+
+    def _result_path(self, gate: str, pr_number: int) -> Path:
+        return self.state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
+
+    def request_and_execute(self, *, pr_number, branch, review_stack, risk_class,
+                             changed_files, mode, dispatch_id=""):
+        self.calls.append(
+            {"pr_number": pr_number, "branch": branch, "review_stack": list(review_stack)}
+        )
+        for gate in review_stack:
+            self._request_path(gate, pr_number).write_text(
+                json.dumps({"gate": gate, "pr_number": pr_number, "status": "requested"}),
+                encoding="utf-8",
+            )
+        target = self.target_gate or review_stack[0]
+        self._result_path(target, pr_number).write_text(
+            json.dumps({
+                "gate": target,
+                "pr_number": pr_number,
+                "dispatch_id": dispatch_id,
+                "status": self.status,
+                "contract_hash": self.contract_hash,
+                "report_path": str(self.report_path),
+            }),
+            encoding="utf-8",
+        )
+        return {"pr_number": pr_number, "branch": branch, "gates": [], "has_required_failure": False}
+
+
+def _seed_stuck_gate_result(state_dir: Path, gate: str, pr_number: int) -> None:
+    """Pre-seed a declared gate's OWN result record stuck on a classic
+    ``lane_exhausted`` shape (``status="unavailable"``, empty evidence) --
+    the exact pr-1726-codex_gate.json shape measured live, never rewritten
+    by :class:`_TakeoverFakeReviewGateManager` when ``target_gate`` names a
+    successor instead.
+    """
+    (state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json").write_text(
+        json.dumps({
+            "gate": gate, "pr_number": pr_number, "status": "unavailable",
+            "reason": "dispatch_error", "contract_hash": "", "report_path": "",
+        }),
+        encoding="utf-8",
+    )
+
+
+class TestTakeoverChainEvidence:
+    @pytest.fixture(autouse=True)
+    def _clean_takeover_chain_env(self, monkeypatch):
+        # Hermetic: the default chain (codex_gate,kimi_gate,glm_gate,
+        # deepseek_gate) must come from the registry default, never from
+        # whatever happens to be set in the ambient shell/CI environment.
+        monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+        monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+
+    def test_fulfilled_via_takeover_successor_evidence(self, tmp_path, monkeypatch):
+        """RED on unfixed main (measured 2026-08-30, D2e): codex_gate's own
+        record stays stuck ``unavailable`` forever while kimi_gate already
+        carries a complete-evidence PASS for the same PR -- the runner must
+        find it and book the obligation fulfilled, naming kimi_gate as the
+        gate that actually decided.
+        """
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-d2e-takeover-pass", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1726,
+        )
+        _seed_stuck_gate_result(state_dir, "codex_gate", 1726)
+        report_file = state_dir / "unified_reports" / "kimi-gate-pr1726.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("kimi_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate="kimi_gate", status="pass", report_path=report_file,
+        )
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 0
+        record = _read_obligation(state_dir, "20260830-d2e-takeover-pass")
+        assert record["status"] == STATUS_FULFILLED
+        assert record["resolved_by_gate"] == "kimi_gate"
+        assert record["takeover_hops"] == ["codex_gate", "kimi_gate"]
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+        assert outcome["resolved_by_gate"] == "kimi_gate"
+
+    def test_failed_via_takeover_successor_evidence_never_reads_as_fulfilled(self, tmp_path, monkeypatch):
+        """A DECIDED FAIL at the successor discharges the obligation but must
+        never be laundered into a clean 'fulfilled' -- mirrors the BETA3-C2
+        fulfill_by_failed_evidence discipline, now for takeover evidence."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-d2e-takeover-fail", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1729,
+        )
+        _seed_stuck_gate_result(state_dir, "codex_gate", 1729)
+        report_file = state_dir / "unified_reports" / "kimi-gate-pr1729.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("kimi_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate="kimi_gate", status="failed", report_path=report_file,
+        )
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 0
+        record = _read_obligation(state_dir, "20260830-d2e-takeover-fail")
+        assert record["status"] == STATUS_FAILED
+        assert record["resolved_by_gate"] == "kimi_gate"
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FAILED
+
+    def test_incomplete_successor_evidence_is_the_third_branch_stays_pending(self, tmp_path, monkeypatch):
+        """Third branch (D2e): evidence at a successor that is NOT complete
+        (report_path points at a file that does not exist) must never count
+        -- and must never be silently folded into either 'found at the
+        declared gate' or 'found via takeover'. The obligation stays
+        pending, exactly as it does today with no successor at all."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-d2e-takeover-incomplete", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1730,
+        )
+        _seed_stuck_gate_result(state_dir, "codex_gate", 1730)
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate="kimi_gate", status="pass",
+            report_path=state_dir / "unified_reports" / "never-written.md",
+        )
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 1
+        record = _read_obligation(state_dir, "20260830-d2e-takeover-incomplete")
+        assert record["status"] == STATUS_PENDING
+        assert "resolved_by_gate" not in record
+
+    def test_declared_gate_evidence_still_found_directly_when_present(self, tmp_path, monkeypatch):
+        """The existing path must keep working unchanged: when the declared
+        gate itself produces complete, decided evidence, the takeover chain
+        is never consulted at all."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-d2e-takeover-declared", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1731,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr1731.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate=None, status="pass", report_path=report_file,
+        )
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 0
+        record = _read_obligation(state_dir, "20260830-d2e-takeover-declared")
+        assert record["status"] == STATUS_FULFILLED
+        assert "resolved_by_gate" not in record
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+        assert "resolved_by_gate" not in outcome

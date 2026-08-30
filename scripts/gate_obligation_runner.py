@@ -67,6 +67,30 @@ runner fulfils them:
      caller-side check drifts the moment a new call site is added) — the
      gate never ran, so there is no verdict to rescue anything with, no
      matter what its evidence fields contain.
+  9. D2e (2026-08-30, dispatch 20260830-120000-d2e-takeover-keten-bewijs):
+     items 1-8 above only ever look at the DECLARED gate's own result file
+     (``manager._result_path(gate, pr_number)``). But the review-gate
+     takeover chain (``codex_gate -> kimi_gate -> glm_gate -> deepseek_gate``,
+     ``gate_request_handler._build_review_gate_takeover_chain``, BETA3-E1)
+     can already have substituted a SUCCESSOR gate as the reader at request
+     time — and that successor writes its verdict under its OWN name, never
+     the declared gate's. Live evidence, PR #1726: ``pr-1726-codex_gate.json``
+     stayed a stale ``lane_exhausted`` record forever while
+     ``pr-1726-kimi_gate.json`` carried a real, complete-evidence verdict —
+     evidence that existed, was complete, and was invisible to the only
+     party looking for it. CONTRACT: when the declared gate's own record is
+     not itself a decided, complete-evidence verdict, the runner now walks
+     the SAME chain (never a second, locally-defined copy —
+     :func:`_find_takeover_successor_evidence`) looking for the first
+     successor that IS one. Found, the obligation is booked
+     ``fulfilled``/``failed`` exactly as items 7/8 already do for the
+     declared gate, but the record ALSO carries ``resolved_by_gate`` (the
+     successor's name — never silently attributed to the declared gate) and
+     ``takeover_hops`` (the full walk). Incomplete evidence at a successor
+     (missing ``contract_hash``/``report_path``, or a ``report_path`` whose
+     file no longer exists) does NOT count — that is a third, distinct
+     outcome (chain walked, nothing usable found anywhere), never conflated
+     with either "found at the declared gate" or "found via takeover".
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -665,6 +689,38 @@ def _index_gate_results(
     return index
 
 
+def _has_decided_evidence(record: Dict[str, Any]) -> bool:
+    """True when ``record`` is a DECIDED pass/fail gate verdict carrying a
+    complete, still-on-disk evidence trail.
+
+    "Complete evidence" mirrors ``gate_status.has_complete_evidence``
+    (non-empty ``contract_hash`` AND ``report_path`` — the same bar
+    ``closure_verifier`` enforces at merge time), plus an on-disk check that
+    the report file the record points to still exists, plus (BETA3-C2) a
+    DECIDED-verdict check: ``not_executable`` is never evidence regardless
+    of what its evidence fields contain (the gate never ran), and neither is
+    any other status that is not a decided pass/fail (incomplete,
+    ``unavailable``, or unrecognised) — only :func:`gate_status.is_pass`
+    returning True, or a status in :data:`gate_status.FAIL_STATES`, counts.
+
+    Factored out of :func:`_fulfilling_result` (D2e) so the OI-1388
+    evidence-index lookup and the takeover-chain walk
+    (:func:`_find_takeover_successor_evidence`, which reads records fresh
+    off disk rather than through an index) share exactly ONE "is this
+    usable evidence" predicate instead of two that could silently drift
+    apart.
+    """
+    if not has_complete_evidence(record):
+        return False
+    if not Path(str(record.get("report_path"))).exists():
+        return False
+    status = _gate_canonical_status(record)
+    if status == "not_executable":
+        return False
+    passed, _reason = _gate_is_pass(record)
+    return passed or status in _GATE_RESULT_FAIL_STATES
+
+
 def _fulfilling_result(
     index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
     dispatch_id: str,
@@ -674,62 +730,90 @@ def _fulfilling_result(
     ``(dispatch_id, gate)`` — a gate that actually ran and reached a verdict.
 
     OI-1388 defect 1: a terminal retirement/escalation must never overwrite
-    evidence that a gate already produced. "Complete evidence" mirrors
-    ``gate_status.has_complete_evidence`` (non-empty ``contract_hash`` AND
-    ``report_path`` — the same bar ``closure_verifier`` enforces at merge
-    time) plus an on-disk check that the report file the record points to
-    still exists.
-
-    BETA3-C2 (2026-08-26): complete evidence fields alone are not proof a
-    gate reviewed and decided. glm_gate/kimi_gate have emitted BOTH
-    ``contract_hash`` and ``report_path`` on a FAILED run since #1669, and
-    nothing forbids a ``not_executable`` record from echoing both fields
-    from a request payload that never actually ran. ``has_complete_evidence``
-    answers "is the trail complete"; it deliberately does not ask "what does
-    the verdict say" — callers (:func:`_pre_execution_decision`,
-    :func:`fulfill_obligation`) need that second answer to decide what to
-    stamp. Two rejections layer on top of ``has_complete_evidence``, both
-    INSIDE this function rather than at a call site, so the property holds
-    no matter what order/how many callers exist (the #1688 lesson: a
-    caller-side check drifts the moment a new call site is added; a
-    function-side check cannot):
-
-      - ``not_executable`` is never evidence, full stop, regardless of what
-        its evidence fields contain — the gate never ran, so there is no
-        verdict to rescue an obligation with.
-      - any other status that is not a DECIDED verdict — incomplete
-        (pending/running/queued/requested), ``unavailable`` (provider
-        outage, OI-1142), or a status this vocabulary has never seen — is
-        rejected the same way, even carrying both evidence fields. This
-        mirrors the OI-1400 principle already applied on the live-run path
-        ("anything I don't recognise as a pass is NOT a pass", see the
-        ``elif`` chain in :func:`fulfill_obligation`): only
-        :func:`gate_status.is_pass` returning True, or a status in
-        :data:`gate_status.FAIL_STATES`, counts as decided. No new
-        vocabulary is invented here — both checks reuse ``gate_status``'s.
-
-    Four distinct non-evidence states are rejected: a result that is
-    entirely absent (empty index bucket), one whose evidence fields are
-    empty strings (fails ``has_complete_evidence``), one whose
-    ``report_path`` points at a file that no longer exists, and — as of
-    BETA3-C2 — one whose verdict itself is not decided.
+    evidence that a gate already produced. "Usable evidence" is
+    :func:`_has_decided_evidence` — four distinct non-evidence states are
+    rejected there: a result that is entirely absent (empty index bucket,
+    checked here), one whose evidence fields are empty strings, one whose
+    ``report_path`` points at a file that no longer exists, and one whose
+    verdict itself is not decided (BETA3-C2).
 
     The caller determines PASS vs. FAIL on the returned record via
     :func:`gate_status.is_pass` — this function only answers "does usable
     evidence exist", never "what should the obligation be stamped".
     """
     for entry, record in index.get((dispatch_id, gate), []):
-        if not has_complete_evidence(record):
+        if _has_decided_evidence(record):
+            return entry, record
+    return None
+
+
+def _find_takeover_successor_evidence(
+    manager: Any,
+    declared_gate: str,
+    pr_number: int,
+) -> Optional[Tuple[str, Path, Dict[str, Any], List[str]]]:
+    """D2e (dispatch 20260830-120000-d2e-takeover-keten-bewijs): walk the
+    review-gate takeover chain FORWARD from ``declared_gate``, reading each
+    successor's OWN result record FRESH off disk, looking for the first one
+    carrying decided, complete evidence.
+
+    ``gate_request_handler._dispatch_review_seat`` already substitutes a
+    successor gate as the READER at request time once the declared gate's
+    own last-recorded result classifies as ``lane_exhausted`` — but it
+    writes the request/result records under the SUCCESSOR's own name
+    (``pr-<n>-<successor>.json``), never under the declared gate's. A
+    declared-gate obligation whose own result file never advances past that
+    exhaustion (live evidence, PR #1726: ``pr-1726-codex_gate.json`` stayed
+    the stale exhaustion record while ``pr-1726-kimi_gate.json`` carried the
+    real, complete-evidence verdict) must still be able to find that
+    verdict — this is the READ-side mirror of the SAME operator-configured
+    chain, sourced from the single place it is built
+    (``gate_request_handler._build_review_gate_takeover_chain``) rather than
+    a second, locally-defined copy that could drift out of step with it.
+
+    Read FRESH from disk via ``manager._result_path`` — never a
+    pre-execution :func:`_index_gate_results` snapshot — because the caller
+    invokes this immediately after ``manager.request_and_execute`` may have
+    just written or updated exactly the successor record being looked for.
+    Keyed by ``pr_number`` alone, matching the SAME convention the
+    pre-existing declared-gate lookup two lines above this call site
+    already uses (``manager._result_path(gate, pr_number)``) — gate result
+    files are one-per-(pr_number, gate), never indexed by dispatch_id.
+
+    Returns ``(gate, path, record, hops)`` for the first successor with
+    usable evidence — ``hops`` is the full walk INCLUDING ``declared_gate``
+    at index 0, so the obligation record can carry the whole path, not just
+    the landing. Returns ``None`` when the chain runs out (or
+    ``declared_gate`` has no configured successor at all) with nothing
+    found — the caller falls through to the pre-existing declared-gate-only
+    handling unchanged. That is its own visible outcome (the third branch
+    D2e requires), never silently folded into either "found at the declared
+    gate" or "found via takeover": a chain that legitimately ends at
+    ``deepseek_gate`` (a named, ratified skip — its runner ships in a
+    separate dispatch, E2) walks off the end of ``chain`` here exactly the
+    same way a chain that never produced any evidence at all does, and
+    both correctly return ``None``.
+    """
+    from gate_request_handler import _build_review_gate_takeover_chain  # noqa: PLC0415
+
+    chain = _build_review_gate_takeover_chain()
+    hops = [declared_gate]
+    current = declared_gate
+    while current in chain:
+        current = chain[current]
+        hops.append(current)
+        candidate_path = manager._result_path(current, pr_number)
+        if not candidate_path.exists():
             continue
-        if not Path(str(record.get("report_path"))).exists():
+        try:
+            candidate_record = json.loads(candidate_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             continue
-        status = _gate_canonical_status(record)
-        if status == "not_executable":
+        if not isinstance(candidate_record, dict):
             continue
-        passed, _reason = _gate_is_pass(record)
-        if not passed and status not in _GATE_RESULT_FAIL_STATES:
+        if not _has_decided_evidence(candidate_record):
             continue
-        return entry, record
+        return current, candidate_path, candidate_record, hops
     return None
 
 
@@ -1156,6 +1240,7 @@ def fulfill_obligation(
         # must tell the same truth, not a cosmetic "fulfilled".
         result_status = ""
         result_reason = ""
+        result_data: Optional[Dict[str, Any]] = None
         try:
             if result_file.exists():
                 result_data = json.loads(result_file.read_text(encoding="utf-8"))
@@ -1163,6 +1248,54 @@ def fulfill_obligation(
                 result_reason = str(result_data.get("reason") or "")
         except (OSError, json.JSONDecodeError) as exc:
             _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
+
+        # D2e: the declared gate's own record can be a permanent dead end
+        # (lane_exhausted, PR #1726 measured live) while the review-gate
+        # takeover chain already substituted a successor as the reader —
+        # see _find_takeover_successor_evidence. Only consulted when the
+        # declared gate's OWN record is not ALREADY a decided, complete
+        # verdict: when it is, the existing handling below books it exactly
+        # as it does today, and a successor is never even looked at (D2e:
+        # "bewijs bij de gedeclareerde poort zelf wordt gevonden zoals nu").
+        takeover_hit = None
+        if not (result_data is not None and _has_decided_evidence(result_data)):
+            takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number)
+
+        if takeover_hit is not None:
+            successor_gate, successor_path, successor_record, hops = takeover_hit
+            passed, verdict_reason = _gate_is_pass(successor_record)
+            terminal = STATUS_FULFILLED if passed else STATUS_FAILED
+            hop_chain = " -> ".join(hops)
+            reason = "fulfilled_by_takeover_evidence" if passed else "failed_by_takeover_evidence"
+            reason_detail = (
+                f"{gate} never produced a decided verdict of its own for PR "
+                f"#{pr_number} -- the review-gate takeover chain ({hop_chain}) "
+                f"already substituted {successor_gate} as the reader, and "
+                f"{successor_gate} produced a complete-evidence verdict "
+                f"({verdict_reason}). Booked against {gate}'s obligation with "
+                f"resolved_by_gate={successor_gate!r} (D2e)."
+            )
+            updated = update_obligation(
+                path,
+                status=terminal,
+                pr_number=pr_number,
+                branch=branch,
+                attempts=attempts,
+                last_attempt_at=now,
+                resolved_at=utc_now_iso(),
+                request_path=str(manager._request_path(gate, pr_number)),
+                result_path=str(successor_path),
+                resolved_by_gate=successor_gate,
+                takeover_hops=hops,
+                reason=reason,
+                reason_detail=reason_detail,
+            )
+            outcome["action"] = updated.get("status", terminal)
+            outcome["request_path"] = updated.get("request_path")
+            outcome["result_path"] = updated.get("result_path")
+            outcome["resolved_by_gate"] = successor_gate
+            outcome["has_required_failure"] = not passed
+            return outcome
 
         # OI-1469: "provider_not_installed" means the required CLI binary was
         # missing from THIS RUNNER's own process environment (e.g. a

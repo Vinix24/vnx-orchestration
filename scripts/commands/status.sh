@@ -329,8 +329,20 @@ HELP
 
   # Legacy bash paths for filter flags and fallback.
   if command -v python3 >/dev/null 2>&1 && [ -f "$VNX_HOME/scripts/build_t0_state.py" ]; then
-    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-      python3 "$VNX_HOME/scripts/build_t0_state.py" >/dev/null 2>&1 || true
+    # D1 (poort E): this refresh used to discard BOTH streams and the exit
+    # code (`>/dev/null 2>&1 || true`) — `vnx status` must never fail on a
+    # background refresh, but a crash must still leave the same evidence a
+    # hook-driven failure would. Keep stdout silent (status output owns the
+    # terminal), append stderr on failure to the shared build_t0_state.err.
+    _status_err_log="${VNX_LOGS_DIR:-$VNX_DATA_DIR/logs}/build_t0_state.err"
+    mkdir -p "$(dirname "$_status_err_log")" 2>/dev/null || true
+    _status_build_rc=0
+    _status_build_err="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
+      python3 "$VNX_HOME/scripts/build_t0_state.py" 2>&1 >/dev/null)" || _status_build_rc=$?
+    if [ "$_status_build_rc" -ne 0 ] && [ -n "$_status_build_err" ]; then
+      printf '===== %s (rc=%s, via vnx status) =====\n%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_status_build_rc" "$_status_build_err" >> "$_status_err_log"
+    fi
   fi
 
   printf '\n'
