@@ -392,6 +392,67 @@ A result record is stale if:
 
 ---
 
+## 9. The Canonical `failure_reason` Field
+
+### 9.1 What the field carries
+
+`failure_reason` is the canonical "why did this not pass" field a generic reader
+queries. OI-1415 established it for `phantom_guard` and `pr_enforcement`; OI-1453
+extends it to every `review_gates/results/` record through a single derivation
+at the one point every result record passes through on its way to disk
+(`gate_recorder._write_result_atomic`).
+
+The field carries a **cause**, never a category, a summary, or a placeholder.
+Measured 2026-08-30 over 501 non-pass gate-result records across every project
+store (non-pass defined canonically as `gate_status.is_pass` returning `False`,
+which counts `completed`/`approve` as a pass and therefore excludes them), the
+cause on a record lives under one of these names and only these:
+
+| field | what it is | route into `failure_reason` |
+|-------|-----------|------------------------------|
+| `failure_reason` (pre-stamped) | a cause the lane established upstream | wins via the `existing` shortcut — the lane-log lift (OI-1452) stamps it in the report frontmatter when it found a real exhaustion marker |
+| `blocking_findings` | a cause (the gate ran and found a blockade) | lifted when the list is non-empty; "N blocking finding(s): <first>" |
+| `reason_detail` | a cause ("codex binary not found in PATH", "Subprocess exited with code 1") | lifted from the source chain |
+
+### 9.2 What the field does NOT carry
+
+These fields are deliberately NOT consulted by the derivation. Lifting any of
+them is the bug OI-1453 measured: on the real PR #1677 outage record,
+`reason="dispatch_error"` won and a category landed where a cause belongs.
+
+| field | what it actually is | why it is not a cause |
+|-------|---------------------|------------------------|
+| `reason` | a classification (`provider_not_installed`, `dispatch_error`, `exit_nonzero`, `provider_disabled`) | a label for routing/triage, not an explanation a reader can act on |
+| `residual_risk` | prose, often frontmatter-derived ("kimi's own report stamps this run as failed...") | a field named "remaining risk"; its text resembles a cause but is not one |
+| `summary` | a one-line verdict summary ("gate found problems") | a summary, by construction not a cause |
+| terminal fallbacks | `f"status: {status}"`, `"unspecified"` | a placeholder invented to satisfy a presence check — the worst case, because it passes every presence check while explaining nothing |
+
+### 9.3 Three states, three meanings
+
+`failure_reason` is not a binary "filled or not". It has three states, each
+with its own meaning. This is a contract, not an implementation detail:
+
+| state | `failure_reason` value | meaning |
+|-------|------------------------|---------|
+| a pass | **absent** | no failure to explain; presence would make the field meaningless as a signal |
+| a non-pass WITH an established cause | **the cause text** | the gate filed the cause under `reason_detail`, blocking findings, or a pre-stamp |
+| a non-pass where the cause was NOT established | **empty (`""`)** | the record honestly says "not a pass, and we could not say why" |
+
+The third state is **a valid state, not a defect**. A check that treats it as a
+violation is the trap this contract exists to prevent: it forces every gate to
+fill the field with *something* to pass the check, the field stops meaning
+anything, and the real cause is buried under invented placeholders. A guard on
+this field MUST distinguish all three states — a two-bucket "pass empty /
+non-pass filled" guard books the third state as a violation and is wrong by
+construction.
+
+The empty third state is also how the lane-log lift (OI-1452) leaves a record
+when it found no marker: the gate pre-stamps `failure_reason = ""`, and the
+derivation honors that rather than inventing a cause from `reason` or
+`residual_risk`.
+
+---
+
 ## Appendix A: GATE Rule Summary
 
 | Rule | Obligation |
@@ -409,6 +470,7 @@ A result record is stale if:
 | GATE-11 | Artifact materialization is all-or-nothing |
 | GATE-12 | Artifact consistency checks before `completed` |
 | GATE-13 | Stale artifact detection via contract_hash recomputation |
+| GATE-14 | `failure_reason` carries a cause only; empty is a valid third state for a non-pass whose cause was not established (see §9) |
 
 ## Appendix B: Relationship To Other Contracts
 

@@ -409,8 +409,98 @@ def _check_overwrite_guard(
         )
 
 
+# A CAUSE, not a category. Measured 2026-08-30 over 501 non-pass gate-result
+# records across every project store (non-pass defined canonically as
+# ``gate_status.is_pass`` returning False, which counts ``completed``/
+# ``approve`` as a pass): ``reason_detail`` carries an actual
+# cause ("codex binary not found in PATH", "Subprocess exited with code 1"),
+# ``reason`` carries a CLASSIFICATION ("provider_not_installed",
+# "dispatch_error", "exit_nonzero"), and ``residual_risk``/``summary`` carry
+# prose that only looks like a cause. Only ``reason_detail`` is in the chain.
+#
+# The lane-log lift (OI-1452) does NOT reach the cause through
+# ``residual_risk`` on the derivation path: when the lift found a real
+# marker it stamps ``failure_reason`` directly in the report frontmatter
+# (governance_emit), so the ``existing`` shortcut below wins before this
+# tuple is ever walked. A record that reaches this walk with only
+# ``residual_risk``/``reason``/``summary`` populated is a record whose cause
+# was NOT established -- and "" is the honest value for that, not a
+# best-effort summary lifted from a field that merely sounds like one.
+_FAILURE_REASON_SOURCES = ("reason_detail",)
+
+
+def derive_failure_reason(payload: Dict[str, Any]) -> str:
+    """The canonical cause, or "" when the cause was not established.
+
+    ``failure_reason`` is the field a generic reader queries, established by
+    OI-1415 for phantom_guard and pr_enforcement. It carries a CAUSE, never a
+    category, a summary, or a placeholder. Three states, each with its own
+    meaning (OI-1453, measured 2026-08-30):
+
+    - a PASS -> "". A pass has no failure to explain; stamping one would make
+      the field's presence meaningless as a signal.
+    - a non-pass WITH an established cause -> the cause text. Lifted from the
+      lane-log stamp (``existing``), from ``blocking_findings`` when a gate
+      ran to completion and failed on what it found, or from ``reason_detail``
+      when a lane filed the cause there.
+    - a non-pass where the cause was NOT established -> "". This is a valid
+      third state, not a defect: the record honestly says "not a pass, and we
+      could not say why". A check that treats this third state as a violation
+      forces placeholders back into the field -- every gate would fill it with
+      something to pass the check, and the field would stop meaning anything.
+
+    What this function deliberately does NOT consult: ``reason`` (a
+    classification such as "dispatch_error"), ``residual_risk`` and
+    ``summary`` (prose that resembles a cause but is not one), and the
+    terminal fallbacks ``f"status: {status}"`` / ``"unspecified"`` (a
+    placeholder invented to satisfy a presence check). Lifting any of those
+    into the canonical field is precisely the bug OI-1453 measured: on the
+    real PR #1677 outage record, ``reason="dispatch_error"`` won and a
+    category landed where a cause belongs.
+    """
+    from gate_status import is_pass  # noqa: PLC0415
+
+    existing = str(payload.get("failure_reason") or "").strip()
+    if existing:
+        return existing
+    passed, _ = is_pass(payload)
+    if passed:
+        return ""
+
+    blocking = payload.get("blocking_findings")
+    if isinstance(blocking, list) and blocking:
+        first = blocking[0] if isinstance(blocking[0], dict) else {}
+        detail = str(
+            first.get("message") or first.get("title") or first.get("description") or ""
+        ).strip()
+        head = f"{len(blocking)} blocking finding(s)"
+        return f"{head}: {detail}" if detail else head
+
+    for field in _FAILURE_REASON_SOURCES:
+        value = str(payload.get(field) or "").strip()
+        if value:
+            return value
+    # Cause not established -> honest "", not an invented placeholder.
+    return ""
+
+
 def _write_result_atomic(result_path: Path, payload: Dict[str, Any]) -> None:
-    """Write one result record through the shared atomic-write helper.
+    """Write one result record, stamping the canonical failure reason first.
+
+    Every production writer of a ``review_gates/results/`` record reaches disk
+    through here -- the guarded entry points both call it, and the OI-1472
+    table lists no other. Deriving ``failure_reason`` at this one point is what
+    makes "every gate fills it" a property of the code rather than a rule six
+    lanes have to remember separately, which is how it came to be 1-in-470
+    (OI-1453).
+
+    The payload is stamped in place so the record the caller holds is the
+    record on disk. A caller comparing its own dict against the file would
+    otherwise find a field it never set. Stamping only fires when the
+    derivation produced a cause: a pass leaves the field absent, and a
+    non-pass whose cause was not established leaves the field at whatever the
+    caller already set (often "" -- the honest third state, see
+    :func:`derive_failure_reason`).
 
     Callers must already hold :func:`atomic_io.slot_lock` for ``result_path``
     — both guarded entry points below do. This is the write half of that
@@ -427,6 +517,9 @@ def _write_result_atomic(result_path: Path, payload: Dict[str, Any]) -> None:
     on disk matched neither writer's account of what it had written.
     ``atomic_io`` gives each writer its own ``mkstemp`` scratch file.
     """
+    reason = derive_failure_reason(payload)
+    if reason:
+        payload["failure_reason"] = reason
     atomic_write_json(result_path, payload)
 
 
