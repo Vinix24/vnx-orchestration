@@ -1,8 +1,14 @@
 """Build the unified read-only federation view DB.
 
-Attaches each registered project's `quality_intelligence.db`,
-`runtime_coordination.db`, and `dispatch_tracker.db` in `?mode=ro` and
-materializes a small set of unified views in `~/.vnx-aggregator/data.db`.
+Attaches each registered project's `quality_intelligence.db` and
+`runtime_coordination.db` in `?mode=ro` and materializes a small set of
+unified views in `~/.vnx-aggregator/data.db`.
+
+`dispatch_tracker.db` was unified into quality_intelligence.db's
+dispatch_experiments table at V18 (scripts/quality_db_init.py::_migrate_v18)
+and is formally retired — it is not a real source DB on any project, and
+listing it in SOURCE_DBS produced a permanent, unfixable "N-1/N dbs present"
+result in --dry-run diagnostics for every project (OI: absence-is-loud D5).
 
 Read-only at the source: writes only happen against the central view DB
 under `~/.vnx-aggregator/`. The operator can delete that directory at
@@ -39,7 +45,7 @@ from scripts.aggregator import (
 
 LOG = logging.getLogger("vnx.aggregator.build")
 
-SOURCE_DBS = ("quality_intelligence.db", "runtime_coordination.db", "dispatch_tracker.db")
+SOURCE_DBS = ("quality_intelligence.db", "runtime_coordination.db")
 
 # Tables we materialize into the unified view. Each entry: (source_db, table, has_project_id).
 # Tables marked has_project_id=True already carry a `project_id` column post-Phase 0; for

@@ -31,6 +31,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env, _git_toplevel
+from qi_db_health import MIN_HEALTHY_TABLE_COUNT, count_tables as _qi_count_tables
 
 # ---------------------------------------------------------------------------
 # Result model
@@ -476,11 +477,12 @@ def check_database(paths: Dict[str, str]) -> List[CheckResult]:
                             "Quality intelligence DB not found",
                             "Run: vnx init-db")]
 
+    table_count = _qi_count_tables(db_path)
+    if table_count is None:
+        return [CheckResult("database", FAIL, f"Cannot read DB: {db_path}")]
+
     try:
         conn = sqlite3.connect(str(db_path))
-        table_count = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-        ).fetchone()[0]
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_sentinel = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='success_patterns'"
@@ -491,10 +493,10 @@ def check_database(paths: Dict[str, str]) -> List[CheckResult]:
 
     results: List[CheckResult] = []
 
-    if table_count < 10:
+    if table_count < MIN_HEALTHY_TABLE_COUNT:
         results.append(CheckResult(
             "database", FAIL,
-            f"Quality DB incomplete: {table_count} tables (expected >= 10)",
+            f"Quality DB incomplete: {table_count} tables (expected >= {MIN_HEALTHY_TABLE_COUNT})",
             "Run: python3 scripts/quality_db_init.py or vnx doctor --repair-quality-db",
         ))
         return results

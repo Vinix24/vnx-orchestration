@@ -43,7 +43,6 @@ except Exception:
 
 REPO_ROOT = SCRIPT_DIR.parent
 QI_DB = STATE_DIR / "quality_intelligence.db"
-TRACKER_DB = STATE_DIR / "dispatch_tracker.db"
 RECEIPTS_PATH = STATE_DIR / "t0_receipts.ndjson"
 ARCHIVE_DIR = REPO_ROOT / ".vnx-data" / "events" / "archive"
 BEHAVIORS_OUTPUT = STATE_DIR / "dispatch_behaviors.json"
