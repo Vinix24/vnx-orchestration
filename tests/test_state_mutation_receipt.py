@@ -157,7 +157,11 @@ def test_build_failure_does_not_emit_state_mutation(tmp_path: Path) -> None:
          mock.patch("state_mutation.emit_state_mutation") as mock_emit:
         result = bts.main()
 
-    assert result == 0
+    # Poort D changed the build-failure exit code from 0 to _EXIT_BUILD_FAILED (2)
+    # so a failed build can no longer look like success; the exit code is not
+    # this test's real claim (that's mock_emit.assert_not_called() below), but
+    # it must track the current contract instead of the pre-poort-D value.
+    assert result == bts._EXIT_BUILD_FAILED
     mock_emit.assert_not_called()
 
 
@@ -172,7 +176,9 @@ def test_write_atomic_failure_does_not_emit_state_mutation(tmp_path: Path) -> No
          mock.patch("state_mutation.emit_state_mutation") as mock_emit:
         result = bts.main()
 
-    assert result == 0
+    # Same poort-D contract as test_build_failure_does_not_emit_state_mutation
+    # above: a write failure must also exit _EXIT_BUILD_FAILED (2), not the old 0.
+    assert result == bts._EXIT_BUILD_FAILED
     mock_emit.assert_not_called()
 
 
