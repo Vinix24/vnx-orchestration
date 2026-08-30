@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from scripts.aggregator.build_central_view import (
+    SOURCE_DBS,
     UNIFIED_TABLES,
     ProjectEntry,
     attach_readonly,
@@ -358,10 +359,21 @@ def test_dry_run_writes_nothing(four_project_fixture, tmp_path: Path):
 
 def test_unified_tables_constants_consistent():
     # Each entry is (db_name, table, has_project_id) and the db_name must be one
-    # of the three source DBs we attach.
-    valid_dbs = {"quality_intelligence.db", "runtime_coordination.db", "dispatch_tracker.db"}
+    # of the two source DBs we attach. dispatch_tracker.db is formally retired
+    # (unified into quality_intelligence.db's dispatch_experiments at V18) and
+    # is deliberately absent from SOURCE_DBS — see build_central_view.py.
+    valid_dbs = {"quality_intelligence.db", "runtime_coordination.db"}
     for db_name, _table, _has_pid in UNIFIED_TABLES:
         assert db_name in valid_dbs
+
+
+def test_source_dbs_does_not_include_retired_dispatch_tracker():
+    """dispatch_tracker.db must never come back into SOURCE_DBS: it was unified
+    into quality_intelligence.db's dispatch_experiments table at V18 and no
+    live project has this file — listing it here produces a permanent,
+    unfixable "N-1/N dbs present" false signal in --dry-run diagnostics for
+    every project (OI: absence-is-loud D5)."""
+    assert "dispatch_tracker.db" not in SOURCE_DBS
 
 
 # ---------------------------------------------------------------------------

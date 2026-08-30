@@ -90,6 +90,7 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from health_status import worst_status  # noqa: E402
+from qi_db_health import is_empty_schema as _qi_db_is_empty_schema  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
 try:
     from vnx_paths import resolve_central_data_dir  # noqa: E402
@@ -1287,8 +1288,23 @@ _RECENT_DISPATCHES_CENTRAL_SQL_NO_PROVIDER = (
 
 
 def _query_qi_db(db_path: Path, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-    """Execute a read-only query against a quality_intelligence.db and return dicts."""
+    """Execute a read-only query against a quality_intelligence.db and return dicts.
+
+    A 0-table file at ``db_path`` (a decoy left by an interrupted
+    create-then-bootstrap sequence elsewhere, not a real quality_intelligence.db)
+    reads identically to "no rows yet" once ``sqlite3.OperationalError: no such
+    table`` is swallowed below — so it is checked and refused loudly BEFORE the
+    query runs, rather than silently degrading to the same empty list a
+    genuinely-empty-but-real table would return (OI: absence-is-loud D5).
+    """
     if not db_path.exists():
+        return []
+    if _qi_db_is_empty_schema(db_path):
+        log.error(
+            "quality_intelligence.db at %s exists but has 0 tables — refusing to "
+            "read it as 'no data' (this is the wrong file, not empty state)",
+            db_path,
+        )
         return []
     try:
         conn = sqlite3.connect(str(db_path), timeout=5)
