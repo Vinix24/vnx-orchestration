@@ -7,6 +7,7 @@ not assert it" finding into an executable check.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -312,3 +313,101 @@ def test_shell_string_spawn_is_not_treated_as_help_string(tmp_path):
     assert "scripts/runner.py" in found, (
         "shell-string spawn false-negatived as if it were a help= documentation string"
     )
+
+
+# --- Three-state partition + operator override (sidedoor-drie-toestanden) ---
+
+
+def _delivery_result(unaudited=(), open_doors=()):
+    return {
+        "unaudited": set(unaudited),
+        "known_open_side_doors": set(open_doors),
+    }
+
+
+def test_dispatch_agent_cli_is_door_handled_not_open():
+    # bucket (a): the packaged CLI routes through deliver_via_door — handled, no finding.
+    assert "vnx_cli/commands/dispatch_agent.py" in audit_mod.DOOR_HANDLED_CALLERS
+    assert "vnx_cli/commands/dispatch_agent.py" not in audit_mod.KNOWN_OPEN_SIDE_DOORS
+
+
+def test_plan_gate_panel_is_a_known_open_side_door():
+    # bucket (b): plan_gate_panel.py is a KNOWN OPEN side door, and its rule carries
+    # structured fields (owner / close condition / follow-up), not just a comment.
+    assert "scripts/lib/plan_gate_panel.py" in audit_mod.KNOWN_OPEN_SIDE_DOORS
+    rule = audit_mod.KNOWN_OPEN_SIDE_DOORS["scripts/lib/plan_gate_panel.py"]
+    assert rule.owner
+    assert rule.closes_when
+    assert rule.followup
+
+
+def test_partition_is_exhaustive_and_disjoint():
+    # every audited delivery caller sits in exactly one of the two "known" buckets, and the
+    # two buckets never overlap — "known" must not be one list with two meanings.
+    a = set(audit_mod.DOOR_HANDLED_CALLERS)
+    b = set(audit_mod.KNOWN_OPEN_SIDE_DOORS)
+    assert a & b == set(), "a caller cannot be both door-handled and a known open side door"
+    historical = {
+        "scripts/lib/dispatch_deliver.sh",
+        "scripts/lib/pool_worker_runner.py",
+        "scripts/lib/headless_dispatch_daemon.py",
+        "scripts/lib/adapters/claude_adapter.py",
+        "scripts/commands/dispatch-agent.sh",
+        "scripts/commands/dispatch.sh",
+        "scripts/lib/plan_gate_panel.py",
+        "vnx_cli/commands/dispatch_agent.py",
+    }
+    assert a | b == historical, "every audited caller must sit in exactly one bucket"
+    assert audit_mod.audit()["known"] == a | b, "audit()['known'] must equal the bucket union"
+
+
+def test_plan_gate_panel_surfaces_as_known_open_side_door_in_audit():
+    # the red run: on the current tree the watcher must see the open side door, not swallow it.
+    result = audit_mod.audit()
+    assert "scripts/lib/plan_gate_panel.py" in result["known_open_side_doors"]
+    assert "scripts/lib/plan_gate_panel.py" not in result["unaudited"]
+
+
+def test_known_open_side_door_fails_without_override():
+    # no override -> the known open side door is a finding and the gate FAILS.
+    result = _delivery_result(open_doors=["scripts/lib/plan_gate_panel.py"])
+    assert audit_mod._decide_delivery(result, flag="", reason="") is True
+
+
+def test_override_with_reason_allows_and_records(tmp_path):
+    # override + reason -> the known open side door is allowed AND recorded to the ledger.
+    ledger = tmp_path / "overrides.ndjson"
+    result = _delivery_result(open_doors=["scripts/lib/plan_gate_panel.py"])
+    failed = audit_mod._decide_delivery(
+        result, flag="1", reason="known open side door; closed by part 2", ledger=ledger
+    )
+    assert failed is False
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["reason"] == "known open side door; closed by part 2"
+    assert [d["path"] for d in entry["side_doors"]] == ["scripts/lib/plan_gate_panel.py"]
+    assert entry["side_doors"][0]["owner"]
+    assert entry["side_doors"][0]["closes_when"]
+    assert entry["side_doors"][0]["followup"]
+
+
+def test_override_without_reason_refuses():
+    # flag set but reason empty -> the flag is INERT and the refusal stays blocking.
+    result = _delivery_result(open_doors=["scripts/lib/plan_gate_panel.py"])
+    assert audit_mod._decide_delivery(result, flag="1", reason="") is True
+
+
+def test_override_does_not_allow_unaudited(tmp_path):
+    # the override downgrades ONLY known open side doors; a NEW (unaudited) caller still fails.
+    ledger = tmp_path / "overrides.ndjson"
+    result = _delivery_result(unaudited=["scripts/lib/new_side_door.py"])
+    assert audit_mod._decide_delivery(result, flag="1", reason="any reason", ledger=ledger) is True
+    assert not ledger.exists(), "no override may be recorded when the gate fails on an unaudited caller"
+
+
+def test_read_override_trims_whitespace():
+    flag, reason = audit_mod._read_override(
+        {audit_mod.SIDEDOOR_OVERRIDE_ENV: " 1 ", audit_mod.SIDEDOOR_OVERRIDE_REASON_ENV: " r "}
+    )
+    assert (flag, reason) == ("1", "r")

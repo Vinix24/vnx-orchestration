@@ -18,14 +18,23 @@ Classifier notes (why it is reproducible, not hand-waved):
   * benchmarks + provider-spawn machinery are excluded — test harnesses / provider_dispatch's
     own internals, not production delivery side-doors.
 
+Audited delivery callers are partitioned into THREE states — (a) door-handled (no finding),
+(b) known-open side door (a finding, fails unless the operator override is set), (c) unaudited
+(fails like before). See the constants below and docs/core/DISPATCH_RULES.md.
+
 Run standalone:  python3 scripts/lib/dispatch_sidedoor_audit.py   (exit 1 if a new caller appears)
 """
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import re
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Set
+from typing import Mapping, Set
 
 _LANES = ("subprocess_dispatch", "provider_dispatch", "tmux_interactive_dispatch")
 
@@ -150,18 +159,46 @@ _RAW_SCAN_EXCLUDE_SUBSTR = (
     "/process_cleanup.py",          # process-hygiene scanner: holds claude -p/--print as DETECTION patterns to hunt forbidden spawns, never spawns (#1029)
 )
 
-# Audited delivery callers (PR-2). A scanned file outside this set is a NEW side door and
-# fails the gate until it is audited (added here) and wired through dispatch_bridge.
-KNOWN_DELIVERY_CALLERS = frozenset({
+# Audited delivery callers, partitioned into THREE states (not two). A single "known" list
+# carried two opposite meanings — routed THROUGH the door vs a KNOWN OPEN side door — so a
+# known open side door could never fail the gate: being known was what exempted it.
+#   (a) DOOR_HANDLED_CALLERS  — through the door (or the door's own machinery), no finding
+#   (b) KNOWN_OPEN_SIDE_DOORS — a known side door with OWNER + CLOSE condition; a finding
+#                               that fails unless the operator override (below) is set
+#   (c) everything else found  — UNAUDITED, a new side door, fails like before
+@dataclass(frozen=True)
+class SideDoorRule:
+    """Bucket-(b) rule the watcher and the override ledger read, not just a comment."""
+    owner: str
+    closes_when: str
+    followup: str
+
+
+DOOR_HANDLED_CALLERS = frozenset({
     "scripts/lib/dispatch_deliver.sh",
     "scripts/lib/pool_worker_runner.py",
     "scripts/lib/headless_dispatch_daemon.py",
     "scripts/lib/adapters/claude_adapter.py",
     "scripts/commands/dispatch-agent.sh",     # caught by the scan (not in the docstring's "4")
     "scripts/commands/dispatch.sh",           # caught by the scan (not in the docstring's "4")
-    "scripts/lib/plan_gate_panel.py",         # interim side door PR-7 removes
     "vnx_cli/commands/dispatch_agent.py",     # packaged CLI; now routes through deliver_via_door (flip-PR F3)
 })
+
+KNOWN_OPEN_SIDE_DOORS: dict[str, SideDoorRule] = {
+    "scripts/lib/plan_gate_panel.py": SideDoorRule(
+        owner="T0 (plan-gate door dispatch — part 2 of sidedoor-drie-toestanden)",
+        closes_when="plan_gate_panel.py routes delivery through deliver_via_door",
+        followup="part 2 PR: plan_gate_panel.py door de deur",
+    ),
+}
+
+# Operator override (house style, mirrors VNX_OVERRIDE_WORKER_CLAUDE): a per-run escape hatch
+# that lets a KNOWN OPEN side door (bucket b) pass. BOTH must hold or the refusal stands:
+#   VNX_OVERRIDE_SIDEDOOR=1 AND VNX_OVERRIDE_SIDEDOOR_REASON non-empty (inert + blocking without it).
+# A flag without a reason never passes. Bucket (c) fails regardless of the override.
+SIDEDOOR_OVERRIDE_ENV = "VNX_OVERRIDE_SIDEDOOR"
+SIDEDOOR_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_SIDEDOOR_REASON"
+SIDEDOOR_LEDGER_ENV = "VNX_SIDEDOOR_LEDGER"
 
 
 def _repo_root() -> Path:
@@ -276,37 +313,152 @@ def scan_raw_claude_spawns(root: Path | None = None) -> Set[str]:
 def audit(root: Path | None = None) -> dict:
     """Return delivery-caller and raw-claude spawn scan results.
 
-    `unaudited` or `raw_claude_unaudited` non-empty = a new side door = gate fails.
+    `unaudited` (bucket c) or `raw_claude_unaudited` non-empty = a NEW side door = gate
+    fails. `known_open_side_doors` (bucket b) non-empty = a KNOWN open side door = a
+    finding that also fails unless the operator override is set.
     """
     found = scan_delivery_callers(root)
     raw = scan_raw_claude_spawns(root)
+    open_keys = set(KNOWN_OPEN_SIDE_DOORS)
+    known = set(DOOR_HANDLED_CALLERS) | open_keys
     return {
-        "known": set(KNOWN_DELIVERY_CALLERS),
+        "known": known,
         "found": found,
-        "unaudited": found - KNOWN_DELIVERY_CALLERS,
+        "unaudited": found - known,                          # bucket (c): new side doors
+        "known_open_side_doors": found & open_keys,          # bucket (b): known, open, a finding
+        "door_handled": found & set(DOOR_HANDLED_CALLERS),   # bucket (a): through the door
         "raw_claude_known": set(KNOWN_RAW_CLAUDE_CALLERS),
         "raw_claude_found": raw,
         "raw_claude_unaudited": raw - KNOWN_RAW_CLAUDE_CALLERS,
     }
 
 
+def _ledger_path() -> Path:
+    """Append-only override ledger (NDJSON, one JSON object per line).
+
+    Precedence: VNX_SIDEDOOR_LEDGER (explicit) -> $VNX_STATE_DIR -> $VNX_DATA_DIR/state ->
+    <repo_root>/.vnx-data/state. Every applied override appends the reason + the bucket-(b)
+    rule(s) it concerned, so "how many times did we go around, and why" is countable later.
+    """
+    env = os.environ.get(SIDEDOOR_LEDGER_ENV)
+    if env:
+        return Path(env).expanduser()
+    state = os.environ.get("VNX_STATE_DIR")
+    if state:
+        return Path(state) / "sidedoor_overrides.ndjson"
+    data = os.environ.get("VNX_DATA_DIR")
+    if data:
+        return Path(data) / "state" / "sidedoor_overrides.ndjson"
+    return _repo_root() / ".vnx-data" / "state" / "sidedoor_overrides.ndjson"
+
+
+def _record_override(ledger: Path, reason: str, rules: Mapping[str, SideDoorRule]) -> None:
+    """Append one ledger entry. Flocked so concurrent jobs append whole lines; a write
+    failure propagates (an override without a trace must not silently pass)."""
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "reason": reason,
+        "side_doors": [
+            {
+                "path": path,
+                "owner": rule.owner,
+                "closes_when": rule.closes_when,
+                "followup": rule.followup,
+            }
+            for path, rule in sorted(rules.items())
+        ],
+    }
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with open(ledger, "a", encoding="utf-8") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+            fh.flush()
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _read_override(environ: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """Return (flag, reason) — the raw override env values, whitespace-trimmed."""
+    env = environ if environ is not None else os.environ
+    return (
+        (env.get(SIDEDOOR_OVERRIDE_ENV) or "").strip(),
+        (env.get(SIDEDOOR_OVERRIDE_REASON_ENV) or "").strip(),
+    )
+
+
+def _decide_delivery(result: dict, flag: str, reason: str, ledger: Path | None = None) -> bool:
+    """True when the delivery gate FAILS. Bucket (c) always fails; bucket (b) fails unless the
+    override is active (flag=1 AND reason) — active records a ledger entry and passes; a flag
+    without a reason is inert and the refusal stays blocking."""
+    if result["unaudited"]:
+        print(
+            f"\nFAIL: {len(result['unaudited'])} unaudited delivery caller(s); audit + wire "
+            "through dispatch_bridge before flipping VNX_SINGLE_ENTRY_DISPATCH.",
+            file=sys.stderr,
+        )
+        return True
+    open_doors = sorted(result["known_open_side_doors"])
+    if not open_doors:
+        return False
+    if flag == "1" and reason:
+        path = ledger if ledger is not None else _ledger_path()
+        try:
+            _record_override(path, reason, {p: KNOWN_OPEN_SIDE_DOORS[p] for p in open_doors})
+        except OSError as exc:
+            print(
+                f"\nFAIL: override requested but the ledger write failed ({exc}); refusing — "
+                "an override without a trace is a side door with a form.",
+                file=sys.stderr,
+            )
+            return True
+        print(
+            f"\noverride applied: {len(open_doors)} known open side door(s) allowed; "
+            f"recorded to {path}"
+        )
+        return False
+    if flag == "1":
+        print(
+            f"\nFAIL: {SIDEDOOR_OVERRIDE_ENV}=1 is set but {SIDEDOOR_OVERRIDE_REASON_ENV} is "
+            "empty — the flag is inert and the refusal stays blocking.",
+            file=sys.stderr,
+        )
+        return True
+    print(
+        f"\nFAIL: {len(open_doors)} known open side door(s) found. Set "
+        f"{SIDEDOOR_OVERRIDE_ENV}=1 and a non-empty {SIDEDOOR_OVERRIDE_REASON_ENV} to "
+        "temporarily allow (recorded to the ledger), or close the side door:",
+        file=sys.stderr,
+    )
+    for path in open_doors:
+        rule = KNOWN_OPEN_SIDE_DOORS[path]
+        print(
+            f"  {path}: owner={rule.owner}; closes_when={rule.closes_when}; followup={rule.followup}",
+            file=sys.stderr,
+        )
+    return True
+
+
 def main() -> int:
     result = audit()
     print(f"delivery callers found: {len(result['found'])}")
     for c in sorted(result["found"]):
-        flag = "  [UNAUDITED — new side door]" if c in result["unaudited"] else ""
-        print(f"  {c}{flag}")
+        if c in result["unaudited"]:
+            tag = "  [UNAUDITED — new side door]"
+        elif c in result["known_open_side_doors"]:
+            tag = "  [KNOWN OPEN — owner + close condition below]"
+        else:
+            tag = ""
+        print(f"  {c}{tag}")
 
     print(f"\nraw claude -p/--print spawns found: {len(result['raw_claude_found'])}")
     for c in sorted(result["raw_claude_found"]):
-        flag = "  [UNAUDITED — new receipt-bypass side door]" if c in result["raw_claude_unaudited"] else ""
-        print(f"  {c}{flag}")
+        tag = "  [UNAUDITED — new receipt-bypass side door]" if c in result["raw_claude_unaudited"] else ""
+        print(f"  {c}{tag}")
 
-    fail = False
-    if result["unaudited"]:
-        print(f"\nFAIL: {len(result['unaudited'])} unaudited delivery caller(s); audit + wire "
-              "through dispatch_bridge before flipping VNX_SINGLE_ENTRY_DISPATCH.", file=sys.stderr)
-        fail = True
+    flag, reason = _read_override()
+    fail = _decide_delivery(result, flag, reason)
+
     if result["raw_claude_unaudited"]:
         print(f"\nFAIL: {len(result['raw_claude_unaudited'])} unaudited raw claude -p/--print spawn(s); "
               "route via a governed lane (provider_dispatch) or audit here.", file=sys.stderr)

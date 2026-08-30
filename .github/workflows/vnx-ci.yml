@@ -218,6 +218,13 @@ jobs:
       - name: Side-door exhaustiveness audit
         env:
           VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+          # plan_gate_panel.py is a KNOWN OPEN side door (bucket b), closed by the plan-gate
+          # door PR (part 2 of the sidedoor-drie-toestanden dispatch). Until then CI must
+          # carry the override + a reason that names the close condition — the override is
+          # recorded to the ledger, so it is counted, not a silent bypass.
+          VNX_OVERRIDE_SIDEDOOR: "1"
+          VNX_OVERRIDE_SIDEDOOR_REASON: "known open side door plan_gate_panel.py; closed by part 2 (plan_gate_panel.py door de deur) of sidedoor-drie-toestanden"
+          VNX_SIDEDOOR_LEDGER: ${{ github.workspace }}/.vnx-data/state/sidedoor_overrides.ndjson
         run: |
           set -euo pipefail
           # Audit #2: the dispatch-lane exhaustiveness invariant — fail CI if a new direct delivery

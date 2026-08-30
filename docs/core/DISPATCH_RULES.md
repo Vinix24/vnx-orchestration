@@ -15,6 +15,8 @@
 >
 > End-to-end architecture (door → assembly → delivery → govern → intelligence): see
 > **`DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`**.
+>
+> Side-door exhaustiveness (three states + the operator override): **§14**.
 
 ## 1. Decision tree (first matching rule wins)
 
@@ -183,3 +185,38 @@ python3 scripts/receipt_query.py pull --state-dir <state-dir> --json
 - **OI-188 note:** this step belongs in the `t0-orchestrator` skill's cycle steps (`.claude/skills/t0-orchestrator/SKILL.md` §"2. Primary workflow"), mirroring the parked commit `24f71d22`'s intent. No lane can reliably write under `.claude/skills/` (Claude treats it read-only) — this section is the canonical, git-tracked source until an operator applies the equivalent edit to the skill file by hand. Track as an operator follow-up, not something to force through a lane edit.
 
 See also: `docs/operations/RECEIPT_PIPELINE.md` (pipeline mechanics), ADR-035 §5 (pull interface design), §5.3 (push retirement), §6.4 (`oi_pending` lifecycle + escalation).
+
+## 14. Side-door audit — three states and the operator override
+
+`scripts/lib/dispatch_sidedoor_audit.py` (CI step "Side-door exhaustiveness audit") proves the single-entry
+door has no un-audited delivery path. Every scanned delivery caller lands in exactly ONE state:
+
+| state | meaning | gate outcome |
+|---|---|---|
+| (a) door-handled | routes through the door (or is the door's own delivery machinery) | no finding |
+| (b) known-open side door | a known side door with an OWNER and a CLOSE condition | FAILS unless the override below is set |
+| (c) unaudited | a NEW side door on neither list | FAILS, override does not apply |
+
+State (b) is the fix: "known" used to be one list with two meanings, so a known open side door was
+exempted by being known. A bucket-(b) entry is a finding with a machine-readable rule (owner / close
+condition / follow-up). The canonical list is generated from the watcher itself, not hand-maintained:
+`KNOWN_OPEN_SIDE_DOORS` (in `scripts/lib/dispatch_sidedoor_audit.py`) is the SSOT, and the watcher's
+failure output prints `owner=` / `closes_when=` / `followup=` per open door.
+
+**Operator override (house style, mirrors `VNX_OVERRIDE_WORKER_CLAUDE`):** to temporarily let a KNOWN
+open side door pass, set BOTH `VNX_OVERRIDE_SIDEDOOR=1` and a non-empty `VNX_OVERRIDE_SIDEDOOR_REASON`.
+The flag is INERT without the reason (blocking refusal). The override downgrades ONLY bucket (b).
+
+**Recording (an override without a trace is a side door with a form):** every applied override appends
+one NDJSON record to `sidedoor_overrides.ndjson` (timestamp + reason + the bucket-(b) rule(s) concerned).
+Ledger location, first match wins: `VNX_SIDEDOOR_LEDGER` → `$VNX_STATE_DIR` → `$VNX_DATA_DIR/state` →
+`<repo_root>/.vnx-data/state`. Read back the bypass count and reasons:
+
+```bash
+grep -c '"reason"' <ledger-path>            # how many times we went around
+grep -o '"reason": "[^"]*"' <ledger-path>   # each reason, oldest first
+```
+
+CI carries the override + a reason for the current open door (`plan_gate_panel.py`, closed by the
+plan-gate door PR — part 2 of this dispatch). That is not a silent escape hatch: the side door is now
+known, owned, has a close condition, is counted, and carries a reason — before it was merely "known".
