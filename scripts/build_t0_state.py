@@ -76,7 +76,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -1761,6 +1761,7 @@ def _build_system_health(
     build_degraded: bool = False,
     db_health: str = "healthy",
     daemon_liveness: Optional[Dict[str, Any]] = None,
+    expected_beacon_components: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     uptime_seconds = 0
     panes_path = state_dir / "panes.json"
@@ -1788,11 +1789,28 @@ def _build_system_health(
     # visible in t0_state.json on every session start. Best-effort: a
     # beacon read failure must not break the session-start hot path.
     # Beacons live under <data_dir>/health/, one level above state_dir.
+    #
+    # D3a (gap 2): a component that is expected to write a beacon (per
+    # beacon_register's static discovery of HealthBeacon(...) call sites)
+    # but never has is the most suspect case of all — invisible to a plain
+    # glob over what already exists in health/. expected_beacon_components
+    # is injectable (mirrors daemon_liveness above) so tests isolate from
+    # this repo's real beacon-writer set the same way they already isolate
+    # from real daemon-process state; production leaves it unset and gets
+    # the live register. A register-discovery failure must not blank out an
+    # otherwise-successful beacon read, so it has its own inner try/except.
     beacon_health: Optional[Dict[str, Any]] = None
     try:
         from health_beacon import beacon_summary
         data_dir = state_dir.parent
-        beacon_health = beacon_summary(data_dir)
+        if expected_beacon_components is None:
+            try:
+                from beacon_register import expected_component_names
+                expected_beacon_components = expected_component_names()
+            except Exception as exc:  # vnx-silent-except: register discovery is best-effort, mirrors beacon_health/daemon_liveness's own best-effort contract
+                log.debug("beacon_register unavailable (non-critical): %s", exc)
+                expected_beacon_components = ()
+        beacon_health = beacon_summary(data_dir, expected=expected_beacon_components)
     except Exception as exc:
         log.debug("beacon_summary failed (non-critical): %s", exc)
 

@@ -467,7 +467,12 @@ def test_system_health_includes_beacon_data_when_beacons_exist(tmp_path: Path) -
         status="ok", details={"key": "val"}
     )
 
-    health = bts._build_system_health(state_dir, db_initialized=True)
+    # expected_beacon_components=() isolates from this repo's real
+    # beacon-writer register (D3a gap 2) -- this test is about a single
+    # written beacon surfacing correctly, not about absence detection.
+    health = bts._build_system_health(
+        state_dir, db_initialized=True, expected_beacon_components=(),
+    )
     assert "beacon_health" in health, (
         f"Expected beacon_health key in system_health, got: {list(health.keys())}"
     )
@@ -515,7 +520,11 @@ def test_system_health_surfaces_stale_beacon(tmp_path: Path) -> None:
         _json.dumps(stale_payload), encoding="utf-8"
     )
 
-    health = bts._build_system_health(state_dir, db_initialized=True)
+    # expected_beacon_components=() isolates from this repo's real
+    # beacon-writer register (D3a gap 2) -- see the sibling test above.
+    health = bts._build_system_health(
+        state_dir, db_initialized=True, expected_beacon_components=(),
+    )
     assert "beacon_health" in health
     bh = health["beacon_health"]
     assert bh["overall"] == "stale"

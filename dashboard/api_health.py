@@ -22,6 +22,7 @@ if str(_SCRIPTS_LIB) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_LIB))
 
 from health_beacon import all_beacons, beacon_summary  # noqa: E402
+from beacon_register import expected_component_names  # noqa: E402
 
 
 def _resolve_data_dir() -> Path:
@@ -79,11 +80,20 @@ def _subsystem_effectiveness_summary(data_dir: Path) -> List[Dict[str, Any]]:
 
 def _operator_get_health() -> Dict[str, Any]:
     """GET /api/operator/health — beacon dump with classification, plus the
-    per-subsystem effectiveness summary (PR-18)."""
+    per-subsystem effectiveness summary (PR-18).
+
+    ``expected=expected_component_names()`` (D3a gap 2) makes a
+    beacon-writing component that never once wrote (invisible to a plain
+    glob over ``health/``) surface as ``health="absent"`` here, the raw
+    operator view of every beacon — distinct from
+    ``_subsystem_effectiveness_summary``'s own, separate "unknown for an
+    unprobed cockpit subsystem" handling below, which answers a different
+    question over a different namespace and is left untouched.
+    """
     now = datetime.now(timezone.utc).isoformat()
     data_dir = _resolve_data_dir()
     try:
-        summary = beacon_summary(data_dir)
+        summary = beacon_summary(data_dir, expected=expected_component_names())
         return {
             "queried_at": now,
             "data_dir": str(data_dir),
@@ -97,7 +107,7 @@ def _operator_get_health() -> Dict[str, Any]:
             "queried_at": now,
             "data_dir": str(data_dir),
             "overall": "fail",
-            "counts": {"ok": 0, "stale": 0, "fail": 0, "corrupt": 0},
+            "counts": {"ok": 0, "stale": 0, "fail": 0, "corrupt": 0, "absent": 0, "unknown": 0},
             "beacons": {},
             "subsystems": [],
             "error": str(exc),
