@@ -32,6 +32,15 @@ Regression guard included: the number of *.py files calling
 health_beacon.all_beacons()/beacon_summary() outside tests/ must not grow —
 this hook shells out to the EXISTING scripts/health_check.py CLI rather than
 importing health_beacon() directly.
+
+D3b2 fix-forward: `.claude/vnx-system/` is also excluded from that guard's
+grep. CI's own VNX CI workflow rsyncs the whole repo into that directory
+(`rsync -a --exclude '.git' --exclude '.claude' ./
+"$GITHUB_WORKSPACE/.claude/vnx-system/"`) before running these tests, so on
+CI it holds a full second copy of every caller in the baseline below. Those
+are not additional call sites of the fabric -- they are copies of the ones
+already counted at repo root -- so counting them would double the number on
+every CI run while a local run (no rollout copy) still saw the true count.
 """
 from __future__ import annotations
 
@@ -196,7 +205,19 @@ class TestCallSiteCountDoesNotGrow:
 
     This PR must not add a file to that set. It doesn't: the beacon digest
     lives in hooks/sessionstart.sh, a .sh file the --include='*.py' filter
-    never sees, regardless of what it shells out to."""
+    never sees, regardless of what it shells out to.
+
+    D3b2 fix-forward: `--exclude-dir=.claude` is added to the dispatch's
+    literal command. `.claude/vnx-system/` is a rolled-out COPY of this
+    repo's fabric (see the module docstring), not a second source tree.
+    VNX CI's own workflow rsyncs the whole repo into it before the test
+    suite runs, so on CI every path in _BASELINE below also exists a second
+    time under `./.claude/vnx-system/...`, doubling the matched set to 20
+    without a single new caller. A run on a checkout that never had that
+    rollout (a plain local clone) would still see 10 and pass, which is
+    exactly why this only broke on CI and not locally: the grep's answer
+    depended on which environment it ran in, not on the code it counted.
+    Excluding `.claude` makes both environments agree."""
 
     _BASELINE = {
         "./dashboard/api_health.py",
@@ -214,7 +235,7 @@ class TestCallSiteCountDoesNotGrow:
     def test_grep_count_matches_the_dispatchs_own_command(self):
         result = subprocess.run(
             "grep -rn \"beacon_summary\\|all_beacons\" --include='*.py' . "
-            "--exclude-dir=tests | cut -d: -f1 | sort -u",
+            "--exclude-dir=tests --exclude-dir=.claude | cut -d: -f1 | sort -u",
             shell=True, capture_output=True, text=True, cwd=str(REPO),
         )
         matched = {line for line in result.stdout.splitlines() if line.strip()}
