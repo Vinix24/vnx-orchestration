@@ -269,6 +269,24 @@ jobs:
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 
+      - name: Architecture doc drift guard (D6a)
+        run: |
+          set -euo pipefail
+          # Fail CI when docs/core/00_VNX_ARCHITECTURE.md's generated
+          # "Supervised Components" / "Hooks" sections drift from the live
+          # start_all() registry / .claude/settings.json wiring. See D6
+          # (dispatch 20260830-090600) — the doc used to hand-list 15
+          # "Active Components" with no relationship to what actually runs.
+          python3 "$GITHUB_WORKSPACE/scripts/generate_architecture_doc.py"
+
+      - name: Run architecture doc drift guard unit tests
+        run: |
+          set -euo pipefail
+          pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_architecture_doc_drift.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_pytest_safe
+
       - name: Status vocabulary drift guard
         run: |
           set -euo pipefail
