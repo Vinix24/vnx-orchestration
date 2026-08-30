@@ -195,6 +195,64 @@ def test_failing_build_is_visible_and_does_not_block(tmp_path: Path) -> None:
     assert "missing module" in err_log.read_text(encoding="utf-8")
 
 
+def test_failing_build_appends_across_multiple_runs_with_timestamps(tmp_path: Path) -> None:
+    """D1 poort C: the error log must APPEND one incident per failed run,
+    each carrying its own timestamp — not overwrite, which left only the
+    last-ever failure visible no matter how many times the build crashed."""
+    builder = (
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stderr.write('boom\\n')\n"
+        "raise SystemExit(1)\n"
+    )
+    engine = _make_fake_engine(tmp_path, builder_source=builder)
+    data_dir = tmp_path / "data"
+
+    r1 = _run_hook(engine, data_dir)
+    assert r1.returncode == 0
+    err_log = data_dir / "logs" / "build_t0_state.err"
+    first_content = err_log.read_text(encoding="utf-8")
+    assert first_content.count("boom") == 1
+
+    r2 = _run_hook(engine, data_dir)
+    assert r2.returncode == 0
+    second_content = err_log.read_text(encoding="utf-8")
+    assert second_content.count("boom") == 2, (
+        f"second failed run must be APPENDED, not overwrite the first: {second_content!r}"
+    )
+    # Each incident carries its own timestamp banner (ISO-ish UTC stamp).
+    assert second_content.count("=====") >= 4, (
+        "expected an opening+closing-style banner pair per incident"
+    )
+
+
+def test_degraded_health_rc_is_not_reported_as_not_refreshed(tmp_path: Path) -> None:
+    """D1 poort D 'PAS OP': rc=1 means the build SUCCEEDED and wrote a fresh
+    t0_state.json, but system_health itself is degraded/failed. The hook
+    must not say "not refreshed" for this rc — that would be a loud
+    falsehood over a file that is in fact fresh."""
+    builder = (
+        "#!/usr/bin/env python3\n"
+        "import sys, os, json\n"
+        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
+        "with open(out, 'w') as f:\n"
+        "    json.dump({'generated_at': '2026-08-30T00:00:00+00:00', 'system_health': {'status': 'degraded'}}, f)\n"
+        "sys.exit(1)\n"
+    )
+    engine = _make_fake_engine(tmp_path, builder_source=builder)
+    data_dir = tmp_path / "data"
+
+    r = _run_hook(engine, data_dir)
+    assert r.returncode == 0, "still non-blocking"
+    assert "not refreshed" not in r.stderr, f"rc=1 (degraded) is not a refresh failure: {r.stderr!r}"
+    assert "build_t0_state_hook FAILED" not in r.stderr
+    assert "degraded" in r.stderr
+    # The state file IS present and fresh — the build genuinely succeeded.
+    state_path = data_dir / "state" / "t0_state.json"
+    assert state_path.is_file(), "a degraded-health build still writes its state file"
+
+
 def test_failing_build_visible_when_builder_missing(tmp_path: Path) -> None:
     """If the engine tree is somehow broken (no builder under it), the hook
     reports it visibly instead of silently doing nothing."""

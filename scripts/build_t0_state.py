@@ -139,6 +139,15 @@ def _parse_iso(ts: str) -> Optional[datetime]:
     OI-949: needed for datetime-aware event sorting so mixed-precision
     timestamps (e.g. "…00.123456Z" vs "…00Z") are ordered by actual time,
     not by lexicographic collation where "." sorts before "Z".
+
+    D1: a timestamp with neither a trailing ``Z`` nor an explicit UTC offset
+    (e.g. "2026-08-07T08:01:47") parses as a NAIVE datetime. Left as-is, a
+    sort key mixing this return value with an aware one (or with an aware
+    fallback for a missing timestamp) raises "can't compare offset-naive and
+    offset-aware datetimes" — the crash that silently took down every
+    build_t0_state run for any event set containing one non-Z timestamp.
+    Normalizing here, once, means every caller gets an aware value (or
+    None) and never has to reason about naive/aware mixing itself.
     """
     if not ts:
         return None
@@ -146,9 +155,20 @@ def _parse_iso(ts: str) -> Optional[datetime]:
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
     except (TypeError, ValueError):
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# D1: the aware equivalent of `datetime.min`, for sort-key fallbacks paired
+# with `_parse_iso`. `_parse_iso` now always returns an aware datetime (or
+# None), but a naive `datetime.min` fallback for the None case would still
+# crash the comparison the moment any other element in the same sort parsed
+# successfully — both sides of a sort key must share the same awareness.
+_MIN_AWARE_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _safe_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -983,7 +1003,7 @@ def _build_feature_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
     for did, events in by_dispatch.items():
         events_sorted = sorted(
             events,
-            key=lambda e: (_parse_iso(e.get("timestamp", "")) or datetime.min, e.get("timestamp", "")),
+            key=lambda e: (_parse_iso(e.get("timestamp", "")) or _MIN_AWARE_DATETIME, e.get("timestamp", "")),
         )
         latest = events_sorted[-1]
         latest_event = latest.get("event", "")
@@ -1694,7 +1714,10 @@ def _build_recent_receipts(
     recs = list(best_by_dispatch.values()) + no_dispatch_recs
     return sorted(
         recs,
-        key=lambda x: (_parse_iso(str(x.get("timestamp") or "")) or datetime.min, str(x.get("timestamp") or "")),
+        key=lambda x: (
+            _parse_iso(str(x.get("timestamp") or "")) or _MIN_AWARE_DATETIME,
+            str(x.get("timestamp") or ""),
+        ),
         reverse=True,
     )[:limit]
 
@@ -2762,6 +2785,19 @@ def _emit_health_beacon(
 # CLI
 # ---------------------------------------------------------------------------
 
+# D1: three outcomes main() must let a caller (build_t0_state_hook.sh and any
+# other invoker) tell apart. Before this fix every non-clean path returned 0,
+# so a caller that trusted the exit code treated a crash as a clean no-op
+# forever. Keep these distinct: _EXIT_HEALTH_DEGRADED means the build DID
+# write a fresh t0_state.json (the fabric itself is what's unhealthy);
+# collapsing it into _EXIT_BUILD_FAILED would make "t0_state.json not
+# refreshed" a lie the moment a healthy build routinely carries a degraded
+# system_health (see D1 dispatch "PAS OP" note).
+_EXIT_OK = 0
+_EXIT_HEALTH_DEGRADED = 1
+_EXIT_BUILD_FAILED = 2
+
+
 def main() -> int:
     args = _parse_args()
     output_path = _resolve_output_path(args)
@@ -2813,11 +2849,18 @@ def main() -> int:
         track_freshness=(state or {}).get("track_freshness") if state else None,
     )
 
-    if _build_succeeded and state is not None:
+    if not _build_succeeded:
+        # D1: the build raised before a state file could be produced — the
+        # exact "t0_state.json not refreshed" case. A caller ignoring this
+        # exit code (as the SessionStart hook did before D1) never learns the
+        # build stopped happening at all.
+        return _EXIT_BUILD_FAILED
+
+    if state is not None:
         sh_status = (state.get("system_health") or {}).get("status", "healthy")
         if sh_status in ("degraded", "failed"):
-            return 1
-    return 0
+            return _EXIT_HEALTH_DEGRADED
+    return _EXIT_OK
 
 
 if __name__ == "__main__":
