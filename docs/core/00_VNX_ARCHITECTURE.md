@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-06-22
+**Last Updated**: 2026-08-30
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -828,22 +828,72 @@ project-root/
 
 ## Current System Status (VNX 1.0.0)
 
-### Active Components ✅
-- Smart Tap V7 (JSON/Markdown auto-translation)
-- Dispatcher V8 Minimal (Native skills, multi-provider, 87% token reduction)
-- Receipt Processor V4 (Report → receipt → T0 delivery, adoption tracking)
-- Heartbeat ACK Monitor (ACK processing + timeout tracking)
-- Queue Popup Watcher (dispatch review UI)
-- Dashboard Generator (Real-time metrics → `dashboard_status.json`)
-- Unified State Manager V2 (state consolidation, 5s cycle)
-- Intelligence Daemon (real-time intelligence updates)
-- Recommendations Engine (T0 dispatch suggestions, 30s cycle, max 5 pending — G-L8)
-- VNX Supervisor (Health monitoring, 10s checks, auto-restart)
-- Quality Advisory Pipeline (file size warnings on every completion)
-- PR Queue Manager (parallel PRs, staging → promote workflow)
-- Operator Dashboard (vanilla HTML/JS + `serve_dashboard.py`, attention model, jump command)
-- Worker Intelligence Injection (`userpromptsubmit_worker_intelligence_inject.sh` — T1-T3)
-- Nightly Intelligence Pipeline (`nightly_intelligence_pipeline.sh`, 02:00, 4-phase ordered)
+### Supervised Components (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
+
+Every row below is a daemon `vnx_supervisor_simple.sh`'s `start_all()` actually
+starts, read live via `scripts/lib/daemon_register.py` (shared with
+`docs/core/DAEMON_LIVENESS.md` — one register, not two). A daemon renamed or
+removed in `start_all()` fails this file's generation instead of silently
+going stale here.
+
+Running/absent state is deliberately **not** stored in this file — it
+changes by the minute, and a committed "✅ Active" checkmark is exactly the
+claim that drifted (measured 2026-08-30: 0 of these 9 processes were running
+while all 15 old checklist items still said "Active"). Check current
+liveness with `bash scripts/vnx_supervisor_simple.sh status` or
+`python3 -c "import sys; sys.path.insert(0,'scripts/lib'); import daemon_register as d; print(d.measure_daemon_liveness())"`.
+
+<!-- BEGIN GENERATED: supervised-components -->
+- Dispatcher (native skills, multi-provider dispatch). — `dispatcher_minimal.sh` — `scripts/vnx_supervisor_simple.sh:198`
+- Smart Tap (JSON/Markdown auto-translation). — `smart_tap_json_translator.sh` — `scripts/vnx_supervisor_simple.sh:204`
+- Receipt Processor (report -> receipt -> T0 delivery, adoption tracking). — `receipt_processor.sh` — `scripts/vnx_supervisor_simple.sh:205`
+- Heartbeat ACK Monitor (ACK processing + timeout tracking). — `heartbeat_ack_monitor.py` — `scripts/vnx_supervisor_simple.sh:210`
+- Queue Watcher (dispatch review popup; falls back to auto-accept when VNX_QUEUE_POPUP_ENABLED=0). — `queue_popup_watcher.sh` or `queue_auto_accept.sh` (conditional) — `scripts/vnx_supervisor_simple.sh:212`
+- Dashboard Generator (real-time metrics -> dashboard_status.json). — `generate_valid_dashboard.sh` — `scripts/vnx_supervisor_simple.sh:217`
+- Unified State Manager (state consolidation, 5s cycle). — `unified_state_manager.py` — `scripts/vnx_supervisor_simple.sh:218`
+- Intelligence Daemon (real-time intelligence updates). — `intelligence_daemon.py` — `scripts/vnx_supervisor_simple.sh:219`
+- Recommendations Engine (T0 dispatch suggestions, max 5 pending). — `recommendations_engine_daemon.sh` — `scripts/vnx_supervisor_simple.sh:220`
+<!-- END GENERATED: supervised-components -->
+
+### Hooks Wired in `.claude/settings.json` (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
+
+<!-- BEGIN GENERATED: hooks -->
+- **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_block_subagent.sh`
+- **SessionEnd**: `session_reconcile_cleanup.sh`, `build_current_state.py`, `build_doc_indexes.py`
+- **SessionStart**: `session_reconcile_autoclose.sh`, `build_t0_state_hook.sh`, `tmux_signal_session_ready.sh`, `path_parity_check.sh`, `monitor_tripwire.sh`, `sessionstart.sh`, `hookpin_check.sh`
+- **Stop**: `stop_report_hook.sh`, `tmux_signal_stop_receipt.sh`, `session_stop_rotation.py`
+- **UserPromptSubmit**: `tmux_signal_prompt_received.sh`
+<!-- END GENERATED: hooks -->
+
+`scripts/userpromptsubmit_worker_intelligence_inject.sh` is intentionally
+absent above: it exists on disk but no hook event in `.claude/settings.json`
+references it (verified 2026-08-30 — `grep -c
+userpromptsubmit_worker_intelligence_inject .claude/settings.json` is 0; its
+only other reference in the tree is its own test,
+`tests/test_learning_feature.py`). It is dead code or a pending wiring
+change, not an active component — the previous "Worker Intelligence
+Injection" checklist entry was wrong.
+
+### Not Continuously Supervised
+
+These are real components but are neither `start_all()` daemons nor
+`.claude/settings.json` hooks, so the two generated sections above correctly
+omit them. Listed by hand — not generated — so they don't silently
+disappear from this document:
+
+- **VNX Supervisor** — the process that runs `start_all()` itself
+  (`scripts/vnx_supervisor_simple.sh`); tracked by its own PID file
+  (`$VNX_PIDS_DIR/vnx_supervisor.pid`), not a `start_all()` entry.
+- **Quality Advisory Pipeline** — `scripts/lib/quality_advisory.py`,
+  imported and invoked inline by `scripts/append_receipt.py` on every
+  receipt write. A feature of Receipt Processor, not an independent process.
+- **PR Queue Manager** — `scripts/pr_queue_manager.py`, invoked on demand
+  via `bin/vnx`; not a persistent daemon.
+- **Operator Dashboard** — `dashboard/serve_dashboard.py`, launched via
+  `dashboard/launch-dashboard.sh`; not part of `start_all()` or `start.sh`.
+- **Nightly Intelligence Pipeline** — `scripts/nightly_intelligence_pipeline.sh`,
+  cron-scheduled (`scripts/install_nightly_crons.sh:28`, `0 4 * * *`), not
+  supervisor-managed.
 
 ### Deprecated Components (not started by supervisor)
 - ACK Dispatcher V2 (`ack_dispatcher_v2.sh`) — replaced by `heartbeat_ack_monitor.py`
