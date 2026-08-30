@@ -56,6 +56,16 @@ Concrete rules:
 
 Migration scoping + the precise reclaim plan are in `claudedocs/2026-06-27-store-model-research-SYNTHESIS.md` and `claudedocs/2026-06-27-sales-copilot-vnx-cutover-PLAN.md`. The panel reports are at `~/.vnx-data/vnx-dev/unified_reports/20260627-storemodel-{deepseek,kimi,codex,glm}.md`.
 
+## Conformance
+
+Hooks that read or write VNX runtime state must resolve the per-project CENTRAL store — never a repo-local guess. Each of the following hit the same repo-local-vs-central split-brain and was fixed the same way, shelling out to the canonical Python resolver (`vnx_paths.resolve_paths()['VNX_STATE_DIR']`), or its bash lockstep mirror `scripts/lib/vnx_paths.sh`:
+
+- `scripts/hooks/path_parity_check.sh` (OI-852).
+- `scripts/hooks/build_t0_state_hook.sh` (OI-859) — writes `t0_state.json` there.
+- `hooks/sessionstart.sh` (D4, 2026-08-30) — reads `terminal_state_*.json` / `open_items.json` from there for the T0 SessionStart briefing. The prior version only walked repo-local `.vnx-data/state` / `.claude/vnx-data/state` candidates up from `$PWD`; once a checkout had no repo-local `.vnx-data` (the normal case post-cutover), it silently showed an empty-looking "No open items data" briefing instead of the real central-store content. Regression coverage: `tests/test_sessionstart_hook_central_store.py`. A resolved-but-absent store is now a loud `VNX STATE STORE NOT FOUND` in the injected context, not indistinguishable from a genuinely empty one.
+
+Any new hook that reads or writes VNX runtime state must resolve through the same resolver rather than re-deriving a repo-local guess.
+
 ## See also
 
 - ADR-007 — Multi-tenant project_id stamping (the rule this ADR preserves; this ADR amends only the store form).

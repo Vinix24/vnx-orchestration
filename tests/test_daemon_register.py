@@ -83,6 +83,26 @@ def fixture_supervisor(tmp_path: Path) -> Path:
     return p
 
 
+# D2b reproduction: the exact real-world defect. A purely cosmetic edit —
+# switching start_process's opening quote from double to single — leaves
+# start_all() perfectly findable but silently breaks every _START_PROCESS_RE
+# match (it anchors on a literal `"` right after `start_process`), so the
+# parse goes from nine entries to zero without raising anything on its own.
+# Measured live against the real supervisor shell before this fix:
+# read_daemon_register() returned () with no exception, and
+# measure_daemon_liveness(()) reported {"overall": "ok", "daemons": {}}.
+_FIXTURE_SUPERVISOR_BROKEN_QUOTES = _FIXTURE_SUPERVISOR.replace(
+    'start_process "', "start_process '"
+)
+
+
+@pytest.fixture()
+def fixture_supervisor_broken_quotes(tmp_path: Path) -> Path:
+    p = tmp_path / "vnx_supervisor_simple.sh"
+    p.write_text(_FIXTURE_SUPERVISOR_BROKEN_QUOTES, encoding="utf-8")
+    return p
+
+
 class TestReadDaemonRegister:
     def test_nine_daemons_from_fixture(self, fixture_supervisor: Path) -> None:
         reg = dr.read_daemon_register(fixture_supervisor)
@@ -123,6 +143,16 @@ class TestReadDaemonRegister:
         with pytest.raises(ValueError):
             dr.read_daemon_register(p)
 
+    def test_broken_quote_style_raises_not_empty_tuple(
+        self, fixture_supervisor_broken_quotes: Path
+    ) -> None:
+        """D2b: start_all() is found, but the quote-style change means zero
+        start_process lines match. This must raise -- NOT return () as if
+        the project legitimately runs zero daemons (the exact real-world
+        defect: nine daemons silently became zero and nothing said so)."""
+        with pytest.raises(ValueError, match="zero start_process"):
+            dr.read_daemon_register(fixture_supervisor_broken_quotes)
+
     def test_real_supervisor_script_gives_nine(self) -> None:
         """Integration: the actual vnx_supervisor_simple.sh in this repo."""
         reg = dr.read_daemon_register()
@@ -150,9 +180,29 @@ class TestMeasureDaemonLivenessAbsence:
         assert result["daemons"]["nope"]["since"] is None
 
     def test_all_ok_when_register_empty(self) -> None:
+        # An EXPLICIT empty register, handed in by the caller, is a
+        # legitimate "zero daemons expected" -- distinct from D2b's failed-
+        # internal-parse case below, which must NOT reach this outcome.
         result = dr.measure_daemon_liveness(())
         assert result["overall"] == "ok"
         assert result["daemons"] == {}
+
+
+class TestMeasureDaemonLivenessFailedParse:
+    def test_broken_quote_style_register_is_not_ok(
+        self, fixture_supervisor_broken_quotes: Path
+    ) -> None:
+        """D2b reproduction end-to-end: register=None (the real call shape
+        used by build_t0_state.py) against a supervisor script whose
+        start_process quoting broke. Before this fix, read_daemon_register()
+        silently returned () and this call reported {"overall": "ok"} --
+        nine daemons vanishing with a clean bill of health. It must now
+        surface as a failure, never "ok"."""
+        result = dr.measure_daemon_liveness(supervisor_script=fixture_supervisor_broken_quotes)
+        assert result["overall"] != "ok"
+        assert result["overall"] == "unknown"
+        assert "reason" in result
+        assert "zero start_process" in result["reason"]
 
 
 class TestMeasureDaemonLivenessRunning:
