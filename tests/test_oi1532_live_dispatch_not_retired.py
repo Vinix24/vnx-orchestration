@@ -302,7 +302,7 @@ class TestTakALivenessUnmeasured:
         _patch_resolution(monkeypatch, branch_exists=False)
         # No lock file exists in the temp state dir -> the REAL probe returns
         # None. Do NOT stub _dispatch_is_live: we want to prove the real
-        # three-way branch reaches retire_unmeasured on a missing lock file.
+        # three-way branch reaches stay_pending_unmeasured on a missing lock file.
 
         summary = runner.run(state_dir)
 

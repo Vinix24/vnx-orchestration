@@ -1255,7 +1255,7 @@ def _pre_execution_decision(
         the two other bounded branches already do
       - ``retire``                     — dead dispatch (branch gone AND not
         live), no rescuing evidence
-      - ``retire_live``                — OI-1532: branch gone but the dispatch
+      - ``stay_pending_live``          — OI-1532: branch gone but the dispatch
         is still running — stays pending (NOT retired), carried distinctly so
         the caller records WHY it stayed pending, not just that it did
       - ``fulfill_by_evidence``        — OI-1388 defect 1: a complete-evidence
@@ -1295,8 +1295,8 @@ def _pre_execution_decision(
         never be closed on ambiguous evidence, per the OI-1388 docstring) and
         to record the liveness-unmeasured state VISIBLY so it is not mistaken
         for a normal wait — carried as ``decision["liveness"] = "unmeasured"``
-        and routed through ``retire_unmeasured`` (which itself stays pending,
-        never retires).
+        and routed through ``stay_pending_unmeasured`` (which itself stays
+        pending, never retires).
 
     The sha check and the liveness check answer DIFFERENT questions and are
     never folded into a single rejection: the sha check answers whether THIS
@@ -1340,14 +1340,14 @@ def _pre_execution_decision(
                 # (live on 20260830-124500-sidedoor). Stays pending, distinctly
                 # labelled so the recorded reason says "live, not pushed" and
                 # not a generic "no PR yet".
-                return {"kind": "retire_live", "mismatch_detail": lookup.get("detail")}
+                return {"kind": "stay_pending_live", "mismatch_detail": lookup.get("detail")}
             if resolution.dispatch_live is None:
                 # Liveness could not be measured — a THIRD state. Do not retire
                 # (a live dispatch must never be closed on ambiguous evidence),
                 # and carry the reason visibly so it is not mistaken for a
                 # normal wait. Stays pending under the same bound as below.
                 return {
-                    "kind": "retire_unmeasured",
+                    "kind": "stay_pending_unmeasured",
                     "liveness": "unmeasured",
                     "mismatch_detail": lookup.get("detail"),
                 }
@@ -1376,8 +1376,8 @@ _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "fulfill_by_failed_evidence": "would_stamp_failed",
     "sha_unverifiable": "would_stay_pending_sha_unverifiable",
     "retire": "would_retire",
-    "retire_live": "would_stay_pending_live",
-    "retire_unmeasured": "would_stay_pending_unmeasured",
+    "stay_pending_live": "would_stay_pending_live",
+    "stay_pending_unmeasured": "would_stay_pending_unmeasured",
     "stay_pending": "would_stay_pending",
     "escalate_stay_pending": "would_escalate_stay_pending",
     "attempt_gate": "would_fulfill",
@@ -1436,14 +1436,14 @@ def _dry_run_outcome(
         outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
-    elif decision["kind"] == "retire_live":
+    elif decision["kind"] == "stay_pending_live":
         outcome["detail"] = (
             "dispatch branch is gone on GitHub but the dispatch is still RUNNING "
             "(occupancy lock held) — not pushed yet, NOT retired (OI-1532)"
         )
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
-    elif decision["kind"] == "retire_unmeasured":
+    elif decision["kind"] == "stay_pending_unmeasured":
         outcome["detail"] = (
             "dispatch branch is gone on GitHub but liveness could not be measured "
             "(no occupancy lock file or probe failed) — staying pending rather than "
@@ -1683,7 +1683,7 @@ def fulfill_obligation(
         outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
         return outcome
 
-    if decision["kind"] == "retire_live":
+    if decision["kind"] == "stay_pending_live":
         # OI-1532: the branch is gone on GitHub but the dispatch is still
         # RUNNING (its occupancy lock is held by a live process). It has simply
         # not pushed its branch yet. Retiring here was the defect this dispatch
@@ -1719,7 +1719,7 @@ def fulfill_obligation(
         )
         return outcome
 
-    if decision["kind"] == "retire_unmeasured":
+    if decision["kind"] == "stay_pending_unmeasured":
         # OI-1532 third state: the branch is gone but liveness could not be
         # measured (no occupancy lock file — the dispatch never created a
         # worktree, a dry-run, a hand-registered obligation, or a lane without
@@ -2239,7 +2239,7 @@ def run(
         if not write:
             outcome = _dry_run_outcome(state_dir, path, record, result_index)
             outcomes.append(outcome)
-            # OI-1532: retire_live and retire_unmeasured stay pending too
+            # OI-1532: stay_pending_live and stay_pending_unmeasured stay pending too
             # (a live / unmeasured dispatch is never closed), so their dry-run
             # labels count toward the pending backlog alongside the normal
             # wait. escalate_stay_pending is terminal and does NOT count.
