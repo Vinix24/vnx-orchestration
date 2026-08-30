@@ -25,6 +25,15 @@
 # stale state file never blocks a session from starting. The full builder
 # traceback still goes to the central logs dir for diagnosis.
 #
+# D1: that central log (build_t0_state.err) used to be overwritten on every
+# run (`2>"$ERR_LOG"`), so it could only ever show the LAST failure — no way
+# to tell "failed once" from "fails every session". Failures are now
+# APPENDED with a UTC timestamp per incident. D1 also distinguishes the
+# builder's two non-zero exit codes: rc=1 means the build succeeded and
+# wrote a fresh t0_state.json but system_health itself is degraded/failed
+# (a fabric-health judgment); any other non-zero rc means the build raised
+# before a state file could be produced (the true "not refreshed" case).
+#
 # Uses an explicit interpreter: bare `python3` can be relinked out from under
 # the hook (OI-852/OI-857) — repo venv > pinned homebrew 3.12 > bare python3.
 
@@ -65,28 +74,55 @@ LOG="$(printf '%s\n' "$PATHS" | sed -n 2p)"
 mkdir -p "$LOG" 2>/dev/null || true
 
 # ── Run the builder: visible failure, non-blocking exit ───────────────
-# Capture the full builder stderr to the central log for diagnosis, but tee
-# a concise failure line to the hook's OWN stderr so it lands on the session
-# that fired the hook (the mechanism the harness actually surfaces). The
-# hook still exits 0: a stale/broken state file must never block a session.
+# Capture the builder's stderr to a per-run scratch file, then APPEND only
+# the failure incidents to the central log with an incident timestamp (D1:
+# this used to be a plain `2>"$ERR_LOG"`, i.e. overwrite-on-every-run — the
+# one artefact that could show HOW OFTEN this fails ever showed just the
+# last occurrence, 1 line / 102 bytes no matter how many times it happened).
+# A concise line still goes to the hook's OWN stderr so it lands on the
+# session that fired the hook. The hook still exits 0: a stale/broken state
+# file must never block a session.
+#
+# D1 also splits build_t0_state.py main()'s two non-zero outcomes: rc=1
+# means the build SUCCEEDED and t0_state.json WAS written, but
+# system_health.status itself is degraded/failed -- a fabric-health
+# judgment, not a refresh failure. Any other non-zero rc means the build
+# raised before a state file could be produced. Reporting both as "t0_state
+# not refreshed" would turn this line into a loud falsehood the moment a
+# healthy build routinely carries a degraded system_health.
 ERR_LOG="$LOG/build_t0_state.err"
+_RUN_STDERR="$LOG/.build_t0_state.err.tmp.$$"
 BUILD_RC=0
 PYTHONPATH="$ENGINE_ROOT/scripts/lib:${PYTHONPATH:-}" \
     "$PY" "$ENGINE_ROOT/scripts/build_t0_state.py" --output "$STATE/t0_state.json" \
-    2>"$ERR_LOG" || BUILD_RC=$?
+    2>"$_RUN_STDERR" || BUILD_RC=$?
 
 if [ "$BUILD_RC" -ne 0 ]; then
-    # Surface the failure on the session's own output. Keep it to the last
-    # line of the builder's stderr so it is concise but carries the real
-    # cause (the full traceback stays in $ERR_LOG for follow-up).
-    _last_err="$(tail -n 1 "$ERR_LOG" 2>/dev/null | tr -d '\r')"
-    if [ -n "$_last_err" ]; then
-        printf '[vnx] build_t0_state_hook FAILED (rc=%s): t0_state.json not refreshed. %s (full output: %s)\n' \
-            "$BUILD_RC" "$_last_err" "$ERR_LOG" >&2
-    else
-        printf '[vnx] build_t0_state_hook FAILED (rc=%s): t0_state.json not refreshed (full output: %s)\n' \
+    if [ -s "$_RUN_STDERR" ]; then
+        {
+            printf '===== %s (rc=%s) =====\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BUILD_RC"
+            cat "$_RUN_STDERR"
+        } >> "$ERR_LOG"
+    fi
+    if [ "$BUILD_RC" -eq 1 ]; then
+        # Build OK, state file IS fresh -- rc=1 here is a fabric-health
+        # signal (system_health.status degraded/failed), not a stale read.
+        printf '[vnx] build_t0_state_hook: build OK, t0_state.json IS refreshed, but system_health is degraded/failed (rc=%s; full output: %s)\n' \
             "$BUILD_RC" "$ERR_LOG" >&2
+    else
+        # Surface the failure on the session's own output. Keep it to the
+        # last line of the builder's stderr so it is concise but carries the
+        # real cause (the full traceback stays in $ERR_LOG for follow-up).
+        _last_err="$(tail -n 1 "$_RUN_STDERR" 2>/dev/null | tr -d '\r')"
+        if [ -n "$_last_err" ]; then
+            printf '[vnx] build_t0_state_hook FAILED (rc=%s): t0_state.json not refreshed. %s (full output: %s)\n' \
+                "$BUILD_RC" "$_last_err" "$ERR_LOG" >&2
+        else
+            printf '[vnx] build_t0_state_hook FAILED (rc=%s): t0_state.json not refreshed (full output: %s)\n' \
+                "$BUILD_RC" "$ERR_LOG" >&2
+        fi
     fi
 fi
+rm -f "$_RUN_STDERR" 2>/dev/null || true
 
 exit 0

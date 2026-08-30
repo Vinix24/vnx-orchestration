@@ -12,6 +12,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -39,6 +40,37 @@ def _resolve_state_dir() -> Path:
         if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
             return Path(os.environ["VNX_DATA_DIR"]) / "state"
         return _REPO_ROOT / ".vnx-data" / "state"
+
+
+def _reap_and_log_on_failure(proc: "subprocess.Popen[bytes]", state_dir: Path) -> None:
+    """Wait for the fired rebuild in the background; leave evidence if it failed.
+
+    D1 (poort E): before this, a rebuild fired here had exactly two outcomes
+    in the code — throttled, or "fired" (Popen didn't raise) — while a third,
+    real outcome existed in practice: fired-and-then-crashed. Popen was
+    started with stdout/stderr=DEVNULL and never wait()ed, so a crash inside
+    build_t0_state.py from this path left no trace anywhere. Runs in a daemon
+    thread so the caller stays non-blocking (the whole point of firing this
+    under a throttle instead of calling build_t0_state directly) while still
+    appending a timestamped incident to the same central log
+    build_t0_state_hook.sh uses, once the child actually exits.
+    """
+    try:
+        rc = proc.wait()
+    except Exception:
+        return
+    if rc == 0:
+        return
+    try:
+        log_path = state_dir.parent / "logs" / "build_t0_state.err"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(
+                "===== %s (rc=%s, fired async via state_rebuild_trigger) =====\n"
+                % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), rc)
+            )
+    except OSError:
+        pass
 
 
 def maybe_trigger_state_rebuild(
@@ -94,12 +126,20 @@ def maybe_trigger_state_rebuild(
                     return False
 
             try:
-                subprocess.Popen(
+                proc = subprocess.Popen(
                     ["python3", str(_REPO_ROOT / "scripts" / "build_t0_state.py")],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
+                # D1 (poort E): reap in the background so a crash on this
+                # fire-and-forget path leaves the same evidence a hook-driven
+                # failure would, without blocking this throttle-guarded call.
+                threading.Thread(
+                    target=_reap_and_log_on_failure,
+                    args=(proc, state_dir),
+                    daemon=True,
+                ).start()
                 # Atomic throttle marker — write ONLY after Popen succeeded
                 tmp = throttle.with_suffix(".tmp")
                 tmp.write_text(str(now), encoding="utf-8")
@@ -119,4 +159,11 @@ __all__ = ["maybe_trigger_state_rebuild", "CRITICAL_EVENTS"]
 #   python3 scripts/lib/state_rebuild_trigger.py
 if __name__ == "__main__":
     maybe_trigger_state_rebuild()
-    sys.exit(0)  # Always 0: throttled-as-expected and fired-successfully are both valid outcomes
+    # Always 0, regardless of outcome. There are three outcomes here —
+    # throttled, fired-and-succeeded, fired-and-failed — and this exit code
+    # cannot distinguish them: the call above only fires Popen and returns,
+    # it never wait()s for the child (that would turn a throttle meant to
+    # protect a hot path into a blocking call). A fired-and-failed rebuild
+    # is not silent though — see _reap_and_log_on_failure, which appends to
+    # the shared build_t0_state.err once the child actually exits.
+    sys.exit(0)

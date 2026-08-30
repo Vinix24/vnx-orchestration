@@ -2,6 +2,8 @@
 
 This document is the single source of truth for which VNX subsystems are live, parked, cut, or scoped. **Generated (PR-3):** the deterministic columns (subsystem/what/flag/status) are regenerated from `scripts/lib/config_registry.py` via `vnx subsystems --md`; `.github/workflows/subsystems-drift.yml` fails CI if this file drifts from that output. The `health` column is dynamic — it comes from a live health beacon when a probe has run (PR-5–7), else falls back to the last-committed value here. Hand-edits to the deterministic columns will be reverted by the next `vnx subsystems --md` run; hand-edits to `health` are fine until a probe takes over that row.
 
+**Not the daemon-process register.** These rows are feature flags (`config_registry`), not OS processes. Which processes VNX's supervisor actually starts, and whether each one is currently running, lives in a separate generated file: `docs/core/DAEMON_LIVENESS.md` (source: `scripts/lib/daemon_register.py`, regenerate with `python3 scripts/generate_daemon_liveness_md.py`). It is a dedicated file rather than a section here because its table shares this ledger's 5-column shape, which `check_subsystems_drift.py` would otherwise misread as phantom subsystem rows (measured while building the D2 daemon-liveness dispatch). Overlap between the two registers is exactly two.
+
 | subsystem | what | flag | status | health |
 |-----------|------|------|--------|--------|
 | provider-routing | Model/provider selection, constraint solving, fallback order. | — | LIVE | works — dispatch outcomes routed correctly |

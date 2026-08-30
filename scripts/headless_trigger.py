@@ -345,7 +345,14 @@ def silence_watchdog(
 # ---------------------------------------------------------------------------
 
 def _refresh_t0_state(state_dir: Path) -> bool:
-    """Rebuild t0_state.json atomically. Returns True on success."""
+    """Rebuild t0_state.json atomically. Returns True on success.
+
+    D1 (poort E): of the four build_t0_state invokers, this is the one that
+    imports build_t0_state() directly rather than shelling out, so a crash
+    here is an ordinary Python exception, not a swallowed subprocess exit
+    code. It is already caught and logged at ERROR below — unlike the other
+    three invokers before D1, this one never discarded the evidence.
+    """
     sys.path.insert(0, str(_REPO_ROOT / "scripts"))
     try:
         from build_t0_state import build_t0_state, _write_atomic
