@@ -11,7 +11,9 @@ message instead of writing to a fabricated or unattributable store.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -276,11 +278,25 @@ def _make_state_dir(tmp_path: Path) -> Path:
     return state_dir
 
 
-def _patch_manager(monkeypatch, manager: "_FakeReviewGateManager") -> None:
+# OI-1571 tak 3: attempt_gate now resolves a PR head sha up front for every
+# obligation it processes. The default here is an arbitrary fixed sentinel
+# most tests never need to match against anything — _patch_manager stubs
+# _get_pr_head_sha_for_gate to this value purely for hermeticity (no test in
+# this file may shell out to a real `gh pr view`). Tests that DO care about
+# sha binding (TestTakeoverChainEvidence) stamp their fake managers' result
+# records with this same value so "the happy path still works" stays the
+# default, and override it locally to build a mismatch.
+_DEFAULT_TEST_HEAD_SHA = "deadbeef00" * 4
+
+
+def _patch_manager(
+    monkeypatch, manager: "_FakeReviewGateManager", *, head_sha: str = _DEFAULT_TEST_HEAD_SHA,
+) -> None:
     """Hermetic patch: no git, no gh, no real gate — only the fake manager."""
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head_sha)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -431,12 +447,17 @@ class _TakeoverFakeReviewGateManager:
     def __init__(
         self, state_dir: Path, *, target_gate: "str | None", status: str,
         report_path: Path, contract_hash: str = "sha256:deadbeef",
+        commit_sha: str = "deadbeef00" * 4,
     ) -> None:
         self.state_dir = Path(state_dir)
         self.target_gate = target_gate
         self.status = status
         self.report_path = report_path
         self.contract_hash = contract_hash
+        # OI-1571 tak 3: matches _patch_manager's default _get_pr_head_sha_for_gate
+        # stub so "the successor's evidence is current" is the default shape
+        # -- pass a different value to build a mismatch/unverifiable record.
+        self.commit_sha = commit_sha
         self.calls = []
 
     def _request_path(self, gate: str, pr_number: int) -> Path:
@@ -464,6 +485,7 @@ class _TakeoverFakeReviewGateManager:
                 "status": self.status,
                 "contract_hash": self.contract_hash,
                 "report_path": str(self.report_path),
+                "commit_sha": self.commit_sha,
             }),
             encoding="utf-8",
         )
@@ -609,3 +631,308 @@ class TestTakeoverChainEvidence:
         outcome = summary["outcomes"][0]
         assert outcome["action"] == STATUS_FULFILLED
         assert "resolved_by_gate" not in outcome
+        # OI-1571 tak 3, Klaar item 4: even the non-takeover fulfilment path
+        # must fill fulfilled_by/takeover_gate/evidence_result_path.
+        assert record["fulfilled_by"] == "codex_gate"
+        assert record["takeover_gate"] is None
+        assert record["evidence_result_path"] == record["result_path"]
+
+
+# ---------------------------------------------------------------------------
+# OI-1571 tak 3 (dispatch 20260830-153000-oi1569-quota-heeft-geen-tijddimensie):
+# _has_decided_evidence never checked commit_sha, so evidence for a DIFFERENT
+# commit than the PR's current head could still fulfil an obligation.
+#
+# TWO independently measured live shapes, both fixed by the SAME predicate
+# (_has_decided_evidence(record, head_sha)), never two separate checks:
+#
+#   1. KRUIS-POORT (PR #1719): a codex-declared obligation booked fulfilled
+#      via _find_takeover_successor_evidence off a glm_gate record from a
+#      PRIOR commit -- the takeover-chain walk never checked the successor's
+#      sha either.
+#   2. ZELFDE-POORT (PR #1736): a codex-declared obligation booked fulfilled
+#      off codex_gate's OWN result file, left on disk by an EARLIER dispatch
+#      against the same PR and never overwritten by this attempt (the
+#      gate_recorder overwrite guard preserves a decided verdict rather than
+#      let a less-decided fresh attempt replace it -- see gate_executor.py's
+#      OI-1488 note) -- the declared-gate gating check never checked sha
+#      either, so it never even looked at the takeover chain.
+# ---------------------------------------------------------------------------
+
+
+class _NoOpReviewGateManager:
+    """A ``request_and_execute`` that writes ONLY request records and
+    touches NO result file at all -- mirrors the real overwrite guard
+    (gate_recorder) refusing to let a fresh, less-decided attempt replace an
+    existing decided verdict: from this runner's point of view, the result
+    file on disk after the call is EXACTLY what it was before the call.
+    """
+
+    def __init__(self, state_dir: Path) -> None:
+        self.state_dir = Path(state_dir)
+        self.calls = []
+
+    def _request_path(self, gate: str, pr_number: int) -> Path:
+        return self.state_dir / "review_gates" / "requests" / f"pr-{pr_number}-{gate}.json"
+
+    def _result_path(self, gate: str, pr_number: int) -> Path:
+        return self.state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
+
+    def request_and_execute(self, *, pr_number, branch, review_stack, risk_class,
+                             changed_files, mode, dispatch_id=""):
+        self.calls.append(
+            {"pr_number": pr_number, "branch": branch, "review_stack": list(review_stack)}
+        )
+        for gate in review_stack:
+            self._request_path(gate, pr_number).write_text(
+                json.dumps({"gate": gate, "pr_number": pr_number, "status": "requested"}),
+                encoding="utf-8",
+            )
+        return {"pr_number": pr_number, "branch": branch, "gates": [], "has_required_failure": False}
+
+
+def _seed_decided_gate_result(
+    state_dir: Path, gate: str, pr_number: int, *, commit_sha: str, report_path: Path,
+    status: str = "pass", contract_hash: str = "sha256:deadbeef",
+) -> None:
+    """Pre-seed a gate's OWN result record as a DECIDED, complete-evidence
+    verdict for ``commit_sha`` -- the shape a genuinely-reviewed commit
+    leaves behind, used here to build a STALE record for an OLDER commit
+    than the one :func:`_patch_manager`'s stub reports as the PR head.
+    """
+    (state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json").write_text(
+        json.dumps({
+            "gate": gate, "pr_number": pr_number, "status": status,
+            "contract_hash": contract_hash, "report_path": str(report_path),
+            "commit_sha": commit_sha,
+        }),
+        encoding="utf-8",
+    )
+
+
+class TestShaBindingBlocksStaleEvidence:
+    @pytest.fixture(autouse=True)
+    def _clean_takeover_chain_env(self, monkeypatch):
+        monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+        monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+
+    def test_kruis_poort_stale_takeover_successor_evidence_never_fulfills(self, tmp_path, monkeypatch):
+        """(a) kruis-poort, PR #1719 shape: codex's own record stays stuck
+        unavailable (lane_exhausted), and the takeover successor (glm_gate)
+        DOES carry complete, decided evidence -- but for an OLDER commit
+        than the PR's current head. Must NOT fulfil."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-oi1571-kruis-poort", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1719,
+        )
+        _seed_stuck_gate_result(state_dir, "codex_gate", 1719)
+        report_file = state_dir / "unified_reports" / "glm-gate-pr1719.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("glm_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate="glm_gate", status="pass", report_path=report_file,
+            commit_sha="ffffffffffffffffffffffffffffffffffffff",  # a DIFFERENT commit than the head
+        )
+        _patch_manager(monkeypatch, manager)  # head_sha defaults to "deadbeef00" * 4
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 1, (
+            "stale takeover evidence (wrong commit) must never fulfil the obligation"
+        )
+        record = _read_obligation(state_dir, "20260830-oi1571-kruis-poort")
+        assert record["status"] == STATUS_PENDING
+        assert "resolved_by_gate" not in record
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == "pending"
+
+    def test_kruis_poort_matching_sha_still_fulfills(self, tmp_path, monkeypatch):
+        """Control for (a): the exact same shape, but the successor's
+        commit_sha matches the PR head -- must still fulfil via takeover
+        (never a false negative introduced by the sha check)."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-oi1571-kruis-poort-match", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1720,
+        )
+        _seed_stuck_gate_result(state_dir, "codex_gate", 1720)
+        report_file = state_dir / "unified_reports" / "glm-gate-pr1720.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("glm_gate report body", encoding="utf-8")
+
+        manager = _TakeoverFakeReviewGateManager(
+            state_dir, target_gate="glm_gate", status="pass", report_path=report_file,
+            # default commit_sha matches _patch_manager's default head_sha
+        )
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 0
+        record = _read_obligation(state_dir, "20260830-oi1571-kruis-poort-match")
+        assert record["status"] == STATUS_FULFILLED
+        assert record["resolved_by_gate"] == "glm_gate"
+
+    def test_zelfde_poort_stale_declared_gate_evidence_never_fulfills(self, tmp_path, monkeypatch):
+        """(b) zelfde-poort, PR #1736 shape: codex_gate's OWN result record
+        is a DECIDED, complete-evidence PASS -- but left on disk by an
+        EARLIER dispatch against the same PR, for an OLDER commit. This
+        attempt's manager.request_and_execute does not overwrite it (mirrors
+        the real overwrite guard). Must NOT fulfil off it, and the takeover
+        chain must actually be consulted (no successor exists here either,
+        so it stays pending)."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-oi1571-zelfde-poort", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1736,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr1736-earlier-dispatch.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body from an earlier dispatch", encoding="utf-8")
+        _seed_decided_gate_result(
+            state_dir, "codex_gate", 1736,
+            commit_sha="ffffffffffffffffffffffffffffffffffffff",  # a DIFFERENT, OLDER commit
+            report_path=report_file,
+        )
+
+        manager = _NoOpReviewGateManager(state_dir)
+        _patch_manager(monkeypatch, manager)  # head_sha defaults to "deadbeef00" * 4
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 1, (
+            "a same-gate result left on disk for a DIFFERENT commit must "
+            "never silently fulfil the obligation"
+        )
+        record = _read_obligation(state_dir, "20260830-oi1571-zelfde-poort")
+        assert record["status"] == STATUS_PENDING
+        assert record["reason"] == "stale_evidence_sha_mismatch"
+        assert "fulfilled_by" not in record
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == "pending"
+
+    def test_zelfde_poort_matching_sha_still_fulfills(self, tmp_path, monkeypatch):
+        """Control for (b): codex_gate's own record is decided, complete,
+        AND for the current head -- must fulfil directly, exactly as
+        test_declared_gate_evidence_still_found_directly_when_present
+        already proves for the takeover-chain-untouched case; this control
+        additionally proves it through the _NoOpReviewGateManager shape."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-oi1571-zelfde-poort-match", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1737,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr1737.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+        _seed_decided_gate_result(
+            state_dir, "codex_gate", 1737,
+            commit_sha="deadbeef00" * 4,  # matches _patch_manager's default head_sha
+            report_path=report_file,
+        )
+
+        manager = _NoOpReviewGateManager(state_dir)
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 0
+        record = _read_obligation(state_dir, "20260830-oi1571-zelfde-poort-match")
+        assert record["status"] == STATUS_FULFILLED
+        assert record["fulfilled_by"] == "codex_gate"
+
+    def test_unknown_sha_binding_suspends_judgement_third_branch(self, tmp_path, monkeypatch):
+        """The third branch: the declared gate's own record is decided and
+        complete, but its commit_sha is EMPTY (unverifiable) -- must neither
+        silently accept (fulfil) nor silently refuse (retire/escalate). It
+        must stay pending with a reason that names the third branch
+        explicitly, distinct from both the happy path and the mismatch path.
+        """
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-oi1571-unknown-sha", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1738,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr1738.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+        _seed_decided_gate_result(
+            state_dir, "codex_gate", 1738, commit_sha="", report_path=report_file,
+        )
+
+        manager = _NoOpReviewGateManager(state_dir)
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert summary["pending_after"] == 1
+        record = _read_obligation(state_dir, "20260830-oi1571-unknown-sha")
+        assert record["status"] == STATUS_PENDING
+        assert record["reason"] == "sha_binding_unverifiable"
+
+
+# ---------------------------------------------------------------------------
+# OI-1569 Klaar item 8: a loud tripwire, not just a code comment, for the
+# exact measured signature of a silent stale-evidence fulfilment — a
+# terminal booking whose evidence FILE predates the attempt that used it.
+# The sha check above already prevents the specific PR #1719/#1736 defect
+# from fulfilling silently; this is a second, independent, cheap safety net
+# that stays useful even if some future change reopens a different hole.
+# ---------------------------------------------------------------------------
+
+
+class TestFastFulfillmentTripwire:
+    def test_evidence_file_touched_by_this_attempt_is_silent(self, tmp_path, monkeypatch):
+        """Control: the overwhelmingly common case — the result file is
+        freshly written by THIS attempt — must never trip the warning."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-oi1569-fresh-evidence", gate="ci_gate",
+            project_id="vnx-dev", pr_number=9670,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        outcome = summary["outcomes"][0]
+        assert "fast_fulfillment_warning" not in outcome
+
+    def test_stale_result_file_trips_the_warning(self, tmp_path, monkeypatch):
+        """RED on unfixed main (measured 2026-08-30: no such check existed
+        at all): a result file whose mtime predates this attempt by well
+        over the threshold, but whose commit_sha still happens to match the
+        PR head (so the sha check alone does not intercept it — this is a
+        deliberately independent second signal), must trip a LOUD,
+        observable warning on the outcome."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260830-oi1569-stale-evidence", gate="codex_gate",
+            project_id="vnx-dev", pr_number=9671,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr9671.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+        result_path = state_dir / "review_gates" / "results" / "pr-9671-codex_gate.json"
+        result_path.write_text(
+            json.dumps({
+                "gate": "codex_gate", "pr_number": 9671, "status": "pass",
+                "contract_hash": "sha256:deadbeef", "report_path": str(report_file),
+                "commit_sha": _DEFAULT_TEST_HEAD_SHA,
+            }),
+            encoding="utf-8",
+        )
+        old_mtime = time.time() - (runner._FAST_FULFILLMENT_MTIME_THRESHOLD_SECONDS + 120)
+        os.utime(result_path, (old_mtime, old_mtime))
+
+        manager = _NoOpReviewGateManager(state_dir)
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED, "the sha still matches, so this must still fulfil"
+        assert "fast_fulfillment_warning" in outcome
+        assert "not provably a fresh run this cycle" in outcome["fast_fulfillment_warning"]

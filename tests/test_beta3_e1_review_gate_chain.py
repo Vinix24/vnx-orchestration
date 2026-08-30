@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,15 @@ for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
         sys.path.insert(0, _p)
 
 import config_registry as cr  # noqa: E402
+
+# OI-1569 tak 1+2: _classify_review_seat_failure now recency-gates a
+# lane_exhausted classification (gate_request_handler._lane_exhausted_or_expired,
+# TTL 3600s) -- a fixture's recorded_at must be FRESH relative to whenever the
+# suite actually runs, or these marker-discrimination fixtures would silently
+# start exercising the recency branch instead of the thing they are named
+# for. Computed once at collection time, not hardcoded, so this file never
+# goes stale the way the hand-dated 2026-08-26/08-22 fixtures below did.
+_FRESH_RECORDED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @pytest.fixture(autouse=True)
@@ -203,6 +213,7 @@ for _provider in ("codex", "kimi", "glm", "deepseek"):
     PROVIDER_CASES.append((_provider, "real_exhaustion", {
         "gate": _gate, "status": "unavailable", "reason": "dispatch_error",
         "residual_risk": _REAL_EXHAUSTION_TEXT[_provider],
+        "recorded_at": _FRESH_RECORDED_AT,
     }, "lane_exhausted"))
     PROVIDER_CASES.append((_provider, "parse_miss", {
         "gate": _gate, "status": "unavailable", "reason": "parse_error",
@@ -266,6 +277,7 @@ _PR1691_RESULT = {
     "contract_hash": "",
     "provider": "glm",
     "branch": "fix/pr1691",
+    "recorded_at": _FRESH_RECORDED_AT,
 }
 
 
@@ -333,7 +345,12 @@ _PR1696_REAL_CODEX_RECORD = {
     "advisory_findings": [],
     "required_reruns": ["codex_gate"],
     "residual_risk": "Gate exit_nonzero. Re-run required.",
-    "recorded_at": "2026-08-26T18:01:55Z",
+    # OI-1569 tak 1+2: recorded_at is FRESH (not the original 26-08 capture
+    # time) so this record exercises the marker-discrimination it is named
+    # for, not the separate recency gate (gate_request_handler.
+    # _lane_exhausted_or_expired) added later. Every other field stays the
+    # verbatim measured shape.
+    "recorded_at": _FRESH_RECORDED_AT,
     "branch": "dispatch/20260826-beta3-f-uitval-overschrijft-verdict-niet",
     "commit_sha": "ed3bdd97caf88094a4854067beed38594dc03d59",
 }
@@ -497,11 +514,13 @@ def test_three_step_chain_carries_full_path_in_annotation(manager_env, monkeypat
         "gate": "codex_gate", "pr_number": pr_number, "status": "unavailable",
         "reason": "dispatch_error",
         "residual_risk": _REAL_EXHAUSTION_TEXT["codex"],
+        "recorded_at": _FRESH_RECORDED_AT,
     })
     _write_result(manager_env["results_dir"], pr_number, "kimi_gate", {
         "gate": "kimi_gate", "pr_number": pr_number, "status": "unavailable",
         "reason": "dispatch_error",
         "residual_risk": _REAL_EXHAUSTION_TEXT["kimi"],
+        "recorded_at": _FRESH_RECORDED_AT,
     })
 
     with _patch_governance_receipt():
@@ -614,10 +633,12 @@ def test_chain_runs_empty_is_named_terminal_state(manager_env, monkeypatch):
     _write_result(manager_env["results_dir"], pr_number, "kimi_gate", {
         "gate": "kimi_gate", "pr_number": pr_number, "status": "unavailable",
         "reason": "dispatch_error", "residual_risk": _REAL_EXHAUSTION_TEXT["kimi"],
+        "recorded_at": _FRESH_RECORDED_AT,
     })
     _write_result(manager_env["results_dir"], pr_number, "glm_gate", {
         "gate": "glm_gate", "pr_number": pr_number, "status": "unavailable",
         "reason": "dispatch_error", "residual_risk": _REAL_EXHAUSTION_TEXT["glm"],
+        "recorded_at": _FRESH_RECORDED_AT,
     })
 
     with _patch_governance_receipt():
@@ -971,7 +992,9 @@ _PR1696_REAL_GLM_RESULT = {
         "a review outcome"
     ),
     "failure_reason": "",
-    "recorded_at": "2026-08-26T20:18:37Z",
+    # OI-1569 tak 1+2: fresh, not the original 26-08 capture time -- see the
+    # matching note on _PR1696_REAL_CODEX_RECORD above.
+    "recorded_at": _FRESH_RECORDED_AT,
     "evidence_source": "live",
     "branch": "dispatch/20260826-beta3-f-uitval-overschrijft-verdict-niet",
     "commit_sha": "cfcd8d3181e18452949bc2130149ffc40018eb62",
@@ -1164,3 +1187,130 @@ def test_derived_dispatch_id_path_escape_is_refused(manager_env, monkeypatch, ca
 def _patch_governance_receipt():
     from unittest.mock import patch
     return patch("governance_receipts.emit_governance_receipt")
+
+
+# ---------------------------------------------------------------------------
+# OI-1569 tak 1+2 (dispatch 20260830-153000-oi1569-quota-heeft-geen-tijddimensie):
+# _classify_review_seat_failure had no time dimension -- a lane_exhausted
+# classification, once recorded, blocked the takeover walk from ever
+# re-attempting that gate again. Measured live: PR #1719's codex_gate
+# obligation stayed pending on a 10:13 record five hours later (15:08), with
+# five OTHER PRs completing real codex runs in between -- no provider
+# outage, just a classification with no way to expire.
+#
+# _lane_exhausted_or_expired (gate_request_handler.py) is the fix: THREE
+# outcomes, matching the same "never collapse the third branch" discipline
+# as the sha-binding fix in gate_obligation_runner.py.
+# ---------------------------------------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+import gate_request_handler  # noqa: E402
+
+
+def test_recent_lane_exhausted_stays_lane_exhausted():
+    """A record recorded well inside the TTL still classifies as
+    lane_exhausted -- the walk keeps skipping this hop, unchanged."""
+    record = {
+        "gate": "codex_gate", "pr_number": 1719, "status": "unavailable",
+        "reason": "dispatch_error", "residual_risk": _REAL_EXHAUSTION_TEXT["codex"],
+        "recorded_at": _FRESH_RECORDED_AT,
+    }
+    manager = _make_manager()
+    assert manager._classify_review_seat_failure(record) == "lane_exhausted"
+
+
+def test_stale_lane_exhausted_expires_and_stops_the_walk():
+    """RED on unfixed main (measured 2026-08-30): a lane_exhausted record
+    older than the TTL used to classify as 'lane_exhausted' forever, so
+    _dispatch_review_seat's walk always skipped past it -- once every gate
+    in the chain had one, NOTHING ever got a fresh attempt again (PR #1719,
+    #1728). GREEN here: an expired record classifies as something other
+    than the literal 'lane_exhausted', which already stops the walk and
+    re-dispatches this exact gate."""
+    old = (
+        datetime.now(timezone.utc) - timedelta(seconds=gate_request_handler._LANE_EXHAUSTION_TTL_SECONDS + 60)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record = {
+        "gate": "codex_gate", "pr_number": 1719, "status": "unavailable",
+        "reason": "dispatch_error", "residual_risk": _REAL_EXHAUSTION_TEXT["codex"],
+        "recorded_at": old,
+    }
+    manager = _make_manager()
+    classification = manager._classify_review_seat_failure(record)
+    assert classification != "lane_exhausted", (
+        f"an expired lane_exhausted record must not classify as still-exhausted, got {classification!r}"
+    )
+    assert classification == "lane_exhausted_expired"
+
+
+def test_stale_lane_exhausted_actually_reattempts_the_gate(manager_env, monkeypatch):
+    """Integration proof: with an EXPIRED codex_gate record on disk and no
+    successor configured, request_reviews must dispatch codex_gate itself
+    again -- never fall into _chain_exhausted_result on a stale record."""
+    monkeypatch.chdir(manager_env["project_root"])
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate")
+    old = (
+        datetime.now(timezone.utc) - timedelta(seconds=gate_request_handler._LANE_EXHAUSTION_TTL_SECONDS + 60)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pr_number = 9503
+    _write_result(manager_env["results_dir"], pr_number, "codex_gate", {
+        "gate": "codex_gate", "pr_number": pr_number, "status": "unavailable",
+        "reason": "dispatch_error", "residual_risk": _REAL_EXHAUSTION_TEXT["codex"],
+        "recorded_at": old,
+    })
+    manager = _make_manager()
+
+    with _patch_governance_receipt():
+        result = manager.request_reviews(
+            pr_number=pr_number,
+            branch="fix/stale-exhaustion-retry",
+            review_stack=["codex_gate"],
+            risk_class="medium",
+            changed_files=["scripts/foo.py"],
+            mode="per_pr",
+            dispatch_id="oi1569-stale-retry-test",
+        )
+
+    seat = result["requested"][0]
+    assert seat["gate"] == "codex_gate", (
+        f"an expired lane_exhausted record must re-dispatch the ORIGINAL gate, got {seat['gate']!r}"
+    )
+    assert not seat.get("takeover"), "a re-attempt of the same gate is not a takeover"
+
+
+def test_lane_exhausted_with_no_recorded_at_is_the_third_branch_not_silently_either_extreme(caplog):
+    """The third branch: a record with NO usable recorded_at at all must not
+    silently read as 'still exhausted' (perpetuating an unverifiable block
+    forever) NOR silently read the same as a confirmed expiry -- it gets its
+    own named outcome, loud in the log."""
+    record = {
+        "gate": "codex_gate", "pr_number": 1719, "status": "unavailable",
+        "reason": "dispatch_error", "residual_risk": _REAL_EXHAUSTION_TEXT["codex"],
+        # no recorded_at at all
+    }
+    manager = _make_manager()
+    with caplog.at_level("WARNING"):
+        caplog.clear()
+        classification = manager._classify_review_seat_failure(record)
+    assert classification == "lane_exhausted_unknown_age"
+    assert classification not in ("lane_exhausted", "lane_exhausted_expired")
+    assert "no usable recorded_at" in caplog.text
+
+
+def test_age_seconds_helper_three_states():
+    """_seat_failure_age_seconds itself: missing, unparseable, and a real
+    ISO8601 timestamp (with and without the Z suffix) are all handled, and
+    the missing/unparseable cases both return None -- never 0, never a huge
+    sentinel that would smuggle a specific answer into "unknown"."""
+    assert gate_request_handler._seat_failure_age_seconds(None) is None
+    assert gate_request_handler._seat_failure_age_seconds("") is None
+    assert gate_request_handler._seat_failure_age_seconds("not-a-timestamp") is None
+    assert gate_request_handler._seat_failure_age_seconds(12345) is None
+
+    recent = datetime.now(timezone.utc) - timedelta(seconds=30)
+    age = gate_request_handler._seat_failure_age_seconds(recent.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert age is not None and 25 <= age <= 45
+
+    age_iso = gate_request_handler._seat_failure_age_seconds(recent.isoformat())
+    assert age_iso is not None and 25 <= age_iso <= 45

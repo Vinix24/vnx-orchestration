@@ -220,6 +220,96 @@ def _scan_seat_failure_text(result: Dict[str, Any], manager: "Optional[GateReque
     return "no_response", (field_text or "no detail recorded")
 
 
+# OI-1569 tak 1+2 (dispatch 20260830-153000-oi1569-quota-heeft-geen-tijddimensie):
+# a lane_exhausted classification had no time dimension at all -- a quota
+# refusal is inherently temporary, but the walk in _dispatch_review_seat
+# reads it as a permanent property of the lane. Measured live: once EVERY
+# gate in the configured chain (codex_gate -> kimi_gate -> glm_gate ->
+# deepseek_gate) has a lane_exhausted record on file, the walk always lands
+# on _chain_exhausted_result and NOTHING ever gets a fresh attempt again --
+# PR #1719 stayed blocked on a 10:13 record five hours later, at 15:08, with
+# five OTHER PRs completing real codex runs in between (no provider outage).
+# This constant is the deliberately simple fix: a lane_exhausted record
+# older than this TTL no longer counts as "still exhausted" -- the walk
+# stops at that hop and re-dispatches it fresh, exactly as it would for a
+# gate with no prior failure at all. Retrying too early is cheap (a
+# still-exhausted gate re-records lane_exhausted in 3-15s, per the dispatch's
+# own measurements) -- a short, simple TTL is safer than a long one or a
+# parsed reset-time from provider-specific prose.
+_LANE_EXHAUSTION_TTL_SECONDS = 3600
+
+
+def _seat_failure_age_seconds(recorded_at: Any) -> Optional[float]:
+    """Age, in seconds, of a gate result's ``recorded_at`` timestamp.
+
+    Returns None -- not 0, not a huge sentinel -- when ``recorded_at`` is
+    missing, not a string, or not a parseable ISO8601 timestamp. OI-1569 tak
+    1+2's third branch (see :func:`_lane_exhausted_or_expired`) depends on
+    this distinction: "no usable timestamp" must never silently read as
+    either "just recorded" (age 0) or "ancient" (a huge sentinel) -- both
+    would smuggle a specific answer into what is actually unknown.
+    """
+    if not isinstance(recorded_at, str) or not recorded_at.strip():
+        return None
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    text = recorded_at.strip()
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return max(0.0, (now - parsed).total_seconds())
+
+
+def _lane_exhausted_or_expired(result: Dict[str, Any]) -> str:
+    """Recency-gate a ``lane_exhausted`` classification (OI-1569 tak 1+2).
+
+    Three outcomes, never two -- collapsing the third into either of the
+    first two is exactly the defect this exists to fix:
+
+      - the record's ``recorded_at`` is recent (age < TTL): still
+        exhausted -- returns ``'lane_exhausted'`` unchanged, the walk keeps
+        skipping this hop.
+      - ``recorded_at`` is old: EXPIRED -- a quota refusal is not a
+        permanent lane property. Returns ``'lane_exhausted_expired'``
+        (anything other than the literal ``'lane_exhausted'`` already stops
+        the caller's walk and re-dispatches this gate).
+      - the record has no usable ``recorded_at`` at all: THIS IS ITS OWN
+        BRANCH, not "still exhausted" and not "expired" -- logged loudly
+        (an operator must be able to see an unverifiable-age record, never
+        have it pass through silently either way) and returns
+        ``'lane_exhausted_unknown_age'``. Behaviourally this also stops the
+        walk (the safe default when staleness cannot be proven is to allow
+        a retry, never to perpetuate an unverifiable block forever) -- but
+        it is a NAMED, distinct outcome so the two cases stay
+        distinguishable in logs and tests.
+    """
+    age_seconds = _seat_failure_age_seconds(result.get("recorded_at"))
+    if age_seconds is None:
+        logger.warning(
+            "gate_request_handler: lane_exhausted record for gate=%s pr=%s has "
+            "no usable recorded_at (%r) -- cannot verify staleness; treating "
+            "as retry-eligible rather than perpetuating an unverifiable block "
+            "(OI-1569 tak 1+2)",
+            result.get("gate", "?"), result.get("pr_number", "?"), result.get("recorded_at"),
+        )
+        return "lane_exhausted_unknown_age"
+    if age_seconds >= _LANE_EXHAUSTION_TTL_SECONDS:
+        logger.info(
+            "gate_request_handler: lane_exhausted record for gate=%s pr=%s is "
+            "%.0fs old (TTL=%ds) -- treating as EXPIRED, re-dispatching fresh "
+            "(OI-1569 tak 1+2)",
+            result.get("gate", "?"), result.get("pr_number", "?"),
+            age_seconds, _LANE_EXHAUSTION_TTL_SECONDS,
+        )
+        return "lane_exhausted_expired"
+    return "lane_exhausted"
+
+
 class GateRequestHandlerMixin:
     """Mixin providing gate request creation methods for ReviewGateManager."""
 
@@ -405,6 +495,19 @@ class GateRequestHandlerMixin:
                                      payment/quota code, or a permanent
                                      not_executable refusal with a
                                      provider-owned reason). Take over.
+            'lane_exhausted_expired' / 'lane_exhausted_unknown_age' --
+                                     OI-1569 tak 1+2: a marker WAS found, but
+                                     the recency gate below (see
+                                     :func:`_lane_exhausted_or_expired`)
+                                     refuses to keep treating it as a
+                                     currently-exhausted lane. Any value that
+                                     is not the literal string
+                                     'lane_exhausted' already stops the
+                                     caller's chain walk and re-dispatches
+                                     this seat -- these two names exist so
+                                     the reason is loud and distinguishable
+                                     in logs, never to be pattern-matched by
+                                     a caller.
             'unreadable_verdict' -- toestand 2: a response existed, the
                                      verdict block did not parse. Abstain --
                                      never take over.
@@ -423,7 +526,7 @@ class GateRequestHandlerMixin:
             # over FROM a seat that was never real would misattribute cause.
             if result.get("reason") == "gate_runner_missing":
                 return "ok"
-            return "lane_exhausted"
+            return _lane_exhausted_or_expired(result)
         if status != "unavailable":
             return "ok"
         reason = result.get("reason", "")
@@ -440,6 +543,8 @@ class GateRequestHandlerMixin:
         # msg='Expecting value: line 1' beside raw='Error code: 403'; a
         # msg-keyed check reads toestand 2 while the raw body says toestand 1.
         state, _detail = _scan_seat_failure_text(result, self)
+        if state == "lane_exhausted":
+            return _lane_exhausted_or_expired(result)
         return state
 
     def _read_lane_log_or_report_text(self, result: Dict[str, Any]) -> str:
