@@ -110,7 +110,12 @@ def _resolve_component_arg(call: ast.Call, consts: Dict[str, str]) -> Optional[s
 
 
 def _default_scripts_root() -> Path:
-    root = project_root.resolve_project_root(__file__)
+    # No __file__ anchor (central-mode path gate, shape 3a): a central install
+    # runs this module from the read-only keystone checkout, so anchoring on
+    # __file__ would resolve the keystone's scripts/ tree, not the project's.
+    # CWD-first resolution matches every other scripts/lib register reader
+    # (daemon_register.py's _default_supervisor_script()).
+    root = project_root.resolve_project_root()
     return root / "scripts"
 
 
