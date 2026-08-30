@@ -126,8 +126,14 @@ def build_hook_rows(settings_path: Optional[Path] = None) -> List[Dict[str, Any]
     """One row per Claude Code hook event in ``.claude/settings.json``,
     listing every script basename actually referenced by that event's
     commands (declaration order, deduplicated)."""
+    # No __file__ anchor (central-mode path gate, shape 3a): a central install
+    # runs this module from the read-only keystone checkout, so anchoring on
+    # __file__ would resolve the keystone's settings.json, not the project's.
+    # CWD-first resolution matches build_daemon_rows' own default and
+    # generate_architecture_doc.py, which both run with the project checkout
+    # as CWD.
     path = Path(settings_path) if settings_path else (
-        project_root.resolve_project_root(__file__) / SETTINGS_RELATIVE_PATH
+        project_root.resolve_project_root() / SETTINGS_RELATIVE_PATH
     )
     data = json.loads(path.read_text(encoding="utf-8"))
 
