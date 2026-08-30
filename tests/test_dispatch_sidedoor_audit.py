@@ -312,3 +312,58 @@ def test_shell_string_spawn_is_not_treated_as_help_string(tmp_path):
     assert "scripts/runner.py" in found, (
         "shell-string spawn false-negatived as if it were a help= documentation string"
     )
+
+
+# ── Three-state sidedoor model: bucket (b) + fail switch + operator override. ──
+# The watcher's known-open-side-door bucket (b) is exercised against the REAL
+# repo, whose one open side door is scripts/lib/plan_gate_panel.py (deel 2 closes
+# it). FAIL_ON_OPEN_SIDEDOOR is off on main in this PR; the four scenarios below
+# prove the switch works before deel 2 ever flips it.
+
+
+def test_open_sidedoor_fails_when_switch_on_without_override(monkeypatch):
+    # The red run: fail switch ON + no override env -> the watcher FAILS (exit 1).
+    monkeypatch.delenv(audit_mod.SIDEDOOR_OVERRIDE_ENV, raising=False)
+    monkeypatch.delenv(audit_mod.SIDEDOOR_OVERRIDE_REASON_ENV, raising=False)
+    rc = audit_mod.main(fail_on_open_sidedoor=True)
+    assert rc == 1, "watcher must fail on a known open side door when the fail switch is on"
+
+
+def test_open_sidedoor_override_with_reason_records_bypass(monkeypatch, tmp_path):
+    # Fail switch ON + override flag + reason -> pass (exit 0) AND the bypass is
+    # recorded. Assert on the recording, not just the exit code.
+    monkeypatch.setenv(audit_mod.SIDEDOOR_OVERRIDE_ENV, "1")
+    monkeypatch.setenv(
+        audit_mod.SIDEDOOR_OVERRIDE_REASON_ENV, "operator: plan-gate interim until deel 2"
+    )
+    ledger = tmp_path / "sidedoor_overrides.ndjson"
+    rc = audit_mod.main(fail_on_open_sidedoor=True, ledger_path=ledger)
+    assert rc == 0, "override + reason must let the watcher through"
+    records = audit_mod.read_sidedoor_overrides(ledger)
+    assert len(records) == 1, "bypass must be recorded to the ledger"
+    assert records[0]["reason"] == "operator: plan-gate interim until deel 2"
+    assert records[0]["path"] == "scripts/lib/plan_gate_panel.py"
+    assert records[0]["owner"] == "T0 (orchestrator)"
+    assert records[0]["tracking"] == "deel 2 (plan_gate_panel.py door de deur)"
+
+
+def test_open_sidedoor_override_without_reason_is_blocking(monkeypatch, tmp_path):
+    # Fail switch ON + override flag but NO reason -> the flag is INERT, the
+    # refusal is blocking (exit 1), and nothing is recorded.
+    monkeypatch.setenv(audit_mod.SIDEDOOR_OVERRIDE_ENV, "1")
+    monkeypatch.delenv(audit_mod.SIDEDOOR_OVERRIDE_REASON_ENV, raising=False)
+    ledger = tmp_path / "sidedoor_overrides.ndjson"
+    rc = audit_mod.main(fail_on_open_sidedoor=True, ledger_path=ledger)
+    assert rc == 1, "an override flag with no reason must be inert (blocking refusal)"
+    assert not ledger.exists(), "a refused override must not write a bypass record"
+
+
+def test_open_sidedoor_reports_loudly_but_passes_when_switch_off(monkeypatch, capsys):
+    # Fail switch OFF (this PR's main state): loud named report, exit 0.
+    monkeypatch.delenv(audit_mod.SIDEDOOR_OVERRIDE_ENV, raising=False)
+    monkeypatch.delenv(audit_mod.SIDEDOOR_OVERRIDE_REASON_ENV, raising=False)
+    rc = audit_mod.main(fail_on_open_sidedoor=False)
+    assert rc == 0, "bucket (b) must not fail the watcher while the switch is off"
+    err = capsys.readouterr().err
+    assert "KNOWN OPEN SIDE DOOR" in err, "bucket (b) must be reported by name on stderr"
+    assert "scripts/lib/plan_gate_panel.py" in err
