@@ -27,10 +27,15 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
 import vnx_paths  # noqa: E402
 import gate_obligation_runner as runner  # noqa: E402
 from gate_obligations import (  # noqa: E402
+    REASON_NO_PR_BRANCH_GONE,
+    REASON_PR_CLOSED,
+    REASON_PR_MERGED,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
+    STATUS_RETIRED,
+    STATUS_UNRESOLVABLE,
     obligation_path,
     register_obligation,
     update_obligation,
@@ -291,12 +296,26 @@ _DEFAULT_TEST_HEAD_SHA = "deadbeef00" * 4
 
 def _patch_manager(
     monkeypatch, manager: "_FakeReviewGateManager", *, head_sha: str = _DEFAULT_TEST_HEAD_SHA,
+    pr_state: "str | None" = "OPEN",
 ) -> None:
-    """Hermetic patch: no git, no gh, no real gate — only the fake manager."""
+    """Hermetic patch: no git, no gh, no real gate — only the fake manager.
+
+    ``pr_state`` (OI-1508) stubs the RESOLVED branch's own ``gh pr view``
+    state check to a fixed answer — default ``"OPEN"`` so every test in this
+    file that registers an obligation WITH a ``pr_number`` (a RESOLVED
+    resolution) keeps reaching ``attempt_gate`` exactly as before this fix,
+    unless a test overrides it to exercise the new retire/undetermined
+    outcomes.
+    """
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head_sha)
+    # raising=False: on unfixed pre-OI-1508 code this attribute does not
+    # exist yet — the RED proof for OI-1508 must fail on BEHAVIOR (the gate
+    # manager gets called when it must not be), never on this shared test
+    # helper's own AttributeError.
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state, raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -936,3 +955,256 @@ class TestFastFulfillmentTripwire:
         assert outcome["action"] == STATUS_FULFILLED, "the sha still matches, so this must still fulfil"
         assert "fast_fulfillment_warning" in outcome
         assert "not provably a fresh run this cycle" in outcome["fast_fulfillment_warning"]
+
+
+# ---------------------------------------------------------------------------
+# OI-1508: the RESOLVED branch of _pre_execution_decision used to return
+# {"kind": "attempt_gate"} unconditionally — never checking for existing
+# evidence, never checking whether the PR was still open. Measured live
+# against the central store: 258 obligations would re-run a gate (110-880s
+# each), 95 of them already carrying their own pr_number, at least 19 of
+# those already with a DECIDED PASS on disk, and a 40-PR sample coming back
+# 36 MERGED / 4 CLOSED / 0 OPEN.
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedBranchChecksEvidenceBeforeGating:
+    """RED on unfixed main (measured 2026-09-02, the OI-1508 defect): a
+    RESOLVED obligation (``pr_number`` already known) with a pre-existing
+    DECIDED PASS for the same dispatch_id+gate still called the gate
+    manager and booked the obligation via the unconditional "attempt_gate"
+    path, never even looking at the evidence already on disk.
+
+    Driven through the stable :func:`runner.run` entry point rather than
+    calling ``_pre_execution_decision`` directly — the OI-1508 fix adds a
+    ``state_dir`` parameter to that function, so a direct call would fail
+    unfixed code on a signature mismatch (an interface error) instead of on
+    the actual regression. Through ``run()`` the RED run fails on OBSERVED
+    BEHAVIOR: the gate manager gets invoked when it must not be, and the
+    booked reason differs.
+    """
+
+    def test_pre_existing_pass_evidence_is_stamped_without_gating(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-resolved-evidence", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50001,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr50001.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+        result_path = state_dir / "review_gates" / "results" / "pr-50001-codex_gate.json"
+        result_path.write_text(
+            json.dumps({
+                "gate": "codex_gate", "pr_number": 50001,
+                "dispatch_id": "20260902-oi1508-resolved-evidence",
+                "status": "pass", "contract_hash": "sha256:deadbeef",
+                "report_path": str(report_file), "commit_sha": _DEFAULT_TEST_HEAD_SHA,
+            }),
+            encoding="utf-8",
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], (
+            "existing evidence must be found BEFORE the RESOLVED branch "
+            "gates — a gate must never be re-run when a decided verdict "
+            "already exists for this dispatch+gate (OI-1508)"
+        )
+        record = _read_obligation(state_dir, "20260902-oi1508-resolved-evidence")
+        assert record["status"] == STATUS_FULFILLED
+        assert record["reason"] == "fulfilled_by_existing_evidence"
+        assert record["result_path"] == str(result_path)
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+
+
+class TestResolvedBranchPreExecutionDecision:
+    """Direct unit coverage of every outcome the RESOLVED branch of
+    ``_pre_execution_decision`` can now reach (OI-1508) — one test per tak,
+    a positive alongside each negative so every individual check can fail
+    on its own: bewijs-aanwezig-pass, bewijs-aanwezig-fail,
+    sha-onverifieerbaar, PR-open, PR-merged, PR-closed, and
+    PR-status-onbepaalbaar.
+    """
+
+    GATE = "codex_gate"
+    DISPATCH_ID = "20260902-oi1508-branch-coverage"
+    PR_NUMBER = 50100
+    OWNER_REPO = "Vinix24/vnx-orchestration"
+    HEAD_SHA = _DEFAULT_TEST_HEAD_SHA
+
+    def _resolution(self) -> "runner.PrResolution":
+        return runner.PrResolution(
+            runner.RESOLUTION_RESOLVED, pr_number=self.PR_NUMBER, owner_repo=self.OWNER_REPO,
+        )
+
+    def _seed_evidence(self, state_dir: Path, *, status: str, commit_sha: str = "__default__") -> Path:
+        report_file = state_dir / "unified_reports" / f"{self.GATE}-pr{self.PR_NUMBER}.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("report body", encoding="utf-8")
+        result_path = state_dir / "review_gates" / "results" / f"pr-{self.PR_NUMBER}-{self.GATE}.json"
+        result_path.write_text(
+            json.dumps({
+                "gate": self.GATE, "pr_number": self.PR_NUMBER, "dispatch_id": self.DISPATCH_ID,
+                "status": status, "contract_hash": "sha256:deadbeef",
+                "report_path": str(report_file),
+                "commit_sha": self.HEAD_SHA if commit_sha == "__default__" else commit_sha,
+            }),
+            encoding="utf-8",
+        )
+        return result_path
+
+    def _decide(self, state_dir: Path, monkeypatch, *, attempts: int = 1) -> dict:
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: self.HEAD_SHA)
+        index = runner._index_gate_results(state_dir)
+        return runner._pre_execution_decision(
+            state_dir, self.DISPATCH_ID, self.GATE, self._resolution(), attempts, index,
+        )
+
+    # -- bewijs-aanwezig-pass ----------------------------------------------
+
+    def test_evidence_present_pass_rescues_instead_of_gating(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_evidence(state_dir, status="pass")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "fulfill_by_evidence"
+
+    # -- bewijs-aanwezig-fail -----------------------------------------------
+
+    def test_evidence_present_fail_discharges_without_a_clean_pass(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_evidence(state_dir, status="failed")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "fulfill_by_failed_evidence"
+
+    # -- sha-onverifieerbaar --------------------------------------------------
+
+    def test_evidence_present_unverifiable_sha_suspends_judgement(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_evidence(state_dir, status="pass", commit_sha="")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "sha_unverifiable"
+
+    # -- PR-open --------------------------------------------------------------
+
+    def test_pr_open_still_attempts_the_gate(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "OPEN")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "attempt_gate"
+
+    # -- PR-merged --------------------------------------------------------------
+
+    def test_pr_merged_retires_with_pr_merged_reason(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "MERGED")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "retire"
+        assert decision["retire_reason"] == REASON_PR_MERGED
+
+    # -- PR-closed --------------------------------------------------------------
+
+    def test_pr_closed_retires_with_pr_closed_reason(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "CLOSED")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "retire"
+        assert decision["retire_reason"] == REASON_PR_CLOSED
+
+    # -- PR-status-onbepaalbaar ---------------------------------------------
+
+    def test_pr_state_undetermined_neither_retires_nor_gates(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        decision = self._decide(state_dir, monkeypatch, attempts=1)
+        assert decision["kind"] == "unresolvable"
+        assert decision["detail"] is not None and "could not be determined" in decision["detail"]
+
+    def test_pr_state_undetermined_escalates_past_threshold(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        decision = self._decide(
+            state_dir, monkeypatch, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS,
+        )
+        assert decision["kind"] == "escalate"
+
+
+class TestResolvedBranchRetireIntegration:
+    """End-to-end (through ``runner.run``) proof that a merged/closed PR
+    without rescuing evidence is actually retired on disk, and that the
+    boundary is hard: an OPEN PR is NEVER retired, regardless of age."""
+
+    def test_merged_pr_without_evidence_is_retired(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-merged-retire", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50002,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="MERGED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "a merged PR must never re-fire the gate"
+        record = _read_obligation(state_dir, "20260902-oi1508-merged-retire")
+        assert record["status"] == STATUS_RETIRED
+        assert record["reason"] == REASON_PR_MERGED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_RETIRED
+
+    def test_closed_pr_without_evidence_is_retired(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-closed-retire", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50003,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="CLOSED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "a closed PR must never re-fire the gate"
+        record = _read_obligation(state_dir, "20260902-oi1508-closed-retire")
+        assert record["status"] == STATUS_RETIRED
+        assert record["reason"] == REASON_PR_CLOSED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_RETIRED
+
+    def test_open_pr_is_never_retired_gate_still_runs(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-open-control", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50004,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+
+        summary = runner.run(state_dir)
+
+        assert len(manager.calls) == 1, "an OPEN PR must still be gated"
+        record = _read_obligation(state_dir, "20260902-oi1508-open-control")
+        assert record["status"] == STATUS_FULFILLED
+        assert record["status"] != STATUS_RETIRED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+
+    def test_undetermined_pr_state_stays_unresolvable_never_retired(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-undetermined", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50005,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state=None)
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "an undeterminable PR state must never gate"
+        record = _read_obligation(state_dir, "20260902-oi1508-undetermined")
+        assert record["status"] == STATUS_UNRESOLVABLE
+        assert record["status"] != STATUS_RETIRED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == "unresolvable"

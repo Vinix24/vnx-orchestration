@@ -122,6 +122,8 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
     REASON_NO_PR_BRANCH_GONE,
+    REASON_PR_CLOSED,
+    REASON_PR_MERGED,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
@@ -444,6 +446,32 @@ def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool
         "(rc=%s) — treating as unknown, not gone: %s",
         branch, proc.returncode, combined.strip(),
     )
+    return None
+
+
+def _pr_state_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
+    """Whether a resolved PR is ``OPEN``, ``MERGED``, or ``CLOSED`` on GitHub.
+
+    OI-1508: the RESOLVED branch of :func:`_pre_execution_decision` knows a
+    PR number but nothing about its live disposition — measuring it here is
+    the read-only ``gh pr view <n> --json state`` call that the RESOLVED
+    branch was missing entirely, unconditionally treating every resolved PR
+    as still open and re-attempting the gate on it.
+
+    Returns the state string on a definite answer, ``None`` when it cannot
+    be determined (gh missing, timeout, network error, or an unrecognised
+    response) — mirrors :func:`_branch_exists_on_github`: a caller may only
+    retire on a definite ``MERGED``/``CLOSED``, never on ``None`` (OI-1388:
+    ambiguous evidence must never close an obligation).
+    """
+    data = _gh_json(
+        ["pr", "view", str(pr_number), "--json", "state"],
+        owner_repo=owner_repo,
+    )
+    if isinstance(data, dict):
+        state = data.get("state")
+        if isinstance(state, str) and state.strip():
+            return state.strip().upper()
     return None
 
 
@@ -1054,6 +1082,7 @@ def _evidence_decision(evidence: Tuple[Path, Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _pre_execution_decision(
+    state_dir: Path,
     dispatch_id: str,
     gate: str,
     resolution: PrResolution,
@@ -1068,13 +1097,33 @@ def _pre_execution_decision(
     (OI-1388 defect 2). Every input here is already read-only-derivable: PR
     resolution and the branch-existence check both happen inside
     :func:`resolve_pr_number` via read-only ``gh`` calls (safe in a dry run),
-    and the evidence lookup is a local file read.
+    the evidence lookup is a local file read, and the RESOLVED branch's own
+    ``gh pr view`` state check (:func:`_pr_state_from_github`, OI-1508) is
+    read-only too — ``state_dir`` is only needed to resolve an owner/repo
+    that :func:`resolve_pr_number` did not already attach to ``resolution``
+    (it only does when a PR was actually found via GitHub search; a
+    ``pr_number`` sourced from the record itself or dispatch metadata
+    carries no owner/repo at all).
 
     Returns ``{"kind": ..., ...}`` where ``kind`` is one of:
-      - ``unresolvable``               — env fault, stays retryable (below threshold)
-      - ``escalate``                   — env fault, past threshold: terminal escalation
+      - ``unresolvable``               — env fault, stays retryable (below
+        threshold). OI-1508: also reused by the RESOLVED branch when a
+        known PR's live state (open/merged/closed) could not be determined
+        — the same class of fault (the environment cannot answer a
+        required question) even though the PR number itself is known;
+        deliberately NOT a new status vocabulary member every other
+        consumer of ``STATUS_*`` would need to learn about. Carries
+        ``decision["detail"]`` naming what could not be determined.
+      - ``escalate``                   — env fault, past threshold: terminal
+        escalation. Same OI-1508 reuse as ``unresolvable`` above.
       - ``stay_pending``               — genuine wait (branch alive / undetermined)
-      - ``retire``                     — dead dispatch, no rescuing evidence
+      - ``retire``                     — dead dispatch, no rescuing evidence.
+        OI-1508: also returned by the RESOLVED branch when ``gh`` confirms
+        the PR is MERGED or CLOSED (never on OPEN, and never without first
+        checking for rescuing evidence) — carries
+        ``decision["retire_reason"]`` (``REASON_PR_MERGED``/
+        ``REASON_PR_CLOSED``) so the caller can distinguish it from the
+        pre-existing "branch gone, no PR ever" retirement.
       - ``fulfill_by_evidence``        — OI-1388 defect 1: a complete-evidence
         DECIDED PASS, sha-current with the PR head, already exists for this
         dispatch_id + gate; carried as ``decision["evidence"] = (path, record)``
@@ -1086,8 +1135,10 @@ def _pre_execution_decision(
         result exists but its sha binding to the PR head could not be
         verified. NEITHER a rescue NOR a retire/escalate — a third outcome
         that suspends judgement; carries ``decision["detail"]``
-      - ``attempt_gate``               — PR resolved: the caller must actually
-        run the gate to learn the outcome (only the real run does this)
+      - ``attempt_gate``               — PR resolved AND (for a RESOLVED
+        resolution) confirmed OPEN, or no evidence-check applies at all:
+        the caller must actually run the gate to learn the outcome (only
+        the real run does this)
 
     ``not_executable`` and any other undecided status are never returned as
     evidence here — :func:`_fulfilling_result` rejects those itself, so a
@@ -1098,6 +1149,14 @@ def _pre_execution_decision(
     carries ``decision["mismatch_detail"]`` when one was seen, so whatever
     record documents the retirement/escalation can also document why the
     rejected evidence did not count.
+
+    OI-1508: before this fix, ``resolution.status == RESOLUTION_RESOLVED``
+    returned ``attempt_gate`` unconditionally — never checking for existing
+    evidence, never checking whether the PR was still open. Measured live
+    against the central store: 258 obligations would re-run a gate
+    (110-880s each) that in most cases had already merged or closed, and at
+    least 19 of them already carried a DECIDED PASS this branch was
+    silently discarding.
     """
     if resolution.status == RESOLUTION_UNRESOLVABLE:
         lookup = _fulfilling_result(result_index, dispatch_id, gate)
@@ -1119,7 +1178,51 @@ def _pre_execution_decision(
             return {"kind": "retire", "mismatch_detail": lookup.get("detail")}
         return {"kind": "stay_pending"}
 
-    return {"kind": "attempt_gate"}
+    # resolution.status == RESOLUTION_RESOLVED (OI-1508): a PR is known, but
+    # that alone never used to be checked against existing evidence or the
+    # PR's live state — see the docstring measurement above.
+    lookup = _fulfilling_result(result_index, dispatch_id, gate)
+    if lookup["kind"] == "found":
+        return _evidence_decision(lookup["entry"])
+    if lookup["kind"] == "unverifiable":
+        return {"kind": "sha_unverifiable", "detail": lookup["detail"]}
+
+    pr_number = resolution.pr_number
+    owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
+    pr_state = (
+        _pr_state_from_github(pr_number, owner_repo)
+        if pr_number and owner_repo else None
+    )
+    if pr_state == "OPEN":
+        return {"kind": "attempt_gate"}
+    if pr_state in ("MERGED", "CLOSED"):
+        retire_reason = REASON_PR_MERGED if pr_state == "MERGED" else REASON_PR_CLOSED
+        return {
+            "kind": "retire",
+            "retire_reason": retire_reason,
+            "mismatch_detail": lookup.get("detail"),
+        }
+
+    # PR state could not be determined (gh missing/timed out/unrecognised
+    # response, or the owner/repo itself could not be resolved) — a THIRD
+    # outcome, distinct from both "confirmed open" (attempt_gate) and
+    # "confirmed merged/closed" (retire). OI-1388: ambiguous evidence must
+    # never retire an obligation; an unqueryable PR state must not silently
+    # gate on it either, since it might just as well already be closed.
+    if pr_number and owner_repo:
+        detail = (
+            f"PR #{pr_number} state on {owner_repo} could not be determined "
+            "(gh unreachable, timed out, or returned an unrecognised "
+            "response) — cannot safely retire or gate it"
+        )
+    else:
+        detail = (
+            "PR resolved but its owner/repo could not be determined to "
+            "query PR state — cannot safely retire or gate it"
+        )
+    if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
+        return {"kind": "escalate", "detail": detail, "mismatch_detail": lookup.get("detail")}
+    return {"kind": "unresolvable", "detail": detail}
 
 
 _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
@@ -1163,7 +1266,7 @@ def _dry_run_outcome(
 
     attempts = int(record.get("attempts") or 0) + 1
     resolution = resolve_pr_number(state_dir, record)
-    decision = _pre_execution_decision(dispatch_id, gate, resolution, attempts, result_index)
+    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index)
     outcome: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         "gate": gate,
@@ -1183,11 +1286,28 @@ def _dry_run_outcome(
     elif decision["kind"] == "sha_unverifiable":
         outcome["detail"] = decision.get("detail")
     elif decision["kind"] == "retire":
-        outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
+        # OI-1508: retire_reason distinguishes the RESOLVED branch's own
+        # merged/closed retirement from the pre-existing "branch gone, no
+        # PR ever" retirement — resolution.reason is unset for the former
+        # (RESOLUTION_RESOLVED never populates it), so it must not be used
+        # as the fallback text there.
+        retire_reason = decision.get("retire_reason")
+        if retire_reason in (REASON_PR_MERGED, REASON_PR_CLOSED):
+            state_word = "merged" if retire_reason == REASON_PR_MERGED else "closed without merge"
+            outcome["detail"] = (
+                f"PR #{resolution.pr_number} is {state_word} and no rescuing "
+                f"{gate} evidence was found"
+            )
+        else:
+            outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     elif decision["kind"] in ("unresolvable", "escalate"):
-        outcome["detail"] = resolution.reason
+        # OI-1508: decision["detail"] carries the RESOLVED branch's own
+        # "PR state undeterminable" message when present — resolution.reason
+        # is unset for RESOLUTION_RESOLVED, so it is only the fallback for
+        # the pre-existing RESOLUTION_UNRESOLVABLE origin of this branch.
+        outcome["detail"] = decision.get("detail") or resolution.reason
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     return outcome
@@ -1230,7 +1350,7 @@ def fulfill_obligation(
     now = utc_now_iso()
 
     resolution = resolve_pr_number(state_dir, record)
-    decision = _pre_execution_decision(dispatch_id, gate, resolution, attempts, result_index)
+    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index)
 
     if decision["kind"] == "fulfill_by_evidence":
         # OI-1388 defect 1: a gate already produced a complete-evidence PASS
@@ -1347,6 +1467,13 @@ def fulfill_obligation(
         # misconfigured obligation can never masquerade as "not yet". It stays
         # retryable — the env may be fixed — until it crosses the escalation
         # threshold, where it becomes the loud terminal not_executable.
+        #
+        # OI-1508: decision["detail"] carries the RESOLVED branch's own "PR
+        # state undeterminable" message when this kind originated there —
+        # resolution.reason is unset for RESOLUTION_RESOLVED (only
+        # RESOLUTION_UNRESOLVABLE/RESOLUTION_AWAITING populate it), so it is
+        # only the fallback for this block's pre-existing origin.
+        reason_source = decision.get("detail") or resolution.reason
         mismatch_note = (
             f" A prior {gate} result exists for this dispatch but is about a "
             f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
@@ -1359,10 +1486,10 @@ def fulfill_obligation(
             attempts=attempts,
             last_attempt_at=now,
             reason="unresolvable_repo",
-            reason_detail=f"{resolution.reason}{mismatch_note}",
+            reason_detail=f"{reason_source}{mismatch_note}",
         )
         outcome["action"] = "unresolvable"
-        outcome["detail"] = resolution.reason
+        outcome["detail"] = reason_source
         if decision["kind"] == "escalate":
             update_obligation(
                 path,
@@ -1373,7 +1500,7 @@ def fulfill_obligation(
                 reason="unresolvable_timeout",
                 reason_detail=(
                     f"PR unresolved after {attempts} attempts because the "
-                    f"environment is misconfigured: {resolution.reason}. Fix "
+                    f"environment is misconfigured: {reason_source}. Fix "
                     "the project attribution (VNX_PROJECT_ID / "
                     "~/.vnx/projects.json / the checkout's git origin remote) "
                     f"and reset this obligation to pending.{mismatch_note}"
@@ -1383,16 +1510,41 @@ def fulfill_obligation(
         return outcome
 
     if decision["kind"] == "retire":
-        # OI-1388: the dispatch never produced a PR AND its head branch is
-        # gone from origin — nothing will ever gate this obligation.
-        # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
-        branch_name = f"dispatch/{dispatch_id}"
         mismatch_note = (
             f" A prior {gate} result exists for this dispatch but is about a "
             f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
             "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
             if decision.get("mismatch_detail") else ""
         )
+        retire_reason = decision.get("retire_reason", REASON_NO_PR_BRANCH_GONE)
+        if retire_reason in (REASON_PR_MERGED, REASON_PR_CLOSED):
+            # OI-1508: the RESOLVED branch's own retirement — gh confirmed
+            # the PR is no longer open, and the evidence lookup above this
+            # branch found no rescuing verdict. Never fires on an OPEN PR
+            # (that stays attempt_gate) and never without that lookup.
+            state_word = "merged" if retire_reason == REASON_PR_MERGED else "closed without merge"
+            update_obligation(
+                path,
+                status=STATUS_RETIRED,
+                pr_number=resolution.pr_number,
+                attempts=attempts,
+                last_attempt_at=now,
+                resolved_at=now,
+                reason=retire_reason,
+                reason_detail=(
+                    f"PR #{resolution.pr_number} for dispatch {dispatch_id} is "
+                    f"{state_word} and no rescuing {gate} evidence was found — "
+                    f"nothing left for {gate} to guard.{mismatch_note}"
+                ),
+            )
+            outcome["action"] = STATUS_RETIRED
+            outcome["detail"] = f"PR #{resolution.pr_number} is {state_word} — retired"
+            return outcome
+
+        # OI-1388: the dispatch never produced a PR AND its head branch is
+        # gone from origin — nothing will ever gate this obligation.
+        # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
+        branch_name = f"dispatch/{dispatch_id}"
         update_obligation(
             path,
             status=STATUS_RETIRED,
