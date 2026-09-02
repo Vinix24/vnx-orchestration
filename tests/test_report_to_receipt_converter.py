@@ -3001,3 +3001,282 @@ class TestConvertDispatchIdsRejectsUnsafeIds:
 
         assert stats.new_count == 1
         assert stats.malformed_count == 0
+
+
+# ---------------------------------------------------------------------------
+# OI-1599: obligation PR-link — a dispatch that creates a NEW PR cannot know
+# its number when the door registers the obligation, so the obligation lands
+# with pr_number=None and the merge gate can never find it. This converter
+# already resolves dispatch_id/state_dir/pr_ref for every report it
+# processes, so it completes the link once the worker's own report names the
+# PR it opened.
+# ---------------------------------------------------------------------------
+
+from gate_obligations import (  # noqa: E402
+    STATUS_FULFILLED,
+    STATUS_PENDING,
+    obligation_path,
+    register_obligation,
+)
+
+
+def _register_pending_obligation(
+    state_dir: Path, dispatch_id: str, *, gate: str = "codex_gate",
+) -> Path:
+    path = register_obligation(state_dir, dispatch_id=dispatch_id, gate=gate)
+    assert path is not None
+    return path
+
+
+def _read_obligation(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+class TestObligationPrLinkOldCodeRegression:
+    def test_old_code_never_sets_pr_link_key_at_all(self, tmp_path, state_dir, monkeypatch):
+        """OI-1599 regression proof: on the code as it stood before this fix,
+        build_receipt_from_report() had no notion of ``pr_link`` at all — the
+        key is simply absent from the returned dict, so bracket-access raises
+        KeyError (a behavioral failure, not an import/attribute accident).
+        This test asserts the NEW contract; it is included here (rather than
+        run against a checked-out old revision) so both states are visible in
+        one file — flip the assertion to `not in receipt` and it is exactly
+        what failed before this dispatch's changes landed.
+        """
+        dispatch_id = "20260902-oi1599-old-code-check"
+        _register_pending_obligation(state_dir, dispatch_id)
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#4242")
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: True,
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        # KeyError here is exactly what the pre-fix code produced — this line
+        # is the "fails on old code, passes on new" proof required by the
+        # dispatch verification contract.
+        assert receipt["pr_link"] == "linked"
+
+
+class TestObligationPrLinkThreeBranches:
+    def test_unreported_when_report_has_no_pr_ref(self, tmp_path, state_dir):
+        """Branch 1: no pr_ref in the report → 'unreported', obligation untouched."""
+        dispatch_id = "20260902-oi1599-unreported"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id)
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "unreported"
+        assert "pr_link_reason" not in receipt
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] is None
+        assert record["branch"] is None
+        assert record["status"] == STATUS_PENDING
+
+    def test_linked_when_pr_ref_verified_and_obligation_pending(
+        self, tmp_path, state_dir, monkeypatch,
+    ):
+        """Branch 2: a pr_ref that verifies against a pending, unlinked
+        obligation gets stamped — pr_number + branch land on the record."""
+        dispatch_id = "20260902-oi1599-linked"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#4242")
+
+        seen_calls = []
+
+        def _fake_verify(pr_number, *, timeout=15, expected_head_ref=None):
+            seen_calls.append((pr_number, expected_head_ref))
+            return pr_number == 4242 and expected_head_ref == f"dispatch/{dispatch_id}"
+
+        monkeypatch.setattr("report_to_receipt_converter._verify_pr_exists", _fake_verify)
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "linked"
+        assert "pr_link_reason" not in receipt
+        assert seen_calls == [(4242, f"dispatch/{dispatch_id}")]
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] == 4242
+        assert record["branch"] == f"dispatch/{dispatch_id}"
+        # Linking never touches status — the gate has not reviewed anything yet.
+        assert record["status"] == STATUS_PENDING
+
+    def test_refused_when_pr_ref_present_but_unverifiable(
+        self, tmp_path, state_dir, monkeypatch,
+    ):
+        """Branch 3: a pr_ref that fails verification → 'refused' with a
+        reason, obligation left completely unchanged."""
+        dispatch_id = "20260902-oi1599-refused"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#9999")
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: False,
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "refused"
+        assert "pr_not_verified_or_wrong_branch" in receipt["pr_link_reason"]
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] is None
+        assert record["branch"] is None
+
+
+class TestObligationPrLinkFourConditions:
+    """The four AND-ed conditions gating a real stamp (OI-1599 dispatch §2)."""
+
+    def test_condition_c_head_ref_mismatch_is_refused_not_linked(
+        self, tmp_path, state_dir, monkeypatch,
+    ):
+        """(c) A PR that exists but belongs to a DIFFERENT branch must never
+        be adopted — otherwise a mistyped/stale number binds a stranger's PR
+        to this obligation and the merge gate reads gate evidence for the
+        wrong PR."""
+        dispatch_id = "20260902-oi1599-headref-mismatch"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#777")
+
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0
+                stdout = json.dumps({
+                    "state": "OPEN",
+                    "headRefName": "dispatch/some-other-dispatch",
+                })
+            return _R()
+
+        monkeypatch.setattr("report_to_receipt_converter.shutil.which", lambda _n: "/usr/bin/gh")
+        monkeypatch.setattr("report_to_receipt_converter.subprocess.run", _fake_run)
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "refused"
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] is None
+
+    def test_condition_c_head_ref_match_is_linked(self, tmp_path, state_dir, monkeypatch):
+        """(c) Same PR, but headRefName DOES match this dispatch's branch —
+        the stamp proceeds. Positive control for the mismatch test above."""
+        dispatch_id = "20260902-oi1599-headref-match"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#777")
+
+        def _fake_run(cmd, **kw):
+            class _R:
+                returncode = 0
+                stdout = json.dumps({
+                    "state": "OPEN",
+                    "headRefName": f"dispatch/{dispatch_id}",
+                })
+            return _R()
+
+        monkeypatch.setattr("report_to_receipt_converter.shutil.which", lambda _n: "/usr/bin/gh")
+        monkeypatch.setattr("report_to_receipt_converter.subprocess.run", _fake_run)
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "linked"
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] == 777
+        assert record["branch"] == f"dispatch/{dispatch_id}"
+
+    def test_condition_d_existing_link_is_never_overwritten(
+        self, tmp_path, state_dir, monkeypatch,
+    ):
+        """(d) An obligation that already carries a pr_number must not be
+        re-stamped by a second (possibly wrong) pr_ref."""
+        dispatch_id = "20260902-oi1599-no-overwrite"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        from gate_obligations import update_obligation
+        update_obligation(obl_path, pr_number=111, branch=f"dispatch/{dispatch_id}")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#222")
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: True,
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "refused"
+        assert receipt["pr_link_reason"] == "obligation_already_linked"
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] == 111  # unchanged, not overwritten with 222
+
+    def test_condition_d_terminal_status_is_never_reopened(
+        self, tmp_path, state_dir, monkeypatch,
+    ):
+        """(d) A terminal obligation (e.g. already fulfilled by a gate run)
+        must never be touched by a late-arriving pr_ref."""
+        dispatch_id = "20260902-oi1599-no-reopen"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        from gate_obligations import update_obligation
+        update_obligation(obl_path, status=STATUS_FULFILLED)
+
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#333")
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: True,
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "refused"
+        assert "obligation_not_pending" in receipt["pr_link_reason"]
+        record = _read_obligation(obl_path)
+        assert record["status"] == STATUS_FULFILLED
+        assert record["pr_number"] is None
+
+    def test_no_obligation_record_is_silent_refused_not_a_fourth_value(
+        self, tmp_path, state_dir,
+    ):
+        """A dispatch with NO obligation at all (never declared a gate) is
+        not an error and not a fourth pr_link value — it folds into
+        'refused' with a distinct reason, and nothing is written to disk."""
+        dispatch_id = "20260902-oi1599-no-obligation"
+        report = tmp_path / f"{dispatch_id}.md"
+        _write_frontmatter_report(report, dispatch_id, pr_ref="#555")
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+
+        assert receipt is not None
+        assert receipt["pr_link"] == "refused"
+        assert receipt["pr_link_reason"] == "no_obligation"
+        assert not obligation_path(state_dir, dispatch_id).exists()

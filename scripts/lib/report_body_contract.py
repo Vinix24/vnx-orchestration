@@ -59,11 +59,31 @@ def build_directive(dispatch_id: str, *, pr_id: "str | None" = None) -> str:
 
     Workers use the exact headings listed. Validator also accepts common
     aliases (## Files Modified, ## Test Results, ## Work Completed, ## Evidence).
+
+    OI-1599: the ``**PR_Ref**`` request below is UNCONDITIONAL — it does not
+    gate on ``pr_id``, unlike the ``## PR`` section above it. ``pr_id`` is only
+    non-None when a PR already existed BEFORE this dispatch ran; a dispatch
+    that creates a brand-new PR cannot know its number until ``gh pr create``
+    runs mid-dispatch, so gating the request on ``pr_id`` (as the ``## PR``
+    section does) would never ask exactly the dispatches that most need
+    asking. This is a request, not a requirement: it adds no heading
+    ``validate_body()`` checks for, so a report that never produces a PR is
+    never marked invalid for omitting it, and no existing report is retroactively
+    broken by this change.
     """
     sections = list(_REQUIRED_SECTIONS)
     if pr_id:
         sections.append("## PR")
     sections_formatted = "\n".join(f"- `{s}`" for s in sections)
+    pr_ref_note = (
+        "\nIf this dispatch creates or updates a pull request, also stamp its "
+        "number as a bold field within the first 3000 characters of your report "
+        "(or as frontmatter `pr_ref`): `**PR_Ref**: #1234`. This is how the "
+        "receipt converter links the PR to this dispatch's review-gate "
+        "obligation — without it the obligation can never be matched to a PR "
+        "that did not exist yet when the dispatch was registered. Omit this "
+        "field entirely when this dispatch does not produce a PR.\n"
+    )
     return (
         f"{_DIRECTIVE_SENTINEL}\n\n"
         "## Report Body Contract\n\n"
@@ -72,6 +92,7 @@ def build_directive(dispatch_id: str, *, pr_id: "str | None" = None) -> str:
         "are also accepted by the validator):\n\n"
         f"{sections_formatted}\n\n"
         "Each section must be non-empty. `## Open Items` may contain \"None\" explicitly.\n"
+        f"{pr_ref_note}"
     )
 
 
