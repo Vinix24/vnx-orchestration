@@ -35,27 +35,69 @@ for sub in (_REPO_ROOT / "scripts", _REPO_ROOT / "scripts" / "lib"):
 sys.path.insert(0, str(_REPO_ROOT))
 
 
-# Health cells read "<category> — <detail>" (e.g. "works — CI green"). These
-# are the categories this check has verified mean "a probe or seed actually
-# produced a reading" (OI-1593): `works`, `degraded`, and `produces-crap` are
-# real probe/seed outcomes; `stale` means the beacon aged out but still holds
-# a prior real reading (health_beacon.py). None of the four says whether
-# LIVE+degraded/produces-crap/stale SHOULD be legal — that is a separate
-# design question this check does not take a position on. It only asserts
-# they are genuinely measured, so they are exempt from the "unmeasured"
-# violation this check exists to catch.
+# Health cells read "<category> — <detail>" (e.g. "works — CI green").
+# ``subsystems._attach_health`` fills this column from ONE OF TWO vocabularies
+# per row (a beacon wins if one exists for the subsystem, else the row falls
+# back to seed prose — see its docstring), and this allowlist must recognize
+# both or it silently only covers whichever one the original author had in
+# view (OI-1596: a version of this list that covered only the seed
+# vocabulary reported LIVE+beacon-`ok` as a VIOLATION with the message
+# "health is unmeasured" — the exact opposite of what had been measured).
 #
-# Everything else falls through to "unmeasured": `unknown` (explicit "no
-# probe yet"), an empty cell, a missing `health` key, and any category this
-# check has never seen before. That last case is deliberate fail-closed
-# behavior — a new beacon category (e.g. a future `absent`) is unmeasured
-# until this allowlist is updated to say otherwise, not until this check
-# happens to not recognize it as a violation.
+#   seed prose (docs/core/SUBSYSTEMS.md health column, parsed by
+#   ``_parse_seed_health``; verified against the committed file on OI-1596):
+#       works, degraded, produces-crap, unknown
+#
+#   beacon (``health_beacon.all_beacons()``'s derived ``health`` field, which
+#   is what ``beacon.get('health', ...)`` in ``_attach_health`` actually
+#   reads; verified against health_beacon.py's docstring and its
+#   ``beacon_summary()`` counts dict, both of which enumerate the same six):
+#       ok, stale, fail, corrupt, unknown, absent
+#
+# A component CAN self-report a raw ``status`` of "degraded" (e.g.
+# ``learning_loop.py``), but ``all_beacons()`` only ever honors a
+# self-reported ok/fail/stale/corrupt — anything else, including "degraded",
+# collapses to "fail" before this check ever sees it (health_beacon.py
+# ``_status_to_health``). So the beacon vocabulary this check actually
+# receives never contains the word "degraded"; that spelling only ever
+# arrives via a seed row.
+#
+# `works`, `degraded`, and `produces-crap` (seed) are real seed outcomes — a
+# human recorded a measurement. `ok` and `fail` (beacon) are likewise
+# genuinely measured: `fail` is measured-and-bad, a SEPARATE design question
+# (may LIVE+fail be legal?) this check does not take a position on, same as
+# it already declines to judge degraded/produces-crap — this check is about
+# *unmeasured*, not about *bad*. `stale` (beacon) means the beacon aged out
+# but still holds a prior real reading. None of these six says whether the
+# LIVE+<category> combination SHOULD be legal — only that it is genuinely
+# measured, so all six are exempt from the "unmeasured" violation this check
+# exists to catch.
+#
+# Everything else falls through to "unmeasured": `unknown` (both
+# vocabularies' explicit "no probe/no recent signal yet"), `absent` (beacon:
+# an expected component that never once wrote), `corrupt` (beacon: the JSON
+# could not be read at all — not a trustworthy reading, so it is treated the
+# same as never having measured, not bundled in with `fail`), an empty cell,
+# a missing `health` key, and any category this check has never seen before.
+# That last case is deliberate fail-closed behavior — a new category is
+# unmeasured until this allowlist is updated to say otherwise, not until
+# this check happens to not recognize it as a violation.
+#
+# Not derived from a shared source: neither vocabulary has one. The seed
+# words are free text in a markdown table, not a validated enum anywhere in
+# code. The beacon side comes closest — ``health_beacon.beacon_summary()``
+# has an inline ``counts`` dict naming the same six categories — but it is
+# not exported as a reusable constant, and only covers the beacon half
+# anyway. Exporting one would mean refactoring health_beacon.py's internals,
+# which is out of scope for this one allowlist; if a shared constant is
+# wanted, do it as its own change.
 _MEASURED_HEALTH_CATEGORIES = frozenset({
     "works",
     "degraded",
     "produces-crap",
     "stale",
+    "ok",
+    "fail",
 })
 
 

@@ -114,3 +114,57 @@ def test_violations_in_rows_allows_live_with_stale_health() -> None:
         {"subsystem": "provider-routing", "status": "LIVE", "health": "stale — ok"},
     ]
     assert check.violations_in_rows(rows) == []
+
+
+def test_violations_in_rows_allows_live_with_beacon_ok_health() -> None:
+    """OI-1596: the allowlist only covered the seed-prose vocabulary
+    (works/degraded/produces-crap/stale). A live beacon reporting a bare
+    'ok' — no ' — detail' suffix, since ``_attach_health`` only appends one
+    when a signal is present — used to be reported as a VIOLATION with the
+    message "health is unmeasured", the opposite of what was measured:
+    'ok' is a genuine, healthy reading from ``health_beacon.all_beacons()``."""
+    rows = [
+        {"subsystem": "provider-routing", "status": "LIVE", "health": "ok"},
+    ]
+    assert check.violations_in_rows(rows) == []
+
+
+def test_violations_in_rows_allows_live_with_beacon_fail_health() -> None:
+    """OI-1596: 'fail' is measured-and-bad, not unmeasured. Whether
+    LIVE+fail SHOULD be legal is a separate design question this check does
+    not take a position on, same as LIVE+degraded/produces-crap — this check
+    only asserts a reading exists, it never judges whether the reading is
+    good."""
+    rows = [
+        {"subsystem": "provider-routing", "status": "LIVE", "health": "fail"},
+    ]
+    assert check.violations_in_rows(rows) == []
+
+
+def test_violations_in_rows_catches_live_with_bare_unknown_beacon_health() -> None:
+    """'unknown' with no ' — detail' suffix (the bare beacon form, e.g. an
+    event-driven beacon past its freshness backstop) must stay a violation —
+    both vocabularies agree 'unknown' means not genuinely measured."""
+    rows = [
+        {"subsystem": "provider-routing", "status": "LIVE", "health": "unknown"},
+    ]
+    assert check.violations_in_rows(rows) == ["provider-routing"]
+
+
+def test_violations_in_rows_catches_live_with_bare_absent_beacon_health() -> None:
+    """'absent' (an expected component that never once wrote a beacon) must
+    stay a violation — it is the beacon vocabulary's own "never measured"
+    category, distinct from but just as unmeasured as seed 'unknown'."""
+    rows = [
+        {"subsystem": "provider-routing", "status": "LIVE", "health": "absent"},
+    ]
+    assert check.violations_in_rows(rows) == ["provider-routing"]
+
+
+def test_violations_in_rows_catches_live_with_fabricated_category() -> None:
+    """Fail-closed property, independent of any real category: a health
+    string neither vocabulary has ever produced must be a violation."""
+    rows = [
+        {"subsystem": "provider-routing", "status": "LIVE", "health": "frobnicated"},
+    ]
+    assert check.violations_in_rows(rows) == ["provider-routing"]
