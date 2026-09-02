@@ -731,3 +731,175 @@ class TestEvidenceLivenessMatrix:
         assert "rejected as rescue evidence" in record["reason_detail"]
         assert summary["pending_after"] == 1
         assert summary["outcomes"][0]["action"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# OI-1587 — the two stay-pending branches OI-1532 INTRODUCED must not
+# reintroduce the unbounded wait Tak B closed. Measured by T0 directly on
+# _pre_execution_decision at 882c5817, threshold _STAY_PENDING_ESCALATION_ATTEMPTS = 96:
+#   branch gone, live=True   att 1/96/960/100000 -> stay_pending_live        (never escalates)
+#   branch gone, live=None   att 1/96/960/100000 -> stay_pending_unmeasured  (never escalates)
+#   branch gone, live=False  att 1/96/960/100000 -> retire
+#   branch exists (Tak B)    att 1 -> stay_pending, att >= 96 -> escalate_stay_pending
+# The attempts check lived only in the branch_exists True/None tak; the two
+# new returns never saw it. The fix bounds stay_pending_unmeasured with the
+# SAME constant (never a second bound — test_threshold_reuses_unresolvable_constant
+# above pins that), and leaves stay_pending_live deliberately unbounded: a held
+# occupancy lock is kernel-enforced positive evidence of a live process and
+# self-corrects the instant the holder exits, so an attempt count must never
+# escalate over a provably-running dispatch.
+# ---------------------------------------------------------------------------
+
+
+class TestTakCNewBranchesBounded:
+    """Bounding the branches OI-1532 added (OI-1587 fix-forward on PR #1729).
+
+    The escalate tests are RED on 882c5817 (the unmeasured branch returned
+    ``stay_pending_unmeasured`` for EVERY attempts value) and GREEN after the
+    fix; the live-branch test is GREEN on both — it pins the deliberate
+    "unbounded, and here is why" decision so it cannot silently drift.
+    """
+
+    _DECISION_DISPATCH_ID = "20260902-oi1587-tak-c"
+
+    @staticmethod
+    def _decision(attempts: int, dispatch_live) -> dict:
+        """Drive the REAL ``_pre_execution_decision`` — the same surface T0
+        measured — with an empty result index (no rescue evidence) and the
+        branch-gone AWAITING resolution split by the given liveness answer."""
+        return runner._pre_execution_decision(
+            TestTakCNewBranchesBounded._DECISION_DISPATCH_ID,
+            "codex_gate",
+            runner.PrResolution(
+                runner.RESOLUTION_AWAITING,
+                owner_repo="Vinix24/vnx-orchestration",
+                branch_exists=False,
+                dispatch_live=dispatch_live,
+                reason=(
+                    "no PR yet for head branch "
+                    f"dispatch/{TestTakCNewBranchesBounded._DECISION_DISPATCH_ID}"
+                ),
+            ),
+            attempts,
+            {},
+        )
+
+    def test_unmeasured_escalates_at_and_past_threshold(self):
+        """RED on 882c5817: returned ``stay_pending_unmeasured`` at every
+        attempts value, including 100000 — an unmeasurable state that never
+        resolves is a measurement defect, not a wait, and must escalate to
+        the loud terminal outcome past the SAME threshold Tak B uses."""
+        threshold = runner._STAY_PENDING_ESCALATION_ATTEMPTS
+        assert self._decision(1, None)["kind"] == "stay_pending_unmeasured"
+        assert self._decision(threshold - 1, None)["kind"] == "stay_pending_unmeasured"
+        for attempts in (threshold, 960, 100000):
+            kind = self._decision(attempts, None)["kind"]
+            assert kind == "escalate_stay_pending_unmeasured", (
+                f"attempts={attempts}: an unmeasured liveness that has failed "
+                f"{attempts} consecutive measurements must escalate loudly — "
+                f"got {kind!r}, i.e. the OI-1532 unmeasured branch reintroduced "
+                "the unbounded wait Tak B closed (OI-1587)"
+            )
+
+    def test_unmeasured_escalation_reuses_the_same_constant(self):
+        """The escalation boundary IS ``_STAY_PENDING_ESCALATION_ATTEMPTS`` —
+        never a second, drift-prone bound: one attempt below it still waits,
+        at it the wait is over."""
+        threshold = runner._STAY_PENDING_ESCALATION_ATTEMPTS
+        assert self._decision(threshold - 1, None)["kind"] == "stay_pending_unmeasured"
+        assert self._decision(threshold, None)["kind"] == "escalate_stay_pending_unmeasured"
+
+    def test_live_stays_pending_at_every_attempt_count(self):
+        """The explicit OI-1587 decision for ``live=True``: DELIBERATELY
+        UNBOUNDED. A held occupancy lock is kernel-enforced positive evidence
+        that a live process owns the dispatch right now, and the kernel
+        releases it the instant the holder exits — the state self-corrects
+        without a timer, and escalating on an attempt count would book a loud
+        terminal outcome over a dispatch that is provably still running (the
+        exact retire-the-live defect OI-1532 fixed, in a new shape)."""
+        threshold = runner._STAY_PENDING_ESCALATION_ATTEMPTS
+        for attempts in (1, threshold - 1, threshold, 960, 100000):
+            kind = self._decision(attempts, True)["kind"]
+            assert kind == "stay_pending_live", (
+                f"attempts={attempts}: a live dispatch (occupancy lock held) "
+                f"must NEVER be escalated or retired on an attempt count — "
+                f"got {kind!r}"
+            )
+
+    def test_unmeasured_escalation_writes_loud_terminal_record(self, tmp_path, monkeypatch):
+        """End-to-end through ``runner.run`` — RED on 882c5817 (the record
+        landed STATUS_PENDING forever). The escalation must book the SAME loud
+        terminal not_executable the other bounded branches book, under its OWN
+        reason that says the liveness MEASUREMENT failed — never a generic
+        timeout that reads as 'the dispatch simply outwaited a PR'."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260902-oi1587-unmeasured-escalate"
+        path = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        # One attempt below the threshold so this run crosses it (the runner
+        # increments attempts by 1 before deciding).
+        update_obligation(path, attempts=runner._STAY_PENDING_ESCALATION_ATTEMPTS - 1)
+        _patch_resolution(monkeypatch, branch_exists=False)
+        # No lock file in the temp state dir -> the REAL probe returns None
+        # (unmeasured) — the exact shape of the 262 lock-less pending
+        # obligations measured on the vnx-dev store.
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_NOT_EXECUTABLE, (
+            "an unmeasured liveness past the stay-pending threshold must "
+            "escalate to the loud terminal not_executable — a state that could "
+            "not be measured 96 times in a row is a defect in the measurement, "
+            "not a wait (OI-1587)"
+        )
+        assert record["reason"] == "stay_pending_unmeasured_timeout", (
+            "the escalation reason must name the UNMEASURED liveness, never "
+            "fold into the generic stay_pending_timeout"
+        )
+        assert record["reason_detail"], "reason_detail is required, never empty"
+        assert "could not be measured" in record["reason_detail"]
+        assert summary["pending_after"] == 0, "escalated obligation is terminal, not still open"
+        assert summary["outcomes"][0]["action"] == "not_executable"
+
+    def test_unmeasured_below_threshold_stays_pending_visibly(self, tmp_path, monkeypatch):
+        """Below the threshold the unmeasured branch keeps its OI-1532
+        behaviour: stays pending, visibly labelled, never retired."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260902-oi1587-unmeasured-below"
+        path = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        update_obligation(path, attempts=runner._STAY_PENDING_ESCALATION_ATTEMPTS - 2)
+        _patch_resolution(monkeypatch, branch_exists=False)
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING
+        assert record["reason"] == REASON_NO_PR_BRANCH_GONE_UNMEASURED
+        assert summary["pending_after"] == 1
+
+    def test_unmeasured_escalation_dry_run_parity(self, tmp_path, monkeypatch):
+        """The dry run must forecast the escalation a real run takes (OI-1388
+        defect 2 extended to the new kind) — RED on 882c5817, which forecast
+        ``would_stay_pending_unmeasured`` at every attempts value."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260902-oi1587-unmeasured-dry"
+        path = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        update_obligation(path, attempts=runner._STAY_PENDING_ESCALATION_ATTEMPTS - 1)
+        _patch_resolution(monkeypatch, branch_exists=False)
+
+        dry_summary = runner.run(state_dir, write=False)
+
+        assert dry_summary["outcomes"][0]["action"] == "would_escalate_stay_pending_unmeasured"
+        assert dry_summary["pending_after"] == 0, (
+            "an escalation is terminal — the dry run must not count it toward "
+            "the pending backlog"
+        )
+        # A dry run never writes: the record on disk is untouched.
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING

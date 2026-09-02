@@ -109,6 +109,15 @@ runner fulfils them:
       loudly past the SAME threshold the other bounded branches use
       (``_STAY_PENDING_ESCALATION_ATTEMPTS`` reuses
       ``_UNRESOLVABLE_ESCALATION_ATTEMPTS`` — never a second, drift-prone bound).
+      OI-1587 (2026-09-02): the liveness-unmeasurable branch was unbounded the
+      same way — its return sat before the attempts check. It now shares the
+      SAME threshold: a state that could not be measured once is "unknown", a
+      state that failed 96 consecutive measurements is a defect in the
+      measurement, escalated loudly under its own reason
+      (``stay_pending_unmeasured_timeout``). The alive branch stays
+      DELIBERATELY unbounded — a held occupancy lock is kernel-enforced proof
+      of a live process and self-corrects the instant the holder exits, so an
+      attempt count must never escalate over a provably-running dispatch.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -230,17 +239,23 @@ _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
 _FAST_FULFILLMENT_MTIME_THRESHOLD_SECONDS = 60
 
 # OI-1532: the ``stay_pending`` branch (a genuine wait for a PR the dispatch
-# could still produce, OR liveness-unmeasurable) used to retry FOREVER — no
-# attempt bound, no escalation. Measured live on mission-control 2026-08-30:
-# 11 obligations on 776 attempts, three on 779, one on 724 — at the 900s launchd
-# cadence that is over EIGHT DAYS of unbroken retrying with nothing alarming.
-# Reuse the SAME constant and the SAME mechanism as the two existing bounded
-# branches (``_UNRESOLVABLE_ESCALATION_ATTEMPTS`` on :854 and the temporary-
+# could still produce) used to retry FOREVER — no attempt bound, no
+# escalation. Measured live on mission-control 2026-08-30: 11 obligations on
+# 776 attempts, three on 779, one on 724 — at the 900s launchd cadence that is
+# over EIGHT DAYS of unbroken retrying with nothing alarming. Reuse the SAME
+# constant and the SAME mechanism as the two existing bounded branches
+# (``_UNRESOLVABLE_ESCALATION_ATTEMPTS`` on :854 and the temporary-
 # refusal escalation via ``_TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS`` on :1261) —
 # a SECOND bound that drifts out of step with these is the next defect. 96
 # attempts at 900s ≈ 24h, matching the producer-freshness cadence window; a wait
 # that exceeds a full day without producing a PR is no longer "not yet" but a
-# loud terminal ``not_executable`` so someone is forced to look.
+# loud terminal ``not_executable`` so someone is forced to look. OI-1587: the
+# liveness-unmeasurable branch (``stay_pending_unmeasured``) shares this SAME
+# bound — an unmeasurable state that never resolves is a measurement defect,
+# not a wait. The ``stay_pending_live`` branch is the ONE deliberate exception:
+# it carries kernel-enforced proof of a live process and self-corrects on
+# holder exit, so no attempt count applies to it (see the branch's own
+# comment in :func:`_pre_execution_decision`).
 _STAY_PENDING_ESCALATION_ATTEMPTS = _UNRESOLVABLE_ESCALATION_ATTEMPTS
 
 # PR-resolution outcomes. The runner must tell "no PR yet" (a wait) apart from
@@ -1247,8 +1262,8 @@ def _pre_execution_decision(
     Returns ``{"kind": ..., ...}`` where ``kind`` is one of:
       - ``unresolvable``               — env fault, stays retryable (below threshold)
       - ``escalate``                   — env fault, past threshold: terminal escalation
-      - ``stay_pending``               — genuine wait (branch alive / liveness
-        unmeasured / branch-gone-but-live), below the stay-pending threshold
+      - ``stay_pending``               — genuine wait (branch exists, or its
+        existence could not be determined), below the stay-pending threshold
       - ``escalate_stay_pending``      — OI-1532: a ``stay_pending`` that has
         retried past the stay-pending threshold without producing a PR — the
         unbounded wait is replaced by a loud terminal escalation, exactly as
@@ -1257,7 +1272,18 @@ def _pre_execution_decision(
         live), no rescuing evidence
       - ``stay_pending_live``          — OI-1532: branch gone but the dispatch
         is still running — stays pending (NOT retired), carried distinctly so
-        the caller records WHY it stayed pending, not just that it did
+        the caller records WHY it stayed pending, not just that it did.
+        OI-1587: DELIBERATELY unbounded, no attempts threshold — see the
+        branch's own comment for the reasoning
+      - ``stay_pending_unmeasured``    — OI-1532 third state: branch gone and
+        liveness could not be measured — stays pending (never retired on
+        ambiguous evidence), carried distinctly; OI-1587: bounded by the SAME
+        stay-pending threshold
+      - ``escalate_stay_pending_unmeasured`` — OI-1587: liveness unmeasurable
+        past the stay-pending threshold. An unmeasurable state that never
+        resolves is a defect in the measurement, not a wait — escalated to
+        the same loud terminal outcome, under its own reason so the record
+        says the MEASUREMENT failed, never that a dispatch outwaited a PR
       - ``fulfill_by_evidence``        — OI-1388 defect 1: a complete-evidence
         DECIDED PASS, sha-current with the PR head, already exists for this
         dispatch_id + gate; carried as ``decision["evidence"] = (path, record)``
@@ -1295,8 +1321,11 @@ def _pre_execution_decision(
         never be closed on ambiguous evidence, per the OI-1388 docstring) and
         to record the liveness-unmeasured state VISIBLY so it is not mistaken
         for a normal wait — carried as ``decision["liveness"] = "unmeasured"``
-        and routed through ``stay_pending_unmeasured`` (which itself stays
-        pending, never retires).
+        and routed through ``stay_pending_unmeasured`` (which stays pending,
+        never retires — and since OI-1587 is bounded by the SAME
+        ``_STAY_PENDING_ESCALATION_ATTEMPTS``: an unmeasurable state that
+        never resolves is a measurement defect, escalated loudly via
+        ``escalate_stay_pending_unmeasured``, not waited out forever).
 
     The sha check and the liveness check answer DIFFERENT questions and are
     never folded into a single rejection: the sha check answers whether THIS
@@ -1340,6 +1369,19 @@ def _pre_execution_decision(
                 # (live on 20260830-124500-sidedoor). Stays pending, distinctly
                 # labelled so the recorded reason says "live, not pushed" and
                 # not a generic "no PR yet".
+                # OI-1587: DELIBERATELY UNBOUNDED — no attempts threshold here,
+                # on purpose. A held occupancy lock is kernel-enforced POSITIVE
+                # evidence that a live process owns this dispatch right now,
+                # and the kernel releases the lock the instant the holder exits
+                # (clean finish OR crash) — the state self-corrects without a
+                # timer, unlike every other branch that waits on an absence.
+                # Escalating on an attempt count would book a loud terminal
+                # not_executable over a dispatch that is provably still
+                # working — the exact retire-the-live defect in a new shape.
+                # The remaining unbounded case (a holder that never exits AND
+                # never pushes) is a HUNG dispatch: detecting that needs a
+                # runtime/stall signal owned by dispatch supervision, not a
+                # gate-obligation runner that only sees the lock every 900s.
                 return {
                     "kind": "stay_pending_live",
                     "mismatch_detail": lookup.get("detail"),
@@ -1349,7 +1391,24 @@ def _pre_execution_decision(
                 # Liveness could not be measured — a THIRD state. Do not retire
                 # (a live dispatch must never be closed on ambiguous evidence),
                 # and carry the reason visibly so it is not mistaken for a
-                # normal wait. Stays pending under the same bound as below.
+                # normal wait. OI-1587: this branch IS bounded — by the SAME
+                # _STAY_PENDING_ESCALATION_ATTEMPTS the genuine-wait branch
+                # below uses, never a second bound. A state that could not be
+                # measured once is "unknown"; a state that failed 96
+                # consecutive measurements (≈24h at the 900s cadence) is a
+                # defect in the MEASUREMENT itself — waiting longer cannot fix
+                # a probe that never answers, so it escalates loudly under its
+                # own reason instead of retrying forever (the pre-fix comment
+                # here claimed "the same bound as below"; no bound existed —
+                # the attempts check lived only in the branch_exists
+                # True/None tak and this return never reached it).
+                if attempts >= _STAY_PENDING_ESCALATION_ATTEMPTS:
+                    return {
+                        "kind": "escalate_stay_pending_unmeasured",
+                        "liveness": "unmeasured",
+                        "mismatch_detail": lookup.get("detail"),
+                        "rejected_evidence": lookup["kind"],
+                    }
                 return {
                     "kind": "stay_pending_unmeasured",
                     "liveness": "unmeasured",
@@ -1389,6 +1448,7 @@ _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "stay_pending_unmeasured": "would_stay_pending_unmeasured",
     "stay_pending": "would_stay_pending",
     "escalate_stay_pending": "would_escalate_stay_pending",
+    "escalate_stay_pending_unmeasured": "would_escalate_stay_pending_unmeasured",
     "attempt_gate": "would_fulfill",
 }
 
@@ -1466,6 +1526,15 @@ def _dry_run_outcome(
             f"(branch exists or undetermined) — escalating the unbounded wait to a "
             f"loud terminal outcome (OI-1532)"
         )
+    elif decision["kind"] == "escalate_stay_pending_unmeasured":
+        outcome["detail"] = (
+            "dispatch branch is gone on GitHub and liveness could not be measured "
+            f"for {attempts} consecutive attempts — an unmeasurable state that "
+            "never resolves is a measurement defect, not a wait; escalating to a "
+            "loud terminal outcome (OI-1587)"
+        )
+        if decision.get("mismatch_detail"):
+            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     elif decision["kind"] in ("unresolvable", "escalate"):
         outcome["detail"] = resolution.reason
         if decision.get("mismatch_detail"):
@@ -1752,7 +1821,10 @@ def fulfill_obligation(
         # choice is to stay pending (never close on ambiguous evidence, per
         # the OI-1388 docstring) and record the unmeasured state VISIBLY so
         # the freshness monitor and any reader can tell it apart from a normal
-        # wait. Stays under the same bounded escalation as stay_pending below.
+        # wait. OI-1587: this wait IS bounded — the decision above escalates
+        # it to ``escalate_stay_pending_unmeasured`` once the measurement has
+        # failed ``_STAY_PENDING_ESCALATION_ATTEMPTS`` times in a row (the SAME
+        # bound the genuine-wait branch uses, never a second one).
         branch_name = f"dispatch/{dispatch_id}"
         mismatch_note = _rejected_evidence_note(gate, decision)
         update_obligation(
@@ -1779,14 +1851,60 @@ def fulfill_obligation(
         )
         return outcome
 
+    if decision["kind"] == "escalate_stay_pending_unmeasured":
+        # OI-1587: the branch is gone AND liveness could not be measured for
+        # _STAY_PENDING_ESCALATION_ATTEMPTS consecutive attempts (≈24h at the
+        # 900s cadence). An unmeasured state once is "unknown"; unmeasured 96
+        # times in a row is a defect in the MEASUREMENT itself — no amount of
+        # extra waiting fixes a probe that never answers, and retiring is
+        # still forbidden (ambiguous evidence never closes a live dispatch).
+        # Escalate to the SAME loud terminal not_executable the other bounded
+        # branches book, under its OWN reason so the record says the liveness
+        # measurement failed — never the generic stay_pending_timeout, which
+        # would read as "the dispatch simply outwaited a PR".
+        branch_name = f"dispatch/{dispatch_id}"
+        mismatch_note = _rejected_evidence_note(gate, decision)
+        update_obligation(
+            path,
+            status=STATUS_NOT_EXECUTABLE,
+            branch=branch_name,
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=now,
+            reason="stay_pending_unmeasured_timeout",
+            reason_detail=(
+                f"dispatch {dispatch_id} has no PR, its head branch "
+                f"{branch_name} is not on GitHub, and liveness could not be "
+                f"measured (no occupancy lock file at "
+                f"{_occupancy_lock_path(state_dir, dispatch_id)} or the probe "
+                f"failed) for {attempts} consecutive attempts (≈ "
+                f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence). An "
+                "unmeasurable state that never resolves is a measurement "
+                "defect, not a wait (OI-1587). Restore the occupancy lock "
+                "lane for this dispatch class, or reset this obligation to "
+                f"pending if the dispatch is known to be live.{mismatch_note}"
+            ),
+        )
+        outcome["action"] = "not_executable"
+        outcome["detail"] = (
+            f"liveness unmeasurable for {attempts} consecutive attempts — "
+            "escalating the unbounded unmeasured wait to a loud terminal "
+            "outcome (OI-1587)"
+        )
+        return outcome
+
     if decision["kind"] == "escalate_stay_pending":
-        # OI-1532: the genuine-wait branch (branch exists / undetermined / live
-        # / unmeasured) used to retry FOREVER — no bound, no escalation.
+        # OI-1532: the genuine-wait branch (branch exists or its existence
+        # undetermined) used to retry FOREVER — no bound, no escalation.
         # Measured on mission-control 2026-08-30: 11 obligations on 776
         # attempts (8+ days) with nothing alarming. After the stay-pending
         # threshold a wait that never produced a PR escalates to the SAME loud
         # terminal not_executable the other bounded branches use, reusing the
-        # SAME constant — never a second, drift-prone bound.
+        # SAME constant — never a second, drift-prone bound. (The two sibling
+        # branches are NOT escalated here: stay_pending_live is deliberately
+        # unbounded — kernel-enforced proof of a live process — and
+        # stay_pending_unmeasured escalates under its own reason just above,
+        # OI-1587.)
         update_obligation(
             path,
             status=STATUS_NOT_EXECUTABLE,
