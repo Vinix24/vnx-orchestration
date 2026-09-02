@@ -91,6 +91,32 @@ runner fulfils them:
      file no longer exists) does NOT count — that is a third, distinct
      outcome (chain walked, nothing usable found anywhere), never conflated
      with either "found at the declared gate" or "found via takeover".
+  10. OI-1612: items 7-9's evidence lookup was keyed ONLY on
+      ``(dispatch_id, gate)`` — matching a result record only when its OWN
+      ``dispatch_id`` field equals the obligation's. That join holds for a
+      result THIS runner just wrote itself (``request_and_execute`` stamps
+      the obligation's ``dispatch_id`` onto whatever it produces), but a gate
+      result file is written per ``(pr_number, gate)`` regardless of who ran
+      it — a manually-triggered poortrun, a takeover successor, or any other
+      process writes its OWN dispatch_id (the poortrun's, not the build
+      dispatch's) into that same slot. Measured live: 345 of 524 results on
+      vnx-dev carry a dispatch_id, and it is essentially always the
+      poortrun's — the dispatch_id join for a RESOLVED obligation (a PR
+      already known) could structurally never match pre-existing evidence
+      from any run other than this runner's own, and ``would_stamp`` stayed
+      at 0 across the whole store. The evidence index now also keys on
+      ``(pr_number, gate)`` (gate results are one-per-(pr_number, gate),
+      never one-per-dispatch — the same convention item 9 already documents
+      for ``manager._result_path``), and the RESOLVED branch of
+      :func:`_pre_execution_decision` looks evidence up by ITS OWN resolved
+      ``pr_number`` in addition to ``dispatch_id``. AWAITING/UNRESOLVABLE
+      obligations have no ``pr_number`` to look up by definition (that is
+      exactly why the dispatch_id join existed in the first place) and keep
+      using the dispatch_id-only lookup unchanged. The sha-binding check
+      (item 9's :func:`_has_decided_evidence`) is untouched either way — a
+      pr_number-matched candidate is rejected exactly as a dispatch_id-
+      matched one is when its ``commit_sha`` does not match the PR's current
+      head.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -114,7 +140,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -754,21 +780,51 @@ def _record_loud_not_executable(
     )
 
 
-def _index_gate_results(
-    state_dir: Path,
-) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
-    """Index ``review_gates/results`` records by ``(dispatch_id, gate)``.
+class GateResultIndex(NamedTuple):
+    """Two views over ``review_gates/results``, built once per :func:`run` call.
+
+    ``by_dispatch`` keys on ``(dispatch_id, gate)`` — the join that holds for
+    a result THIS runner wrote itself (``manager.request_and_execute(...,
+    dispatch_id=dispatch_id)`` stamps the obligation's own dispatch_id onto
+    whatever it produces). AWAITING/UNRESOLVABLE obligations have no
+    ``pr_number`` at all, so this is the only lookup available to them.
+
+    ``by_pr`` keys on ``(pr_number, gate)`` — a gate result file is written
+    one-per-(pr_number, gate) regardless of which poortrun produced it (the
+    same convention :func:`_find_takeover_successor_evidence`'s docstring
+    already documents via ``manager._result_path(gate, pr_number)``). OI-1612:
+    this is the join a RESOLVED obligation (``pr_number`` already known)
+    actually needs — its own ``dispatch_id`` almost never equals the
+    dispatch_id a pre-existing result record carries, because that field
+    records the POORTRUN that produced the result, not the build dispatch the
+    obligation was declared for.
+    """
+
+    by_dispatch: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]
+    by_pr: Dict[Tuple[int, str], List[Tuple[Path, Dict[str, Any]]]]
+
+
+def _index_gate_results(state_dir: Path) -> GateResultIndex:
+    """Index ``review_gates/results`` records by ``(dispatch_id, gate)`` AND
+    by ``(pr_number, gate)`` — see :class:`GateResultIndex`.
 
     Built once per :func:`run` call so the OI-1388 evidence discriminator
     (defect 1) costs O(results) instead of O(obligations * results). A
     malformed/unreadable result file is skipped, never raised — the same
     tolerance :func:`fulfill_obligation` already applies when it reads a
     result file's status back after invoking a gate.
+
+    OI-1612: a record is indexed by whichever key(s) it actually carries — a
+    record with a ``pr_number`` but no ``dispatch_id`` (179 of 524, measured
+    live) used to be skipped entirely; it now lands in ``by_pr`` even though
+    ``by_dispatch`` has nothing for it. A record needs at least ``gate`` and
+    one of ``dispatch_id``/``pr_number`` to be indexed at all.
     """
     results_dir = Path(state_dir) / "review_gates" / "results"
-    index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]] = {}
+    by_dispatch: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]] = {}
+    by_pr: Dict[Tuple[int, str], List[Tuple[Path, Dict[str, Any]]]] = {}
     if not results_dir.is_dir():
-        return index
+        return GateResultIndex(by_dispatch, by_pr)
     for entry in sorted(results_dir.glob("*.json")):
         try:
             record = json.loads(entry.read_text(encoding="utf-8"))
@@ -776,12 +832,16 @@ def _index_gate_results(
             continue
         if not isinstance(record, dict):
             continue
-        dispatch_id = str(record.get("dispatch_id") or "")
         gate = str(record.get("gate") or "")
-        if not dispatch_id or not gate:
+        if not gate:
             continue
-        index.setdefault((dispatch_id, gate), []).append((entry, record))
-    return index
+        dispatch_id = str(record.get("dispatch_id") or "")
+        if dispatch_id:
+            by_dispatch.setdefault((dispatch_id, gate), []).append((entry, record))
+        pr_number = record.get("pr_number")
+        if isinstance(pr_number, int):
+            by_pr.setdefault((pr_number, gate), []).append((entry, record))
+    return GateResultIndex(by_dispatch, by_pr)
 
 
 # OI-1571 tak 3: four outcomes for "is this record usable evidence", never
@@ -868,13 +928,24 @@ def _has_decided_evidence(record: Dict[str, Any], head_sha: str) -> Tuple[str, s
 
 
 def _fulfilling_result(
-    index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    index: GateResultIndex,
     dispatch_id: str,
     gate: str,
+    pr_number: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Scan the ``(dispatch_id, gate)`` bucket for a complete-evidence,
-    DECIDED, sha-CURRENT result — a gate that actually ran, reached a
-    verdict, and is provably about the PR's current head.
+    """Scan for a complete-evidence, DECIDED, sha-CURRENT result — a gate
+    that actually ran, reached a verdict, and is provably about the PR's
+    current head.
+
+    OI-1612: candidates come from BOTH of :class:`GateResultIndex`'s views —
+    ``index.by_dispatch[(dispatch_id, gate)]`` (a result THIS runner wrote
+    itself for this exact obligation) and, when ``pr_number`` is given,
+    ``index.by_pr[(pr_number, gate)]`` (any result for this PR+gate,
+    regardless of which poortrun's dispatch_id it carries — see
+    :class:`GateResultIndex`). A record present in both is scanned once, not
+    twice. ``pr_number`` is only available for a RESOLVED obligation; the
+    AWAITING/UNRESOLVABLE callers pass ``None`` and get exactly the
+    pre-OI-1612 dispatch_id-only behaviour.
 
     OI-1388 defect 1: a terminal retirement/escalation must never overwrite
     evidence that a gate already produced. OI-1571 tak 3 tightens "already
@@ -883,6 +954,9 @@ def _fulfilling_result(
     :func:`_get_pr_head_sha_for_gate` off the CANDIDATE record's own
     ``pr_number`` (never the caller's obligation, which by construction
     could not resolve one — that is exactly why this rescue path exists).
+    This sha check applies identically to every candidate regardless of
+    which index found it — a pr_number-matched candidate about a different
+    commit is rejected exactly like a dispatch_id-matched one would be.
 
     Returns a dict, never a bare ``Optional[Tuple]`` (OI-1571 tak 3: an
     UNVERIFIABLE candidate must not collapse into "nothing found" — that
@@ -904,9 +978,18 @@ def _fulfilling_result(
     :func:`gate_status.is_pass` — this function only answers "does usable
     evidence exist", never "what should the obligation be stamped".
     """
+    candidates: List[Tuple[Path, Dict[str, Any]]] = list(index.by_dispatch.get((dispatch_id, gate), []))
+    if isinstance(pr_number, int):
+        seen_paths = {path for path, _record in candidates}
+        for entry in index.by_pr.get((pr_number, gate), []):
+            path, _record = entry
+            if path not in seen_paths:
+                candidates.append(entry)
+                seen_paths.add(path)
+
     unverifiable: Optional[Tuple[Path, Dict[str, Any], str]] = None
     mismatch_detail: Optional[str] = None
-    for entry, record in index.get((dispatch_id, gate), []):
+    for entry, record in candidates:
         candidate_pr = record.get("pr_number")
         head_sha = (
             _get_pr_head_sha_for_gate(candidate_pr) if isinstance(candidate_pr, int) else ""
@@ -1007,7 +1090,7 @@ def _find_takeover_successor_evidence(
 
 def _terminal_evidence_contradictions(
     obligations: List[Tuple[Path, Dict[str, Any]]],
-    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    result_index: GateResultIndex,
 ) -> List[Dict[str, Any]]:
     """Report ALREADY-terminal obligations whose evidence contradicts them.
 
@@ -1024,6 +1107,12 @@ def _terminal_evidence_contradictions(
     the two statuses this dispatch's fix intercepts pre-write. A ``no_gate``
     obligation (``gate == NO_GATE_KEY``) never had a gate to review it, so it
     is excluded — there is no dispatch_id+gate result to contradict it.
+
+    OI-1612: the lookup also passes the obligation's own ``pr_number`` (when
+    the record carries one) so this diagnostic surfaces the SAME class of
+    contradiction the pre-execution rescue now catches — a terminal record
+    whose evidence carries a poortrun's own dispatch_id rather than the
+    obligation's.
     """
     contradictions: List[Dict[str, Any]] = []
     for path, record in obligations:
@@ -1034,7 +1123,11 @@ def _terminal_evidence_contradictions(
         if not gate or gate == NO_GATE_KEY:
             continue
         dispatch_id = str(record.get("dispatch_id") or path.stem)
-        lookup = _fulfilling_result(result_index, dispatch_id, gate)
+        obligation_pr_number = record.get("pr_number")
+        lookup = _fulfilling_result(
+            result_index, dispatch_id, gate,
+            pr_number=obligation_pr_number if isinstance(obligation_pr_number, int) else None,
+        )
         if lookup["kind"] != "found":
             continue
         evidence_path, _evidence_record = lookup["entry"]
@@ -1087,7 +1180,7 @@ def _pre_execution_decision(
     gate: str,
     resolution: PrResolution,
     attempts: int,
-    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    result_index: GateResultIndex,
 ) -> Dict[str, Any]:
     """Decide what happens to an obligation before any gate is actually run.
 
@@ -1181,7 +1274,17 @@ def _pre_execution_decision(
     # resolution.status == RESOLUTION_RESOLVED (OI-1508): a PR is known, but
     # that alone never used to be checked against existing evidence or the
     # PR's live state — see the docstring measurement above.
-    lookup = _fulfilling_result(result_index, dispatch_id, gate)
+    #
+    # OI-1612: this is the ONE branch that can pass pr_number into the
+    # lookup — the dispatch_id-only join could structurally never find
+    # pre-existing evidence here (see GateResultIndex/_fulfilling_result):
+    # resolution.pr_number is already known, so the lookup also checks
+    # index.by_pr[(pr_number, gate)], which is how a poortrun's own
+    # differently-named dispatch_id no longer hides its evidence from this
+    # obligation.
+    lookup = _fulfilling_result(
+        result_index, dispatch_id, gate, pr_number=resolution.pr_number,
+    )
     if lookup["kind"] == "found":
         return _evidence_decision(lookup["entry"])
     if lookup["kind"] == "unverifiable":
@@ -1241,7 +1344,7 @@ def _dry_run_outcome(
     state_dir: Path,
     path: Path,
     record: Dict[str, Any],
-    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    result_index: GateResultIndex,
 ) -> Dict[str, Any]:
     """Report the action a real run would take for one obligation — never writes.
 
@@ -1318,7 +1421,7 @@ def fulfill_obligation(
     path: Path,
     record: Dict[str, Any],
     *,
-    result_index: Optional[Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]] = None,
+    result_index: Optional[GateResultIndex] = None,
 ) -> Dict[str, Any]:
     """Attempt fulfilment of one pending obligation.
 
