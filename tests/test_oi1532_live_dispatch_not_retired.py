@@ -47,6 +47,7 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
 
 import gate_obligation_runner as runner  # noqa: E402
 from gate_obligations import (  # noqa: E402
+    STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
     STATUS_RETIRED,
@@ -462,3 +463,271 @@ class TestDryRunParity:
 
         assert dry_summary["outcomes"][0]["action"] == "would_escalate_stay_pending"
         assert dry_summary["pending_after"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Rebase on #1740 (dispatch 20260902-oi1532-rebase-1729) — the
+# evidence-x-liveness matrix. #1740 rebuilt the evidence layer underneath
+# this PR: ``_fulfilling_result`` no longer returns "an entry or None" but a
+# three-kind dict (``found`` / ``unverifiable`` / ``absent`` with a mismatch
+# detail), and ``_has_decided_evidence`` binds every candidate's commit_sha
+# to the PR head via ``gate_executor._classify_sha_binding``. The merge rule
+# is a design decision, pinned here so neither side of it can silently drift:
+#
+#   The sha check answers "does THIS evidence count".
+#   The liveness check answers "is MORE evidence still coming".
+#   A no on the first says nothing about the second — the two are never
+#   folded into a single rejection.
+#
+# Five combinations, five tests:
+#   evidence found + dispatch live            -> fulfil
+#   evidence found + dispatch dead            -> fulfil
+#   rejected evidence + dispatch live         -> stay PENDING
+#   rejected evidence + dispatch dead         -> retire, WITH mismatch detail
+#   liveness NOT MEASURABLE                   -> stay PENDING (its OWN branch —
+#                                                an unmeasured liveness is not
+#                                                a dead dispatch)
+# ---------------------------------------------------------------------------
+
+_HEAD_SHA = "deadbeef00" * 4
+_OTHER_SHA = "ffffffffffffffffffffffffffffffffffffff"
+
+
+def _write_gate_result(
+    state_dir: Path,
+    *,
+    filename: str,
+    dispatch_id: str,
+    gate: str,
+    pr_number: int,
+    status: str = "pass",
+    commit_sha: str = _HEAD_SHA,
+) -> Path:
+    """Write a decided, complete-evidence ``review_gates/results`` record.
+
+    Mirrors ``test_gate_obligations.py``'s ``_write_result_record`` (this file
+    is deliberately self-contained): the report file is really written so both
+    ``has_complete_evidence`` and the on-disk report check pass, and the
+    default ``commit_sha`` matches the ``_get_pr_head_sha_for_gate`` stub so
+    "usable evidence" is the default shape — pass ``_OTHER_SHA`` for a
+    mismatch or ``""`` for an unverifiable binding.
+    """
+    results_dir = state_dir / "review_gates" / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    report_file = state_dir / "review_gates" / "reports" / f"{filename}.md"
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    report_file.write_text("# gate report\n\npass\n", encoding="utf-8")
+    payload = {
+        "gate": gate,
+        "dispatch_id": dispatch_id,
+        "pr_number": pr_number,
+        "status": status,
+        "contract_hash": "sha256:deadbeef",
+        "report_path": str(report_file),
+        "commit_sha": commit_sha,
+    }
+    path = results_dir / f"{filename}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _patch_head_sha(monkeypatch, head_sha: str = _HEAD_SHA) -> None:
+    """Hermetic sha binding: no test here may shell out to ``gh pr view``
+    (OI-1571 tak 3 added that call to the evidence lookup)."""
+    monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head_sha)
+
+
+def _commit_sha_for_shape(rejected_shape: str) -> str:
+    """The commit_sha that makes the evidence record REJECTED in the
+    requested way: a proven mismatch (about a different commit) or an
+    unverifiable binding (empty commit_sha -> ``_classify_sha_binding``
+    answers ``unknown``)."""
+    return _OTHER_SHA if rejected_shape == "mismatch" else ""
+
+
+class TestEvidenceLivenessMatrix:
+    """The five evidence-x-liveness combinations from the rebase dispatch."""
+
+    def test_usable_evidence_fulfils_when_dispatch_live(self, tmp_path, monkeypatch):
+        """Combinatie 1: evidence found + dispatch live -> fulfil.
+
+        The gate already reviewed this dispatch (decided, complete, sha-current
+        evidence); that the dispatch is STILL RUNNING and has not pushed its
+        branch changes nothing about a review that already happened."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260902-oi1532-matrix-found-live"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        _patch_resolution(monkeypatch, branch_exists=False)
+        _patch_head_sha(monkeypatch)
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: True)
+        result_path = _write_gate_result(
+            state_dir, filename="pr-9901-codex_gate",
+            dispatch_id=dispatch_id, gate="codex_gate", pr_number=9901,
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_FULFILLED, (
+            "usable evidence fulfils regardless of liveness — the sha check "
+            "said this evidence counts, and that settles it"
+        )
+        assert record["reason"] == "fulfilled_by_existing_evidence"
+        assert record["result_path"] == str(result_path)
+        assert summary["pending_after"] == 0
+        assert summary["outcomes"][0]["action"] == STATUS_FULFILLED
+
+    def test_usable_evidence_fulfils_when_dispatch_dead(self, tmp_path, monkeypatch):
+        """Combinatie 2: evidence found + dispatch dead -> fulfil.
+
+        The OI-1388 rescue, unchanged by the liveness split: a dead dispatch
+        a gate already reviewed is fulfilled on the evidence, never retired
+        as unreviewed."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260902-oi1532-matrix-found-dead"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        _patch_resolution(monkeypatch, branch_exists=False)
+        _patch_head_sha(monkeypatch)
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
+        result_path = _write_gate_result(
+            state_dir, filename="pr-9902-codex_gate",
+            dispatch_id=dispatch_id, gate="codex_gate", pr_number=9902,
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_FULFILLED
+        assert record["status"] != STATUS_RETIRED
+        assert record["reason"] == "fulfilled_by_existing_evidence"
+        assert record["result_path"] == str(result_path)
+        assert summary["pending_after"] == 0
+
+    @pytest.mark.parametrize("rejected_shape", ["mismatch", "unverifiable"])
+    def test_rejected_evidence_stays_pending_when_dispatch_live(
+        self, tmp_path, monkeypatch, rejected_shape,
+    ):
+        """Combinatie 3: rejected evidence (sha mismatch OR unverifiable) +
+        dispatch live -> stay PENDING, never retire.
+
+        Levendheid wint van sha-mismatch: the rejected evidence says THIS
+        record does not count; the live dispatch says MORE evidence is still
+        coming (its own gate run may still produce a current verdict).
+        Folding the two into one rejection is exactly the defect."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = f"20260902-oi1532-matrix-{rejected_shape}-live"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        _patch_resolution(monkeypatch, branch_exists=False)
+        _patch_head_sha(monkeypatch)
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: True)
+        _write_gate_result(
+            state_dir, filename=f"pr-9903-{rejected_shape}-codex_gate",
+            dispatch_id=dispatch_id, gate="codex_gate", pr_number=9903,
+            commit_sha=_commit_sha_for_shape(rejected_shape),
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING, (
+            f"a LIVE dispatch stays pending on {rejected_shape} evidence — "
+            "the sha check rejected THIS evidence, it said nothing about "
+            "whether more evidence is coming"
+        )
+        assert record["status"] != STATUS_RETIRED
+        assert record["reason"] == REASON_NO_PR_BRANCH_GONE_LIVE
+        # The rejected evidence is documented, not silently discarded.
+        assert "rejected as rescue evidence" in record["reason_detail"]
+        assert summary["pending_after"] == 1
+        assert summary["outcomes"][0]["action"] == "pending"
+
+    @pytest.mark.parametrize("rejected_shape", ["mismatch", "unverifiable"])
+    def test_rejected_evidence_retires_with_mismatch_detail_when_dispatch_dead(
+        self, tmp_path, monkeypatch, rejected_shape,
+    ):
+        """Combinatie 4: rejected evidence + dispatch dead -> retire, WITH
+        the mismatch detail in the record.
+
+        A dead dispatch produces no more evidence, so nothing can ever
+        resolve the rejection — retire is correct. But the record must say
+        WHY the existing evidence did not count, never silently proceed as
+        if nothing existed at all (OI-1571 tak 3)."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = f"20260902-oi1532-matrix-{rejected_shape}-dead"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        _patch_resolution(monkeypatch, branch_exists=False)
+        _patch_head_sha(monkeypatch)
+        monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
+        _write_gate_result(
+            state_dir, filename=f"pr-9904-{rejected_shape}-codex_gate",
+            dispatch_id=dispatch_id, gate="codex_gate", pr_number=9904,
+            commit_sha=_commit_sha_for_shape(rejected_shape),
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_RETIRED, (
+            f"a DEAD dispatch with {rejected_shape} evidence is retired — "
+            "nothing more is coming, so the obligation can never resolve"
+        )
+        assert record["reason"] == REASON_NO_PR_BRANCH_GONE
+        # mismatch_detail in the record — the shape named accurately:
+        # "about a DIFFERENT commit" only for a proven mismatch, "could not
+        # be verified" for an unverifiable binding.
+        assert "rejected as rescue evidence" in record["reason_detail"]
+        if rejected_shape == "mismatch":
+            assert "DIFFERENT commit" in record["reason_detail"]
+            assert "this verdict is about other code" in record["reason_detail"]
+        else:
+            assert "could not be verified" in record["reason_detail"]
+            assert "DIFFERENT commit" not in record["reason_detail"]
+        assert summary["pending_after"] == 0
+
+    @pytest.mark.parametrize("rejected_shape", ["mismatch", "unverifiable"])
+    def test_rejected_evidence_stays_pending_when_liveness_unmeasured(
+        self, tmp_path, monkeypatch, rejected_shape,
+    ):
+        """Combinatie 5: liveness NOT MEASURABLE -> stay PENDING, its OWN branch.
+
+        Identical setup to combinatie 4 minus the liveness answer (no
+        occupancy lock file, real probe -> None). An unmeasured liveness is
+        NOT a dead dispatch: the same rejected evidence that retires a dead
+        dispatch must leave an unmeasured one pending — that distinction is
+        precisely what this PR adds, and folding it into "dood" reintroduces
+        the retire-on-ambiguous-evidence defect."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = f"20260902-oi1532-matrix-{rejected_shape}-unmeasured"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        _patch_resolution(monkeypatch, branch_exists=False)
+        _patch_head_sha(monkeypatch)
+        # No _dispatch_is_live stub and no lock file: the REAL probe returns
+        # None (unmeasured) — the third state, exercised end to end.
+        _write_gate_result(
+            state_dir, filename=f"pr-9905-{rejected_shape}-codex_gate",
+            dispatch_id=dispatch_id, gate="codex_gate", pr_number=9905,
+            commit_sha=_commit_sha_for_shape(rejected_shape),
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_PENDING, (
+            f"unmeasured liveness + {rejected_shape} evidence stays pending — "
+            "unmeasured is its own branch, never folded into 'dead'"
+        )
+        assert record["status"] != STATUS_RETIRED
+        assert record["reason"] == REASON_NO_PR_BRANCH_GONE_UNMEASURED
+        assert "rejected as rescue evidence" in record["reason_detail"]
+        assert summary["pending_after"] == 1
+        assert summary["outcomes"][0]["action"] == "pending"

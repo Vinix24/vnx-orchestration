@@ -1340,7 +1340,11 @@ def _pre_execution_decision(
                 # (live on 20260830-124500-sidedoor). Stays pending, distinctly
                 # labelled so the recorded reason says "live, not pushed" and
                 # not a generic "no PR yet".
-                return {"kind": "stay_pending_live", "mismatch_detail": lookup.get("detail")}
+                return {
+                    "kind": "stay_pending_live",
+                    "mismatch_detail": lookup.get("detail"),
+                    "rejected_evidence": lookup["kind"],
+                }
             if resolution.dispatch_live is None:
                 # Liveness could not be measured — a THIRD state. Do not retire
                 # (a live dispatch must never be closed on ambiguous evidence),
@@ -1350,13 +1354,18 @@ def _pre_execution_decision(
                     "kind": "stay_pending_unmeasured",
                     "liveness": "unmeasured",
                     "mismatch_detail": lookup.get("detail"),
+                    "rejected_evidence": lookup["kind"],
                 }
             # dispatch_live is False: the dispatch ended and its branch is gone
             # — nothing will ever gate this obligation. The existing, correct
             # retirement, unchanged — except it now documents WHY any rejected
             # evidence did not count (mismatch/unverifiable detail), never
             # silently proceeding as if nothing existed at all (OI-1571 tak 3).
-            return {"kind": "retire", "mismatch_detail": lookup.get("detail")}
+            return {
+                "kind": "retire",
+                "mismatch_detail": lookup.get("detail"),
+                "rejected_evidence": lookup["kind"],
+            }
         # branch_exists is True (branch still there) or None (gh could not
         # tell) — a genuine wait. OI-1532: this branch was unbounded; it now
         # escalates loudly past the same threshold the other branches use, so
@@ -1462,6 +1471,34 @@ def _dry_run_outcome(
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     return outcome
+
+
+def _rejected_evidence_note(gate: str, decision: Dict[str, Any]) -> str:
+    """Render the audit note for evidence a decision REJECTED, or ``""``.
+
+    Two rejected shapes reach a retire/escalate/stay-pending record (OI-1571
+    tak 3 meets OI-1532): a proven ``mismatch`` (the verdict is about another
+    commit) and an ``unverifiable`` binding (whether it is current could not
+    even be determined). The note must name the shape accurately — claiming
+    "about a DIFFERENT commit" for a merely unverifiable record would assert
+    as proven what was actually unmeasurable. ``decision["mismatch_detail"]``
+    carries the underlying detail text either way (both shas for a mismatch,
+    the missing-sha explanation for the unverifiable case).
+    """
+    detail = decision.get("mismatch_detail")
+    if not detail:
+        return ""
+    if decision.get("rejected_evidence") == "unverifiable":
+        return (
+            f" A prior {gate} result exists for this dispatch but its sha "
+            f"binding to the PR head could not be verified ({detail}); it was "
+            "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
+        )
+    return (
+        f" A prior {gate} result exists for this dispatch but is about a "
+        f"DIFFERENT commit ({detail}) and was "
+        "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
+    )
 
 
 def fulfill_obligation(
@@ -1618,12 +1655,7 @@ def fulfill_obligation(
         # misconfigured obligation can never masquerade as "not yet". It stays
         # retryable — the env may be fixed — until it crosses the escalation
         # threshold, where it becomes the loud terminal not_executable.
-        mismatch_note = (
-            f" A prior {gate} result exists for this dispatch but is about a "
-            f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
-            "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
-            if decision.get("mismatch_detail") else ""
-        )
+        mismatch_note = _rejected_evidence_note(gate, decision)
         update_obligation(
             path,
             status=STATUS_UNRESOLVABLE,
@@ -1658,12 +1690,7 @@ def fulfill_obligation(
         # gone from origin — nothing will ever gate this obligation.
         # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
         branch_name = f"dispatch/{dispatch_id}"
-        mismatch_note = (
-            f" A prior {gate} result exists for this dispatch but is about a "
-            f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
-            "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
-            if decision.get("mismatch_detail") else ""
-        )
+        mismatch_note = _rejected_evidence_note(gate, decision)
         update_obligation(
             path,
             status=STATUS_RETIRED,
@@ -1691,12 +1718,7 @@ def fulfill_obligation(
         # pid 82207). Stays pending — NEVER retired — with a named reason so
         # the recorded state says "live, not pushed" and not a generic wait.
         branch_name = f"dispatch/{dispatch_id}"
-        mismatch_note = (
-            f" A prior {gate} result exists for this dispatch but is about a "
-            f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
-            "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
-            if decision.get("mismatch_detail") else ""
-        )
+        mismatch_note = _rejected_evidence_note(gate, decision)
         update_obligation(
             path,
             status=STATUS_PENDING,
@@ -1732,12 +1754,7 @@ def fulfill_obligation(
         # the freshness monitor and any reader can tell it apart from a normal
         # wait. Stays under the same bounded escalation as stay_pending below.
         branch_name = f"dispatch/{dispatch_id}"
-        mismatch_note = (
-            f" A prior {gate} result exists for this dispatch but is about a "
-            f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
-            "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
-            if decision.get("mismatch_detail") else ""
-        )
+        mismatch_note = _rejected_evidence_note(gate, decision)
         update_obligation(
             path,
             status=STATUS_PENDING,
