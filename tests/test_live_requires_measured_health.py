@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for scripts/check_live_requires_measured_health.py (D6b).
+"""Tests for scripts/check_live_requires_measured_health.py (D6b + OI-1593).
 
 Pins the invariant this dispatch introduced: a cockpit subsystem may not
 carry status=LIVE while its health reads "unknown". Six subsystems
@@ -7,6 +7,12 @@ carry status=LIVE while its health reads "unknown". Six subsystems
 central-db-routing, smart-router-staging, claude-tmux-serialization) carried
 exactly that combination before this dispatch moved them to
 ACTIVATE-and-measure in scripts/lib/config_registry.py.
+
+OI-1593 hardened the filter from a prefix match on the literal string
+'unknown' to an allowlist of known-measured categories (works, degraded,
+produces-crap, stale). A prefix match let an empty health cell, or any
+future beacon category the filter had never seen, pass LIVE silently —
+exactly the "unmeasured" state this check exists to catch.
 """
 from __future__ import annotations
 
@@ -70,3 +76,41 @@ def test_real_repo_tree_would_have_flagged_the_six_before_the_fix() -> None:
             row["status"] = "LIVE"
 
     assert set(check.violations_in_rows(rows)) == pre_fix_six
+
+
+def test_violations_in_rows_catches_live_with_empty_health() -> None:
+    """OI-1593: an empty health cell does not start with 'unknown', so the
+    old prefix filter passed it silently. Empty means nobody wrote a
+    reading — it must be a violation, same as an explicit 'unknown'."""
+    rows = [
+        {"subsystem": "cheap-recon-scout", "status": "LIVE", "health": ""},
+    ]
+    assert check.violations_in_rows(rows) == ["cheap-recon-scout"]
+
+
+def test_violations_in_rows_catches_live_with_unrecognized_category() -> None:
+    """OI-1593: a beacon category this check has never seen (e.g. a future
+    'absent — no beacon file') must fail closed as a violation, not pass
+    because it happens not to start with 'unknown'."""
+    rows = [
+        {"subsystem": "cheap-recon-scout", "status": "LIVE", "health": "absent — no beacon file"},
+    ]
+    assert check.violations_in_rows(rows) == ["cheap-recon-scout"]
+
+
+def test_violations_in_rows_allows_live_with_works_health() -> None:
+    rows = [
+        {"subsystem": "provider-routing", "status": "LIVE", "health": "works — dispatch outcomes routed correctly"},
+    ]
+    assert check.violations_in_rows(rows) == []
+
+
+def test_violations_in_rows_allows_live_with_stale_health() -> None:
+    """OI-1593: 'stale' means a probe DID run and produced a reading that has
+    since aged out — it is measured, just old. Whether LIVE+stale SHOULD be
+    legal is a separate design question this check does not take a position
+    on; it is pinned here as explicitly out of scope for this filter."""
+    rows = [
+        {"subsystem": "provider-routing", "status": "LIVE", "health": "stale — ok"},
+    ]
+    assert check.violations_in_rows(rows) == []

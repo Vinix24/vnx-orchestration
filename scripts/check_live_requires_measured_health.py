@@ -35,6 +35,37 @@ for sub in (_REPO_ROOT / "scripts", _REPO_ROOT / "scripts" / "lib"):
 sys.path.insert(0, str(_REPO_ROOT))
 
 
+# Health cells read "<category> — <detail>" (e.g. "works — CI green"). These
+# are the categories this check has verified mean "a probe or seed actually
+# produced a reading" (OI-1593): `works`, `degraded`, and `produces-crap` are
+# real probe/seed outcomes; `stale` means the beacon aged out but still holds
+# a prior real reading (health_beacon.py). None of the four says whether
+# LIVE+degraded/produces-crap/stale SHOULD be legal — that is a separate
+# design question this check does not take a position on. It only asserts
+# they are genuinely measured, so they are exempt from the "unmeasured"
+# violation this check exists to catch.
+#
+# Everything else falls through to "unmeasured": `unknown` (explicit "no
+# probe yet"), an empty cell, a missing `health` key, and any category this
+# check has never seen before. That last case is deliberate fail-closed
+# behavior — a new beacon category (e.g. a future `absent`) is unmeasured
+# until this allowlist is updated to say otherwise, not until this check
+# happens to not recognize it as a violation.
+_MEASURED_HEALTH_CATEGORIES = frozenset({
+    "works",
+    "degraded",
+    "produces-crap",
+    "stale",
+})
+
+
+def _health_category(health: str) -> str:
+    """First token of a health cell, e.g. 'works — CI green' -> 'works'.
+    An empty or missing cell yields '', which is never in
+    ``_MEASURED_HEALTH_CATEGORIES`` and therefore always a violation."""
+    return (health or "").split("—", 1)[0].strip()
+
+
 def violations_in_rows(rows: list[dict]) -> list[str]:
     """Pure filter: subsystem names that are status=LIVE with unmeasured health.
 
@@ -45,7 +76,8 @@ def violations_in_rows(rows: list[dict]) -> list[str]:
     return [
         row["subsystem"]
         for row in rows
-        if row["status"] == "LIVE" and row.get("health", "").startswith("unknown")
+        if row["status"] == "LIVE"
+        and _health_category(row.get("health", "")) not in _MEASURED_HEALTH_CATEGORIES
     ]
 
 
