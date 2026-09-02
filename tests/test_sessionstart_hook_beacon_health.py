@@ -41,15 +41,47 @@ CI it holds a full second copy of every caller in the baseline below. Those
 are not additional call sites of the fabric -- they are copies of the ones
 already counted at repo root -- so counting them would double the number on
 every CI run while a local run (no rollout copy) still saw the true count.
+
+OI-1594 fix-forward, two more defects in the same guard: (1) the grep matched
+*mentions* of the function names — a docstring or comment referencing
+`all_beacons()`/`beacon_summary()` counted the same as an actual call, which
+is why landing scripts/lib/beacon_register.py (a docstring mention only)
+turned this guard red on the very commit that introduced it. Replaced with
+an AST scan for real `ast.Call` nodes. (2) the grep never excluded
+`.vnx-data/` — a worktree nested inside the repo (this project's normal
+local layout, see `.vnx-data/worktrees/`) doubled the count the same way
+`.claude/vnx-system/` did on CI. Added to the exclusion set alongside
+`tests` and `.claude`.
+
+OI-1597 fix-forward, the same guard a third time: T0 measured 11 real call
+sites against the actual repo tree (not a report) on the same commit that
+added `.vnx-data` to the exclusion list — a fourth copy, `build/` (a local
+`pip install -e`/`setup.py build` artifact, 658 .py files, gitignored at
+`.gitignore:75`), was present on the machine that measured it and wasn't on
+the namelist. The namelist is provably never complete: `.venv`, `dist`,
+`node_modules`, a second worktree location all break it the same way. It is
+replaced by a PROPERTY instead of a fourth name: only *git-tracked* .py
+files are scanned (`git ls-files -- '*.py'`), plus the pre-existing `tests/`
+carve-out (tests legitimately reference these functions in test code, which
+is not a "call site" the fabric ships). `.claude/vnx-system/`, `.vnx-data/`
+and `build/` all disappear from the count for the same underlying reason —
+none of them is ever `git add`-ed — instead of three separate reasons that
+each needed its own name on a list. A tree that is not a git work tree, or
+a machine without `git`, fails CLOSED with a `RuntimeError` naming the
+problem, rather than silently falling back to a namelist that reintroduces
+the exact defect being fixed.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "sessionstart.sh"
@@ -184,9 +216,89 @@ class TestBeaconHealthDigest:
         assert result.returncode == 0, result.stderr
 
 
+_CALL_SITE_TARGETS = frozenset({"all_beacons", "beacon_summary"})
+_CALL_SITE_EXCLUDE_DIRS = frozenset({"tests"})
+
+
+def _git_tracked_py_files(root: Path) -> list[Path]:
+    """Absolute paths to every git-tracked `.py` file under `root`.
+
+    Tracked-ness (not a directory namelist) is the property that keeps a
+    build artifact, a nested worktree, or a CI rollout copy out of the
+    count: none of them is ever `git add`-ed, so `git ls-files` never
+    returns them, regardless of what they're named or where they live
+    (OI-1597).
+
+    Fails CLOSED — raises `RuntimeError` — when git is unavailable or
+    `root` is not inside a git work tree, rather than silently falling
+    back to a namelist. A silent fallback would reintroduce the exact
+    defect this replaces: a namelist that is never complete.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.py"],
+            cwd=str(root), capture_output=True, timeout=10,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"git is not available to determine tracked .py files under {root}"
+        ) from exc
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"`git ls-files` failed under {root} (not a git work tree?): {stderr}"
+        )
+    stdout = result.stdout.decode("utf-8")
+    return [root / rel for rel in stdout.split("\0") if rel]
+
+
+def _find_call_sites(root: Path, exclude_dirs: frozenset[str] = _CALL_SITE_EXCLUDE_DIRS) -> set[str]:
+    """AST scan for real `ast.Call` nodes targeting `all_beacons`/
+    `beacon_summary`, over the git-tracked `.py` files rooted at `root`.
+
+    A name that only appears in a docstring or a comment is not a call
+    site — the grep this replaces could not tell the two apart (OI-1594).
+    Matches on the bare function name, whether called directly
+    (`all_beacons(...)`) or via attribute access
+    (`health_beacon.all_beacons(...)`), which is exactly what the
+    dispatch's literal `beacon_summary\\|all_beacons` grep pattern matched
+    too — this only narrows *which* matches count, not what they match on.
+
+    An unparseable or non-UTF-8 file raises a clean `AssertionError`
+    naming the file, instead of letting the raw `SyntaxError`/
+    `UnicodeDecodeError` traceback escape (OI-1597 advisory).
+    """
+    found: set[str] = set()
+    for full_path in _git_tracked_py_files(root):
+        rel = full_path.relative_to(root)
+        if any(part in exclude_dirs for part in rel.parts[:-1]):
+            continue
+        try:
+            source = full_path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(full_path))
+        except (SyntaxError, UnicodeDecodeError, ValueError) as exc:
+            raise AssertionError(
+                f"cannot parse {rel} while scanning for beacon call sites: {exc}"
+            ) from exc
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name):
+                name = func.id
+            elif isinstance(func, ast.Attribute):
+                name = func.attr
+            else:
+                continue
+            if name in _CALL_SITE_TARGETS:
+                found.add("./" + str(rel))
+    return found
+
+
 class TestCallSiteCountDoesNotGrow:
     """D3b Klaar-wanneer #2: "Het aantal wachters is niet gegroeid" has a
-    count rule — the dispatch's own prescribed command, run verbatim:
+    count rule — originally the dispatch's own prescribed command, run
+    verbatim:
 
         grep -rn "beacon_summary\\|all_beacons" --include='*.py' . \\
             --exclude-dir=tests | cut -d: -f1 | sort -u
@@ -217,34 +329,241 @@ class TestCallSiteCountDoesNotGrow:
     rollout (a plain local clone) would still see 10 and pass, which is
     exactly why this only broke on CI and not locally: the grep's answer
     depended on which environment it ran in, not on the code it counted.
-    Excluding `.claude` makes both environments agree."""
+    Excluding `.claude` makes both environments agree.
+
+    OI-1594 fix-forward, replacing the grep with `_find_call_sites`: the
+    grep-based guard went red on the very commit that introduced it
+    (scripts/lib/beacon_register.py, landed one commit earlier), for a name
+    it only mentions in two docstrings, never calls. Text-matching cannot
+    tell "the name appears" from "the name is called" apart; an AST scan
+    for `ast.Call` nodes can. Re-running that scan drops the baseline from
+    10 to 7: scripts/lib/beacon_register.py,
+    scripts/lib/effectiveness_probe.py,
+    scripts/lib/report_to_receipt_converter.py, and
+    scripts/ledger_health.py all mention `all_beacons`/`beacon_summary` in
+    a docstring or comment with zero real calls, and drop out. The
+    remaining 7 (dashboard/api_health.py, dashboard/api_subsystems.py,
+    scripts/build_t0_state.py, scripts/health_check.py,
+    scripts/lib/health_beacon.py — its own `beacon_summary()` calls
+    `all_beacons()` internally — vnx_cli/commands/doctor.py,
+    vnx_cli/commands/subsystems.py) each contain a genuine
+    `all_beacons(...)`/`beacon_summary(...)` call.
+
+    Second defect fixed at the time: the exclusion set gained `.vnx-data`,
+    alongside `tests` and `.claude`. A worktree nested under
+    `.vnx-data/worktrees/` is this project's normal local layout (this
+    file's own worktree is one), not an exception — the same class of
+    double-count `.claude/vnx-system/` caused on CI, just triggered locally
+    instead.
+
+    That earlier fix-forward left an open design question for the operator,
+    deliberately not decided there: keep the guard a fixed namelist, or
+    make it a property. OI-1597 answers it. T0 measured 11 call sites
+    against the real repo tree with a fourth copy present — `build/`, a
+    local `pip install -e`/`setup.py build` artifact (658 .py files,
+    gitignored) — that the namelist didn't cover. A namelist is provably
+    never complete: `.venv`, `dist`, `node_modules`, a second worktree
+    location all break it the same way `build/` did. The exclusion set is
+    now just `{"tests"}` (tests legitimately reference these functions in
+    test code, which isn't a "call site" the fabric ships); everything else
+    is decided by `git ls-files` — `.claude/vnx-system/`, `.vnx-data/` and
+    `build/` all drop out because none of them is ever `git add`-ed, not
+    because a name matched.
+    """
 
     _BASELINE = {
         "./dashboard/api_health.py",
         "./dashboard/api_subsystems.py",
         "./scripts/build_t0_state.py",
         "./scripts/health_check.py",
-        "./scripts/ledger_health.py",
-        "./scripts/lib/effectiveness_probe.py",
         "./scripts/lib/health_beacon.py",
-        "./scripts/lib/report_to_receipt_converter.py",
         "./vnx_cli/commands/doctor.py",
         "./vnx_cli/commands/subsystems.py",
     }
 
-    def test_grep_count_matches_the_dispatchs_own_command(self):
-        result = subprocess.run(
-            "grep -rn \"beacon_summary\\|all_beacons\" --include='*.py' . "
-            "--exclude-dir=tests --exclude-dir=.claude | cut -d: -f1 | sort -u",
-            shell=True, capture_output=True, text=True, cwd=str(REPO),
-        )
-        matched = {line for line in result.stdout.splitlines() if line.strip()}
+    def test_call_site_count_matches_baseline(self):
+        matched = _find_call_sites(REPO)
         assert matched == self._BASELINE, (
             f"caller set changed: added={matched - self._BASELINE}, "
             f"removed={self._BASELINE - matched}"
         )
 
+    def test_call_site_count_is_unchanged_with_a_build_artifact_present(self):
+        """OI-1597: `build/` is a local `pip install -e`/`setup.py build`
+        artifact — gitignored (`.gitignore:75`), absent on CI and on a
+        fresh clone, but present on any machine that ever built the
+        package, where it mirrors this repo's own source tree 1:1. Proves
+        the property directly on the real repo: a genuine call site placed
+        under `build/` must not move the count, because `build/` is never
+        git-tracked.
+        """
+        build_dir = REPO / "build"
+        pre_existing = build_dir.exists()
+        marker = build_dir / "oi1597_build_artifact_marker.py"
+        build_dir.mkdir(exist_ok=True)
+        try:
+            marker.write_text(
+                "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+            )
+            matched = _find_call_sites(REPO)
+            assert matched == self._BASELINE, (
+                f"a build/ artifact changed the caller set: "
+                f"added={matched - self._BASELINE}, removed={self._BASELINE - matched}"
+            )
+        finally:
+            marker.unlink(missing_ok=True)
+            if not pre_existing:
+                build_dir.rmdir()
+
+
+def _git_init(root: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=str(root), check=True)
+
+
+def _git_add(root: Path, *relative_paths: str) -> None:
+    subprocess.run(["git", "add", "--", *relative_paths], cwd=str(root), check=True)
+
+
+class TestCallSiteGuardCanActuallyFail:
+    """A wachter die niet kan falen, faalt stil. `_find_call_sites` is
+    exercised directly against isolated fixture trees (never the real repo)
+    so this guard's *mechanism* is proven, not just today's baseline.
+
+    OI-1597: the mechanism is now git-trackedness, not a directory
+    namelist, so each fixture tree is its own throwaway git repo
+    (`_git_init`) and a file only counts as a call site once it's
+    `git add`-ed (`_git_add`). A file left un-added models exactly what
+    `.claude/vnx-system/`, `.vnx-data/` and `build/` are in the real repo:
+    present on disk, never in the index.
+    """
+
+    def test_a_real_new_caller_turns_the_assertion_red(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        _git_add(tmp_path, "existing.py")
+        baseline = _find_call_sites(tmp_path)
+
+        (tmp_path / "new_caller.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        _git_add(tmp_path, "new_caller.py")
+        matched = _find_call_sites(tmp_path)
+
+        assert matched != baseline
+        with pytest.raises(AssertionError):
+            assert matched == baseline
+
+    def test_a_docstring_mention_in_a_new_file_does_not_trip_it(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        _git_add(tmp_path, "existing.py")
+        baseline = _find_call_sites(tmp_path)
+
+        (tmp_path / "mentions_only.py").write_text(
+            '"""Eventually calls all_beacons() and beacon_summary()."""\n'
+            "# see all_beacons for details\n",
+            encoding="utf-8",
+        )
+        _git_add(tmp_path, "mentions_only.py")
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
+
+    def test_a_hit_under_vnx_data_does_not_trip_it(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        _git_add(tmp_path, "existing.py")
+        baseline = _find_call_sites(tmp_path)
+
+        nested = tmp_path / ".vnx-data" / "worktrees" / "dispatch-example" / "scripts"
+        nested.mkdir(parents=True)
+        (nested / "build_t0_state.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        # Never git add-ed — .vnx-data/ is gitignored in the real repo.
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
+
+    def test_a_hit_under_claude_does_not_trip_it(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        _git_add(tmp_path, "existing.py")
+        baseline = _find_call_sites(tmp_path)
+
+        nested = tmp_path / ".claude" / "vnx-system" / "scripts"
+        nested.mkdir(parents=True)
+        (nested / "build_t0_state.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        # Never git add-ed — CI's rsync rollout target is never committed.
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
+
+    def test_a_hit_under_build_does_not_trip_it(self, tmp_path):
+        """OI-1597: the defect that started this fix-forward. `build/` is a
+        local build artifact, gitignored, and reproduces real call sites
+        1:1 when present — it must not trip the guard for the same reason
+        `.vnx-data/` and `.claude/` don't: it's never in the index."""
+        _git_init(tmp_path)
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        _git_add(tmp_path, "existing.py")
+        baseline = _find_call_sites(tmp_path)
+
+        nested = tmp_path / "build" / "lib" / "scripts"
+        nested.mkdir(parents=True)
+        (nested / "build_t0_state.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        # Never git add-ed — build/ is gitignored (.gitignore:75).
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
+
+    def test_an_untracked_file_anywhere_does_not_trip_it(self, tmp_path):
+        """The general property, not just the three known directories
+        above: ANY untracked file is invisible to the guard, regardless of
+        where it lives — that's the whole point of replacing a namelist
+        with a property."""
+        _git_init(tmp_path)
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        _git_add(tmp_path, "existing.py")
+        baseline = _find_call_sites(tmp_path)
+
+        nested = tmp_path / "some" / "arbitrary" / "unlisted" / "path"
+        nested.mkdir(parents=True)
+        (nested / "surprise_caller.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        # Deliberately never git add-ed.
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
+
+    def test_an_unparseable_file_gives_a_clean_assertion_not_a_traceback(self, tmp_path):
+        """OI-1597 advisory: a syntax error in a tracked .py file must raise
+        a clean, file-naming AssertionError — the grep this guard replaced
+        was crash-proof against bad source; the AST scan must be too."""
+        _git_init(tmp_path)
+        (tmp_path / "broken.py").write_text("def broken(:\n    pass\n", encoding="utf-8")
+        _git_add(tmp_path, "broken.py")
+
+        with pytest.raises(AssertionError, match="broken.py"):
+            _find_call_sites(tmp_path)
+
 
 if __name__ == "__main__":
-    import pytest
     sys.exit(pytest.main([__file__, "-v"]))
