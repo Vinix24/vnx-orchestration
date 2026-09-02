@@ -285,3 +285,93 @@ class TestContradictionTrap:
 
         assert verdict["verdict"] == "GO"
         assert "evidence_gate" not in verdict
+
+
+class TestFilenameFilterPreservesEvidence:
+    """OI-1599 advisory: ``_find_takeover_successor_results`` now pre-filters
+    the results_dir glob by filename (``_pr_scoped_json_candidates``) before
+    opening/parsing a single record — the glm_gate advisory on cd0e3112 flags
+    the unconditional ``*.json`` scan as a merge-time cost that grows with the
+    (monotonically growing) results directory.
+
+    The only real risk of that change is a filename the filter skips that
+    still carries valid evidence. Every test below drives the PUBLIC
+    ``check_review_gate_for_merge`` path (never the private filter helper
+    directly), so the SAME test runs unmodified against the pre-change code
+    (which never filters by filename — it always scans everything) and the
+    post-change code. Both must pass identically; a test that only passes
+    post-change would prove the filter self-consistent, not that it preserved
+    what the unfiltered scan used to find.
+    """
+
+    def test_successor_found_regardless_of_filename_convention(self, tmp_path):
+        """The two real writer conventions — legacy ``pr-<n>-<gate>.json``
+        (``_write_result``) and contract-style ``<slug>-<gate>-contract.json``
+        (``gate_recorder.result_file_path`` when ``pr_id`` is set) — must both
+        still be found as takeover evidence, not just whichever one a test
+        helper happens to default to."""
+        results_dir = tmp_path / "results"
+        results_dir.mkdir(parents=True)
+        report = _report_file(tmp_path)
+        _write_result(results_dir, "codex_gate", _declared_unavailable())
+        # Contract-style filename instead of the legacy pr-<n>-<gate>.json.
+        contract_path = results_dir / f"{PR_ID}-glm_gate-contract.json"
+        contract_path.write_text(json.dumps(_successor(report)), encoding="utf-8")
+
+        verdict = _check(results_dir)
+
+        assert verdict["verdict"] == "GO"
+        assert verdict["evidence_gate"] == "glm_gate"
+
+    def test_successor_found_among_many_other_pr_noise_files(self, tmp_path):
+        """Hundreds of OTHER PRs' records sit in the same results_dir (the
+        live vnx-dev store measured 522 files across 419 distinct pr_ids on
+        2026-09-02). None of that noise — written under both naming
+        conventions — may hide this PR's own successor evidence."""
+        results_dir = tmp_path / "results"
+        results_dir.mkdir(parents=True)
+        report = _report_file(tmp_path)
+        for other_pr in range(1000, 1050):
+            noise = _declared_unavailable()
+            noise["pr_id"] = str(other_pr)
+            noise["gate"] = "glm_gate"
+            (results_dir / f"pr-{other_pr}-glm_gate.json").write_text(
+                json.dumps(noise), encoding="utf-8"
+            )
+            (results_dir / f"{other_pr}-glm_gate-contract.json").write_text(
+                json.dumps(noise), encoding="utf-8"
+            )
+        _write_result(results_dir, "codex_gate", _declared_unavailable())
+        _write_result(results_dir, "glm_gate", _successor(report))
+
+        verdict = _check(results_dir)
+
+        assert verdict["verdict"] == "GO"
+        assert verdict["evidence_gate"] == "glm_gate"
+
+    def test_pr_id_with_glob_metacharacter_falls_back_to_full_scan(self, tmp_path):
+        """A pr_id containing a glob metacharacter is never produced by any
+        real caller (every one passes ``str(pr_number)``), but the filter
+        must still resolve correctly rather than silently mis-globbing and
+        losing evidence for it."""
+        results_dir = tmp_path / "results"
+        results_dir.mkdir(parents=True)
+        report = _report_file(tmp_path)
+        weird_pr_id = "17[29]"
+        declared = _declared_unavailable()
+        declared["pr_id"] = weird_pr_id
+        (results_dir / "weird-codex_gate.json").write_text(
+            json.dumps(declared), encoding="utf-8"
+        )
+        successor = _successor(report)
+        successor["pr_id"] = weird_pr_id
+        (results_dir / "weird-glm_gate.json").write_text(
+            json.dumps(successor), encoding="utf-8"
+        )
+
+        verdict = closure_verifier.check_review_gate_for_merge(
+            weird_pr_id, "codex_gate", results_dir, branch=BRANCH, head_sha=HEAD_SHA
+        )
+
+        assert verdict["verdict"] == "GO"
+        assert verdict["evidence_gate"] == "glm_gate"

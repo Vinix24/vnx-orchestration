@@ -379,6 +379,42 @@ def _find_gate_result(
 # takeover-provenance route (OI-1576) may speak for it.
 _DECIDED_VERDICT_STATES = _GATE_PASS_STATES | _GATE_FAIL_STATES
 
+# Glob metacharacters that would change the meaning of a pr_id-derived glob
+# pattern (e.g. turn it into a wildcard match instead of a literal prefix).
+_GLOB_UNSAFE_CHARS = frozenset("*?[]")
+
+
+def _pr_scoped_json_candidates(results_dir: Path, pr_id: str) -> List[Path]:
+    """Cheap filename pre-filter for ``_find_takeover_successor_results`` (OI-1599 advisory).
+
+    Every gate-result writer (``gate_recorder.result_file_path`` and the
+    legacy ``pr-{n}-{gate}.json`` fallback it replaced) stamps the SAME
+    ``pr_id``/``pr_number`` value into both the filename and the record's own
+    ``pr_id`` field — there is no writer that names a file for one PR and
+    stamps another PR's id inside it. That means a file whose name cannot
+    possibly carry this ``pr_id`` can be skipped before it is ever opened,
+    without weakening ``_record_matches_scope``'s own pr_id check in any way:
+    the two checks agree by construction.
+
+    Three literal prefixes cover every writer observed in the live store:
+    ``{pr_id}-...json`` (contract writer, slug == bare pr_id), ``pr-{pr_id}-...json``
+    (legacy writer), and ``{slug}-...json`` where ``slug`` strips dashes the
+    same way ``_find_gate_result`` does — covering a dash-bearing pr_id even
+    though every current caller passes a bare digit string.
+
+    Falls back to the unfiltered ``*.json`` scan when ``pr_id`` is empty or
+    contains a glob metacharacter: a prefix filter must never risk silently
+    dropping a record it cannot express as a safe literal glob.
+    """
+    if not pr_id or any(ch in _GLOB_UNSAFE_CHARS for ch in pr_id):
+        return sorted(results_dir.glob("*.json"))
+    slug = pr_id.lower().replace("-", "")
+    patterns = {f"{pr_id}-*.json", f"pr-{pr_id}-*.json", f"{slug}-*.json"}
+    matches: set = set()
+    for pattern in patterns:
+        matches.update(results_dir.glob(pattern))
+    return sorted(matches)
+
 
 def _find_takeover_successor_results(
     gate: str,
@@ -422,7 +458,7 @@ def _find_takeover_successor_results(
     provenance_notes: List[str] = []
     if not results_dir.exists():
         return candidates, provenance_notes
-    for path in sorted(results_dir.glob("*.json")):
+    for path in _pr_scoped_json_candidates(results_dir, pr_id):
         try:
             data = json.loads(_read_text(path))
         except (json.JSONDecodeError, OSError):
