@@ -41,15 +41,29 @@ CI it holds a full second copy of every caller in the baseline below. Those
 are not additional call sites of the fabric -- they are copies of the ones
 already counted at repo root -- so counting them would double the number on
 every CI run while a local run (no rollout copy) still saw the true count.
+
+OI-1594 fix-forward, two more defects in the same guard: (1) the grep matched
+*mentions* of the function names — a docstring or comment referencing
+`all_beacons()`/`beacon_summary()` counted the same as an actual call, which
+is why landing scripts/lib/beacon_register.py (a docstring mention only)
+turned this guard red on the very commit that introduced it. Replaced with
+an AST scan for real `ast.Call` nodes. (2) the grep never excluded
+`.vnx-data/` — a worktree nested inside the repo (this project's normal
+local layout, see `.vnx-data/worktrees/`) doubled the count the same way
+`.claude/vnx-system/` did on CI. Added to the exclusion set alongside
+`tests` and `.claude`.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "sessionstart.sh"
@@ -184,9 +198,49 @@ class TestBeaconHealthDigest:
         assert result.returncode == 0, result.stderr
 
 
+_CALL_SITE_TARGETS = frozenset({"all_beacons", "beacon_summary"})
+_CALL_SITE_EXCLUDE_DIRS = frozenset({"tests", ".claude", ".vnx-data"})
+
+
+def _find_call_sites(root: Path, exclude_dirs: frozenset[str] = _CALL_SITE_EXCLUDE_DIRS) -> set[str]:
+    """AST scan for real `ast.Call` nodes targeting `all_beacons`/
+    `beacon_summary`, rooted at `root`.
+
+    A name that only appears in a docstring or a comment is not a call
+    site — the grep this replaces could not tell the two apart (OI-1594).
+    Matches on the bare function name, whether called directly
+    (`all_beacons(...)`) or via attribute access
+    (`health_beacon.all_beacons(...)`), which is exactly what the
+    dispatch's literal `beacon_summary\\|all_beacons` grep pattern matched
+    too — this only narrows *which* matches count, not what they match on.
+    """
+    found: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            full_path = Path(dirpath) / filename
+            tree = ast.parse(full_path.read_text(encoding="utf-8"), filename=str(full_path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if isinstance(func, ast.Name):
+                    name = func.id
+                elif isinstance(func, ast.Attribute):
+                    name = func.attr
+                else:
+                    continue
+                if name in _CALL_SITE_TARGETS:
+                    found.add("./" + str(full_path.relative_to(root)))
+    return found
+
+
 class TestCallSiteCountDoesNotGrow:
     """D3b Klaar-wanneer #2: "Het aantal wachters is niet gegroeid" has a
-    count rule — the dispatch's own prescribed command, run verbatim:
+    count rule — originally the dispatch's own prescribed command, run
+    verbatim:
 
         grep -rn "beacon_summary\\|all_beacons" --include='*.py' . \\
             --exclude-dir=tests | cut -d: -f1 | sort -u
@@ -217,32 +271,122 @@ class TestCallSiteCountDoesNotGrow:
     rollout (a plain local clone) would still see 10 and pass, which is
     exactly why this only broke on CI and not locally: the grep's answer
     depended on which environment it ran in, not on the code it counted.
-    Excluding `.claude` makes both environments agree."""
+    Excluding `.claude` makes both environments agree.
+
+    OI-1594 fix-forward, replacing the grep with `_find_call_sites`: the
+    grep-based guard went red on the very commit that introduced it
+    (scripts/lib/beacon_register.py, landed one commit earlier), for a name
+    it only mentions in two docstrings, never calls. Text-matching cannot
+    tell "the name appears" from "the name is called" apart; an AST scan
+    for `ast.Call` nodes can. Re-running that scan drops the baseline from
+    10 to 7: scripts/lib/beacon_register.py,
+    scripts/lib/effectiveness_probe.py,
+    scripts/lib/report_to_receipt_converter.py, and
+    scripts/ledger_health.py all mention `all_beacons`/`beacon_summary` in
+    a docstring or comment with zero real calls, and drop out. The
+    remaining 7 (dashboard/api_health.py, dashboard/api_subsystems.py,
+    scripts/build_t0_state.py, scripts/health_check.py,
+    scripts/lib/health_beacon.py — its own `beacon_summary()` calls
+    `all_beacons()` internally — vnx_cli/commands/doctor.py,
+    vnx_cli/commands/subsystems.py) each contain a genuine
+    `all_beacons(...)`/`beacon_summary(...)` call.
+
+    Second defect fixed here: the exclusion set gains `.vnx-data`, alongside
+    `tests` and `.claude`. A worktree nested under `.vnx-data/worktrees/`
+    is this project's normal local layout (this file's own worktree is one),
+    not an exception — the same class of double-count `.claude/vnx-system/`
+    caused on CI, just triggered locally instead.
+
+    Open design question for the operator, deliberately NOT decided here:
+    whether the guard should stay a fixed namelist (current choice — it
+    forces a human to look at every addition) or become a property (e.g.
+    "every real caller lives under dashboard/, scripts/, or vnx_cli/").
+    A property would have let scripts/lib/beacon_register.py's docstring
+    mentions pass silently along with any *actual* new caller placed under
+    those same trees, which is the opposite of what this guard is for."""
 
     _BASELINE = {
         "./dashboard/api_health.py",
         "./dashboard/api_subsystems.py",
         "./scripts/build_t0_state.py",
         "./scripts/health_check.py",
-        "./scripts/ledger_health.py",
-        "./scripts/lib/effectiveness_probe.py",
         "./scripts/lib/health_beacon.py",
-        "./scripts/lib/report_to_receipt_converter.py",
         "./vnx_cli/commands/doctor.py",
         "./vnx_cli/commands/subsystems.py",
     }
 
     def test_grep_count_matches_the_dispatchs_own_command(self):
-        result = subprocess.run(
-            "grep -rn \"beacon_summary\\|all_beacons\" --include='*.py' . "
-            "--exclude-dir=tests --exclude-dir=.claude | cut -d: -f1 | sort -u",
-            shell=True, capture_output=True, text=True, cwd=str(REPO),
-        )
-        matched = {line for line in result.stdout.splitlines() if line.strip()}
+        matched = _find_call_sites(REPO)
         assert matched == self._BASELINE, (
             f"caller set changed: added={matched - self._BASELINE}, "
             f"removed={self._BASELINE - matched}"
         )
+
+
+class TestCallSiteGuardCanActuallyFail:
+    """A wachter die niet kan falen, faalt stil. `_find_call_sites` is
+    exercised directly against isolated fixture trees (never the real repo)
+    so this guard's *mechanism* is proven, not just today's baseline."""
+
+    def test_a_real_new_caller_turns_the_assertion_red(self, tmp_path):
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        baseline = _find_call_sites(tmp_path)
+
+        (tmp_path / "new_caller.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        matched = _find_call_sites(tmp_path)
+
+        assert matched != baseline
+        with pytest.raises(AssertionError):
+            assert matched == baseline
+
+    def test_a_docstring_mention_in_a_new_file_does_not_trip_it(self, tmp_path):
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        baseline = _find_call_sites(tmp_path)
+
+        (tmp_path / "mentions_only.py").write_text(
+            '"""Eventually calls all_beacons() and beacon_summary()."""\n'
+            "# see all_beacons for details\n",
+            encoding="utf-8",
+        )
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
+
+    def test_a_hit_under_vnx_data_does_not_trip_it(self, tmp_path):
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        baseline = _find_call_sites(tmp_path)
+
+        nested = tmp_path / ".vnx-data" / "worktrees" / "dispatch-example" / "scripts"
+        nested.mkdir(parents=True)
+        (nested / "build_t0_state.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
+
+    def test_a_hit_under_claude_does_not_trip_it(self, tmp_path):
+        (tmp_path / "existing.py").write_text(
+            "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+        )
+        baseline = _find_call_sites(tmp_path)
+
+        nested = tmp_path / ".claude" / "vnx-system" / "scripts"
+        nested.mkdir(parents=True)
+        (nested / "build_t0_state.py").write_text(
+            "from health_beacon import beacon_summary\nbeacon_summary(x)\n", encoding="utf-8",
+        )
+        matched = _find_call_sites(tmp_path)
+
+        assert matched == baseline
 
 
 if __name__ == "__main__":
