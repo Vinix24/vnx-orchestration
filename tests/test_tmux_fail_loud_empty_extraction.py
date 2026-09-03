@@ -103,7 +103,9 @@ class TestFailLoudOnEmptyExtractionUnit(_BaseCase):
         mock_guard.assert_called_once()
         call_kwargs = mock_guard.call_args.kwargs
         self.assertEqual(call_kwargs["dispatch_id"], self.DISPATCH_ID)
-        self.assertEqual(call_kwargs["status"], "done")
+        # OI-1614: role/status/task_class/read_only/worktree_diff travel bundled in
+        # one PhantomDecisionContext now, not as flat kwargs — see phantom_guard.py.
+        self.assertEqual(call_kwargs["context"].status, "done")
         self.assertEqual(call_kwargs["token_usage"], 231)
         self.assertEqual(call_kwargs["receipts_file"], str(self.receipts_file))
         self.assertEqual(call_kwargs["state_dir"], self.state_dir)
@@ -164,7 +166,7 @@ class TestFailLoudOnEmptyExtractionUnit(_BaseCase):
                 worktree_path=None,
                 base_sha=None,
             )
-        self.assertEqual(mock_guard.call_args.kwargs["role"], "plan-reviewer")
+        self.assertEqual(mock_guard.call_args.kwargs["context"].role, "plan-reviewer")
         self.assertEqual(result["status"], "done")
 
     def test_guard_error_is_non_fatal_receipt_passthrough(self):

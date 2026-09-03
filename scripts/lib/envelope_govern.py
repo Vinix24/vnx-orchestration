@@ -545,7 +545,7 @@ def _govern(
     # a corrective failed receipt. worktree_path is unavailable on EnvelopeSpec, so the guard derives
     # the dispatch/<id> branch (isolated dispatches) or abstains (never false-rejects). Non-fatal.
     try:
-        from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+        from phantom_guard import PhantomDecisionContext, record_phantom_if_any  # noqa: PLC0415
         _tok = adapter_result.token_usage or {}
         # Fix-forward: an empty own-worktree/dispatch-branch diff is falsely read as phantom when
         # the dispatch targets an existing PR (spec.pr_id) and pushed its commit onto THAT branch
@@ -553,12 +553,25 @@ def _govern(
         _effective_diff = _resolve_fix_forward_diff(spec, phantom_diff, base_ref=base_ref)
         record_phantom_if_any(
             dispatch_id=spec.dispatch_id,
-            role=spec.role,
-            status=_effective_status,
+            context=PhantomDecisionContext(
+                role=spec.role,
+                # OI-1614: EnvelopeSpec already carries task_class (threaded from the
+                # plan/DispatchSpec at PREPARE) — it was simply never forwarded to the
+                # guard, which is why a research/review dispatch on the provider lane
+                # was rejected despite the guard's own task_class exemption being
+                # correct all along.
+                task_class=spec.task_class,
+                # No provider-lane caller currently computes an explicit read_only
+                # signal — EnvelopeSpec carries no such field. Explicit None (not an
+                # omitted keyword) records that this lane looked and found nothing,
+                # not that it forgot to ask (see PhantomDecisionContext docstring).
+                read_only=None,
+                status=_effective_status,
+                worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
+            ),
             token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
             worktree_path=None,
             base_sha=None,
-            worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
             receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
             state_dir=spec.state_dir,
         )
