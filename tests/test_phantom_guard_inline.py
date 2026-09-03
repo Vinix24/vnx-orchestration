@@ -12,6 +12,14 @@ import phantom_guard as pg
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
+def _ctx(role="backend-developer", status="done", task_class=None, read_only=None,
+         worktree_diff=None):
+    return pg.PhantomDecisionContext(
+        role=role, task_class=task_class, read_only=read_only,
+        status=status, worktree_diff=worktree_diff,
+    )
+
+
 def test_guard_at_govern_abstains_on_unresolvable_ref():
     # an unresolvable branch/worktree must ABSTAIN (ok), never false-reject as "empty diff"
     v = pg.guard_at_govern(dispatch_id="no-such-dispatch-xyz", role="backend-developer",
@@ -35,8 +43,13 @@ def test_record_phantom_appends_corrective_failed_receipt(monkeypatch, tmp_path)
     captured = {}
     monkeypatch.setattr(append_receipt, "append_receipt_payload",
                         lambda payload, **kw: captured.update(payload=payload, kw=kw))
-    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
-                                 receipts_file=str(tmp_path / "r.ndjson"))
+    v = pg.record_phantom_if_any(
+        dispatch_id="d1",
+        context=pg.PhantomDecisionContext(
+            role="backend-developer", task_class=None, read_only=None,
+            status="done", worktree_diff=None,
+        ),
+        receipts_file=str(tmp_path / "r.ndjson"))
     assert v.is_phantom
     assert captured["payload"]["status"] == "failed"
     assert captured["payload"]["phantom_rejected"] is True
@@ -87,10 +100,14 @@ def test_record_phantom_threads_task_class_and_read_only(monkeypatch, tmp_path):
         return pg.PhantomVerdict(False, "ok")
 
     monkeypatch.setattr(pg, "guard_at_govern", _fake_guard_at_govern)
-    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
-                                 token_usage=987, worktree_diff="",
-                                 receipts_file=str(tmp_path / "r.ndjson"),
-                                 task_class="review", read_only=None)
+    v = pg.record_phantom_if_any(
+        dispatch_id="d1",
+        context=pg.PhantomDecisionContext(
+            role="backend-developer", task_class="review", read_only=None,
+            status="done", worktree_diff="",
+        ),
+        token_usage=987,
+        receipts_file=str(tmp_path / "r.ndjson"))
     assert not v.is_phantom
     assert captured["task_class"] == "review"
     assert captured["read_only"] is None
@@ -112,7 +129,7 @@ def test_record_phantom_no_append_when_not_phantom(monkeypatch, tmp_path):
     calls = {"n": 0}
     monkeypatch.setattr(append_receipt, "append_receipt_payload",
                         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
-    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+    v = pg.record_phantom_if_any(dispatch_id="d1", context=_ctx(),
                                  receipts_file=str(tmp_path / "r.ndjson"))
     assert not v.is_phantom
     assert calls["n"] == 0
@@ -128,7 +145,7 @@ def test_record_phantom_append_failure_is_non_fatal(monkeypatch, tmp_path):
         raise RuntimeError("append exploded")
 
     monkeypatch.setattr(append_receipt, "append_receipt_payload", _boom)
-    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+    v = pg.record_phantom_if_any(dispatch_id="d1", context=_ctx(),
                                  receipts_file=str(tmp_path / "r.ndjson"))
     assert v.is_phantom  # verdict still returned, no exception escaped
 
@@ -145,7 +162,7 @@ def test_record_phantom_calls_gate_findings_bridge(monkeypatch, tmp_path):
         gate_findings_bridge, "record_gate_finding",
         lambda state_dir, **kw: captured.update(state_dir=state_dir, kw=kw) or True,
     )
-    pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+    pg.record_phantom_if_any(dispatch_id="d1", context=_ctx(),
                              receipts_file=str(tmp_path / "r.ndjson"), state_dir=tmp_path)
     assert captured["state_dir"] == tmp_path
     assert captured["kw"]["dispatch_id"] == "d1"
@@ -163,7 +180,7 @@ def test_record_phantom_bridge_failure_is_non_fatal(monkeypatch, tmp_path):
         raise RuntimeError("db locked")
 
     monkeypatch.setattr(gate_findings_bridge, "record_gate_finding", _boom)
-    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+    v = pg.record_phantom_if_any(dispatch_id="d1", context=_ctx(),
                                  receipts_file=str(tmp_path / "r.ndjson"), state_dir=tmp_path)
     assert v.is_phantom  # verdict unaffected by a bridge failure
 
@@ -180,7 +197,7 @@ def test_record_phantom_no_bridge_call_without_state_dir(monkeypatch, tmp_path):
         gate_findings_bridge, "record_gate_finding",
         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1),
     )
-    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+    v = pg.record_phantom_if_any(dispatch_id="d1", context=_ctx(),
                                  receipts_file=str(tmp_path / "r.ndjson"))
     assert v.is_phantom
     assert calls["n"] == 0
@@ -199,7 +216,7 @@ def test_record_phantom_no_append_when_not_phantom_never_gets_a_failure_reason(m
     calls = {"n": 0}
     monkeypatch.setattr(append_receipt, "append_receipt_payload",
                         lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
-    v = pg.record_phantom_if_any(dispatch_id="d1", role="backend-developer", status="done",
+    v = pg.record_phantom_if_any(dispatch_id="d1", context=_ctx(),
                                  receipts_file=str(tmp_path / "r.ndjson"))
     assert not v.is_phantom
     assert calls["n"] == 0
