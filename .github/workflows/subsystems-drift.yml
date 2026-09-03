@@ -21,3 +21,6 @@ jobs:
 
       - name: Check ledger drift (deterministic columns only)
         run: make subsystems-check
+
+      - name: Check LIVE status requires measured health (D6b)
+        run: make live-health-check

@@ -109,12 +109,6 @@ _ROW_ORDER: List[str] = [
     "zero-llm-injection",
     "dispatch-plan",
     "test-suite",
-    "cheap-recon-scout",
-    "horizon-planning",
-    "headless-dispatch-routing",
-    "central-db-routing",
-    "smart-router-staging",
-    "claude-tmux-serialization",
     # PARK-with-trigger / CUT
     "migration-mechanisms",
     "within-db-tenancy",
@@ -128,6 +122,17 @@ _ROW_ORDER: List[str] = [
     "dream-consolidation",
     "injection-effectiveness-eval-loop",
     "cross-project-federation",
+    # D6b (30-08): LIVE claimed for these six despite having no probe — a
+    # status is a written claim, not a measurement (config_registry.py's own
+    # docstring: "no read-site consults them"). "LIVE and unmeasured" is not
+    # a legal combination, so they move here alongside the loop's other
+    # dormant-until-measured subsystems.
+    "cheap-recon-scout",
+    "horizon-planning",
+    "headless-dispatch-routing",
+    "central-db-routing",
+    "smart-router-staging",
+    "claude-tmux-serialization",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

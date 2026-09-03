@@ -84,7 +84,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
         "Cheap-model scout recon pre-pass in the door (fail-open).",
-        subsystem="cheap-recon-scout", status="LIVE"),
+        subsystem="cheap-recon-scout", status="ACTIVATE"),
     "VNX_TAGGER_ENABLED": _e(
         "VNX_TAGGER_ENABLED", "bool", "0", "intelligence",
         "Persist-time LLM tagging over the closed VNX vocabulary.",
@@ -108,11 +108,11 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_ROADMAP_AUTOPILOT": _e(
         "VNX_ROADMAP_AUTOPILOT", "bool", "0", "dispatch",
         "Autonomous roadmap auto-next loading (starts work).", approval=True,
-        subsystem="horizon-planning", status="LIVE"),
+        subsystem="horizon-planning", status="ACTIVATE"),
     "VNX_HEADLESS_ROUTING": _e(
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
         "Headless dispatch routing mode.",
-        subsystem="headless-dispatch-routing", status="LIVE"),
+        subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_DEFAULT_REVIEW_STACK": _e(
         "VNX_DEFAULT_REVIEW_STACK", "string", "gemini_review,codex_gate,claude_github_optional", "gate",
         "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435). "
@@ -166,7 +166,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Central-DB read mode (''=per-project | '1'=central | 'shadow'). Process-start routing — "
         "env-only, surfaced read-only: live-toggling would split reads across DBs mid-process.",
         writable=False,
-        subsystem="central-db-routing", status="LIVE"),
+        subsystem="central-db-routing", status="ACTIVATE"),
     "VNX_USE_FEDERATION": _e(
         "VNX_USE_FEDERATION", "bool", "0", "intelligence",
         "Cross-project intelligence federation (NOT yet implemented).",
@@ -250,24 +250,24 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_SMART_ROUTER_TIER_ZERO": _e(
         "VNX_SMART_ROUTER_TIER_ZERO", "bool", "0", "dispatch",
         "Route tier-zero (trivial reformat) dispatches through the smart router.",
-        subsystem="smart-router-staging", status="LIVE"),
+        subsystem="smart-router-staging", status="ACTIVATE"),
     "VNX_SMART_ROUTER_TIER_LOW": _e(
         "VNX_SMART_ROUTER_TIER_LOW", "bool", "0", "dispatch",
         "Route tier-low (script edit) dispatches through the smart router.",
-        subsystem="smart-router-staging", status="LIVE"),
+        subsystem="smart-router-staging", status="ACTIVATE"),
     "VNX_SMART_ROUTER_TIER_MID": _e(
         "VNX_SMART_ROUTER_TIER_MID", "bool", "0", "dispatch",
         "Route tier-mid (multi-file/design) dispatches through the smart router.",
-        subsystem="smart-router-staging", status="LIVE"),
+        subsystem="smart-router-staging", status="ACTIVATE"),
     "VNX_SMART_ROUTER_TIER_HIGH": _e(
         "VNX_SMART_ROUTER_TIER_HIGH", "bool", "0", "dispatch",
         "Route tier-high (architectural/security) dispatches through the smart router.",
-        subsystem="smart-router-staging", status="LIVE"),
+        subsystem="smart-router-staging", status="ACTIVATE"),
     "VNX_SMART_ROUTER_CANARY_PCT": _e(
         "VNX_SMART_ROUTER_CANARY_PCT", "string", "0", "dispatch",
         "Canary fraction (0-100) of an enabled tier's traffic routed via the smart "
         "router; the rest follows the legacy path. Deterministic per dispatch.",
-        subsystem="smart-router-staging", status="LIVE",
+        subsystem="smart-router-staging", status="ACTIVATE",
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
         # this subsystem's 5 flags. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
@@ -283,7 +283,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "scoped to this project. The process env var still wins over this "
         "config-store value as an explicit per-session override.",
         approval=True,
-        subsystem="claude-tmux-serialization", status="LIVE"),
+        subsystem="claude-tmux-serialization", status="ACTIVATE"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
