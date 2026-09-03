@@ -1024,6 +1024,65 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
     )
 
 
+def _record_bookkeeping_failure(
+    site: str, dispatch_id: str, exc: Exception, *, state_dir: Path,
+) -> None:
+    """Turn a swallowed door-bookkeeping exception into a durable, per-site FACT.
+
+    dispatch-20260903-deur-boekhouding-luid / OI-1617: five door bookkeeping
+    steps (``_persist_dispatch_row``, ``_register_gate_obligation``,
+    ``_persist_track_id``, the checkout-lag resolution, the scout pre-pass) are
+    all correctly ``except Exception`` — bookkeeping must never block the door,
+    that contract stands — but each one only called ``logger.debug(...)`` on
+    the caught exception. Measured on this process: the root logger carries no
+    handlers and ``dispatch_cli``'s own logger has no handler either, so a
+    ``.debug()`` call is discarded before it reaches any sink. That is exactly
+    what happened on 2026-09-03 to dispatch ``20260903-oi1614-guard-contract``:
+    ``_register_gate_obligation`` failed silently, the gate had already PASSed
+    with valid evidence on the correct head-sha, and the door answered "NOT
+    READY — no review-gate obligation declared" with zero trace of why
+    (OI-1617).
+
+    The fix is not "stop swallowing" — a bookkeeping failure must still never
+    block the door. The fix is that swallowing now leaves a FACT: a
+    ``door_bookkeeping_failed`` event appended to ``dispatch_register.ndjson``,
+    the same ledger ``build_t0_state.py`` already folds into
+    ``dispatch_register_events`` on every T0 state build — a consumer that is
+    ALREADY running, not a new file nobody opens. ``site`` makes each of the
+    five (or a future sixth) call sites distinguishable in that ledger; "iets
+    ging mis in de deur" would be too coarse to act on.
+
+    Never raises: recording the failure must never itself become a second,
+    worse failure. ``dispatch_register.append_event`` already swallows
+    everything internally and returns False on any failure, so the try/except
+    here only guards the ``import`` itself. The one exception is
+    ``TestIsolationGuardError`` (OI-1079) — the same re-raise contract every
+    other ``dispatch_register.append_event`` call site in this file already
+    honors (see the register-emit and route-decision persist sites below):
+    a test that lost its isolation must fail loudly, never be swallowed here.
+    """
+    logger.warning(
+        "[dispatch_cli] door bookkeeping failed site=%s dispatch=%s: %s",
+        site, dispatch_id, exc,
+    )
+    from vnx_paths import TestIsolationGuardError  # noqa: PLC0415
+    try:
+        import dispatch_register  # noqa: PLC0415
+        dispatch_register.append_event(
+            "door_bookkeeping_failed",
+            dispatch_id=dispatch_id,
+            extra={"site": site, "error": f"{type(exc).__name__}: {exc}"},
+            state_dir=state_dir,
+        )
+    except TestIsolationGuardError:  # vnx-silent-except: OI-1079 — must fail the test loudly, never swallowed here
+        raise
+    except Exception:  # vnx-silent-except: recording the failure must never raise a second, worse one
+        logger.warning(
+            "[dispatch_cli] door bookkeeping failure-record itself failed site=%s dispatch=%s",
+            site, dispatch_id,
+        )
+
+
 def _persist_dispatch_row(
     spec: DispatchSpec,
     *,
@@ -1136,8 +1195,10 @@ def _persist_dispatch_row(
             conn.commit()
         finally:
             conn.close()
-    except Exception as exc:
-        logger.debug("[dispatch_cli] dispatch row persist skipped: %s", exc)
+    except Exception as exc:  # vnx-silent-except: dispatch-row persistence is best-effort; door must never block on a tracker-row write failure
+        _record_bookkeeping_failure(
+            "_persist_dispatch_row", spec.dispatch_id, exc, state_dir=state_dir,
+        )
 
 
 def _spec_is_writing(spec: DispatchSpec) -> bool:
@@ -1237,8 +1298,10 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
             pr_id=spec.pr_id,
             gate_requirement_resolution=gate_requirement_resolution,
         )
-    except Exception as exc:  # noqa: BLE001 — door bookkeeping must never raise
-        logger.debug("[dispatch_cli] gate obligation register skipped: %s", exc)
+    except Exception as exc:  # vnx-silent-except: door bookkeeping must never raise
+        _record_bookkeeping_failure(
+            "_register_gate_obligation", spec.dispatch_id, exc, state_dir=state_dir,
+        )
 
 
 def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
@@ -1272,8 +1335,10 @@ def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
             conn.commit()
         finally:
             conn.close()
-    except Exception as exc:
-        logger.debug("[dispatch_cli] track_id persist skipped: %s", exc)
+    except Exception as exc:  # vnx-silent-except: track_id linkage is best-effort; door must never block on it
+        _record_bookkeeping_failure(
+            "_persist_track_id", spec.dispatch_id, exc, state_dir=state_dir,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1833,7 +1898,9 @@ def build_runtime_snapshot(
         from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
         checkout_lag = main_checkout_lag(resolve_consumer_project_root())
     except Exception as exc:  # vnx-silent-except: lag is advisory except for the refusal below; resolution must never block the door
-        logger.debug("[dispatch_cli] checkout-lag resolution failed for dispatch=%s: %s", spec.dispatch_id, exc)
+        _record_bookkeeping_failure(
+            "checkout_lag_resolution", spec.dispatch_id, exc, state_dir=data_dir / "state",
+        )
     _log_checkout_lag(spec, checkout_lag)
     if checkout_lag is not None and checkout_lag > 0 and spec.post_merge_verification:
         constraint_verdicts = constraint_verdicts + (
@@ -2462,8 +2529,10 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                     task_class=getattr(vspec.spec, "task_class", None),
                     lane=plan.lane,
                 )
-            except Exception as exc:
-                logger.debug("[dispatch_cli] scout pre-pass skipped: %s", exc)
+            except Exception as exc:  # vnx-silent-except: scout pre-pass is best-effort; door must never block on it
+                _record_bookkeeping_failure(
+                    "scout_prepass", plan.dispatch_id, exc, state_dir=state_dir,
+                )
 
             # The dispatch is irrevocably accepted here (validated, plan
             # compiled): create its dispatches tracker row BEFORE the lane
