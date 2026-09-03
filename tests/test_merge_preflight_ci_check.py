@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the fail-closed VNX CI-run check (OI-1216, OI-1387).
+"""Tests for the fail-closed VNX CI-run check (OI-1216, OI-1387, OI-1613).
 
 Covers the four required states from the original dispatch, each with a
 stubbed ``gh`` outcome (no network):
@@ -12,9 +12,16 @@ plus the fail-closed edges the dispatch names: gh missing, gh not
 authenticated, and a still-running (in_progress) run.
 
 OI-1387 adds: the query must be scoped to the exact commit (``--commit``, not
-``--branch``), and the verdict must require EVERY run found for that commit to
-be conclusion=success, not just the first one encountered. See
-``TestCommitScopedQuery`` below.
+``--branch``). See ``TestCommitScopedQuery`` below.
+
+OI-1613 adds: OI-1387's "every run on this commit must succeed" made a run
+history immutable — a sha that failed once and was later re-verified via a
+reopen-to-retrigger (unchanged head sha, so bound review-gate evidence stays
+valid) stayed NO-GO forever. The fix: among completed runs on a commit, the
+LATEST one (by ``createdAt``, sorted here — gh's own order is not relied on)
+is the current truth; older runs are history. See ``TestLatestRunWins`` and
+``TestOrderUnknown`` below. The still-running guard is unaffected: an
+in_progress/queued run blocks regardless of any completed run's conclusion.
 """
 
 import json
@@ -49,12 +56,13 @@ def _gh_auth_fail(stderr: str = "You are not logged into any GitHub hosts.") -> 
     return MagicMock(returncode=1, stdout="", stderr=stderr)
 
 
-def _gh_run_output(conclusion, head_sha, status="completed", database_id=12345):
+def _gh_run_output(conclusion, head_sha, status="completed", database_id=12345, created_at="2026-01-01T00:00:00Z"):
     runs = [{
         "conclusion": conclusion,
         "headSha": head_sha,
         "status": status,
         "databaseId": database_id,
+        "createdAt": created_at,
     }]
     return MagicMock(returncode=0, stdout=json.dumps(runs), stderr="")
 
@@ -304,12 +312,13 @@ class TestCommitScopedQuery:
 
     def test_two_successful_runs_on_same_commit_is_go(self, tmp_path):
         """Two runs for the same commit, both conclusion=success (e.g. one per
-        branch after a fix-forward push) -> GO. Every run succeeded and none is
-        running, which is exactly what the fixed comparison requires."""
+        branch after a fix-forward push) -> GO. Order is resolvable and the
+        latest (222) is success, so it decides -- ci_run_id names that run,
+        not a list of every run (OI-1613: only the latest counts)."""
         sha = "3" * 40
         runs = [
-            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111},
-            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 222},
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111, "createdAt": "2026-09-02T13:00:00Z"},
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 222, "createdAt": "2026-09-02T18:00:00Z"},
         ]
         mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
         with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
@@ -317,22 +326,145 @@ class TestCommitScopedQuery:
             result = check_ci_run_for_head(tmp_path)
         assert result["verdict"] == "GO"
         assert result["ci_conclusion"] == "success"
-        assert result["ci_run_id"] == [111, 222]
+        assert result["ci_run_id"] == 222
 
-    def test_one_success_one_failed_on_same_commit_is_no_go(self, tmp_path):
-        """Two runs for the same commit, one success and one failure -> NO-GO:
-        every run must succeed, not just one of them."""
-        sha = "4" * 40
+
+class TestLatestRunWins:
+    """OI-1613: among multiple completed runs on the same commit, the LATEST
+    one (by ``createdAt``) is the current truth. An older run on the same sha
+    never stands as a permanent veto once the same commit has been
+    re-verified — nor does an older success paper over a newer failure.
+    """
+
+    def test_older_failure_newer_success_is_go(self, tmp_path):
+        """OI-1613 regression, measured on PR #1743 (2026-09-02): an older
+        failing run (14:46) sits next to a newer successful run (18:25) on the
+        SAME head sha, because the tmux-spawn lane reopens the PR to
+        retrigger CI on an unchanged head so bound review-gate evidence for
+        that sha stays valid. The pre-fix rule ("every run must succeed")
+        gave NO-GO here forever; the fix reads the latest run as the current
+        truth -> GO."""
+        sha = "5" * 40
         runs = [
-            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111},
-            {"conclusion": "failure", "headSha": sha, "status": "completed", "databaseId": 222},
+            {"conclusion": "failure", "headSha": sha, "status": "completed", "databaseId": 111, "createdAt": "2026-09-02T14:46:00Z"},
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 222, "createdAt": "2026-09-02T18:25:00Z"},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "GO"
+        assert result["ci_conclusion"] == "success"
+        assert result["ci_run_id"] == 222
+        assert "geslaagd" in result["message"]
+
+    def test_older_success_newer_failure_is_no_go(self, tmp_path):
+        """Mirror case: an older success must NOT paper over a newer failure
+        on the same commit. The latest run decides in both directions."""
+        sha = "6" * 40
+        runs = [
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111, "createdAt": "2026-09-02T13:00:00Z"},
+            {"conclusion": "failure", "headSha": sha, "status": "completed", "databaseId": 222, "createdAt": "2026-09-02T18:00:00Z"},
         ]
         mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
         with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
              patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
             result = check_ci_run_for_head(tmp_path)
         assert result["verdict"] == "NO-GO"
+        assert result["ci_conclusion"] == "failure"
+        assert result["ci_run_id"] == 222
         assert "conclusion is 'failure'" in result["message"]
+        assert "niet toetsbaar" in result["message"]
+
+    def test_still_running_blocks_even_beside_a_newer_success(self, tmp_path):
+        """Point (a), reaffirmed under OI-1613: a still-running run on the
+        commit is NOT "an older run that lost to the latest" -- it blocks
+        unconditionally, even when a *newer* completed run already succeeded.
+        The still-running guard runs before any ordering/latest-wins logic."""
+        sha = "7" * 40
+        runs = [
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111, "createdAt": "2026-09-02T13:00:00Z"},
+            {"conclusion": None, "headSha": sha, "status": "in_progress", "databaseId": 222, "createdAt": "2026-09-02T18:00:00Z"},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "NO-GO"
+        assert result["ran_on_sha"] is True
+        assert "draait nog" in result["message"]
+
+
+class TestOrderUnknown:
+    """OI-1613 third branch: when order among completed runs cannot be
+    established, that is its own named NO-GO -- never a silent fall-through
+    to "first in the list" or back to the old all-must-succeed rule.
+    """
+
+    def test_missing_created_at_is_no_go(self, tmp_path):
+        """One of two completed runs has no createdAt field at all."""
+        sha = "8" * 40
+        runs = [
+            {"conclusion": "failure", "headSha": sha, "status": "completed", "databaseId": 111},
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 222, "createdAt": "2026-09-02T18:00:00Z"},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "NO-GO"
+        assert "kan de volgorde" in result["message"]
+        assert "niet vaststellen" in result["message"]
+        assert "niet toetsbaar" in result["message"]
+        # Must not fall back to the old "any failure anywhere = NO-GO because
+        # it failed" wording, nor silently pick a "first" run's conclusion.
+        assert "conclusion is" not in result["message"]
+
+    def test_unparseable_created_at_is_no_go(self, tmp_path):
+        """One of two completed runs has a createdAt that isn't valid ISO8601."""
+        sha = "9" * 40
+        runs = [
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111, "createdAt": "not-a-timestamp"},
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 222, "createdAt": "2026-09-02T18:00:00Z"},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "NO-GO"
+        assert "kan de volgorde" in result["message"]
+        assert "onparsebaar" in result["message"]
+
+    def test_identical_created_at_is_no_go(self, tmp_path):
+        """Two completed runs sharing the exact same createdAt timestamp: a
+        tie is not "latest is green", it is order-unknown."""
+        sha = "0" * 40
+        runs = [
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 111, "createdAt": "2026-09-02T18:00:00Z"},
+            {"conclusion": "failure", "headSha": sha, "status": "completed", "databaseId": 222, "createdAt": "2026-09-02T18:00:00Z"},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "NO-GO"
+        assert "kan de volgorde" in result["message"]
+        assert "dezelfde createdAt" in result["message"]
+
+    def test_resolvable_order_is_not_flagged(self, tmp_path):
+        """Positive control: two completed runs with distinct, parseable
+        timestamps resolve normally and never hit the order-unknown path."""
+        sha = "1a" + "1" * 38
+        runs = [
+            {"conclusion": "failure", "headSha": sha, "status": "completed", "databaseId": 111, "createdAt": "2026-09-02T13:00:00Z"},
+            {"conclusion": "success", "headSha": sha, "status": "completed", "databaseId": 222, "createdAt": "2026-09-02T18:00:00Z"},
+        ]
+        mocks = _subprocess_mocks(sha) + [_gh_multi_run_output(runs)]
+        with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks), \
+             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+            result = check_ci_run_for_head(tmp_path)
+        assert result["verdict"] == "GO"
+        assert "kan de volgorde" not in result["message"]
 
 
 class TestOverrideEscapeHatch:
