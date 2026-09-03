@@ -27,10 +27,15 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
 import vnx_paths  # noqa: E402
 import gate_obligation_runner as runner  # noqa: E402
 from gate_obligations import (  # noqa: E402
+    REASON_NO_PR_BRANCH_GONE,
+    REASON_PR_CLOSED,
+    REASON_PR_MERGED,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
+    STATUS_RETIRED,
+    STATUS_UNRESOLVABLE,
     obligation_path,
     register_obligation,
     update_obligation,
@@ -291,12 +296,26 @@ _DEFAULT_TEST_HEAD_SHA = "deadbeef00" * 4
 
 def _patch_manager(
     monkeypatch, manager: "_FakeReviewGateManager", *, head_sha: str = _DEFAULT_TEST_HEAD_SHA,
+    pr_state: "str | None" = "OPEN",
 ) -> None:
-    """Hermetic patch: no git, no gh, no real gate — only the fake manager."""
+    """Hermetic patch: no git, no gh, no real gate — only the fake manager.
+
+    ``pr_state`` (OI-1508) stubs the RESOLVED branch's own ``gh pr view``
+    state check to a fixed answer — default ``"OPEN"`` so every test in this
+    file that registers an obligation WITH a ``pr_number`` (a RESOLVED
+    resolution) keeps reaching ``attempt_gate`` exactly as before this fix,
+    unless a test overrides it to exercise the new retire/undetermined
+    outcomes.
+    """
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head_sha)
+    # raising=False: on unfixed pre-OI-1508 code this attribute does not
+    # exist yet — the RED proof for OI-1508 must fail on BEHAVIOR (the gate
+    # manager gets called when it must not be), never on this shared test
+    # helper's own AttributeError.
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state, raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -900,13 +919,24 @@ class TestFastFulfillmentTripwire:
         outcome = summary["outcomes"][0]
         assert "fast_fulfillment_warning" not in outcome
 
-    def test_stale_result_file_trips_the_warning(self, tmp_path, monkeypatch):
-        """RED on unfixed main (measured 2026-08-30: no such check existed
-        at all): a result file whose mtime predates this attempt by well
-        over the threshold, but whose commit_sha still happens to match the
-        PR head (so the sha check alone does not intercept it — this is a
-        deliberately independent second signal), must trip a LOUD,
-        observable warning on the outcome."""
+    def test_stale_result_file_is_rescued_pre_execution_since_oi_1612(self, tmp_path, monkeypatch):
+        """Superseded by OI-1612: before that fix, this exact record (no
+        ``dispatch_id`` field at all — only ``pr_number``) was INVISIBLE to
+        the pre-execution evidence lookup (dispatch_id-only join), so the
+        RESOLVED branch always fell through to ``attempt_gate``, called the
+        (no-op) manager, and read this same stale file back — which is what
+        the mtime tripwire below used to catch as its only signal.
+
+        OI-1612 indexes this record by ``(pr_number, gate)`` too, so the
+        pre-execution rescue now finds and books it BEFORE ``attempt_gate``
+        is ever reached — exactly the same class of wasted re-run OI-1508
+        eliminated for the dispatch_id-matching case. The gate manager must
+        never be invoked at all; the old mtime-staleness path this test used
+        to exercise is now provably unreachable for a RESOLVED obligation
+        with a pre-existing sha-matching decided result, since RESOLVED is
+        the only resolution that ever reaches ``attempt_gate`` and it always
+        supplies the same ``pr_number`` the pre-execution rescue now checks.
+        """
         state_dir = _make_state_dir(tmp_path)
         register_obligation(
             state_dir, dispatch_id="20260830-oi1569-stale-evidence", gate="codex_gate",
@@ -934,5 +964,564 @@ class TestFastFulfillmentTripwire:
 
         outcome = summary["outcomes"][0]
         assert outcome["action"] == STATUS_FULFILLED, "the sha still matches, so this must still fulfil"
-        assert "fast_fulfillment_warning" in outcome
-        assert "not provably a fresh run this cycle" in outcome["fast_fulfillment_warning"]
+        assert outcome["detail"] == (
+            "rescued by the OI-1388 evidence discriminator — a gate had "
+            "already reviewed and approved this dispatch"
+        )
+        assert manager.calls == [], (
+            "OI-1612: pre-existing pr_number-matched evidence must be "
+            "rescued BEFORE the gate manager is ever invoked — never "
+            "re-attempted just because its dispatch_id does not match"
+        )
+        assert "fast_fulfillment_warning" not in outcome
+
+
+# ---------------------------------------------------------------------------
+# OI-1508: the RESOLVED branch of _pre_execution_decision used to return
+# {"kind": "attempt_gate"} unconditionally — never checking for existing
+# evidence, never checking whether the PR was still open. Measured live
+# against the central store: 258 obligations would re-run a gate (110-880s
+# each), 95 of them already carrying their own pr_number, at least 19 of
+# those already with a DECIDED PASS on disk, and a 40-PR sample coming back
+# 36 MERGED / 4 CLOSED / 0 OPEN.
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedBranchChecksEvidenceBeforeGating:
+    """RED on unfixed main (measured 2026-09-02, the OI-1508 defect): a
+    RESOLVED obligation (``pr_number`` already known) with a pre-existing
+    DECIDED PASS for the same dispatch_id+gate still called the gate
+    manager and booked the obligation via the unconditional "attempt_gate"
+    path, never even looking at the evidence already on disk.
+
+    Driven through the stable :func:`runner.run` entry point rather than
+    calling ``_pre_execution_decision`` directly — the OI-1508 fix adds a
+    ``state_dir`` parameter to that function, so a direct call would fail
+    unfixed code on a signature mismatch (an interface error) instead of on
+    the actual regression. Through ``run()`` the RED run fails on OBSERVED
+    BEHAVIOR: the gate manager gets invoked when it must not be, and the
+    booked reason differs.
+    """
+
+    def test_pre_existing_pass_evidence_is_stamped_without_gating(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-resolved-evidence", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50001,
+        )
+        report_file = state_dir / "unified_reports" / "codex-gate-pr50001.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("codex_gate report body", encoding="utf-8")
+        result_path = state_dir / "review_gates" / "results" / "pr-50001-codex_gate.json"
+        result_path.write_text(
+            json.dumps({
+                "gate": "codex_gate", "pr_number": 50001,
+                "dispatch_id": "20260902-oi1508-resolved-evidence",
+                "status": "pass", "contract_hash": "sha256:deadbeef",
+                "report_path": str(report_file), "commit_sha": _DEFAULT_TEST_HEAD_SHA,
+            }),
+            encoding="utf-8",
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager)
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], (
+            "existing evidence must be found BEFORE the RESOLVED branch "
+            "gates — a gate must never be re-run when a decided verdict "
+            "already exists for this dispatch+gate (OI-1508)"
+        )
+        record = _read_obligation(state_dir, "20260902-oi1508-resolved-evidence")
+        assert record["status"] == STATUS_FULFILLED
+        assert record["reason"] == "fulfilled_by_existing_evidence"
+        assert record["result_path"] == str(result_path)
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+
+
+class TestResolvedBranchPreExecutionDecision:
+    """Direct unit coverage of every outcome the RESOLVED branch of
+    ``_pre_execution_decision`` can now reach (OI-1508) — one test per tak,
+    a positive alongside each negative so every individual check can fail
+    on its own: bewijs-aanwezig-pass, bewijs-aanwezig-fail,
+    sha-onverifieerbaar, PR-open, PR-merged, PR-closed, and
+    PR-status-onbepaalbaar.
+    """
+
+    GATE = "codex_gate"
+    DISPATCH_ID = "20260902-oi1508-branch-coverage"
+    PR_NUMBER = 50100
+    OWNER_REPO = "Vinix24/vnx-orchestration"
+    HEAD_SHA = _DEFAULT_TEST_HEAD_SHA
+
+    def _resolution(self) -> "runner.PrResolution":
+        return runner.PrResolution(
+            runner.RESOLUTION_RESOLVED, pr_number=self.PR_NUMBER, owner_repo=self.OWNER_REPO,
+        )
+
+    def _seed_evidence(self, state_dir: Path, *, status: str, commit_sha: str = "__default__") -> Path:
+        report_file = state_dir / "unified_reports" / f"{self.GATE}-pr{self.PR_NUMBER}.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("report body", encoding="utf-8")
+        result_path = state_dir / "review_gates" / "results" / f"pr-{self.PR_NUMBER}-{self.GATE}.json"
+        result_path.write_text(
+            json.dumps({
+                "gate": self.GATE, "pr_number": self.PR_NUMBER, "dispatch_id": self.DISPATCH_ID,
+                "status": status, "contract_hash": "sha256:deadbeef",
+                "report_path": str(report_file),
+                "commit_sha": self.HEAD_SHA if commit_sha == "__default__" else commit_sha,
+            }),
+            encoding="utf-8",
+        )
+        return result_path
+
+    def _decide(self, state_dir: Path, monkeypatch, *, attempts: int = 1) -> dict:
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: self.HEAD_SHA)
+        index = runner._index_gate_results(state_dir)
+        return runner._pre_execution_decision(
+            state_dir, self.DISPATCH_ID, self.GATE, self._resolution(), attempts, index,
+        )
+
+    # -- bewijs-aanwezig-pass ----------------------------------------------
+
+    def test_evidence_present_pass_rescues_instead_of_gating(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_evidence(state_dir, status="pass")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "fulfill_by_evidence"
+
+    # -- bewijs-aanwezig-fail -----------------------------------------------
+
+    def test_evidence_present_fail_discharges_without_a_clean_pass(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_evidence(state_dir, status="failed")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "fulfill_by_failed_evidence"
+
+    # -- sha-onverifieerbaar --------------------------------------------------
+
+    def test_evidence_present_unverifiable_sha_suspends_judgement(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_evidence(state_dir, status="pass", commit_sha="")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "sha_unverifiable"
+
+    # -- PR-open --------------------------------------------------------------
+
+    def test_pr_open_still_attempts_the_gate(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "OPEN")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "attempt_gate"
+
+    # -- PR-merged --------------------------------------------------------------
+
+    def test_pr_merged_retires_with_pr_merged_reason(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "MERGED")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "retire"
+        assert decision["retire_reason"] == REASON_PR_MERGED
+
+    # -- PR-closed --------------------------------------------------------------
+
+    def test_pr_closed_retires_with_pr_closed_reason(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "CLOSED")
+        decision = self._decide(state_dir, monkeypatch)
+        assert decision["kind"] == "retire"
+        assert decision["retire_reason"] == REASON_PR_CLOSED
+
+    # -- PR-status-onbepaalbaar ---------------------------------------------
+
+    def test_pr_state_undetermined_neither_retires_nor_gates(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        decision = self._decide(state_dir, monkeypatch, attempts=1)
+        assert decision["kind"] == "unresolvable"
+        assert decision["detail"] is not None and "could not be determined" in decision["detail"]
+
+    def test_pr_state_undetermined_escalates_past_threshold(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        decision = self._decide(
+            state_dir, monkeypatch, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS,
+        )
+        assert decision["kind"] == "escalate"
+
+
+class TestResolvedBranchRetireIntegration:
+    """End-to-end (through ``runner.run``) proof that a merged/closed PR
+    without rescuing evidence is actually retired on disk, and that the
+    boundary is hard: an OPEN PR is NEVER retired, regardless of age."""
+
+    def test_merged_pr_without_evidence_is_retired(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-merged-retire", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50002,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="MERGED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "a merged PR must never re-fire the gate"
+        record = _read_obligation(state_dir, "20260902-oi1508-merged-retire")
+        assert record["status"] == STATUS_RETIRED
+        assert record["reason"] == REASON_PR_MERGED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_RETIRED
+
+    def test_closed_pr_without_evidence_is_retired(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-closed-retire", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50003,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="CLOSED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "a closed PR must never re-fire the gate"
+        record = _read_obligation(state_dir, "20260902-oi1508-closed-retire")
+        assert record["status"] == STATUS_RETIRED
+        assert record["reason"] == REASON_PR_CLOSED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_RETIRED
+
+    def test_open_pr_is_never_retired_gate_still_runs(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-open-control", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50004,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="OPEN")
+
+        summary = runner.run(state_dir)
+
+        assert len(manager.calls) == 1, "an OPEN PR must still be gated"
+        record = _read_obligation(state_dir, "20260902-oi1508-open-control")
+        assert record["status"] == STATUS_FULFILLED
+        assert record["status"] != STATUS_RETIRED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+
+    def test_undetermined_pr_state_stays_unresolvable_never_retired(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1508-undetermined", gate="codex_gate",
+            project_id="vnx-dev", pr_number=50005,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state=None)
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "an undeterminable PR state must never gate"
+        record = _read_obligation(state_dir, "20260902-oi1508-undetermined")
+        assert record["status"] == STATUS_UNRESOLVABLE
+        assert record["status"] != STATUS_RETIRED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == "unresolvable"
+
+
+# ---------------------------------------------------------------------------
+# OI-1612: the OI-1388 evidence index joined on (dispatch_id, gate) alone.
+# A gate result record's dispatch_id names the POORTRUN that produced it,
+# never the build dispatch the obligation was declared for — item 9's
+# ``manager.request_and_execute(..., dispatch_id=dispatch_id)`` is the ONE
+# exception, a result THIS runner writes for itself. For a RESOLVED
+# obligation (pr_number already known), the old join could therefore never
+# match a pre-existing result written by any OTHER process — measured live
+# on vnx-dev: would_stamp stayed at 0 across 593 and 594 obligations, even
+# though 345 of 524 results carried a dispatch_id (just never the right
+# one). The fix also indexes results by (pr_number, gate) and has the
+# RESOLVED branch of _pre_execution_decision look up by pr_number in
+# addition to dispatch_id — AWAITING/UNRESOLVABLE, which never have a
+# pr_number to look up by, are unchanged.
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceIndexJoinsOnPrNumber:
+    """RED on #1745 (dispatch_id-only join) / GREEN on OI-1612 for the exact
+    live case measured on vnx-dev: obligation
+    ``20260902-oi1599-verplichting-krijgt-pr-r2`` (glm_gate, PR #1744) vs.
+    result record ``pr-1744-glm_gate.json``, written under the poortrun's OWN
+    dispatch_id (``glm-gate-pr1744-1788369563``), never the obligation's.
+    """
+
+    GATE = "glm_gate"
+    PR_NUMBER = 1744
+    OBLIGATION_DISPATCH_ID = "20260902-oi1599-verplichting-krijgt-pr-r2"
+    POORTRUN_DISPATCH_ID = "glm-gate-pr1744-1788369563"
+    HEAD_SHA = _DEFAULT_TEST_HEAD_SHA
+
+    def _seed_result(
+        self,
+        state_dir: Path,
+        *,
+        dispatch_id: str,
+        pr_number: int = PR_NUMBER,
+        gate: str = GATE,
+        status: str = "pass",
+        commit_sha: "str | None" = "__default__",
+        filename: "str | None" = None,
+    ) -> Path:
+        commit_sha = self.HEAD_SHA if commit_sha == "__default__" else commit_sha
+        filename = filename or f"pr-{pr_number}-{gate}"
+        report_file = state_dir / "unified_reports" / f"{filename}.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("report body", encoding="utf-8")
+        result_path = state_dir / "review_gates" / "results" / f"{filename}.json"
+        result_path.write_text(
+            json.dumps({
+                "gate": gate, "pr_number": pr_number, "dispatch_id": dispatch_id,
+                "status": status, "contract_hash": "sha256:deadbeef",
+                "report_path": str(report_file), "commit_sha": commit_sha,
+            }),
+            encoding="utf-8",
+        )
+        return result_path
+
+    # -- the live case: RED on #1745, GREEN on OI-1612 (also condition a) --
+
+    def test_pr_number_matched_evidence_rescues_when_dispatch_id_differs(self, tmp_path, monkeypatch):
+        """The exact vnx-dev case (r2 / pr-1744-glm_gate). PR merged, so the
+        ONLY thing standing between retire and fulfil is whether the
+        evidence lookup can find this record at all — a poortrun's OWN
+        dispatch_id, never the obligation's, is exactly what #1745 could not
+        join on."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id=self.OBLIGATION_DISPATCH_ID, gate=self.GATE,
+            project_id="vnx-dev", pr_number=self.PR_NUMBER,
+        )
+        self._seed_result(state_dir, dispatch_id=self.POORTRUN_DISPATCH_ID)
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="MERGED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], (
+            "existing pr_number-matched evidence must be found BEFORE the "
+            "RESOLVED branch retires or re-gates"
+        )
+        record = _read_obligation(state_dir, self.OBLIGATION_DISPATCH_ID)
+        assert record["status"] == STATUS_FULFILLED, (
+            f"expected fulfilled via the OI-1612 rescue, got {record['status']!r} "
+            f"(reason={record.get('reason')!r}) — on #1745 this stays RETIRED "
+            "because the dispatch_id-only join never finds a poortrun's own "
+            "result record"
+        )
+        assert record["status"] != STATUS_RETIRED
+        assert record["reason"] == "fulfilled_by_existing_evidence"
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+
+    # -- condition b: AWAITING/UNRESOLVABLE keep working via dispatch_id ---
+
+    def test_awaiting_branch_still_rescues_via_dispatch_id_match(self, tmp_path, monkeypatch):
+        """Control for condition (b): an AWAITING obligation (no PR found,
+        dead branch) has no pr_number to look up by at all — it must keep
+        finding evidence exactly the way it did before OI-1612, via a
+        dispatch_id match."""
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_id = "20260902-oi1612-awaiting-dispatch-id-match"
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", project_id="vnx-dev",
+        )
+        monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
+        monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+        monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+        monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: self.HEAD_SHA)
+        self._seed_result(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", pr_number=50200,
+            filename="pr-50200-codex_gate",
+        )
+
+        summary = runner.run(state_dir)
+
+        record = _read_obligation(state_dir, dispatch_id)
+        assert record["status"] == STATUS_FULFILLED
+        assert record["status"] != STATUS_RETIRED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+
+    def test_fulfilling_result_without_pr_number_ignores_by_pr_index(self, tmp_path, monkeypatch):
+        """Direct boundary proof for (b): when a caller passes no
+        ``pr_number`` (exactly what the AWAITING/UNRESOLVABLE call sites
+        do), a record only reachable via ``index.by_pr`` must NOT be found —
+        even though the SAME gate result would be found if ``pr_number``
+        were supplied. Proves those two call sites cannot accidentally start
+        matching on pr_number just because the index now carries one."""
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: self.HEAD_SHA)
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_result(
+            state_dir, dispatch_id="", pr_number=50201, gate="codex_gate",
+            filename="pr-50201-codex_gate",
+        )
+        index = runner._index_gate_results(state_dir)
+
+        no_pr = runner._fulfilling_result(index, "some-other-dispatch-id", "codex_gate")
+        assert no_pr["kind"] == "absent"
+
+        with_pr = runner._fulfilling_result(
+            index, "some-other-dispatch-id", "codex_gate", pr_number=50201,
+        )
+        assert with_pr["kind"] == "found"
+
+    # -- condition c: a pr_number-only record (no dispatch_id) must not be -
+    # silently skipped anymore ----------------------------------------------
+
+    def test_index_places_dispatch_id_less_record_under_by_pr(self, tmp_path):
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_result(
+            state_dir, dispatch_id="", pr_number=50202, gate="codex_gate",
+            filename="pr-50202-codex_gate",
+        )
+        index = runner._index_gate_results(state_dir)
+        assert index.by_pr.get((50202, "codex_gate"))
+        assert index.by_dispatch == {}
+
+    def test_record_without_dispatch_id_or_pr_number_is_never_indexed(self, tmp_path):
+        """Negative control for (c): a record needs at least ONE of
+        dispatch_id/pr_number (plus gate) to be indexed at all — a record
+        carrying neither must still be invisible, exactly as before
+        OI-1612."""
+        state_dir = _make_state_dir(tmp_path)
+        report_file = state_dir / "unified_reports" / "orphan.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("report body", encoding="utf-8")
+        result_path = state_dir / "review_gates" / "results" / "orphan-codex_gate.json"
+        result_path.write_text(
+            json.dumps({
+                "gate": "codex_gate", "pr_number": None, "dispatch_id": "",
+                "status": "pass", "contract_hash": "sha256:deadbeef",
+                "report_path": str(report_file), "commit_sha": self.HEAD_SHA,
+            }),
+            encoding="utf-8",
+        )
+        index = runner._index_gate_results(state_dir)
+        assert index.by_dispatch == {}
+        assert index.by_pr == {}
+
+    # -- condition d: pr_number-matched evidence about a DIFFERENT commit --
+    # is still rejected, unchanged -------------------------------------------
+
+    def test_pr_number_matched_evidence_with_wrong_sha_is_not_rescued(self, tmp_path, monkeypatch):
+        """Negative: same live shape as the RED/GREEN case above, except the
+        pr_number-matched record is about a DIFFERENT commit. The
+        pr_number-based lookup must not bypass the sha binding check — this
+        must still retire, exactly as the mismatched-evidence path already
+        did before OI-1612."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1612-wrong-sha", gate=self.GATE,
+            project_id="vnx-dev", pr_number=self.PR_NUMBER,
+        )
+        self._seed_result(
+            state_dir, dispatch_id="glm-gate-pr1744-other-run",
+            commit_sha="c0ffee00" * 5,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="MERGED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == [], "a merged PR must never re-fire the gate"
+        record = _read_obligation(state_dir, "20260902-oi1612-wrong-sha")
+        assert record["status"] == STATUS_RETIRED
+        assert record["status"] != STATUS_FULFILLED
+        assert "rejected as rescue evidence" in record["reason_detail"], (
+            "the retired obligation's own record must document that a "
+            "pr_number-matched candidate existed but was rejected on its "
+            "sha binding, not silently ignored"
+        )
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_RETIRED
+
+    def test_pr_number_matched_evidence_with_matching_sha_is_rescued(self, tmp_path, monkeypatch):
+        """Positive control alongside (d): identical setup with the correct
+        sha must fulfil — proves the rejection above is about the sha, not
+        some other accidental difference."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1612-right-sha", gate=self.GATE,
+            project_id="vnx-dev", pr_number=self.PR_NUMBER,
+        )
+        self._seed_result(state_dir, dispatch_id="glm-gate-pr1744-other-run-2")
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="MERGED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == []
+        record = _read_obligation(state_dir, "20260902-oi1612-right-sha")
+        assert record["status"] == STATUS_FULFILLED
+        outcome = summary["outcomes"][0]
+        assert outcome["action"] == STATUS_FULFILLED
+
+    # -- condition e: two obligations sharing a PR share the SAME evidence -
+    # legitimately (one file is the single source of truth for that
+    # (pr_number, gate)) — and share the SAME sha rejection too ------------
+
+    def test_two_obligations_same_pr_both_rescued_by_shared_evidence(self, tmp_path, monkeypatch):
+        """Positive: obligation A and obligation B both declare glm_gate
+        against the SAME PR (a re-dispatched fix-forward, e.g. #1729's three
+        obligations) — the single per-(pr_number, gate) result file is
+        legitimate evidence for BOTH, since it genuinely reflects the state
+        of that one PR; this is sharing, not stealing."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1612-shared-a", gate=self.GATE,
+            project_id="vnx-dev", pr_number=self.PR_NUMBER,
+        )
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1612-shared-b", gate=self.GATE,
+            project_id="vnx-dev", pr_number=self.PR_NUMBER,
+        )
+        self._seed_result(state_dir, dispatch_id="glm-gate-pr1744-shared-run")
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="MERGED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == []
+        record_a = _read_obligation(state_dir, "20260902-oi1612-shared-a")
+        record_b = _read_obligation(state_dir, "20260902-oi1612-shared-b")
+        assert record_a["status"] == STATUS_FULFILLED
+        assert record_b["status"] == STATUS_FULFILLED
+        assert record_a["result_path"] == record_b["result_path"]
+
+    def test_two_obligations_same_pr_neither_rescued_by_mismatched_evidence(self, tmp_path, monkeypatch):
+        """Negative alongside (e): sharing a pr_number must never let EITHER
+        obligation bypass the sha check — both must be rejected identically
+        when the shared record is about a different commit."""
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1612-shared-mismatch-a", gate=self.GATE,
+            project_id="vnx-dev", pr_number=self.PR_NUMBER,
+        )
+        register_obligation(
+            state_dir, dispatch_id="20260902-oi1612-shared-mismatch-b", gate=self.GATE,
+            project_id="vnx-dev", pr_number=self.PR_NUMBER,
+        )
+        self._seed_result(
+            state_dir, dispatch_id="glm-gate-pr1744-shared-mismatch-run",
+            commit_sha="badc0de0" * 5,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager, pr_state="MERGED")
+
+        summary = runner.run(state_dir)
+
+        assert manager.calls == []
+        record_a = _read_obligation(state_dir, "20260902-oi1612-shared-mismatch-a")
+        record_b = _read_obligation(state_dir, "20260902-oi1612-shared-mismatch-b")
+        assert record_a["status"] == STATUS_RETIRED
+        assert record_b["status"] == STATUS_RETIRED
