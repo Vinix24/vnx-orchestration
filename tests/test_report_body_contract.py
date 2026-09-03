@@ -239,6 +239,42 @@ def test_build_directive_excludes_pr_when_not_set():
 
 
 # ---------------------------------------------------------------------------
+# OI-1599 — the PR_Ref request is unconditional, unlike the ## PR heading
+# ---------------------------------------------------------------------------
+
+def test_build_directive_requests_pr_ref_even_without_pr_id():
+    """A dispatch that will create a BRAND NEW PR has no pr_id yet at
+    dispatch time — the door cannot know the PR's number until ``gh pr
+    create`` runs mid-dispatch. If the request were gated on pr_id (like the
+    ``## PR`` heading is), exactly the dispatches that most need to report
+    their PR number would never be asked."""
+    d = build_directive("test-dispatch-004")
+    assert "**PR_Ref**" in d
+
+
+def test_build_directive_requests_pr_ref_when_pr_id_also_set():
+    """The request stays present when pr_id IS already known — the ## PR
+    heading and the PR_Ref bold-field request are independent asks."""
+    d = build_directive("test-dispatch-005", pr_id="PR-9")
+    assert "**PR_Ref**" in d
+    assert "## PR" in d
+
+
+def test_build_directive_pr_ref_request_does_not_add_a_required_heading():
+    """The PR_Ref instruction must not turn into a NEW required section —
+    a report that never produces a PR must still validate cleanly."""
+    d = build_directive("test-dispatch-006")
+    body = _canonical_body()
+    result = validate_body(body)
+    assert result.valid is True, f"missing={result.missing}"
+    # And the directive text itself carries no NEW "## " heading — the
+    # PR_Ref ask is a bold field, not a section header.
+    import re
+    headings = set(re.findall(r"^## .+", d, re.MULTILINE))
+    assert headings == {"## Report Body Contract"}
+
+
+# ---------------------------------------------------------------------------
 # CI assertion: no unified_reports body contains the old placeholder string
 # ---------------------------------------------------------------------------
 
