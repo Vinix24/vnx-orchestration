@@ -107,6 +107,28 @@ def _raising_runner(exc: Exception):
     return _runner
 
 
+# A test must not measure whichever platform it happens to run on (macOS,
+# where launchctl exists, locally; a Linux CI runner, where it categorically
+# does not -- PR #1755's second CI round: every test below that used
+# `runner=` without also injecting `which_fn` silently fell through to the
+# REAL `shutil.which`, so on this dev machine the tests exercised the
+# "present" branch and on CI they all exercised "absent" instead, no matter
+# what the injected `runner` was built to simulate. Every test that cares
+# about a SPECIFIC launchctl-present behavior now pins `which_fn=_present_which`
+# explicitly; the platform-not-applicable tests pin `which_fn=_absent_which`.
+# Both are asserted, hard, in both directions -- never loosened to accept
+# either outcome (that would test nothing).
+def _present_which(name: str) -> Any:
+    """Pins 'launchctl is on PATH' regardless of the real host OS."""
+    return f"/usr/bin/{name}" if name == "launchctl" else None
+
+
+def _absent_which(name: str) -> None:
+    """Pins 'launchctl does not exist on this platform' regardless of the
+    real host OS -- e.g. every Linux CI runner."""
+    return None
+
+
 # ---------------------------------------------------------------------------
 # _discover_launchd_jobs
 # ---------------------------------------------------------------------------
@@ -200,40 +222,44 @@ class TestScanLaunchdDir:
 
 
 class TestMeasureLaunchdNow:
+    """which_fn=_present_which is pinned on every test here: these all
+    exercise the 'launchctl exists' branch on purpose, and must not depend
+    on whether the machine actually running the suite has launchctl."""
+
     def test_loaded_job_is_measured_loaded(self) -> None:
         runner = _fake_runner({"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}})
-        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner)
+        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner, which_fn=_present_which)
         assert result["measured"] is True
         assert "com.vnx.alpha-job" in result["jobs"]
         assert result["jobs"]["com.vnx.alpha-job"]["last_exit_status"] == 0
 
     def test_not_loaded_job_is_absent_from_jobs(self) -> None:
         runner = _fake_runner({"com.vnx.other-job": {"pid": None, "last_exit_status": 0}})
-        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner)
+        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner, which_fn=_present_which)
         assert result["measured"] is True
         assert "com.vnx.alpha-job" not in result["jobs"]
 
     def test_nonzero_last_exit_status_is_captured(self) -> None:
         runner = _fake_runner({"com.vnx.alpha-job": {"pid": None, "last_exit_status": 11}})
-        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner)
+        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner, which_fn=_present_which)
         assert result["jobs"]["com.vnx.alpha-job"]["last_exit_status"] == 11
 
     def test_launchctl_missing_binary_is_unmeasurable(self) -> None:
-        """A race between which() succeeding and the actual invocation
-        failing (or a test that does not touch which_fn at all, as here --
-        which_fn defaults to the real shutil.which, which finds a real
-        launchctl on this dev machine) is a TRANSIENT failure: applicable
-        stays True (tried on a platform where it should work, failed this
-        time), never conflated with 'does not exist on this platform'."""
+        """which_fn pinned to 'present' -- this test is specifically about
+        a RACE (which() said yes, the actual invocation then failed), a
+        TRANSIENT failure: applicable stays True (tried on a platform where
+        it should work, failed this time), never conflated with 'does not
+        exist on this platform' (that is TestLaunchctlNotApplicableOnThisPlatform,
+        below, which pins which_fn=_absent_which instead)."""
         runner = _raising_runner(FileNotFoundError("launchctl: not found"))
-        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner)
+        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner, which_fn=_present_which)
         assert result["measured"] is False
         assert result["applicable"] is True
         assert "reason" in result
 
     def test_launchctl_nonzero_exit_is_unmeasurable(self) -> None:
         runner = _fake_runner({}, returncode=1)
-        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner)
+        result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner, which_fn=_present_which)
         assert result["measured"] is False
         assert result["applicable"] is True
 
@@ -248,7 +274,7 @@ class TestLaunchctlNotApplicableOnThisPlatform:
     non-macOS machine."""
 
     def test_which_fn_absent_is_not_applicable_not_a_transient_failure(self) -> None:
-        result = bts._measure_launchd_now(["com.vnx.alpha-job"], which_fn=lambda _name: None)
+        result = bts._measure_launchd_now(["com.vnx.alpha-job"], which_fn=_absent_which)
         assert result["measured"] is False
         assert result["applicable"] is False
         assert "reason" in result
@@ -263,15 +289,15 @@ class TestLaunchctlNotApplicableOnThisPlatform:
             calls.append(args)
             return _FakeCompletedProcess()
 
-        bts._measure_launchd_now(["com.vnx.alpha-job"], runner=_runner, which_fn=lambda _name: None)
+        bts._measure_launchd_now(["com.vnx.alpha-job"], runner=_runner, which_fn=_absent_which)
         assert calls == []
 
     def test_which_fn_present_measures_normally(self) -> None:
         """Sanity: injecting a which_fn that DOES find launchctl behaves
-        exactly like the default (real shutil.which on this dev machine)."""
+        exactly like the 'present' branch regardless of the real host OS."""
         runner = _fake_runner({"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}})
         result = bts._measure_launchd_now(
-            ["com.vnx.alpha-job"], runner=runner, which_fn=lambda name: f"/usr/bin/{name}",
+            ["com.vnx.alpha-job"], runner=runner, which_fn=_present_which,
         )
         assert result["measured"] is True
         assert result["applicable"] is True
@@ -365,6 +391,11 @@ class TestCombineLivenessOverall:
 
 
 class TestMeasureLaunchdLiveness:
+    """which_fn=_present_which is pinned wherever the test simulates a
+    specific launchctl-list outcome via `runner=` -- otherwise the test
+    would measure whichever platform happens to run it (PR #1755's second
+    CI round) instead of the branch it names."""
+
     def test_not_loaded_job_forces_overall_fail(self, tmp_path: Path) -> None:
         launchd_dir = tmp_path / "launchd"
         _write_plist(launchd_dir, "com.vnx.alpha-job")
@@ -372,7 +403,7 @@ class TestMeasureLaunchdLiveness:
         state_dir.mkdir()
         runner = _fake_runner({})  # nothing loaded
 
-        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
 
         assert result["overall"] == "fail"
         assert result["jobs"]["com.vnx.alpha-job"]["state"] == "not_loaded"
@@ -384,19 +415,23 @@ class TestMeasureLaunchdLiveness:
         state_dir.mkdir()
         runner = _fake_runner({"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}})
 
-        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
 
         assert result["overall"] == "ok"
         assert result["jobs"]["com.vnx.alpha-job"]["state"] == "loaded"
 
     def test_unmeasurable_launchctl_is_unknown_not_ok_or_fail(self, tmp_path: Path) -> None:
+        """which_fn pinned 'present' -- this is the TRANSIENT-failure branch
+        (launchctl exists, this one invocation raised), not the
+        not-applicable-platform branch (TestMeasureLaunchdLivenessNotApplicable,
+        below)."""
         launchd_dir = tmp_path / "launchd"
         _write_plist(launchd_dir, "com.vnx.alpha-job")
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         runner = _raising_runner(FileNotFoundError("no launchctl"))
 
-        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
 
         assert result["overall"] == "unknown"
         assert result["jobs"]["com.vnx.alpha-job"]["state"] == "unknown"
@@ -421,7 +456,7 @@ class TestMeasureLaunchdLiveness:
         state_dir.mkdir()
         runner = _fake_runner({"com.vnx.good-job": {"pid": None, "last_exit_status": 0}})
 
-        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
 
         assert result["overall"] == "unknown"
         assert result["unparseable_plists"] == ["broken.plist"]
@@ -439,7 +474,7 @@ class TestMeasureLaunchdLiveness:
         state_dir.mkdir()
         runner = _fake_runner({})  # com.vnx.good-job NOT loaded
 
-        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
 
         assert result["overall"] == "fail"
         assert result["unparseable_plists"] == ["broken.plist"]
@@ -479,10 +514,11 @@ class TestMeasureLaunchdLiveness:
             )
         runner = _fake_runner({"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}})
 
-        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
 
         assert result["jobs"]["com.vnx.alpha-job"]["since"] == "2026-08-15T06:00:00Z"
         assert result["jobs"]["com.vnx.alpha-job"]["since_measured"] is True
+        assert result["jobs"]["com.vnx.alpha-job"]["state"] == "loaded"
 
     def test_since_explicitly_not_measured_when_no_history(self, tmp_path: Path) -> None:
         """Third branch, not a third value: no job_exits history means 'we
@@ -494,10 +530,11 @@ class TestMeasureLaunchdLiveness:
         state_dir.mkdir()
         runner = _fake_runner({"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}})
 
-        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
 
         assert result["jobs"]["com.vnx.alpha-job"]["since"] is None
         assert result["jobs"]["com.vnx.alpha-job"]["since_measured"] is False
+        assert result["jobs"]["com.vnx.alpha-job"]["state"] == "loaded"
 
 
 class TestMeasureLaunchdLivenessNotApplicable:
@@ -514,7 +551,7 @@ class TestMeasureLaunchdLivenessNotApplicable:
         state_dir.mkdir()
 
         result = bts._measure_launchd_liveness(
-            state_dir, launchd_dir=launchd_dir, which_fn=lambda _name: None,
+            state_dir, launchd_dir=launchd_dir, which_fn=_absent_which,
         )
 
         assert result["overall"] == "unknown"
@@ -533,7 +570,7 @@ class TestMeasureLaunchdLivenessNotApplicable:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
 
-        result = bts._measure_launchd_liveness(state_dir, which_fn=lambda _name: None)
+        result = bts._measure_launchd_liveness(state_dir, which_fn=_absent_which)
 
         assert result["overall"] == "unknown"
         assert "com.vnx.gate-obligation-runner.plist" in result.get("unparseable_plists", [])
