@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the four audit-correctness fixes (C3, C4, C6, C7).
+"""Regression tests for the audit-correctness fixes (C3, C4, C6, C7, C8).
 
 Dispatch-ID: feat/audit-correctness-fixes
 
@@ -7,6 +7,9 @@ C3 — VNX_OVERRIDE_* truthy spellings (config_registry.get_bool)
 C4 — two project_ids in one process get distinct stores (config_runtime.autowire)
 C6 — two receipts with a missing timestamp get distinct idempotency keys
 C7 — an in-window key survives a duplicate receipt append
+C8 — the idempotency key carries status and commit_sha, so a valid verdict
+     landing after a stale/unavailable one for the same gate+PR is never
+     silently dropped as a duplicate (agent dispatch, 2026-09-04)
 """
 
 from __future__ import annotations
@@ -31,6 +34,9 @@ from append_receipt_internals.idempotency import (  # noqa: E402
     _cache_file_for,
     _load_cache,
 )
+# Canonical gate-result status vocabulary (CFX-3) — never a hand-rolled
+# "pass"/"unavailable" literal in a test that exercises status-based dedup.
+import gate_status  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +298,170 @@ class TestC7InWindowKeyNotEvicted:
         assert line_count_before == line_count_after, (
             f"Duplicate append wrote to the receipt file: {line_count_before} → {line_count_after} lines"
         )
+
+
+# ===========================================================================
+# C8 — the idempotency key must carry status and commit_sha
+# ===========================================================================
+#
+# Root cause (verified by reading, not assumed): IDEMPOTENCY_FIELDS
+# (idempotency.py:24-37) is dispatch_id, task_id, pr_number, gate, terminal,
+# event_type, event, report_path, source, file, trigger, section — no
+# "status", no "commit_sha".
+#
+# The concrete production shape this bites is a "review_gate_result" receipt
+# built by GateResultParserMixin._emit_result_receipt
+# (scripts/lib/gate_result_parser.py) via governance_receipts.
+# emit_governance_receipt -> append_receipt_payload. That call site NEVER
+# passes dispatch_id (it is not one of the kwargs at all), and record_result's
+# report_path falls back to the ORIGINAL request record's report_path when
+# the caller omits --report-path (review_gate_manager.py's own
+# "record-result" CLI subcommand exposes exactly that: --report-path
+# defaults to "", so an operator/automation re-running record-result for the
+# same --gate/--pr with a corrected --status reuses the same report_path).
+# So the surviving digest for two such calls on the same gate+PR is
+# {pr_number, gate, terminal="T0", event_type="review_gate_result",
+# source="vnx_governance", report_path} — identical whether the run booked
+# "unavailable" or "pass". The second (valid) verdict was silently dropped
+# as a duplicate within the cache window (default 300s).
+#
+# Note on the PR-1762 anecdote in the dispatch prompt (glm_gate UNAVAILABLE
+# then kimi_gate PASS): that specific pair does NOT collide under the
+# CURRENT key, because "gate" already differs (glm_gate vs kimi_gate) and
+# because glm_gate.py/kimi_gate.py are GATE_PROVIDER_SCRIPT_RUNNER gates
+# that record their own verdict via gate_recorder.record_terminal_result —
+# a direct JSON-file write with its own overwrite guard, never through
+# append_receipt_payload/idempotency.py at all. The real, reachable
+# collision is the SAME gate re-verdicted on the SAME PR (the
+# claude_github_optional / gemini_review / codex_gate / ci_gate /
+# wiring_gate family, which DOES route review_gate_result through
+# emit_governance_receipt) — reproduced below without a live store, with an
+# injected receipt/cache path exactly like C6/C7 above.
+#
+# "hetzelfde" for this key, going forward: same PR, same commit, same gate,
+# same outcome IS a duplicate. Same PR with a different commit OR a
+# different outcome is NOT a duplicate — a rerun that corrects a stale
+# UNAVAILABLE booking into a real PASS/FAIL must always land.
+
+def _review_gate_result_receipt(status: str, **extra: object) -> dict:
+    """Mirrors the exact shape GateResultParserMixin._emit_result_receipt
+    builds for emit_governance_receipt("review_gate_result", ...) — no
+    dispatch_id, no commit_sha (governance_receipts.emit_governance_receipt
+    prepends timestamp/event_type/receipt_kind/status/terminal/source, then
+    `receipt.update(fields)` from the call site's kwargs)."""
+    receipt = {
+        "timestamp": "2026-09-04T10:00:00Z",
+        "event_type": "review_gate_result",
+        "receipt_kind": "review_gate",
+        "status": status,
+        "terminal": "T0",
+        "source": "vnx_governance",
+        "pr_number": 1762,
+        "pr_id": "1762",
+        "branch": "fix/whatever",
+        "gate": "codex_gate",
+        "summary": f"codex gate: {status}",
+        "contract_hash": "abc123",
+        "report_path": "/state/unified_reports/codex-gate-pr1762.md",
+    }
+    receipt.update(extra)
+    return receipt
+
+
+class TestC8StatusAndCommitShaInIdempotencyKey:
+    """C8: a valid gate verdict must never be dedup-dropped against a stale
+    unavailable/failed verdict for the same gate+PR."""
+
+    def test_key_differs_when_status_differs_same_gate_and_pr(self) -> None:
+        unavailable_status = sorted(gate_status.UNAVAILABLE_STATES)[0]
+        pass_status = "pass"
+        assert pass_status in gate_status.PASS_STATES
+
+        r_unavailable = _review_gate_result_receipt(unavailable_status)
+        r_pass = _review_gate_result_receipt(pass_status)
+
+        k_unavailable = _compute_idempotency_key(r_unavailable, "review_gate_result")
+        k_pass = _compute_idempotency_key(r_pass, "review_gate_result")
+
+        assert k_unavailable != k_pass, (
+            "Same gate/PR/report_path with a different status must not share "
+            "an idempotency key — an unavailable booking must never occupy "
+            "the slot a later real verdict needs."
+        )
+
+    def test_pass_after_unavailable_same_gate_pr_is_not_dropped_as_duplicate(
+        self, tmp_path: Path,
+    ) -> None:
+        """End-to-end (mirrors C6's file-append shape): the UNAVAILABLE run
+        lands first (e.g. an OpenRouter outage), then the SAME gate on the
+        SAME PR is re-verdicted as PASS once the provider recovers. Both
+        must be durably appended — the PASS is the record every downstream
+        merge-readiness check depends on."""
+        receipt_path = tmp_path / "t0_receipts.ndjson"
+        cache_path = _cache_file_for(receipt_path)
+        window = 300
+
+        unavailable_status = sorted(gate_status.UNAVAILABLE_STATES)[0]
+        r1 = _review_gate_result_receipt(unavailable_status)
+        r2 = _review_gate_result_receipt("pass")
+
+        k1 = _compute_idempotency_key(r1, "review_gate_result")
+        res1 = _write_receipt_under_lock(r1, receipt_path, cache_path, k1, window)
+        assert res1.status == "appended"
+
+        k2 = _compute_idempotency_key(r2, "review_gate_result")
+        res2 = _write_receipt_under_lock(r2, receipt_path, cache_path, k2, window)
+        assert res2.status == "appended", (
+            f"The PASS verdict was booked as {res2.status!r} instead of "
+            "'appended' — the valid outcome was dropped behind the stale "
+            "unavailable one."
+        )
+
+        lines = [json.loads(l) for l in receipt_path.read_text().splitlines() if l.strip()]
+        assert len(lines) == 2, f"Expected both verdicts in the ledger, got {len(lines)}"
+        statuses = {entry["status"] for entry in lines}
+        assert statuses == {unavailable_status, "pass"}
+
+    def test_key_differs_when_commit_sha_differs_same_status_and_gate(self) -> None:
+        """Forward-looking: when a receipt DOES carry commit_sha (the field
+        is not yet stamped by any current emit site — verified by grep,
+        zero hits outside a comment — but the key's own contract must not
+        silently ignore it once a caller does), two runs on the same PR at
+        different commits must never collapse to one key."""
+        r_commit_a = _review_gate_result_receipt("pass", commit_sha="aaaaaaa")
+        r_commit_b = _review_gate_result_receipt("pass", commit_sha="bbbbbbb")
+
+        k_a = _compute_idempotency_key(r_commit_a, "review_gate_result")
+        k_b = _compute_idempotency_key(r_commit_b, "review_gate_result")
+
+        assert k_a != k_b, (
+            "Same gate/PR/status at two different commits must not share an "
+            "idempotency key."
+        )
+
+    def test_identical_review_gate_receipt_is_still_a_true_duplicate(
+        self, tmp_path: Path,
+    ) -> None:
+        """Guard against over-fixing: an exact repeat (same status, same
+        commit_sha) of the same gate+PR result must still dedupe — a
+        network retry replaying the identical booking must not double-write
+        the ledger."""
+        receipt_path = tmp_path / "t0_receipts.ndjson"
+        cache_path = _cache_file_for(receipt_path)
+        window = 300
+
+        r = _review_gate_result_receipt("pass", commit_sha="ccccccc")
+        k1 = _compute_idempotency_key(r, "review_gate_result")
+        res1 = _write_receipt_under_lock(dict(r), receipt_path, cache_path, k1, window)
+        assert res1.status == "appended"
+
+        k2 = _compute_idempotency_key(dict(r), "review_gate_result")
+        assert k1 == k2, "Byte-identical receipts must still compute the same key"
+        res2 = _write_receipt_under_lock(dict(r), receipt_path, cache_path, k2, window)
+        assert res2.status == "duplicate"
+
+        lines = [l for l in receipt_path.read_text().splitlines() if l.strip()]
+        assert len(lines) == 1
 
 
 if __name__ == "__main__":

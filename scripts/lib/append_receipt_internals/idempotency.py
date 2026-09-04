@@ -34,6 +34,26 @@ IDEMPOTENCY_FIELDS = (
     "file",
     "trigger",
     "section",
+    # "hetzelfde" for a receipt is: same identity fields above AND the same
+    # outcome at the same commit — not merely the same identity fields.
+    # Without these two, a review_gate_result receipt (gate_result_parser.py
+    # GateResultParserMixin._emit_result_receipt: no dispatch_id, report_path
+    # reused from the original request record across reruns) collapses two
+    # genuinely different verdicts on the same gate+PR into one digest: an
+    # UNAVAILABLE booking (e.g. a provider outage) occupies the cache slot
+    # and a later real PASS/FAIL for the exact same gate+PR is then dropped
+    # as a "duplicate" — the valid verdict never lands, the unusable one does
+    # (agent dispatch, 2026-09-04, OI raised against PR 1762's glm_gate/
+    # kimi_gate booking sequence). "status" is present on virtually every
+    # receipt shape and is cheap to include unconditionally: two calls that
+    # really are the same repeated event always carry the same status too,
+    # so this never breaks a genuine duplicate. "commit_sha" is not yet
+    # stamped by any current emit site (verified by grep — zero producers)
+    # but the key's own contract must not silently ignore it the moment a
+    # caller does start passing it: the same PR at two different commits is
+    # never the same result.
+    "status",
+    "commit_sha",
 )
 
 
