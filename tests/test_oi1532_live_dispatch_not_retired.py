@@ -766,8 +766,15 @@ class TestTakCNewBranchesBounded:
     def _decision(attempts: int, dispatch_live) -> dict:
         """Drive the REAL ``_pre_execution_decision`` — the same surface T0
         measured — with an empty result index (no rescue evidence) and the
-        branch-gone AWAITING resolution split by the given liveness answer."""
+        branch-gone AWAITING resolution split by the given liveness answer.
+
+        ``state_dir`` (#1745/OI-1508) is a required positional now, but the
+        AWAITING branch this test drives never reads it — only the RESOLVED
+        branch's owner/repo fallback does — so a placeholder path that is
+        never touched is correct here, not a real temp dir.
+        """
         return runner._pre_execution_decision(
+            Path("/unused-state-dir-oi1587-tak-c"),
             TestTakCNewBranchesBounded._DECISION_DISPATCH_ID,
             "codex_gate",
             runner.PrResolution(
@@ -781,7 +788,7 @@ class TestTakCNewBranchesBounded:
                 ),
             ),
             attempts,
-            {},
+            runner.GateResultIndex({}, {}),
         )
 
     def test_unmeasured_escalates_at_and_past_threshold(self):
