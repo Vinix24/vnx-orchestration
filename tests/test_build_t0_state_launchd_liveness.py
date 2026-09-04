@@ -219,15 +219,62 @@ class TestMeasureLaunchdNow:
         assert result["jobs"]["com.vnx.alpha-job"]["last_exit_status"] == 11
 
     def test_launchctl_missing_binary_is_unmeasurable(self) -> None:
+        """A race between which() succeeding and the actual invocation
+        failing (or a test that does not touch which_fn at all, as here --
+        which_fn defaults to the real shutil.which, which finds a real
+        launchctl on this dev machine) is a TRANSIENT failure: applicable
+        stays True (tried on a platform where it should work, failed this
+        time), never conflated with 'does not exist on this platform'."""
         runner = _raising_runner(FileNotFoundError("launchctl: not found"))
         result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner)
         assert result["measured"] is False
+        assert result["applicable"] is True
         assert "reason" in result
 
     def test_launchctl_nonzero_exit_is_unmeasurable(self) -> None:
         runner = _fake_runner({}, returncode=1)
         result = bts._measure_launchd_now(["com.vnx.alpha-job"], runner=runner)
         assert result["measured"] is False
+        assert result["applicable"] is True
+
+
+class TestLaunchctlNotApplicableOnThisPlatform:
+    """Golf 1B follow-up (PR #1755 CI failure, both on the Linux CI runner
+    AND reproduced locally on macOS via a different path -- see the
+    TestMeasureLaunchdLiveness unparseable-plist tests above): 'launchctl
+    does not exist on this platform at all' is a DIFFERENT claim than 'we
+    tried launchctl and it failed this time'. which_fn is the injection
+    seam (mirrors runner) so this is testable without needing an actual
+    non-macOS machine."""
+
+    def test_which_fn_absent_is_not_applicable_not_a_transient_failure(self) -> None:
+        result = bts._measure_launchd_now(["com.vnx.alpha-job"], which_fn=lambda _name: None)
+        assert result["measured"] is False
+        assert result["applicable"] is False
+        assert "reason" in result
+
+    def test_which_fn_absent_short_circuits_before_invoking_runner(self) -> None:
+        """No point spawning a subprocess for a binary we already know is
+        not on PATH -- and this proves the short-circuit, not just the
+        outcome."""
+        calls: List[Any] = []
+
+        def _runner(*args: Any, **kwargs: Any) -> _FakeCompletedProcess:
+            calls.append(args)
+            return _FakeCompletedProcess()
+
+        bts._measure_launchd_now(["com.vnx.alpha-job"], runner=_runner, which_fn=lambda _name: None)
+        assert calls == []
+
+    def test_which_fn_present_measures_normally(self) -> None:
+        """Sanity: injecting a which_fn that DOES find launchctl behaves
+        exactly like the default (real shutil.which on this dev machine)."""
+        runner = _fake_runner({"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}})
+        result = bts._measure_launchd_now(
+            ["com.vnx.alpha-job"], runner=runner, which_fn=lambda name: f"/usr/bin/{name}",
+        )
+        assert result["measured"] is True
+        assert result["applicable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -354,10 +401,18 @@ class TestMeasureLaunchdLiveness:
         assert result["overall"] == "unknown"
         assert result["jobs"]["com.vnx.alpha-job"]["state"] == "unknown"
 
-    def test_unparseable_plist_forces_overall_fail_even_if_all_valid_jobs_are_loaded(self, tmp_path: Path) -> None:
-        """A plist that fails to parse names a producer this module cannot
-        even identify -- that alone must not be masked by every OTHER,
-        successfully-parsed job happening to be loaded."""
+    def test_unparseable_plist_alone_yields_unknown_not_fail(self, tmp_path: Path) -> None:
+        """Corrected behaviour (OI found via PR #1755 CI): an unparseable
+        plist names a producer this module cannot even identify -- that is
+        a "we don't know", not a "we know and it's broken". It stays LOUD
+        (unparseable_plists is never emptied out) but must not by itself
+        force overall to "fail": a plist with invalid XML is a standing,
+        cross-platform, this-PR-cannot-fix-it fact, and forcing "fail" for
+        it forever would make every single measurement on every machine
+        report unhealthy for a reason no amount of retrying changes --
+        exactly the noise that makes a REAL "fail" (an actually not-loaded,
+        measured job) easy to ignore. See TestMeasuredNotLoadedStillWinsOverUnparseable
+        below for the case where a genuine finding still forces "fail"."""
         launchd_dir = tmp_path / "launchd"
         launchd_dir.mkdir(parents=True)
         (launchd_dir / "broken.plist").write_text("not a plist at all", encoding="utf-8")
@@ -368,9 +423,27 @@ class TestMeasureLaunchdLiveness:
 
         result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
 
-        assert result["overall"] == "fail"
+        assert result["overall"] == "unknown"
         assert result["unparseable_plists"] == ["broken.plist"]
         assert result["jobs"]["com.vnx.good-job"]["state"] == "loaded"
+
+    def test_measured_not_loaded_job_still_forces_fail_even_with_unparseable_plist(self, tmp_path: Path) -> None:
+        """A REAL, measured, not-loaded job is a genuine finding and must
+        still win: 'we don't know about the broken plist' does not get to
+        launder away 'we DO know this other job is down'."""
+        launchd_dir = tmp_path / "launchd"
+        launchd_dir.mkdir(parents=True)
+        (launchd_dir / "broken.plist").write_text("not a plist at all", encoding="utf-8")
+        _write_plist(launchd_dir, "com.vnx.good-job")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        runner = _fake_runner({})  # com.vnx.good-job NOT loaded
+
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner)
+
+        assert result["overall"] == "fail"
+        assert result["unparseable_plists"] == ["broken.plist"]
+        assert result["jobs"]["com.vnx.good-job"]["state"] == "not_loaded"
 
     def test_zero_discovered_jobs_is_unknown_not_ok(self, tmp_path: Path) -> None:
         """An empty register must never silently read as 'nothing to report,
@@ -425,3 +498,44 @@ class TestMeasureLaunchdLiveness:
 
         assert result["jobs"]["com.vnx.alpha-job"]["since"] is None
         assert result["jobs"]["com.vnx.alpha-job"]["since_measured"] is False
+
+
+class TestMeasureLaunchdLivenessNotApplicable:
+    """PR #1755 CI failure: on a Linux CI runner launchctl does not exist at
+    all, so every job's loaded/not-loaded state is structurally unknowable
+    there -- that must read 'unknown' (per-job 'not_applicable'), never
+    'fail'. which_fn is the injection seam that makes this reproducible on
+    any dev machine, macOS included."""
+
+    def test_not_applicable_platform_yields_unknown_overall_and_not_applicable_jobs(self, tmp_path: Path) -> None:
+        launchd_dir = tmp_path / "launchd"
+        _write_plist(launchd_dir, "com.vnx.alpha-job")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        result = bts._measure_launchd_liveness(
+            state_dir, launchd_dir=launchd_dir, which_fn=lambda _name: None,
+        )
+
+        assert result["overall"] == "unknown"
+        assert result["jobs"]["com.vnx.alpha-job"]["state"] == "not_applicable"
+
+    def test_real_repo_register_with_no_launchctl_is_unknown_not_fail(self, tmp_path: Path) -> None:
+        """The exact CI reproduction: the REAL scripts/launchd directory
+        (including its one currently-unparseable plist,
+        com.vnx.gate-obligation-runner.plist) plus 'launchctl does not
+        exist' must together read 'unknown', not 'fail' -- this is what
+        made tests/test_build_t0_brief_output.py::TestFormatBriefOutputPath
+        assert rc == 0 fail with rc == 1 on the Linux CI runner AND,
+        independently, on this macOS dev machine (there via genuinely
+        not-loaded real jobs, a SEPARATE true-ambient-state fact -- see
+        TestMeasureLaunchdLiveness's unparseable-plist tests for that half)."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        result = bts._measure_launchd_liveness(state_dir, which_fn=lambda _name: None)
+
+        assert result["overall"] == "unknown"
+        assert "com.vnx.gate-obligation-runner.plist" in result.get("unparseable_plists", [])
+        for label, info in result["jobs"].items():
+            assert info["state"] == "not_applicable", f"{label}: {info}"

@@ -70,6 +70,7 @@ import logging
 import os
 import plistlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1914,36 +1915,54 @@ def _measure_launchd_now(
     labels: Sequence[str],
     *,
     runner: Any = None,
+    which_fn: Any = None,
     timeout: int = 10,
 ) -> Dict[str, Any]:
     """Query ``launchctl list`` once, live, for the current loaded/exit-status
     state of every label. Reuses job_exit_capture's own output parser rather
     than a second hand-rolled regex.
 
-    Returns ``{"measured": True, "jobs": {label: {"pid", "last_exit_status"}}}``
+    Returns ``{"measured": True, "applicable": True, "jobs": {label: {...}}}``
     on success (only labels launchctl actually reports are present -- a
     requested label simply absent from the dict means "not loaded", it is
     the caller's job to turn that into the "not_loaded" state), or
-    ``{"measured": False, "reason": "..."}`` when launchctl itself could not
-    be queried (missing binary, non-zero exit, timeout) -- this is the
-    'unmeasurable' half of the tri-state contract; it must never collapse
-    into an empty (and therefore "everything absent") jobs dict.
+    ``{"measured": False, "applicable": bool, "reason": "..."}`` when
+    launchctl itself could not be queried -- this is the 'unmeasurable' half
+    of the tri-state contract; it must never collapse into an empty (and
+    therefore "everything absent") jobs dict.
+
+    ``applicable`` distinguishes two different kinds of "could not measure"
+    (PR #1755 CI failure, both on a Linux CI runner AND reproduced
+    independently on a real macOS dev machine): ``applicable=False`` means
+    ``launchctl`` does not exist on this platform AT ALL (checked via
+    ``which_fn``, default ``shutil.which``, BEFORE spawning any subprocess)
+    -- a structural, permanent fact (every non-macOS machine, forever), not
+    a transient failure worth investigating. ``applicable=True`` (the prior,
+    only behavior) means launchctl exists but this particular invocation
+    failed (a race where the binary vanished after the which() check,
+    non-zero exit, timeout) -- "tried on a platform where it should work,
+    and this one attempt failed", a genuinely different, more actionable
+    claim than "not applicable here".
     """
+    which = which_fn or shutil.which
+    if which("launchctl") is None:
+        return {"measured": False, "applicable": False, "reason": "launchctl not present on this platform"}
+
     run = runner or subprocess.run
     try:
         proc = run(["launchctl", "list"], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"measured": False, "reason": f"launchctl unavailable: {exc}"}
+        return {"measured": False, "applicable": True, "reason": f"launchctl unavailable: {exc}"}
     if proc.returncode != 0:
-        return {"measured": False, "reason": f"launchctl list exited {proc.returncode}"}
+        return {"measured": False, "applicable": True, "reason": f"launchctl list exited {proc.returncode}"}
 
     try:
         from job_exit_capture import _parse_launchctl_list
     except ImportError as exc:
-        return {"measured": False, "reason": f"job_exit_capture unavailable: {exc}"}
+        return {"measured": False, "applicable": True, "reason": f"job_exit_capture unavailable: {exc}"}
 
     jobs = {job["label"]: job for job in _parse_launchctl_list(proc.stdout)}
-    return {"measured": True, "jobs": jobs}
+    return {"measured": True, "applicable": True, "jobs": jobs}
 
 
 def _last_job_exit_by_label(state_dir: Path, labels: Sequence[str]) -> Dict[str, Dict[str, Any]]:
@@ -2004,26 +2023,49 @@ def _measure_launchd_liveness(
     *,
     launchd_dir: Optional[Path] = None,
     runner: Any = None,
+    which_fn: Any = None,
 ) -> Dict[str, Any]:
     """Measure whether every expected launchd job is currently loaded, and
     since when its last recorded exit is known.
 
     Returns ``{"overall": "ok"|"fail"|"unknown", "jobs": {label: {...}}}``,
     plus ``"unparseable_plists"`` (filenames, non-empty only when at least
-    one exists) -- a plist that fails to parse names a producer this module
-    cannot even identify, which is itself a "fail", not a reason to fall
-    silently back to "everything else looked fine". Zero discovered plist
-    labels (register + zero valid AND zero unparseable) is its OWN "unknown"
-    case (a register that could not be established at all, exactly the
-    discipline ``daemon_register.read_daemon_register`` already applies to a
-    structurally-empty parse) -- it must never silently read as "ok, nothing
-    to report".
+    one exists).
+
+    ``overall`` is ``"fail"`` ONLY when a label was actually measured
+    (launchctl ran, on a platform where it applies) and found not loaded --
+    a real, actionable finding. Everything else this module could not
+    establish -- launchctl not applicable on this platform, launchctl
+    applicable but this invocation failed, OR a plist that failed to parse
+    and so names a producer this module cannot even identify -- folds into
+    ``"unknown"``. This is a deliberate correction (PR #1755 CI failure):
+    an unparseable plist used to force ``"fail"`` unconditionally, which
+    made ONE broken, cross-platform, this-module-cannot-fix-it plist a
+    permanent, unfalsifiable "everything is unhealthy" signal on every
+    single measurement forever -- niet-gemeten is een derde tak, geen derde
+    waarde: "we could not identify this producer" is a "we don't know", not
+    a "we know and it's broken", and treating it as the latter is exactly
+    the kind of noise that makes a REAL "fail" easy to tune out. The
+    ``unparseable_plists`` finding stays fully visible either way -- it is
+    never dropped, only kept out of the pass/fail verdict. A genuinely
+    measured not-loaded label still wins over an unrelated unparseable
+    plist (a real finding is never laundered away by an unrelated unknown).
+
+    Zero discovered plist labels (register + zero valid AND zero
+    unparseable) is its own "unknown" case (a register that could not be
+    established at all, exactly the discipline
+    ``daemon_register.read_daemon_register`` already applies to a
+    structurally-empty parse) -- it must never silently read as "ok,
+    nothing to report".
     """
     labels, unparseable = _scan_launchd_dir(launchd_dir)
     if not labels and not unparseable:
         return {"overall": "unknown", "jobs": {}, "reason": "no launchd plist files discovered"}
 
-    now_result = _measure_launchd_now(labels, runner=runner) if labels else {"measured": True, "jobs": {}}
+    now_result = (
+        _measure_launchd_now(labels, runner=runner, which_fn=which_fn) if labels
+        else {"measured": True, "applicable": True, "jobs": {}}
+    )
     exit_history = _last_job_exit_by_label(state_dir, labels)
 
     jobs: Dict[str, Any] = {}
@@ -2031,13 +2073,15 @@ def _measure_launchd_liveness(
     for label in labels:
         history = exit_history.get(label)
         since = history.get("timestamp") if history else None
+        if now_result["measured"]:
+            state = "loaded" if label in now_result["jobs"] else "not_loaded"
+        elif not now_result.get("applicable", True):
+            state = "not_applicable"
+        else:
+            state = "unknown"
         jobs[label] = {
             "expected": True,
-            "state": (
-                "unknown" if not now_result["measured"]
-                else "loaded" if label in now_result["jobs"]
-                else "not_loaded"
-            ),
+            "state": state,
             "since": since,
             "since_measured": since is not None,
             "last_exit_code": history.get("exit_code") if history else None,
@@ -2045,9 +2089,9 @@ def _measure_launchd_liveness(
         if now_result["measured"] and label not in now_result["jobs"]:
             any_not_loaded = True
 
-    if unparseable or (now_result["measured"] and any_not_loaded):
+    if now_result["measured"] and any_not_loaded:
         overall = "fail"
-    elif not now_result["measured"]:
+    elif not now_result["measured"] or unparseable:
         overall = "unknown"
     else:
         overall = "ok"
