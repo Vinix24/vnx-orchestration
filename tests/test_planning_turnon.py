@@ -452,3 +452,107 @@ def test_drift_never_writes_roadmap_or_calls_seeder(seeded_state, monkeypatch):
         t["track_id"]: t["phase"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")
     }
     assert after_phases == before_phases
+
+
+# ---------------------------------------------------------------------------
+# Part 4 — drift reason: plan-gate unread vs refused (OI-823)
+# ---------------------------------------------------------------------------
+#
+# `_drift_reason` collapsed every 'blocked' track behind an open
+# OI-PLAN-<track> blocker to the single string "blocked by open item" —
+# whether the plan-gate had never looked at the plan (queue depth, not a real
+# problem) or had reviewed it and REFUSED (REVISE/BLOCK, a finding on
+# record). Measured on the live store 2026-09-04: 88 of 91 divergent
+# `vnx objective drift` rows carried that identical reason, all 88 backed by
+# an OI-PLAN-<track> blocker, splitting ~72 unread / ~16 refused via
+# `plan_gate_enforcement.classify_review_state` — the SAME classifier
+# `cmd_objective_list` already uses for its unread/refused badge (see
+# tests/test_planning_cli_objective.py::TestObjectiveListReviewSplit). A
+# signal where 88/91 rows say the same thing sends no signal; this section
+# proves `objective drift`'s per-row reason distinguishes the two, and keeps
+# the ordinary non-plan-gate "blocked by open item" path distinct from both.
+
+@pytest.fixture()
+def plan_gate_seeded_state(seeded_state: tuple[Path, Path]) -> tuple[Path, Path]:
+    """seeded_state + migrations 29/30/33 so the OI-PLAN blocker (resolved_at)
+    and the durable decision_ref both exist and drift's reason can classify
+    unread vs refused (mirrors review_seeded_state in
+    tests/test_planning_cli_objective.py)."""
+    state_dir, roadmap = seeded_state
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    for ver, fname in (
+        (29, "0029_track_type_discriminator.sql"),
+        (30, "0030_track_oi_resolved_at.sql"),
+        (33, "0033_track_decision_ref.sql"),
+    ):
+        schema_migration.apply_script_if_below(
+            conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8")
+        )
+        conn.commit()
+    conn.close()
+    return state_dir, roadmap
+
+
+def test_drift_reason_distinguishes_unread_from_refused_plan_gate(plan_gate_seeded_state, capsys):
+    state_dir, _ = plan_gate_seeded_state
+
+    # feat-a: OI-PLAN blocker seeded, never reviewed -> unread.
+    tracks_lib.link_open_item(
+        state_dir, "feat-a", "vnx-dev", "OI-PLAN-feat-a", "blocks", "manual",
+    )
+    # feat-c: OI-PLAN blocker seeded AND a recorded REVISE decision -> refused.
+    tracks_lib.link_open_item(
+        state_dir, "feat-c", "vnx-dev", "OI-PLAN-feat-c", "blocks", "manual",
+    )
+    tracks_lib.set_decision_ref(
+        state_dir, "feat-c", "vnx-dev",
+        json.dumps({
+            "decision": "REVISE", "reports": [], "rejected_alternatives": [],
+            "set_at": "2026-09-04T00:00:00Z",
+        }),
+    )
+
+    rc = planning_cli.main([
+        "objective", "drift", "--project-id", "vnx-dev",
+        "--state-dir", str(state_dir), "--json",
+    ])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    by_id = {d["track_id"]: d["reason"] for d in summary["divergent"]}
+
+    assert "feat-a" in by_id
+    assert "feat-c" in by_id
+    reason_a = by_id["feat-a"]
+    reason_c = by_id["feat-c"]
+
+    # The core complaint: two structurally different facts must not collapse
+    # to the same string.
+    assert reason_a != reason_c
+    assert "unread" in reason_a.lower()
+    assert "refused" in reason_c.lower()
+    assert "OI-PLAN-feat-a" in reason_a
+    assert "OI-PLAN-feat-c" in reason_c
+
+
+def test_drift_reason_keeps_generic_open_item_distinct_from_plan_gate(plan_gate_seeded_state, capsys):
+    """A genuine (non-plan-gate) blocking open item must still read as a
+    plain 'blocked by open item' — never absorbed into the plan-gate
+    unread/refused split, and never silently indistinguishable from it."""
+    state_dir, _ = plan_gate_seeded_state
+    tracks_lib.link_open_item(
+        state_dir, "feat-c", "vnx-dev", "OI-9001", "blocks", "manual",
+    )
+
+    rc = planning_cli.main([
+        "objective", "drift", "--project-id", "vnx-dev",
+        "--state-dir", str(state_dir), "--json",
+    ])
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    by_id = {d["track_id"]: d["reason"] for d in summary["divergent"]}
+
+    assert "feat-c" in by_id
+    reason = by_id["feat-c"]
+    assert "OI-9001" in reason
+    assert "unread" not in reason.lower()
+    assert "refused" not in reason.lower()
