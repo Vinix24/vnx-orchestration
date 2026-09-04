@@ -1867,10 +1867,15 @@ def _scan_launchd_dir(launchd_dir: Optional[Path] = None) -> "tuple[List[str], L
     can surface it as a loud finding instead of a debug-log line nobody
     reads. This is exactly the failure mode this dispatch exists to prevent:
     measured live while building this module,
-    ``scripts/launchd/com.vnx.gate-obligation-runner.plist`` contains a
+    ``scripts/launchd/com.vnx.gate-obligation-runner.plist`` contained a
     literal ``--`` inside an XML comment ("...the --project-id value...")
     which is invalid XML (comments may never contain ``--``) -- a real,
-    currently-broken plist in this repo, not a hypothetical one.
+    currently-broken plist in this repo, not a hypothetical one. OI-1621
+    fixed that specific file (the comment no longer says "--project-id");
+    the fail-soft path itself stays, since any future plist edit can
+    reintroduce an unparseable file the same way -- see
+    ``scripts/lib/path_parity.check_repo_launchd_templates`` and
+    ``tests/test_launchd_plist_guard.py`` for the regression guard.
     """
     directory = launchd_dir if launchd_dir is not None else (_PROJECT_ROOT / "scripts" / "launchd")
     labels: List[str] = []

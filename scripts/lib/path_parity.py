@@ -16,8 +16,10 @@ The check probes ``python3`` twice:
 That bare probe is diagnostic only (``raw_probe``, always ``info``): a
 minimal PATH on a macOS host without Xcode Command Line Tools legitimately
 resolves Xcode's bundled ``/usr/bin/python3`` (3.9.x on this fleet), which no
-real background job ever runs on — every scheduled consumer pins its own
-interpreter (see ``discover_launchd_consumers``/``discover_crontab_consumers``
+real background job ever runs on — every scheduled consumer either pins its
+own interpreter, or declares its own ``EnvironmentVariables.PATH``/crontab
+``PATH=`` line precisely so a bare ``python3`` never falls back to that
+Xcode stub (see ``discover_launchd_consumers``/``discover_crontab_consumers``
 below). Comparing the bare probes can therefore never reach parity on this
 kind of machine, which is a property of macOS, not a defect anyone can fix —
 so it never drives ``parity``.
@@ -31,6 +33,25 @@ interpreter falls outside this project's ``requires-python`` range
 (``pyproject.toml``). Consumers that invoke a script outside this repo, or a
 non-Python program, are recorded but never flagged — this project's
 ``requires-python`` bound is not their bound to police.
+
+A launchd consumer's own ``EnvironmentVariables.PATH`` (when declared) IS the
+search path a bare ``python3`` in its ``ProgramArguments`` resolves against
+at runtime — ``_launchd_search_path`` reads it, mirroring how
+``discover_crontab_consumers`` already honors a crontab's leading ``PATH=``
+line. OI-1621: before this, every launchd consumer was scanned under the
+hardcoded ``BACKGROUND_PATH`` regardless of its own declared PATH, which
+false-flagged ``com.vnx.gate-obligation-runner``/``com.vnx.ledger-health`` —
+both deliberately declare a homebrew-first PATH so their bare ``python3``
+resolves a modern interpreter, but the scan ignored that declaration and
+checked the Xcode-CLT stub instead.
+
+``check_repo_launchd_templates`` runs the same static resolution over this
+repo's own plist TEMPLATES (``scripts/launchd/*.plist``, not the installed
+copies) plus a well-formed-XML check — a regression guard so a future
+template edit cannot silently reintroduce either OI-1621 defect: invalid XML
+(a literal ``--`` inside an XML comment, which XML forbids, once broke
+``com.vnx.gate-obligation-runner.plist``) or an interpreter pin/PATH that
+falls outside ``requires-python``.
 
 The library is pure/injectable for tests; the CLI is used by
 scripts/hooks/path_parity_check.sh at SessionStart.
@@ -49,7 +70,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from xml.parsers.expat import ExpatError
+from xml.parsers.expat import ExpatError, ParserCreate
 
 _LOG = logging.getLogger(__name__)
 
@@ -297,6 +318,29 @@ def resolve_interpreter_version(
     return version
 
 
+def _launchd_search_path(data: Dict[str, Any]) -> str:
+    """The PATH launchd will actually hand this job.
+
+    A launchd agent's own ``EnvironmentVariables.PATH`` (when it declares
+    one) IS the search path a bare ``python3`` in its ``ProgramArguments``
+    resolves against at runtime — mirrors how ``discover_crontab_consumers``
+    already honors a crontab's leading ``PATH=`` line rather than assuming
+    the launchd/cron default everywhere.
+
+    OI-1621: before this, every launchd consumer was scanned under the
+    hardcoded ``BACKGROUND_PATH`` regardless of what its own plist declared,
+    so a job that deliberately sets ``EnvironmentVariables.PATH`` to a
+    homebrew-first PATH (precisely to avoid resolving macOS's ancient
+    Xcode-CLT ``/usr/bin/python3``) was still scanned as if it hadn't —
+    flagging ``com.vnx.gate-obligation-runner``/``com.vnx.ledger-health`` as
+    a false ``consumer_interpreter_out_of_range`` even though their real,
+    declared PATH resolves a fine interpreter.
+    """
+    env_vars = data.get("EnvironmentVariables")
+    declared = env_vars.get("PATH") if isinstance(env_vars, dict) else None
+    return declared if isinstance(declared, str) and declared.strip() else BACKGROUND_PATH
+
+
 def discover_launchd_consumers(agents_dir: Path) -> List[Dict[str, Any]]:
     """Enumerate ``com.vnx.*.plist`` launchd agents as ``{label, argv, source}``.
 
@@ -324,7 +368,7 @@ def discover_launchd_consumers(agents_dir: Path) -> List[Dict[str, Any]]:
                 "label": data.get("Label") or plist.stem,
                 "argv": list(argv),
                 "source": str(plist),
-                "search_path": BACKGROUND_PATH,
+                "search_path": _launchd_search_path(data),
             }
         )
     return consumers
@@ -538,6 +582,114 @@ def scan_consumers(
         "requires_python": requires_python,
         "consumers": resolved,
         "mismatches": mismatches,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Repo launchd TEMPLATE guard — scripts/launchd/*.plist itself, not the
+# installed copies under ~/Library/LaunchAgents (OI-1621).
+# ─────────────────────────────────────────────────────────────────────────
+
+_VNX_HOME_PLACEHOLDER = "${VNX_HOME}"
+
+
+def check_repo_launchd_templates(
+    templates_dir: Path,
+    repo_root: Path,
+    requires_python: Optional[str],
+    runner: Any = None,
+) -> Dict[str, Any]:
+    """Guard for the launchd plist TEMPLATES this repo ships under
+    ``scripts/launchd/`` — a regression check, not a live-host scan (that is
+    ``discover_launchd_consumers`` + ``scan_consumers`` above). Enforces two
+    properties every template must hold before it is ever installed:
+
+      1. well-formed XML — OI-1621: ``com.vnx.gate-obligation-runner.plist``
+         once carried a literal ``--`` inside an XML comment, which XML
+         forbids on every parser, not just a strict one.
+      2. any interpreter a template's ``ProgramArguments`` resolves to (after
+         substituting the ``${VNX_HOME}`` placeholder the install scripts
+         themselves substitute — ``reload_plist.sh``, ``vnx init``) falls
+         inside this project's ``requires_python`` range.
+
+    A template using an install-time placeholder this function cannot
+    statically resolve (e.g. ``headless-trigger``'s ``__VNX_PYTHON__``, which
+    no installer in this repo currently substitutes) is reported
+    not-relevant, same as ``resolve_consumer_interpreter``'s existing
+    "cannot judge" cases — never silently treated as in-range.
+
+    A file that fails the XML check is skipped for the interpreter check
+    (nothing to resolve from unparseable content) but is still surfaced in
+    ``xml_errors`` — one broken template must not blank out the rest of the
+    scan, the same fail-soft discipline as ``discover_launchd_consumers``.
+    """
+    templates_dir = Path(templates_dir)
+    repo_root = Path(repo_root).resolve()
+    xml_errors: List[Dict[str, str]] = []
+    consumers: List[Dict[str, Any]] = []
+
+    if not templates_dir.is_dir():
+        return {
+            "ok": False,
+            "xml_errors": [{"file": str(templates_dir), "error": "not a directory"}],
+            "mismatches": [],
+            "consumers": [],
+        }
+
+    version_cache: Dict[str, Optional[str]] = {}
+    for plist in sorted(templates_dir.glob("*.plist")):
+        parser = ParserCreate()
+        try:
+            with open(plist, "rb") as fh:
+                parser.ParseFile(fh)
+        except ExpatError as exc:
+            xml_errors.append({"file": plist.name, "error": str(exc)})
+            continue
+
+        try:
+            with open(plist, "rb") as fh:
+                data = plistlib.load(fh)
+        except (plistlib.InvalidFileException, OSError, ValueError) as exc:
+            xml_errors.append({"file": plist.name, "error": f"plistlib: {exc}"})
+            continue
+
+        argv = data.get("ProgramArguments")
+        if not argv:
+            continue
+
+        resolved_argv = [str(arg).replace(_VNX_HOME_PLACEHOLDER, str(repo_root)) for arg in argv]
+        search_path = _launchd_search_path(data)
+        outcome = resolve_consumer_interpreter(resolved_argv, repo_root, search_path)
+        entry: Dict[str, Any] = {
+            "file": plist.name,
+            "label": data.get("Label") or plist.stem,
+            **outcome,
+        }
+        if outcome["relevant"] and outcome["interpreter"]:
+            version = resolve_interpreter_version(outcome["interpreter"], runner=runner, cache=version_cache)
+            entry["version"] = version
+            entry["in_range"] = version_in_range(version, requires_python) if version else None
+        consumers.append(entry)
+
+    mismatches = [
+        {
+            "kind": "template_interpreter_out_of_range",
+            "file": c["file"],
+            "label": c["label"],
+            "interpreter": c.get("interpreter"),
+            "version": c.get("version"),
+            "requires_python": requires_python,
+        }
+        for c in consumers
+        if c.get("relevant") and c.get("in_range") is False
+    ]
+
+    return {
+        "ok": not xml_errors and not mismatches,
+        "requires_python": requires_python,
+        "xml_errors": xml_errors,
+        "mismatches": mismatches,
+        "consumers": consumers,
     }
 
 
