@@ -92,12 +92,12 @@ class TestStatusCannotBeHealthierThanBeacon:
         assert health["status"] != "healthy"
 
     def test_ok_beacon_allows_healthy_status(self, tmp_path: Path) -> None:
-        # daemon_liveness is injected as neutral "ok" so this test isolates
-        # beacon behavior instead of depending on which real daemons happen
-        # to be running on the machine executing the suite. Same reasoning
-        # for expected_beacon_components=() (D3a): the real repo's 9
-        # beacon-writer names would otherwise show up as "absent" against
-        # this bare tmp_path and force overall to "fail".
+        # daemon_liveness/launchd_liveness are injected as neutral "ok" so
+        # this test isolates beacon behavior instead of depending on which
+        # real daemons/launchd jobs happen to be loaded on the machine
+        # executing the suite. Same reasoning for expected_beacon_components=()
+        # (D3a): the real repo's 9 beacon-writer names would otherwise show up
+        # as "absent" against this bare tmp_path and force overall to "fail".
         state_dir = _state_dir_with_terminal_marker(tmp_path)
         HealthBeacon(state_dir.parent, "good_comp", expected_interval_seconds=3600).heartbeat(
             status="ok", details={}
@@ -105,6 +105,7 @@ class TestStatusCannotBeHealthierThanBeacon:
         health = bts._build_system_health(
             state_dir, db_initialized=True,
             daemon_liveness={"overall": "ok", "daemons": {}},
+            launchd_liveness={"overall": "ok", "jobs": {}},
             expected_beacon_components=(),
         )
         assert health["beacon_health"]["overall"] == "ok"
@@ -177,7 +178,11 @@ class TestDaemonLivenessMonotonic:
         # expected_beacon_components=() isolates from this repo's real
         # beacon-writer register (D3a) -- this test writes no beacon at all,
         # so without the override every one of the real names would read
-        # "absent" and force status to "degraded".
+        # "absent" and force status to "degraded". launchd_liveness is
+        # injected neutral for the same reason daemon_liveness always was --
+        # without it, the real (unmocked) launchctl measurement would run
+        # against whatever com.vnx.* jobs happen to be loaded on the machine
+        # running the suite.
         state_dir = _state_dir_with_terminal_marker(tmp_path)
         daemon_liveness = {
             "overall": "ok",
@@ -185,6 +190,7 @@ class TestDaemonLivenessMonotonic:
         }
         health = bts._build_system_health(
             state_dir, db_initialized=True, daemon_liveness=daemon_liveness,
+            launchd_liveness={"overall": "ok", "jobs": {}},
             expected_beacon_components=(),
         )
         assert health["status"] == "healthy"
@@ -196,6 +202,7 @@ class TestDaemonLivenessMonotonic:
         daemon_liveness = {"overall": "unknown", "daemons": {}, "reason": "psutil unavailable"}
         health = bts._build_system_health(
             state_dir, db_initialized=True, daemon_liveness=daemon_liveness,
+            launchd_liveness={"overall": "unknown", "jobs": {}, "reason": "launchctl unavailable"},
             expected_beacon_components=(),
         )
         assert health["status"] == "healthy"
@@ -208,6 +215,155 @@ class TestDaemonLivenessMonotonic:
         health = bts._build_system_health(state_dir, db_initialized=True)
         assert "daemon_liveness" in health
         assert health["daemon_liveness"]["overall"] in ("ok", "fail", "unknown")
+
+
+class TestLaunchdLivenessMonotonic:
+    """Golf 1B: the second producer class daemon_liveness does not cover --
+    scripts/launchd/*.plist-declared batch jobs. Same monotonicity contract
+    as TestDaemonLivenessMonotonic above, applied to the new signal."""
+
+    def test_injected_launchd_fail_forbids_healthy_status(self, tmp_path: Path) -> None:
+        """THE red test this dispatch asked for: a producer measured as NOT
+        running next to status=healthy is exactly the bug OI-1511 named."""
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        launchd_liveness = {
+            "overall": "fail",
+            "jobs": {"com.vnx.ledger-health": {"expected": True, "state": "not_loaded", "since": None, "since_measured": False}},
+        }
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            launchd_liveness=launchd_liveness,
+            expected_beacon_components=(),
+        )
+        assert health["launchd_liveness"]["overall"] == "fail"
+        assert health["status"] != "healthy", (
+            f"status={health['status']!r} sits next to launchd_liveness.overall='fail' "
+            "-- a summary reported healthier than its own nested signal"
+        )
+
+    def test_injected_launchd_ok_allows_healthy_status(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            launchd_liveness={"overall": "ok", "jobs": {"com.vnx.ledger-health": {"expected": True, "state": "loaded", "since": "2026-09-04T06:00:00Z", "since_measured": True}}},
+            expected_beacon_components=(),
+        )
+        assert health["status"] == "healthy"
+
+    def test_unknown_launchd_liveness_does_not_force_degraded(self, tmp_path: Path) -> None:
+        """'unknown' (launchctl itself could not be queried) is a third
+        branch -- it must not be silently treated as a failure."""
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            launchd_liveness={"overall": "unknown", "jobs": {}, "reason": "launchctl unavailable"},
+            expected_beacon_components=(),
+        )
+        assert health["status"] == "healthy"
+
+    def test_real_measurement_runs_when_not_injected(self, tmp_path: Path) -> None:
+        """Default (no launchd_liveness param) exercises the real
+        discover-plists + launchctl-list measurement -- must not raise, and
+        must surface a launchd_liveness key with a recognized overall value
+        regardless of what is actually loaded on the machine running this
+        suite (CI has no launchctl at all -- that must read 'unknown', never
+        raise)."""
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(state_dir, db_initialized=True)
+        assert "launchd_liveness" in health
+        assert health["launchd_liveness"]["overall"] in ("ok", "fail", "unknown")
+
+    def test_never_silently_omitted_when_measurement_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Niet-gemeten is een derde tak, geen derde waarde -- en zeker geen
+        afwezig veld. Unlike the pre-existing beacon_health/daemon_liveness
+        pattern (which silently drops the key entirely when the underlying
+        measurement raises), launchd_liveness must ALWAYS be present: an
+        absent key looks like 'nobody wired this in', an explicit 'unknown'
+        says 'we tried and could not tell' -- those are different claims."""
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated total measurement failure")
+
+        monkeypatch.setattr(bts, "_measure_launchd_liveness", _boom)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            expected_beacon_components=(),
+        )
+        assert "launchd_liveness" in health
+        assert health["launchd_liveness"]["overall"] == "unknown"
+        assert health["status"] == "healthy"
+
+
+class TestProducerLivenessComposedField:
+    """The single 'first-class producer liveness field' this dispatch asked
+    for: producer_liveness folds daemon_liveness (supervised, always-on
+    daemons) and launchd_liveness (scheduled batch jobs) into ONE overall
+    value via _combine_liveness_overall, so a caller does not have to know
+    both sub-signals exist and combine them by hand."""
+
+    def test_either_producer_class_failing_forbids_producer_liveness_ok(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "fail", "daemons": {"dispatcher": {"state": "absent"}}},
+            launchd_liveness={"overall": "ok", "jobs": {}},
+            expected_beacon_components=(),
+        )
+        assert health["producer_liveness"]["overall"] == "fail"
+
+    def test_launchd_failing_alone_forbids_producer_liveness_ok(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            launchd_liveness={"overall": "fail", "jobs": {"com.vnx.ledger-health": {"state": "not_loaded"}}},
+            expected_beacon_components=(),
+        )
+        assert health["producer_liveness"]["overall"] == "fail"
+
+    def test_both_ok_yields_producer_liveness_ok(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            launchd_liveness={"overall": "ok", "jobs": {}},
+            expected_beacon_components=(),
+        )
+        assert health["producer_liveness"]["overall"] == "ok"
+
+    def test_both_unknown_yields_producer_liveness_unknown_not_ok(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "unknown", "daemons": {}, "reason": "psutil unavailable"},
+            launchd_liveness={"overall": "unknown", "jobs": {}, "reason": "launchctl unavailable"},
+            expected_beacon_components=(),
+        )
+        assert health["producer_liveness"]["overall"] == "unknown"
+
+    def test_producer_liveness_carries_both_sub_overalls(self, tmp_path: Path) -> None:
+        """A summary, not a re-embedding of the full per-daemon/per-job
+        dicts (those already sit as sibling keys -- see the size-budget note
+        on the production code): producer_liveness carries each class's
+        overall value, not its full breakdown."""
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        daemon_liveness = {"overall": "ok", "daemons": {"dispatcher": {"state": "running"}}}
+        launchd_liveness = {"overall": "fail", "jobs": {"com.vnx.ledger-health": {"state": "not_loaded"}}}
+        health = bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness=daemon_liveness,
+            launchd_liveness=launchd_liveness,
+            expected_beacon_components=(),
+        )
+        assert health["producer_liveness"]["daemon_overall"] == "ok"
+        assert health["producer_liveness"]["launchd_overall"] == "fail"
+        assert "daemons" not in health["producer_liveness"]
+        assert "jobs" not in health["producer_liveness"]
 
 
 class TestBriefCarriesDaemonLiveness:
@@ -239,3 +395,37 @@ class TestBriefCarriesDaemonLiveness:
         }
         brief = bts._state_to_brief(state)
         assert brief["system_health"]["status"] == "degraded"
+
+    def test_state_to_brief_includes_launchd_liveness(self) -> None:
+        """Second-reader gap (D2's own note above): a field that lands only
+        in the builder and not in the backward-compat brief is a half
+        repair."""
+        state = {
+            "generated_at": "2026-09-04T10:00:00Z",
+            "system_health": {
+                "status": "degraded",
+                "uptime_seconds": 0,
+                "db_initialized": True,
+                "beacon_health": {"overall": "fail"},
+                "launchd_liveness": {"overall": "fail", "jobs": {"com.vnx.ledger-health": {"state": "not_loaded"}}},
+            },
+        }
+        brief = bts._state_to_brief(state)
+        assert brief["system_health"].get("launchd_liveness") == {
+            "overall": "fail", "jobs": {"com.vnx.ledger-health": {"state": "not_loaded"}},
+        }
+
+    def test_state_to_brief_includes_producer_liveness(self) -> None:
+        state = {
+            "generated_at": "2026-09-04T10:00:00Z",
+            "system_health": {
+                "status": "degraded",
+                "uptime_seconds": 0,
+                "db_initialized": True,
+                "producer_liveness": {"overall": "fail", "daemon_overall": "ok", "launchd_overall": "fail"},
+            },
+        }
+        brief = bts._state_to_brief(state)
+        assert brief["system_health"].get("producer_liveness") == {
+            "overall": "fail", "daemon_overall": "ok", "launchd_overall": "fail",
+        }

@@ -68,7 +68,9 @@ import argparse
 import json
 import logging
 import os
+import plistlib
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -1825,6 +1827,284 @@ def _build_git_context() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Launchd-job liveness (Golf 1B, absence-is-loud / ledger-is-falsifiable)
+#
+# daemon_liveness (D2, above) already gives t0_state.json first-class, tri-
+# state (running/absent/unknown) visibility into the always-on daemons
+# vnx_supervisor_simple.sh's start_all() starts. It parses ONLY that shell
+# function. The seven com.vnx.* launchd-scheduled BATCH jobs declared in
+# scripts/launchd/*.plist (producer-freshness-monitor, gate-obligation-
+# runner, nightly-intelligence-pipeline, receipt-classifier-batch, ledger-
+# health, conversation-analyzer, headless-trigger) had ZERO visibility here
+# before this: measured live while building this module, `launchctl list`
+# showed conversation-analyzer/gate-obligation-runner/ledger-health/producer-
+# freshness-monitor loaded (TWO of those four with a nonzero last-exit-status
+# -- gate-obligation-runner=11, ledger-health=1, i.e. loaded but failing)
+# while headless-trigger/nightly-intelligence-pipeline/receipt-classifier-
+# batch were not loaded at all. A "the process exists" proxy (daemon_liveness)
+# cannot see any of this: these jobs are not supposed to be a running PID
+# most of the time, only loaded-and-scheduled.
+#
+# Same tri-state discipline as daemon_register.py, never collapsed to two
+# values: "loaded" (measured, now) / "not_loaded" (measured absence, a real
+# finding) / "unknown" (launchctl itself could not be queried). "since when"
+# is a SEPARATE fact -- launchctl list carries no timestamp, so it comes from
+# the most recent matching record in job_exits.ndjson's existing launchd-
+# harvest stream (scripts/lib/job_exit_capture.py) when one exists, and is
+# explicitly None (with since_measured=False) -- never a fabricated value --
+# when no harvest history exists yet.
+# ---------------------------------------------------------------------------
+
+_JOB_EXITS_TAIL_LINES = 2000
+
+
+def _scan_launchd_dir(launchd_dir: Optional[Path] = None) -> "tuple[List[str], List[str]]":
+    """Expected launchd job labels, read explicitly from each plist's own
+    Label key -- never guessed off the filename. Returns ``(labels,
+    unparseable_filenames)``: a plist that fails to parse is excluded from
+    ``labels`` (one broken file must not blank out the rest of the register)
+    but its filename is NOT silently dropped -- it is returned so the caller
+    can surface it as a loud finding instead of a debug-log line nobody
+    reads. This is exactly the failure mode this dispatch exists to prevent:
+    measured live while building this module,
+    ``scripts/launchd/com.vnx.gate-obligation-runner.plist`` contains a
+    literal ``--`` inside an XML comment ("...the --project-id value...")
+    which is invalid XML (comments may never contain ``--``) -- a real,
+    currently-broken plist in this repo, not a hypothetical one.
+    """
+    directory = launchd_dir if launchd_dir is not None else (_PROJECT_ROOT / "scripts" / "launchd")
+    labels: List[str] = []
+    unparseable: List[str] = []
+    try:
+        plist_paths = sorted(directory.glob("*.plist"))
+    except OSError as exc:
+        log.debug("_scan_launchd_dir: cannot list %s: %s", directory, exc)
+        return labels, unparseable
+    for path in plist_paths:
+        try:
+            with open(path, "rb") as fh:
+                data = plistlib.load(fh)
+        except Exception as exc:  # vnx-silent-except: one unparseable plist must not blank out the rest of the register; the filename itself is returned to the caller, not swallowed
+            log.debug("_scan_launchd_dir: could not parse %s: %s", path, exc)
+            unparseable.append(path.name)
+            continue
+        label = data.get("Label") if isinstance(data, dict) else None
+        if isinstance(label, str) and label:
+            labels.append(label)
+        else:
+            unparseable.append(path.name)
+    return sorted(set(labels)), sorted(unparseable)
+
+
+def _discover_launchd_jobs(launchd_dir: Optional[Path] = None) -> List[str]:
+    """Expected launchd job labels only. See ``_scan_launchd_dir`` for the
+    variant that also surfaces filenames that failed to parse -- used by
+    ``_measure_launchd_liveness`` so a broken plist is a loud finding, not a
+    silently-dropped debug line.
+
+    A missing/unreadable directory or zero parseable labels is simply an
+    empty list, never raised: the caller (``_measure_launchd_liveness``)
+    treats a resulting empty list as its own signal ("could not establish a
+    register"), not as "zero jobs expected".
+    """
+    labels, _unparseable = _scan_launchd_dir(launchd_dir)
+    return labels
+
+
+def _measure_launchd_now(
+    labels: Sequence[str],
+    *,
+    runner: Any = None,
+    which_fn: Any = None,
+    timeout: int = 10,
+) -> Dict[str, Any]:
+    """Query ``launchctl list`` once, live, for the current loaded/exit-status
+    state of every label. Reuses job_exit_capture's own output parser rather
+    than a second hand-rolled regex.
+
+    Returns ``{"measured": True, "applicable": True, "jobs": {label: {...}}}``
+    on success (only labels launchctl actually reports are present -- a
+    requested label simply absent from the dict means "not loaded", it is
+    the caller's job to turn that into the "not_loaded" state), or
+    ``{"measured": False, "applicable": bool, "reason": "..."}`` when
+    launchctl itself could not be queried -- this is the 'unmeasurable' half
+    of the tri-state contract; it must never collapse into an empty (and
+    therefore "everything absent") jobs dict.
+
+    ``applicable`` distinguishes two different kinds of "could not measure"
+    (PR #1755 CI failure, both on a Linux CI runner AND reproduced
+    independently on a real macOS dev machine): ``applicable=False`` means
+    ``launchctl`` does not exist on this platform AT ALL (checked via
+    ``which_fn``, default ``shutil.which``, BEFORE spawning any subprocess)
+    -- a structural, permanent fact (every non-macOS machine, forever), not
+    a transient failure worth investigating. ``applicable=True`` (the prior,
+    only behavior) means launchctl exists but this particular invocation
+    failed (a race where the binary vanished after the which() check,
+    non-zero exit, timeout) -- "tried on a platform where it should work,
+    and this one attempt failed", a genuinely different, more actionable
+    claim than "not applicable here".
+    """
+    which = which_fn or shutil.which
+    if which("launchctl") is None:
+        return {"measured": False, "applicable": False, "reason": "launchctl not present on this platform"}
+
+    run = runner or subprocess.run
+    try:
+        proc = run(["launchctl", "list"], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"measured": False, "applicable": True, "reason": f"launchctl unavailable: {exc}"}
+    if proc.returncode != 0:
+        return {"measured": False, "applicable": True, "reason": f"launchctl list exited {proc.returncode}"}
+
+    try:
+        from job_exit_capture import _parse_launchctl_list
+    except ImportError as exc:
+        return {"measured": False, "applicable": True, "reason": f"job_exit_capture unavailable: {exc}"}
+
+    jobs = {job["label"]: job for job in _parse_launchctl_list(proc.stdout)}
+    return {"measured": True, "applicable": True, "jobs": jobs}
+
+
+def _last_job_exit_by_label(state_dir: Path, labels: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    """Best-effort: the most recent ``job_exit`` record per label from
+    ``job_exits.ndjson`` (mirrors the tail-read convention this file already
+    uses for t0_receipts.ndjson -- ``.splitlines()[-N:]``). A missing file,
+    or a label with no matching record, is simply absent from the result --
+    the caller reports that as an explicit "since not measured", never as
+    "never ran" (those are different claims; a job can be loaded and healthy
+    with no harvest history yet because the harvest itself has not run)."""
+    path = state_dir / "job_exits.ndjson"
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+
+    label_set = set(labels)
+    result: Dict[str, Dict[str, Any]] = {}
+    for line in text.splitlines()[-_JOB_EXITS_TAIL_LINES:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("event_type") != "job_exit":
+            continue
+        job = record.get("job")
+        if job not in label_set:
+            continue
+        prev = result.get(job)
+        ts = str(record.get("timestamp") or "")
+        if prev is None or ts >= str(prev.get("timestamp") or ""):
+            result[job] = record
+    return result
+
+
+def _combine_liveness_overall(*values: Optional[str]) -> str:
+    """Fold sub-signal ``overall`` values (the ``"ok"``/``"fail"``/``"unknown"``
+    vocabulary daemon_liveness already established) into one, mirroring the
+    stop_conditions.py ``CheckStatus``/``_combine`` combination rule (PR
+    #1754, not on this branch's main yet -- rebuilt here in this file's own
+    idiom rather than imported, since 'unmeasurable' must stay a distinct
+    branch, never collapsed into either of the other two): ANY ``"fail"`` ->
+    ``"fail"``; else ANY ``"ok"`` -> ``"ok"``; else ``"unknown"`` (every
+    sub-signal was itself unmeasured, or there were none at all)."""
+    present = [v for v in values if v is not None]
+    if any(v == "fail" for v in present):
+        return "fail"
+    if any(v == "ok" for v in present):
+        return "ok"
+    return "unknown"
+
+
+def _measure_launchd_liveness(
+    state_dir: Path,
+    *,
+    launchd_dir: Optional[Path] = None,
+    runner: Any = None,
+    which_fn: Any = None,
+) -> Dict[str, Any]:
+    """Measure whether every expected launchd job is currently loaded, and
+    since when its last recorded exit is known.
+
+    Returns ``{"overall": "ok"|"fail"|"unknown", "jobs": {label: {...}}}``,
+    plus ``"unparseable_plists"`` (filenames, non-empty only when at least
+    one exists).
+
+    ``overall`` is ``"fail"`` ONLY when a label was actually measured
+    (launchctl ran, on a platform where it applies) and found not loaded --
+    a real, actionable finding. Everything else this module could not
+    establish -- launchctl not applicable on this platform, launchctl
+    applicable but this invocation failed, OR a plist that failed to parse
+    and so names a producer this module cannot even identify -- folds into
+    ``"unknown"``. This is a deliberate correction (PR #1755 CI failure):
+    an unparseable plist used to force ``"fail"`` unconditionally, which
+    made ONE broken, cross-platform, this-module-cannot-fix-it plist a
+    permanent, unfalsifiable "everything is unhealthy" signal on every
+    single measurement forever -- niet-gemeten is een derde tak, geen derde
+    waarde: "we could not identify this producer" is a "we don't know", not
+    a "we know and it's broken", and treating it as the latter is exactly
+    the kind of noise that makes a REAL "fail" easy to tune out. The
+    ``unparseable_plists`` finding stays fully visible either way -- it is
+    never dropped, only kept out of the pass/fail verdict. A genuinely
+    measured not-loaded label still wins over an unrelated unparseable
+    plist (a real finding is never laundered away by an unrelated unknown).
+
+    Zero discovered plist labels (register + zero valid AND zero
+    unparseable) is its own "unknown" case (a register that could not be
+    established at all, exactly the discipline
+    ``daemon_register.read_daemon_register`` already applies to a
+    structurally-empty parse) -- it must never silently read as "ok,
+    nothing to report".
+    """
+    labels, unparseable = _scan_launchd_dir(launchd_dir)
+    if not labels and not unparseable:
+        return {"overall": "unknown", "jobs": {}, "reason": "no launchd plist files discovered"}
+
+    now_result = (
+        _measure_launchd_now(labels, runner=runner, which_fn=which_fn) if labels
+        else {"measured": True, "applicable": True, "jobs": {}}
+    )
+    exit_history = _last_job_exit_by_label(state_dir, labels)
+
+    jobs: Dict[str, Any] = {}
+    any_not_loaded = False
+    for label in labels:
+        history = exit_history.get(label)
+        since = history.get("timestamp") if history else None
+        if now_result["measured"]:
+            state = "loaded" if label in now_result["jobs"] else "not_loaded"
+        elif not now_result.get("applicable", True):
+            state = "not_applicable"
+        else:
+            state = "unknown"
+        jobs[label] = {
+            "expected": True,
+            "state": state,
+            "since": since,
+            "since_measured": since is not None,
+            "last_exit_code": history.get("exit_code") if history else None,
+        }
+        if now_result["measured"] and label not in now_result["jobs"]:
+            any_not_loaded = True
+
+    if now_result["measured"] and any_not_loaded:
+        overall = "fail"
+    elif not now_result["measured"] or unparseable:
+        overall = "unknown"
+    else:
+        overall = "ok"
+
+    result: Dict[str, Any] = {"overall": overall, "jobs": jobs}
+    if unparseable:
+        result["unparseable_plists"] = unparseable
+    if not now_result["measured"]:
+        result["reason"] = now_result["reason"]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # System health
 # ---------------------------------------------------------------------------
 
@@ -1836,6 +2116,7 @@ def _build_system_health(
     db_health: str = "healthy",
     daemon_liveness: Optional[Dict[str, Any]] = None,
     expected_beacon_components: Optional[Sequence[str]] = None,
+    launchd_liveness: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     uptime_seconds = 0
     panes_path = state_dir / "panes.json"
@@ -1898,6 +2179,21 @@ def _build_system_health(
         except Exception as exc:  # vnx-silent-except: daemon-liveness read is best-effort, mirrors beacon_health above; a failure here must not break the session-start hot path
             log.debug("measure_daemon_liveness failed (non-critical): %s", exc)
 
+    # Golf 1B: launchd-scheduled batch jobs are a second producer class
+    # daemon_liveness above does not cover at all (it parses ONLY
+    # vnx_supervisor_simple.sh's start_all()). Read the same best-effort way
+    # as beacon_health/daemon_liveness -- but, unlike those two, NEVER
+    # silently omitted from `result` when the measurement raises: an absent
+    # key looks like "nobody wired this in", an explicit "unknown" says "we
+    # tried and could not tell" -- niet-gemeten is een derde tak, geen derde
+    # waarde, en zeker geen weggelaten veld.
+    if launchd_liveness is None:
+        try:
+            launchd_liveness = _measure_launchd_liveness(state_dir)
+        except Exception as exc:  # vnx-silent-except: launchd-liveness read is best-effort, mirrors beacon_health/daemon_liveness above; a failure here must not break the session-start hot path
+            log.debug("measure_launchd_liveness failed (non-critical): %s", exc)
+            launchd_liveness = {"overall": "unknown", "jobs": {}, "reason": f"measurement raised: {exc}"}
+
     # R6.4 (D2): a summary can never report healthier than the worst thing it
     # summarizes. Before this, `status` was computed once above (from
     # db_health/build_degraded/artifact-presence) and never revisited, so
@@ -1905,11 +2201,12 @@ def _build_system_health(
     # `status: "healthy"` in the same object -- a structurally possible
     # outcome of the code, not a fluke (measured 2026-08-30 in production
     # t0_state.json). Every nested health field added here must feed this
-    # aggregation, including daemon_liveness.
+    # aggregation, including daemon_liveness and launchd_liveness.
     status = worst_status(
         status,
         beacon_health.get("overall") if beacon_health else None,
         daemon_liveness.get("overall") if daemon_liveness else None,
+        launchd_liveness.get("overall") if launchd_liveness else None,
     )
 
     result: Dict[str, Any] = {
@@ -1921,6 +2218,30 @@ def _build_system_health(
         result["beacon_health"] = beacon_health
     if daemon_liveness is not None:
         result["daemon_liveness"] = daemon_liveness
+    # launchd_liveness is unconditional -- see the "never silently omitted"
+    # note above; it is always a dict by this point, never None.
+    result["launchd_liveness"] = launchd_liveness
+    # producer_liveness: the single first-class liveness field a caller can
+    # check without knowing daemon_liveness and launchd_liveness are two
+    # separate producer classes that need combining by hand. Folds both via
+    # _combine_liveness_overall -- also unconditional, always a dict.
+    #
+    # Deliberately a SUMMARY, not a re-embedding of the full daemon_liveness/
+    # launchd_liveness dicts: those already sit as sibling keys in this same
+    # result, and t0_index.json copies system_health wholesale into its
+    # cheap, always-loaded ``health`` field under a hard <=5KB budget
+    # (measured live building this module: duplicating both full dicts here
+    # pushed a real t0_index.json from 3559 to 8024 bytes). Per-daemon and
+    # per-job detail is one field away (daemon_liveness/launchd_liveness
+    # above) for a caller that wants it.
+    result["producer_liveness"] = {
+        "overall": _combine_liveness_overall(
+            daemon_liveness.get("overall") if daemon_liveness else None,
+            launchd_liveness.get("overall") if launchd_liveness else None,
+        ),
+        "daemon_overall": daemon_liveness.get("overall") if daemon_liveness else None,
+        "launchd_overall": launchd_liveness.get("overall") if launchd_liveness else None,
+    }
     return result
 
 
@@ -2586,6 +2907,8 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "db_initialized": sh.get("db_initialized", False),
             "beacon_health": sh.get("beacon_health"),
             "daemon_liveness": sh.get("daemon_liveness"),
+            "launchd_liveness": sh.get("launchd_liveness"),
+            "producer_liveness": sh.get("producer_liveness"),
         },
     }
 
@@ -2609,6 +2932,39 @@ _DETAIL_SECTION_MAP: Dict[str, str] = {
     # brief output but still mirrored to t0_detail/strategic_state.json.
     "_strategic_state_heavy": "strategic_state",
 }
+
+
+def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact projection of system_health for the cheap, always-loaded
+    t0_index.json (<=5KB budget, enforced by TestIntegrationWithBuildT0State
+    in tests/test_t0_index_split.py).
+
+    Per-daemon (daemon_liveness.daemons), per-job (launchd_liveness.jobs),
+    and per-beacon (beacon_health.beacons) detail stays ONLY in the full
+    system_health (t0_state.json / t0_detail); the index keeps just each
+    nested signal's ``overall`` value -- still enough to answer "is
+    everything healthy" without loading anything else, matching the
+    module's own index/detail split ("t0_index.json: cheap always-loaded
+    index... t0_detail/<section>.json: full per-section files loaded on-
+    demand"). Measured live while adding launchd_liveness/producer_liveness
+    to this file: re-embedding their full per-item breakdowns in the index
+    pushed a real t0_index.json from 3559 to 8024 bytes, over budget --
+    slimming here (not shrinking the fields themselves) is the fix.
+    """
+    slim: Dict[str, Any] = {
+        "status": system_health.get("status"),
+        "db_initialized": system_health.get("db_initialized"),
+        "uptime_seconds": system_health.get("uptime_seconds"),
+    }
+    for key in ("beacon_health", "daemon_liveness", "launchd_liveness"):
+        nested = system_health.get(key)
+        if nested is not None:
+            slim[key] = {"overall": nested.get("overall")}
+    if "producer_liveness" in system_health:
+        # Already a lightweight summary (overall + two sub-overalls) -- no
+        # per-item breakdown to strip.
+        slim["producer_liveness"] = system_health.get("producer_liveness")
+    return slim
 
 
 def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -2645,7 +3001,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         },
         "active_dispatches": [d.get("dispatch_id", "") for d in active_work],
         "recent_receipts": (state.get("recent_receipts") or [])[-3:],
-        "health": state.get("system_health") or {},
+        "health": _slim_health_for_index(state.get("system_health") or {}),
         "track_freshness": _track_freshness_summary(state.get("track_freshness")),
         "last_rebuild_seconds": state.get("_build_seconds"),
     }
