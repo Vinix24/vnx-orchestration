@@ -460,19 +460,44 @@ def _drift_reason(
         if derived == "blocked":
             if _has_table(conn, "track_open_items"):
                 has_pid = _has_col(conn, "track_open_items", "project_id")
+                has_resolved_at = _has_col(conn, "track_open_items", "resolved_at")
+                select_sql = "SELECT oi_id FROM track_open_items WHERE track_id = ?"
+                params: list = [track_id]
                 if has_pid:
-                    blocker = conn.execute(
-                        "SELECT 1 FROM track_open_items WHERE track_id = ? AND project_id = ? "
-                        "AND link_type = 'blocks' LIMIT 1",
-                        (track_id, project_id),
-                    ).fetchone()
-                else:
-                    blocker = conn.execute(
-                        "SELECT 1 FROM track_open_items WHERE track_id = ? AND link_type = 'blocks' LIMIT 1",
-                        (track_id,),
-                    ).fetchone()
+                    select_sql += " AND project_id = ?"
+                    params.append(project_id)
+                select_sql += " AND link_type = 'blocks'"
+                if has_resolved_at:
+                    select_sql += " AND resolved_at IS NULL"
+                select_sql += " ORDER BY oi_id ASC LIMIT 1"
+                blocker = conn.execute(select_sql, params).fetchone()
                 if blocker:
-                    return "blocked by open item"
+                    oi_id = blocker["oi_id"]
+                    # OI-823: a single "blocked by open item" reason hid two
+                    # structurally different facts behind the synthetic
+                    # OI-PLAN-<track> blocker — a plan the gate never
+                    # reviewed (queue depth, not a real problem) and a plan
+                    # the gate reviewed and REFUSED (a finding is on
+                    # record). Reuse the exact classifier cmd_objective_list
+                    # already surfaces as its unread/refused badge, so
+                    # drift's per-row reason and that badge can never
+                    # disagree. A generic (non-plan-gate) blocking open item
+                    # keeps the plain, unqualified label.
+                    if oi_id and oi_id.startswith(_PLAN_OI_PREFIX):
+                        decision_ref = None
+                        if _has_col(conn, "tracks", "decision_ref"):
+                            row = conn.execute(
+                                "SELECT decision_ref FROM tracks WHERE track_id = ? AND project_id = ?",
+                                (track_id, project_id),
+                            ).fetchone()
+                            decision_ref = row["decision_ref"] if row else None
+                        review = plan_gate_enforcement.classify_review_state(
+                            open_plan_blocker=True, decision_ref=decision_ref,
+                        )
+                        if review == plan_gate_enforcement.REFUSED:
+                            return f"blocked: plan-gate refused ({oi_id})"
+                        return f"blocked: plan-gate unread ({oi_id})"
+                    return f"blocked by open item: {oi_id}"
             unmet = conn.execute(
                 """
                 SELECT td.to_track_id
@@ -2339,6 +2364,20 @@ def _fetch_deliverable_records(
             records = []
             for r in raw:
                 meta = json.loads(r["metadata_json"] or "{}")
+                # OI-1615: state IN ('proposed', 'ready') alone is NOT unique
+                # to deliverables — it is the door's ordinary rest state for
+                # ANY accepted dispatch (dispatch_cli.py's
+                # _persist_dispatch_row). Without this check this fallback
+                # lists every plain door dispatch as a "deliverable" the
+                # moment a store hits it (a store predating migration 0027,
+                # where the `deliverables` VIEW that normally shields this
+                # path via `output_ref IS NOT NULL` does not exist yet).
+                # Same discriminator as #1747/OI-1609's
+                # build_t0_state._build_human_gate_queue fix: only a
+                # dispatch cmd_deliverable_add actually created carries
+                # metadata_json.deliverable == true.
+                if not (isinstance(meta, dict) and meta.get("deliverable") is True):
+                    continue
                 rec = {
                     "deliverable_ref": r["output_ref"] or r["dispatch_id"],
                     "output_kind": r["output_kind"] or "-",
@@ -2398,7 +2437,15 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
         kind = r.get("output_kind") or "-"
         count = r.get("dispatch_count", 1)
         meta = r.get("metadata") or {}
+        # The text view rendered only the synthetic <kind>:dlv-<hex> ref, never
+        # the title `_fetch_deliverable_records` already parses from
+        # metadata_json (and `--json` already emits) — an operator scanning
+        # this list had no way to tell what any row was without switching to
+        # --json. Same "(missing...)" fallback text as
+        # _format_deliverable_for_plan's title handling, for consistency.
+        title = r.get("title") or "(missing — not set on this deliverable)"
         print(f"    {ref:<36} {kind:<6} {status:<12} ({count} dispatch(es))")
+        print(f"        {title}")
         print(f"        {_format_deliverable_field(meta, 'task_class')}")
         print(f"        {_format_deliverable_field(meta, 'routing_floor')}")
     print()

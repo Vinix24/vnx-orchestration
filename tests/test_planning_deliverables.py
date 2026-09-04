@@ -36,8 +36,13 @@ from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
 PROJECT_ID = "test-proj"
 
 
-def _build_db(tmp_path: Path) -> Path:
-    """Return a state_dir with migrations 0022 + 0024 + 0027 applied."""
+def _build_db(tmp_path: Path, *, apply_view: bool = True) -> Path:
+    """Return a state_dir with migrations 0022 + 0024 (+ 0027 unless
+    ``apply_view=False``) applied. ``apply_view=False`` leaves the
+    ``deliverables`` VIEW absent so ``_fetch_deliverable_records`` takes the
+    raw-dispatches fallback branch (planning_cli.py's "Fallback: read raw
+    dispatches when view hasn't been applied yet") — the branch OI-1615
+    measured as still carrying the pre-#1747 discriminator bug."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
     # events dir for track audit ledger
@@ -106,12 +111,13 @@ def _build_db(tmp_path: Path) -> Path:
     conn.execute("PRAGMA user_version = 26")
     conn.commit()
 
-    schema_migration.apply_script_if_below(
-        conn,
-        27,
-        (_MIGRATIONS / "0027_planning_horizon_and_deliverable_view.sql").read_text(encoding="utf-8"),
-    )
-    conn.commit()
+    if apply_view:
+        schema_migration.apply_script_if_below(
+            conn,
+            27,
+            (_MIGRATIONS / "0027_planning_horizon_and_deliverable_view.sql").read_text(encoding="utf-8"),
+        )
+        conn.commit()
     conn.close()
     return state_dir
 
@@ -208,6 +214,37 @@ def test_deliverable_list_shows_proposed(state_with_track: tuple[Path, str], cap
     assert rc == 0
     out = capsys.readouterr().out
     assert track_id in out
+
+
+def test_deliverable_list_shows_titles(state_with_track: tuple[Path, str], capsys):
+    """The human-readable `deliverable list` view must surface each
+    deliverable's title, not just its synthetic `<kind>:dlv-<hex>` ref. The
+    title is already present on every record `_fetch_deliverable_records`
+    returns (`r["title"]`, parsed from metadata_json) and `--json` already
+    emits it (see test_deliverable_list_json) — only the text renderer never
+    printed it, leaving an operator staring at bare ids with no way to tell
+    what any of them are without switching to --json."""
+    state_dir, track_id = state_with_track
+    for title in ("Post One", "Post Two"):
+        planning_cli.main([
+            "deliverable", "add",
+            "--objective", track_id,
+            "--output-kind", "post",
+            "--title", title,
+            "--project-id", PROJECT_ID,
+            "--state-dir", str(state_dir),
+        ])
+    capsys.readouterr()  # discard add output
+
+    rc = planning_cli.main([
+        "deliverable", "list",
+        "--project-id", PROJECT_ID,
+        "--state-dir", str(state_dir),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Post One" in out
+    assert "Post Two" in out
 
 
 def test_deliverable_list_json(state_with_track: tuple[Path, str], capsys):
@@ -412,3 +449,70 @@ def test_ready_dispatch_is_claimable(state_with_track: tuple[Path, str], tmp_pat
     result = broker.claim(dispatch_id, terminal_id="T1")
     assert result.dispatch_row["state"] == "claimed"
     assert result.dispatch_row["dispatch_id"] == dispatch_id
+
+
+# ---------------------------------------------------------------------------
+# deliverable list — raw-dispatches fallback (pre-migration-0027 store), OI-1615
+# ---------------------------------------------------------------------------
+#
+# OI-1615 (2026-09-03): the fallback branch of `_fetch_deliverable_records`
+# (planning_cli.py, "Fallback: read raw dispatches when view hasn't been
+# applied yet") selects on `state IN ('proposed', 'ready')` alone, with no
+# check for the `metadata_json.deliverable == true` marker `cmd_deliverable_add`
+# stamps on every row it creates. That is the EXACT bug shape #1747/OI-1609
+# fixed in `build_t0_state._build_human_gate_queue`: state='proposed' is the
+# door's ordinary rest state for ANY accepted dispatch
+# (dispatch_cli.py's `_persist_dispatch_row`), not a deliverable-specific
+# signal. Dormant on the live store today because the `deliverables` VIEW is
+# active there and filters on `output_ref IS NOT NULL` (plain dispatches have
+# a NULL output_ref) — but a store that hasn't run migration 0027 yet (a
+# fresh project cutover) hits this fallback directly and would list every
+# plain door dispatch as a "deliverable".
+
+def test_deliverable_list_fallback_excludes_plain_dispatches(tmp_path: Path, capsys):
+    state_dir = _build_db(tmp_path, apply_view=False)
+    track_id = "feat-alpha"
+    tracks_lib.create_track(
+        state_dir, track_id, PROJECT_ID,
+        title="Feature Alpha", goal_state="ship Feature Alpha",
+        phase="queued",
+        # No horizon= here: migration 0027 (which adds tracks.horizon) is
+        # deliberately absent in this fixture (apply_view=False) — a pre-0027
+        # store cannot set it either.
+    )
+
+    rc = planning_cli.main([
+        "deliverable", "add",
+        "--objective", track_id,
+        "--output-kind", "post",
+        "--title", "Real deliverable",
+        "--project-id", PROJECT_ID,
+        "--state-dir", str(state_dir),
+    ])
+    assert rc == 0
+    capsys.readouterr()
+
+    # A plain door-accepted dispatch: state='proposed' (the door's ordinary
+    # rest state), but NO deliverable marker in metadata_json — this is what
+    # dispatch_cli._persist_dispatch_row leaves behind for every accepted
+    # dispatch, not a proposed deliverable awaiting an operator promote.
+    conn = sqlite3.connect(str(state_dir / tracks_lib.DB_FILENAME))
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track, metadata_json) "
+        "VALUES (?, ?, 'proposed', ?, '{}')",
+        ("plain-dispatch-001", PROJECT_ID, track_id),
+    )
+    conn.commit()
+    conn.close()
+
+    rc = planning_cli.main([
+        "deliverable", "list",
+        "--project-id", PROJECT_ID,
+        "--state-dir", str(state_dir),
+        "--json",
+    ])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    refs = {d["deliverable_ref"] for d in data}
+    assert "plain-dispatch-001" not in refs
+    assert any(d.get("title") == "Real deliverable" for d in data)
