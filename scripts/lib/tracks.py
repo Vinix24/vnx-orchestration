@@ -18,6 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+try:
+    from qi_db_health import is_empty_schema as _db_is_empty_schema
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from qi_db_health import is_empty_schema as _db_is_empty_schema
+
 DB_FILENAME = "runtime_coordination.db"
 _TRACK_EVENTS_FILE = "track_events.ndjson"
 
@@ -48,6 +54,30 @@ class DecisionRefColumnMissingError(RuntimeError):
     Fail-closed (D5): a store predating migration 0033 lacks the decision_ref column.
     We refuse loudly and point the operator at `vnx migrate` instead of silently
     dropping the plan-gate decision pointer.
+    """
+    pass
+
+
+class EmptySchemaDecoyError(RuntimeError):
+    """Raised when state_dir resolves to a 0-table runtime_coordination.db.
+
+    Fail-closed (mirrors qi_db_health's D5/golf-3C classification for
+    quality_intelligence.db, #1737/#1759, applied here to this module's own
+    database): ``sqlite3.connect(path)`` lazily creates a 0-byte, 0-table file
+    at ``path`` the moment it is called, even when nothing is ever written or
+    committed. runtime_coordination.db is only ever bootstrapped in one shot
+    by ``runtime_coordination_init.py``'s canonical schema
+    (``schemas/runtime_coordination.sql``, 20+ tables at once) — never
+    incrementally — so a 0-table file at this exact path is never a
+    legitimate "still initializing" state.
+
+    Without this check, a decoy connects fine and the first query against it
+    raises a bare ``sqlite3.OperationalError: no such table`` — a message
+    that reads identically whether the store is a decoy (wrong
+    --project-id/--central-state) or a genuinely old store missing one
+    column after a real migration. We refuse loudly here, before that opaque
+    error has a chance to fire, and name the resolved path so the operator
+    can tell the two apart instead of chasing the wrong remediation.
     """
     pass
 
@@ -171,6 +201,18 @@ def _emit_or_defer(
 
 def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
     path = _db_path(state_dir)
+    # A 0-table file at this exact path is a decoy, never a legitimate
+    # "still initializing" state (see EmptySchemaDecoyError) — checked and
+    # refused loudly BEFORE a connection is handed out, so callers never see
+    # an opaque "no such table" instead (OI: absence-is-loud D5/golf 3C).
+    if path.exists() and _db_is_empty_schema(path):
+        raise EmptySchemaDecoyError(
+            f"_get_conn: {path} exists but has zero tables — refusing to open "
+            "it as a bootstrapped runtime_coordination.db (this is a decoy, "
+            "not \"no tracks yet\"). Check --project-id / --central-state, or "
+            "run `python scripts/runtime_coordination_init.py` against this "
+            "state_dir if it is genuinely meant to be a fresh store."
+        )
     conn = sqlite3.connect(str(path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
