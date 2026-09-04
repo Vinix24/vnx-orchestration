@@ -71,6 +71,13 @@ except ImportError:
     def _derive_tags(text, paths=None):  # type: ignore[misc]
         return []
 
+try:
+    from qi_db_health import is_empty_schema as _qi_db_is_empty_schema
+except ImportError:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from qi_db_health import is_empty_schema as _qi_db_is_empty_schema
+
 # Direct injection source table: (item_class, cumulative_drop_order)
 _DIRECT_SOURCES = [
     ("prior_round_finding", ["prior_round_finding"]),
@@ -159,6 +166,19 @@ class IntelligenceSelector:
             return self._quality_db
         if self._quality_db_path is None or not self._quality_db_path.exists():
             return None
+        # A 0-table file here is a decoy left by an interrupted
+        # create-then-bootstrap sequence elsewhere, not a real
+        # quality_intelligence.db — it reads identically to "no candidates
+        # yet" once "no such table" is swallowed by the per-source query
+        # functions below, so it is checked and refused loudly BEFORE a
+        # connection is handed out (OI: absence-is-loud D5/golf 3C).
+        if _qi_db_is_empty_schema(self._quality_db_path):
+            logger.error(
+                "_get_quality_db: quality_intelligence.db at %s exists but has 0 tables — "
+                "refusing to read it as 'no data yet' (this is the wrong file, not empty state)",
+                self._quality_db_path,
+            )
+            return None
         try:
             self._quality_db = sqlite3.connect(str(self._quality_db_path))
             self._quality_db.row_factory = sqlite3.Row
@@ -194,6 +214,14 @@ class IntelligenceSelector:
                 return None
             db_path = _resolve_central_data_dir(project_id) / "state" / "quality_intelligence.db"
             if not db_path.exists():
+                return None
+            if _qi_db_is_empty_schema(db_path):
+                logger.error(
+                    "_get_central_qi_conn: quality_intelligence.db at %s exists but has 0 "
+                    "tables — refusing to read it as 'no data yet' (this is the wrong file, "
+                    "not empty state)",
+                    db_path,
+                )
                 return None
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
