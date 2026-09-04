@@ -686,6 +686,27 @@ def _build_tracks_from_db(state_dir: Path, project_id: str) -> Dict[str, Any]:
 # metadata_json, created_at, project_id) so the query never trips on
 # later-migration-only columns (e.g. output_kind/output_ref) on a store that
 # hasn't run the out-of-band migration yet.
+#
+# state='proposed' is NOT unique to deliverables (OI-1609 point 3). Every
+# door-accepted dispatch also lands with state='proposed' — dispatch_cli.py's
+# _persist_dispatch_row deliberately uses it ("'proposed' is invisible to
+# [the claim/stuck/ghost sweeps] — the same state the deliverable layer
+# uses") and, per OI-1609 point 2 (separate dispatch), a plain dispatch
+# should leave 'proposed' once claimed but today does not. Selecting on
+# state alone therefore surfaced ~670 already-run dispatches alongside ~54
+# real deliverables (measured 2026-09-03 on vnx-dev). The `dlv-` id prefix
+# and a non-null `track` are correlated *observations* of that bug, not the
+# actual marker, and a non-null `track` would also disappear the day
+# _persist_dispatch_row starts stamping track_id-derived track values.
+#
+# The actual structural discriminator is `metadata_json.deliverable == true`
+# — the field `cmd_deliverable_add` (planning_cli.py) stamps on every row it
+# creates (`metadata_dict = {"title": title, "deliverable": True}`).
+# `_persist_dispatch_row` never writes metadata_json at all, so a plain
+# dispatch's row always parses to `{}` here. Filtering on this marker keeps
+# the reader correct independent of OI-1609 point 2 landing: it does not
+# rely on plain dispatches leaving 'proposed', so it stays correct before
+# and after that transition is fixed.
 
 _HUMAN_GATE_QUEUE_SQL = (
     "SELECT dispatch_id, track, metadata_json, created_at "
@@ -695,12 +716,18 @@ _HUMAN_GATE_QUEUE_SQL = (
 
 
 def _build_human_gate_queue(state_dir: Path, project_id: str) -> List[Dict[str, Any]]:
-    """Proposed deliverables/dispatches waiting on an operator promote decision.
+    """Proposed deliverables waiting on an operator promote decision.
 
     Read-only and additive: never mutates state, never promotes. Degrades to
     an empty list (never raises) on unavailable identity, a missing/premigration
     DB, or a locked/malformed DB — this is advisory surfacing, not a gate, so a
     degraded read must not block SessionStart.
+
+    Only rows carrying ``metadata_json.deliverable == true`` are returned —
+    see the discriminator note above the SQL. A plain door-accepted dispatch
+    that happens to also sit at state='proposed' is not a decision an
+    operator owes; it is excluded even though it matches the SQL WHERE
+    clause.
     """
     pid = (project_id or "").strip()
     if not pid:
@@ -724,6 +751,8 @@ def _build_human_gate_queue(state_dir: Path, project_id: str) -> List[Dict[str, 
             meta = json.loads(row.get("metadata_json") or "{}")
         except (TypeError, ValueError):
             meta = {}
+        if not (isinstance(meta, dict) and meta.get("deliverable") is True):
+            continue
         title = meta.get("title") if isinstance(meta, dict) else None
         queue.append({
             "id": row.get("dispatch_id"),
@@ -1639,6 +1668,32 @@ def _build_active_work(
 # Recent receipts (last N lines from t0_receipts.ndjson)
 # ---------------------------------------------------------------------------
 
+# D2 (OI, measured 2026-09-04): t0_receipts.ndjson carries pytest-fixture
+# noise (source == "pytest") — test runs that append onto the live ledger
+# instead of an isolated tmp_path. Measured on
+# ~/.vnx-data/vnx-dev/state/t0_receipts.ndjson: 28,944 lines total, 7,738
+# (27%) carrying source == "pytest". These are synthetic test entries
+# (dispatch_id like "DISP-007"/"TASK-021"), not real dispatch work, and any
+# state-reader that folds them into a success/completion count is reading a
+# polluted number. PYTEST_NOISE_FILTER_EPOCH is the explicit marker for when
+# this filter was introduced (mirrors ADR-029's chain_epoch_start
+# convention): a reader comparing an old cached count to a new one has an
+# auditable reason for the delta. The ledger itself is untouched — it is
+# append-only (ADR-005) — only the reader's interpretation changes from this
+# point forward.
+PYTEST_NOISE_FILTER_EPOCH = "2026-09-04T00:00:00+00:00"
+
+
+def _is_pytest_noise_receipt(entry: Dict[str, Any]) -> bool:
+    """True when a receipt entry is pytest-fixture noise, not real work.
+
+    D2: any receipt with ``source == "pytest"`` was written by a test run,
+    never by a real dispatch. State-readers must exclude these from recent-
+    activity views and from any derived success/completion metric.
+    """
+    return str(entry.get("source") or "").strip().lower() == "pytest"
+
+
 _STATUS_PRIORITY: Dict[str, int] = {
     "done": 0, "success": 0, "completed": 0, "pass": 0,
     "failed": 1, "failure": 1, "timeout": 1, "blocked": 1,
@@ -1691,6 +1746,9 @@ def _build_recent_receipts(
         try:
             r = json.loads(line)
         except Exception:
+            continue
+        # D2: pytest-fixture noise never represents real dispatch work.
+        if _is_pytest_noise_receipt(r):
             continue
         # Skip internal bookkeeping events — T0 wants worker completion signals
         if r.get("event_type") == "state_mutation":

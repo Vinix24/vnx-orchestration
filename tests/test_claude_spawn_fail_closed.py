@@ -67,6 +67,7 @@ class TestClaudeSpawnFailClosed:
             MockAdapter.return_value = adapter_mock
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="test",
                 model="sonnet",
                 dispatch_id="test-fail-closed",
@@ -85,6 +86,7 @@ class TestClaudeSpawnFailClosed:
             MockAdapter.return_value = adapter_mock
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="test",
                 model="sonnet",
                 dispatch_id="test-fail-closed-zero-rc",
@@ -103,6 +105,7 @@ class TestClaudeSpawnFailClosed:
             MockAdapter.return_value = adapter_mock
 
             spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="test",
                 model="sonnet",
                 dispatch_id="test-fail-closed",
@@ -120,6 +123,7 @@ class TestClaudeSpawnFailClosed:
 
             with patch("provider_spawns.claude_spawn.logger") as mock_logger:
                 spawn_claude(
+                    scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                     prompt="test",
                     model="sonnet",
                     dispatch_id="test-fail-closed",
@@ -140,6 +144,7 @@ class TestClaudeSpawnFailClosed:
             MockAdapter.return_value = adapter_mock
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="test",
                 model="sonnet",
                 dispatch_id="test-fail-closed",
@@ -155,6 +160,7 @@ class TestClaudeSpawnFailClosed:
             MockAdapter.return_value = _make_adapter_mock(_MINIMAL_EVENTS, returncode=0)
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-regression-ok",

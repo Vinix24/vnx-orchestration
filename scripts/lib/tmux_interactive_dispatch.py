@@ -1328,12 +1328,29 @@ class TmuxInteractiveDispatch:
             return receipt
         try:
             import os  # noqa: PLC0415
-            from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+            from phantom_guard import PhantomDecisionContext, record_phantom_if_any  # noqa: PLC0415
             _tok = pane_tokens or {}
             verdict = record_phantom_if_any(
                 dispatch_id=dispatch_id,
-                role=role,
-                status=receipt.get("status"),
+                context=PhantomDecisionContext(
+                    role=role,
+                    # OI-1614: this method's own signature carries no task_class param
+                    # (the tmux lane's dispatch() never learned one) — mirror the
+                    # VNX_TASK_CLASS env fallback already used for work_ref/pr_id/
+                    # parent_dispatch just below (the door's env, inherited by the
+                    # tmux pane), so a research/review dispatch is exempted here too,
+                    # not just in govern()'s later backstop.
+                    task_class=os.environ.get("VNX_TASK_CLASS") or None,
+                    # No caller on this lane currently computes an explicit read_only
+                    # signal. Explicit None (not an omitted keyword) records that this
+                    # lane looked and found nothing, not that it forgot to ask (see
+                    # PhantomDecisionContext docstring).
+                    read_only=None,
+                    status=receipt.get("status"),
+                    # Not pre-captured here — guard_at_govern resolves it below from
+                    # worktree_path/base_sha.
+                    worktree_diff=None,
+                ),
                 token_usage=(
                     int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)
                 ) or None,

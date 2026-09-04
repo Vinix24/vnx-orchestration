@@ -16,6 +16,7 @@ BILLING SAFETY: Only calls subprocess.Popen(["claude", ...]). No Anthropic SDK.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -301,6 +302,15 @@ class SubprocessAdapter:
         the agent's project directory (e.g. agents/{role}/) so the headless
         process has the right working context.
 
+        scrub_env_keys: fnmatch-style glob patterns (matched with
+        ``fnmatch.fnmatchcase`` against each env var NAME, e.g. ``"*_TOKEN"``) removed
+        from the merged environment before Popen. A literal name with no wildcard
+        matches only itself, so exact-key sets (e.g. the harness lanes'
+        ``_HARNESS_SCRUB_KEYS``) keep working unchanged. See env_scrub_patterns.py for
+        the shared default set; callers that spawn a real claude subprocess should pass
+        it explicitly rather than relying on the ``None`` default (no scrub) — see
+        tests/test_spawn_scrub_env_keys_contract.py for the enforced call-site contract.
+
         extra_cli_args: if provided, these flags are inserted into the claude
         argv after the standard flags and before --resume/instruction.  Used by
         the DeepSeek-harness lane to force MCP off
@@ -389,8 +399,13 @@ class SubprocessAdapter:
                 merged_env.update({k: v for k, v in extra_env.items() if v is not None})
             if dispatch_id:
                 merged_env["VNX_CURRENT_DISPATCH_ID"] = dispatch_id
-            for _scrub_key in (scrub_env_keys or ()):
-                merged_env.pop(_scrub_key, None)
+            if scrub_env_keys:
+                for _existing_key in list(merged_env.keys()):
+                    if any(
+                        fnmatch.fnmatchcase(_existing_key, _pattern)
+                        for _pattern in scrub_env_keys
+                    ):
+                        merged_env.pop(_existing_key, None)
             popen_kwargs["env"] = merged_env
 
         # Clear stale session_id before spawning; updated when the init event arrives.

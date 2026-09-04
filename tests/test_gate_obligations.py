@@ -191,11 +191,18 @@ class _FakeManager(GateReportGeneratorMixin):
         return {"pr_number": pr_number, "branch": branch, "gates": [], "has_required_failure": False}
 
 
-def _patch_manager(monkeypatch, manager: "_FakeManager") -> None:
-    """Hermetic patch: no git, no gh, no real gate — only the fake manager."""
+def _patch_manager(monkeypatch, manager: "_FakeManager", *, pr_state: str = "OPEN") -> None:
+    """Hermetic patch: no git, no gh, no real gate — only the fake manager.
+
+    ``pr_state`` (OI-1508) stubs the RESOLVED branch's own ``gh pr view``
+    state check to a fixed answer — default ``"OPEN"`` so every test in this
+    file that registers an obligation WITH a ``pr_number`` (a RESOLVED
+    resolution) keeps reaching ``attempt_gate`` exactly as before this fix.
+    """
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state, raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     # _write_not_executable_result (mixed into _FakeManager, real production

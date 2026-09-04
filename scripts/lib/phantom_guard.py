@@ -59,9 +59,27 @@ _LOG = logging.getLogger(__name__)
 # task_class="research_structured" (REVIEW_TASK_CLASSES below), but a role-based
 # reviewer belongs in the role SSOT too so a future caller that checks role alone
 # does not have to rediscover that.
+# OI-1614: "research-analyst" is a CANONICAL, T0-dispatched role
+# (.vnx/worker_permissions.yaml) with Edit/MultiEdit DENIED and file_write_scope
+# limited to the unified-reports drop — structurally incapable of producing a
+# worktree diff, the same permission shape as code-reviewer/plan-reviewer above.
+# It was simply missing. Cross-checked the rest of worker_permissions.yaml's
+# registered roles against this set while fixing it: quality-engineer,
+# frontend-developer, system-architect, security-engineer are documented "Build
+# role"s there (Edit/MultiEdit allowed, push-mandatory footer, expected to
+# deliver a real diff) — adding them here would suppress a genuine phantom for
+# those roles, so they stay out. dispatch_router.py's SKILL_TO_TASK_CLASS lists
+# a few more names (data-analyst, t0-orchestrator, architect, performance-
+# profiler) in its "research_structured" bucket, but none of those are in the
+# canonical worker_permissions.yaml registry — that file's own comment says
+# legacy/undispatched names are "NOT carried here: nobody dispatches them" — so
+# there is no live role behind them to add. A dispatch that genuinely carries
+# task_class="research_structured" for one of those names is still exempt via
+# REVIEW_TASK_CLASSES below; this set only adds a second, role-string key for
+# roles verified to exist and to be permission-locked out of writing.
 REVIEW_ROLES = frozenset({
     "plan-reviewer", "code-reviewer", "security-reviewer", "reviewer",
-    "deliberation-panelist", "review-gate",
+    "deliberation-panelist", "review-gate", "research-analyst",
 })
 
 # SSOT for review/analysis task_class values — a second key onto the same exemption for callers
@@ -78,6 +96,44 @@ REVIEW_TASK_CLASSES = frozenset({
 
 # Receipt status values that assert the work completed.
 COMPLETION_STATUSES = frozenset({"done", "success", "complete", "completed"})
+
+
+@dataclass(frozen=True)
+class PhantomDecisionContext:
+    """The decision-relevant fields the exemption logic reads — ``role``,
+    ``task_class``, ``read_only``, ``status``, ``worktree_diff`` — bundled into ONE
+    object so a lane cannot drop one by simply never writing its keyword (OI-1614).
+
+    Before this contract, ``record_phantom_if_any`` accepted these as five
+    independent keyword arguments with defaults. Each of the three call sites
+    (envelope_govern, dispatch_govern, tmux_interactive_dispatch) picked its own
+    subset — NONE of them passed ``task_class`` or ``read_only`` — and Python's
+    defaults silently supplied ``None`` for whatever a caller forgot, which the
+    decision function reads as "not exempt", not as "nobody asked". The pure
+    decision logic in ``_phantom_guard_decision`` was, and is, correct; the bug
+    was entirely upstream, in the signal never arriving.
+
+    All five fields are REQUIRED, with no default. Constructing
+    ``PhantomDecisionContext(role=x, task_class=y)`` and forgetting
+    ``read_only``/``status``/``worktree_diff`` is a ``TypeError`` at the call
+    site, not a silently-wrong verdict three call-stack frames away.
+
+    A lane that genuinely has no source for a field (e.g. no caller currently
+    computes ``read_only`` — see the three real construction sites) must still
+    say so EXPLICITLY (``read_only=None``) rather than omitting the keyword.
+    Explicit-``None`` and an omitted keyword read identically to the decision
+    logic today (both mean "not exempt via this signal"), but only the former is
+    visible to the call-site guard in
+    ``tests/test_phantom_guard_context_contract.py`` — an AST scan can only see
+    what a call site WROTE, not what a caller silently meant. That test fails
+    the moment a call site's inline ``PhantomDecisionContext(...)`` construction
+    drops one of these five keywords, whatever the reason.
+    """
+    role: Optional[str]
+    task_class: Optional[str]
+    read_only: Optional[bool]
+    status: Optional[str]
+    worktree_diff: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -425,22 +481,28 @@ def guard_at_govern(
 def record_phantom_if_any(
     *,
     dispatch_id: str,
-    role: Optional[str] = None,
-    status: Optional[str] = None,
+    context: PhantomDecisionContext,
     token_usage: Optional[int] = None,
     worktree_path: Optional[Path] = None,
     base_sha: Optional[str] = None,
-    worktree_diff: Optional[str] = None,
     receipts_file: Optional[str] = None,
     state_dir: Optional[Path] = None,
-    task_class: Optional[str] = None,
-    read_only: Optional[bool] = None,
     work_ref: Optional[str] = None,
     pr_id: Optional[str] = None,
     parent_dispatch: Optional[str] = None,
     repo: Optional[Path] = None,
 ) -> PhantomVerdict:
     """``guard_at_govern`` + on a phantom verdict, append a corrective ``failed`` completion receipt.
+
+    OI-1614: ``role``/``status``/``task_class``/``read_only``/``worktree_diff`` — the
+    decision-relevant signals — travel as ONE required ``context``
+    (``PhantomDecisionContext``) instead of five independent optional keywords. See
+    that dataclass's docstring for why: a caller that forgets one no longer produces a
+    silently-wrong verdict, it produces a ``TypeError`` at the call site, and the
+    call-site AST guard (``tests/test_phantom_guard_context_contract.py``) additionally
+    fails the moment an inline construction of it drops a field. ``token_usage``
+    is corroborating detail only (never decision-relevant — see the module docstring)
+    and stays a plain keyword.
 
     The corrective receipt uses ``event_type="subprocess_completion"`` (one of the watchers'
     ACTIONABLE_EVENTS — codex F3: a custom ``phantom_rejected`` event_type is invisible to the live
@@ -456,9 +518,10 @@ def record_phantom_if_any(
     receipt. Degrades quietly on an unlinked dispatch; never fatal to the guard itself.
     """
     verdict = guard_at_govern(
-        dispatch_id=dispatch_id, role=role, status=status, token_usage=token_usage,
-        worktree_path=worktree_path, base_sha=base_sha, worktree_diff=worktree_diff,
-        task_class=task_class, read_only=read_only,
+        dispatch_id=dispatch_id, role=context.role, status=context.status,
+        token_usage=token_usage,
+        worktree_path=worktree_path, base_sha=base_sha, worktree_diff=context.worktree_diff,
+        task_class=context.task_class, read_only=context.read_only,
         work_ref=work_ref, pr_id=pr_id, parent_dispatch=parent_dispatch, repo=repo,
     )
     if verdict.is_phantom and state_dir:

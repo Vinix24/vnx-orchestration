@@ -447,12 +447,29 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     # check in dispatch_envelope._govern. Best-effort: never fatal to govern (a guard failure must
     # not lose the report). guard_at_govern abstains on an unresolvable ref (never false-rejects).
     try:
-        from phantom_guard import record_phantom_if_any  # noqa: PLC0415
+        from phantom_guard import PhantomDecisionContext, record_phantom_if_any  # noqa: PLC0415
         _tok = raw.token_usage or {}
         record_phantom_if_any(
             dispatch_id=spec.dispatch_id,
-            role=spec.role,
-            status=(raw.receipt.get("status") if isinstance(raw.receipt, dict) else None),
+            context=PhantomDecisionContext(
+                role=spec.role,
+                # OI-1614: GovernSpec already carries task_class (chain-link,
+                # dispatch-20260802-model-ssot-en-ketenlink) — it was simply never
+                # forwarded to the guard, which is why a research/review dispatch on
+                # the tmux lane's govern()-time backstop was rejected despite the
+                # guard's own task_class exemption being correct all along.
+                task_class=spec.task_class,
+                # No caller on this lane currently computes an explicit read_only
+                # signal — GovernSpec carries no such field. Explicit None (not an
+                # omitted keyword) records that this lane looked and found nothing,
+                # not that it forgot to ask (see PhantomDecisionContext docstring).
+                read_only=None,
+                status=(raw.receipt.get("status") if isinstance(raw.receipt, dict) else None),
+                # Not pre-captured on this lane (unlike the provider lane) —
+                # guard_at_govern resolves it below from worktree_path/base_sha (a
+                # LIVE worktree here, not yet torn down).
+                worktree_diff=None,
+            ),
             token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
             worktree_path=spec.worktree_path,
             base_sha=spec.base_sha,

@@ -1639,6 +1639,7 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
     `no-anthropic-sdk` intact) → governed report via _emit_governance. NOTE: post the
     2026-06-15 subscription-escape cutover this bills API credits, not the subscription.
     """
+    from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS
     from provider_spawns.claude_spawn import spawn_claude
 
     event_store = None
@@ -1705,6 +1706,7 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
             event_writer=event_store.append if event_store is not None else None,
             total_deadline=total_deadline,
             requires_mcp=getattr(args, "requires_mcp", False),
+            scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
         )
         end_time = datetime.now(timezone.utc)
 

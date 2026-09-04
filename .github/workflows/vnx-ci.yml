@@ -330,9 +330,18 @@ jobs:
           rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
 
       - name: Run trace token validation
+        # ENFORCED since 2026-09-03 (was shadow/WARN — a required context that could
+        # never fail). Safe to flip without a separate ratchet mechanism: the script
+        # only validates MERGE_BASE..HEAD (this PR's own new commits, via
+        # ci_trace_token_check.sh's `git log "$MERGE_BASE..HEAD"`), never main's
+        # existing history — a push event to main resolves MERGE_BASE==HEAD (empty
+        # range), so already-merged commits are structurally never re-litigated.
+        # Baseline measured against origin/main @ 065939fa: 41/150 (27.3%) of recent
+        # commits and 860/2130 (40.4%) of all commits would fail if re-checked, which
+        # is exactly why this only gates NEW commits going forward, not history.
         env:
           VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
-          VNX_PROVENANCE_ENFORCEMENT: "0"
+          VNX_PROVENANCE_ENFORCEMENT: "1"
           VNX_PROVENANCE_LEGACY_ACCEPTED: "1"
         run: |
           set -euo pipefail
@@ -375,6 +384,28 @@ jobs:
           rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
 
       - name: Run Dispatch-ID slug-match gate
+        # STAYS shadow/WARN (deliberately, not an oversight) — measured 2026-09-03:
+        # this job's own branch_slug() cannot pass for this fleet's actual branch
+        # convention. BRANCH_PREFIX_RE (scripts/check_ci_slug_match.py) strips
+        # fix/feat/feature/test/docs/chore/refactor/hotfix/perf/ci/build/revert but
+        # NOT "dispatch/" — the prefix on 15/15 of the most recent merged PRs' head
+        # branches (`gh pr list --state merged --json headRefName`). Even with that
+        # fixed, branch_slug() doesn't strip the embedded YYYYMMDD date the way
+        # dispatch_id_slug() does for the Dispatch-ID side, so the two slugs still
+        # wouldn't compare like-for-like. And some real, currently-used Dispatch-IDs
+        # (the YYYYMMDD-HHMMSS-<slug> shape with no trailing track letter, e.g.
+        # PR #1740's branch) don't match either DISPATCH_ID_EXTRACT_RE or
+        # DISPATCH_ID_EXTRACT_LEGACY_RE at all — dispatch_id_slug() returns None,
+        # and CommitResult.all_slugs_match treats that as a hard failure, not a
+        # skip. Enforcing today would fail effectively every fleet PR, not just the
+        # ~27-40% trace-token-check would flag — the "ratchet" fix that worked for
+        # that job (flip the env var; the merge-base delta already grandfathers
+        # history) does not apply here, because this job's failures would be on
+        # brand-new commits too, not just old ones. Fixing branch_slug()/
+        # dispatch_id_slug() properly is a separate, larger PR; recommendation for
+        # this one is to drop this context from branch-protection's required-checks
+        # list (operator action — not done here) so its WARN-only status stops
+        # reading as a check that could ever fail.
         env:
           VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
           GITHUB_HEAD_REF: ${{ github.head_ref }}
