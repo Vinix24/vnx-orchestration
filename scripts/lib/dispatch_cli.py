@@ -1700,11 +1700,125 @@ def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# golf 2A (dispatch/20260904-deur-leest-stopcondities) — the door reads T0's
+# autonomous-chain stop-conditions (stop_conditions.py, PR #1754) before every
+# fire and refuses fail-closed on a TRIGGERED result.
+#
+# Design decisions, made explicit here rather than left implicit in the code:
+#
+# 1. LIVE measurement, not a halt.json read. stop_conditions.py's own module
+#    docstring says wiring is "calling it from the dispatch door" — it never
+#    prescribes reading its output artifact. halt.json is written ONLY on a
+#    trigger and is NEVER auto-cleared (write_halt_file's docstring: "Recovery
+#    ... is a deliberate, separate action"), so treating a present halt.json
+#    as the door's OWN gating signal would mean a single historical trigger
+#    blocks every dispatch forever with no code path that ever re-measures
+#    reality — worse than doing nothing, because it would look like
+#    governance while actually being a permanent, indiscriminate lockout with
+#    no relation to current state. This mirrors the file's OWN established
+#    precedent: _check_reachability reads the ledger LIVE on every fire
+#    (mirrors merge_preflight_ci_check._capture) rather than trusting a
+#    cached fact — that is what "fail-closed" means everywhere else in this
+#    module. run_all_checks(write_halt=True) still WRITES halt.json as a side
+#    effect of the live measurement, so the door is a WRITER of the shared
+#    record other daemons/dashboards read, not a second, independent reader
+#    racing a daemon that may not exist yet.
+#
+# 2. Only CheckStatus.TRIGGERED blocks. stop_conditions.py's own module
+#    docstring is explicit: "a caller that only checks
+#    status == CheckStatus.TRIGGERED before proceeding is correct by
+#    construction: unmeasurable is silently NOT a green light." Refusing on
+#    UNMEASURABLE (gh hiccups, receipts.ndjson momentarily unreadable, fewer
+#    than `threshold` attempts in the window — the common, benign case for
+#    provider_exhausted/repeated_gate_failure_cause) would make the door
+#    fail-CLOSED on measurement noise, not on a real condition — that is
+#    fragility wearing governance's clothes, not fail-closed. TRIGGERED is a
+#    positive, evidenced fact; UNMEASURABLE is the absence of a fact. Only the
+#    former is grounds to refuse real work.
+#
+# 3. The escape hatch mirrors --refire's shape (a mandatory REASON threaded
+#    through run_dispatch, logged via logger.warning), not --reopen-lane's
+#    durable ledger-event shape. --reopen-lane durably clears ONE provider's
+#    exhaustion fact, which self-re-arms cleanly against a NEW receipt that
+#    postdates the reopen (_lane_reopened_after's since_ts comparison). A
+#    stop-conditions halt has FOUR heterogeneous causes (E1/E4/provider-
+#    exhaustion/E6) with no single evidence timestamp to compare a durable
+#    override against without risking a stale override from one incident
+#    silently covering a later, unrelated one. A per-fire reason forces the
+#    operator to consciously re-affirm the override on every dispatch while
+#    the condition is still live — safer for a global gate than a durable
+#    toggle, and the smaller, fully-correct surface given four checks whose
+#    evidence shapes do not share a common "since" field.
+# ---------------------------------------------------------------------------
+
+def _check_stop_conditions_verdict(
+    *, state_dir: Path, override_reason: Optional[str] = None,
+) -> Optional[ConstraintVerdict]:
+    """Measure stop_conditions.run_all_checks() live and return a BLOCKING
+    ConstraintVerdict iff any check is TRIGGERED, unless override_reason is a
+    non-empty explicit operator reason (audited, warn-severity verdict
+    instead). Returns None when nothing is TRIGGERED (CLEAR and/or
+    UNMEASURABLE only) — see the module-level comment above for why.
+    """
+    from stop_conditions import CheckStatus, run_all_checks  # noqa: PLC0415
+
+    try:
+        results = run_all_checks(state_dir=state_dir, write_halt=True)
+    except Exception as exc:  # vnx-silent-except: a bug in the checker must never itself become an outage of the whole door — degrade to "not measured", never crash the fire
+        print(
+            f"[dispatch_cli] [WARN] stop-conditions measurement raised "
+            f"{exc!r} — treating as UNMEASURABLE, not blocking",
+            file=sys.stderr,
+        )
+        return None
+
+    triggered = [r for r in results if r.status == CheckStatus.TRIGGERED]
+    unmeasurable = [r.check_id for r in results if r.status == CheckStatus.UNMEASURABLE]
+    if unmeasurable:
+        print(
+            f"[dispatch_cli] [stop-conditions] unmeasurable (not a green "
+            f"light, not a refusal): {', '.join(unmeasurable)}",
+            file=sys.stderr,
+        )
+    if not triggered:
+        return None
+
+    summary = "; ".join(f"{r.check_id}: {r.message}" for r in triggered)
+    reason = (override_reason or "").strip()
+    if reason:
+        logger.warning(
+            "[dispatch_cli] AUDIT stop-conditions-override-applied triggered=%s reason=%s",
+            [r.check_id for r in triggered], reason,
+        )
+        return ConstraintVerdict(
+            code="stop-conditions-override-applied",
+            severity="warn",
+            message=(
+                f"stop-condition(s) TRIGGERED but overridden by explicit "
+                f"operator reason: {summary}. Override reason: {reason}"
+            ),
+            override_applied=True,
+        )
+
+    return ConstraintVerdict(
+        code="stop-conditions-triggered",
+        severity="blocking",
+        message=(
+            f"autonomous-chain stop-condition(s) TRIGGERED "
+            f"(stop_conditions.py): {summary}. Refusing to fire — pass "
+            f"--override-stop-conditions REASON to bypass for this fire, or "
+            f"resolve the underlying condition."
+        ),
+    )
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
     data_dir: Path,
     spec_file: Path,
+    stop_conditions_override_reason: Optional[str] = None,
 ) -> RuntimeSnapshot:
     """Perform all I/O required by compile_plan.
 
@@ -1712,6 +1826,9 @@ def build_runtime_snapshot(
     P0-2: staging binding verified via spec_file containment check.
     P1-#3: model_pins from provider_constraints.yaml SSOT.
     OI-921: valid_roles discovered from the engine's agents/ registry (fail-closed).
+    golf 2A: T0 autonomous-chain stop-conditions (stop_conditions.py), measured
+    LIVE on every fire — see _check_stop_conditions_verdict for the tri-state
+    handling and the override contract.
     """
     from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
     from staging_validator import _exists_in_dir as _staging_exists  # noqa: PLC0415
@@ -1929,6 +2046,14 @@ def build_runtime_snapshot(
     track_verdict = _check_track_link_verdict(spec, state_dir=data_dir / "state")
     if track_verdict is not None:
         constraint_verdicts = constraint_verdicts + (track_verdict,)
+
+    # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
+    stop_verdict = _check_stop_conditions_verdict(
+        state_dir=data_dir / "state",
+        override_reason=stop_conditions_override_reason,
+    )
+    if stop_verdict is not None:
+        constraint_verdicts = constraint_verdicts + (stop_verdict,)
 
     if is_claude_lane:
         target_health: dict[str, str] = {"ephemeral": "healthy"}
@@ -2696,7 +2821,13 @@ def _owner_finish(
         )
 
 
-def run_dispatch(spec_file: Path, *, dry_run: bool = False, refire_reason: Optional[str] = None) -> int:
+def run_dispatch(
+    spec_file: Path,
+    *,
+    dry_run: bool = False,
+    refire_reason: Optional[str] = None,
+    stop_conditions_override_reason: Optional[str] = None,
+) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
     Returns 0 on success, 1 on any reject or execution failure.
@@ -2865,7 +2996,10 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False, refire_reason: Optio
 
     # P1-#1: wrap everything after validate in try/except — door never panics
     try:
-        snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
+        snapshot = build_runtime_snapshot(
+            vspec, data_dir=data_dir, spec_file=spec_file,
+            stop_conditions_override_reason=stop_conditions_override_reason,
+        )
 
         plan = compile_plan(vspec, snapshot)
         if isinstance(plan, Reject):
@@ -3190,6 +3324,14 @@ def main(argv: Optional[list] = None) -> int:
         "--reopen-reason", dest="reopen_lane_reason", metavar="REASON", default=None,
         help="Reason for --reopen-lane (mandatory alongside it)",
     )
+    parser.add_argument(
+        "--override-stop-conditions", dest="stop_conditions_override_reason",
+        metavar="REASON", default=None,
+        help="Explicit reason to bypass a TRIGGERED autonomous-chain "
+             "stop-condition (stop_conditions.py) for THIS fire only; the "
+             "condition is re-measured live on the next fire and must be "
+             "overridden again if it is still triggered",
+    )
     args = parser.parse_args(argv)
 
     if args.force_release_class is not None:
@@ -3206,7 +3348,10 @@ def main(argv: Optional[list] = None) -> int:
     if args.spec_file is None:
         parser.error("--spec-file is required")
 
-    return run_dispatch(args.spec_file, dry_run=args.dry_run, refire_reason=args.refire_reason)
+    return run_dispatch(
+        args.spec_file, dry_run=args.dry_run, refire_reason=args.refire_reason,
+        stop_conditions_override_reason=args.stop_conditions_override_reason,
+    )
 
 
 if __name__ == "__main__":
