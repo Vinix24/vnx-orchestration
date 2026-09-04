@@ -2565,5 +2565,97 @@ class TestInjectSkillContextEndToEnd(unittest.TestCase):
         self.assertEqual(kw["instruction_text"], instruction)
 
 
+# ---------------------------------------------------------------------------
+# Tests: resolvers refuse a 0-table decoy quality_intelligence.db (golf 3C,
+# absence-is-loud criterion 4)
+# ---------------------------------------------------------------------------
+#
+# quality_intelligence.db is only ever fully bootstrapped in one shot by
+# quality_db_init.py's canonical CREATE-TABLE script — there is no legitimate
+# "still initializing, 0 tables so far" state for this filename. A 0-table
+# file that exists at this path is always a decoy left behind by an
+# interrupted create-then-populate sequence elsewhere (D5 found and fixed
+# one such writer in migrate_to_central_vnx.py). Before this fix,
+# IntelligenceSelector opened the decoy anyway; the per-source query then hit
+# "no such table", swallowed it, and returned [] — indistinguishable from a
+# genuinely empty (but real) success_patterns table answering "zero matching
+# patterns" instead of "this is the wrong database."
+
+class TestIntelligenceSelectorRefusesZeroTableDecoy(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _make_decoy(self, path: Path) -> Path:
+        """A 0-byte, 0-table file — the exact lazy-create side effect that
+        produces the real-world decoy (sqlite3.connect().close(), no schema
+        ever applied)."""
+        sqlite3.connect(str(path)).close()
+        self.assertTrue(path.exists())
+        return path
+
+    def test_get_quality_db_refuses_zero_table_decoy(self):
+        """_get_quality_db() must return None for a 0-table file, not a live
+        connection an unwary caller will happily run 'SELECT ... FROM
+        success_patterns' against and silently get back []."""
+        decoy = self._make_decoy(self._base / "quality_intelligence.db")
+        selector = IntelligenceSelector(quality_db_path=decoy)
+        with self.assertLogs("intelligence_selector", level="ERROR") as cm:
+            conn = selector._get_quality_db()
+        self.assertIsNone(conn)
+        self.assertTrue(
+            any("0 tables" in msg for msg in cm.output),
+            f"expected a loud 0-table refusal in the logs, got: {cm.output}",
+        )
+
+    def test_get_quality_db_still_opens_a_healthy_db(self):
+        """Sanity check: a real (non-decoy) db still opens normally — the
+        refusal must not become a blanket 'never connect' regression."""
+        healthy = self._base / "quality_intelligence.db"
+        db = _setup_quality_db(healthy)
+        db.close()
+        selector = IntelligenceSelector(quality_db_path=healthy)
+        conn = selector._get_quality_db()
+        self.assertIsNotNone(conn)
+        selector.close()
+
+    def test_query_candidates_returns_empty_not_crash_on_decoy(self):
+        """End-to-end: selecting against a decoy degrades to 'no candidates',
+        the same shape as the legitimate empty-db case — advisory-only
+        injection (G-R7) must never crash a dispatch over a corrupt or
+        wrong-path state store."""
+        decoy = self._make_decoy(self._base / "quality_intelligence.db")
+        selector = IntelligenceSelector(quality_db_path=decoy)
+        result = selector._query_candidates("backend-developer", [])
+        self.assertEqual(result["proven_pattern"], [])
+        self.assertEqual(result["failure_prevention"], [])
+        self.assertEqual(result["recent_comparable"], [])
+
+    def test_get_central_qi_conn_refuses_zero_table_decoy(self):
+        """Same refusal for the central-DB code path (_get_central_qi_conn)
+        — the second place this module opens quality_intelligence.db, used
+        when VNX_USE_CENTRAL_DB routes queries at the per-source central
+        connection instead of the per-project one passed in at construction."""
+        from unittest.mock import patch
+
+        state_dir = self._base / "state"
+        state_dir.mkdir()
+        decoy = self._make_decoy(state_dir / "quality_intelligence.db")
+        selector = IntelligenceSelector()
+        with patch("intelligence_selector._resolve_central_data_dir", return_value=self._base), \
+                patch("intelligence_selector.current_project_id", return_value="vnx-dev"):
+            with self.assertLogs("intelligence_selector", level="ERROR") as cm:
+                conn = selector._get_central_qi_conn()
+        self.assertIsNone(conn)
+        self.assertTrue(
+            any("0 tables" in msg for msg in cm.output),
+            f"expected a loud 0-table refusal in the logs, got: {cm.output}",
+        )
+        self.assertTrue(decoy.exists())  # never written to by this test
+
+
 if __name__ == "__main__":
     unittest.main()
