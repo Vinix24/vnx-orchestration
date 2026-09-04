@@ -15,9 +15,19 @@ invoked. No Anthropic SDK, no direct API calls. LiteLLM is isolated to
 _litellm_runner.py subprocess.
 
 CREDENTIAL SAFETY (audit S2): every Popen env for these subprocesses is built via
-_scrubbed_env(), which strips ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN after
-merging the parent env — an external/untrusted model driven through the agentic
-runner's run_command tool cannot read the Anthropic account's own credentials.
+_scrubbed_env(), which delegates to env_scrub_patterns.scrub_env() with
+_LITELLM_SCRUB_PATTERNS (OI-1619 followup, 2026-09-04) after merging the parent env —
+an external/untrusted model driven through the agentic runner's run_command tool
+cannot read the Anthropic account's own credentials, and (unlike this lane's original
+hand-rolled two-key allowlist) cannot read any other *_PASS/*_SECRET/*_TOKEN-shaped
+secret either. _LITELLM_SCRUB_PATTERNS is DEFAULT_SCRUB_KEY_PATTERNS minus the
+blanket `*_KEY` glob: this lane's OWN child process legitimately reads a provider API
+key from env to authenticate outbound (DEEPSEEK_API_KEY / MOONSHOT_API_KEY /
+OPENROUTER_API_KEY — see _PROVIDER_KEY_REQS in _litellm_runner.py /
+_litellm_agentic_runner.py), so the blanket glob would break every litellm-routed
+dispatch's own auth. ANTHROPIC_API_KEY stays covered regardless via its own explicit
+literal in the shared pattern set, independent of the glob — see _LITELLM_SCRUB_PATTERNS
+below for the measured detail.
 """
 
 from __future__ import annotations
@@ -38,6 +48,7 @@ if _LIB_DIR not in sys.path:
 
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
+from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +62,39 @@ _TIER_STREAMING = 1
 # runner via completion(), the agentic runner via its run_command tool (shell=True, no
 # allowlist; audit S1). Full os.environ inheritance would hand the Anthropic account's own
 # credentials to that subprocess, readable/exfiltratable by an external/untrusted model
-# through run_command. Neither key is ever needed by a litellm-routed child, so both are
-# scrubbed from every Popen env unconditionally (not caller-optional — there is no legitimate
-# case where a litellm child needs them).
-_CREDENTIAL_SCRUB_KEYS = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+# through run_command. Neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is ever
+# needed by a litellm-routed child.
+#
+# OI-1619 followup (2026-09-04): this used to be a hand-rolled, exact-key-only allowlist
+# (ANTHROPIC_API_KEY + CLAUDE_CODE_OAUTH_TOKEN) — narrower than the shared
+# DEFAULT_SCRUB_KEY_PATTERNS glob set the sibling kimi/codex/gemini lanes were fixed to
+# use, so a VNX_SMTP_PASS-shaped secret crossed straight through here while those three
+# were already scrubbing it (measured via tests/test_litellm_spawn_credential_scrub.py's
+# new red-then-green case). _scrubbed_env() now delegates to the SAME scrub_env()
+# mechanism those three use, rather than carrying a second, hand-rolled rule.
+#
+# It does NOT reuse DEFAULT_SCRUB_KEY_PATTERNS verbatim, though — measured: swapping it
+# in unscoped turned test_extra_env_cannot_reintroduce_credentials red, because this
+# lane's OWN child process legitimately reads a provider API key from env to
+# authenticate outbound (DEEPSEEK_API_KEY / MOONSHOT_API_KEY / OPENROUTER_API_KEY — see
+# _PROVIDER_KEY_REQS in _litellm_runner.py / _litellm_agentic_runner.py, both *_KEY
+# shaped). Unlike the OAuth-only kimi/codex/gemini CLIs (which read zero *_KEY-shaped
+# vars themselves), the blanket `*_KEY` glob would strip this lane's own required
+# credentials and break every litellm-routed dispatch's auth. So this pattern set is
+# DEFAULT_SCRUB_KEY_PATTERNS computed MINUS that one glob — everything else (`*_PASS`,
+# `*_PASSWORD`, `*_SECRET`, `*_TOKEN`, and the explicit literals) still applies.
+# ANTHROPIC_API_KEY stays covered regardless: it is ALSO listed as its own explicit
+# literal in DEFAULT_SCRUB_KEY_PATTERNS, independent of the `*_KEY` glob (measured via
+# fnmatch.fnmatchcase against every pattern in the shared set) — dropping only the glob
+# loses no coverage this lane relied on.
+_LITELLM_SCRUB_PATTERNS: frozenset = DEFAULT_SCRUB_KEY_PATTERNS - {"*_KEY"}
 
 
 def _scrubbed_env(extra_env: Optional[Dict[str, str]]) -> Dict[str, str]:
-    """Merge extra_env over the parent env, then strip Anthropic-account credentials."""
+    """Merge extra_env over the parent env, then strip every secret-shaped key this
+    lane does not itself need (see _LITELLM_SCRUB_PATTERNS above)."""
     env = {**os.environ, **(extra_env or {})}
-    for _key in _CREDENTIAL_SCRUB_KEYS:
-        env.pop(_key, None)
-    return env
+    return scrub_env(env, _LITELLM_SCRUB_PATTERNS)
 
 
 # ---------------------------------------------------------------------------

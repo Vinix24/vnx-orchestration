@@ -26,6 +26,11 @@ from provider_spawns import litellm_spawn as ls  # noqa: E402
 
 _LEAKED_ANTHROPIC_KEY = "sk-ant-real-production-key"
 _LEAKED_OAUTH_TOKEN = "oauth-real-production-session-token"
+# OI-1619 followup: a fabricated (never-real) secret shaped like the exact literal
+# VNX_SMTP_PASS finding that motivated the sibling kimi/codex/gemini fix — proves
+# _scrubbed_env() now routes through the FULL DEFAULT_SCRUB_KEY_PATTERNS set, not
+# just its own hand-rolled two-key allowlist.
+_LEAKED_SMTP_PASS = "fake-test-smtp-secret-not-real"
 
 
 def _leaked_credentials_env() -> dict:
@@ -55,6 +60,39 @@ class TestScrubbedEnvHelper:
         assert "ANTHROPIC_API_KEY" not in env
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
         assert env["DEEPSEEK_API_KEY"] == "sk-deepseek-own-key"
+
+    def test_vnx_smtp_pass_shaped_secret_is_scrubbed(self):
+        """OI-1619 followup: _scrubbed_env()'s OWN pre-existing allowlist
+        (ANTHROPIC_API_KEY + CLAUDE_CODE_OAUTH_TOKEN, exact-key only) never covered
+        this shape — this is the same defect class the sibling kimi/codex/gemini fix
+        closed, one lane over. A litellm-routed external model's run_command tool
+        (audit S1) could read it out of its own subprocess env."""
+        with patch.dict(
+            "os.environ", {"VNX_SMTP_PASS": _LEAKED_SMTP_PASS, "PATH": "/usr/bin"}, clear=True,
+        ):
+            env = ls._scrubbed_env(None)
+        assert "VNX_SMTP_PASS" not in env
+        assert env["PATH"] == "/usr/bin"
+
+    def test_own_provider_keys_survive_the_broader_scrub(self):
+        """OI-1619 followup regression guard: the naive fix (swap in the FULL
+        DEFAULT_SCRUB_KEY_PATTERNS unscoped) would strip every *_KEY-shaped var,
+        including the provider API keys _litellm_runner.py / _litellm_agentic_runner.py
+        themselves read from env to authenticate outbound (_PROVIDER_KEY_REQS) — that
+        would break every litellm-routed dispatch's own auth. This must never regress."""
+        with patch.dict(
+            "os.environ",
+            {
+                "DEEPSEEK_API_KEY": "sk-deepseek-own-key",
+                "MOONSHOT_API_KEY": "sk-moonshot-own-key",
+                "OPENROUTER_API_KEY": "sk-openrouter-own-key",
+            },
+            clear=True,
+        ):
+            env = ls._scrubbed_env(None)
+        assert env["DEEPSEEK_API_KEY"] == "sk-deepseek-own-key"
+        assert env["MOONSHOT_API_KEY"] == "sk-moonshot-own-key"
+        assert env["OPENROUTER_API_KEY"] == "sk-openrouter-own-key"
 
 
 class TestOneShotSpawnPopenEnv:
@@ -89,6 +127,38 @@ class TestOneShotSpawnPopenEnv:
         assert env is not None, "Popen must receive an explicit env dict"
         assert "ANTHROPIC_API_KEY" not in env
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+    def test_final_popen_env_excludes_vnx_smtp_pass_shaped_secret(self):
+        """OI-1619 followup: the Popen boundary, not just the _scrubbed_env() unit."""
+        captured = {}
+
+        class _FakeProc:
+            returncode = 0
+            stdin = MagicMock()
+            stdout = MagicMock()
+            stderr = MagicMock()
+
+            def wait(self, timeout=None):
+                return 0
+
+        def _fake_popen(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return _FakeProc()
+
+        with patch.dict(
+            "os.environ", {"VNX_SMTP_PASS": _LEAKED_SMTP_PASS, "PATH": "/usr/bin"}, clear=True,
+        ), patch("provider_spawns.litellm_spawn.subprocess.Popen", _fake_popen):
+            ls._start_litellm_subprocess(
+                runner_path="/fake/runner.py",
+                payload_json="{}",
+                extra_env=None,
+                cwd=None,
+            )
+
+        env = captured.get("env")
+        assert env is not None, "Popen must receive an explicit env dict"
+        assert "VNX_SMTP_PASS" not in env
+        assert env.get("PATH") == "/usr/bin"
 
 
 class TestAgenticSpawnPopenEnv:

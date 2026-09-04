@@ -24,15 +24,30 @@ This test is the STATIC backstop: an AST scan over every git-tracked, non-test .
 file under ``scripts/lib/provider_spawns/`` (the directory every provider spawn lane
 lives in — extraction convention shared by every file there, see each module's own
 "Extracted in Wave 4.6" header) for a ``subprocess.Popen(...)`` / ``subprocess.run(...)``
-call carrying an ``env=`` kwarg whose value does not resolve to a call to
-``scrub_env(...)`` (this fix) or ``_scrubbed_env(...)`` (litellm_spawn.py's own,
-narrower, pre-existing, documented scrub — see its own CREDENTIAL SAFETY docstring;
-recognising it here is NOT a judgment that its narrower coverage is sufficient, only
-that it is a deliberate, existing scrub call, not the "no scrub at all" defect this
-guard exists to catch). A brand-new provider_spawns file added later that Popens a
-worker CLI with a raw ``{**os.environ, ...}`` env and no scrub call is caught by this
-scan automatically, the same "catch the lane that doesn't exist yet" property the
-phantom-guard and claude-scrub call-site guards both have.
+call carrying an ``env=`` kwarg whose value does not resolve to ``scrub_env(...)``,
+directly or through exactly one named local helper (e.g. litellm_spawn.py's own
+``_scrubbed_env()``, which delegates to ``scrub_env()`` with its own, narrower
+pattern set — see its own CREDENTIAL SAFETY docstring). A brand-new provider_spawns
+file added later that Popens a worker CLI with a raw ``{**os.environ, ...}`` env and
+no scrub call is caught by this scan automatically, the same "catch the lane that
+doesn't exist yet" property the phantom-guard and claude-scrub call-site guards both
+have.
+
+Round 1 of this guard trusted ANY function named ``scrub_env`` or ``_scrubbed_env`` by
+NAME alone — a real gap, found in review: litellm_spawn.py's ``_scrubbed_env()``
+originally hand-rolled its own two-key strip (``ANTHROPIC_API_KEY`` +
+``CLAUDE_CODE_OAUTH_TOKEN``, exact-key only) with no call to the shared
+``scrub_env()`` at all, and the guard called it safe purely because of its name — it
+would have said the same about ANY function named ``_scrubbed_env``, including one
+that scrubbed nothing. This round replaces the name allowlist with a PROPERTY check:
+``_call_resolves_to_scrub_env()`` requires the call target to be ``scrub_env`` itself,
+OR a locally-defined function whose OWN body (walked via ``ast.walk``, any depth
+within that one function) contains a real call to ``scrub_env(...)``. One hop of
+named-helper indirection is resolved; a helper that calls a second, differently-named
+helper that itself calls ``scrub_env`` is NOT resolved and fails closed as unsafe
+(over-flag rather than under-flag — the safe failure direction for a security guard).
+litellm_spawn.py's real ``_scrubbed_env()`` (a single function whose body directly
+calls ``scrub_env(env, _LITELLM_SCRUB_PATTERNS)``) resolves cleanly under this rule.
 
 A ``subprocess.Popen(...)``/``subprocess.run(...)`` call with NO ``env=`` kwarg at all
 (e.g. kimi_spawn.py's internal ``git status``/``git diff`` calls, which inherit the
@@ -59,7 +74,7 @@ REPO = Path(__file__).resolve().parent.parent
 TARGET_DIR = REPO / "scripts" / "lib" / "provider_spawns"
 
 _POPEN_METHODS = frozenset({"Popen", "run"})
-_SAFE_SCRUB_CALL_NAMES = frozenset({"scrub_env", "_scrubbed_env"})
+_SCRUB_ENV_NAME = "scrub_env"
 _ENV_KWARG = "env"
 
 
@@ -111,19 +126,57 @@ def _is_subprocess_popen_or_run(node: ast.Call) -> bool:
     )
 
 
-def _collect_safe_assigned_names(tree: ast.Module) -> set[str]:
+def _function_defs_by_name(tree: ast.Module) -> "dict[str, ast.AST]":
+    """Map of function name -> its FunctionDef/AsyncFunctionDef node, module-wide
+    (last definition wins on a name collision — a theoretical, not real, edge case
+    in this repo's small provider_spawns modules)."""
+    defs: "dict[str, ast.AST]" = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs[node.name] = node
+    return defs
+
+
+def _calls_scrub_env(node: ast.AST) -> bool:
+    """True iff a direct call to ``scrub_env(...)`` appears anywhere in *node*'s
+    subtree (any statement, any nesting depth within that one function body)."""
+    return any(
+        isinstance(sub, ast.Call) and _call_target_name(sub) == _SCRUB_ENV_NAME
+        for sub in ast.walk(node)
+    )
+
+
+def _call_resolves_to_scrub_env(call_name: str, funcs: "dict[str, ast.AST]") -> bool:
+    """PROPERTY check, not a name allowlist: *call_name* is safe when it IS
+    ``scrub_env`` itself, or when it names a function defined in this module whose
+    OWN body actually calls ``scrub_env(...)`` — e.g. litellm_spawn.py's
+    ``_scrubbed_env()``, which delegates to ``scrub_env()`` with its own pattern set.
+    A function with any other name, or one that does not itself call ``scrub_env``
+    (however it's named), resolves to False. Only one hop of named-helper
+    indirection is resolved — a helper that calls a second, differently-named helper
+    which itself calls ``scrub_env`` is NOT resolved and fails closed as unsafe."""
+    if call_name == _SCRUB_ENV_NAME:
+        return True
+    func = funcs.get(call_name)
+    if func is None:
+        return False
+    return _calls_scrub_env(func)
+
+
+def _collect_safe_assigned_names(tree: ast.Module, funcs: "dict[str, ast.AST]") -> set[str]:
     """Names of local variables whose assigned expression contains (anywhere in its
-    subtree) a call to a known-safe scrub function. Deliberately module-wide and
-    scope-blind — same "good enough, no false negatives in this repo today" tradeoff
-    documented in test_spawn_scrub_env_keys_contract.py's
-    ``_subprocess_adapter_var_names``.
+    subtree) a call that resolves to ``scrub_env`` under ``_call_resolves_to_scrub_env``.
+    Deliberately module-wide and scope-blind — same "good enough, no false negatives
+    in this repo today" tradeoff documented in
+    test_spawn_scrub_env_keys_contract.py's ``_subprocess_adapter_var_names``.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
         contains_safe_call = any(
-            isinstance(sub, ast.Call) and _call_target_name(sub) in _SAFE_SCRUB_CALL_NAMES
+            isinstance(sub, ast.Call)
+            and _call_resolves_to_scrub_env(_call_target_name(sub) or "", funcs)
             for sub in ast.walk(node.value)
         )
         if not contains_safe_call:
@@ -142,9 +195,11 @@ def _env_kwarg_value(call: ast.Call) -> "tuple[bool, Optional[ast.AST]]":
     return False, None
 
 
-def _env_value_is_safe(value: ast.AST, safe_names: set[str]) -> bool:
-    if isinstance(value, ast.Call) and _call_target_name(value) in _SAFE_SCRUB_CALL_NAMES:
-        return True
+def _env_value_is_safe(value: ast.AST, safe_names: set[str], funcs: "dict[str, ast.AST]") -> bool:
+    if isinstance(value, ast.Call):
+        name = _call_target_name(value)
+        if name and _call_resolves_to_scrub_env(name, funcs):
+            return True
     if isinstance(value, ast.Name):
         return value.id in safe_names
     return False
@@ -173,7 +228,8 @@ def _find_popen_env_sites(
                 f"cannot parse {rel} while scanning for Popen/run env= call sites: {exc}"
             ) from exc
 
-        safe_names = _collect_safe_assigned_names(tree)
+        funcs = _function_defs_by_name(tree)
+        safe_names = _collect_safe_assigned_names(tree, funcs)
         sites: list[tuple[int, bool]] = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not _is_subprocess_popen_or_run(node):
@@ -181,7 +237,7 @@ def _find_popen_env_sites(
             has_env, value = _env_kwarg_value(node)
             if not has_env:
                 continue
-            is_safe = _env_value_is_safe(value, safe_names)
+            is_safe = _env_value_is_safe(value, safe_names, funcs)
             sites.append((node.lineno, is_safe))
         if sites:
             found[str(rel)] = sites
@@ -192,16 +248,19 @@ _KNOWN_CALL_SITE_FILES = frozenset({
     "scripts/lib/provider_spawns/kimi_spawn.py",
     "scripts/lib/provider_spawns/codex_spawn.py",
     "scripts/lib/provider_spawns/gemini_spawn.py",
+    "scripts/lib/provider_spawns/litellm_spawn.py",
 })
 
 
 class TestEveryProviderSpawnPopenSupplessScrubbedEnv:
     """The wachter: every real, git-tracked subprocess.Popen()/subprocess.run() call
     under scripts/lib/provider_spawns/ that carries an env= kwarg must resolve that
-    kwarg to a call to scrub_env(...) or _scrubbed_env(...). This does not enumerate a
-    fixed baseline of files (unlike a growth-tripwire test) — a brand-new provider
-    spawn lane is picked up automatically by the git-tracked-.py scan and held to the
-    same bar, without this test needing to be edited."""
+    kwarg to scrub_env(...), directly or through one named local helper whose own
+    body actually calls it (see _call_resolves_to_scrub_env — a property check, not
+    a name allowlist). This does not enumerate a fixed baseline of files (unlike a
+    growth-tripwire test) — a brand-new provider spawn lane is picked up
+    automatically by the git-tracked-.py scan and held to the same bar, without this
+    test needing to be edited."""
 
     def test_known_call_sites_are_found(self):
         sites = _find_popen_env_sites(REPO, TARGET_DIR)
@@ -210,7 +269,7 @@ class TestEveryProviderSpawnPopenSupplessScrubbedEnv:
 
     def test_every_popen_env_kwarg_resolves_to_a_scrub_call(self):
         sites = _find_popen_env_sites(REPO, TARGET_DIR)
-        assert sites, "expected at least the three known call-site files"
+        assert sites, "expected at least the four known call-site files"
         problems = []
         for rel, calls in sites.items():
             for lineno, is_safe in calls:
@@ -218,9 +277,10 @@ class TestEveryProviderSpawnPopenSupplessScrubbedEnv:
                     problems.append(f"{rel}:{lineno}")
         assert not problems, (
             "subprocess.Popen()/subprocess.run() call(s) under provider_spawns/ pass "
-            "an env= kwarg that does not resolve to scrub_env(...) or "
-            "_scrubbed_env(...) — the worker subprocess would inherit the full "
-            "ambient environment, secrets included:\n" + "\n".join(problems)
+            "an env= kwarg that does not resolve (directly, or through one named "
+            "local helper that itself calls it) to scrub_env(...) — the worker "
+            "subprocess would inherit the full ambient environment, secrets "
+            "included:\n" + "\n".join(problems)
         )
 
 
@@ -248,7 +308,18 @@ _GOOD_VAR_CALL_SITE = (
     "proc = subprocess.Popen(cmd, env=env)\n"
 )
 
-_GOOD_LITELLM_STYLE_SITE = (
+_GOOD_INDIRECT_HELPER_SITE = (
+    "import os\n"
+    "import subprocess\n"
+    "from env_scrub_patterns import scrub_env\n"
+    "def _my_arbitrarily_named_helper(extra_env):\n"
+    "    env = {**os.environ, **(extra_env or {})}\n"
+    "    return scrub_env(env, frozenset({'*_PASS'}))\n"
+    "env = _my_arbitrarily_named_helper(None)\n"
+    "proc = subprocess.Popen(cmd, env=env)\n"
+)
+
+_BAD_SCRUBBED_ENV_NAMED_HELPER_THAT_NEVER_CALLS_SCRUB_ENV = (
     "import os\n"
     "import subprocess\n"
     "def _scrubbed_env(extra_env):\n"
@@ -290,10 +361,14 @@ class TestCallSiteGuardCanActuallyFail:
             for _lineno, is_safe in calls:
                 assert is_safe
 
-    def test_a_compliant_litellm_style_underscore_scrub_call_site_passes(self, tmp_path):
+    def test_a_compliant_indirect_helper_with_an_arbitrary_name_passes(self, tmp_path):
+        """PROPERTY, not name: a locally-defined helper whose own body actually calls
+        scrub_env(...) is trusted regardless of what it's called — this is what makes
+        litellm_spawn.py's real _scrubbed_env() (a different name, same property)
+        resolve, without hardcoding that one name into the guard."""
         _git_init(tmp_path)
         (tmp_path / "provider_spawns").mkdir()
-        (tmp_path / "provider_spawns" / "good.py").write_text(_GOOD_LITELLM_STYLE_SITE, encoding="utf-8")
+        (tmp_path / "provider_spawns" / "good.py").write_text(_GOOD_INDIRECT_HELPER_SITE, encoding="utf-8")
         _git_add(tmp_path, "provider_spawns/good.py")
 
         sites = _find_popen_env_sites(tmp_path, tmp_path / "provider_spawns")
@@ -301,6 +376,29 @@ class TestCallSiteGuardCanActuallyFail:
         for calls in sites.values():
             for _lineno, is_safe in calls:
                 assert is_safe
+
+    def test_a_helper_merely_named_scrubbed_env_that_never_calls_scrub_env_turns_the_assertion_red(self, tmp_path):
+        """The literal loophole Round 1 of this guard had: it trusted ANY function
+        named scrub_env or _scrubbed_env by NAME alone. litellm_spawn.py's real
+        _scrubbed_env() happened to be safe, but the guard could not tell that apart
+        from a same-named function that scrubs nothing at all — this fixture IS that
+        function. The property check must reject it precisely because its body never
+        calls scrub_env(...), regardless of its name."""
+        _git_init(tmp_path)
+        (tmp_path / "provider_spawns").mkdir()
+        (tmp_path / "provider_spawns" / "bad.py").write_text(
+            _BAD_SCRUBBED_ENV_NAMED_HELPER_THAT_NEVER_CALLS_SCRUB_ENV, encoding="utf-8",
+        )
+        _git_add(tmp_path, "provider_spawns/bad.py")
+
+        sites = _find_popen_env_sites(tmp_path, tmp_path / "provider_spawns")
+        problems = [
+            (rel, lineno)
+            for rel, calls in sites.items()
+            for lineno, is_safe in calls
+            if not is_safe
+        ]
+        assert problems == [("provider_spawns/bad.py", 8)]
 
     def test_a_raw_os_environ_merge_with_no_scrub_call_turns_the_assertion_red(self, tmp_path):
         """The literal historic defect: kimi/codex/gemini built
