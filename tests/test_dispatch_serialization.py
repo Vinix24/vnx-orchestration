@@ -545,6 +545,142 @@ def test_force_release_after_clean_release_shows_no_prior_holder(tmp_path, monke
 
 
 # ---------------------------------------------------------------------------
+# test_lock_wait_times_out_by_default (dispatch-20260904-lock-timeout-eindig)
+# ---------------------------------------------------------------------------
+
+def test_lock_wait_times_out_within_bounded_default(tmp_path, monkeypatch):
+    """A waiter on a PERMANENTLY FULL lane must give up under the DEFAULT
+    config (no VNX_CLAUDE_LOCK_TIMEOUT_SECONDS set) -- forced via a
+    monkeypatched "lane always full" acquire plus a fast-forwarded fake
+    clock, executed on a background thread joined with a short real
+    wall-clock bound. Before the fix, VNX_CLAUDE_LOCK_TIMEOUT_SECONDS
+    defaulted to "0" and the wait-loop's `if timeout_secs > 0` guard (line
+    214) made the TimeoutError branch structurally unreachable on default
+    config -- the thread never finishes and this test fails on that
+    behavior (not on a missing symbol)."""
+    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.delenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", raising=False)
+    # Lane is permanently full: every acquire attempt reports "busy".
+    monkeypatch.setattr(_ds_mod, "_try_acquire_any_slot", lambda fds: None)
+
+    # Fast-forward the fake clock 5000s per time.monotonic() call so even a
+    # multi-hour default timeout trips within a handful of loop iterations,
+    # instead of the test needing to wait out that timeout in real time.
+    fake_clock = {"t": 0.0}
+
+    def fake_monotonic():
+        fake_clock["t"] += 5000.0
+        return fake_clock["t"]
+
+    monkeypatch.setattr(_ds_mod.time, "monotonic", fake_monotonic)
+    # Small real sleep per poll (not a true no-op) so a still-buggy run
+    # burns bounded CPU instead of a tight spin for the full join window.
+    # Captures the real time.sleep BEFORE patching -- referencing the
+    # (patched) module attribute from inside its own replacement would
+    # self-recurse.
+    _real_sleep = _ds_mod.time.sleep
+    monkeypatch.setattr(_ds_mod.time, "sleep", lambda secs: _real_sleep(0.001))
+
+    outcome: dict = {}
+
+    def waiter():
+        try:
+            with serialize_lane("claude-tmux", dispatch_id="perma-full"):
+                pass  # must never be reached -- lane is permanently full
+        except BaseException as exc:  # capture anything, including TimeoutError
+            outcome["exc"] = exc
+        else:
+            outcome["exc"] = None
+        outcome["done"] = True
+
+    t = threading.Thread(target=waiter, daemon=True)
+    t.start()
+    t.join(timeout=2.0)
+
+    assert outcome.get("done"), (
+        "serialize_lane on a permanently-full lane did not return/raise "
+        "within 2s under the DEFAULT config -- the default lock-wait "
+        "timeout is not finite (VNX_CLAUDE_LOCK_TIMEOUT_SECONDS default "
+        "must be > 0, not \"0\")"
+    )
+    assert isinstance(outcome.get("exc"), TimeoutError), (
+        f"expected a TimeoutError from the default lock-wait timeout, "
+        f"got {outcome.get('exc')!r}"
+    )
+
+
+def test_timeout_seconds_default_is_finite(monkeypatch):
+    """No VNX_CLAUDE_LOCK_TIMEOUT_SECONDS set -> a positive, finite default
+    (not the old "0" == wait-forever default)."""
+    monkeypatch.delenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", raising=False)
+    result = _ds_mod._timeout_seconds()
+    assert 0 < result < float("inf"), (
+        f"expected a positive finite default timeout, got {result!r}"
+    )
+
+
+@pytest.mark.parametrize("raw_value", ["x", "", "-5", "-0.001"])
+def test_timeout_seconds_bad_or_negative_values_fall_back_to_finite_default(
+    raw_value, monkeypatch,
+):
+    """Unparseable or negative VNX_CLAUDE_LOCK_TIMEOUT_SECONDS falls back to
+    the finite default -- same fail-soft-to-default posture as
+    _max_concurrent()'s clamp of bad input (test_max_concurrent_clamps_bad_values).
+    A negative wait has no sane meaning and is not the sanctioned opt-out
+    (that is exactly "0", covered by test_lock_timeout_zero_is_explicit_infinite_wait_opt_out)."""
+    monkeypatch.setenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", raw_value)
+    result = _ds_mod._timeout_seconds()
+    assert result == _ds_mod._DEFAULT_TIMEOUT_SECONDS
+
+
+def test_timeout_seconds_zero_is_preserved_as_explicit_value(monkeypatch):
+    """VNX_CLAUDE_LOCK_TIMEOUT_SECONDS=0 must still resolve to exactly 0.0 --
+    the sanctioned explicit opt-out for "wait forever", not silently clamped
+    to the finite default like a negative/garbage value is."""
+    monkeypatch.setenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", "0")
+    assert _ds_mod._timeout_seconds() == 0.0
+
+
+def test_lock_timeout_zero_is_explicit_infinite_wait_opt_out(monkeypatch):
+    """VNX_CLAUDE_LOCK_TIMEOUT_SECONDS=0 remains a legal, explicit opt-out:
+    the waiter keeps retrying no matter how much (simulated) time has
+    passed. Proven with a bounded, deterministic acquire-eventually-
+    succeeds sequence (3rd attempt succeeds) rather than an actual
+    unbounded wait."""
+    monkeypatch.setenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", "0")
+
+    calls = {"n": 0}
+
+    def flaky_then_ok(fds):
+        calls["n"] += 1
+        return None if calls["n"] < 3 else 0
+
+    monkeypatch.setattr(_ds_mod, "_try_acquire_any_slot", flaky_then_ok)
+
+    fake_clock = {"t": 0.0}
+
+    def fake_monotonic():
+        fake_clock["t"] += 10 ** 9  # astronomically past any sane finite default
+        return fake_clock["t"]
+
+    monkeypatch.setattr(_ds_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(_ds_mod.time, "sleep", lambda secs: None)
+
+    idx = _ds_mod._acquire_any_slot_with_warn(
+        fds=[object(), object(), object()],  # never dereferenced by the mocked acquire
+        lock_paths=[
+            Path("/nonexistent-a"), Path("/nonexistent-b"), Path("/nonexistent-c"),
+        ],
+        serialization_class="claude-tmux",
+        dispatch_id="opt-out-test",
+    )
+    assert idx == 0
+    assert calls["n"] == 3, (
+        "explicit 0 must keep retrying past any elapsed time, not give up early"
+    )
+
+
+# ---------------------------------------------------------------------------
 # test_iso_now_is_timezone_aware
 # ---------------------------------------------------------------------------
 
