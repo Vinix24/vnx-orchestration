@@ -167,14 +167,23 @@ class TestDiscoverLaunchdJobs:
         """Nul-is-eerst-een-meetfout: prove the real scripts/launchd/ directory
         is actually found and parsed, not just that an empty/fake dir works.
 
-        OI-1621 fixed the one plist that used to fail this: all 7 real plist
+        OI-1621 fixed the one plist that used to fail this: all real plist
         files now parse as valid XML -- com.vnx.gate-obligation-runner.plist
         no longer carries the literal "--" inside an XML comment that used
-        to make it invalid XML (see TestScanLaunchdDir below)."""
+        to make it invalid XML (see TestScanLaunchdDir below).
+
+        OI-1509/OI-1510 (golf 3): com.vnx.gate-obligation-runner.plist's
+        Label now carries the unsubstituted "${VNX_PROJECT_ID}" placeholder
+        (per-project scoping) -- labels are read raw from each plist's own
+        Label key, never substituted here, so the expected string below
+        changed to match. com.vnx.receipt-processor.plist is new (same golf,
+        same per-project pattern) -- the >= 7 floor still holds with it
+        counted in."""
         labels = bts._discover_launchd_jobs()
         assert "com.vnx.producer-freshness-monitor" in labels
         assert "com.vnx.ledger-health" in labels
-        assert "com.vnx.gate-obligation-runner" in labels
+        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in labels
+        assert "com.vnx.receipt-processor.${VNX_PROJECT_ID}" in labels
         assert len(labels) >= 7
 
 
@@ -211,10 +220,15 @@ class TestScanLaunchdDir:
         assert the resulting unparseable state. The comment was reworded to
         drop the double-dash (no longer '--project-id', now 'the project id
         argument') so the plist is well-formed XML and its label is found
-        like every other real launchd template."""
+        like every other real launchd template.
+
+        OI-1509/OI-1510 (golf 3): the Label read back is now the
+        unsubstituted "${VNX_PROJECT_ID}"-suffixed form (per-project
+        scoping) -- see test_real_repo_register_finds_the_known_jobs above
+        for why."""
         labels, unparseable = bts._scan_launchd_dir()
         assert "com.vnx.gate-obligation-runner.plist" not in unparseable
-        assert "com.vnx.gate-obligation-runner" in labels
+        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in labels
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +585,11 @@ class TestMeasureLaunchdLivenessNotApplicable:
         OI-1621 fixed com.vnx.gate-obligation-runner.plist's XML, so the
         real register no longer carries an unparseable plist -- this test's
         ``unparseable_plists`` assertion flipped from "in" to empty when that
-        landed."""
+        landed.
+
+        OI-1509/OI-1510 (golf 3): the expected job key is now the
+        unsubstituted "${VNX_PROJECT_ID}"-suffixed Label -- see
+        test_real_repo_register_finds_the_known_jobs above."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
 
@@ -579,6 +597,6 @@ class TestMeasureLaunchdLivenessNotApplicable:
 
         assert result["overall"] == "unknown"
         assert result.get("unparseable_plists", []) == []
-        assert "com.vnx.gate-obligation-runner" in result["jobs"]
+        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in result["jobs"]
         for label, info in result["jobs"].items():
             assert info["state"] == "not_applicable", f"{label}: {info}"
