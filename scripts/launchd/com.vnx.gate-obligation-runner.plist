@@ -3,7 +3,7 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.vnx.gate-obligation-runner</string>
+  <key>Label</key><string>com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}</string>
   <!--
     Review-gate obligation fulfilment (OI-876/OI-881). Every 15 minutes,
     fulfils pending gate obligations the dispatch door registered for specs
@@ -14,20 +14,48 @@
     Also installable manually via reload_plist.sh:
       bash scripts/launchd/reload_plist.sh com.vnx.gate-obligation-runner
 
-    Exit 11 (obligations still open) is captured into job_exits.ndjson by
-    the producer-freshness monitor's launchd harvest; obligations pending
-    longer than a day are flagged per gate key by the same monitor's
-    review_gate_obligations producer.
-
     The store is NOT pinned by path. The job identifies its project via
     VNX_PROJECT_ID (below), one instance per project; the runner then resolves
     the store from that id and, independently, the GitHub owner/repo whose PRs
     its obligations live in. A consumer installing this template for their own
-    project MUST set VNX_PROJECT_ID to their project id: vnx init substitutes
-    the ${VNX_PROJECT_ID} placeholder with the project id argument, so manual
-    installs must edit it by hand. Hardcoding a store path here would make a
-    copied template run on the original project's obligations
-    (OI-1253 fix-forward).
+    project MUST set VNX_PROJECT_ID to their project id.
+
+    OI-1509/OI-1510 (golf 3, 2026-09-04): the Label itself, not just the
+    EnvironmentVariables entry, now carries ${VNX_PROJECT_ID}. Before this,
+    the Label was the bare literal string above with no suffix; vnx init
+    (_install_launchd_agent in vnx_cli/commands/init_cmd.py) substitutes
+    ${VNX_PROJECT_ID} across the whole template body, so the EnvironmentVariables
+    value was already correct per project, but every project's installed job
+    carried the SAME Label. A second project's `vnx init` reloads the SAME
+    destination file (still a known gap, see below) and unloads whichever
+    project's job was there first: exactly the "two projects get in each
+    other's way" failure OI-1509/OI-1510 describe, measured live on this
+    machine as a hand-installed workaround (this repo's own project's
+    plist, project-suffixed by hand) sitting next to the still-bare,
+    still-shared plist for a second, unrelated project on the same machine.
+    reload_plist.sh (scripts/launchd/reload_plist.sh) now
+    derives BOTH the installed Label and the destination filename from this
+    template's own (post-substitution) Label, so a manual reload per project
+    lands in separate files and never unloads another project's job.
+
+    REMAINING GAP (flagged, not fixed here; out of this dispatch's file
+    scope): vnx_cli/commands/init_cmd.py::_install_launchd_agent still writes
+    to a destination path built from the literal plist_name argument
+    ("com.vnx.gate-obligation-runner.plist"), not from the project-scoped
+    Label. `vnx init` therefore still overwrites one project's installed
+    plist FILE with another's on a second install, even though the Label text
+    inside each file is now correct. Until that destination-path bug is fixed,
+    installing per project must go through reload_plist.sh (this file's own
+    documented path above), not `vnx init`, on a machine serving more than
+    one VNX project. Hardcoding a store path in this template would be a
+    separate, worse bug: a copied template running on the original project's
+    obligations (OI-1253 fix-forward); this template still resolves the
+    store from VNX_PROJECT_ID, never from a literal path.
+
+    Exit 11 (obligations still open) is captured into job_exits.ndjson by
+    the producer-freshness monitor's launchd harvest; obligations pending
+    longer than a day are flagged per gate key by the same monitor's
+    review_gate_obligations producer.
   -->
   <key>ProgramArguments</key>
   <array>
@@ -37,8 +65,8 @@
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
-  <key>StandardOutPath</key><string>/tmp/vnx-gate-obligation-runner.log</string>
-  <key>StandardErrorPath</key><string>/tmp/vnx-gate-obligation-runner.err</string>
+  <key>StandardOutPath</key><string>/tmp/vnx-gate-obligation-runner-${VNX_PROJECT_ID}.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-gate-obligation-runner-${VNX_PROJECT_ID}.err</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>VNX_HOME</key>

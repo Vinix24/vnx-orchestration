@@ -1858,9 +1858,49 @@ def _build_git_context() -> Dict[str, Any]:
 _JOB_EXITS_TAIL_LINES = 2000
 
 
-def _scan_launchd_dir(launchd_dir: Optional[Path] = None) -> "tuple[List[str], List[str]]":
+# OI-1509/OI-1510 (golf 3): a per-project launchd template's Label carries
+# this literal placeholder in the TEMPLATE FILE (e.g.
+# "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}") so two projects
+# installing it never collide on one launchd Label -- see
+# scripts/launchd/com.vnx.gate-obligation-runner.plist and
+# scripts/launchd/reload_plist.sh. The INSTALLED job's real Label has this
+# resolved to an actual project id (e.g. "...vnx-dev"). A register built
+# from the raw, un-resolved template text would therefore never match what
+# `launchctl list` actually reports for that job -- see
+# _resolve_launchd_label below.
+_LAUNCHD_PROJECT_ID_PLACEHOLDER = "${VNX_PROJECT_ID}"
+
+
+def _resolve_launchd_label(label: str, project_id: Optional[str]) -> str:
+    """Resolve a launchd Label read from a template against this project's
+    own id, mirroring the substitution ``reload_plist.sh`` and
+    ``vnx_cli.commands.init_cmd._install_launchd_agent`` apply at install
+    time. A label with no placeholder is returned unchanged -- most
+    templates in this repo are not per-project. A label WITH the
+    placeholder but no resolvable ``project_id`` is ALSO returned
+    unchanged, deliberately: the caller cannot then match that literal,
+    unresolved string against any real ``launchctl list`` label, and reads
+    it as "cannot judge this job" (an explicit unknown) rather than
+    fabricating a guessed label that would either never match (permanent
+    false fail) or accidentally match another project's job of the same
+    family."""
+    if _LAUNCHD_PROJECT_ID_PLACEHOLDER not in label:
+        return label
+    if not project_id:
+        return label
+    return label.replace(_LAUNCHD_PROJECT_ID_PLACEHOLDER, project_id)
+
+
+def _scan_launchd_dir(
+    launchd_dir: Optional[Path] = None, *, project_id: Optional[str] = None
+) -> "tuple[List[str], List[str]]":
     """Expected launchd job labels, read explicitly from each plist's own
-    Label key -- never guessed off the filename. Returns ``(labels,
+    Label key -- never guessed off the filename -- then resolved against
+    ``project_id`` via ``_resolve_launchd_label`` (OI-1509/OI-1510: a
+    per-project template's raw Label carries the literal
+    ``${VNX_PROJECT_ID}`` placeholder, which never matches a real installed
+    job's Label; resolving it here is what lets the register compare
+    like-for-like against ``launchctl list``). Returns ``(labels,
     unparseable_filenames)``: a plist that fails to parse is excluded from
     ``labels`` (one broken file must not blank out the rest of the register)
     but its filename is NOT silently dropped -- it is returned so the caller
@@ -1895,13 +1935,15 @@ def _scan_launchd_dir(launchd_dir: Optional[Path] = None) -> "tuple[List[str], L
             continue
         label = data.get("Label") if isinstance(data, dict) else None
         if isinstance(label, str) and label:
-            labels.append(label)
+            labels.append(_resolve_launchd_label(label, project_id))
         else:
             unparseable.append(path.name)
     return sorted(set(labels)), sorted(unparseable)
 
 
-def _discover_launchd_jobs(launchd_dir: Optional[Path] = None) -> List[str]:
+def _discover_launchd_jobs(
+    launchd_dir: Optional[Path] = None, *, project_id: Optional[str] = None
+) -> List[str]:
     """Expected launchd job labels only. See ``_scan_launchd_dir`` for the
     variant that also surfaces filenames that failed to parse -- used by
     ``_measure_launchd_liveness`` so a broken plist is a loud finding, not a
@@ -1912,7 +1954,7 @@ def _discover_launchd_jobs(launchd_dir: Optional[Path] = None) -> List[str]:
     treats a resulting empty list as its own signal ("could not establish a
     register"), not as "zero jobs expected".
     """
-    labels, _unparseable = _scan_launchd_dir(launchd_dir)
+    labels, _unparseable = _scan_launchd_dir(launchd_dir, project_id=project_id)
     return labels
 
 
@@ -2029,9 +2071,20 @@ def _measure_launchd_liveness(
     launchd_dir: Optional[Path] = None,
     runner: Any = None,
     which_fn: Any = None,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Measure whether every expected launchd job is currently loaded, and
     since when its last recorded exit is known.
+
+    ``project_id`` (default: derived from ``state_dir`` via
+    ``project_id_from_state_dir``, the same resolver this file already uses
+    elsewhere) resolves a per-project template's ``${VNX_PROJECT_ID}``-
+    carrying Label against this project's own id before comparing it to
+    ``launchctl list`` -- see ``_resolve_launchd_label``. Without this, a
+    per-project job's expected label stays the literal, unresolved
+    placeholder text, which can never match what launchctl actually
+    reports, making every SessionStart read that job as permanently
+    not_loaded regardless of its real state (OI-1509/OI-1510 fix-forward).
 
     Returns ``{"overall": "ok"|"fail"|"unknown", "jobs": {label: {...}}}``,
     plus ``"unparseable_plists"`` (filenames, non-empty only when at least
@@ -2062,8 +2115,16 @@ def _measure_launchd_liveness(
     ``daemon_register.read_daemon_register`` already applies to a
     structurally-empty parse) -- it must never silently read as "ok,
     nothing to report".
+
+    A label that STILL carries the literal ``${VNX_PROJECT_ID}`` placeholder
+    after resolution (this project's own id could not be established) reads
+    as ``"unknown"`` and is excluded from the pass/fail verdict, same
+    treatment as an unparseable plist: this module could not identify what
+    job to expect, which is a "we don't know", never a fabricated "not
+    loaded".
     """
-    labels, unparseable = _scan_launchd_dir(launchd_dir)
+    resolved_project_id = project_id if project_id is not None else project_id_from_state_dir(state_dir)
+    labels, unparseable = _scan_launchd_dir(launchd_dir, project_id=resolved_project_id)
     if not labels and not unparseable:
         return {"overall": "unknown", "jobs": {}, "reason": "no launchd plist files discovered"}
 
@@ -2075,11 +2136,19 @@ def _measure_launchd_liveness(
 
     jobs: Dict[str, Any] = {}
     any_not_loaded = False
+    any_unresolved_placeholder = False
     for label in labels:
         history = exit_history.get(label)
         since = history.get("timestamp") if history else None
+        unresolved_placeholder = _LAUNCHD_PROJECT_ID_PLACEHOLDER in label
+        # Platform-level facts (not_applicable / launchctl invocation
+        # itself failed) apply to every expected job identically and take
+        # priority over the label-specific unresolved-placeholder case:
+        # when launchctl was never even queried, whether we could resolve
+        # a per-project label is moot. The placeholder only matters once we
+        # actually HAVE live launchctl data to compare it against.
         if now_result["measured"]:
-            state = "loaded" if label in now_result["jobs"] else "not_loaded"
+            state = "unknown" if unresolved_placeholder else ("loaded" if label in now_result["jobs"] else "not_loaded")
         elif not now_result.get("applicable", True):
             state = "not_applicable"
         else:
@@ -2091,12 +2160,14 @@ def _measure_launchd_liveness(
             "since_measured": since is not None,
             "last_exit_code": history.get("exit_code") if history else None,
         }
-        if now_result["measured"] and label not in now_result["jobs"]:
+        if now_result["measured"] and not unresolved_placeholder and label not in now_result["jobs"]:
             any_not_loaded = True
+        if now_result["measured"] and unresolved_placeholder:
+            any_unresolved_placeholder = True
 
     if now_result["measured"] and any_not_loaded:
         overall = "fail"
-    elif not now_result["measured"] or unparseable:
+    elif not now_result["measured"] or unparseable or any_unresolved_placeholder:
         overall = "unknown"
     else:
         overall = "ok"

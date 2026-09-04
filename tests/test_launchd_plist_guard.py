@@ -209,11 +209,21 @@ def test_real_repo_launchd_templates_clear_the_guard(monkeypatch) -> None:
 
     # nul-is-eerst-een-meetfout: prove the scan actually found and judged the
     # two OI-1621 consumers, not that it silently checked nothing.
+    #
+    # com.vnx.gate-obligation-runner's Label carries the literal, unsubstituted
+    # "${VNX_PROJECT_ID}" placeholder as of OI-1509/OI-1510 (golf 3): the Label
+    # is now per-project-scoped, same as its EnvironmentVariables entry always
+    # was, so two projects installing this template resolve to different
+    # launchd Labels instead of colliding. check_repo_launchd_templates reads
+    # the template's Label raw (it only substitutes ${VNX_HOME} inside
+    # ProgramArguments for the interpreter check, never the Label), so the
+    # value this scan reports is that unsubstituted placeholder form.
+    gate_obligation_runner_label = "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}"
     checked_labels = {
         c["label"] for c in result["consumers"] if c.get("relevant") and c.get("in_range") is not None
     }
-    assert "com.vnx.gate-obligation-runner" in checked_labels
+    assert gate_obligation_runner_label in checked_labels
     assert "com.vnx.ledger-health" in checked_labels
     for c in result["consumers"]:
-        if c["label"] in ("com.vnx.gate-obligation-runner", "com.vnx.ledger-health"):
+        if c["label"] in (gate_obligation_runner_label, "com.vnx.ledger-health"):
             assert c["in_range"] is True, c

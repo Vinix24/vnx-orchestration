@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.receipt-processor.${VNX_PROJECT_ID}</string>
+  <!--
+    OI-1509/OI-1510 (golf 3, 2026-09-04): receipt_processor.sh has always run
+    as a supervised foreground daemon (receipt_processor_supervisor.sh, its
+    own flock(2) singleton + exponential-backoff restart loop), started by
+    hand or by `vnx start` inside a live terminal session, never by launchd.
+    Nothing here replaces that path; it stays the normal way to run VNX
+    interactively. This plist exists for the case that path does not cover:
+    a project's receipt processor needs to keep running (and auto-recover
+    after a crash or reboot) without a terminal session attached at all,
+    the same coverage gate-obligation-runner already had before this pair
+    of daemons had per-project launchd support.
+
+    Per-project from the start: the Label carries ${VNX_PROJECT_ID}, matching
+    the fix just made to com.vnx.gate-obligation-runner.plist, so a second
+    project installing this template never collides with (or unloads) the
+    first project's job. See that template's comment for the full history
+    of the collision this pattern now avoids, and reload_plist.sh for how
+    the Label and destination filename are both derived from this template's
+    own (post-substitution) content, never from a bare literal.
+
+    receipt_processor_supervisor.sh resolves VNX_HOME/VNX_STATE_DIR/
+    VNX_PIDS_DIR/VNX_LOCKS_DIR itself via scripts/lib/vnx_paths.sh, keyed off
+    VNX_PROJECT_ID (below) or the .vnx-project-id marker under VNX_HOME, so
+    two projects' supervisors never share a lock, PID file, or state root
+    even while both run concurrently on the same machine.
+
+    KeepAlive only on a NON-zero exit: the supervisor's own singleton
+    enforcement exits 0 (not an error) both when another instance already
+    holds the lock and when the VNX_STATE_DIR/PAUSED marker is present
+    (`vnx resume` clears it) — SuccessfulExit=false means launchd leaves
+    those clean exits alone instead of respawning into a tight loop, and
+    still restarts the supervisor after a real crash (non-zero exit).
+
+    Installed manually via reload_plist.sh (not yet wired into vnx init;
+    see com.vnx.gate-obligation-runner.plist's comment for the matching
+    destination-path gap in vnx_cli/commands/init_cmd.py):
+      bash scripts/launchd/reload_plist.sh com.vnx.receipt-processor
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec bash scripts/receipt_processor_supervisor.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/vnx-receipt-processor-${VNX_PROJECT_ID}.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-receipt-processor-${VNX_PROJECT_ID}.err</string>
+  <key>WorkingDirectory</key><string>${VNX_HOME}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>VNX_PROJECT_ID</key>
+    <string>${VNX_PROJECT_ID}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
