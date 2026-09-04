@@ -96,15 +96,22 @@ print(p['VNX_DATA_DIR'])
     fi
 
     if [ -n "$_VNX_STATE_DIR" ] && [ -d "$_VNX_STATE_DIR" ]; then
-      # Terminal states from shadow state files
-      for _t in T1 T2 T3; do
-        _sf="$_VNX_STATE_DIR/terminal_state_${_t}.json"
-        if [ -f "$_sf" ]; then
-          _status=$(jq -r '.status // "unknown"' "$_sf" 2>/dev/null || echo "unknown")
-          _task=$(jq -r '.current_task // "idle"' "$_sf" 2>/dev/null || echo "idle")
-          T0_TERMINAL_STATES="${T0_TERMINAL_STATES}${_t}: ${_status} (${_task})\n"
-        fi
-      done
+      # Terminal states from the shadow state file (scripts/lib/terminal_state_shadow.py).
+      # Golf 3A fix: this used to glob terminal_state_${_t}.json (a per-terminal
+      # suffixed filename) but the actual writer (TERMINAL_STATE_FILENAME in
+      # terminal_state_shadow.py) has only ever written the SINGULAR
+      # terminal_state.json, with a `.terminals.<id>` map inside it. The suffixed
+      # glob matched nothing, on any project — this section silently fell
+      # through to "No terminal state data" every session, discovered via this
+      # dispatch's own measurement discipline, not reported by anything.
+      _tsf="$_VNX_STATE_DIR/terminal_state.json"
+      if [ -f "$_tsf" ]; then
+        for _t in T1 T2 T3; do
+          _status=$(jq -r --arg t "$_t" '.terminals[$t].status // "unknown"' "$_tsf" 2>/dev/null || echo "unknown")
+          _last_activity=$(jq -r --arg t "$_t" '.terminals[$t].last_activity // "unknown"' "$_tsf" 2>/dev/null || echo "unknown")
+          T0_TERMINAL_STATES="${T0_TERMINAL_STATES}${_t}: ${_status} (last_activity: ${_last_activity})\n"
+        done
+      fi
 
       # Open items digest (compact)
       _oi_file="$_VNX_STATE_DIR/open_items.json"
@@ -181,6 +188,51 @@ $_BEACON_BAD"
       BEACON_SECTION="BEACON HEALTH UNAVAILABLE this session (UNMEASURED, not zero) — data dir unresolved or scripts/health_check.py missing."
     fi
 
+    # ── State artifact freshness (golf 3A, absence-is-loud #1, OI-1512 fix-forward) ──
+    # T0 reads a handful of point-in-time snapshots at SessionStart (t0_state.json,
+    # open_items.json, terminal_state.json, dashboard_status.json,
+    # t0_recommendations.json) with nothing surfacing how old they are. Measured
+    # 2026-08-29: a session orchestrated a merge against a 22-day-old t0_state.json
+    # (dashboard_status.json 63 days, t0_recommendations.json 73 days) and nobody
+    # noticed until the merge itself. scripts/lib/session_state_freshness.py reads
+    # each file's own declared timestamp (falling back to mtime), same precedent as
+    # t0_state_health.py, and classifies missing/stale/fresh/unknown — three real
+    # branches, never conflating "never populated" with "went stale". Reused here via
+    # subprocess exactly like health_check.py above, not reimplemented inline.
+    FRESHNESS_SECTION=""
+    _FRESHNESS_PY="$_HOOK_DIR/../scripts/lib/session_state_freshness.py"
+    if [ -n "$_VNX_STATE_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_FRESHNESS_PY" ]; then
+      _FRESHNESS_JSON="$("$_VNX_PY" "$_FRESHNESS_PY" --state-dir "$_VNX_STATE_DIR" --json 2>/dev/null || true)"
+      if [ -n "$_FRESHNESS_JSON" ] && command -v jq &>/dev/null; then
+        _FRESHNESS_PARSE_OK=$(echo "$_FRESHNESS_JSON" | jq -e '.artifacts | type == "object"' >/dev/null 2>&1 && echo yes || echo no)
+        if [ "$_FRESHNESS_PARSE_OK" = "yes" ]; then
+          _FRESHNESS_THRESHOLD=$(echo "$_FRESHNESS_JSON" | jq -r '.threshold_hours')
+          _FRESHNESS_ANY_STALE=$(echo "$_FRESHNESS_JSON" | jq -r '.any_stale')
+          _FRESHNESS_LINES=$(echo "$_FRESHNESS_JSON" | jq -r '
+            .artifacts | to_entries | sort_by(.key)[] |
+            if .value.status == "missing" then "  - [missing] \(.key): not found"
+            elif .value.status == "unknown" then "  - [unknown] \(.key): timestamp unreadable"
+            elif .value.status == "stale" then "  - [STALE] \(.key): age \(.value.age_human) (source: \(.value.source))"
+            else "  - [fresh] \(.key): age \(.value.age_human) (source: \(.value.source))"
+            end
+          ')
+          if [ "$_FRESHNESS_ANY_STALE" = "true" ]; then
+            FRESHNESS_SECTION="STATE FRESHNESS: BLOCKED — one or more session-start artifacts are older than ${_FRESHNESS_THRESHOLD}h (one working session; see scripts/lib/session_state_freshness.py for the measured commit-cadence this threshold is based on). DO NOT dispatch, merge, or close deliverables on the strength of this state — refresh it, or independently re-verify the specific facts it claims, before acting on it.
+$_FRESHNESS_LINES"
+          else
+            FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than ${_FRESHNESS_THRESHOLD}h
+$_FRESHNESS_LINES"
+          fi
+        else
+          FRESHNESS_SECTION="STATE FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — session_state_freshness.py did not return an artifacts object."
+        fi
+      else
+        FRESHNESS_SECTION="STATE FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — session_state_freshness.py produced no output, or jq is missing."
+      fi
+    else
+      FRESHNESS_SECTION="STATE FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — state dir unresolved or scripts/lib/session_state_freshness.py missing."
+    fi
+
     # ── T0 Orchestrator playbook body (in-context injection) ────────────
     # t0-orchestrator is intentionally not model-invocable
     # (disable-model-invocation: true, A-4 hardening), so its content has to
@@ -207,6 +259,8 @@ Model-invocable skills: @horizon @planner @panel @fabric-reference
 Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
 Use /t0-orchestrator for orchestration decisions and receipt processing
+
+$FRESHNESS_SECTION
 
 $T0_STATE_SECTION
 

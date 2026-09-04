@@ -104,8 +104,19 @@ class TestCentralStoreResolution:
         )
 
         expected_state_dir.mkdir(parents=True, exist_ok=True)
-        (expected_state_dir / "terminal_state_T1.json").write_text(
-            json.dumps({"status": "busy", "current_task": "UNIQUE-TASK-MARKER-9f2a"}),
+        # Golf 3A fix-forward: this fixture used to write the singular-terminal
+        # filename `terminal_state_T1.json` with a top-level `current_task`
+        # field. Measured against the real writer
+        # (scripts/lib/terminal_state_shadow.py:TERMINAL_STATE_FILENAME) while
+        # fixing hooks/sessionstart.sh's own dead read of that same filename:
+        # the writer has only ever produced the SINGULAR `terminal_state.json`
+        # with a `.terminals.<id>` map (no `current_task` field — the hook
+        # reads `.status` / `.last_activity` per terminal). This test's own
+        # purpose is central-store PATH resolution (D4), not the terminal-state
+        # schema, so the fixture is corrected to match reality rather than the
+        # dead-code path both the hook and this fixture used to share.
+        (expected_state_dir / "terminal_state.json").write_text(
+            json.dumps({"terminals": {"T1": {"status": "busy", "last_activity": "UNIQUE-TASK-MARKER-9f2a"}}}),
             encoding="utf-8",
         )
         (expected_state_dir / "open_items.json").write_text(
