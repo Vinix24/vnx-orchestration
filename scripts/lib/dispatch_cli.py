@@ -1720,51 +1720,104 @@ def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
 #    precedent: _check_reachability reads the ledger LIVE on every fire
 #    (mirrors merge_preflight_ci_check._capture) rather than trusting a
 #    cached fact — that is what "fail-closed" means everywhere else in this
-#    module. run_all_checks(write_halt=True) still WRITES halt.json as a side
-#    effect of the live measurement, so the door is a WRITER of the shared
-#    record other daemons/dashboards read, not a second, independent reader
-#    racing a daemon that may not exist yet.
+#    module.
 #
-# 2. Only CheckStatus.TRIGGERED blocks. stop_conditions.py's own module
-#    docstring is explicit: "a caller that only checks
+# 2. Only CheckStatus.TRIGGERED is ever grounds to refuse. stop_conditions.py's
+#    own module docstring is explicit: "a caller that only checks
 #    status == CheckStatus.TRIGGERED before proceeding is correct by
 #    construction: unmeasurable is silently NOT a green light." Refusing on
-#    UNMEASURABLE (gh hiccups, receipts.ndjson momentarily unreadable, fewer
-#    than `threshold` attempts in the window — the common, benign case for
-#    provider_exhausted/repeated_gate_failure_cause) would make the door
-#    fail-CLOSED on measurement noise, not on a real condition — that is
-#    fragility wearing governance's clothes, not fail-closed. TRIGGERED is a
-#    positive, evidenced fact; UNMEASURABLE is the absence of a fact. Only the
-#    former is grounds to refuse real work.
+#    UNMEASURABLE would make the door fail-CLOSED on measurement noise, not on
+#    a real condition — fragility wearing governance's clothes, not
+#    fail-closed.
 #
-# 3. The escape hatch mirrors --refire's shape (a mandatory REASON threaded
+# 3. Only TWO of the four TRIGGERED check_ids are BLOCKING; the other two are
+#    WARN-only. Found the hard way, not designed up front: PR #1757's own CI
+#    run (job 100996619247, 2026-09-04) turned every pre-existing dispatch
+#    test red with `[dispatch_cli] REJECT [stop-conditions-triggered]:
+#    ... gh_auth_dead: gh is niet geauthenticeerd ... You are not logged into
+#    any GitHub hosts.` — ALL 65 occurrences in that job's log were
+#    gh_auth_dead; zero were provider_exhausted/repeated_gate_failure_cause
+#    (confirmed by grepping the full log, not a sample). The state_dir
+#    threading itself was NOT the bug: check_provider_exhausted and
+#    check_repeated_gate_failure_cause are resolved against the exact
+#    `state_dir` this call passes in (stop_conditions.run_all_checks reads
+#    `resolved_state_dir / "t0_receipts.ndjson"` / `.../review_gates/results`
+#    ONLY when state_dir is given — never a fallback lookup), and
+#    tests/conftest.py's autouse module fixture already pins
+#    VNX_DATA_DIR/VNX_DATA_DIR_EXPLICIT to an isolated tmp dir for the whole
+#    suite, so those two checks were correctly isolated in CI the whole time.
+#    check_gh_auth_dead is structurally different: it takes NO state_dir or
+#    project_root parameter at all (stop_conditions.py, out of this dispatch's
+#    file scope to change) — it always inspects the literal `gh` CLI login
+#    state of whatever process happens to invoke it. On the CI runner that is
+#    a fact about the test job's own subprocess environment, not about this
+#    project or its operator; nothing distinguishes that from a genuine
+#    operator gh-auth outage. check_main_ci_red is the same shape one layer
+#    down: it takes a project_root but no state_dir, and this call never
+#    passed one, so it falls back to _default_project_root()'s CWD-based git
+#    resolution — the actual on-disk repo, not any test's tmp dir; it makes a
+#    real `gh run list` network call against the real project's real main
+#    branch, same live-network-in-a-hot-path problem, just not what tripped
+#    this specific CI run.
+#    _STOP_CONDITIONS_BLOCKING_CHECK_IDS below is exactly the two checks that
+#    ARE resolved against the state_dir THIS call passes in — a durable,
+#    reproducible fact about this project's own dispatch history, the same
+#    shape _check_reachability's ledger-based known-rejected-fact already
+#    blocks on. main_ci_red/gh_auth_dead are still measured and surfaced
+#    loudly (a real operator-facing signal — see the WARN print below), just
+#    never blocking and never persisted to halt.json on their own: blocking
+#    the door's fail-closed behavior on whichever incidental environment
+#    happens to invoke it is not what a durable governance fact should mean.
+#
+# 4. The escape hatch mirrors --refire's shape (a mandatory REASON threaded
 #    through run_dispatch, logged via logger.warning), not --reopen-lane's
 #    durable ledger-event shape. --reopen-lane durably clears ONE provider's
 #    exhaustion fact, which self-re-arms cleanly against a NEW receipt that
-#    postdates the reopen (_lane_reopened_after's since_ts comparison). A
-#    stop-conditions halt has FOUR heterogeneous causes (E1/E4/provider-
-#    exhaustion/E6) with no single evidence timestamp to compare a durable
-#    override against without risking a stale override from one incident
-#    silently covering a later, unrelated one. A per-fire reason forces the
-#    operator to consciously re-affirm the override on every dispatch while
-#    the condition is still live — safer for a global gate than a durable
-#    toggle, and the smaller, fully-correct surface given four checks whose
-#    evidence shapes do not share a common "since" field.
+#    postdates the reopen (_lane_reopened_after's since_ts comparison). The
+#    two blocking-eligible causes here (provider-exhaustion, E6) have no
+#    single evidence timestamp to compare a durable override against without
+#    risking a stale override from one incident silently covering a later,
+#    unrelated one. A per-fire reason forces the operator to consciously
+#    re-affirm the override on every dispatch while the condition is still
+#    live — safer for a global gate than a durable toggle.
+#
+# 5. halt.json is written ONLY on an ACTUAL non-dry-run fire that hits a
+#    blocking-eligible trigger — never by the measurement itself (never
+#    passed write_halt=True to run_all_checks; write_halt_file is called
+#    directly, once, exactly at that one point). A dry-run is a preview: it
+#    must produce zero durable side effects, same as every other dry-run
+#    check in this module. This also means the overwhelming majority of the
+#    existing dispatch-test suite — which fires for real (dry_run=False, with
+#    _execute_claude*/subprocess spawn mocked out) but triggers nothing in
+#    stop_conditions at all in their own isolated tmp state_dir — never
+#    touches halt.json either: the write is gated on there being a REAL
+#    blocking-eligible trigger to record, which for those tests there never
+#    is. Only a test that deliberately manufactures such a trigger (this
+#    file's own gate tests) exercises the write, which is exactly the tests
+#    that should.
 # ---------------------------------------------------------------------------
 
+# See point 3 above for the full reasoning and the CI evidence this is based on.
+_STOP_CONDITIONS_BLOCKING_CHECK_IDS = frozenset({"provider_exhausted", "repeated_gate_failure_cause"})
+
+
 def _check_stop_conditions_verdict(
-    *, state_dir: Path, override_reason: Optional[str] = None,
+    *, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
 ) -> Optional[ConstraintVerdict]:
     """Measure stop_conditions.run_all_checks() live and return a BLOCKING
-    ConstraintVerdict iff any check is TRIGGERED, unless override_reason is a
-    non-empty explicit operator reason (audited, warn-severity verdict
-    instead). Returns None when nothing is TRIGGERED (CLEAR and/or
-    UNMEASURABLE only) — see the module-level comment above for why.
+    ConstraintVerdict iff a check in _STOP_CONDITIONS_BLOCKING_CHECK_IDS is
+    TRIGGERED, unless override_reason is a non-empty explicit operator reason
+    (audited, warn-severity verdict instead). Returns None when nothing
+    blocking-eligible is TRIGGERED — see the module-level comment above for
+    the full tri-state / blocking-vs-warn-only / halt.json-write contract.
     """
-    from stop_conditions import CheckStatus, run_all_checks  # noqa: PLC0415
+    from stop_conditions import CheckStatus, run_all_checks, write_halt_file  # noqa: PLC0415
 
     try:
-        results = run_all_checks(state_dir=state_dir, write_halt=True)
+        # write_halt=False: a measurement pass never writes on its own — see
+        # point 5 above and the explicit write_halt_file call further down,
+        # gated on an ACTUAL blocking-eligible trigger on a real fire.
+        results = run_all_checks(state_dir=state_dir, write_halt=False)
     except Exception as exc:  # vnx-silent-except: a bug in the checker must never itself become an outage of the whole door — degrade to "not measured", never crash the fire
         print(
             f"[dispatch_cli] [WARN] stop-conditions measurement raised "
@@ -1781,15 +1834,36 @@ def _check_stop_conditions_verdict(
             f"light, not a refusal): {', '.join(unmeasurable)}",
             file=sys.stderr,
         )
-    if not triggered:
+
+    blocking_triggered = [r for r in triggered if r.check_id in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
+    warn_only_triggered = [r for r in triggered if r.check_id not in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
+    if warn_only_triggered:
+        print(
+            f"[dispatch_cli] [WARN] stop-condition(s) TRIGGERED but WARN-only "
+            f"(an ambient probe, not a state_dir-scoped project fact — never "
+            f"blocks, never persisted to halt.json on its own): "
+            + "; ".join(f"{r.check_id}: {r.message}" for r in warn_only_triggered),
+            file=sys.stderr,
+        )
+
+    if not blocking_triggered:
         return None
 
-    summary = "; ".join(f"{r.check_id}: {r.message}" for r in triggered)
+    if not dry_run:
+        try:
+            write_halt_file(state_dir, results)
+        except Exception as exc:  # vnx-silent-except: halt.json persistence is a best-effort audit trail, never a reason to change the verdict already decided
+            print(
+                f"[dispatch_cli] [WARN] failed to persist halt.json: {exc!r}",
+                file=sys.stderr,
+            )
+
+    summary = "; ".join(f"{r.check_id}: {r.message}" for r in blocking_triggered)
     reason = (override_reason or "").strip()
     if reason:
         logger.warning(
             "[dispatch_cli] AUDIT stop-conditions-override-applied triggered=%s reason=%s",
-            [r.check_id for r in triggered], reason,
+            [r.check_id for r in blocking_triggered], reason,
         )
         return ConstraintVerdict(
             code="stop-conditions-override-applied",
@@ -1819,6 +1893,7 @@ def build_runtime_snapshot(
     data_dir: Path,
     spec_file: Path,
     stop_conditions_override_reason: Optional[str] = None,
+    dry_run: bool = False,
 ) -> RuntimeSnapshot:
     """Perform all I/O required by compile_plan.
 
@@ -2051,6 +2126,7 @@ def build_runtime_snapshot(
     stop_verdict = _check_stop_conditions_verdict(
         state_dir=data_dir / "state",
         override_reason=stop_conditions_override_reason,
+        dry_run=dry_run,
     )
     if stop_verdict is not None:
         constraint_verdicts = constraint_verdicts + (stop_verdict,)
@@ -2999,6 +3075,7 @@ def run_dispatch(
         snapshot = build_runtime_snapshot(
             vspec, data_dir=data_dir, spec_file=spec_file,
             stop_conditions_override_reason=stop_conditions_override_reason,
+            dry_run=dry_run,
         )
 
         plan = compile_plan(vspec, snapshot)
