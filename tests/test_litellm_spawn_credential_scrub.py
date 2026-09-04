@@ -31,6 +31,13 @@ _LEAKED_OAUTH_TOKEN = "oauth-real-production-session-token"
 # _scrubbed_env() now routes through the FULL DEFAULT_SCRUB_KEY_PATTERNS set, not
 # just its own hand-rolled two-key allowlist.
 _LEAKED_SMTP_PASS = "fake-test-smtp-secret-not-real"
+# OI-1619 followup round 2 (coordinator review): a fabricated *_KEY-shaped secret
+# this lane does NOT need — not deepseek/moonshot/openrouter's own key. Proves the
+# need-based exception is scoped to exactly the lane's required keys, not a blanket
+# `*_KEY` carve-out that would let ANY such secret (OPENAI_API_KEY, SUPABASE_KEY,
+# whatever else happens to be in the parent env) survive for a subprocess an external
+# model can direct via run_command (audit S1).
+_LEAKED_UNNEEDED_KEY = "fake-test-unneeded-api-key-not-real"
 
 
 def _leaked_credentials_env() -> dict:
@@ -72,6 +79,21 @@ class TestScrubbedEnvHelper:
         ):
             env = ls._scrubbed_env(None)
         assert "VNX_SMTP_PASS" not in env
+        assert env["PATH"] == "/usr/bin"
+
+    def test_unneeded_key_shaped_secret_is_scrubbed(self):
+        """OI-1619 followup round 2 (coordinator review): a prior version of this
+        function excepted the WHOLE `*_KEY` glob from the pattern set, so any
+        *_KEY-shaped secret survived — not just the three provider keys this lane
+        actually needs (_PROVIDER_KEY_REQS). This must be scrubbed like any other
+        secret; only the lane's own needed keys get the exception."""
+        with patch.dict(
+            "os.environ",
+            {"SOMETHING_UNNEEDED_API_KEY": _LEAKED_UNNEEDED_KEY, "PATH": "/usr/bin"},
+            clear=True,
+        ):
+            env = ls._scrubbed_env(None)
+        assert "SOMETHING_UNNEEDED_API_KEY" not in env
         assert env["PATH"] == "/usr/bin"
 
     def test_own_provider_keys_survive_the_broader_scrub(self):
