@@ -16,14 +16,14 @@
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 538,
+      "line": 569,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 543,
+      "line": 574,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
@@ -358,6 +358,90 @@
       "symbol": "_govern"
     },
     {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 29,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 29,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 99,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 104,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 105,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 128,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 150,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 157,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 158,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 177,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 184,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_dispatch_envelope_paid_lane_budget.py",
+      "line": 185,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
       "file": "tests/test_dispatch_envelope_plan.py",
       "line": 30,
       "mechanism": "direct-call",
@@ -660,14 +744,14 @@
     },
     {
       "file": "tests/test_failclass_registry.py",
-      "line": 1087,
+      "line": 1273,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_failclass_registry.py",
-      "line": 1119,
+      "line": 1305,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_resolve_phantom_diff"

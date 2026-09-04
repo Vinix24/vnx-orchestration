@@ -85,6 +85,10 @@ from envelope_adapters_claude import (  # noqa: E402
     CodexAdapter,
 )
 from envelope_adapters_provider import ProviderAdapter  # noqa: E402
+from paid_lane_budget import (  # noqa: E402
+    PaidLaneBudgetExceededError,
+    enforce_daily_budget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -575,6 +579,37 @@ def run_envelope_plan(
         instruction,
         bundle_dir=Path(plan.instruction_file).parent,
     )
+
+    # PAID-LANE DAILY BUDGET (golf 2B) — refuse before any worktree/worker
+    # cost is incurred when today's cumulative spend on a metered-API lane
+    # (DEEPSEEK_API_KEY / OPENROUTER_API_KEY) already meets the daily cap.
+    # No-op for claude/codex/gemini/kimi/local-gemma (subscription/OAuth/free
+    # lanes) and for litellm:moonshot (its own key, not in scope here). This
+    # is THE choke point for the door: dispatch_cli.py calls run_envelope_plan
+    # directly for every provider-lane dispatch, so gating here covers the
+    # door without touching dispatch_cli.py itself.
+    try:
+        enforce_daily_budget(plan.provider.value, state_dir=state_dir)
+    except PaidLaneBudgetExceededError as _budget_exc:
+        _budget_fail_result = _AdapterResult(
+            returncode=1,
+            completion_text="",
+            status="failure",
+            error=str(_budget_exc),
+        )
+        _budget_fail_start = _budget_fail_end = datetime.now(timezone.utc)
+        report_path, receipt_path = _govern(
+            enriched_spec, _budget_fail_result, _budget_fail_start, _budget_fail_end,
+            integrity=integrity,
+        )
+        return EnvelopeResult(
+            status="failure",
+            returncode=1,
+            report_path=report_path,
+            receipt_path=receipt_path,
+            completion_text="",
+            error=str(_budget_exc),
+        )
 
     from dispatch_worktree_isolation import (  # noqa: PLC0415
         create_dispatch_worktree,
