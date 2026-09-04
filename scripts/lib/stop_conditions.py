@@ -66,6 +66,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from project_root import resolve_project_root  # noqa: E402
+from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES  # noqa: E402
 
 try:
     from failure_classification import FAILURE_CLASSES as _KNOWN_FAILURE_CLASSES
@@ -159,27 +160,63 @@ def _parse_iso(value: Any) -> Optional[datetime]:
 # ── Path resolution (mirrors dispatch_register.py's fallback chain) ────────
 
 
+class StateDirUnresolvable(RuntimeError):
+    """Raised when VNX_STATE_DIR cannot be resolved by any legitimate means.
+
+    There is deliberately NO further fallback beyond the canonical resolver
+    and the direct env-var overrides: a ``resolve_project_root(__file__) /
+    ".vnx-data" / "state"`` last resort is exactly the bug class the
+    central-mode path gate (``scripts/check_no_file_derived_data_paths.py``)
+    exists to block — in a central install that derivation resolves the
+    shared fabric checkout's own ``.vnx-data``, not the project's
+    ``~/.vnx-data/<project_id>``, forking state and producing split-brain.
+    A caller that cannot resolve the canonical state dir must read that as
+    "this measurement is UNMEASURABLE", never synthesize a wrong path.
+    """
+
+
 def _resolve_state_dir() -> Path:
-    """Resolve VNX_STATE_DIR via the canonical resolver, with the same
-    fallback chain dispatch_register.py uses when it is unavailable. Never
-    a hardcoded ``.vnx-data/`` literal — see project CLAUDE.md on
-    central-store authority (ADR-026)."""
+    """Resolve VNX_STATE_DIR via the canonical resolver, or the same direct
+    env-var overrides dispatch_register.py honors when it is unavailable.
+
+    Raises StateDirUnresolvable when neither works. Callers that need a
+    default state dir must catch this and report UNMEASURABLE — see the
+    module docstring's tri-state contract.
+    """
     try:
         from vnx_paths import resolve_paths
 
         return Path(resolve_paths()["VNX_STATE_DIR"])
-    except Exception:  # vnx-silent-except: fallback chain below mirrors dispatch_register._register_path
-        state_dir_env = os.environ.get("VNX_STATE_DIR")
-        if state_dir_env:
-            return Path(state_dir_env)
-        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
-            return Path(os.environ["VNX_DATA_DIR"]) / "state"
-        return resolve_project_root(__file__) / ".vnx-data" / "state"
+    except Exception:  # vnx-silent-except: fall through to the direct env-var overrides below
+        pass
+
+    state_dir_env = os.environ.get("VNX_STATE_DIR")
+    if state_dir_env:
+        return Path(state_dir_env)
+    if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
+        return Path(os.environ["VNX_DATA_DIR"]) / "state"
+
+    raise StateDirUnresolvable(
+        "vnx_paths.resolve_paths() faalde en geen VNX_STATE_DIR/VNX_DATA_DIR "
+        "override staat: geen repo-lokale __file__-fallback (central-mode "
+        "path gate verbiedt dat expliciet, zie OI 'un-grandfathered violation')"
+    )
 
 
 def _default_project_root() -> Optional[Path]:
+    """Best-effort project root for check_main_ci_red's ``gh`` invocation.
+
+    Deliberately calls resolve_project_root() WITHOUT a __file__ anchor: with
+    no caller_file, resolution is CWD-first (git rev-parse from the process's
+    working directory), never derived from where this module physically
+    lives on disk. That is exactly what a ``gh run list`` needs — the git
+    checkout the orchestrator is actually running in — and it is immune to
+    the central-mode keystone bug an anchored resolve_project_root(__file__)
+    would reintroduce (in a central install that resolves the shared fabric
+    checkout, not the project).
+    """
     try:
-        return resolve_project_root(__file__)
+        return resolve_project_root()
     except RuntimeError:
         return None
 
@@ -353,8 +390,18 @@ def check_gh_auth_dead(*, gh_bin: str = "gh") -> StopConditionResult:
 # ── Shared receipt-ledger reading helpers ───────────────────────────────────
 
 _ATTEMPT_EVENT_TYPES = frozenset({"task_complete", "subprocess_completion", "task_failed"})
-_SUCCESS_STATUSES = frozenset({"success", "done", "complete"})
-_FAILURE_STATUSES = frozenset({"failed", "failure"})
+
+# Completion-outcome vocabulary: imported from receipt_verdict.py (ADR-035
+# §3.1), the same source deliberation_panel.py and dispatch_outcome_classifier.py
+# already import from — not re-typed here. HARD_FAILURE_STATUSES is WIDER
+# than a hand-picked {"failed", "failure"} would be: it also carries "error",
+# "blocked", "timeout", "contract_invalid". That widening is a deliberate
+# improvement, not just import hygiene — see check_provider_exhausted's
+# docstring for the behavior it changes and why that is more correct, not
+# less. No narrower derived subset is needed: every extra status the
+# canonical set adds is itself a distinguishable, non-ambiguous outcome (a
+# receipt genuinely means it), so nothing here needs to strip entries back
+# out.
 
 # The two failure_classification.py classes that mean "the provider itself
 # structurally refuses" — auth/quota rejection (401/403) or balance/credit
@@ -402,13 +449,33 @@ def check_provider_exhausted(
 
     Per provider seen in the last ``tail_lines`` receipt-ledger lines, this
     looks at the most recent ``threshold`` clean attempts (status normalized
-    to success/failure; anything ambiguous — timeout, unknown, no_signal,
-    contract_invalid, ... — is excluded from the timeline rather than guessed
-    either way) and triggers only when ALL of them are exhaustion-class
-    failures. A single success in that window clears the streak.
+    to success/failure via receipt_verdict.py's canonical
+    SUCCESS_STATUSES/HARD_FAILURE_STATUSES vocabulary — genuinely ambiguous
+    values like "unknown"/"no_signal"/"in_progress"/"" are excluded from the
+    timeline rather than guessed either way) and triggers only when ALL of
+    them are exhaustion-class failures. A single success in that window
+    clears the streak.
+
+    Behavior note: HARD_FAILURE_STATUSES is wider than {"failed", "failure"}
+    — it also carries "error", "blocked", "timeout", "contract_invalid".
+    Those now count as real (non-exhaustion) "failure" attempts instead of
+    being skipped as ambiguous. That is strictly more correct for this
+    check: a "timeout" or "contract_invalid" receipt IS a definite, legible
+    outcome (just not an exhaustion one), so it should occupy a window slot
+    and correctly dilute/break a would-be exhaustion streak — the same way a
+    success does — rather than being invisible to the measurement. The
+    practical effect is fewer false UNMEASURABLE verdicts (more real
+    attempts are now recognized) without weakening the TRIGGERED condition,
+    which still requires the failure_class itself to be exhaustion-specific.
     """
     check_id = "provider_exhausted"
-    resolved_path = Path(receipts_path) if receipts_path is not None else (_resolve_state_dir() / "t0_receipts.ndjson")
+    if receipts_path is not None:
+        resolved_path = Path(receipts_path)
+    else:
+        try:
+            resolved_path = _resolve_state_dir() / "t0_receipts.ndjson"
+        except StateDirUnresolvable as exc:
+            return _unmeasurable(check_id, f"kon state-dir niet resolven: {exc}")
 
     if not resolved_path.is_file():
         return _unmeasurable(check_id, f"receipts-bestand ontbreekt: {resolved_path}")
@@ -432,9 +499,9 @@ def check_provider_exhausted(
         if providers is not None and provider not in providers:
             continue
         raw_status = str(d.get("status") or "").strip().lower()
-        if raw_status in _SUCCESS_STATUSES:
+        if raw_status in SUCCESS_STATUSES:
             norm = "success"
-        elif raw_status in _FAILURE_STATUSES:
+        elif raw_status in HARD_FAILURE_STATUSES:
             norm = "failure"
         else:
             continue
@@ -518,7 +585,13 @@ def check_repeated_gate_failure_cause(
     all carry the same non-null cause.
     """
     check_id = "repeated_gate_failure_cause"
-    resolved_dir = Path(results_dir) if results_dir is not None else (_resolve_state_dir() / "review_gates" / "results")
+    if results_dir is not None:
+        resolved_dir = Path(results_dir)
+    else:
+        try:
+            resolved_dir = _resolve_state_dir() / "review_gates" / "results"
+        except StateDirUnresolvable as exc:
+            return _unmeasurable(check_id, f"kon state-dir niet resolven: {exc}")
 
     if not resolved_dir.is_dir():
         return _unmeasurable(check_id, f"resultaten-map ontbreekt: {resolved_dir}")
@@ -594,19 +667,38 @@ def run_all_checks(
     ``write_halt`` is true, write/overwrite ``halt.json`` in ``state_dir``.
 
     Never raises: each check function is itself fail-closed-to-unmeasurable,
-    never fail-open-to-clear.
+    never fail-open-to-clear. When the state dir cannot be resolved at all
+    (no explicit ``state_dir`` and ``_resolve_state_dir`` raises
+    StateDirUnresolvable), the two ledger-backed checks report UNMEASURABLE
+    and halt.json is not written — there is no canonical location left to
+    write it to, and no repo-local guess is taken instead.
     """
-    resolved_state_dir = Path(state_dir) if state_dir is not None else _resolve_state_dir()
+    resolved_state_dir: Optional[Path]
+    if state_dir is not None:
+        resolved_state_dir = Path(state_dir)
+    else:
+        try:
+            resolved_state_dir = _resolve_state_dir()
+        except StateDirUnresolvable:
+            resolved_state_dir = None
+
     resolved_root = Path(project_root) if project_root is not None else _default_project_root()
+
+    if resolved_state_dir is not None:
+        provider_result = check_provider_exhausted(resolved_state_dir / "t0_receipts.ndjson")
+        gate_result = check_repeated_gate_failure_cause(resolved_state_dir / "review_gates" / "results")
+    else:
+        provider_result = _unmeasurable("provider_exhausted", "state-dir niet resolvbaar: geen locatie voor t0_receipts.ndjson")
+        gate_result = _unmeasurable("repeated_gate_failure_cause", "state-dir niet resolvbaar: geen locatie voor review_gates/results")
 
     results = [
         check_main_ci_red(resolved_root),
         check_gh_auth_dead(),
-        check_provider_exhausted(resolved_state_dir / "t0_receipts.ndjson"),
-        check_repeated_gate_failure_cause(resolved_state_dir / "review_gates" / "results"),
+        provider_result,
+        gate_result,
     ]
 
-    if write_halt and any(r.status == CheckStatus.TRIGGERED for r in results):
+    if write_halt and resolved_state_dir is not None and any(r.status == CheckStatus.TRIGGERED for r in results):
         write_halt_file(resolved_state_dir, results)
 
     return results

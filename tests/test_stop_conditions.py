@@ -29,6 +29,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 import stop_conditions as sc  # noqa: E402
 from stop_conditions import (  # noqa: E402
     CheckStatus,
+    StateDirUnresolvable,
     StopConditionResult,
     check_gh_auth_dead,
     check_main_ci_red,
@@ -455,3 +456,112 @@ class TestRunAllChecksAndHalt:
         assert not list(state_dir.glob("*.tmp"))
         payload = json.loads(halt_path.read_text())
         assert payload["triggered"][0]["check_id"] == "x"
+
+
+# ── central-mode path gate (OI: un-grandfathered violation, PR #1754 review) ─
+#
+# stop_conditions.py must never fall back to a __file__-anchored repo-local
+# .vnx-data guess: scripts/check_no_file_derived_data_paths.py forbids this
+# exact bug class (a central install would resolve the shared fabric
+# checkout's own .vnx-data instead of the project's ~/.vnx-data/<project_id>,
+# forking state). These tests pin that both directly (the gate's own scanner
+# against this module's source) and behaviorally (the tri-state contract
+# a caller sees when state-dir truly cannot be resolved).
+
+
+class TestCentralModePathGate:
+    def test_module_source_has_no_file_derived_data_path_violations(self):
+        import importlib
+
+        scripts_dir = str(Path(sc.__file__).resolve().parent.parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        gate = importlib.import_module("check_no_file_derived_data_paths")
+        source = Path(sc.__file__).read_text(encoding="utf-8")
+        violations = gate.check_source(source)
+        assert violations == [], f"central-mode path gate violation(s) in stop_conditions.py: {violations}"
+
+    def test_resolve_state_dir_raises_never_a_repo_local_fallback(self, monkeypatch):
+        monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+        monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+        monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+        with patch("vnx_paths.resolve_paths", side_effect=RuntimeError("boom")):
+            with pytest.raises(StateDirUnresolvable):
+                sc._resolve_state_dir()
+
+    def test_resolve_state_dir_honors_direct_env_override_not_canonical(self, monkeypatch, tmp_path):
+        # Direct VNX_STATE_DIR override still works (not __file__-anchored) —
+        # only the removed repo-local __file__ fallback is forbidden.
+        monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path))
+        with patch("vnx_paths.resolve_paths", side_effect=RuntimeError("boom")):
+            result = sc._resolve_state_dir()
+        assert result == tmp_path
+
+    def test_provider_exhausted_unmeasurable_when_state_dir_unresolvable(self):
+        with patch("stop_conditions._resolve_state_dir", side_effect=StateDirUnresolvable("boom")):
+            result = check_provider_exhausted()
+        assert result.status == CheckStatus.UNMEASURABLE
+
+    def test_repeated_gate_failure_cause_unmeasurable_when_state_dir_unresolvable(self):
+        with patch("stop_conditions._resolve_state_dir", side_effect=StateDirUnresolvable("boom")):
+            result = check_repeated_gate_failure_cause()
+        assert result.status == CheckStatus.UNMEASURABLE
+
+    def test_run_all_checks_survives_unresolvable_state_dir_no_halt_written(self, tmp_path):
+        clear = StopConditionResult("x", CheckStatus.CLEAR, "ok")
+        with patch("stop_conditions._resolve_state_dir", side_effect=StateDirUnresolvable("boom")), \
+             patch("stop_conditions.check_main_ci_red", return_value=clear), \
+             patch("stop_conditions.check_gh_auth_dead", return_value=clear):
+            results = run_all_checks(state_dir=None, project_root=tmp_path)
+        by_id = {r.check_id: r for r in results}
+        assert by_id["provider_exhausted"].status == CheckStatus.UNMEASURABLE
+        assert by_id["repeated_gate_failure_cause"].status == CheckStatus.UNMEASURABLE
+        # nothing crashed and no halt.json materialized anywhere under tmp_path
+        assert not list(tmp_path.rglob("halt.json"))
+
+    def test_default_project_root_calls_resolver_with_no_file_anchor(self):
+        with patch("stop_conditions.resolve_project_root", return_value=Path("/x")) as mock_resolver:
+            sc._default_project_root()
+        mock_resolver.assert_called_once_with()
+
+
+# ── completion-outcome vocabulary (OI: hand-typed duplicate of receipt_verdict) ─
+
+
+class TestCompletionOutcomeVocabulary:
+    def test_vocab_is_imported_not_redefined(self):
+        import receipt_verdict
+
+        assert sc.SUCCESS_STATUSES is receipt_verdict.SUCCESS_STATUSES
+        assert sc.HARD_FAILURE_STATUSES is receipt_verdict.HARD_FAILURE_STATUSES
+
+    def test_contract_invalid_status_counts_as_a_real_failure_attempt(self, tmp_path):
+        # "contract_invalid" is in the canonical HARD_FAILURE_STATUSES but was
+        # NOT in the old hand-typed {"failed", "failure"} pair — with only the
+        # hand-typed pair, only 1 of these 3 records would register as an
+        # "attempt" (insufficient data -> UNMEASURABLE). With the canonical
+        # vocabulary all 3 register; none are exhaustion-class, so the verdict
+        # is a measured CLEAR, not a data-starved UNMEASURABLE.
+        receipts = tmp_path / "t0_receipts.ndjson"
+        records = [
+            _attempt("glm-harness", "contract_invalid", failure_class=None),
+            _attempt("glm-harness", "contract_invalid", failure_class=None),
+            _attempt("glm-harness", "failure", failure_class="auth_rejected"),
+        ]
+        _write_receipt_lines(receipts, records)
+        result = check_provider_exhausted(receipts, threshold=3)
+        assert result.status == CheckStatus.CLEAR
+
+    def test_completed_status_recognized_as_success_breaks_streak(self, tmp_path):
+        # "completed" (distinct from "complete") is in the canonical
+        # SUCCESS_STATUSES but was NOT in the old hand-typed
+        # {"success", "done", "complete"} triple.
+        receipts = tmp_path / "t0_receipts.ndjson"
+        records = [
+            _attempt("kimi", "failure", failure_class="auth_rejected"),
+            _attempt("kimi", "completed"),
+            _attempt("kimi", "failure", failure_class="auth_rejected"),
+        ]
+        _write_receipt_lines(receipts, records)
+        result = check_provider_exhausted(receipts, threshold=3)
+        assert result.status == CheckStatus.CLEAR
