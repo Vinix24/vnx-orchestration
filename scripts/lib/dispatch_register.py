@@ -76,6 +76,12 @@ VALID_EVENTS = {
     "pr_merged",
     "runtime_anomaly_detected",          # RuntimeSupervisor detected a stalled/zombie worker
     "lease_released_on_failure_partial", # lease released but failure_recorded=False — incomplete cleanup
+    "door_bookkeeping_failed",           # dispatch-20260903-deur-boekhouding-luid: a door
+                                          # bookkeeping write (tracker row, gate obligation,
+                                          # track_id, checkout-lag, scout pre-pass) raised and
+                                          # was swallowed by design — this is the durable FACT
+                                          # of that swallow, carrying `extra.site`. See
+                                          # dispatch_cli._record_bookkeeping_failure.
 }
 
 
