@@ -150,8 +150,11 @@ else
     log_msg "Phase 3 WARNING: suggested edits generation failed (non-fatal)"
 fi
 
-# Phase 4: Send digest email (requires VNX_DIGEST_EMAIL + VNX_SMTP_PASS)
-if [ -n "${VNX_DIGEST_EMAIL:-}" ] && [ -n "${VNX_SMTP_PASS:-}" ]; then
+# Phase 4: Send digest email (requires VNX_DIGEST_EMAIL; the SMTP password
+# comes from VNX_SMTP_PASS or, when unset, the macOS keychain — the shell
+# doesn't know which source will resolve, so send_digest_email.py judges
+# availability itself and reports failure via its own exit code + log line).
+if [ -n "${VNX_DIGEST_EMAIL:-}" ]; then
     log_msg "Phase 4: Sending digest email to $VNX_DIGEST_EMAIL..."
     if "$VNX_PYTHON" "$SCRIPT_DIR/send_digest_email.py" 2>&1 | tee -a "$LOG_FILE"; then
         log_msg "Phase 4 complete: digest email sent"
@@ -159,7 +162,7 @@ if [ -n "${VNX_DIGEST_EMAIL:-}" ] && [ -n "${VNX_SMTP_PASS:-}" ]; then
         log_msg "Phase 4 WARNING: digest email failed (non-fatal)"
     fi
 else
-    log_msg "Phase 4: Skipped — VNX_DIGEST_EMAIL or VNX_SMTP_PASS not set"
+    log_msg "Phase 4: Skipped — VNX_DIGEST_EMAIL not set"
 fi
 
 log_msg "=== Nightly analysis pipeline complete (analyzer_exit=$ANALYZER_EXIT) ==="
