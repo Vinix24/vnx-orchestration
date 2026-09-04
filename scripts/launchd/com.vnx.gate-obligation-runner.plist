@@ -24,7 +24,7 @@
     the store from that id and, independently, the GitHub owner/repo whose PRs
     its obligations live in. A consumer installing this template for their own
     project MUST set VNX_PROJECT_ID to their project id: vnx init substitutes
-    the ${VNX_PROJECT_ID} placeholder with the --project-id value, so manual
+    the ${VNX_PROJECT_ID} placeholder with the project id argument, so manual
     installs must edit it by hand. Hardcoding a store path here would make a
     copied template run on the original project's obligations
     (OI-1253 fix-forward).

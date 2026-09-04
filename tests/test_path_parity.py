@@ -187,6 +187,89 @@ def test_discover_launchd_consumers_missing_dir_returns_empty(tmp_path) -> None:
     assert path_parity.discover_launchd_consumers(tmp_path / "nope") == []
 
 
+def test_discover_launchd_consumers_defaults_search_path_without_declared_path(tmp_path) -> None:
+    """No ``EnvironmentVariables`` key at all (``_FAKE_PLIST`` above) must
+    still fall back to the launchd/cron default -- the pre-existing
+    behavior this OI-1621 fix must not regress."""
+    agents_dir = tmp_path / "LaunchAgents"
+    agents_dir.mkdir()
+    (agents_dir / "com.vnx.fake.plist").write_text(_FAKE_PLIST)
+
+    consumers = path_parity.discover_launchd_consumers(agents_dir)
+    assert consumers[0]["search_path"] == path_parity.BACKGROUND_PATH
+
+
+_FAKE_PLIST_WITH_DECLARED_PATH = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.vnx.fake-declared-path</string>
+<key>ProgramArguments</key><array>
+<string>/bin/bash</string>
+<string>-c</string>
+<string>cd /repo &amp;&amp; exec python3 script.py</string>
+</array>
+<key>EnvironmentVariables</key><dict>
+<key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+</dict>
+</dict></plist>
+"""
+
+
+def test_discover_launchd_consumers_honors_declared_environment_path(tmp_path) -> None:
+    """OI-1621 regression: a launchd agent that declares its own
+    ``EnvironmentVariables.PATH`` (exactly the shape of the real
+    com.vnx.gate-obligation-runner/com.vnx.ledger-health plists) must have
+    THAT path threaded through as ``search_path`` -- not the hardcoded
+    ``BACKGROUND_PATH`` -- because that declared PATH is what launchd
+    actually hands the job at runtime."""
+    agents_dir = tmp_path / "LaunchAgents"
+    agents_dir.mkdir()
+    (agents_dir / "com.vnx.fake-declared-path.plist").write_text(_FAKE_PLIST_WITH_DECLARED_PATH)
+
+    consumers = path_parity.discover_launchd_consumers(agents_dir)
+    assert len(consumers) == 1
+    assert consumers[0]["search_path"] == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    assert consumers[0]["search_path"] != path_parity.BACKGROUND_PATH
+
+
+def test_gate_obligation_runner_shaped_consumer_resolves_via_declared_path_not_background(
+    tmp_path, monkeypatch
+) -> None:
+    """End-to-end OI-1621 reproduction: a bare-``python3`` launchd job
+    declaring a homebrew-first PATH must be judged against THAT PATH's
+    interpreter, not the Xcode-CLT stub ``BACKGROUND_PATH`` would resolve.
+
+    Simulates two competing interpreters at two competing search paths (a
+    modern one at the declared homebrew-first PATH, an old one at
+    BACKGROUND_PATH) via a monkeypatched ``shutil.which`` -- deterministic,
+    no dependency on what is actually installed on the machine running this
+    test. Before the OI-1621 fix (search_path hardcoded to BACKGROUND_PATH
+    in discover_launchd_consumers) this reproduces the false
+    consumer_interpreter_out_of_range finding; after the fix it is clean."""
+    agents_dir = tmp_path / "LaunchAgents"
+    agents_dir.mkdir()
+    (agents_dir / "com.vnx.fake-declared-path.plist").write_text(_FAKE_PLIST_WITH_DECLARED_PATH)
+
+    def fake_which(name, path=None):
+        assert name == "python3"
+        if path == path_parity.BACKGROUND_PATH:
+            return "/usr/bin/python3.9"  # the Xcode-CLT stub OI-852/OI-1621 warn about
+        return "/opt/homebrew/opt/python@3.12/bin/python3.12"
+
+    monkeypatch.setattr(path_parity.shutil, "which", fake_which)
+
+    consumers = path_parity.discover_launchd_consumers(agents_dir)
+    # "/repo" matches the literal text baked into _FAKE_PLIST_WITH_DECLARED_PATH's
+    # inline -c script above -- resolve_consumer_interpreter's in-repo check is a
+    # literal substring match, not path resolution.
+    result = path_parity.scan_consumers(consumers, Path("/repo"), ">=3.11,<3.14")
+
+    assert result["parity"] is True
+    assert result["mismatches"] == []
+    assert result["consumers"][0]["interpreter"] == "/opt/homebrew/opt/python@3.12/bin/python3.12"
+    assert result["consumers"][0]["in_range"] is True
+
+
 def test_discover_crontab_consumers_parses_schedule_and_declared_path() -> None:
     text = (
         "PATH=/opt/homebrew/bin:/usr/bin:/bin\n"
