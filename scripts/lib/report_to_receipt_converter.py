@@ -640,26 +640,40 @@ def _parse_pr_number(pr_ref: Optional[str]) -> Optional[int]:
         return None
 
 
-def _verify_pr_exists(pr_number: int, *, timeout: int = 15) -> bool:
+def _verify_pr_exists(
+    pr_number: int, *, timeout: int = 15, expected_head_ref: Optional[str] = None,
+) -> bool:
     """Return True when *pr_number* resolves to a real PR on GitHub.
 
-    Uses ``gh pr view <n> --json state`` so existence is MEASURED against the
-    remote — never taken from a report at face value (OI-1203: a number the
-    worker types into its own report is a claim, not evidence).  Returns False
-    on any error (missing ``gh``, non-zero exit, unparseable output, timeout).
+    Uses ``gh pr view <n> --json state,headRefName`` so existence is MEASURED
+    against the remote — never taken from a report at face value (OI-1203: a
+    number the worker types into its own report is a claim, not evidence).
+    Returns False on any error (missing ``gh``, non-zero exit, unparseable
+    output, timeout).
+
+    ``expected_head_ref`` (OI-1599): when set, the PR must ALSO carry this
+    exact ``headRefName`` or the check fails. Plain existence is not enough
+    once the caller is about to bind this PR number to a SPECIFIC dispatch's
+    gate obligation — a real PR that merely happens to share the typed number
+    but belongs to a different branch must never be adopted, or the merge
+    gate would later read gate evidence for the wrong PR.
     """
     gh = shutil.which("gh")
     if not gh:
         return False
     try:
         result = subprocess.run(
-            [gh, "pr", "view", str(pr_number), "--json", "state"],
+            [gh, "pr", "view", str(pr_number), "--json", "state,headRefName"],
             capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode != 0:
             return False
         data = json.loads(result.stdout or "{}")
-        return isinstance(data, dict)
+        if not isinstance(data, dict):
+            return False
+        if expected_head_ref is not None and data.get("headRefName") != expected_head_ref:
+            return False
+        return True
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return False
 
@@ -752,7 +766,7 @@ def _run_fail_closed_checks(
     return violations
 
 
-def build_receipt_from_report(
+def _build_receipt_from_report_core(
     report_path: Path, text: str, *, state_dir: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
     """Build a minimal governed receipt dict from report content.
@@ -1042,6 +1056,127 @@ def build_receipt_from_report(
         route_dec = _load_route_decision(dispatch_id, state_dir)
         if route_dec:
             receipt["route_decision"] = route_dec
+    return receipt
+
+
+# ---------------------------------------------------------------------------
+# Obligation PR-link (OI-1599)
+# ---------------------------------------------------------------------------
+#
+# The dispatch door registers a review-gate obligation BEFORE the worker runs
+# (gate_obligations.register_obligation, called from dispatch_cli.run_dispatch)
+# — a dispatch that creates a NEW PR cannot know its PR number at that point,
+# so the obligation lands with pr_number=None. pr_merge._resolve_declared_gate
+# joins on pr_number and finds nothing for these obligations, so the merge
+# gate refuses PRs that carry real, evidenced gate passes (OI-1508 / OI-1599,
+# measured 2026-09-02: 286 of 591 obligations pr_number-less, all pending).
+# scripts/gate_obligation_runner.py would close this gap later, but is not
+# scheduled for every project (only mission-control's launchd label is
+# loaded). This converter already resolves dispatch_id, state_dir and the
+# report's own declared pr_ref for every report it processes — completing the
+# link here needs no second channel, only asking the worker for the number
+# (report_body_contract.build_directive) and reading what it wrote back.
+
+_PR_LINK_LINKED = "linked"
+_PR_LINK_UNREPORTED = "unreported"
+_PR_LINK_REFUSED = "refused"
+
+
+def _resolve_pr_link(
+    dispatch_id: Optional[str], merged: Dict[str, Any], state_dir: Optional[Path],
+) -> Tuple[str, Optional[str]]:
+    """Best-effort: stamp this dispatch's PR number onto its gate obligation.
+
+    Returns ``(pr_link, reason)``. ``pr_link`` is exactly one of
+    ``"linked"``, ``"unreported"``, ``"refused"`` — never a boolean, and
+    never a fourth value: a dispatch with no obligation record at all is not
+    a failure of this mechanism (it is a dispatch that never declared a
+    gate), so it is folded into ``"refused"`` with reason ``"no_obligation"``
+    rather than invented as a distinct state. ``reason`` is populated only
+    for ``"refused"``.
+
+    The obligation is stamped (``pr_number`` + ``branch``) ONLY when all four
+    hold:
+      a. the report carries a ``pr_ref`` that parses to an integer;
+      b. ``gh pr view`` confirms that PR exists;
+      c. its ``headRefName`` is ``dispatch/<dispatch_id>`` — otherwise a
+         mistyped or stale number would bind a stranger's PR to this
+         obligation, and the merge gate would later read gate evidence for
+         the WRONG PR;
+      d. the obligation is still ``pending`` and carries no ``pr_number`` yet
+         — an existing link is never overwritten and a terminal status is
+         never reopened.
+
+    Never raises: obligation linking is best-effort relative to the receipt
+    write path, the same contract ``register_obligation`` keeps at the door.
+    """
+    pr_ref = str(merged.get("pr_ref") or "").strip() if merged else ""
+    if not pr_ref:
+        return _PR_LINK_UNREPORTED, None
+    if not dispatch_id or state_dir is None:
+        return _PR_LINK_REFUSED, "no_dispatch_id_or_state_dir"
+
+    try:
+        sys.path.insert(0, str(_LIB_DIR))
+        from gate_obligations import obligation_path, update_obligation, STATUS_PENDING
+
+        path = obligation_path(state_dir, dispatch_id)
+        if not path.exists():
+            return _PR_LINK_REFUSED, "no_obligation"
+
+        pr_number = _parse_pr_number(pr_ref)
+        if pr_number is None:
+            return _PR_LINK_REFUSED, f"unparseable_pr_ref:{pr_ref}"
+
+        expected_branch = f"dispatch/{dispatch_id}"
+        if not _verify_pr_exists(pr_number, expected_head_ref=expected_branch):
+            return _PR_LINK_REFUSED, f"pr_not_verified_or_wrong_branch:{pr_number}"
+
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return _PR_LINK_REFUSED, f"obligation_unreadable:{exc}"
+
+        if record.get("status") != STATUS_PENDING:
+            return _PR_LINK_REFUSED, f"obligation_not_pending:{record.get('status')}"
+        if record.get("pr_number") is not None:
+            return _PR_LINK_REFUSED, "obligation_already_linked"
+
+        update_obligation(path, pr_number=pr_number, branch=expected_branch)
+        return _PR_LINK_LINKED, None
+    except Exception as exc:  # noqa: BLE001 — best-effort, mirrors register_obligation
+        logger.warning(
+            "report_to_receipt_converter: obligation pr_link failed dispatch=%s pr_ref=%s: %s",
+            dispatch_id, pr_ref, exc,
+        )
+        return _PR_LINK_REFUSED, f"exception:{type(exc).__name__}"
+
+
+def build_receipt_from_report(
+    report_path: Path, text: str, *, state_dir: Optional[Path] = None
+) -> Optional[Dict[str, Any]]:
+    """Build a governed receipt dict from report content (see
+    :func:`_build_receipt_from_report_core` for the full return-shape
+    contract) and, best-effort, complete the OI-1599 obligation PR-link.
+
+    Every receipt this returns (regardless of event_type — task_complete,
+    task_failed, or report_contract_invalid all count, since a PR can exist
+    independent of whether the report itself passed every check) carries a
+    ``pr_link`` field: ``"linked"``, ``"unreported"``, or ``"refused"`` (see
+    :func:`_resolve_pr_link`). ``None`` results (no dispatch_id resolvable at
+    all) pass through untouched — there is nothing to link.
+    """
+    receipt = _build_receipt_from_report_core(report_path, text, state_dir=state_dir)
+    if receipt is None:
+        return receipt
+
+    fm = parse_frontmatter(text)
+    body = _extract_body_fields(text)
+    merged: Dict[str, Any] = {**body, **fm}
+    pr_link, pr_link_reason = _resolve_pr_link(receipt.get("dispatch_id"), merged, state_dir)
+    receipt["pr_link"] = pr_link
+    if pr_link_reason:
+        receipt["pr_link_reason"] = pr_link_reason
     return receipt
 
 

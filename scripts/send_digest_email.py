@@ -7,7 +7,8 @@ and sends via SMTP (default: Gmail).
 
 Configuration via environment variables:
   VNX_DIGEST_EMAIL  — recipient email address (required)
-  VNX_SMTP_PASS     — SMTP password / Gmail App Password (required)
+  VNX_SMTP_PASS     — SMTP password / Gmail App Password (falls back to the
+                      macOS keychain item "vnx-smtp-pass" when unset)
   VNX_SMTP_USER     — SMTP username (defaults to VNX_DIGEST_EMAIL)
   VNX_SMTP_HOST     — SMTP server (default: smtp.gmail.com)
   VNX_SMTP_PORT     — SMTP port (default: 587)
@@ -20,6 +21,7 @@ Usage:
 import json
 import os
 import smtplib
+import subprocess
 import sys
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -233,6 +235,34 @@ def build_digest() -> tuple[str, str]:
     return subject, body
 
 
+def _read_smtp_pass_from_keychain() -> str:
+    """Read the SMTP password from the macOS keychain item "vnx-smtp-pass".
+
+    Never raises: returns "" when `security` is unavailable, the item is
+    missing, or the host isn't macOS.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                "vnx-smtp-pass",
+                "-a",
+                os.environ.get("USER", ""),
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
 def send_email(subject: str, body: str, dry_run: bool = False) -> bool:
     """Send the digest email via SMTP.
 
@@ -240,7 +270,7 @@ def send_email(subject: str, body: str, dry_run: bool = False) -> bool:
         True if sent successfully, False otherwise.
     """
     recipient = os.environ.get("VNX_DIGEST_EMAIL", "")
-    smtp_pass = os.environ.get("VNX_SMTP_PASS", "")
+    smtp_pass = os.environ.get("VNX_SMTP_PASS", "") or _read_smtp_pass_from_keychain()
     smtp_user = os.environ.get("VNX_SMTP_USER", "") or recipient
     smtp_host = os.environ.get("VNX_SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("VNX_SMTP_PORT", "587"))

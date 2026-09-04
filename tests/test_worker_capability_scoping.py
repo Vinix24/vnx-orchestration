@@ -558,6 +558,7 @@ class TestClaudeSpawnRoleForwarding:
 
         with patch.object(SubprocessAdapter, "deliver", capturing_deliver):
             spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="test prompt",
                 model="sonnet",
                 dispatch_id="dispatch-role-1",
@@ -595,6 +596,7 @@ class TestClaudeSpawnRoleForwarding:
 
         with patch.object(SubprocessAdapter, "deliver", capturing_deliver):
             spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="test prompt",
                 model="sonnet",
                 dispatch_id="dispatch-role-2",

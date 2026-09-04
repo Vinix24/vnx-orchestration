@@ -117,6 +117,7 @@ class ClaudeAdapter(ProviderAdapter):
         Useful for callers that want raw event access.  Does not write receipts
         or handle retries — use execute() for full lifecycle management.
         """
+        from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS  # noqa: PLC0415
         from subprocess_adapter import SubprocessAdapter  # noqa: PLC0415
         from subprocess_dispatch import (  # noqa: PLC0415
             _inject_skill_context,
@@ -147,6 +148,7 @@ class ClaudeAdapter(ProviderAdapter):
             instruction=full_instruction,
             model=model,
             cwd=agent_cwd,
+            scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
         )
         if not result.success:
             return

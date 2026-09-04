@@ -86,6 +86,7 @@ class TestClaudeSpawnMatchesLegacyEventShape:
             MockAdapter.return_value = _make_adapter_mock(_MINIMAL_EVENTS)
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -114,6 +115,7 @@ class TestClaudeSpawnMatchesLegacyEventShape:
             )
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -135,6 +137,7 @@ class TestClaudeSpawnHandlesCompletion:
             MockAdapter.return_value = _make_adapter_mock(_MINIMAL_EVENTS)
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -152,6 +155,7 @@ class TestClaudeSpawnHandlesCompletion:
             MockAdapter.return_value = _make_adapter_mock(_MINIMAL_EVENTS)
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -180,6 +184,7 @@ class TestClaudeSpawnHandlesPrematureExit:
             )
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -198,6 +203,7 @@ class TestClaudeSpawnHandlesPrematureExit:
             )
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -225,6 +231,7 @@ class TestClaudeSpawnHealthMonitorIntegration:
             MockAdapter.return_value = _make_adapter_mock(_MINIMAL_EVENTS)
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -251,6 +258,7 @@ class TestClaudeSpawnHealthMonitorIntegration:
             MockAdapter.return_value = adapter_mock
 
             spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -283,6 +291,7 @@ class TestClaudeSpawnOnEventCallback:
             MockAdapter.return_value = adapter_mock
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -300,6 +309,7 @@ class TestClaudeSpawnOnEventCallback:
             MockAdapter.return_value = _make_adapter_mock(_MINIMAL_EVENTS)
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="Reply OK.",
                 model="sonnet",
                 dispatch_id="test-dispatch",
@@ -328,6 +338,7 @@ class TestClaudeSpawnDeliverFailure:
             MockAdapter.return_value = instance
 
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="test",
                 model="sonnet",
                 dispatch_id="test-dispatch",

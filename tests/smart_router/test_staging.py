@@ -142,7 +142,10 @@ def test_registry_flags_registered_default_off_with_subsystem():
         entry = cr.CONFIG_REGISTRY[key]
         assert entry.default == "0", f"{key} must default off (rollout starts from zero)"
         assert entry.subsystem == "smart-router-staging"
-        assert entry.status == "LIVE"
+        # D6b (30-08): smart-router-staging carried LIVE with no registered
+        # effectiveness probe (unmeasured) -- moved to ACTIVATE-and-measure,
+        # the cockpit's status for "dormant until a probe exists".
+        assert entry.status == "ACTIVATE"
     canary = cr.CONFIG_REGISTRY[st.CANARY_PCT_KEY]
     assert canary.default == "0"
     assert canary.subsystem == "smart-router-staging"

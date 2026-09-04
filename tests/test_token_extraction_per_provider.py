@@ -164,6 +164,7 @@ class TestClaudeTokenUsage:
 
         with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=adapter_mock):
             res = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="say hi",
                 model="sonnet",
                 dispatch_id="test-dispatch-claude-005",

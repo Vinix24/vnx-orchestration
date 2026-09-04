@@ -91,6 +91,32 @@ runner fulfils them:
      file no longer exists) does NOT count — that is a third, distinct
      outcome (chain walked, nothing usable found anywhere), never conflated
      with either "found at the declared gate" or "found via takeover".
+  10. OI-1612: items 7-9's evidence lookup was keyed ONLY on
+      ``(dispatch_id, gate)`` — matching a result record only when its OWN
+      ``dispatch_id`` field equals the obligation's. That join holds for a
+      result THIS runner just wrote itself (``request_and_execute`` stamps
+      the obligation's ``dispatch_id`` onto whatever it produces), but a gate
+      result file is written per ``(pr_number, gate)`` regardless of who ran
+      it — a manually-triggered poortrun, a takeover successor, or any other
+      process writes its OWN dispatch_id (the poortrun's, not the build
+      dispatch's) into that same slot. Measured live: 345 of 524 results on
+      vnx-dev carry a dispatch_id, and it is essentially always the
+      poortrun's — the dispatch_id join for a RESOLVED obligation (a PR
+      already known) could structurally never match pre-existing evidence
+      from any run other than this runner's own, and ``would_stamp`` stayed
+      at 0 across the whole store. The evidence index now also keys on
+      ``(pr_number, gate)`` (gate results are one-per-(pr_number, gate),
+      never one-per-dispatch — the same convention item 9 already documents
+      for ``manager._result_path``), and the RESOLVED branch of
+      :func:`_pre_execution_decision` looks evidence up by ITS OWN resolved
+      ``pr_number`` in addition to ``dispatch_id``. AWAITING/UNRESOLVABLE
+      obligations have no ``pr_number`` to look up by definition (that is
+      exactly why the dispatch_id join existed in the first place) and keep
+      using the dispatch_id-only lookup unchanged. The sha-binding check
+      (item 9's :func:`_has_decided_evidence`) is untouched either way — a
+      pr_number-matched candidate is rejected exactly as a dispatch_id-
+      matched one is when its ``commit_sha`` does not match the PR's current
+      head.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -114,7 +140,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -122,6 +148,8 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
     REASON_NO_PR_BRANCH_GONE,
+    REASON_PR_CLOSED,
+    REASON_PR_MERGED,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
@@ -447,6 +475,32 @@ def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool
     return None
 
 
+def _pr_state_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
+    """Whether a resolved PR is ``OPEN``, ``MERGED``, or ``CLOSED`` on GitHub.
+
+    OI-1508: the RESOLVED branch of :func:`_pre_execution_decision` knows a
+    PR number but nothing about its live disposition — measuring it here is
+    the read-only ``gh pr view <n> --json state`` call that the RESOLVED
+    branch was missing entirely, unconditionally treating every resolved PR
+    as still open and re-attempting the gate on it.
+
+    Returns the state string on a definite answer, ``None`` when it cannot
+    be determined (gh missing, timeout, network error, or an unrecognised
+    response) — mirrors :func:`_branch_exists_on_github`: a caller may only
+    retire on a definite ``MERGED``/``CLOSED``, never on ``None`` (OI-1388:
+    ambiguous evidence must never close an obligation).
+    """
+    data = _gh_json(
+        ["pr", "view", str(pr_number), "--json", "state"],
+        owner_repo=owner_repo,
+    )
+    if isinstance(data, dict):
+        state = data.get("state")
+        if isinstance(state, str) and state.strip():
+            return state.strip().upper()
+    return None
+
+
 def _owner_repo_from_remote_url(url: str) -> Optional[str]:
     """Derive ``owner/repo`` from a GitHub remote URL (https or ssh form).
 
@@ -726,21 +780,51 @@ def _record_loud_not_executable(
     )
 
 
-def _index_gate_results(
-    state_dir: Path,
-) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
-    """Index ``review_gates/results`` records by ``(dispatch_id, gate)``.
+class GateResultIndex(NamedTuple):
+    """Two views over ``review_gates/results``, built once per :func:`run` call.
+
+    ``by_dispatch`` keys on ``(dispatch_id, gate)`` — the join that holds for
+    a result THIS runner wrote itself (``manager.request_and_execute(...,
+    dispatch_id=dispatch_id)`` stamps the obligation's own dispatch_id onto
+    whatever it produces). AWAITING/UNRESOLVABLE obligations have no
+    ``pr_number`` at all, so this is the only lookup available to them.
+
+    ``by_pr`` keys on ``(pr_number, gate)`` — a gate result file is written
+    one-per-(pr_number, gate) regardless of which poortrun produced it (the
+    same convention :func:`_find_takeover_successor_evidence`'s docstring
+    already documents via ``manager._result_path(gate, pr_number)``). OI-1612:
+    this is the join a RESOLVED obligation (``pr_number`` already known)
+    actually needs — its own ``dispatch_id`` almost never equals the
+    dispatch_id a pre-existing result record carries, because that field
+    records the POORTRUN that produced the result, not the build dispatch the
+    obligation was declared for.
+    """
+
+    by_dispatch: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]
+    by_pr: Dict[Tuple[int, str], List[Tuple[Path, Dict[str, Any]]]]
+
+
+def _index_gate_results(state_dir: Path) -> GateResultIndex:
+    """Index ``review_gates/results`` records by ``(dispatch_id, gate)`` AND
+    by ``(pr_number, gate)`` — see :class:`GateResultIndex`.
 
     Built once per :func:`run` call so the OI-1388 evidence discriminator
     (defect 1) costs O(results) instead of O(obligations * results). A
     malformed/unreadable result file is skipped, never raised — the same
     tolerance :func:`fulfill_obligation` already applies when it reads a
     result file's status back after invoking a gate.
+
+    OI-1612: a record is indexed by whichever key(s) it actually carries — a
+    record with a ``pr_number`` but no ``dispatch_id`` (179 of 524, measured
+    live) used to be skipped entirely; it now lands in ``by_pr`` even though
+    ``by_dispatch`` has nothing for it. A record needs at least ``gate`` and
+    one of ``dispatch_id``/``pr_number`` to be indexed at all.
     """
     results_dir = Path(state_dir) / "review_gates" / "results"
-    index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]] = {}
+    by_dispatch: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]] = {}
+    by_pr: Dict[Tuple[int, str], List[Tuple[Path, Dict[str, Any]]]] = {}
     if not results_dir.is_dir():
-        return index
+        return GateResultIndex(by_dispatch, by_pr)
     for entry in sorted(results_dir.glob("*.json")):
         try:
             record = json.loads(entry.read_text(encoding="utf-8"))
@@ -748,12 +832,16 @@ def _index_gate_results(
             continue
         if not isinstance(record, dict):
             continue
-        dispatch_id = str(record.get("dispatch_id") or "")
         gate = str(record.get("gate") or "")
-        if not dispatch_id or not gate:
+        if not gate:
             continue
-        index.setdefault((dispatch_id, gate), []).append((entry, record))
-    return index
+        dispatch_id = str(record.get("dispatch_id") or "")
+        if dispatch_id:
+            by_dispatch.setdefault((dispatch_id, gate), []).append((entry, record))
+        pr_number = record.get("pr_number")
+        if isinstance(pr_number, int):
+            by_pr.setdefault((pr_number, gate), []).append((entry, record))
+    return GateResultIndex(by_dispatch, by_pr)
 
 
 # OI-1571 tak 3: four outcomes for "is this record usable evidence", never
@@ -840,13 +928,24 @@ def _has_decided_evidence(record: Dict[str, Any], head_sha: str) -> Tuple[str, s
 
 
 def _fulfilling_result(
-    index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    index: GateResultIndex,
     dispatch_id: str,
     gate: str,
+    pr_number: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Scan the ``(dispatch_id, gate)`` bucket for a complete-evidence,
-    DECIDED, sha-CURRENT result — a gate that actually ran, reached a
-    verdict, and is provably about the PR's current head.
+    """Scan for a complete-evidence, DECIDED, sha-CURRENT result — a gate
+    that actually ran, reached a verdict, and is provably about the PR's
+    current head.
+
+    OI-1612: candidates come from BOTH of :class:`GateResultIndex`'s views —
+    ``index.by_dispatch[(dispatch_id, gate)]`` (a result THIS runner wrote
+    itself for this exact obligation) and, when ``pr_number`` is given,
+    ``index.by_pr[(pr_number, gate)]`` (any result for this PR+gate,
+    regardless of which poortrun's dispatch_id it carries — see
+    :class:`GateResultIndex`). A record present in both is scanned once, not
+    twice. ``pr_number`` is only available for a RESOLVED obligation; the
+    AWAITING/UNRESOLVABLE callers pass ``None`` and get exactly the
+    pre-OI-1612 dispatch_id-only behaviour.
 
     OI-1388 defect 1: a terminal retirement/escalation must never overwrite
     evidence that a gate already produced. OI-1571 tak 3 tightens "already
@@ -855,6 +954,9 @@ def _fulfilling_result(
     :func:`_get_pr_head_sha_for_gate` off the CANDIDATE record's own
     ``pr_number`` (never the caller's obligation, which by construction
     could not resolve one — that is exactly why this rescue path exists).
+    This sha check applies identically to every candidate regardless of
+    which index found it — a pr_number-matched candidate about a different
+    commit is rejected exactly like a dispatch_id-matched one would be.
 
     Returns a dict, never a bare ``Optional[Tuple]`` (OI-1571 tak 3: an
     UNVERIFIABLE candidate must not collapse into "nothing found" — that
@@ -876,9 +978,18 @@ def _fulfilling_result(
     :func:`gate_status.is_pass` — this function only answers "does usable
     evidence exist", never "what should the obligation be stamped".
     """
+    candidates: List[Tuple[Path, Dict[str, Any]]] = list(index.by_dispatch.get((dispatch_id, gate), []))
+    if isinstance(pr_number, int):
+        seen_paths = {path for path, _record in candidates}
+        for entry in index.by_pr.get((pr_number, gate), []):
+            path, _record = entry
+            if path not in seen_paths:
+                candidates.append(entry)
+                seen_paths.add(path)
+
     unverifiable: Optional[Tuple[Path, Dict[str, Any], str]] = None
     mismatch_detail: Optional[str] = None
-    for entry, record in index.get((dispatch_id, gate), []):
+    for entry, record in candidates:
         candidate_pr = record.get("pr_number")
         head_sha = (
             _get_pr_head_sha_for_gate(candidate_pr) if isinstance(candidate_pr, int) else ""
@@ -979,7 +1090,7 @@ def _find_takeover_successor_evidence(
 
 def _terminal_evidence_contradictions(
     obligations: List[Tuple[Path, Dict[str, Any]]],
-    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    result_index: GateResultIndex,
 ) -> List[Dict[str, Any]]:
     """Report ALREADY-terminal obligations whose evidence contradicts them.
 
@@ -996,6 +1107,12 @@ def _terminal_evidence_contradictions(
     the two statuses this dispatch's fix intercepts pre-write. A ``no_gate``
     obligation (``gate == NO_GATE_KEY``) never had a gate to review it, so it
     is excluded — there is no dispatch_id+gate result to contradict it.
+
+    OI-1612: the lookup also passes the obligation's own ``pr_number`` (when
+    the record carries one) so this diagnostic surfaces the SAME class of
+    contradiction the pre-execution rescue now catches — a terminal record
+    whose evidence carries a poortrun's own dispatch_id rather than the
+    obligation's.
     """
     contradictions: List[Dict[str, Any]] = []
     for path, record in obligations:
@@ -1006,7 +1123,11 @@ def _terminal_evidence_contradictions(
         if not gate or gate == NO_GATE_KEY:
             continue
         dispatch_id = str(record.get("dispatch_id") or path.stem)
-        lookup = _fulfilling_result(result_index, dispatch_id, gate)
+        obligation_pr_number = record.get("pr_number")
+        lookup = _fulfilling_result(
+            result_index, dispatch_id, gate,
+            pr_number=obligation_pr_number if isinstance(obligation_pr_number, int) else None,
+        )
         if lookup["kind"] != "found":
             continue
         evidence_path, _evidence_record = lookup["entry"]
@@ -1054,11 +1175,12 @@ def _evidence_decision(evidence: Tuple[Path, Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _pre_execution_decision(
+    state_dir: Path,
     dispatch_id: str,
     gate: str,
     resolution: PrResolution,
     attempts: int,
-    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    result_index: GateResultIndex,
 ) -> Dict[str, Any]:
     """Decide what happens to an obligation before any gate is actually run.
 
@@ -1068,13 +1190,33 @@ def _pre_execution_decision(
     (OI-1388 defect 2). Every input here is already read-only-derivable: PR
     resolution and the branch-existence check both happen inside
     :func:`resolve_pr_number` via read-only ``gh`` calls (safe in a dry run),
-    and the evidence lookup is a local file read.
+    the evidence lookup is a local file read, and the RESOLVED branch's own
+    ``gh pr view`` state check (:func:`_pr_state_from_github`, OI-1508) is
+    read-only too — ``state_dir`` is only needed to resolve an owner/repo
+    that :func:`resolve_pr_number` did not already attach to ``resolution``
+    (it only does when a PR was actually found via GitHub search; a
+    ``pr_number`` sourced from the record itself or dispatch metadata
+    carries no owner/repo at all).
 
     Returns ``{"kind": ..., ...}`` where ``kind`` is one of:
-      - ``unresolvable``               — env fault, stays retryable (below threshold)
-      - ``escalate``                   — env fault, past threshold: terminal escalation
+      - ``unresolvable``               — env fault, stays retryable (below
+        threshold). OI-1508: also reused by the RESOLVED branch when a
+        known PR's live state (open/merged/closed) could not be determined
+        — the same class of fault (the environment cannot answer a
+        required question) even though the PR number itself is known;
+        deliberately NOT a new status vocabulary member every other
+        consumer of ``STATUS_*`` would need to learn about. Carries
+        ``decision["detail"]`` naming what could not be determined.
+      - ``escalate``                   — env fault, past threshold: terminal
+        escalation. Same OI-1508 reuse as ``unresolvable`` above.
       - ``stay_pending``               — genuine wait (branch alive / undetermined)
-      - ``retire``                     — dead dispatch, no rescuing evidence
+      - ``retire``                     — dead dispatch, no rescuing evidence.
+        OI-1508: also returned by the RESOLVED branch when ``gh`` confirms
+        the PR is MERGED or CLOSED (never on OPEN, and never without first
+        checking for rescuing evidence) — carries
+        ``decision["retire_reason"]`` (``REASON_PR_MERGED``/
+        ``REASON_PR_CLOSED``) so the caller can distinguish it from the
+        pre-existing "branch gone, no PR ever" retirement.
       - ``fulfill_by_evidence``        — OI-1388 defect 1: a complete-evidence
         DECIDED PASS, sha-current with the PR head, already exists for this
         dispatch_id + gate; carried as ``decision["evidence"] = (path, record)``
@@ -1086,8 +1228,10 @@ def _pre_execution_decision(
         result exists but its sha binding to the PR head could not be
         verified. NEITHER a rescue NOR a retire/escalate — a third outcome
         that suspends judgement; carries ``decision["detail"]``
-      - ``attempt_gate``               — PR resolved: the caller must actually
-        run the gate to learn the outcome (only the real run does this)
+      - ``attempt_gate``               — PR resolved AND (for a RESOLVED
+        resolution) confirmed OPEN, or no evidence-check applies at all:
+        the caller must actually run the gate to learn the outcome (only
+        the real run does this)
 
     ``not_executable`` and any other undecided status are never returned as
     evidence here — :func:`_fulfilling_result` rejects those itself, so a
@@ -1098,6 +1242,14 @@ def _pre_execution_decision(
     carries ``decision["mismatch_detail"]`` when one was seen, so whatever
     record documents the retirement/escalation can also document why the
     rejected evidence did not count.
+
+    OI-1508: before this fix, ``resolution.status == RESOLUTION_RESOLVED``
+    returned ``attempt_gate`` unconditionally — never checking for existing
+    evidence, never checking whether the PR was still open. Measured live
+    against the central store: 258 obligations would re-run a gate
+    (110-880s each) that in most cases had already merged or closed, and at
+    least 19 of them already carried a DECIDED PASS this branch was
+    silently discarding.
     """
     if resolution.status == RESOLUTION_UNRESOLVABLE:
         lookup = _fulfilling_result(result_index, dispatch_id, gate)
@@ -1119,7 +1271,61 @@ def _pre_execution_decision(
             return {"kind": "retire", "mismatch_detail": lookup.get("detail")}
         return {"kind": "stay_pending"}
 
-    return {"kind": "attempt_gate"}
+    # resolution.status == RESOLUTION_RESOLVED (OI-1508): a PR is known, but
+    # that alone never used to be checked against existing evidence or the
+    # PR's live state — see the docstring measurement above.
+    #
+    # OI-1612: this is the ONE branch that can pass pr_number into the
+    # lookup — the dispatch_id-only join could structurally never find
+    # pre-existing evidence here (see GateResultIndex/_fulfilling_result):
+    # resolution.pr_number is already known, so the lookup also checks
+    # index.by_pr[(pr_number, gate)], which is how a poortrun's own
+    # differently-named dispatch_id no longer hides its evidence from this
+    # obligation.
+    lookup = _fulfilling_result(
+        result_index, dispatch_id, gate, pr_number=resolution.pr_number,
+    )
+    if lookup["kind"] == "found":
+        return _evidence_decision(lookup["entry"])
+    if lookup["kind"] == "unverifiable":
+        return {"kind": "sha_unverifiable", "detail": lookup["detail"]}
+
+    pr_number = resolution.pr_number
+    owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
+    pr_state = (
+        _pr_state_from_github(pr_number, owner_repo)
+        if pr_number and owner_repo else None
+    )
+    if pr_state == "OPEN":
+        return {"kind": "attempt_gate"}
+    if pr_state in ("MERGED", "CLOSED"):
+        retire_reason = REASON_PR_MERGED if pr_state == "MERGED" else REASON_PR_CLOSED
+        return {
+            "kind": "retire",
+            "retire_reason": retire_reason,
+            "mismatch_detail": lookup.get("detail"),
+        }
+
+    # PR state could not be determined (gh missing/timed out/unrecognised
+    # response, or the owner/repo itself could not be resolved) — a THIRD
+    # outcome, distinct from both "confirmed open" (attempt_gate) and
+    # "confirmed merged/closed" (retire). OI-1388: ambiguous evidence must
+    # never retire an obligation; an unqueryable PR state must not silently
+    # gate on it either, since it might just as well already be closed.
+    if pr_number and owner_repo:
+        detail = (
+            f"PR #{pr_number} state on {owner_repo} could not be determined "
+            "(gh unreachable, timed out, or returned an unrecognised "
+            "response) — cannot safely retire or gate it"
+        )
+    else:
+        detail = (
+            "PR resolved but its owner/repo could not be determined to "
+            "query PR state — cannot safely retire or gate it"
+        )
+    if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
+        return {"kind": "escalate", "detail": detail, "mismatch_detail": lookup.get("detail")}
+    return {"kind": "unresolvable", "detail": detail}
 
 
 _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
@@ -1138,7 +1344,7 @@ def _dry_run_outcome(
     state_dir: Path,
     path: Path,
     record: Dict[str, Any],
-    result_index: Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]],
+    result_index: GateResultIndex,
 ) -> Dict[str, Any]:
     """Report the action a real run would take for one obligation — never writes.
 
@@ -1163,7 +1369,7 @@ def _dry_run_outcome(
 
     attempts = int(record.get("attempts") or 0) + 1
     resolution = resolve_pr_number(state_dir, record)
-    decision = _pre_execution_decision(dispatch_id, gate, resolution, attempts, result_index)
+    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index)
     outcome: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         "gate": gate,
@@ -1183,11 +1389,28 @@ def _dry_run_outcome(
     elif decision["kind"] == "sha_unverifiable":
         outcome["detail"] = decision.get("detail")
     elif decision["kind"] == "retire":
-        outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
+        # OI-1508: retire_reason distinguishes the RESOLVED branch's own
+        # merged/closed retirement from the pre-existing "branch gone, no
+        # PR ever" retirement — resolution.reason is unset for the former
+        # (RESOLUTION_RESOLVED never populates it), so it must not be used
+        # as the fallback text there.
+        retire_reason = decision.get("retire_reason")
+        if retire_reason in (REASON_PR_MERGED, REASON_PR_CLOSED):
+            state_word = "merged" if retire_reason == REASON_PR_MERGED else "closed without merge"
+            outcome["detail"] = (
+                f"PR #{resolution.pr_number} is {state_word} and no rescuing "
+                f"{gate} evidence was found"
+            )
+        else:
+            outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     elif decision["kind"] in ("unresolvable", "escalate"):
-        outcome["detail"] = resolution.reason
+        # OI-1508: decision["detail"] carries the RESOLVED branch's own
+        # "PR state undeterminable" message when present — resolution.reason
+        # is unset for RESOLUTION_RESOLVED, so it is only the fallback for
+        # the pre-existing RESOLUTION_UNRESOLVABLE origin of this branch.
+        outcome["detail"] = decision.get("detail") or resolution.reason
         if decision.get("mismatch_detail"):
             outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
     return outcome
@@ -1198,7 +1421,7 @@ def fulfill_obligation(
     path: Path,
     record: Dict[str, Any],
     *,
-    result_index: Optional[Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]] = None,
+    result_index: Optional[GateResultIndex] = None,
 ) -> Dict[str, Any]:
     """Attempt fulfilment of one pending obligation.
 
@@ -1230,7 +1453,7 @@ def fulfill_obligation(
     now = utc_now_iso()
 
     resolution = resolve_pr_number(state_dir, record)
-    decision = _pre_execution_decision(dispatch_id, gate, resolution, attempts, result_index)
+    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index)
 
     if decision["kind"] == "fulfill_by_evidence":
         # OI-1388 defect 1: a gate already produced a complete-evidence PASS
@@ -1347,6 +1570,13 @@ def fulfill_obligation(
         # misconfigured obligation can never masquerade as "not yet". It stays
         # retryable — the env may be fixed — until it crosses the escalation
         # threshold, where it becomes the loud terminal not_executable.
+        #
+        # OI-1508: decision["detail"] carries the RESOLVED branch's own "PR
+        # state undeterminable" message when this kind originated there —
+        # resolution.reason is unset for RESOLUTION_RESOLVED (only
+        # RESOLUTION_UNRESOLVABLE/RESOLUTION_AWAITING populate it), so it is
+        # only the fallback for this block's pre-existing origin.
+        reason_source = decision.get("detail") or resolution.reason
         mismatch_note = (
             f" A prior {gate} result exists for this dispatch but is about a "
             f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
@@ -1359,10 +1589,10 @@ def fulfill_obligation(
             attempts=attempts,
             last_attempt_at=now,
             reason="unresolvable_repo",
-            reason_detail=f"{resolution.reason}{mismatch_note}",
+            reason_detail=f"{reason_source}{mismatch_note}",
         )
         outcome["action"] = "unresolvable"
-        outcome["detail"] = resolution.reason
+        outcome["detail"] = reason_source
         if decision["kind"] == "escalate":
             update_obligation(
                 path,
@@ -1373,7 +1603,7 @@ def fulfill_obligation(
                 reason="unresolvable_timeout",
                 reason_detail=(
                     f"PR unresolved after {attempts} attempts because the "
-                    f"environment is misconfigured: {resolution.reason}. Fix "
+                    f"environment is misconfigured: {reason_source}. Fix "
                     "the project attribution (VNX_PROJECT_ID / "
                     "~/.vnx/projects.json / the checkout's git origin remote) "
                     f"and reset this obligation to pending.{mismatch_note}"
@@ -1383,16 +1613,41 @@ def fulfill_obligation(
         return outcome
 
     if decision["kind"] == "retire":
-        # OI-1388: the dispatch never produced a PR AND its head branch is
-        # gone from origin — nothing will ever gate this obligation.
-        # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
-        branch_name = f"dispatch/{dispatch_id}"
         mismatch_note = (
             f" A prior {gate} result exists for this dispatch but is about a "
             f"DIFFERENT commit ({decision['mismatch_detail']}) and was "
             "rejected as rescue evidence, never silently reused (OI-1571 tak 3)."
             if decision.get("mismatch_detail") else ""
         )
+        retire_reason = decision.get("retire_reason", REASON_NO_PR_BRANCH_GONE)
+        if retire_reason in (REASON_PR_MERGED, REASON_PR_CLOSED):
+            # OI-1508: the RESOLVED branch's own retirement — gh confirmed
+            # the PR is no longer open, and the evidence lookup above this
+            # branch found no rescuing verdict. Never fires on an OPEN PR
+            # (that stays attempt_gate) and never without that lookup.
+            state_word = "merged" if retire_reason == REASON_PR_MERGED else "closed without merge"
+            update_obligation(
+                path,
+                status=STATUS_RETIRED,
+                pr_number=resolution.pr_number,
+                attempts=attempts,
+                last_attempt_at=now,
+                resolved_at=now,
+                reason=retire_reason,
+                reason_detail=(
+                    f"PR #{resolution.pr_number} for dispatch {dispatch_id} is "
+                    f"{state_word} and no rescuing {gate} evidence was found — "
+                    f"nothing left for {gate} to guard.{mismatch_note}"
+                ),
+            )
+            outcome["action"] = STATUS_RETIRED
+            outcome["detail"] = f"PR #{resolution.pr_number} is {state_word} — retired"
+            return outcome
+
+        # OI-1388: the dispatch never produced a PR AND its head branch is
+        # gone from origin — nothing will ever gate this obligation.
+        # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
+        branch_name = f"dispatch/{dispatch_id}"
         update_obligation(
             path,
             status=STATUS_RETIRED,

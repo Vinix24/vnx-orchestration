@@ -104,7 +104,7 @@ def spawn_claude(
     total_deadline: float = 900.0,
     role: Optional[str] = None,
     requires_mcp: bool = False,
-    scrub_env_keys: Optional[frozenset] = None,
+    scrub_env_keys: frozenset,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -165,6 +165,18 @@ def spawn_claude(
     total_deadline:
         Max total seconds for the entire dispatch.  Override with
         ``VNX_TOTAL_DEADLINE`` env var.
+    scrub_env_keys:
+        REQUIRED, no default. fnmatch-style glob patterns removed from the child
+        env before Popen (see subprocess_adapter.SubprocessAdapter.deliver and
+        env_scrub_patterns.DEFAULT_SCRUB_KEY_PATTERNS). A caller that spawns a real
+        claude subprocess must pass the default set explicitly; a caller that
+        intentionally wants no scrubbing (e.g. a test that mocks SubprocessAdapter
+        out entirely) must pass ``frozenset()`` explicitly. There is no safe
+        implicit default — measured 2026-09-03: three of five production callers
+        silently forwarded the full ambient environment, secrets included, because
+        the old ``None`` default made omission invisible.
+        tests/test_spawn_scrub_env_keys_contract.py statically enforces that every
+        git-tracked, non-test call site supplies this keyword.
     **kwargs:
         Accepted for forward-compatibility; ignored.
     """

@@ -176,6 +176,43 @@ def test_reader_scopes_to_project_id(
     assert {item["id"] for item in queue_b} == {"dlv-b"}
 
 
+def test_reader_excludes_plain_dispatch_at_proposed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OI-1609 point 3: a plain door-accepted dispatch also lands at
+    state='proposed' (dispatch_cli.py._persist_dispatch_row) — not just
+    deliverables. It has no `dlv-` id, no track, and no metadata_json
+    (row.get("metadata_json") parses to "{}", same as the DB default).
+    That is not a decision an operator owes and must not surface here,
+    regardless of what state OI-1609 point 2 (the state-transition fix,
+    out of scope for this dispatch) eventually leaves it in.
+    """
+    state_dir = _pin_isolation(tmp_path, monkeypatch)
+    db_path = _make_dispatches_db(state_dir)
+    _insert_dispatch(
+        db_path,
+        dispatch_id="20260903-plain-dispatch-abcdef",
+        project_id=_PROJECT_ID,
+        state="proposed",
+        track=None,
+        title=None,
+    )
+    _insert_dispatch(
+        db_path,
+        dispatch_id="dlv-real-deliverable",
+        project_id=_PROJECT_ID,
+        state="proposed",
+        track="kickoff-human-gate-queue",
+        title="Ship the human gate queue",
+    )
+
+    queue = bts._build_human_gate_queue(state_dir, _PROJECT_ID)
+
+    ids = {item["id"] for item in queue}
+    assert "20260903-plain-dispatch-abcdef" not in ids
+    assert ids == {"dlv-real-deliverable"}
+
+
 def test_reader_no_proposed_items_is_empty_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

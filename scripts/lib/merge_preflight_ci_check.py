@@ -5,10 +5,11 @@ Determines whether the configured CI workflow has a *successful* run for the
 exact HEAD SHA being merged. The check toetst op het BESTAAN van een geslaagde
 run voor die head, niet op de afwezigheid van een gefaalde run:
 
-  - zero runs for the head sha          -> NO-GO ("niet toetsbaar")
-  - any run for the head sha is running -> NO-GO (in_progress/queued blocks)
-  - any run for the head sha != success -> NO-GO
-  - every run for the head sha succeeded -> GO
+  - zero runs for the head sha              -> NO-GO ("niet toetsbaar")
+  - any run for the head sha is running     -> NO-GO (in_progress/queued blocks)
+  - exactly one completed run for the head  -> its conclusion decides
+  - multiple completed runs for the head    -> the LATEST one decides (OI-1613)
+  - order among completed runs can't be established -> NO-GO, own reason
 
 Every unverifiable state (``gh`` missing, ``gh`` not authenticated, ``gh run
 list`` failing or unparseable, HEAD unresolvable) is a NO-GO with its own
@@ -22,12 +23,32 @@ run on the branch it was given and can call GO while a run for the exact same
 sha is still in progress on the other branch — which is precisely the
 disagreement OI-1387 measured between this gate (was branch-scoped) and the
 review-gate's ``gh pr checks`` (always commit-scoped). Scoping both to the
-commit, and requiring EVERY run found on that commit to be conclusion=success,
-makes them agree. ``branch`` remains an accepted argument/CLI flag for callers
-that still resolve and pass it (e.g. ``pr_merge.py`` alongside head_sha), but
-it no longer participates in the CI query — there is no fallback to a
-branch-scoped query when head_sha is unresolvable, since that fallback would
-silently reintroduce the exact defect being fixed here.
+commit makes them agree. ``branch`` remains an accepted argument/CLI flag for
+callers that still resolve and pass it (e.g. ``pr_merge.py`` alongside
+head_sha), but it no longer participates in the CI query — there is no
+fallback to a branch-scoped query when head_sha is unresolvable, since that
+fallback would silently reintroduce the exact defect being fixed here.
+
+OI-1613: OI-1387's "every run on this commit must be conclusion=success" was
+itself too strict — a run-history is immutable, so a sha that failed once and
+was later re-verified GO (the tmux-spawn lane re-triggers CI on an UNCHANGED
+head sha by closing/reopening the PR, precisely so bound review-gate evidence
+for that sha stays valid) stayed NO-GO forever, with no way back except
+changing the head sha and invalidating that evidence. Measured on four PRs
+2026-09-02 (#1744, #1733, #1743, #1741): each carried an old failing run next
+to a newer successful one on the same head, and the old "every run" rule
+refused all four. The fix: among completed (non-running) runs on the commit,
+the LATEST one by ``createdAt`` is the current truth; older runs on the same
+sha are history, not a standing veto. The still-running guard (in_progress/
+queued anywhere on the commit blocks, unconditionally) is unchanged — it is
+not a "some runs disagree" case, it is "the truth for this commit isn't known
+yet". Order is established from ``createdAt``, which this module now requests
+explicitly and sorts itself; ``gh run list``'s own return order is not
+documented as time-ordered and is never relied on. When order cannot be
+established — ``createdAt`` missing or unparseable on any completed run, or
+two completed runs sharing the exact same timestamp — that is a distinct
+NO-GO ("kan de volgorde ... niet vaststellen"), never a silent fall-through to
+"first in the list" or back to the old all-must-succeed rule.
 
 Escape hatch (OI-1216 merge-gate): an operator may override the gate by
 supplying a non-empty reason via ``override_reason`` /
@@ -51,6 +72,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -119,6 +141,21 @@ def _capture(argv: List[str], *, timeout: int, cwd: Optional[str] = None) -> Tup
         return None, "missing"
     except subprocess.TimeoutExpired:
         return None, "timeout"
+
+
+def _parse_created_at(value: Any) -> Optional[datetime]:
+    """Parse a gh ``createdAt`` timestamp (e.g. ``2026-09-02T18:24:11Z``).
+
+    Returns ``None`` when the value is missing, not a string, or fails to
+    parse — the caller treats that as "order unknown", never as "sorts
+    first" or "sorts last" (OI-1613).
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _git(project_root: Path, args: List[str]) -> Optional[str]:
@@ -256,7 +293,7 @@ def check_ci_run_for_head(
             "--commit", head_sha,
             "--workflow", resolved_workflow,
             "--limit", str(RUN_LIST_LIMIT),
-            "--json", "conclusion,headSha,status,databaseId",
+            "--json", "conclusion,headSha,status,databaseId,createdAt",
         ],
         timeout=GH_RUN_LIST_TIMEOUT,
         cwd=str(project_root),
@@ -291,13 +328,9 @@ def check_ci_run_for_head(
             workflow_name=resolved_workflow,
         )
 
-    # ── Every run for the exact HEAD SHA must be conclusion=success ────────
+    # ── Match runs to the exact HEAD SHA ────────────────────────────────────
     # ``--commit`` already scopes gh's response to head_sha; this filter is a
-    # defensive no-op against a gh quirk returning extra entries. Unlike the
-    # pre-OI-1387 code, which returned on the FIRST run matching head_sha,
-    # this collects ALL of them: a sha pushed to two branches (tmux-spawn
-    # fix-forward) can have more than one VNX CI run, and one done + one still
-    # running must NO-GO, not GO on the strength of whichever run sorted first.
+    # defensive no-op against a gh quirk returning extra entries.
     matching = [run for run in runs if run.get("headSha") == head_sha]
     if not matching:
         return _no_go(
@@ -306,6 +339,11 @@ def check_ci_run_for_head(
             workflow_name=resolved_workflow,
         )
 
+    # ── Still-running guard (OI-1387, unchanged) ────────────────────────────
+    # Any in_progress/queued run on this commit blocks outright, regardless of
+    # what any completed run on the same commit concluded: this is "the truth
+    # for this commit isn't known yet", not "runs on this commit disagree" —
+    # the latter is what the ordering logic below resolves.
     running = [run for run in matching if (run.get("status") or "") in ("in_progress", "queued")]
     if running:
         run_id = running[0].get("databaseId")
@@ -319,12 +357,26 @@ def check_ci_run_for_head(
             workflow_name=resolved_workflow,
         )
 
-    failing = [run for run in matching if (run.get("conclusion") or "") != "success"]
-    if failing:
-        run_id = failing[0].get("databaseId")
-        conclusion = failing[0].get("conclusion") or ""
+    # From here every run in `matching` is completed (in_progress/queued was
+    # filtered above).
+    completed = matching
+
+    def _go(run_id: Any, detail: str) -> Dict[str, Any]:
+        return {
+            "verdict": "GO",
+            "message": f"{resolved_workflow} geslaagd op {head_sha[:12]} ({detail})",
+            "ci_conclusion": "success",
+            "ran_on_sha": True,
+            "head_sha": head_sha,
+            "ci_run_id": run_id,
+            "workflow_name": resolved_workflow,
+            "overridden": False,
+            "override_reason": None,
+        }
+
+    def _fail(run_id: Any, conclusion: str, detail: str) -> Dict[str, Any]:
         return _no_go(
-            f"{resolved_workflow} conclusion is '{conclusion}' op {head_sha[:12]}: "
+            f"{resolved_workflow} conclusion is '{conclusion}' op {head_sha[:12]} ({detail}): "
             "deze merge is niet toetsbaar",
             ci_conclusion=conclusion or None,
             ran_on_sha=True,
@@ -333,22 +385,50 @@ def check_ci_run_for_head(
             workflow_name=resolved_workflow,
         )
 
-    run_ids = [run.get("databaseId") for run in matching]
-    run_word = "run" if len(run_ids) == 1 else "runs"
-    return {
-        "verdict": "GO",
-        "message": (
-            f"{resolved_workflow} geslaagd op {head_sha[:12]} "
-            f"({run_word} {', '.join(str(r) for r in run_ids)})"
-        ),
-        "ci_conclusion": "success",
-        "ran_on_sha": True,
-        "head_sha": head_sha,
-        "ci_run_id": run_ids[0] if len(run_ids) == 1 else run_ids,
-        "workflow_name": resolved_workflow,
-        "overridden": False,
-        "override_reason": None,
-    }
+    # ── Exactly one completed run: its conclusion decides (unchanged) ──────
+    if len(completed) == 1:
+        run = completed[0]
+        run_id = run.get("databaseId")
+        conclusion = run.get("conclusion") or ""
+        if conclusion != "success":
+            return _fail(run_id, conclusion, f"run {run_id}")
+        return _go(run_id, f"run {run_id}")
+
+    # ── Multiple completed runs on the same commit: the LATEST decides ─────
+    # (OI-1613). A stale failing run next to a newer successful one on the
+    # same head (the tmux-spawn lane's reopen-to-retrigger pattern) must not
+    # veto forever — but if order genuinely cannot be established, that is
+    # its own NO-GO, never a silent fall-through to "all must succeed" or
+    # "first in the list".
+    dated = [(_parse_created_at(run.get("createdAt")), run) for run in completed]
+    if any(ts is None for ts, _ in dated):
+        return _no_go(
+            f"kan de volgorde van {len(completed)} klare VNX CI-runs op {head_sha[:12]} niet "
+            "vaststellen (createdAt ontbreekt of is onparsebaar bij minstens een run): "
+            "deze merge is niet toetsbaar",
+            ran_on_sha=True,
+            head_sha=head_sha,
+            workflow_name=resolved_workflow,
+        )
+
+    dated.sort(key=lambda pair: pair[0], reverse=True)
+    latest_ts, latest_run = dated[0]
+    second_ts, _second_run = dated[1]
+    if latest_ts == second_ts:
+        return _no_go(
+            f"kan de volgorde van {len(completed)} klare VNX CI-runs op {head_sha[:12]} niet "
+            "vaststellen (twee runs delen exact dezelfde createdAt): deze merge is niet toetsbaar",
+            ran_on_sha=True,
+            head_sha=head_sha,
+            workflow_name=resolved_workflow,
+        )
+
+    run_id = latest_run.get("databaseId")
+    conclusion = latest_run.get("conclusion") or ""
+    detail = f"laatste van {len(completed)} runs: {run_id}, createdAt {latest_run.get('createdAt')}"
+    if conclusion != "success":
+        return _fail(run_id, conclusion, detail)
+    return _go(run_id, detail)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

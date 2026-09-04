@@ -24,8 +24,16 @@ def main():
     if args.cmd == "verify":
         ok, violations, status = verify_chain(args.path)
         if status == "unchained":
+            # D1: "unchained" means verify_chain() could not check anything —
+            # no entry carries prev_hash, so integrity is UNMEASURED, not
+            # confirmed. Reporting verified:true/exit 0 here reads to any
+            # caller checking only the exit code or the "verified" field as
+            # "the chain is fine", when no chain was ever there to check.
+            # This does NOT build the hash-chain — that stays an explicit,
+            # separate decision (VNX_CHAIN_RECEIPTS=1). It only stops the
+            # tool from asserting a positive it never measured.
             print(json.dumps({
-                "verified": True,
+                "verified": False,
                 "status": "unchained",
                 "path": str(args.path),
                 "warning": (
@@ -33,7 +41,7 @@ def main():
                     "Enable chaining by setting VNX_CHAIN_RECEIPTS=1."
                 ),
             }, indent=2))
-            sys.exit(0)
+            sys.exit(2)
         elif status == "verified":
             print(json.dumps({
                 "verified": True,
