@@ -18,7 +18,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -335,11 +335,11 @@ class ReachabilityVerdict:
     reason: str = ""
 
 
-_LANE_REJECTION_WINDOW_ENV = "VNX_LANE_REJECTION_WINDOW_MINUTES"
-_DEFAULT_REJECTION_WINDOW_MINUTES = 15
-# Quota/auth-shaped failure classes. These do NOT self-heal inside a short
-# window (a 403 "usage limit" or a 402 "insufficient balance" persists until
-# the operator acts), so a recent one is a hard "known rejected" fact.
+# Quota/auth-shaped failure classes. These do NOT self-heal on a timer (a 403
+# "usage limit" or a 402 "insufficient balance" persists until the operator
+# acts), so a recent one is a hard "known rejected" fact — see
+# _recent_blocking_rejection below for how "recent" stopped meaning
+# "within a wall-clock window" (point 4, golf 1A).
 # Transient classes (empty_completion, timeout, model_error, unknown) never
 # block — they can pass on the next attempt.
 _BLOCKING_FAILURE_CLASSES = frozenset({"auth_rejected", "credit_exhausted"})
@@ -347,25 +347,16 @@ _RECEIPTS_FILENAME = "t0_receipts.ndjson"
 _LEDGER_TAIL_BYTES = 2 * 1024 * 1024   # read at most the last 2 MB of the ledger
 _LEDGER_TAIL_LINES = 200               # keep at most this many recent lines
 
-
-def _rejection_window_minutes() -> int:
-    """The rejection window, in minutes, from VNX_LANE_REJECTION_WINDOW_MINUTES.
-
-    A malformed override is a config error, not a reason to silently widen the
-    window — fall back to the default and say so.
-    """
-    raw = (os.environ.get(_LANE_REJECTION_WINDOW_ENV) or "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            print(
-                f"[dispatch_cli] [WARN] {_LANE_REJECTION_WINDOW_ENV}={raw!r} is "
-                f"not an integer; using {_DEFAULT_REJECTION_WINDOW_MINUTES} "
-                f"minutes",
-                file=sys.stderr,
-            )
-    return _DEFAULT_REJECTION_WINDOW_MINUTES
+# dispatch-20260904-deur-bezit-dispatch-toestand (point 4): the durable fact
+# a blocked reachability check leaves, and the explicit escape hatch that
+# clears it. Named "provider_lane_exhausted" / "provider_lane_reopened"
+# rather than the bare "lane_exhausted" gate_request_handler.py already owns
+# (review-GATE-SEAT exhaustion — codex/glm/kimi as REVIEWERS, a different
+# ledger and a different concept) — same word, deliberately disambiguated so
+# a future reader never has to guess which subsystem a record belongs to.
+_PROVIDER_LANE_EXHAUSTED_EVENT = "provider_lane_exhausted"
+_PROVIDER_LANE_REOPENED_EVENT = "provider_lane_reopened"
+_DISPATCH_REGISTER_FILENAME = "dispatch_register.ndjson"
 
 
 def _read_ledger_tail(path: Path) -> "list[str]":
@@ -396,18 +387,32 @@ def _read_ledger_tail(path: Path) -> "list[str]":
 def _recent_blocking_rejection(provider_val: str, state_dir: Path) -> "Optional[dict]":
     """Most recent receipt marking THIS provider known-rejected, or None.
 
-    Scans the ledger tail for a dispatch receipt whose ``failure_class`` is
-    quota/auth-shaped and whose ``provider`` matches, within the rejection
-    window. Matching is exact on the provider string — the ledger's ``provider``
+    dispatch-20260904-deur-bezit-dispatch-toestand (point 4): this used to
+    cut off at a wall-clock window (VNX_LANE_REJECTION_WINDOW_MINUTES,
+    default 15) — contradicting the module's own stated model directly above
+    ("these do NOT self-heal on a timer... persists until the operator
+    acts"). Measured 2026-09-03: kimi returned a 403 usage-limit at 10:40Z
+    and the door answered "no recent auth/quota rejection" for the SAME
+    provider at 12:27Z — 107 minutes later, with no success and no operator
+    action in between. A dead lane now stays dead until EITHER a LATER
+    success receipt for the same provider proves it recovered, or an
+    explicit ``--reopen-lane`` supersedes it (_lane_reopened_after below) —
+    never a timer.
+
+    Scans the ledger tail (bounded — see _read_ledger_tail) for dispatch
+    receipts matching THIS provider, tracking whichever of "a blocking-class
+    rejection" or "a success" was seen LAST — the tail is chronological
+    (oldest first), so the last matching line is the most recent signal.
+    Matching the provider is exact on the string — the ledger's ``provider``
     field is the same value plan.provider.value carries (measured on the
     2026-08-16 ledger: kimi, deepseek-harness, glm-harness, codex,
-    litellm:deepseek). A missing/empty/corrupt file or an out-of-window hit is
-    the ABSENCE of a known rejection.
+    litellm:deepseek). A missing/empty/corrupt file is the ABSENCE of a
+    known rejection.
     """
     receipts_path = state_dir / _RECEIPTS_FILENAME
     if not receipts_path.exists():
         return None
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=_rejection_window_minutes())
+    latest_blocking: "Optional[dict]" = None
     for line in _read_ledger_tail(receipts_path):
         try:
             r = json.loads(line)
@@ -417,17 +422,54 @@ def _recent_blocking_rejection(provider_val: str, state_dir: Path) -> "Optional[
             continue
         if str(r.get("provider") or "").lower() != provider_val.lower():
             continue
-        if r.get("failure_class") not in _BLOCKING_FAILURE_CLASSES:
+        if r.get("failure_class") in _BLOCKING_FAILURE_CLASSES:
+            latest_blocking = r
+        elif r.get("status") in _RV_SUCCESS_STATUSES:
+            # A later success proves the lane recovered — clears any earlier
+            # block for this provider, no operator action required.
+            latest_blocking = None
+    if latest_blocking is None:
+        return None
+    if _lane_reopened_after(provider_val, latest_blocking.get("timestamp"), state_dir=state_dir):
+        return None
+    return latest_blocking
+
+
+def _lane_reopened_after(
+    provider_val: str, since_ts: "Optional[str]", *, state_dir: Path,
+) -> bool:
+    """True when an explicit provider_lane_reopened event for provider_val
+    exists in dispatch_register.ndjson at/after since_ts — the operator
+    escape hatch (--reopen-lane) that clears a block without waiting on a
+    success receipt (point 4, golf 1A).
+    """
+    if not since_ts:
+        return False
+    path = state_dir / _DISPATCH_REGISTER_FILENAME
+    if not path.exists():
+        return False
+    try:
+        since_dt = datetime.fromisoformat(str(since_ts).rstrip("Z")).replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return False
+    for line in _read_ledger_tail(path):
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("event") != _PROVIDER_LANE_REOPENED_EVENT:
+            continue
+        extra = r.get("extra") or {}
+        if str(extra.get("provider") or "").lower() != provider_val.lower():
             continue
         ts_raw = r.get("timestamp", "")
         try:
             ts = datetime.fromisoformat(str(ts_raw).rstrip("Z")).replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):
             continue
-        if ts < cutoff:
-            continue
-        return r
-    return None
+        if ts >= since_dt:
+            return True
+    return False
 
 
 # Phrases that name a quota/auth cause directly, most-specific first. The
@@ -476,6 +518,9 @@ def _format_known_rejection(provider_val: str, receipt: dict) -> str:
 
     The operator reads the QUOTA/AUTH reason up front (the readable sentence
     extracted from failure_reason), not the JSON-parse noise that buried it.
+    dispatch-20260904-deur-bezit-dispatch-toestand (point 4): no more
+    wall-clock window in this message — the block persists until a later
+    success receipt or an explicit --reopen-lane, and the message says so.
     """
     fc = receipt.get("failure_class")
     ts = receipt.get("timestamp") or "?"
@@ -483,12 +528,40 @@ def _format_known_rejection(provider_val: str, receipt: dict) -> str:
     readable = _readable_refusal_reason(receipt.get("failure_reason") or "")
     return (
         f"lane={provider_val!r} is a KNOWN-rejected fact: a receipt recorded "
-        f"{fc} at {ts} (dispatch {src}) for the same provider within the "
-        f"{_rejection_window_minutes()}-minute rejection window. Reason: "
-        f"{readable}. Refusing to fire — re-route the dispatch or fix the lane "
-        f"(kimi: `kimi login`; deepseek/glm: check API key/credits) and re-fire "
-        f"once it is healthy."
+        f"{fc} at {ts} (dispatch {src}) for the same provider, and no later "
+        f"success receipt or explicit --reopen-lane {provider_val} has "
+        f"cleared it since. Reason: {readable}. This block does NOT expire on "
+        f"a timer — refusing to fire until the lane proves it recovered "
+        f"(kimi: `kimi login`; deepseek/glm: check API key/credits) or an "
+        f"operator runs --reopen-lane {provider_val}."
     )
+
+
+def _record_provider_lane_exhausted(
+    provider_val: str, receipt: dict, *, dispatch_id: str, state_dir: Path,
+) -> None:
+    """Best-effort: durable fact for a refused door fire (point 4, golf 1A) —
+    same door-bookkeeping contract as _record_bookkeeping_failure: never
+    raises, never blocks the door.
+    """
+    try:
+        import dispatch_register  # noqa: PLC0415
+        dispatch_register.append_event(
+            _PROVIDER_LANE_EXHAUSTED_EVENT,
+            dispatch_id=dispatch_id,
+            extra={
+                "provider": provider_val,
+                "failure_class": receipt.get("failure_class"),
+                "rejected_at": receipt.get("timestamp"),
+                "source_dispatch_id": receipt.get("dispatch_id"),
+            },
+            state_dir=state_dir,
+        )
+    except Exception as exc:  # vnx-silent-except: fact recording is best-effort; door must never block on it
+        logger.warning(
+            "[dispatch_cli] provider_lane_exhausted fact-record failed provider=%s: %s",
+            provider_val, exc,
+        )
 
 
 def _not_checkable_note(
@@ -556,6 +629,11 @@ def _check_reachability(
     if lane == "provider" and state_dir is not None:
         receipt = _recent_blocking_rejection(provider_val, state_dir)
         if receipt is not None:
+            # Point 4 (golf 1A): every refusal on this signal leaves a durable
+            # provider_lane_exhausted fact — never only a printed line.
+            _record_provider_lane_exhausted(
+                provider_val, receipt, dispatch_id=spec.dispatch_id, state_dir=state_dir,
+            )
             return ReachabilityVerdict(
                 block=True,
                 reason=_format_known_rejection(provider_val, receipt),
@@ -3024,6 +3102,39 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False, refire_reason: Optio
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def reopen_lane(provider_val: str, reason: str, *, state_dir: Path) -> int:
+    """Operator escape hatch (point 4, golf 1A): record an explicit
+    provider_lane_reopened event for provider_val, clearing any earlier
+    provider_lane_exhausted block (_lane_reopened_after) without waiting on
+    a later success receipt.
+
+    Returns 0 on a durable write, 1 on failure (printed, never silent).
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        print(
+            "[dispatch_cli] --reopen-lane requires a non-empty --reopen-reason",
+            file=sys.stderr,
+        )
+        return 1
+    import dispatch_register  # noqa: PLC0415
+    ok = dispatch_register.append_event(
+        _PROVIDER_LANE_REOPENED_EVENT,
+        dispatch_id=f"lane-reopen:{provider_val}",
+        extra={"provider": provider_val, "reason": reason},
+        state_dir=state_dir,
+    )
+    if not ok:
+        print(
+            f"[dispatch_cli] failed to record provider_lane_reopened for "
+            f"{provider_val!r} — the block was NOT cleared",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"[dispatch_cli] lane reopened: provider={provider_val!r} reason={reason!r}")
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     import argparse
 
@@ -3050,11 +3161,27 @@ def main(argv: Optional[list] = None) -> int:
              "that already carries a terminal receipt, a route decision, or "
              "a runtime end-state",
     )
+    parser.add_argument(
+        "--reopen-lane", dest="reopen_lane_provider", metavar="PROVIDER", default=None,
+        help="Clear a provider_lane_exhausted block for PROVIDER (requires "
+             "--reopen-reason); does not run a dispatch",
+    )
+    parser.add_argument(
+        "--reopen-reason", dest="reopen_lane_reason", metavar="REASON", default=None,
+        help="Reason for --reopen-lane (mandatory alongside it)",
+    )
     args = parser.parse_args(argv)
 
     if args.force_release_class is not None:
         force_release(args.force_release_class)
         return 0
+
+    if args.reopen_lane_provider is not None:
+        data_dir = _resolve_data_dir()
+        return reopen_lane(
+            args.reopen_lane_provider, args.reopen_lane_reason or "",
+            state_dir=data_dir / "state",
+        )
 
     if args.spec_file is None:
         parser.error("--spec-file is required")
