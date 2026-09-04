@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -27,6 +27,9 @@ from review_contract import ReviewContract
 from codex_final_gate import enforce_codex_gate
 from codex_severity_translator import translate_findings as translate_codex_findings
 from gate_status import (
+    FAIL_STATES as _GATE_FAIL_STATES,
+    PASS_STATES as _GATE_PASS_STATES,
+    canonical_status as gate_canonical_status,
     has_complete_evidence as gate_has_complete_evidence,
     is_pass as gate_is_pass,
     is_terminal as gate_is_terminal,
@@ -283,6 +286,47 @@ def _matches_required_field(supplied: Optional[str], actual: Optional[str]) -> b
     return (actual or "") == supplied
 
 
+def _record_matches_scope(
+    data: Dict[str, Any],
+    pr_id: str,
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+) -> bool:
+    """Shared scope matcher for gate result records.
+
+    Used by both ``_find_gate_result`` (the declared gate's own record) and
+    ``_find_takeover_successor_results`` (OI-1576 provenance route) so the two
+    read paths can never drift apart on what counts as in-scope evidence.
+    """
+    # Offline test-run records must never count as evidence for a real PR.
+    # The writer (kimi_gate --diff-file) stamps them test_run: true. Reject
+    # before any pr_id/branch matching so a synthetic pr_id (0, 1, 2)
+    # cannot align with a real contract.
+    if _is_test_run_record(data):
+        return False
+    # PR-scoped AND matching: if data carries pr_id it must match the queried pr_id.
+    # This prevents a result from a different PR satisfying a closure check even when
+    # the filename-based lookup finds a contract for the correct PR name.
+    data_pr_id = data.get("pr_id")
+    if data_pr_id and data_pr_id != pr_id:
+        return False
+    # ADR-007: project_id must be present and match when caller supplies one.
+    if project_id is not None:
+        data_pid = (data.get("project_id") or "").strip()
+        if not data_pid or data_pid != project_id:
+            return False
+    # ADR-005: branch must be present and match when caller supplies one.
+    # A branch-less result is stale evidence from a prior feature.
+    if not _matches_required_field(branch, data.get("branch")):
+        return False
+    # OI-1307: head sha must be present and match when caller supplies one —
+    # same strictness as branch (a result without commit_sha is stale).
+    if not _matches_required_field(head_sha, data.get("commit_sha")):
+        return False
+    return True
+
+
 def _find_gate_result(
     gate: str,
     pr_id: str,
@@ -305,32 +349,7 @@ def _find_gate_result(
     """
 
     def _accept(data: Dict[str, Any]) -> bool:
-        # Offline test-run records must never count as evidence for a real PR.
-        # The writer (kimi_gate --diff-file) stamps them test_run: true. Reject
-        # before any pr_id/branch matching so a synthetic pr_id (0, 1, 2)
-        # cannot align with a real contract.
-        if _is_test_run_record(data):
-            return False
-        # PR-scoped AND matching: if data carries pr_id it must match the queried pr_id.
-        # This prevents a result from a different PR satisfying a closure check even when
-        # the filename-based lookup finds a contract for the correct PR name.
-        data_pr_id = data.get("pr_id")
-        if data_pr_id and data_pr_id != pr_id:
-            return False
-        # ADR-007: project_id must be present and match when caller supplies one.
-        if project_id is not None:
-            data_pid = (data.get("project_id") or "").strip()
-            if not data_pid or data_pid != project_id:
-                return False
-        # ADR-005: branch must be present and match when caller supplies one.
-        # A branch-less result is stale evidence from a prior feature.
-        if not _matches_required_field(branch, data.get("branch")):
-            return False
-        # OI-1307: head sha must be present and match when caller supplies one —
-        # same strictness as branch (a result without commit_sha is stale).
-        if not _matches_required_field(head_sha, data.get("commit_sha")):
-            return False
-        return True
+        return _record_matches_scope(data, pr_id, branch, project_id, head_sha)
 
     pr_slug = pr_id.lower().replace("-", "")
     # Contract-based results: {pr_slug}-{gate}-contract.json
@@ -352,6 +371,203 @@ def _find_gate_result(
         except (json.JSONDecodeError, OSError):
             continue
     return None
+
+
+# A record whose coerced status is in this set reached its own verdict
+# (pass/fail). Anything else — unavailable, not_executable, pending, ... —
+# means the gate never produced a decision, which is exactly when the
+# takeover-provenance route (OI-1576) may speak for it.
+_DECIDED_VERDICT_STATES = _GATE_PASS_STATES | _GATE_FAIL_STATES
+
+# Glob metacharacters that would change the meaning of a pr_id-derived glob
+# pattern (e.g. turn it into a wildcard match instead of a literal prefix).
+_GLOB_UNSAFE_CHARS = frozenset("*?[]")
+
+
+def _pr_scoped_json_candidates(results_dir: Path, pr_id: str) -> List[Path]:
+    """Cheap filename pre-filter for ``_find_takeover_successor_results`` (OI-1599 advisory).
+
+    Every gate-result writer (``gate_recorder.result_file_path`` and the
+    legacy ``pr-{n}-{gate}.json`` fallback it replaced) stamps the SAME
+    ``pr_id``/``pr_number`` value into both the filename and the record's own
+    ``pr_id`` field — there is no writer that names a file for one PR and
+    stamps another PR's id inside it. That means a file whose name cannot
+    possibly carry this ``pr_id`` can be skipped before it is ever opened,
+    without weakening ``_record_matches_scope``'s own pr_id check in any way:
+    the two checks agree by construction.
+
+    Three literal prefixes cover every writer observed in the live store:
+    ``{pr_id}-...json`` (contract writer, slug == bare pr_id), ``pr-{pr_id}-...json``
+    (legacy writer), and ``{slug}-...json`` where ``slug`` strips dashes the
+    same way ``_find_gate_result`` does — covering a dash-bearing pr_id even
+    though every current caller passes a bare digit string.
+
+    Falls back to the unfiltered ``*.json`` scan when ``pr_id`` is empty or
+    contains a glob metacharacter: a prefix filter must never risk silently
+    dropping a record it cannot express as a safe literal glob.
+    """
+    if not pr_id or any(ch in _GLOB_UNSAFE_CHARS for ch in pr_id):
+        return sorted(results_dir.glob("*.json"))
+    slug = pr_id.lower().replace("-", "")
+    patterns = {f"{pr_id}-*.json", f"pr-{pr_id}-*.json", f"{slug}-*.json"}
+    matches: set = set()
+    for pattern in patterns:
+        matches.update(results_dir.glob(pattern))
+    return sorted(matches)
+
+
+def _find_takeover_successor_results(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """OI-1576: successor records that name ``gate`` in their OWN takeover_path.
+
+    The gate chain slides forward (codex unavailable -> kimi not executable ->
+    glm takes over and writes a valid verdict under its OWN name). The runner
+    walks that chain; the merge door does NOT — it reads the provenance FIELD
+    the successor record carries about itself, so no reader ever has to
+    reconstruct the chain from other records again.
+
+    A record is a provenance candidate for declared gate ``gate`` when, and
+    only when:
+
+      1. it carries ``takeover: true`` AND a non-empty ``takeover_path``
+      2. an element of ``takeover_path`` has ``gate == <declared gate>``
+      3. it is in scope for this PR under the SAME matcher the declared-gate
+         lookup uses (``_record_matches_scope``: test_run rejection, pr_id,
+         project_id, branch, and the head-sha binding from #1740)
+
+    The record's OWN status is never inspected here — that is the caller's
+    invariant chain — and a chain step's status inside someone's
+    ``takeover_path`` is never consulted either: two records may legitimately
+    disagree about a gate that ran twice (live #1729: deepseek's path calls
+    glm_gate not_executable while glm_gate's own record says pass), and each
+    record speaks only for itself.
+
+    Returns ``(candidates, provenance_notes)``. ``provenance_notes`` names any
+    record that claims ``takeover: true`` but carries an empty or absent
+    ``takeover_path``: that is a THIRD outcome — not "no takeover", not
+    "proven provenance" — and the caller must refuse it as provenance evidence
+    with a message that the provenance could not be determined.
+    """
+    candidates: List[Dict[str, Any]] = []
+    provenance_notes: List[str] = []
+    if not results_dir.exists():
+        return candidates, provenance_notes
+    for path in _pr_scoped_json_candidates(results_dir, pr_id):
+        try:
+            data = json.loads(_read_text(path))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        record_gate = (data.get("gate") or "").strip()
+        # The declared gate's own record was already evaluated by the caller;
+        # this route only ever looks at OTHER gates' records.
+        if not record_gate or record_gate == gate:
+            continue
+        if data.get("takeover") is not True:
+            continue
+        if not _record_matches_scope(data, pr_id, branch, project_id, head_sha):
+            continue
+        takeover_path = data.get("takeover_path")
+        if not isinstance(takeover_path, list) or not takeover_path:
+            provenance_notes.append(
+                f"{record_gate} (bestand {path.name}) claimt overname maar draagt "
+                "een lege of afwezige takeover_path"
+            )
+            continue
+        path_gates = [
+            str(step.get("gate") or "").strip()
+            for step in takeover_path
+            if isinstance(step, dict)
+        ]
+        if gate not in path_gates:
+            continue
+        candidates.append(data)
+    return candidates, provenance_notes
+
+
+def _merge_door_record_verdict(
+    result: Dict[str, Any],
+    gate_label: str,
+    pr_id: str,
+) -> Dict[str, Any]:
+    """Run the merge door's invariant chain against one gate result record.
+
+    The SAME five invariants for the declared gate's own record and for an
+    OI-1576 takeover successor — ``gate_label`` is the record's own gate name,
+    so messages always name the evidence actually being judged.
+    """
+    if not gate_is_terminal(result):
+        status = result.get("status", "unknown")
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate_label} resultaat is niet terminaal (status={status}): bewijs onvolledig",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate_label,
+        }
+    if not gate_has_complete_evidence(result):
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate_label} resultaat mist contract_hash en/of report_path: bewijs onvolledig",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate_label,
+        }
+    report_path = Path(result["report_path"])
+    if not report_path.exists():
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate_label} report_path bestaat niet: {report_path}",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate_label,
+        }
+    passed, reason = gate_is_pass(result)
+    if not passed:
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate_label} staat merge niet toe — {reason}",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate_label,
+        }
+    # Invariant 7: a passing verdict whose report still carries blocking
+    # indicators is a contradiction, not evidence.
+    try:
+        report_content = report_path.read_text(encoding="utf-8")
+    except OSError:
+        return {
+            "verdict": "NO-GO",
+            "message": f"{gate_label} report_path onleesbaar: {report_path}",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate_label,
+        }
+    if _count_report_blocking_indicators(report_content) > 0:
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"{gate_label} resultaat zegt pass maar het rapport bevat blocking-indicatoren "
+                "— bewijs spreekt zichzelf tegen"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate_label,
+        }
+    return {
+        "verdict": "GO",
+        "message": f"{gate_label} resultaat aanwezig en passing voor {pr_id}",
+        "overridden": False,
+        "override_reason": None,
+        "gate": gate_label,
+    }
 
 
 def check_review_gate_for_merge(
@@ -384,10 +600,75 @@ def check_review_gate_for_merge(
     non-empty subset so an empty-hash result can never green-light a merge.
     The override escape hatch lives in the caller (``pr_merge._run_review_gate``),
     mirroring how the CI gate keeps its override in ``check_ci_run_for_head``.
+
+    OI-1576: when the declared gate never reached its own verdict (record
+    absent, or a non-verdict status like ``unavailable``/``not_executable`` —
+    the chain slid forward), a SUCCESSOR record that names the declared gate
+    in its own ``takeover_path`` counts as evidence, under the SAME invariants
+    (``_merge_door_record_verdict``) plus the SAME scope/sha binding
+    (``_record_matches_scope``). The door reads the provenance FIELD the
+    successor carries about itself; it never walks the chain through other
+    records. A decided verdict at the declared gate (pass or fail) always
+    stands on its own and is never overridden by a successor.
     """
     result = _find_gate_result(
         gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
     )
+    if result is not None and gate_canonical_status(result) in _DECIDED_VERDICT_STATES:
+        # The declared gate reached its own verdict: it stands on its own.
+        # This is also what keeps the walking-reader trap closed — a step
+        # status in someone else's takeover_path can never disqualify a gate
+        # that carries its own decided record (live #1729: deepseek's path
+        # called glm_gate not_executable while glm_gate itself passed).
+        return _merge_door_record_verdict(result, gate, pr_id)
+
+    # The declared gate produced no decided verdict. Consult successor
+    # records that name this gate in their OWN takeover_path (OI-1576).
+    successors, provenance_notes = _find_takeover_successor_results(
+        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
+    )
+    first_failure: Optional[Dict[str, Any]] = None
+    for successor in successors:
+        successor_gate = (successor.get("gate") or "").strip() or gate
+        verdict = _merge_door_record_verdict(successor, successor_gate, pr_id)
+        if verdict["verdict"] == "GO":
+            return {
+                "verdict": "GO",
+                "message": (
+                    f"{gate} bewezen via overname: {successor_gate} draagt {gate} in "
+                    f"zijn takeover_path en is zelf passing voor {pr_id}"
+                ),
+                "overridden": False,
+                "override_reason": None,
+                "gate": gate,
+                "evidence_gate": successor_gate,
+            }
+        if first_failure is None:
+            first_failure = verdict
+    if first_failure is not None:
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"overname-route voor {gate}: {first_failure['message']}"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    if provenance_notes:
+        # Third branch: takeover claimed but provenance not determinable.
+        # Not "no takeover", not "proven provenance" — a refusal that says
+        # exactly what could not be established.
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"overnamebewijs voor {gate} op {pr_id} geweigerd: herkomst niet "
+                f"vast te stellen ({'; '.join(provenance_notes)})"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
     if result is None:
         return {
             "verdict": "NO-GO",
@@ -396,71 +677,7 @@ def check_review_gate_for_merge(
             "override_reason": None,
             "gate": gate,
         }
-    if not gate_is_terminal(result):
-        status = result.get("status", "unknown")
-        return {
-            "verdict": "NO-GO",
-            "message": f"{gate} resultaat is niet terminaal (status={status}): bewijs onvolledig",
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-    if not gate_has_complete_evidence(result):
-        return {
-            "verdict": "NO-GO",
-            "message": f"{gate} resultaat mist contract_hash en/of report_path: bewijs onvolledig",
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-    report_path = Path(result["report_path"])
-    if not report_path.exists():
-        return {
-            "verdict": "NO-GO",
-            "message": f"{gate} report_path bestaat niet: {report_path}",
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-    passed, reason = gate_is_pass(result)
-    if not passed:
-        return {
-            "verdict": "NO-GO",
-            "message": f"{gate} staat merge niet toe — {reason}",
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-    # Invariant 7: a passing verdict whose report still carries blocking
-    # indicators is a contradiction, not evidence.
-    try:
-        report_content = report_path.read_text(encoding="utf-8")
-    except OSError:
-        return {
-            "verdict": "NO-GO",
-            "message": f"{gate} report_path onleesbaar: {report_path}",
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-    if _count_report_blocking_indicators(report_content) > 0:
-        return {
-            "verdict": "NO-GO",
-            "message": (
-                f"{gate} resultaat zegt pass maar het rapport bevat blocking-indicatoren "
-                "— bewijs spreekt zichzelf tegen"
-            ),
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
-    return {
-        "verdict": "GO",
-        "message": f"{gate} resultaat aanwezig en passing voor {pr_id}",
-        "overridden": False,
-        "override_reason": None,
-        "gate": gate,
-    }
+    return _merge_door_record_verdict(result, gate, pr_id)
 
 
 # Request-side states for the optional Claude GitHub review gate that record
