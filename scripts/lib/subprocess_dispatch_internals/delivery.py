@@ -315,6 +315,7 @@ def deliver_via_subprocess(
     prior_round_finding) fire in IntelligenceSelector.select() during assembly.
     """
     import subprocess_dispatch as _sd
+    from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS
     from provider_spawns.claude_spawn import spawn_claude
 
     chunk_timeout, total_deadline = apply_runtime_overrides(chunk_timeout, total_deadline)
@@ -381,6 +382,7 @@ def deliver_via_subprocess(
             total_deadline=total_deadline,
             role=role,
             requires_mcp=requires_mcp,
+            scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
         )
         # Give the silence heartbeat thread access to the adapter so it can
         # kill the worker process on silence timeout (OI-944 / OI-1007).

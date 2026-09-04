@@ -119,6 +119,7 @@ class ClaudeSubprocessAdapter:
         event_writer: Optional[Callable] = None,
         cwd: Optional[Path] = None,
     ) -> _AdapterResult:
+        from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS  # noqa: PLC0415
         from provider_spawns.claude_spawn import spawn_claude  # noqa: PLC0415
 
         try:
@@ -131,6 +132,7 @@ class ClaudeSubprocessAdapter:
                 cwd=cwd,
                 role=spec.role,
                 total_deadline=float(spec.deadline_seconds),
+                scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
             )
         except BrokenPipeError as exc:
             return _AdapterResult(

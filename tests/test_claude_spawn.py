@@ -93,6 +93,7 @@ class TestSpawnClaudeAccumulatesCompletionText:
             return_value=adapter_mock,
         ):
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="write add function",
                 model="sonnet",
                 dispatch_id="test-spawn-001",
@@ -113,6 +114,7 @@ class TestSpawnClaudeAccumulatesCompletionText:
             return_value=adapter_mock,
         ):
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="write foo",
                 model="haiku",
                 dispatch_id="test-spawn-002",
@@ -134,6 +136,7 @@ class TestSpawnClaudeAccumulatesCompletionText:
             return_value=adapter,
         ):
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="write something",
                 model="sonnet",
                 dispatch_id="test-spawn-003",
@@ -152,6 +155,7 @@ class TestSpawnClaudeAccumulatesCompletionText:
             return_value=adapter_mock,
         ):
             result = spawn_claude(
+                scrub_env_keys=frozenset(),  # now-mandatory param; this test does not exercise scrubbing
                 prompt="noop",
                 model="haiku",
                 dispatch_id="test-spawn-004",
