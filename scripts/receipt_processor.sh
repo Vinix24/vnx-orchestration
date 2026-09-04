@@ -358,11 +358,34 @@ _ppr_process_rate_limited() {
     [ "$MAX_PROCESSED_MTIME" -gt 0 ] && echo "$MAX_PROCESSED_MTIME" > "$WATERMARK_FILE"
     log "INFO" "Processed $processed_count reports successfully"
     # Run Python converter after the Bash scan so YAML-frontmatter reports
-    # not handled by report_parser.py also get receipts.  Non-fatal.
-    python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
+    # not handled by report_parser.py also get receipts.  Non-fatal: a
+    # crash here must never abort the processor loop (kept, unchanged).
+    #
+    # D3: the converter fail-closed-refuses a report with no valid Model
+    # field (scripts/lib/append_receipt_internals/validation.py::
+    # _validate_model_present) and logs that refusal as a WARNING on its
+    # own logger — which writes to stderr. main() always returns 0 even
+    # when it rejected reports this scan (a rejection is not a crash), so
+    # the old `|| log ERROR ... (exit $?)` fallback below never fired for
+    # a REJECTED — and the plain `2>/dev/null` threw the WARNING away
+    # regardless of exit code. Net effect: a refused report vanished from
+    # the audit trail with zero trace in this log. Capture stderr
+    # explicitly (independent of exit code, since exit code is not a
+    # reliable signal here) and route every line through log() so a
+    # REJECTED is visible; the non-fatal design itself is unchanged.
+    local _converter_stderr _converter_rc
+    _converter_stderr="$(python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
         --state-dir "$STATE_DIR" \
-        "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>/dev/null \
-        || log "ERROR" "report_to_receipt_converter catchup scan FAILED non-fatal, processor continues (exit $?)"
+        "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>&1 >/dev/null)"
+    _converter_rc=$?
+    if [ -n "$_converter_stderr" ]; then
+        while IFS= read -r _converter_line; do
+            [ -n "$_converter_line" ] && log "WARNING" "report_to_receipt_converter: $_converter_line"
+        done <<< "$_converter_stderr"
+    fi
+    if [ "$_converter_rc" -ne 0 ]; then
+        log "ERROR" "report_to_receipt_converter catchup scan FAILED non-fatal, processor continues (exit $_converter_rc)"
+    fi
 }
 
 # Process all pending reports with flood protection and rate limiting.
