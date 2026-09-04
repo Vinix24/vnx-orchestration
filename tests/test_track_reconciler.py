@@ -634,3 +634,50 @@ def test_0028_down_preserves_track_dependencies(tmp_path):
     dep = conn.execute("SELECT * FROM track_dependencies").fetchone()
     assert dep is not None
     assert dep[0] == "t-a"
+
+
+# ---------------------------------------------------------------------------
+# _get_conn — 0-table decoy refusal (OI: absence-is-loud D5/golf 3C, #1759 shape)
+#
+# track_reconciler.py used to carry its OWN byte-for-byte duplicate of
+# tracks.py's _get_conn(). On a 0-table decoy it connected silently, and
+# _has_col() (PRAGMA table_info against a missing table returns an empty
+# result, not an error) then read "column absent" — so
+# reconcile_all_tracks() raised a MISLEADING "tracks.derived_status column
+# absent; apply migration 0028 first", the wrong diagnosis: it points the
+# operator at a migration when the real problem is a wrong
+# --project-id/--central-state guess that never touched a real store at all.
+# _get_conn() now delegates to tracks_lib._get_conn(), so the SAME decoy
+# refusal that protects tracks.py protects this module too.
+# ---------------------------------------------------------------------------
+
+def _make_zero_table_decoy(tmp_path: Path) -> Path:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    db_path = state_dir / "runtime_coordination.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.close()
+    assert db_path.exists()
+    assert db_path.stat().st_size == 0
+    return state_dir
+
+
+def test_reconcile_all_tracks_refuses_zero_table_decoy(tmp_path):
+    """Before the fix this raised RuntimeError('...apply migration 0028
+    first') — a misdiagnosis. It must now name the decoy instead."""
+    state_dir = _make_zero_table_decoy(tmp_path)
+    with pytest.raises(tracks_lib.EmptySchemaDecoyError, match="zero tables"):
+        track_reconciler.reconcile_all_tracks(state_dir, PROJECT_ID)
+
+
+def test_reconcile_track_refuses_zero_table_decoy(tmp_path):
+    state_dir = _make_zero_table_decoy(tmp_path)
+    with pytest.raises(tracks_lib.EmptySchemaDecoyError, match="zero tables"):
+        track_reconciler.reconcile_track(state_dir, "T-anything", PROJECT_ID)
+
+
+def test_healthy_migrated_store_not_misclassified_as_decoy(tmp_path):
+    """A real (migrated), genuinely track-empty store must reconcile cleanly
+    — proves the refusal counts tables, not tracks."""
+    state_dir = _build_db(tmp_path)
+    assert track_reconciler.reconcile_all_tracks(state_dir, PROJECT_ID) == []

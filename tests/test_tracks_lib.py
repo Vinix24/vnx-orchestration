@@ -394,3 +394,64 @@ class TestAddDependency:
         tracks.create_track(state_dir, "track-01", "vnx-dev", "T1", "G1")
         with pytest.raises(tracks.TrackNotFoundError):
             tracks.add_dependency(state_dir, "track-nope", "vnx-dev", "track-01", "vnx-dev", "hard", "manual")
+
+
+# ---------------------------------------------------------------------------
+# _get_conn — 0-table decoy refusal (OI: absence-is-loud D5/golf 3C, #1759 shape)
+#
+# A 0-table runtime_coordination.db is a decoy — e.g. left behind by a wrong
+# --project-id/--central-state guess that lazily created the file via
+# sqlite3.connect() — not the genuinely-empty-but-real store TestListTracks
+# .test_list_empty above covers (0 ROWS in a fully-migrated schema). Before
+# this fix, both looked identical to a caller once "no such table" fired:
+# _get_conn() connected fine and the first query raised a bare
+# sqlite3.OperationalError, indistinguishable from a real store that merely
+# predates one migration.
+# ---------------------------------------------------------------------------
+
+def _make_zero_table_decoy(tmp_path: Path) -> Path:
+    """A state_dir whose runtime_coordination.db exists but has 0 tables."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    db_path = state_dir / "runtime_coordination.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.close()  # sqlite3.connect() alone lazily creates the 0-byte, 0-table file
+    assert db_path.exists()
+    assert db_path.stat().st_size == 0
+    return state_dir
+
+
+class TestEmptySchemaDecoyRefusal:
+    def test_list_tracks_refuses_zero_table_decoy(self, tmp_path):
+        state_dir = _make_zero_table_decoy(tmp_path)
+        with pytest.raises(tracks.EmptySchemaDecoyError, match="zero tables"):
+            tracks.list_tracks(state_dir, "vnx-dev")
+
+    def test_get_track_refuses_zero_table_decoy(self, tmp_path):
+        state_dir = _make_zero_table_decoy(tmp_path)
+        with pytest.raises(tracks.EmptySchemaDecoyError, match="zero tables"):
+            tracks.get_track(state_dir, "track-01", "vnx-dev")
+
+    def test_create_track_refuses_zero_table_decoy(self, tmp_path):
+        """The write path funnels through the same _get_conn chokepoint."""
+        state_dir = _make_zero_table_decoy(tmp_path)
+        with pytest.raises(tracks.EmptySchemaDecoyError, match="zero tables"):
+            tracks.create_track(state_dir, "track-01", "vnx-dev", "T1", "G1")
+
+    def test_healthy_migrated_store_not_misclassified_as_decoy(self, state_dir):
+        """A real (migrated) store with zero ROWS must not be refused — proves
+        the check counts tables, not rows. Same fixture as
+        TestListTracks.test_list_empty."""
+        assert tracks.list_tracks(state_dir, "vnx-dev") == []
+
+    def test_missing_file_unchanged_behavior(self, tmp_path):
+        """A state_dir whose db file does not exist AT ALL yet is the
+        legitimate not-yet-bootstrapped case (distinct from an existing
+        0-table decoy) and is deliberately NOT covered by this refusal —
+        matches the qi_db_health.is_empty_schema() precedent (None for
+        missing, not True). Unchanged pre-existing behavior: lazy-create
+        then fail on the first query."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            tracks.list_tracks(state_dir, "vnx-dev")

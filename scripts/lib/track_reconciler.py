@@ -366,12 +366,21 @@ def _load_merged_pr_numbers(
 
 
 def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
-    db_path = Path(state_dir) / DB_FILENAME
-    conn = sqlite3.connect(str(db_path), timeout=10.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    """Delegates to tracks_lib._get_conn — the single chokepoint for opening
+    runtime_coordination.db (same DB_FILENAME, same WAL/FK pragmas).
+
+    Was previously a byte-for-byte duplicate of tracks.py's own _get_conn,
+    which meant a decoy (0-table) database connected here just as silently
+    as it did there: _has_col() below reads PRAGMA table_info on a missing
+    table as "column absent" (no exception), so reconcile_all_tracks() would
+    raise a misleading "tracks.derived_status column absent; apply migration
+    0028 first" on a 0-table decoy — the wrong diagnosis, pointing the
+    operator at a migration instead of a wrong --project-id/--central-state.
+    Delegating gets tracks_lib's EmptySchemaDecoyError refusal for free
+    instead of duplicating that check a second time here (OI: absence-is-loud
+    D5/golf 3C).
+    """
+    return tracks_lib._get_conn(state_dir)
 
 
 def _has_col(conn: sqlite3.Connection, table: str, col: str) -> bool:
