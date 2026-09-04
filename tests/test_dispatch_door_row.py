@@ -24,7 +24,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -658,3 +658,48 @@ def test_lane_failure_routes_to_failed_delivery(tmp_path, monkeypatch):
     assert len(attempts) == 1
     assert attempts[0]["state"] == "failed"
     assert attempts[0]["failure_reason"]
+
+
+# ---------------------------------------------------------------------------
+# 8. Point 5 (golf 1A, dispatch-20260904-deur-bezit-dispatch-toestand):
+#    serialize_lane's own LockWaitTimeout (dispatch-20260904-lock-timeout-
+#    eindig, #1752) must route the door-owned row to failed_delivery via the
+#    point-3 state machine — not fall into the generic
+#    "REJECT [runtime-error]" path, which never touched the row's state.
+# ---------------------------------------------------------------------------
+
+def test_lock_wait_timeout_routes_to_failed_delivery(tmp_path, monkeypatch, capsys):
+    from dispatch_serialization import LockWaitTimeout
+
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260904-staging-lockwait",
+        dispatch_id="20260904-lockwait-timeout",
+    )
+    db_path = _make_coordination_db(data_dir / "state", tracks={"oi-847-track": "active"})
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    fake_lock = MagicMock()
+    fake_lock.__enter__.side_effect = LockWaitTimeout(
+        "claude-tmux serial lock: no free slot within 14400s"
+    )
+
+    with patch("dispatch_cli.serialize_lane", return_value=fake_lock):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "lock-wait-timeout" in err
+
+    row = _read_row(db_path, "20260904-lockwait-timeout")
+    assert row is not None
+    assert row["state"] == "failed_delivery", (
+        "a LockWaitTimeout must route the door-owned row to failed_delivery, "
+        f"got state={row['state']!r}"
+    )
+
+    attempts = _read_attempts(db_path, "20260904-lockwait-timeout")
+    assert len(attempts) == 1
+    assert attempts[0]["state"] == "failed"
+    assert "lock-wait timeout" in attempts[0]["failure_reason"]

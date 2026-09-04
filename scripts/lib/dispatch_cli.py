@@ -56,7 +56,7 @@ from dispatch_internal import (  # noqa: E402
     require_permit,
 )
 from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
-from dispatch_serialization import force_release, serialize_lane  # noqa: E402
+from dispatch_serialization import LockWaitTimeout, force_release, serialize_lane  # noqa: E402
 from worker_permissions import role_grants_write  # noqa: E402
 from receipt_verdict import (  # noqa: E402
     HARD_FAILURE_STATUSES as _RV_HARD_FAILURE_STATUSES,
@@ -3092,6 +3092,26 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False, refire_reason: Optio
             getattr(getattr(vspec, "spec", None), "dispatch_id", "?"), exc,
         )
         print(f"[dispatch_cli] REJECT [invariant-violation]: {exc}", file=sys.stderr)
+        return 1
+    except LockWaitTimeout as exc:
+        # Point 5 (golf 1A): serialize_lane's own lock-wait timeout — no free
+        # claude-lane slot within VNX_CLAUDE_LOCK_TIMEOUT_SECONDS (default
+        # 4h, dispatch-20260904-lock-timeout-eindig). This is a caught-before
+        # -spawn failure of the door's OWN serialization mechanism, not a
+        # generic runtime error: route it to failed_delivery via the same
+        # state machine point 3 wired in, instead of folding it into the
+        # bare REJECT [runtime-error] path below (which never touched the
+        # door-owned row's state at all).
+        dispatch_id = getattr(getattr(vspec, "spec", None), "dispatch_id", None)
+        if dispatch_id:
+            _owner_finish(
+                dispatch_id, attempt_id, state_dir=state_dir,
+                success=False, failure_reason=f"lock-wait timeout: {exc}",
+            )
+        logger.error(
+            "[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=%s: %s", dispatch_id, exc,
+        )
+        print(f"[dispatch_cli] REJECT [lock-wait-timeout]: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
