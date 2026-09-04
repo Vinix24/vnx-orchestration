@@ -29,9 +29,9 @@ and skipped when it:
   documents as *not* shipped, so an example filename under them is a
   designed illustration, not a broken reference;
 * starts with ``state/`` or ``logs/`` -- shorthand the doc uses throughout for
-  files nested under the same gitignored ``.vnx-data/`` root (e.g.
-  ``state/t0_receipts.ndjson`` means ``.vnx-data/state/t0_receipts.ndjson``);
-  same reasoning as the ``.vnx-data/`` carve-out above;
+  files nested one level under that same gitignored runtime-data root (e.g.
+  ``state/t0_receipts.ndjson`` names a file inside it); same reasoning as the
+  carve-out above, just one path segment shorter;
 * carries a trailing ``:123`` / ``:120-130`` line-number suffix -- that is a
   ``file.py:123`` citation, already covered precisely (including line-bounds)
   by ``check_docs_file_line_refs.py``; the suffix is stripped before the
