@@ -3105,6 +3105,33 @@ def main(argv: list[str] | None = None) -> int:
                 args.dispatch_id, _recorded_mandate,
             )
 
+    # PAID-LANE DAILY BUDGET (golf 2B) — the standalone-CLI side door onto the
+    # provider lane (e.g. plan_gate_panel.py invokes this file as a subprocess
+    # directly, bypassing dispatch_cli.py's door). run_envelope_plan carries
+    # the matching gate for door-routed dispatches (dispatch_envelope.py); this
+    # is the second, independent entry point that also spends against
+    # DEEPSEEK_API_KEY / OPENROUTER_API_KEY and needed its own pre-flight.
+    try:
+        from paid_lane_budget import (  # noqa: PLC0415
+            PaidLaneBudgetExceededError,
+            enforce_daily_budget,
+        )
+
+        enforce_daily_budget(provider, state_dir=_resolve_state_dir())
+    except PaidLaneBudgetExceededError as _budget_exc:
+        print(f"provider_dispatch: {_budget_exc}", file=sys.stderr)
+        try:
+            _emit_refusal_receipt(
+                args, provider, getattr(args, "model", None) or "unknown",
+                str(_budget_exc),
+            )
+        except Exception as _ref_exc:
+            logger.error(
+                "provider_dispatch: refusal receipt failed for budget exceeded dispatch=%s: %s",
+                args.dispatch_id, _ref_exc,
+            )
+        return 1
+
     try:
         if provider == "claude":
             # Benchmark exemption: the measurement harness is exempt from the single-entry
