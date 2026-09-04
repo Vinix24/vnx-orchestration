@@ -32,6 +32,7 @@ if _LIB_DIR not in sys.path:
 
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
+from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +380,11 @@ def _launch_codex_proc(
     Returns (None, CodexSpawnResult(returncode=127)) when binary is missing.
     """
     cmd = _build_cmd(model)
-    env = {**os.environ, **(extra_env or {})}
+    # OI-1619: codex is a real worker subprocess (untrusted-model-driven) — the
+    # parent env must be scrubbed of secrets before it crosses into it. This lane
+    # Popens directly (no SubprocessAdapter to route the scrub through), so the
+    # free-function counterpart applies here explicitly.
+    env = scrub_env({**os.environ, **(extra_env or {})}, DEFAULT_SCRUB_KEY_PATTERNS)
     cwd_str = str(cwd) if cwd is not None else None
 
     try:
