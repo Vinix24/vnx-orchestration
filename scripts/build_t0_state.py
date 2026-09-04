@@ -1668,6 +1668,32 @@ def _build_active_work(
 # Recent receipts (last N lines from t0_receipts.ndjson)
 # ---------------------------------------------------------------------------
 
+# D2 (OI, measured 2026-09-04): t0_receipts.ndjson carries pytest-fixture
+# noise (source == "pytest") — test runs that append onto the live ledger
+# instead of an isolated tmp_path. Measured on
+# ~/.vnx-data/vnx-dev/state/t0_receipts.ndjson: 28,944 lines total, 7,738
+# (27%) carrying source == "pytest". These are synthetic test entries
+# (dispatch_id like "DISP-007"/"TASK-021"), not real dispatch work, and any
+# state-reader that folds them into a success/completion count is reading a
+# polluted number. PYTEST_NOISE_FILTER_EPOCH is the explicit marker for when
+# this filter was introduced (mirrors ADR-029's chain_epoch_start
+# convention): a reader comparing an old cached count to a new one has an
+# auditable reason for the delta. The ledger itself is untouched — it is
+# append-only (ADR-005) — only the reader's interpretation changes from this
+# point forward.
+PYTEST_NOISE_FILTER_EPOCH = "2026-09-04T00:00:00+00:00"
+
+
+def _is_pytest_noise_receipt(entry: Dict[str, Any]) -> bool:
+    """True when a receipt entry is pytest-fixture noise, not real work.
+
+    D2: any receipt with ``source == "pytest"`` was written by a test run,
+    never by a real dispatch. State-readers must exclude these from recent-
+    activity views and from any derived success/completion metric.
+    """
+    return str(entry.get("source") or "").strip().lower() == "pytest"
+
+
 _STATUS_PRIORITY: Dict[str, int] = {
     "done": 0, "success": 0, "completed": 0, "pass": 0,
     "failed": 1, "failure": 1, "timeout": 1, "blocked": 1,
@@ -1720,6 +1746,9 @@ def _build_recent_receipts(
         try:
             r = json.loads(line)
         except Exception:
+            continue
+        # D2: pytest-fixture noise never represents real dispatch work.
+        if _is_pytest_noise_receipt(r):
             continue
         # Skip internal bookkeeping events — T0 wants worker completion signals
         if r.get("event_type") == "state_mutation":

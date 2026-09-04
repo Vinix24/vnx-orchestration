@@ -248,6 +248,14 @@ def load_receipt_dispatch_ids(receipts_file: Path) -> Set[str]:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # D2: pytest-fixture receipts (source == "pytest") are test noise
+            # from runs that appended onto the live ledger instead of an
+            # isolated tmp_path — never real dispatch work. Measured
+            # 2026-09-04: 7,738 of 28,944 lines on the real t0_receipts.ndjson.
+            # A dispatch must not be marked "confirmed complete" by one of
+            # these, or the completion_pct this feeds is polluted.
+            if str(record.get("source") or "").strip().lower() == "pytest":
+                continue
             event_type = record.get("event_type", "")
             status = record.get("status", "")
             # Terminal event OR explicit success status on a completion-type event

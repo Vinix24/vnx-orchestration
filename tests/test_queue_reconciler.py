@@ -382,6 +382,38 @@ class TestLoadReceiptDispatchIds:
         confirmed = load_receipt_dispatch_ids(receipts)
         assert confirmed == {"dispatch-0", "dispatch-1", "dispatch-2"}
 
+    def test_pytest_source_receipt_not_confirmed(self, tmp_path):
+        """D2: a pytest-fixture receipt (source == 'pytest') must never
+        confirm a dispatch as complete — it is test noise, not real work.
+        Measured 2026-09-04: 7,738 of 28,944 lines on the real
+        t0_receipts.ndjson carry source == 'pytest'."""
+        receipts = tmp_path / "receipts.ndjson"
+        record = {
+            "dispatch_id": "PR-42",
+            "event_type": "task_complete",
+            "status": "success",
+            "source": "pytest",
+        }
+        receipts.write_text(json.dumps(record) + "\n")
+        confirmed = load_receipt_dispatch_ids(receipts)
+        assert "PR-42" not in confirmed
+
+    def test_pytest_source_does_not_shadow_real_confirmation(self, tmp_path):
+        """A real receipt for the same dispatch_id must still confirm it,
+        even when a pytest-noise receipt for the same id is also present."""
+        receipts = tmp_path / "receipts.ndjson"
+        with receipts.open("a") as f:
+            f.write(json.dumps({
+                "dispatch_id": "PR-99", "event_type": "task_complete",
+                "status": "success", "source": "pytest",
+            }) + "\n")
+            f.write(json.dumps({
+                "dispatch_id": "PR-99", "event_type": "task_complete",
+                "status": "success", "source": "subprocess",
+            }) + "\n")
+        confirmed = load_receipt_dispatch_ids(receipts)
+        assert "PR-99" in confirmed
+
 
 # ---------------------------------------------------------------------------
 # State derivation tests
