@@ -34,6 +34,7 @@ if _LIB_DIR not in sys.path:
 
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
+from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +315,11 @@ def spawn_gemini(
     if "VNX_GEMINI_STALL_THRESHOLD" not in os.environ:
         chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
-    env = {**os.environ, **(extra_env or {})}
+    # OI-1619: gemini is a real worker subprocess (untrusted-model-driven) — the
+    # parent env must be scrubbed of secrets before it crosses into it. This lane
+    # Popens directly (no SubprocessAdapter to route the scrub through), so the
+    # free-function counterpart applies here explicitly.
+    env = scrub_env({**os.environ, **(extra_env or {})}, DEFAULT_SCRUB_KEY_PATTERNS)
     cwd_str = str(cwd) if cwd is not None else None
 
     if os.environ.get("VNX_GEMINI_STREAM", "0").strip() == "1":

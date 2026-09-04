@@ -68,6 +68,7 @@ if _LIB_DIR not in sys.path:
 
 from _streaming_drainer import StreamingDrainerMixin, _kill_process, coerce_chunk_stall  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
+from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
 # OI-1087: the read-only task-class list lives in ONE place — phantom_guard's
 # REVIEW_TASK_CLASSES is the fabric's SSOT for "a verdict, not a diff, is the
 # expected deliverable". The fabrication guard below keys off the same list so
@@ -713,6 +714,10 @@ def _isolate_kimi_env(env: Dict[str, str]) -> Dict[str, str]:
     Stripped unconditionally (after any extra_env merge): a standalone uv tool
     has no legitimate use for an inherited VIRTUAL_ENV/PYTHONPATH/PYTHONHOME, and
     leaving them in lets a foreign venv's site-packages shadow kimi's own deps.
+
+    Secret scrubbing (OI-1619) is a SEPARATE concern applied by the caller via
+    ``scrub_env(..., DEFAULT_SCRUB_KEY_PATTERNS)`` — this function only owns venv
+    isolation, never conflate the two when reading a call site.
     """
     return {k: v for k, v in env.items() if k not in _VENV_POLLUTION_VARS}
 
@@ -1206,7 +1211,13 @@ def spawn_kimi(
     if "VNX_KIMI_STALL_THRESHOLD" not in os.environ:
         chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
-    env = _isolate_kimi_env({**os.environ, **(extra_env or {})})
+    # OI-1619: the kimi CLI is a real worker subprocess (untrusted-model-driven,
+    # same threat model as the claude/litellm lanes) — the parent env must be
+    # scrubbed of secrets before it crosses into it, not just venv-isolated.
+    env = scrub_env(
+        _isolate_kimi_env({**os.environ, **(extra_env or {})}),
+        DEFAULT_SCRUB_KEY_PATTERNS,
+    )
     cwd_str = str(cwd) if cwd is not None else None
 
     cmd = _build_kimi_cmd(prompt, model, cwd)
