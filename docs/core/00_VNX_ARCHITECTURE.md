@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-08-30
+**Last Updated**: 2026-09-04
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -197,7 +197,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 **Legacy V7** (`dispatcher_v7_compilation.sh` - Reference only):
 - Template compilation from agent library
 - Full prompt generation (1500+ tokens)
-- See `core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference
+- See `docs/core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference
 
 ### 3. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`)
 
@@ -582,7 +582,11 @@ On `vnx start`, the system:
 
 ### Pattern Matching Engine
 
-**Integration Status**: ✅ FULLY OPERATIONAL
+**Verify liveness**: `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*) FROM pattern_usage; SELECT COUNT(*) FROM tag_combinations;"` --
+a bare checkmark claiming this was fully operational used to sit here with no
+way to re-check it; measured 2026-09-04 the tables hold 352 and 11 rows
+respectively, and `scripts/gather_intelligence.py` (`record_pattern_offer`,
+`record_adoption_from_receipt`) is the code that writes them.
 
 **Pattern Database**:
 - Patterns stored in `quality_intelligence.db` (`pattern_usage` table)
@@ -693,7 +697,13 @@ Level 5 (Full): 20K+ tokens
 
 ### Governance Measurement System (v8.1.0)
 
-**Integration Status**: OPERATIONAL (2026-03-07)
+**Verify liveness**: `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*), MAX(computed_at) FROM governance_metrics;"` --
+a recent `MAX(computed_at)` means the nightly aggregation (`scripts/governance_aggregator.py`)
+is still running. This line used to be a hand-typed "OPERATIONAL (2026-03-07)"
+stamp that nobody re-checked for six months; measured 2026-09-04 the table
+holds 810 rows, latest `computed_at` 2026-09-04 00:00:11 -- current, but a
+dated stamp is exactly the wrong way to say so, since it goes stale the day
+after it is written.
 
 Replaces self-reported status with objective quality scoring using SPC (Statistical Process Control).
 
@@ -710,8 +720,13 @@ Layer 3: Weekly Report       -> Controlled model/role analysis, actionable items
 - **SPC Anomaly Detection**: Western Electric rules (out-of-control, trend, shift, run)
 
 **Database**: `governance_metrics`, `spc_control_limits`, `spc_alerts` tables in quality_intelligence.db
+(schema: `schemas/quality_intelligence.sql`)
 
-**Full Reference**: `docs/intelligence/GOVERNANCE_MEASUREMENT.md`
+**Implementation**: `scripts/lib/cqs_calculator.py` (Layer 1, per-dispatch CQS),
+`scripts/governance_aggregator.py` (Layer 2, nightly FPY/rework/SPC).
+The standalone "docs/intelligence/GOVERNANCE_MEASUREMENT.md" reference doc this
+line used to point at was retired in #193 (2026-04-08, moved out of the public
+repo) and never replaced -- the citation pointed at a dead file for five months.
 
 ### Deterministic Gates
 
@@ -770,7 +785,6 @@ project-root/
 │   │
 │   ├── templates/terminals/         # T0-T3 agent templates
 │   ├── schemas/                     # Quality intelligence SQL schema
-│   ├── demo/                        # Demo setup (setup_demo.sh + FEATURE_PLAN.md)
 │   └── docs/                        # This documentation tree
 │
 ├── .vnx-data/                       # Runtime data (gitignored)
@@ -899,7 +913,7 @@ disappear from this document:
 - ACK Dispatcher V2 (`ack_dispatcher_v2.sh`) — replaced by `heartbeat_ack_monitor.py`
 - Report Watcher (`report_watcher.sh`) — replaced by Receipt Processor V4
 - Receipt Notifier (`receipt_notifier.sh`) — replaced by Receipt Processor V4
-- Dispatcher V7 — reference only (see `core/technical/DISPATCHER_SYSTEM.md`)
+- Dispatcher V7 — reference only (see `docs/core/technical/DISPATCHER_SYSTEM.md`)
 
 ### Terminal Status
 - **T0 (Claude Opus)**: Orchestrator brain, read-only
@@ -951,7 +965,8 @@ Check open items digest
 
 The future state (the track layer + roadmap autopilot) only earns trust if it
 mirrors reality without a human re-stating it. The 1.0.1 future-state
-reconciliation batch (PRD `claudedocs/PRD-future-state-reconciliation-v1.1.md`)
+reconciliation batch (PRD kept in the local, gitignored `claudedocs/` scratch
+space -- not part of the shipped repo, so it has no citable in-tree path)
 makes that linkage automatic and tenant-safe. Three pieces: a **lifecycle**
 (open-item → track → dispatch), a **loop** (the autopilot tick), and a
 **multi-tenancy model** (ADR-007 composite keys).
@@ -1094,16 +1109,18 @@ FEATURE_PLAN.md  →  init-feature  →  staging/  →  T0 review  →  promote 
 **CLI Commands**:
 ```bash
 # ONE TIME: Generate all PR dispatches to staging/
-python .claude/vnx-system/scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md
+python scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md
 
 # Review staging with dependency status
-python .claude/vnx-system/scripts/pr_queue_manager.py staging-list
+python scripts/pr_queue_manager.py staging-list
 
 # Promote individual PR to queue (triggers popup)
-python .claude/vnx-system/scripts/pr_queue_manager.py promote <dispatch-id>
+python scripts/pr_queue_manager.py promote <dispatch-id>
 ```
 
-**State Management**: `.claude/vnx-system/state/pr_queue_state.yaml`
+**State Management**: `pr_queue_state.yaml` under the project's resolved
+`VNX_STATE_DIR` (`PRQueueManager.vnx_state_dir` in `scripts/pr_queue_manager.py`)
+-- the per-project central store (ADR-026), not a fixed repo-relative path.
 - Tracks completed PRs, in-progress PR, execution order
 - Dependency validation during promotion
 - Evidence attachment via receipt processor (T0 reviews and completes PRs)
@@ -1366,16 +1383,13 @@ vnx_version: 1.0.0
 created_at: 2026-02-18
 ```
 
-### Demo Setup
+### Demo Setup (retired)
 
-**Script**: `.claude/vnx-system/demo/setup_demo.sh`
-
-Creates a complete LeadFlow SaaS project with:
-- 6 PRs across 3 parallel tracks (A/B/C)
-- PR dependency graph with quality gates
-- Quality advisory trap file (555 lines > 500 warning threshold)
-- VNX cloned from GitHub and initialized
-- T1 provider auto-configured as Codex CLI
+The "demo/" LeadFlow SaaS project generator (demo/setup_demo.sh, 923 lines,
+plus demo/FEATURE_PLAN.md and the demo/dry-run* replay fixtures) was
+deleted repo-wide in #193 (2026-04-08, "clean public docs structure and move
+private docs out of repo"). No replacement exists. This section previously
+described it as a current component; nothing since has regenerated it.
 
 ### Quality Advisory Pipeline
 
