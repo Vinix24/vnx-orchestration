@@ -82,6 +82,24 @@ VALID_EVENTS = {
                                           # was swallowed by design — this is the durable FACT
                                           # of that swallow, carrying `extra.site`. See
                                           # dispatch_cli._record_bookkeeping_failure.
+    "provider_lane_exhausted",           # dispatch-20260904-deur-bezit-dispatch-toestand
+                                          # (point 4): the door refused to fire because a
+                                          # provider lane carries a recent quota/auth
+                                          # rejection with no later success — carries
+                                          # `extra.provider`/`extra.failure_class`. Named
+                                          # "provider_lane_exhausted" (not the bare
+                                          # "lane_exhausted" gate_request_handler.py already
+                                          # owns for review-GATE-SEAT exhaustion — a
+                                          # different concept, different ledger) to avoid
+                                          # ambiguity. See
+                                          # dispatch_cli._record_provider_lane_exhausted.
+    "provider_lane_reopened",            # dispatch-20260904-deur-bezit-dispatch-toestand
+                                          # (point 4): an operator's explicit
+                                          # --reopen-lane PROVIDER — the escape hatch that
+                                          # clears a provider_lane_exhausted block without
+                                          # waiting on a later success receipt. Carries
+                                          # `extra.provider`/`extra.reason`. See
+                                          # dispatch_cli._lane_reopened_after.
 }
 
 

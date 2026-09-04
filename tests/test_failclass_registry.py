@@ -673,8 +673,13 @@ class TestKnownRejectedLane:
         # the quota cause is surfaced, not the JSON-parse noise
         assert "usage limit" in verdict.reason
 
-    def test_rejection_outside_window_does_not_block(self, tmp_path):
-        """A rejection outside the window is not a known fact -> block=False."""
+    def test_old_rejection_still_blocks_no_wall_clock_expiry(self, tmp_path):
+        """dispatch-20260904-deur-bezit-dispatch-toestand (point 4): a
+        quota/auth rejection does NOT self-heal on a timer — the module's own
+        docstring has always said so, but the code used to cut off at
+        VNX_LANE_REJECTION_WINDOW_MINUTES (default 15) regardless, forgetting
+        a still-live 403 after 107 measured minutes (2026-09-03). 120 minutes
+        with no later success and no --reopen-lane must still block."""
         from dispatch_cli import _check_reachability
 
         self._write_receipt(
@@ -686,7 +691,127 @@ class TestKnownRejectedLane:
         )
         plan = self._plan("kimi")
         verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
-        assert verdict.block is False
+        assert verdict.block is True, (
+            "a quota/auth rejection must stay blocking until a later success "
+            "receipt or an explicit --reopen-lane — never expire on its own"
+        )
+
+    def test_later_success_receipt_clears_the_block(self, tmp_path):
+        """A LATER success receipt for the same provider proves the lane
+        recovered — clears the block without any operator action."""
+        from dispatch_cli import _check_reachability
+
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-blocked",
+            minutes_ago=60,
+        )
+        ledger = tmp_path / "t0_receipts.ndjson"
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "receipt_kind": "dispatch",
+                "dispatch_id": "20260816-recovered",
+                "provider": "kimi",
+                "status": "success",
+                "timestamp": (
+                    __import__("datetime").datetime.now(tz=__import__("datetime").timezone.utc)
+                    - __import__("datetime").timedelta(minutes=30)
+                ).isoformat(),
+            }) + "\n")
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is False, (
+            "a later success receipt for the same provider must clear an "
+            "earlier quota/auth block"
+        )
+
+    def test_earlier_success_does_not_clear_a_later_rejection(self, tmp_path):
+        """An OLDER success does not un-block a NEWER rejection — order matters."""
+        from dispatch_cli import _check_reachability
+
+        ledger = tmp_path / "t0_receipts.ndjson"
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "receipt_kind": "dispatch",
+                "dispatch_id": "20260816-earlier-ok",
+                "provider": "kimi",
+                "status": "success",
+                "timestamp": (
+                    __import__("datetime").datetime.now(tz=__import__("datetime").timezone.utc)
+                    - __import__("datetime").timedelta(minutes=60)
+                ).isoformat(),
+            }) + "\n")
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-later-blocked",
+            minutes_ago=10,
+        )
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is True
+
+    def test_reopen_lane_event_clears_the_block(self, tmp_path):
+        """An explicit provider_lane_reopened event AFTER the rejection
+        (--reopen-lane's durable record) clears the block."""
+        from dispatch_cli import _check_reachability
+
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-blocked-reopen",
+            minutes_ago=60,
+        )
+        register = tmp_path / "dispatch_register.ndjson"
+        with register.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "event": "provider_lane_reopened",
+                "dispatch_id": "lane-reopen:kimi",
+                "extra": {"provider": "kimi", "reason": "operator: kimi login done"},
+                "timestamp": (
+                    __import__("datetime").datetime.now(tz=__import__("datetime").timezone.utc)
+                    - __import__("datetime").timedelta(minutes=30)
+                ).isoformat(),
+            }) + "\n")
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is False, (
+            "an explicit provider_lane_reopened event after the rejection "
+            "must clear the block"
+        )
+
+    def test_reopen_lane_event_before_the_rejection_does_not_clear_it(self, tmp_path):
+        """A reopen that happened BEFORE a NEW rejection must not clear it —
+        order matters, same as the success-receipt case."""
+        from dispatch_cli import _check_reachability
+
+        register = tmp_path / "dispatch_register.ndjson"
+        register.parent.mkdir(parents=True, exist_ok=True)
+        with register.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "event": "provider_lane_reopened",
+                "dispatch_id": "lane-reopen:kimi",
+                "extra": {"provider": "kimi"},
+                "timestamp": (
+                    __import__("datetime").datetime.now(tz=__import__("datetime").timezone.utc)
+                    - __import__("datetime").timedelta(minutes=60)
+                ).isoformat(),
+            }) + "\n")
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-new-block-after-reopen",
+            minutes_ago=10,
+        )
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
+        assert verdict.block is True
 
     def test_credit_exhausted_also_blocks(self, tmp_path):
         """credit_exhausted is quota-shaped too — a recent one also blocks."""
@@ -741,6 +866,67 @@ class TestKnownRejectedLane:
         with mock.patch("urllib.request.urlopen", side_effect=OSError("down")):
             verdict = _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path)
         assert verdict.block is False
+
+    def test_block_leaves_a_durable_provider_lane_exhausted_fact(self, tmp_path):
+        """Point 4: every refusal on this signal must record a durable
+        provider_lane_exhausted event, not just a printed line — mirroring
+        the door_bookkeeping_failed contract (dispatch-20260903)."""
+        import dispatch_register
+        from dispatch_cli import _check_reachability
+
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-fact-source",
+            minutes_ago=1,
+        )
+        spec = mock.MagicMock()
+        spec.dispatch_id = "20260904-fact-test"
+        plan = self._plan("kimi")
+        verdict = _check_reachability(plan, spec, state_dir=tmp_path)
+        assert verdict.block is True
+
+        events = dispatch_register.read_events(state_dir=tmp_path)
+        facts = [e for e in events if e.get("event") == "provider_lane_exhausted"]
+        assert facts, f"expected a provider_lane_exhausted record, got: {events}"
+        assert facts[-1]["dispatch_id"] == "20260904-fact-test"
+        assert facts[-1]["extra"]["provider"] == "kimi"
+        assert facts[-1]["extra"]["failure_class"] == "auth_rejected"
+
+    def test_reopen_lane_writes_a_durable_event_and_clears_the_block(self, tmp_path):
+        """The CLI-level reopen_lane() write, exercised end-to-end against
+        _check_reachability: block -> reopen_lane() -> no longer blocked."""
+        import dispatch_register
+        from dispatch_cli import _check_reachability, reopen_lane
+
+        self._write_receipt(
+            tmp_path,
+            provider="kimi",
+            failure_class="auth_rejected",
+            dispatch_id="20260816-reopen-e2e",
+            minutes_ago=1,
+        )
+        plan = self._plan("kimi")
+        assert _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path).block is True
+
+        rc = reopen_lane("kimi", "operator: kimi login done", state_dir=tmp_path)
+        assert rc == 0
+
+        events = dispatch_register.read_events(state_dir=tmp_path)
+        reopened = [e for e in events if e.get("event") == "provider_lane_reopened"]
+        assert reopened, f"expected a provider_lane_reopened record, got: {events}"
+        assert reopened[-1]["extra"]["provider"] == "kimi"
+        assert reopened[-1]["extra"]["reason"] == "operator: kimi login done"
+
+        assert _check_reachability(plan, mock.MagicMock(), state_dir=tmp_path).block is False
+
+    def test_reopen_lane_requires_a_reason(self, tmp_path, capsys):
+        from dispatch_cli import reopen_lane
+
+        rc = reopen_lane("kimi", "", state_dir=tmp_path)
+        assert rc == 1
+        assert "--reopen-reason" in capsys.readouterr().err
 
 
 # ===========================================================================

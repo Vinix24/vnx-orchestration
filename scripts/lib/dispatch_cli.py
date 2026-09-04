@@ -18,7 +18,7 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -56,8 +56,25 @@ from dispatch_internal import (  # noqa: E402
     require_permit,
 )
 from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
-from dispatch_serialization import force_release, serialize_lane  # noqa: E402
+from dispatch_serialization import LockWaitTimeout, force_release, serialize_lane  # noqa: E402
 from worker_permissions import role_grants_write  # noqa: E402
+from receipt_verdict import (  # noqa: E402
+    HARD_FAILURE_STATUSES as _RV_HARD_FAILURE_STATUSES,
+    SUCCESS_STATUSES as _RV_SUCCESS_STATUSES,
+)
+from runtime_coordination import (  # noqa: E402
+    TERMINAL_DISPATCH_STATES as _RC_TERMINAL_DISPATCH_STATES,
+    create_attempt as _rc_create_attempt,
+    get_connection as _rc_get_connection,
+    increment_attempt_count as _rc_increment_attempt_count,
+    init_schema as _rc_init_schema,
+    register_dispatch as _rc_register_dispatch,
+    transition_dispatch as _rc_transition_dispatch,
+    transition_dispatch_idempotent as _rc_transition_dispatch_idempotent,
+    update_attempt as _rc_update_attempt,
+    InvalidStateError as _RcInvalidStateError,
+    InvalidTransitionError as _RcInvalidTransitionError,
+)
 
 
 class _InvariantViolation(Exception):
@@ -318,11 +335,11 @@ class ReachabilityVerdict:
     reason: str = ""
 
 
-_LANE_REJECTION_WINDOW_ENV = "VNX_LANE_REJECTION_WINDOW_MINUTES"
-_DEFAULT_REJECTION_WINDOW_MINUTES = 15
-# Quota/auth-shaped failure classes. These do NOT self-heal inside a short
-# window (a 403 "usage limit" or a 402 "insufficient balance" persists until
-# the operator acts), so a recent one is a hard "known rejected" fact.
+# Quota/auth-shaped failure classes. These do NOT self-heal on a timer (a 403
+# "usage limit" or a 402 "insufficient balance" persists until the operator
+# acts), so a recent one is a hard "known rejected" fact — see
+# _recent_blocking_rejection below for how "recent" stopped meaning
+# "within a wall-clock window" (point 4, golf 1A).
 # Transient classes (empty_completion, timeout, model_error, unknown) never
 # block — they can pass on the next attempt.
 _BLOCKING_FAILURE_CLASSES = frozenset({"auth_rejected", "credit_exhausted"})
@@ -330,25 +347,16 @@ _RECEIPTS_FILENAME = "t0_receipts.ndjson"
 _LEDGER_TAIL_BYTES = 2 * 1024 * 1024   # read at most the last 2 MB of the ledger
 _LEDGER_TAIL_LINES = 200               # keep at most this many recent lines
 
-
-def _rejection_window_minutes() -> int:
-    """The rejection window, in minutes, from VNX_LANE_REJECTION_WINDOW_MINUTES.
-
-    A malformed override is a config error, not a reason to silently widen the
-    window — fall back to the default and say so.
-    """
-    raw = (os.environ.get(_LANE_REJECTION_WINDOW_ENV) or "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            print(
-                f"[dispatch_cli] [WARN] {_LANE_REJECTION_WINDOW_ENV}={raw!r} is "
-                f"not an integer; using {_DEFAULT_REJECTION_WINDOW_MINUTES} "
-                f"minutes",
-                file=sys.stderr,
-            )
-    return _DEFAULT_REJECTION_WINDOW_MINUTES
+# dispatch-20260904-deur-bezit-dispatch-toestand (point 4): the durable fact
+# a blocked reachability check leaves, and the explicit escape hatch that
+# clears it. Named "provider_lane_exhausted" / "provider_lane_reopened"
+# rather than the bare "lane_exhausted" gate_request_handler.py already owns
+# (review-GATE-SEAT exhaustion — codex/glm/kimi as REVIEWERS, a different
+# ledger and a different concept) — same word, deliberately disambiguated so
+# a future reader never has to guess which subsystem a record belongs to.
+_PROVIDER_LANE_EXHAUSTED_EVENT = "provider_lane_exhausted"
+_PROVIDER_LANE_REOPENED_EVENT = "provider_lane_reopened"
+_DISPATCH_REGISTER_FILENAME = "dispatch_register.ndjson"
 
 
 def _read_ledger_tail(path: Path) -> "list[str]":
@@ -379,18 +387,32 @@ def _read_ledger_tail(path: Path) -> "list[str]":
 def _recent_blocking_rejection(provider_val: str, state_dir: Path) -> "Optional[dict]":
     """Most recent receipt marking THIS provider known-rejected, or None.
 
-    Scans the ledger tail for a dispatch receipt whose ``failure_class`` is
-    quota/auth-shaped and whose ``provider`` matches, within the rejection
-    window. Matching is exact on the provider string — the ledger's ``provider``
+    dispatch-20260904-deur-bezit-dispatch-toestand (point 4): this used to
+    cut off at a wall-clock window (VNX_LANE_REJECTION_WINDOW_MINUTES,
+    default 15) — contradicting the module's own stated model directly above
+    ("these do NOT self-heal on a timer... persists until the operator
+    acts"). Measured 2026-09-03: kimi returned a 403 usage-limit at 10:40Z
+    and the door answered "no recent auth/quota rejection" for the SAME
+    provider at 12:27Z — 107 minutes later, with no success and no operator
+    action in between. A dead lane now stays dead until EITHER a LATER
+    success receipt for the same provider proves it recovered, or an
+    explicit ``--reopen-lane`` supersedes it (_lane_reopened_after below) —
+    never a timer.
+
+    Scans the ledger tail (bounded — see _read_ledger_tail) for dispatch
+    receipts matching THIS provider, tracking whichever of "a blocking-class
+    rejection" or "a success" was seen LAST — the tail is chronological
+    (oldest first), so the last matching line is the most recent signal.
+    Matching the provider is exact on the string — the ledger's ``provider``
     field is the same value plan.provider.value carries (measured on the
     2026-08-16 ledger: kimi, deepseek-harness, glm-harness, codex,
-    litellm:deepseek). A missing/empty/corrupt file or an out-of-window hit is
-    the ABSENCE of a known rejection.
+    litellm:deepseek). A missing/empty/corrupt file is the ABSENCE of a
+    known rejection.
     """
     receipts_path = state_dir / _RECEIPTS_FILENAME
     if not receipts_path.exists():
         return None
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=_rejection_window_minutes())
+    latest_blocking: "Optional[dict]" = None
     for line in _read_ledger_tail(receipts_path):
         try:
             r = json.loads(line)
@@ -400,17 +422,54 @@ def _recent_blocking_rejection(provider_val: str, state_dir: Path) -> "Optional[
             continue
         if str(r.get("provider") or "").lower() != provider_val.lower():
             continue
-        if r.get("failure_class") not in _BLOCKING_FAILURE_CLASSES:
+        if r.get("failure_class") in _BLOCKING_FAILURE_CLASSES:
+            latest_blocking = r
+        elif r.get("status") in _RV_SUCCESS_STATUSES:
+            # A later success proves the lane recovered — clears any earlier
+            # block for this provider, no operator action required.
+            latest_blocking = None
+    if latest_blocking is None:
+        return None
+    if _lane_reopened_after(provider_val, latest_blocking.get("timestamp"), state_dir=state_dir):
+        return None
+    return latest_blocking
+
+
+def _lane_reopened_after(
+    provider_val: str, since_ts: "Optional[str]", *, state_dir: Path,
+) -> bool:
+    """True when an explicit provider_lane_reopened event for provider_val
+    exists in dispatch_register.ndjson at/after since_ts — the operator
+    escape hatch (--reopen-lane) that clears a block without waiting on a
+    success receipt (point 4, golf 1A).
+    """
+    if not since_ts:
+        return False
+    path = state_dir / _DISPATCH_REGISTER_FILENAME
+    if not path.exists():
+        return False
+    try:
+        since_dt = datetime.fromisoformat(str(since_ts).rstrip("Z")).replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return False
+    for line in _read_ledger_tail(path):
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if r.get("event") != _PROVIDER_LANE_REOPENED_EVENT:
+            continue
+        extra = r.get("extra") or {}
+        if str(extra.get("provider") or "").lower() != provider_val.lower():
             continue
         ts_raw = r.get("timestamp", "")
         try:
             ts = datetime.fromisoformat(str(ts_raw).rstrip("Z")).replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):
             continue
-        if ts < cutoff:
-            continue
-        return r
-    return None
+        if ts >= since_dt:
+            return True
+    return False
 
 
 # Phrases that name a quota/auth cause directly, most-specific first. The
@@ -459,6 +518,9 @@ def _format_known_rejection(provider_val: str, receipt: dict) -> str:
 
     The operator reads the QUOTA/AUTH reason up front (the readable sentence
     extracted from failure_reason), not the JSON-parse noise that buried it.
+    dispatch-20260904-deur-bezit-dispatch-toestand (point 4): no more
+    wall-clock window in this message — the block persists until a later
+    success receipt or an explicit --reopen-lane, and the message says so.
     """
     fc = receipt.get("failure_class")
     ts = receipt.get("timestamp") or "?"
@@ -466,12 +528,40 @@ def _format_known_rejection(provider_val: str, receipt: dict) -> str:
     readable = _readable_refusal_reason(receipt.get("failure_reason") or "")
     return (
         f"lane={provider_val!r} is a KNOWN-rejected fact: a receipt recorded "
-        f"{fc} at {ts} (dispatch {src}) for the same provider within the "
-        f"{_rejection_window_minutes()}-minute rejection window. Reason: "
-        f"{readable}. Refusing to fire — re-route the dispatch or fix the lane "
-        f"(kimi: `kimi login`; deepseek/glm: check API key/credits) and re-fire "
-        f"once it is healthy."
+        f"{fc} at {ts} (dispatch {src}) for the same provider, and no later "
+        f"success receipt or explicit --reopen-lane {provider_val} has "
+        f"cleared it since. Reason: {readable}. This block does NOT expire on "
+        f"a timer — refusing to fire until the lane proves it recovered "
+        f"(kimi: `kimi login`; deepseek/glm: check API key/credits) or an "
+        f"operator runs --reopen-lane {provider_val}."
     )
+
+
+def _record_provider_lane_exhausted(
+    provider_val: str, receipt: dict, *, dispatch_id: str, state_dir: Path,
+) -> None:
+    """Best-effort: durable fact for a refused door fire (point 4, golf 1A) —
+    same door-bookkeeping contract as _record_bookkeeping_failure: never
+    raises, never blocks the door.
+    """
+    try:
+        import dispatch_register  # noqa: PLC0415
+        dispatch_register.append_event(
+            _PROVIDER_LANE_EXHAUSTED_EVENT,
+            dispatch_id=dispatch_id,
+            extra={
+                "provider": provider_val,
+                "failure_class": receipt.get("failure_class"),
+                "rejected_at": receipt.get("timestamp"),
+                "source_dispatch_id": receipt.get("dispatch_id"),
+            },
+            state_dir=state_dir,
+        )
+    except Exception as exc:  # vnx-silent-except: fact recording is best-effort; door must never block on it
+        logger.warning(
+            "[dispatch_cli] provider_lane_exhausted fact-record failed provider=%s: %s",
+            provider_val, exc,
+        )
 
 
 def _not_checkable_note(
@@ -539,6 +629,11 @@ def _check_reachability(
     if lane == "provider" and state_dir is not None:
         receipt = _recent_blocking_rejection(provider_val, state_dir)
         if receipt is not None:
+            # Point 4 (golf 1A): every refusal on this signal leaves a durable
+            # provider_lane_exhausted fact — never only a printed line.
+            _record_provider_lane_exhausted(
+                provider_val, receipt, dispatch_id=spec.dispatch_id, state_dir=state_dir,
+            )
             return ReachabilityVerdict(
                 block=True,
                 reason=_format_known_rejection(provider_val, receipt),
@@ -1088,13 +1183,21 @@ def _persist_dispatch_row(
     *,
     state_dir: Path,
     worker_claude_override_reason: Optional[str] = None,
-) -> None:
-    """Best-effort: create the dispatches tracker row for a door-accepted dispatch.
+) -> Optional[str]:
+    """Best-effort: create the dispatches tracker row for a door-accepted
+    dispatch AND drive it through the EXISTING dispatch state machine
+    (runtime_state_machine.register_dispatch / transition_dispatch, reached
+    via the runtime_coordination facade) — point 3, golf 1A
+    (dispatch-20260904-deur-bezit-dispatch-toestand).
 
     The door is the single entry point for dispatches, yet historically never
-    wrote a row to dispatches (runtime_coordination.db) — only the deliverable
-    layer (planning_cli.py, `dlv-` ids) did. Three consumers read this table for
-    door dispatches and all silently no-op without a row:
+    wrote a row to dispatches (runtime_coordination.db) via the real state
+    machine — only the deliverable layer (planning_cli.py, `dlv-` ids) did,
+    and this function's own predecessor used a raw ad-hoc INSERT that parked
+    every row at state='proposed' FOREVER (no transition ever moved it),
+    losing dispatch_attempts entirely. Three consumers read this table for
+    door dispatches and only need the row to EXIST with the right fields —
+    none of them require state='proposed' specifically:
 
     1. ``_persist_track_id`` (UPDATE-only) — track linkage, symptom TL-D1;
     2. ``dispatch_outcome_classifier.reconcile_all_dispatch_outcomes`` — reads
@@ -1106,99 +1209,94 @@ def _persist_dispatch_row(
     choice, so rejected dispatches never get a row and in-flight dispatches are
     visible to live queries.
 
-    ``state='proposed'`` deliberately: 'queued' would be claimed by the worker
-    pool (its claim query keys on state='queued') and, without a staged pool
-    bundle, rot into timed_out/expired via the stuck sweep; the supervisor's
-    stuck/ghost sweeps key on claimed/delivering/accepted/running. 'proposed'
-    is invisible to all of those — the same state the deliverable layer uses.
+    Registers at 'queued' (register_dispatch's own default) then immediately
+    self-claims to 'claimed' inside the SAME connection/commit, so no other
+    reader (e.g. the elastic pool's claim_next_queued_dispatch, which keys on
+    state='queued') ever observes this row sitting in 'queued' — the door
+    executes synchronously, it does not hand the row to an async claimer.
+    terminal_id is deliberately left None on the dispatches row itself:
+    door-fired dispatches (headless / tmux-subscription / provider lanes) do
+    not hold a T1/T2/T3 terminal lease, and
+    runtime_supervisor._detect_ghost_dispatches skips any active dispatch row
+    with no terminal_id — leaving it None keeps this wiring from ever
+    misfiring that blocking anomaly.
 
-    Idempotent per ADR-007's composite UNIQUE(dispatch_id, project_id): a retry
-    or fix-forward with the same id finds the existing row and leaves it
-    untouched. Never raises: tracker bookkeeping must never block the door.
+    target_slot and worker_claude_override_reason (OI-943: so the audit trail
+    can distinguish ported from unported claude dispatches) are no longer
+    dedicated ALTER-TABLE columns — register_dispatch's signature has no
+    per-column extension point, only a generic ``metadata`` dict — so both
+    fold into ``metadata_json`` instead. Confirmed safe: nothing else in the
+    repo reads ``dispatches.target_slot`` or
+    ``dispatches.worker_claude_override_reason`` as a SQL column (grepped);
+    the only other consumer of the override reason is an unrelated in-memory
+    field on RuntimeSnapshot/dispatch_plan.
 
-    OI-943: persists target_slot and worker_claude_override_reason so the audit
-    trail can distinguish ported from unported claude dispatches. target_slot is
-    always present (required in DispatchSpec); worker_claude_override_reason is
-    only present when a build-worker override was applied.
+    Idempotent, but NOT via a second existence check: register_dispatch()
+    itself already returns the existing row unmodified when dispatch_id is
+    already registered (ADR-007 composite key). A retry / fix-forward /
+    operator --refire of the SAME dispatch_id then hits the claim transition
+    against a row already past 'queued' (possibly already terminal) —
+    InvalidTransitionError/InvalidStateError is caught locally as an
+    EXPECTED idempotent no-op (no second row, no forced re-claim, no
+    bookkeeping-failure fact — this is not a bug), and this call returns None
+    (no attempt tracking for that particular re-fire; the dispatch itself
+    still runs for real). Every OTHER failure (missing/locked DB, schema
+    error, etc.) is a genuine bookkeeping failure: never raises, records a
+    durable ``door_bookkeeping_failed`` fact via _record_bookkeeping_failure,
+    and returns None — tracker bookkeeping must never block the door.
+
+    Returns the new dispatch_attempts row's attempt_id on success, else None.
     """
-    db_path = _tracks_db_path(state_dir)
-    if not db_path.exists():
-        return
-    import sqlite3 as _sqlite3
     try:
-        conn = _sqlite3.connect(str(db_path), timeout=10.0)
-        try:
-            if conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'"
-            ).fetchone() is None:
-                return
-            has_project = _has_col(conn, "dispatches", "project_id")
-            track_id = (spec.track_id or "").strip()
-            if track_id and not _has_col(conn, "dispatches", "track_id"):
-                conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
-                conn.commit()
-            # Idempotency: an existing row (retry / fix-forward / deliverable
-            # layer) is left untouched — never a second row, never a mutation.
-            if has_project:
-                existing = conn.execute(
-                    "SELECT 1 FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
-                    (spec.dispatch_id, spec.project_id),
-                ).fetchone()
-            else:
-                existing = conn.execute(
-                    "SELECT 1 FROM dispatches WHERE dispatch_id = ?",
-                    (spec.dispatch_id,),
-                ).fetchone()
-            if existing is not None:
-                return
-            cols = ["dispatch_id"]
-            vals = [spec.dispatch_id]
-            if has_project:
-                cols.append("project_id")
-                vals.append(spec.project_id)
-            cols.append("state")
-            vals.append("proposed")
-            if track_id:
-                cols.append("track_id")
-                vals.append(track_id)
-            # OI-943: persist target_slot (always present) and the worker-claude
-            # override reason (only when an override was applied) so the audit
-            # trail can distinguish ported from unported claude dispatches.
-            target_slot = spec.target_slot.strip()
-            if target_slot and not _has_col(conn, "dispatches", "target_slot"):
-                conn.execute("ALTER TABLE dispatches ADD COLUMN target_slot TEXT")
-                conn.commit()
-            if target_slot:
-                cols.append("target_slot")
-                vals.append(target_slot)
-            override_reason = (worker_claude_override_reason or "").strip()
-            if override_reason:
-                if not _has_col(conn, "dispatches", "worker_claude_override_reason"):
-                    conn.execute(
-                        "ALTER TABLE dispatches ADD COLUMN worker_claude_override_reason TEXT"
-                    )
-                    conn.commit()
-                cols.append("worker_claude_override_reason")
-                vals.append(override_reason)
-            now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-                "+00:00", "Z"
+        _rc_init_schema(state_dir)
+        with _rc_get_connection(state_dir) as conn:
+            _rc_register_dispatch(
+                conn,
+                dispatch_id=spec.dispatch_id,
+                project_id=spec.project_id,
+                terminal_id=None,
+                track=(spec.track_id or None),
+                priority="P2",
+                pr_ref=None,
+                gate=(spec.gate or None),
+                bundle_path=None,
+                metadata={
+                    "target_slot": spec.target_slot,
+                    "worker_claude_override_reason": worker_claude_override_reason,
+                },
+                actor="door",
             )
-            for ts_col in ("created_at", "updated_at"):
-                if _has_col(conn, "dispatches", ts_col):
-                    cols.append(ts_col)
-                    vals.append(now)
-            placeholders = ", ".join("?" for _ in cols)
-            conn.execute(
-                f"INSERT INTO dispatches ({', '.join(cols)}) VALUES ({placeholders})",
-                vals,
+            try:
+                _rc_transition_dispatch(
+                    conn,
+                    dispatch_id=spec.dispatch_id,
+                    to_state="claimed",
+                    actor="door",
+                    reason="door executes synchronously (single-entry dispatch)",
+                    metadata={"target_slot": spec.target_slot},
+                )
+            except (_RcInvalidTransitionError, _RcInvalidStateError):
+                # Expected idempotent no-op — see docstring. Not a bookkeeping
+                # failure: no fact recorded, the door keeps going without
+                # door-owned attempt tracking for this particular re-fire.
+                conn.commit()
+                return None
+            new_count = _rc_increment_attempt_count(conn, spec.dispatch_id)
+            attempt_row = _rc_create_attempt(
+                conn,
+                dispatch_id=spec.dispatch_id,
+                terminal_id=spec.target_slot,
+                attempt_number=new_count,
+                metadata={"worker_claude_override_reason": worker_claude_override_reason},
+                actor="door",
             )
             conn.commit()
-        finally:
-            conn.close()
+            return attempt_row["attempt_id"]
     except Exception as exc:  # vnx-silent-except: dispatch-row persistence is best-effort; door must never block on a tracker-row write failure
         _record_bookkeeping_failure(
             "_persist_dispatch_row", spec.dispatch_id, exc, state_dir=state_dir,
         )
+        return None
 
 
 def _spec_is_writing(spec: DispatchSpec) -> bool:
@@ -2324,7 +2422,281 @@ def _maybe_stage_escalation(plan, result, *, vspec, state_dir, data_dir) -> None
     )
 
 
-def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
+# ---------------------------------------------------------------------------
+# Point 1 (golf 1A) — hervuur-wachter: the door refuses a dispatch_id that
+# already carries a terminal receipt, a route decision, or a runtime
+# end-state, unless the caller passes an explicit --refire reason.
+# ---------------------------------------------------------------------------
+
+_TERMINAL_RECEIPT_STATUSES = _RV_SUCCESS_STATUSES | _RV_HARD_FAILURE_STATUSES
+_RECEIPTS_FILENAME_REFIRE = "t0_receipts.ndjson"
+_ROUTE_DECISIONS_FILENAME = "route_decisions.ndjson"
+
+# "runtime end-state" for refire purposes: a dispatch_id whose row in
+# runtime_coordination.db already sits in one of these states already ran to
+# some conclusion under this exact dispatch_id. completed/expired/dead_letter
+# are the state machine's own TERMINAL_DISPATCH_STATES (no outgoing
+# transitions at all — coordination_db.DISPATCH_TRANSITIONS). failed_delivery
+# and timed_out are NOT structurally terminal (a supervisor can still bounce
+# them through `recovered`), but for THIS dispatch_id, fired through THIS
+# door, they are already "already ran and ended badly" facts an operator must
+# consciously override, not a state the door should silently refire past.
+_REFIRE_RUNTIME_END_STATES = _RC_TERMINAL_DISPATCH_STATES | frozenset(
+    {"failed_delivery", "timed_out"}
+)
+
+# Point 2 (golf 1A) cutover marker: the moment this dispatch's own fix
+# started driving dispatch_id lifecycle through runtime_coordination.db for
+# real (register_dispatch/transition_dispatch wiring, point 3 below).
+# Measured 2026-09-04 on the live central store
+# (~/.vnx-data/vnx-dev/state/runtime_coordination.db): every row's `state`
+# sat in {proposed, ready, completed} — zero rows in queued/claimed/
+# delivering/accepted/running/failed_delivery/timed_out/expired/dead_letter —
+# i.e. the ACTIVE-lifecycle queue this refire-guard reads from
+# (_REFIRE_RUNTIME_END_STATES) was empirically empty at this cutover. This
+# constant is not decorative (cf. OI-1620, a marker with zero read-sites):
+# _refire_guard_verdict below reads it to word the block reason so an
+# operator can tell whether a hit predates the wiring; the guard's DB lookup
+# itself, by construction, NEVER scans dispatches/pending/ — the queue it
+# reads is exclusively runtime_coordination.db, keyed by dispatch_id, and a
+# dispatch_id with no row in that table (the entire pre-cutover population)
+# reads as "no runtime end-state", never as a scan-and-guess over the 2100+
+# historical bundle directories.
+_RUNTIME_QUEUE_CUTOVER = "2026-09-04T00:00:00Z"  # dispatch/20260904-deur-bezit-dispatch-toestand
+
+
+def _find_terminal_receipt_status(dispatch_id: str, *, state_dir: Path) -> Optional[str]:
+    """Return the last terminal-status receipt's status for dispatch_id, or None.
+
+    "Terminal" = status in receipt_verdict.SUCCESS_STATUSES |
+    HARD_FAILURE_STATUSES — never a locally overtyped vocabulary (CLAUDE.md).
+    A cheap substring pre-filter (same pattern as
+    envelope_govern_support._receipt_exists_for_dispatch) skips the json.loads
+    cost for the overwhelming majority of non-matching lines; every candidate
+    line is then fully parsed and compared on the exact dispatch_id field
+    (not the substring) to rule out a collision like "foo-1" inside "foo-12".
+    An absent/unreadable ledger is the ABSENCE of a known receipt, never an
+    error — this is a pre-flight guard, not the receipt pipeline itself.
+    """
+    receipts_path = state_dir / _RECEIPTS_FILENAME_REFIRE
+    if not receipts_path.exists():
+        return None
+    target = f'"dispatch_id":"{dispatch_id}"'
+    last_status: Optional[str] = None
+    try:
+        with receipts_path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if target not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("dispatch_id") != dispatch_id:
+                    continue
+                status = rec.get("status")
+                if status in _TERMINAL_RECEIPT_STATUSES:
+                    last_status = status
+    except OSError:
+        return None
+    return last_status
+
+
+def _route_decision_exists(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when route_decisions.ndjson already carries an entry for dispatch_id.
+
+    A route decision is written once, right when "the door commits to
+    firing" (_persist_route_decision, called on every real, non-dry-run
+    fire) — its mere presence means this dispatch_id already went through
+    the door for real at least once, independent of what happened after.
+    """
+    path = state_dir / _ROUTE_DECISIONS_FILENAME
+    if not path.exists():
+        return False
+    target = f'"dispatch_id":"{dispatch_id}"'
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if target not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("dispatch_id") == dispatch_id:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _runtime_end_state(dispatch_id: str, *, state_dir: Path) -> Optional[str]:
+    """Return dispatch_id's runtime_coordination.db state if it is a refire
+    end-state (_REFIRE_RUNTIME_END_STATES), else None.
+
+    Reads EXCLUSIVELY from runtime_coordination.db's dispatches table, keyed
+    by dispatch_id — never a directory scan of dispatches/pending/ (point 2,
+    golf 1A). A missing DB, missing table, or absent row is "no end-state",
+    not an error: the pre-cutover population (and any dispatch_id that never
+    fired) has no row at all, and that reads as clear-to-fire, exactly as
+    intended.
+    """
+    db_path = _tracks_db_path(state_dir)
+    if not db_path.exists():
+        return None
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'"
+            ).fetchone() is None:
+                return None
+            row = conn.execute(
+                "SELECT state FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except _sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    state = row[0]
+    return state if state in _REFIRE_RUNTIME_END_STATES else None
+
+
+def _refire_guard_verdict(
+    dispatch_id: str, *, state_dir: Path, refire_reason: Optional[str],
+) -> Optional[str]:
+    """Return a block reason when dispatch_id already carries prior evidence
+    and no explicit --refire reason was supplied. None means clear to fire.
+
+    Evidence, checked in order (cheapest/most-conclusive first): a terminal
+    receipt, a route decision, a runtime end-state. Any one hit blocks.
+    """
+    if refire_reason and refire_reason.strip():
+        return None
+
+    receipt_status = _find_terminal_receipt_status(dispatch_id, state_dir=state_dir)
+    if receipt_status is not None:
+        return (
+            f"dispatch_id={dispatch_id!r} already carries a terminal receipt "
+            f"(status={receipt_status!r})"
+        )
+
+    if _route_decision_exists(dispatch_id, state_dir=state_dir):
+        return (
+            f"dispatch_id={dispatch_id!r} already carries a route decision "
+            f"(the door already fired it for real at least once)"
+        )
+
+    end_state = _runtime_end_state(dispatch_id, state_dir=state_dir)
+    if end_state is not None:
+        return (
+            f"dispatch_id={dispatch_id!r} already reached runtime end-state "
+            f"{end_state!r} (runtime-queue cutover: {_RUNTIME_QUEUE_CUTOVER})"
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Point 3 (golf 1A) — the rest of the state-machine wiring: driving the row
+# _persist_dispatch_row registered/claimed above through to a real outcome
+# (delivering -> accepted -> running -> completed/failed_delivery), reached
+# via the SAME runtime_state_machine.transition_dispatch (runtime_coordination
+# facade). No second model.
+# ---------------------------------------------------------------------------
+
+def _owner_transition(
+    dispatch_id: str, to_state: str, *, state_dir: Path,
+    reason: Optional[str] = None, metadata: Optional[dict] = None,
+) -> None:
+    """Best-effort: drive the door-owned dispatch row to to_state.
+
+    transition_dispatch_idempotent so a duplicate call (e.g. a second failure
+    path also landing on failed_delivery) is a safe no-op instead of a raised
+    DuplicateTransitionError. Never blocks the door: any failure (missing
+    row — _persist_dispatch_row itself failed earlier or hit the idempotent
+    no-op path; missing DB; unreachable transition) is recorded via
+    _record_bookkeeping_failure and swallowed, exactly like every other
+    door-bookkeeping site in this module.
+    """
+    try:
+        with _rc_get_connection(state_dir) as conn:
+            _rc_transition_dispatch_idempotent(
+                conn, dispatch_id=dispatch_id, to_state=to_state,
+                actor="door", reason=reason, metadata=metadata,
+            )
+            conn.commit()
+    except Exception as exc:  # vnx-silent-except: owner-state transition is best-effort; door must never block on it
+        _record_bookkeeping_failure(
+            f"_owner_transition:{to_state}", dispatch_id, exc, state_dir=state_dir,
+        )
+
+
+def _owner_update_attempt(
+    attempt_id: Optional[str], state: str, *, dispatch_id: str, state_dir: Path,
+    failure_reason: Optional[str] = None,
+) -> None:
+    """Best-effort: close out the dispatch_attempts row for attempt_id. No-op
+    when attempt_id is None (registration/claim never produced one)."""
+    if not attempt_id:
+        return
+    try:
+        with _rc_get_connection(state_dir) as conn:
+            _rc_update_attempt(
+                conn, attempt_id=attempt_id, state=state,
+                failure_reason=failure_reason, actor="door",
+            )
+            conn.commit()
+    except Exception as exc:  # vnx-silent-except: attempt bookkeeping is best-effort; door must never block on it
+        _record_bookkeeping_failure(
+            f"_owner_update_attempt:{state}", dispatch_id, exc, state_dir=state_dir,
+        )
+
+
+def _owner_finish(
+    dispatch_id: str, attempt_id: Optional[str], *, state_dir: Path,
+    success: bool, failure_reason: Optional[str] = None,
+) -> None:
+    """Best-effort: drive the door-owned row from delivering through the
+    terminal outcome (accepted -> running -> completed on success,
+    -> failed_delivery on failure) and close the matching attempt.
+
+    The door's execution is synchronous end-to-end (it blocks until the lane
+    executor returns) — there is no separate mid-flight signal from
+    _execute_claude / _execute_claude_headless / run_envelope_plan to hang
+    'accepted' (delivery acknowledged) and 'running' (execution in progress)
+    on individually, so both are stamped together with the outcome rather
+    than left unreached. Never blocks the door.
+    """
+    _owner_transition(
+        dispatch_id, "accepted", state_dir=state_dir,
+        reason="lane executor returned",
+    )
+    _owner_transition(
+        dispatch_id, "running", state_dir=state_dir,
+        reason="lane executor returned",
+    )
+    if success:
+        _owner_transition(
+            dispatch_id, "completed", state_dir=state_dir,
+            reason="lane execution succeeded",
+        )
+        _owner_update_attempt(attempt_id, "succeeded", dispatch_id=dispatch_id, state_dir=state_dir)
+    else:
+        _owner_transition(
+            dispatch_id, "failed_delivery", state_dir=state_dir,
+            reason=failure_reason or "lane execution failed",
+        )
+        _owner_update_attempt(
+            attempt_id, "failed", dispatch_id=dispatch_id, state_dir=state_dir,
+            failure_reason=failure_reason,
+        )
+
+
+def run_dispatch(spec_file: Path, *, dry_run: bool = False, refire_reason: Optional[str] = None) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
     Returns 0 on success, 1 on any reject or execution failure.
@@ -2378,6 +2750,25 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
     except Exception as exc:
         print(f"[dispatch_cli] REJECT [spec-parse-error]: {exc}", file=sys.stderr)
         return 1
+
+    # Point 1 (golf 1A) — hervuur-wachter: refuse a dispatch_id that already
+    # carries a terminal receipt, a route decision, or a runtime end-state,
+    # unless the caller supplied an explicit --refire reason. Checked before
+    # any router/validate work is spent on a dispatch_id that already ran.
+    refire_block = _refire_guard_verdict(
+        spec.dispatch_id, state_dir=state_dir, refire_reason=refire_reason,
+    )
+    if refire_block:
+        _emit_reject(Reject(
+            "refire-blocked",
+            f"{refire_block}; pass --refire REASON to override",
+        ))
+        return 1
+    if refire_reason and refire_reason.strip():
+        logger.warning(
+            "[dispatch_cli] REFIRE dispatch_id=%s reason=%s",
+            spec.dispatch_id, refire_reason.strip(),
+        )
 
     # OI-962: resolve provider+model via smart router BEFORE validate().
     # The router fills in provider+model when the spec carries none (AUTO),
@@ -2467,6 +2858,11 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         ))
         return 1
 
+    # Point 3 (golf 1A): the door-owned dispatch_attempts row for this fire,
+    # or None when registration/claim did not produce one (best-effort —
+    # see _persist_dispatch_row). None for dry_run (that block never runs).
+    attempt_id: Optional[str] = None
+
     # P1-#1: wrap everything after validate in try/except — door never panics
     try:
         snapshot = build_runtime_snapshot(vspec, data_dir=data_dir, spec_file=spec_file)
@@ -2538,9 +2934,11 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             # compiled): create its dispatches tracker row BEFORE the lane
             # choice so _persist_track_id, reconcile_all_dispatch_outcomes and
             # the TL-D2 pr_ref propagation all have a row to read. Idempotent
-            # (retry/fix-forward safe), state='proposed' (invisible to the
-            # claim/stuck/ghost sweeps), best-effort — never blocks the door.
-            _persist_dispatch_row(
+            # (retry/fix-forward safe), registered+self-claimed via the real
+            # state machine (point 3, golf 1A), best-effort — never blocks
+            # the door. attempt_id (or None) is used below to close out the
+            # matching dispatch_attempts row once the lane executor returns.
+            attempt_id = _persist_dispatch_row(
                 vspec.spec,
                 state_dir=state_dir,
                 worker_claude_override_reason=snapshot.worker_claude_override_reason,
@@ -2608,6 +3006,14 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
             _print_plan(plan, fp)
             return 0
 
+        # Point 3 (golf 1A): claimed -> delivering — the door is about to
+        # hand off to the lane executor. Best-effort, no-op when attempt_id
+        # is None (registration/claim did not produce a door-owned row).
+        _owner_transition(
+            vspec.spec.dispatch_id, "delivering", state_dir=state_dir,
+            reason="handing off to lane executor",
+        )
+
         with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
             if plan.lane == "provider":
                 result = run_envelope_plan(
@@ -2628,15 +3034,29 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                     _maybe_stage_escalation(
                         plan, result, vspec=vspec, state_dir=state_dir, data_dir=data_dir
                     )
+                _owner_finish(
+                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                    success=(result.status == "success"),
+                    failure_reason=(
+                        None if result.status == "success"
+                        else (result.error or f"provider lane status={result.status}")
+                    ),
+                )
                 return result.returncode
             elif plan.lane == "claude_tmux_subscription":
-                return _execute_claude(
+                rc = _execute_claude(
                     plan,
                     permit,
                     state_dir=state_dir,
                     data_dir=data_dir,
                     role=vspec.spec.role,
                 )
+                _owner_finish(
+                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                    success=(rc == 0),
+                    failure_reason=None if rc == 0 else "claude_tmux_subscription lane returned non-zero",
+                )
+                return rc
             elif plan.lane == "claude_headless":
                 # OI-1158: the door never printed anything about isolation on a
                 # real (non-dry-run) fire — _print_plan's warnings loop only
@@ -2648,13 +3068,19 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
                         f"[dispatch_cli] [WARN] {headless_isolation_warning}",
                         file=sys.stderr,
                     )
-                return _execute_claude_headless(
+                rc = _execute_claude_headless(
                     plan,
                     permit,
                     state_dir=state_dir,
                     data_dir=data_dir,
                     role=vspec.spec.role,
                 )
+                _owner_finish(
+                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                    success=(rc == 0),
+                    failure_reason=None if rc == 0 else "claude_headless lane returned non-zero",
+                )
+                return rc
             else:
                 raise _InvariantViolation(
                     f"closed set violated — unknown lane: {plan.lane!r}"
@@ -2667,6 +3093,26 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
         )
         print(f"[dispatch_cli] REJECT [invariant-violation]: {exc}", file=sys.stderr)
         return 1
+    except LockWaitTimeout as exc:
+        # Point 5 (golf 1A): serialize_lane's own lock-wait timeout — no free
+        # claude-lane slot within VNX_CLAUDE_LOCK_TIMEOUT_SECONDS (default
+        # 4h, dispatch-20260904-lock-timeout-eindig). This is a caught-before
+        # -spawn failure of the door's OWN serialization mechanism, not a
+        # generic runtime error: route it to failed_delivery via the same
+        # state machine point 3 wired in, instead of folding it into the
+        # bare REJECT [runtime-error] path below (which never touched the
+        # door-owned row's state at all).
+        dispatch_id = getattr(getattr(vspec, "spec", None), "dispatch_id", None)
+        if dispatch_id:
+            _owner_finish(
+                dispatch_id, attempt_id, state_dir=state_dir,
+                success=False, failure_reason=f"lock-wait timeout: {exc}",
+            )
+        logger.error(
+            "[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=%s: %s", dispatch_id, exc,
+        )
+        print(f"[dispatch_cli] REJECT [lock-wait-timeout]: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
         return 1
@@ -2675,6 +3121,39 @@ def run_dispatch(spec_file: Path, *, dry_run: bool = False) -> int:
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
+
+def reopen_lane(provider_val: str, reason: str, *, state_dir: Path) -> int:
+    """Operator escape hatch (point 4, golf 1A): record an explicit
+    provider_lane_reopened event for provider_val, clearing any earlier
+    provider_lane_exhausted block (_lane_reopened_after) without waiting on
+    a later success receipt.
+
+    Returns 0 on a durable write, 1 on failure (printed, never silent).
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        print(
+            "[dispatch_cli] --reopen-lane requires a non-empty --reopen-reason",
+            file=sys.stderr,
+        )
+        return 1
+    import dispatch_register  # noqa: PLC0415
+    ok = dispatch_register.append_event(
+        _PROVIDER_LANE_REOPENED_EVENT,
+        dispatch_id=f"lane-reopen:{provider_val}",
+        extra={"provider": provider_val, "reason": reason},
+        state_dir=state_dir,
+    )
+    if not ok:
+        print(
+            f"[dispatch_cli] failed to record provider_lane_reopened for "
+            f"{provider_val!r} — the block was NOT cleared",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"[dispatch_cli] lane reopened: provider={provider_val!r} reason={reason!r}")
+    return 0
+
 
 def main(argv: Optional[list] = None) -> int:
     import argparse
@@ -2696,16 +3175,38 @@ def main(argv: Optional[list] = None) -> int:
         help="Release stale lock for CLASS (default: claude-tmux); "
              "prints prior holder and removes lock file",
     )
+    parser.add_argument(
+        "--refire", dest="refire_reason", metavar="REASON", default=None,
+        help="Explicit reason to bypass the refire guard for a dispatch_id "
+             "that already carries a terminal receipt, a route decision, or "
+             "a runtime end-state",
+    )
+    parser.add_argument(
+        "--reopen-lane", dest="reopen_lane_provider", metavar="PROVIDER", default=None,
+        help="Clear a provider_lane_exhausted block for PROVIDER (requires "
+             "--reopen-reason); does not run a dispatch",
+    )
+    parser.add_argument(
+        "--reopen-reason", dest="reopen_lane_reason", metavar="REASON", default=None,
+        help="Reason for --reopen-lane (mandatory alongside it)",
+    )
     args = parser.parse_args(argv)
 
     if args.force_release_class is not None:
         force_release(args.force_release_class)
         return 0
 
+    if args.reopen_lane_provider is not None:
+        data_dir = _resolve_data_dir()
+        return reopen_lane(
+            args.reopen_lane_provider, args.reopen_lane_reason or "",
+            state_dir=data_dir / "state",
+        )
+
     if args.spec_file is None:
         parser.error("--spec-file is required")
 
-    return run_dispatch(args.spec_file, dry_run=args.dry_run)
+    return run_dispatch(args.spec_file, dry_run=args.dry_run, refire_reason=args.refire_reason)
 
 
 if __name__ == "__main__":

@@ -24,12 +24,14 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
+import coordination_db
+import project_id_migration
 from dispatch_cli import _persist_dispatch_row, _persist_track_id, load_spec, run_dispatch
 
 
@@ -38,35 +40,32 @@ from dispatch_cli import _persist_dispatch_row, _persist_track_id, load_spec, ru
 # ---------------------------------------------------------------------------
 
 def _make_coordination_db(state_dir: Path, *, tracks: "dict[str, str] | None" = None) -> Path:
-    """Minimal runtime_coordination.db mirroring the v10 dispatches schema.
+    """The REAL runtime_coordination.db schema (coordination_db.init_schema),
+    plus a hand-rolled ``tracks`` table for _check_track_link_verdict /
+    _lookup_track_phase (not part of runtime_coordination.sql — a separate
+    concern this file only needs a minimal stand-in for).
 
-    Composite UNIQUE(dispatch_id, project_id) per ADR-007; created_at /
-    updated_at present so the door's row carries timestamps the outcome
-    classifier's age computation can parse. No track_id column on purpose:
-    the door must add it additively (_has_col-guarded), as _persist_track_id
-    already does.
+    dispatch-20260904-deur-bezit-dispatch-toestand (point 3): the door now
+    drives the dispatches row through
+    register_dispatch/transition_dispatch/create_attempt (runtime_state_machine
+    via the runtime_coordination facade), which — unlike this file's old
+    hand-rolled minimal table — needs the REAL column set (terminal_id,
+    attempt_count, metadata_json, ...) and the dispatch_attempts table. A
+    partial/legacy table is exactly the "second, incompatible model" this
+    fix retires; the real schema is the only one under test now.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
+    coordination_db.init_schema(state_dir)
     db_path = state_dir / "runtime_coordination.db"
+    # ADR-007 project_id column + composite UNIQUE — a real central store has
+    # already gone through this (migration 0010); a fresh init_schema() alone
+    # does not add it, so add it here to match production shape rather than
+    # exercise a project_id-less table _persist_track_id was never built for.
+    project_id_migration.run_runtime_coordination_migration(db_path, default_project_id="vnx-dev")
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         """
-        CREATE TABLE dispatches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id TEXT NOT NULL,
-            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
-            state TEXT NOT NULL DEFAULT 'queued',
-            track TEXT,
-            priority TEXT DEFAULT 'P2',
-            created_at TEXT,
-            updated_at TEXT,
-            UNIQUE(dispatch_id, project_id)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE tracks (
+        CREATE TABLE IF NOT EXISTS tracks (
             track_id TEXT NOT NULL PRIMARY KEY,
             phase TEXT NOT NULL,
             project_id TEXT NOT NULL DEFAULT 'vnx-dev'
@@ -149,6 +148,15 @@ def _row_count(db_path: Path) -> int:
     return count
 
 
+def _row_metadata(row) -> dict:
+    """dispatch-20260904-deur-bezit-dispatch-toestand (point 3): target_slot
+    and worker_claude_override_reason are no longer dedicated ALTER-TABLE
+    columns — register_dispatch's signature has no per-column extension
+    point, only a generic ``metadata`` dict — so both now live in
+    ``metadata_json``."""
+    return json.loads(row["metadata_json"] or "{}")
+
+
 # ---------------------------------------------------------------------------
 # 1. A dispatch through the door yields a row with the columns the three
 #    consumers read (dispatch_id, project_id, state, track_id, created_at).
@@ -173,8 +181,12 @@ def test_door_creates_dispatch_row(tmp_path, monkeypatch):
     row = _read_row(db_path, "20260731-oi847-row-created")
     assert row is not None, "door must create a dispatches row for an accepted dispatch"
     assert row["project_id"] == "vnx-dev"
-    # 'proposed': visible to live queries, invisible to claim/stuck/ghost sweeps
-    assert row["state"] == "proposed"
+    # dispatch-20260904-deur-bezit-dispatch-toestand (point 3): the door now
+    # drives the row through the real state machine end-to-end within this
+    # single synchronous run_dispatch() call — queued -> claimed -> delivering
+    # -> accepted -> running -> completed (the lane executor is mocked to
+    # succeed) — instead of parking it at 'proposed' forever.
+    assert row["state"] == "completed"
     # symptom 1 consumer: the track_id column _persist_track_id / D2 read
     assert row["track_id"] == "oi-847-track"
     # symptom 2 consumer: created_at feeds the classifier's age computation
@@ -224,6 +236,15 @@ def test_persist_track_id_hits_row_after_door(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # 3. Idempotency: the same dispatch through the door twice (retry /
 #    fix-forward) creates no second row and leaves the first untouched.
+#
+# dispatch-20260904-deur-bezit-dispatch-toestand (point 1): a second real
+# fire of the SAME dispatch_id is now exactly what the hervuur-wachter exists
+# to catch — after the first call, a route decision for this dispatch_id is
+# on record, so the second call is REFUSED unless it carries an explicit
+# --refire reason. This test now exercises that explicit-override path; the
+# door-side idempotency guarantee (register_dispatch's own idempotent
+# lookup + the claim step's benign no-op once the row is already past
+# 'queued') is what keeps the row itself untouched underneath the refire.
 # ---------------------------------------------------------------------------
 
 def test_retry_is_idempotent(tmp_path, monkeypatch):
@@ -243,8 +264,21 @@ def test_retry_is_idempotent(tmp_path, monkeypatch):
     first = _read_row(db_path, "20260731-oi847-retry")
     assert first is not None
 
+    # Without --refire the second fire is now blocked by the hervuur-wachter
+    # (point 1): a route decision for this dispatch_id already exists.
     with patch("dispatch_cli._execute_claude", return_value=0):
-        assert run_dispatch(spec_file) == 0
+        assert run_dispatch(spec_file) == 1, (
+            "a second fire of the same dispatch_id must be refused by the "
+            "refire guard without an explicit --refire reason"
+        )
+    assert _row_count(db_path) == 1, "a refused refire must not touch the row"
+    assert dict(_read_row(db_path, "20260731-oi847-retry")) == dict(first)
+
+    # With an explicit --refire reason the door proceeds; the row is still
+    # left untouched (register_dispatch's idempotent lookup + the claim
+    # step's benign no-op once the row is already past 'queued').
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        assert run_dispatch(spec_file, refire_reason="test: explicit retry") == 0
 
     assert _row_count(db_path) == 1, "retry must not create a second dispatches row"
     second = _read_row(db_path, "20260731-oi847-retry")
@@ -315,9 +349,9 @@ def test_oi943_persists_target_slot(tmp_path):
 
     row = _read_row(db_path, "20260804-oi943-target-slot")
     assert row is not None, "door must create a dispatches row"
-    assert row["target_slot"] == "T0", (
-        "OI-943: target_slot must be persisted on the dispatch row so the audit "
-        "trail can distinguish ported from unported claude dispatches"
+    assert _row_metadata(row).get("target_slot") == "T0", (
+        "OI-943: target_slot must be persisted (in metadata_json) on the dispatch "
+        "row so the audit trail can distinguish ported from unported claude dispatches"
     )
 
 
@@ -342,10 +376,11 @@ def test_oi943_persists_override_reason(tmp_path):
 
     row = _read_row(db_path, "20260804-oi943-override-reason")
     assert row is not None, "door must create a dispatches row"
-    assert row["target_slot"] == "T0"
-    assert row["worker_claude_override_reason"] == "testing override gate audit", (
-        "OI-943: worker_claude_override_reason must be persisted so the override "
-        "outcome is auditable"
+    meta = _row_metadata(row)
+    assert meta.get("target_slot") == "T0"
+    assert meta.get("worker_claude_override_reason") == "testing override gate audit", (
+        "OI-943: worker_claude_override_reason must be persisted (in metadata_json) "
+        "so the override outcome is auditable"
     )
 
 
@@ -367,13 +402,9 @@ def test_oi943_override_reason_none_is_omitted(tmp_path):
 
     row = _read_row(db_path, "20260804-oi943-no-override")
     assert row is not None, "door must create a dispatches row"
-    assert row["target_slot"] == "T0"
-    # The column may not exist (row_factory returns None for missing columns)
-    # or it may be NULL — either way the override reason is absent.
-    try:
-        override_val = row["worker_claude_override_reason"]
-    except IndexError:
-        override_val = None
+    meta = _row_metadata(row)
+    assert meta.get("target_slot") == "T0"
+    override_val = meta.get("worker_claude_override_reason")
     assert override_val is None or override_val == "", (
         "OI-943: worker_claude_override_reason must be absent when no override was applied"
     )
@@ -399,7 +430,7 @@ def test_oi943_target_slot_survives_through_door(tmp_path, monkeypatch):
     assert rc == 0
     row = _read_row(db_path, "20260804-oi943-integration")
     assert row is not None, "door must create a dispatches row"
-    assert row["target_slot"] == "T0", (
+    assert _row_metadata(row).get("target_slot") == "T0", (
         "OI-943: target_slot must survive the full door path"
     )
 
@@ -552,3 +583,123 @@ def test_control_isolation_success_makes_the_abort_check_fail(tmp_path, monkeypa
     assert rc != 0, "sanity: the control dispatch must still fail (for the wrong reason)"
     with pytest.raises(AssertionError, match="isolation abort specifically"):
         _assert_isolation_abort(rc, caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 7. Point 3 (golf 1A, dispatch-20260904-deur-bezit-dispatch-toestand): the
+#    door drives dispatch_attempts — never populated on origin/main (the old
+#    ad-hoc INSERT touched only `dispatches`, never `dispatch_attempts` /
+#    increment_attempt_count / transition_dispatch) — and the terminal state
+#    reflects the real outcome (completed on success, failed_delivery on a
+#    lane failure), not a permanent 'proposed'.
+# ---------------------------------------------------------------------------
+
+def _read_attempts(db_path: Path, dispatch_id: str) -> list:
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM dispatch_attempts WHERE dispatch_id = ? ORDER BY attempt_number",
+        (dispatch_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def test_success_populates_attempt_and_completes(tmp_path, monkeypatch):
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260904-staging-attempts-ok",
+        dispatch_id="20260904-attempts-ok",
+    )
+    db_path = _make_coordination_db(data_dir / "state", tracks={"oi-847-track": "active"})
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=0):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    row = _read_row(db_path, "20260904-attempts-ok")
+    assert row is not None
+    assert row["state"] == "completed"
+    assert row["attempt_count"] == 1
+
+    attempts = _read_attempts(db_path, "20260904-attempts-ok")
+    assert len(attempts) == 1, (
+        "the door must create exactly one dispatch_attempts row for a single fire "
+        f"(origin/main never populates this table at all): {attempts}"
+    )
+    assert attempts[0]["state"] == "succeeded"
+    assert attempts[0]["terminal_id"] == "T0"
+
+
+def test_lane_failure_routes_to_failed_delivery(tmp_path, monkeypatch):
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260904-staging-attempts-fail",
+        dispatch_id="20260904-attempts-fail",
+    )
+    db_path = _make_coordination_db(data_dir / "state", tracks={"oi-847-track": "active"})
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude", return_value=1):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    row = _read_row(db_path, "20260904-attempts-fail")
+    assert row is not None
+    assert row["state"] == "failed_delivery", (
+        "a failing lane executor must land the door-owned row on "
+        "failed_delivery, not leave it stuck mid-flight or at 'proposed'"
+    )
+
+    attempts = _read_attempts(db_path, "20260904-attempts-fail")
+    assert len(attempts) == 1
+    assert attempts[0]["state"] == "failed"
+    assert attempts[0]["failure_reason"]
+
+
+# ---------------------------------------------------------------------------
+# 8. Point 5 (golf 1A, dispatch-20260904-deur-bezit-dispatch-toestand):
+#    serialize_lane's own LockWaitTimeout (dispatch-20260904-lock-timeout-
+#    eindig, #1752) must route the door-owned row to failed_delivery via the
+#    point-3 state machine — not fall into the generic
+#    "REJECT [runtime-error]" path, which never touched the row's state.
+# ---------------------------------------------------------------------------
+
+def test_lock_wait_timeout_routes_to_failed_delivery(tmp_path, monkeypatch, capsys):
+    from dispatch_serialization import LockWaitTimeout
+
+    data_dir, spec_file = _make_bundle(
+        tmp_path,
+        staging_id="20260904-staging-lockwait",
+        dispatch_id="20260904-lockwait-timeout",
+    )
+    db_path = _make_coordination_db(data_dir / "state", tracks={"oi-847-track": "active"})
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    fake_lock = MagicMock()
+    fake_lock.__enter__.side_effect = LockWaitTimeout(
+        "claude-tmux serial lock: no free slot within 14400s"
+    )
+
+    with patch("dispatch_cli.serialize_lane", return_value=fake_lock):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "lock-wait-timeout" in err
+
+    row = _read_row(db_path, "20260904-lockwait-timeout")
+    assert row is not None
+    assert row["state"] == "failed_delivery", (
+        "a LockWaitTimeout must route the door-owned row to failed_delivery, "
+        f"got state={row['state']!r}"
+    )
+
+    attempts = _read_attempts(db_path, "20260904-lockwait-timeout")
+    assert len(attempts) == 1
+    assert attempts[0]["state"] == "failed"
+    assert "lock-wait timeout" in attempts[0]["failure_reason"]
