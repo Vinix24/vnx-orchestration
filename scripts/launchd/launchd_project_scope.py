@@ -235,10 +235,27 @@ def check_project_scope(
     }
 
 
+class LaunchctlListFailedError(RuntimeError):
+    """``launchctl list`` ran but exited non-zero. Distinct from
+    ``OSError``/``subprocess.SubprocessError`` (binary missing, timeout):
+    this means launchctl itself refused or errored on this specific
+    invocation. Caught separately in ``main()`` so a non-zero exit is never
+    silently treated as "queried successfully, nothing loaded" -- an
+    absence must be MEASURED, never inferred from a failed measurement
+    attempt (the exact class of bug the coordinator flagged in review: a
+    prior version of this function returned ``result.stdout`` unconditionally,
+    discarding ``result.returncode`` entirely)."""
+
+
 def _run_real_launchctl_list() -> str:
     result = subprocess.run(
         ["launchctl", "list"], capture_output=True, text=True, timeout=10, check=False
     )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise LaunchctlListFailedError(
+            f"launchctl list exited {result.returncode}" + (f": {stderr}" if stderr else "")
+        )
     return result.stdout or ""
 
 
@@ -280,7 +297,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         launchctl_output = _run_real_launchctl_list()
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, LaunchctlListFailedError) as exc:
         print(f"launchd_project_scope: launchctl unavailable ({exc}) — cannot verify installed state", file=sys.stderr)
         return 2
 

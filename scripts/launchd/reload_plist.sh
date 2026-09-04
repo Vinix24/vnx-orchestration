@@ -138,6 +138,28 @@ sys.stdout.write(label)
 
 PLIST_DEST="$HOME/Library/LaunchAgents/${RESOLVED_LABEL}.plist"
 
+# Advisory (read-only, never touched): a per-project template resolves its
+# destination from the RESOLVED Label now, not from $TEMPLATE_NAME -- before
+# this fix, every project's install landed at the same legacy path below,
+# derived from the bare template name. If this script (or vnx init, which
+# has the matching gap in its own destination-path construction — see
+# com.vnx.gate-obligation-runner.plist's own comment) was ever run for this
+# project BEFORE this fix, that legacy file may still be sitting there,
+# still loaded, and this script does not know about it or touch it: it only
+# ever unloads/replaces whatever sits at the NEWLY resolved destination
+# above. Left alone, a stale legacy job keeps running under its old, bare
+# Label indefinitely.
+LEGACY_PLIST_DEST="$HOME/Library/LaunchAgents/${TEMPLATE_NAME}.plist"
+if [ "$LEGACY_PLIST_DEST" != "$PLIST_DEST" ] && [ -f "$LEGACY_PLIST_DEST" ]; then
+    echo "WARNING: a legacy install exists at $LEGACY_PLIST_DEST (this project's" >&2
+    echo "  install now resolves to $PLIST_DEST instead). This script does NOT" >&2
+    echo "  unload or remove the legacy file -- check its Label with" >&2
+    echo "  'plutil -p $LEGACY_PLIST_DEST', and if it belongs to this project," >&2
+    echo "  clean it up by hand:" >&2
+    echo "    launchctl unload \"$LEGACY_PLIST_DEST\"" >&2
+    echo "    rm \"$LEGACY_PLIST_DEST\"" >&2
+fi
+
 # Unload existing agent if present (ignore errors — may not be loaded yet).
 # Unloading by DEST PATH, not by a guessed label: this only ever tears down
 # whatever job THIS destination file currently holds, which — now that the

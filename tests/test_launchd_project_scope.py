@@ -35,6 +35,8 @@ import textwrap
 from pathlib import Path
 from typing import Iterable, Tuple
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHD_DIR = REPO_ROOT / "scripts" / "launchd"
 
@@ -320,3 +322,56 @@ def test_main_json_mode_emits_parseable_json(monkeypatch, capsys) -> None:
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# _run_real_launchctl_list -- a failed invocation must never read as "queried
+# successfully, nothing loaded" (absence-is-loud). Caught in review: a prior
+# version discarded subprocess.run's returncode entirely.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompletedProcess:
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def test_run_real_launchctl_list_raises_on_nonzero_exit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        lps.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(stdout="", stderr="launchctl: some failure", returncode=1),
+    )
+    with pytest.raises(lps.LaunchctlListFailedError, match="exited 1"):
+        lps._run_real_launchctl_list()
+
+
+def test_run_real_launchctl_list_returns_stdout_on_success(monkeypatch) -> None:
+    monkeypatch.setattr(
+        lps.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(stdout="PID\tStatus\tLabel\n", returncode=0),
+    )
+    assert lps._run_real_launchctl_list() == "PID\tStatus\tLabel\n"
+
+
+def test_main_fails_closed_not_ok_when_launchctl_list_exits_nonzero(monkeypatch, capsys) -> None:
+    """The regression this guards: a failed launchctl invocation must exit
+    2 ('cannot verify'), never 0 ('OK', because empty output looked like
+    'nothing loaded, therefore nothing missing') and never 1 with fabricated
+    missing_instance violations manufactured from output that was never
+    real."""
+    monkeypatch.setattr(lps.sys, "platform", "darwin")
+
+    def _boom():
+        raise lps.LaunchctlListFailedError("launchctl list exited 1: permission denied")
+
+    monkeypatch.setattr(lps, "_run_real_launchctl_list", _boom)
+
+    rc = lps.main(["--project-id", "vnx-dev", "--templates-dir", str(LAUNCHD_DIR)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "launchctl unavailable" in err
+    assert "permission denied" in err

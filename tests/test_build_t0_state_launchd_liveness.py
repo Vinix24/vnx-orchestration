@@ -173,18 +173,65 @@ class TestDiscoverLaunchdJobs:
         to make it invalid XML (see TestScanLaunchdDir below).
 
         OI-1509/OI-1510 (golf 3): com.vnx.gate-obligation-runner.plist's
-        Label now carries the unsubstituted "${VNX_PROJECT_ID}" placeholder
-        (per-project scoping) -- labels are read raw from each plist's own
-        Label key, never substituted here, so the expected string below
-        changed to match. com.vnx.receipt-processor.plist is new (same golf,
-        same per-project pattern) -- the >= 7 floor still holds with it
-        counted in."""
-        labels = bts._discover_launchd_jobs()
+        Label now carries "${VNX_PROJECT_ID}" (per-project scoping),
+        resolved via _resolve_launchd_label against a real project id --
+        the register must carry the SAME label the installed job actually
+        runs under, or _measure_launchd_liveness can never match it against
+        `launchctl list` (a prior version of this fix left the placeholder
+        unresolved and asserted THAT, which papered over exactly the
+        permanent-fail regression this resolution exists to prevent; see
+        TestResolveLaunchdLabel and TestMeasureLaunchdLivenessProjectScoped
+        below for the behavior this was actually supposed to protect).
+        com.vnx.receipt-processor.plist is new (same golf, same per-project
+        pattern) -- the >= 7 floor still holds with it counted in."""
+        labels = bts._discover_launchd_jobs(project_id="vnx-dev")
         assert "com.vnx.producer-freshness-monitor" in labels
         assert "com.vnx.ledger-health" in labels
-        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in labels
-        assert "com.vnx.receipt-processor.${VNX_PROJECT_ID}" in labels
+        assert "com.vnx.gate-obligation-runner.vnx-dev" in labels
+        assert "com.vnx.receipt-processor.vnx-dev" in labels
         assert len(labels) >= 7
+
+        # Without a project_id, a per-project template's Label is returned
+        # UNRESOLVED (never guessed) -- the function's actual, documented
+        # contract, not a silently-wrong default.
+        unresolved = bts._discover_launchd_jobs()
+        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in unresolved
+
+
+class TestResolveLaunchdLabel:
+    """_resolve_launchd_label is the pure fix for OI-1509/OI-1510's second
+    half: a per-project template's Label carries the literal
+    "${VNX_PROJECT_ID}" placeholder, and the expected-jobs register must
+    resolve it against this project's real id before comparing it to
+    `launchctl list` -- comparing the raw placeholder against a real,
+    substituted, installed Label can never match, which is exactly the
+    regression the coordinator caught: a prior version of this fix left the
+    placeholder unresolved and rewrote the tests to assert THAT, instead of
+    fixing the runtime comparison."""
+
+    def test_non_per_project_label_is_returned_unchanged(self) -> None:
+        assert bts._resolve_launchd_label("com.vnx.conversation-analyzer", "vnx-dev") == "com.vnx.conversation-analyzer"
+
+    def test_placeholder_is_substituted_with_project_id(self) -> None:
+        resolved = bts._resolve_launchd_label("com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}", "vnx-dev")
+        assert resolved == "com.vnx.gate-obligation-runner.vnx-dev"
+
+    def test_different_project_ids_resolve_to_different_labels(self) -> None:
+        template = "com.vnx.receipt-processor.${VNX_PROJECT_ID}"
+        a = bts._resolve_launchd_label(template, "vnx-dev")
+        b = bts._resolve_launchd_label(template, "mission-control")
+        assert a == "com.vnx.receipt-processor.vnx-dev"
+        assert b == "com.vnx.receipt-processor.mission-control"
+        assert a != b
+
+    def test_unresolvable_project_id_leaves_placeholder_untouched(self) -> None:
+        """No project_id (None or empty string) -- never guess. The caller
+        turns an unresolved placeholder into an explicit 'unknown', not a
+        fabricated label that could coincidentally match another project's
+        job of the same family."""
+        template = "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}"
+        assert bts._resolve_launchd_label(template, None) == template
+        assert bts._resolve_launchd_label(template, "") == template
 
 
 class TestScanLaunchdDir:
@@ -222,13 +269,14 @@ class TestScanLaunchdDir:
         argument') so the plist is well-formed XML and its label is found
         like every other real launchd template.
 
-        OI-1509/OI-1510 (golf 3): the Label read back is now the
-        unsubstituted "${VNX_PROJECT_ID}"-suffixed form (per-project
-        scoping) -- see test_real_repo_register_finds_the_known_jobs above
-        for why."""
-        labels, unparseable = bts._scan_launchd_dir()
+        OI-1509/OI-1510 (golf 3): the Label read back is now project-scoped
+        (carries "${VNX_PROJECT_ID}" in the template) -- resolved against a
+        real project id here, matching what the installed job actually runs
+        under. See test_real_repo_register_finds_the_known_jobs above for
+        why the register must resolve this, not just carry it raw."""
+        labels, unparseable = bts._scan_launchd_dir(project_id="vnx-dev")
         assert "com.vnx.gate-obligation-runner.plist" not in unparseable
-        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in labels
+        assert "com.vnx.gate-obligation-runner.vnx-dev" in labels
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +600,100 @@ class TestMeasureLaunchdLiveness:
         assert result["jobs"]["com.vnx.alpha-job"]["state"] == "loaded"
 
 
+class TestMeasureLaunchdLivenessProjectScoped:
+    """OI-1509/OI-1510 golf-3 fix-forward, the actual behavior this dispatch
+    exists to protect: a per-project template's Label carries
+    "${VNX_PROJECT_ID}", and the real INSTALLED job runs under that
+    placeholder resolved against a real project id -- e.g.
+    "com.vnx.gate-obligation-runner.vnx-dev". This must read as loaded when
+    that exact resolved label is present in `launchctl list`'s output, not
+    as a permanent not_loaded/fail because the register still carried the
+    raw, unresolved placeholder text.
+
+    THIS is the test that was red on the commit the coordinator rejected:
+    a register built from a real per-project template, fed a launchctl
+    snapshot carrying the SUBSTITUTED label, used to read not_loaded/fail
+    because _scan_launchd_dir never resolved the placeholder against
+    anything -- an exact-match comparison between a literal
+    "${VNX_PROJECT_ID}" string and a real launchctl label can never
+    succeed."""
+
+    def test_installed_job_with_substituted_label_reads_as_loaded(self, tmp_path: Path) -> None:
+        launchd_dir = tmp_path / "launchd"
+        _write_plist(launchd_dir, "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        # launchctl reports the job under its REAL, resolved Label -- this
+        # is what a genuinely-installed per-project job looks like on disk.
+        runner = _fake_runner({"com.vnx.gate-obligation-runner.vnx-dev": {"pid": None, "last_exit_status": 11}})
+
+        result = bts._measure_launchd_liveness(
+            state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which, project_id="vnx-dev"
+        )
+
+        assert result["overall"] == "ok", result
+        assert result["jobs"]["com.vnx.gate-obligation-runner.vnx-dev"]["state"] == "loaded"
+        # the unresolved placeholder must never appear as a job key once a
+        # project_id was available to resolve it
+        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" not in result["jobs"]
+
+    def test_installed_job_not_loaded_still_fails_with_resolved_label(self, tmp_path: Path) -> None:
+        """The fix must not swallow a REAL finding: a per-project job that
+        genuinely is not loaded still forces overall to fail, keyed by its
+        resolved label."""
+        launchd_dir = tmp_path / "launchd"
+        _write_plist(launchd_dir, "com.vnx.receipt-processor.${VNX_PROJECT_ID}")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        runner = _fake_runner({})  # nothing loaded
+
+        result = bts._measure_launchd_liveness(
+            state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which, project_id="vnx-dev"
+        )
+
+        assert result["overall"] == "fail", result
+        assert result["jobs"]["com.vnx.receipt-processor.vnx-dev"]["state"] == "not_loaded"
+
+    def test_project_id_defaults_from_state_dir_when_not_passed_explicitly(self, tmp_path: Path) -> None:
+        """The common, real-world path: SessionStart never passes
+        project_id explicitly -- it must be derived from state_dir the same
+        way this file already derives it everywhere else
+        (project_id_from_state_dir). Uses that resolver's repo-local branch
+        (a ``.vnx-project-id`` marker found walking up from state_dir) --
+        the same mechanism this actual repo's own root marker uses -- so
+        this test needs no Path.home monkeypatching at all."""
+        launchd_dir = tmp_path / "launchd"
+        _write_plist(launchd_dir, "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}")
+        (tmp_path / ".vnx-project-id").write_text("vnx-dev\n", encoding="utf-8")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        runner = _fake_runner({"com.vnx.gate-obligation-runner.vnx-dev": {"pid": None, "last_exit_status": 0}})
+
+        result = bts._measure_launchd_liveness(
+            state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which
+        )
+
+        assert result["overall"] == "ok", result
+        assert result["jobs"]["com.vnx.gate-obligation-runner.vnx-dev"]["state"] == "loaded"
+
+    def test_unresolvable_project_id_reads_unknown_not_fail(self, tmp_path: Path) -> None:
+        """No project id resolvable at all (a state_dir this module cannot
+        attribute to any project): the per-project job's expected label
+        stays the raw placeholder, which can never match a real launchctl
+        label -- must read as 'unknown' ('we cannot judge this job'), never
+        a fabricated 'not_loaded'/fail for a job we could not even name."""
+        launchd_dir = tmp_path / "launchd"
+        _write_plist(launchd_dir, "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}")
+        state_dir = tmp_path / "state"  # no .vnx-project-id marker anywhere above this
+        state_dir.mkdir()
+        runner = _fake_runner({})  # nothing loaded, irrelevant here
+
+        result = bts._measure_launchd_liveness(state_dir, launchd_dir=launchd_dir, runner=runner, which_fn=_present_which)
+
+        assert result["overall"] == "unknown", result
+        assert result["jobs"]["com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}"]["state"] == "unknown"
+
+
 class TestMeasureLaunchdLivenessNotApplicable:
     """PR #1755 CI failure: on a Linux CI runner launchctl does not exist at
     all, so every job's loaded/not-loaded state is structurally unknowable
@@ -588,15 +730,19 @@ class TestMeasureLaunchdLivenessNotApplicable:
         landed.
 
         OI-1509/OI-1510 (golf 3): the expected job key is now the
-        unsubstituted "${VNX_PROJECT_ID}"-suffixed Label -- see
-        test_real_repo_register_finds_the_known_jobs above."""
+        project-resolved Label -- ``state_dir`` here is a throwaway tmp_path
+        with no resolvable project id of its own, so ``project_id`` is
+        passed explicitly (mirrors what a real SessionStart run resolves
+        from its actual central state_dir). See
+        test_real_repo_register_finds_the_known_jobs above for why an
+        unresolved placeholder must never stand in for this."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
 
-        result = bts._measure_launchd_liveness(state_dir, which_fn=_absent_which)
+        result = bts._measure_launchd_liveness(state_dir, which_fn=_absent_which, project_id="vnx-dev")
 
         assert result["overall"] == "unknown"
         assert result.get("unparseable_plists", []) == []
-        assert "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}" in result["jobs"]
+        assert "com.vnx.gate-obligation-runner.vnx-dev" in result["jobs"]
         for label, info in result["jobs"].items():
             assert info["state"] == "not_applicable", f"{label}: {info}"
