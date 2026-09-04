@@ -570,6 +570,47 @@ def test_cli_no_write_persists_findings_in_report(fake_state: Path) -> None:
     assert heartbeat.exists(), "heartbeat must be written on every run"
 
 
+def test_cli_latest_findings_reads_back_without_a_new_sweep(fake_state: Path, capsys) -> None:
+    """--latest-findings is the cheap read-back path a SessionStart hook can
+    afford to call every session: it must NOT run a sweep (no file touched
+    beyond the read) and must report the findings a PRIOR --config sweep
+    persisted."""
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+
+    rc = cli.main(
+        [
+            "--config",
+            str(REPO_ROOT / "configs" / "producer_freshness.yaml"),
+            "--state-dir",
+            str(fake_state),
+        ]
+    )
+    assert rc == cli.EXIT_OK
+    capsys.readouterr()  # drain the first sweep's stdout
+
+    before = {p: p.stat().st_mtime for p in fake_state.rglob("*") if p.is_file()}
+    rc = cli.main(["--state-dir", str(fake_state), "--latest-findings"])
+    after = {p: p.stat().st_mtime for p in fake_state.rglob("*") if p.is_file()}
+    assert rc == cli.EXIT_OK
+    assert before == after, "--latest-findings must not write or touch any file"
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["swept"] is True
+    assert out["findings_count"] > 0
+    assert any(f["producer"] == "governance_metrics" for f in out["findings"])
+
+
+def test_cli_latest_findings_swept_false_on_an_empty_store(tmp_path: Path, capsys) -> None:
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    rc = cli.main(["--state-dir", str(state_dir), "--latest-findings"])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["swept"] is False
+
+
 # ---------------------------------------------------------------------------
 # 20260816: "PRs merged since the last gate result" — scan_newest + event filter
 # ---------------------------------------------------------------------------
@@ -738,3 +779,195 @@ def test_review_gate_results_freshness_empty_dir_is_missing(tmp_path: Path) -> N
     assert section["findings"][0]["key"] == "results"
     assert section["findings"][0]["kind"] == "missing"
     assert section["findings"][0]["expected_key_absent"] is True
+
+
+# ---------------------------------------------------------------------------
+# latest_findings() — OI-1460: the sweep already detects silent producers
+# (findings_count lands in the heartbeat's `details`, and every finding is
+# appended to producer_freshness.ndjson), but nothing reads that back for a
+# human/session to see. hooks/monitor_tripwire.sh only checks the heartbeat's
+# OWN age; hooks/sessionstart.sh's beacon digest only shows the coarse
+# ok/stale verdict of that same heartbeat. Neither ever surfaces WHICH
+# producer/key went silent, or for how long. Measured live 2026-09-04 in this
+# repo's own store: the last real sweep (run_id 91dc22bbd480) found 10
+# findings, including review_gate_obligations/codex_gate silent 24.88 days --
+# sitting in producer_freshness.ndjson, unread by anything. latest_findings()
+# is the read-back half of the fix: it answers "what did the last sweep find"
+# without running a new sweep, so a cheap SessionStart hook can shell out to
+# it the same way it already shells out to health_check.py.
+# ---------------------------------------------------------------------------
+
+
+def test_latest_findings_swept_false_when_report_file_missing(tmp_path: Path) -> None:
+    """'Never swept' must not read as 'swept, zero findings' -- absence of the
+    report file is its own state, not a favorable default."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    result = pf.latest_findings(state_dir)
+
+    assert result["swept"] is False
+    assert result["run_id"] is None
+    assert result["findings"] == []
+
+
+def test_latest_findings_swept_true_zero_findings_on_a_clean_run(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    report = {
+        "run_id": "clean0000001",
+        "timestamp": "2026-09-04T10:00:00Z",
+        "state_dir": str(state_dir),
+        "producers_evaluated": 3,
+        "keys_evaluated": 12,
+        "findings_count": 0,
+        "status": "ok",
+        "producers": [],
+        "findings": [],
+    }
+    pf.append_report(state_dir, report)
+
+    result = pf.latest_findings(state_dir)
+
+    assert result["swept"] is True
+    assert result["run_id"] == "clean0000001"
+    assert result["findings"] == []
+    assert result["findings_count"] == 0
+
+
+def test_latest_findings_returns_only_the_most_recent_runs_findings(tmp_path: Path) -> None:
+    """Two sweeps are appended (older run stale on codex_gate, newer run
+    clean on codex_gate but stale on a different key). Only the NEWER run's
+    findings must come back -- an old finding must not linger forever just
+    because the file is append-only."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    old_report = {
+        "run_id": "oldrun000001",
+        "timestamp": "2026-09-01T10:00:00Z",
+        "state_dir": str(state_dir),
+        "producers_evaluated": 1,
+        "keys_evaluated": 1,
+        "findings_count": 1,
+        "status": "stale",
+        "producers": [],
+        "findings": [
+            {
+                "producer": "review_gate_obligations",
+                "key": "codex_gate",
+                "kind": "stale",
+                "last_seen": "2026-08-01T00:00:00Z",
+                "silence_seconds": 30 * DAY,
+                "silence_days": 30.0,
+                "cadence_seconds": DAY,
+            }
+        ],
+    }
+    new_report = {
+        "run_id": "newrun000002",
+        "timestamp": "2026-09-04T10:00:00Z",
+        "state_dir": str(state_dir),
+        "producers_evaluated": 1,
+        "keys_evaluated": 1,
+        "findings_count": 1,
+        "status": "stale",
+        "producers": [],
+        "findings": [
+            {
+                "producer": "governance_metrics",
+                "key": "oi_resolution_rate",
+                "kind": "stale",
+                "last_seen": "2026-06-21T00:00:00Z",
+                "silence_seconds": 75 * DAY,
+                "silence_days": 75.0,
+                "cadence_seconds": 3 * DAY,
+            }
+        ],
+    }
+    pf.append_report(state_dir, old_report)
+    pf.append_report(state_dir, new_report)
+
+    result = pf.latest_findings(state_dir)
+
+    assert result["swept"] is True
+    assert result["run_id"] == "newrun000002"
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["producer"] == "governance_metrics"
+    assert result["findings"][0]["key"] == "oi_resolution_rate"
+    keys_seen = {(f["producer"], f["key"]) for f in result["findings"]}
+    assert ("review_gate_obligations", "codex_gate") not in keys_seen, (
+        "a finding from a superseded run must not leak into the latest read"
+    )
+
+
+def test_latest_findings_limit_caps_the_returned_list(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    findings = [
+        {
+            "producer": "governance_metrics",
+            "key": f"metric_{i}",
+            "kind": "stale",
+            "last_seen": "2026-06-21T00:00:00Z",
+            "silence_seconds": 75 * DAY,
+            "silence_days": 75.0,
+            "cadence_seconds": 3 * DAY,
+        }
+        for i in range(5)
+    ]
+    report = {
+        "run_id": "capped000001",
+        "timestamp": "2026-09-04T10:00:00Z",
+        "state_dir": str(state_dir),
+        "producers_evaluated": 1,
+        "keys_evaluated": 5,
+        "findings_count": 5,
+        "status": "stale",
+        "producers": [],
+        "findings": findings,
+    }
+    pf.append_report(state_dir, report)
+
+    result = pf.latest_findings(state_dir, limit=2)
+
+    assert result["findings_count"] == 5, "the true count must survive even when the list is capped"
+    assert len(result["findings"]) == 2
+
+
+def test_latest_findings_ignores_a_torn_final_line(tmp_path: Path) -> None:
+    """A crash mid-append can leave a truncated final line. latest_findings()
+    must not raise, and must still resolve the last COMPLETE sweep."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    report = {
+        "run_id": "torntest0001",
+        "timestamp": "2026-09-04T10:00:00Z",
+        "state_dir": str(state_dir),
+        "producers_evaluated": 1,
+        "keys_evaluated": 1,
+        "findings_count": 1,
+        "status": "stale",
+        "producers": [],
+        "findings": [
+            {
+                "producer": "governance_metrics",
+                "key": "rework_rate",
+                "kind": "stale",
+                "last_seen": "2026-08-12T00:00:00Z",
+                "silence_seconds": 23.67 * DAY,
+                "silence_days": 23.67,
+                "cadence_seconds": 3 * DAY,
+            }
+        ],
+    }
+    pf.append_report(state_dir, report)
+    path = state_dir / pf.REPORT_FILENAME
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write('{"event_type": "producer_freshness_sweep", "run_id": "torn')  # no newline, no close
+
+    result = pf.latest_findings(state_dir)
+
+    assert result["swept"] is True
+    assert result["run_id"] == "torntest0001"
+    assert len(result["findings"]) == 1

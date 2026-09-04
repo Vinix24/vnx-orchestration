@@ -17,6 +17,16 @@ Exit codes (house style, cf. check_intelligence_health.py):
 ``--no-write`` performs a read-only sweep (acceptance runs against the live
 store): nothing is appended, no heartbeat is written, no harvest cache is
 touched; the report goes to stdout only.
+
+``--latest-findings`` (OI-1460) is a SEPARATE, cheaper read-only mode: it runs
+NO sweep at all (no directory globs, no sqlite queries, no launchd harvest) —
+it only reads back whatever the last completed sweep already persisted to
+``producer_freshness.ndjson`` via ``producer_freshness.latest_findings()``.
+This is the mode ``hooks/sessionstart.sh`` shells out to on every session
+(same "reuse the existing CLI via subprocess" convention as its beacon-health
+section calling ``scripts/health_check.py``): a full sweep is a scheduled
+batch job, not something a session-start hot path should re-run on every
+``claude`` launch.
 """
 from __future__ import annotations
 
@@ -81,6 +91,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--no-write", action="store_true", help="read-only sweep; report to stdout only")
     parser.add_argument("--skip-job-exits", action="store_true", help="do not harvest launchd exit codes")
     parser.add_argument("--human", action="store_true", help="human-readable output")
+    parser.add_argument(
+        "--latest-findings",
+        action="store_true",
+        help=(
+            "read back the last persisted sweep's findings (OI-1460) and exit — "
+            "runs NO new sweep, writes NOTHING, does not require --config/PyYAML. "
+            "The cheap path a SessionStart hook can afford to call every session."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -88,6 +107,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ImportError as exc:
         emit_json({"ok": False, "error": {"code": "dependency", "message": str(exc)}})
         return EXIT_DEPENDENCY
+
+    if args.latest_findings:
+        try:
+            state_dir = Path(args.state_dir) if args.state_dir else _default_state_dir()
+        except (OSError, RuntimeError, KeyError) as exc:
+            emit_json({"ok": False, "error": {"code": "io", "message": f"state dir: {exc}"}})
+            return EXIT_IO
+        result = pf.latest_findings(state_dir)
+        emit_json(result)
+        return EXIT_OK
 
     try:
         registry = pf.load_registry(Path(args.config))

@@ -188,6 +188,62 @@ $_BEACON_BAD"
       BEACON_SECTION="BEACON HEALTH UNAVAILABLE this session (UNMEASURED, not zero) — data dir unresolved or scripts/health_check.py missing."
     fi
 
+    # ── Producer freshness findings (OI-1460: a melder existed, no consumer read it) ──
+    # scripts/lib/producer_freshness.py already detects the exact failure
+    # OI-1460 names: "Geen enkele controle gaat af wanneer een poort STOPT met
+    # produceren" — it groups activity per producer KEY (per gate name, per
+    # metric, per dispatch-id prefix) and flags a key whose newest record is
+    # older than its own cadence. It runs on a schedule and writes every
+    # finding to producer_freshness.ndjson, plus a heartbeat on every run. But
+    # nothing previously read that back: hooks/monitor_tripwire.sh only checks
+    # the HEARTBEAT FILE'S AGE (is the monitor itself alive), and the Beacon
+    # health block above only shows producer_freshness_monitor's own derived
+    # health (ok/stale) as one beacon among many — never WHAT the sweep found.
+    # Measured live 2026-09-04 in this repo's own store: the beacon read
+    # [stale] with details.findings_count=10, and inside
+    # producer_freshness.ndjson for that same run one of the ten was
+    # review_gate_obligations/codex_gate silent for 24.88 days — a real gate
+    # that stopped producing, invisible without opening the NDJSON by hand.
+    # Reuses the existing CLI (scripts/producer_freshness_monitor.py) via
+    # subprocess, same convention as health_check.py/session_state_freshness.py
+    # above: --latest-findings runs NO new sweep and writes nothing, it only
+    # reads back whatever the last scheduled sweep already persisted — cheap
+    # enough for this hot path, unlike a full sweep (directory globs, sqlite
+    # queries, a launchd harvest) which stays a scheduled batch job.
+    PRODUCER_FINDINGS_SECTION=""
+    _PF_MONITOR_PY="$_HOOK_DIR/../scripts/producer_freshness_monitor.py"
+    if [ -n "$_VNX_STATE_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_PF_MONITOR_PY" ]; then
+      _PF_JSON="$("$_VNX_PY" "$_PF_MONITOR_PY" --state-dir "$_VNX_STATE_DIR" --latest-findings 2>/dev/null || true)"
+      if [ -n "$_PF_JSON" ] && command -v jq &>/dev/null; then
+        _PF_PARSE_OK=$(echo "$_PF_JSON" | jq -e '.swept | type == "boolean"' >/dev/null 2>&1 && echo yes || echo no)
+        if [ "$_PF_PARSE_OK" = "yes" ]; then
+          _PF_SWEPT=$(echo "$_PF_JSON" | jq -r '.swept')
+          if [ "$_PF_SWEPT" = "true" ]; then
+            _PF_COUNT=$(echo "$_PF_JSON" | jq -r '.findings_count // 0')
+            _PF_RUN_ID=$(echo "$_PF_JSON" | jq -r '.run_id // "unknown"')
+            if [ "$_PF_COUNT" -gt 0 ] 2>/dev/null; then
+              _PF_LINES=$(echo "$_PF_JSON" | jq -r '
+                .findings[] | "  - [\(.kind)] \(.producer)/\(.key): " +
+                (if .silence_days then "\(.silence_days)d silent (cadence \(.cadence_seconds // "unknown")s)" else "never written" end)
+              ' 2>/dev/null || true)
+              PRODUCER_FINDINGS_SECTION="Producer freshness: ${_PF_COUNT} silent producer key(s) at last sweep (run ${_PF_RUN_ID})
+$_PF_LINES"
+            else
+              PRODUCER_FINDINGS_SECTION="Producer freshness: last sweep (run ${_PF_RUN_ID}) found 0 silent producer keys"
+            fi
+          else
+            PRODUCER_FINDINGS_SECTION="PRODUCER FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — no sweep has ever been persisted under ${_VNX_STATE_DIR}/producer_freshness.ndjson. scripts/producer_freshness_monitor.py may never have run against this store."
+          fi
+        else
+          PRODUCER_FINDINGS_SECTION="PRODUCER FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — producer_freshness_monitor.py did not return a swept field."
+        fi
+      else
+        PRODUCER_FINDINGS_SECTION="PRODUCER FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — producer_freshness_monitor.py produced no output, or jq is missing."
+      fi
+    else
+      PRODUCER_FINDINGS_SECTION="PRODUCER FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — state dir unresolved or scripts/producer_freshness_monitor.py missing."
+    fi
+
     # ── State artifact freshness (golf 3A, absence-is-loud #1, OI-1512 fix-forward) ──
     # T0 reads a handful of point-in-time snapshots at SessionStart (t0_state.json,
     # open_items.json, terminal_state.json, dashboard_status.json,
@@ -265,6 +321,8 @@ $FRESHNESS_SECTION
 $T0_STATE_SECTION
 
 $BEACON_SECTION
+
+$PRODUCER_FINDINGS_SECTION
 
 CRITICAL: After every completion receipt, check quality advisory + open items before proceeding.
 Skills must NOT use @ prefix in Role field. Skill registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer).${T0_SKILL_BODY:+

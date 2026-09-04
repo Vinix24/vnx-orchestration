@@ -578,6 +578,93 @@ def append_report(state_dir: Path, report: Dict[str, Any]) -> Path:
     return path
 
 
+# A single sweep run can, in principle, touch every producer's every stale
+# key — but in practice (see configs/producer_freshness.yaml) a run's finding
+# block is a handful to a few dozen lines. 2000 mirrors
+# build_t0_state.py's _JOB_EXITS_TAIL_LINES: producer_freshness.ndjson is
+# append-only and grows forever (one sweep every 8h, forever), so a reader
+# that answers "what did the LAST run find" must bound its own read instead
+# of loading the whole file, without needing the run boundary to fall inside
+# an arbitrarily small window.
+_LATEST_FINDINGS_TAIL_LINES = 2000
+
+
+def latest_findings(state_dir: Path, *, limit: Optional[int] = None) -> Dict[str, Any]:
+    """Read back the most recent sweep's findings WITHOUT running a new sweep
+    (OI-1460: the sweep already detects a producer/gate that stopped writing —
+    this is the read-back half nothing previously called).
+
+    Three states, mirroring this module's existing "niet-gemeten is een derde
+    tak" convention (health_beacon.py's absent/unknown, evaluate_producer's
+    missing/stale):
+
+      - the report file does not exist at all (the monitor has never
+        completed a run against this state dir) -> ``"swept": False``
+      - the file exists and its last sweep found zero findings ->
+        ``"swept": True, "findings": []``
+      - the file exists and its last sweep found N findings ->
+        ``"swept": True, "findings": [...]`` (length N, or ``limit`` if given)
+
+    ``append_report`` always writes one ``producer_freshness_sweep`` record
+    immediately followed by that same run's ``producer_freshness_finding``
+    records, under one ``fcntl`` lock — so within the tail window, every
+    finding for the LATEST sweep record is a finding whose ``run_id`` matches
+    that sweep, appearing anywhere in the tail (before or after the sweep
+    line depends only on how many prior runs' records the tail window still
+    holds) -- filtering by run_id, not by file position, is what keeps a
+    superseded run's findings from leaking into the result once a later,
+    cleaner sweep has appended its own (now un-findinged) record.
+
+    Malformed lines (a partial final line from a crash mid-append, same
+    "torn tail" hazard ``ndjson_io.iter_ndjson`` already guards elsewhere) are
+    skipped rather than raised — mirrors
+    ``build_t0_state.py._last_job_exit_by_label``'s tolerance for the same
+    NDJSON-tail-read shape.
+    """
+    path = Path(state_dir) / REPORT_FILENAME
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {"swept": False, "run_id": None, "timestamp": None, "findings_count": 0, "findings": []}
+
+    latest_sweep: Optional[Dict[str, Any]] = None
+    findings_by_run: Dict[str, List[Dict[str, Any]]] = {}
+    for line in text.splitlines()[-_LATEST_FINDINGS_TAIL_LINES:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        event_type = record.get("event_type")
+        if event_type == "producer_freshness_sweep":
+            if latest_sweep is None or str(record.get("timestamp") or "") >= str(latest_sweep.get("timestamp") or ""):
+                latest_sweep = record
+        elif event_type == "producer_freshness_finding":
+            run_id = record.get("run_id")
+            findings_by_run.setdefault(run_id, []).append(record)
+
+    if latest_sweep is None:
+        return {"swept": False, "run_id": None, "timestamp": None, "findings_count": 0, "findings": []}
+
+    run_id = latest_sweep.get("run_id")
+    findings = findings_by_run.get(run_id, [])
+    findings_count = latest_sweep.get("findings_count", len(findings))
+    if limit is not None:
+        findings = findings[:limit]
+    return {
+        "swept": True,
+        "run_id": run_id,
+        "timestamp": latest_sweep.get("timestamp"),
+        "status": latest_sweep.get("status"),
+        "findings_count": findings_count,
+        "findings": findings,
+    }
+
+
 def write_heartbeat(state_dir: Path, report: Dict[str, Any]) -> Path:
     """Write the sweep heartbeat via the canonical HealthBeacon.
 
@@ -618,5 +705,6 @@ __all__ = [
     "evaluate_producer",
     "run_sweep",
     "append_report",
+    "latest_findings",
     "write_heartbeat",
 ]
