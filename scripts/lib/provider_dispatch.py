@@ -1611,22 +1611,68 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _worker_role_env(role: Optional[str]) -> Optional[Dict[str, str]]:
-    """Build the ``VNX_WORKER_ROLE`` env overlay for a provider-lane worker.
+    """Build the env overlay for a provider-lane worker: role + VNX_DATA_DIR.
 
-    Mirrors ``TmuxInteractiveDispatch._spawn_session`` (the claude/tmux lane): a
-    genuinely-set role in the dispatch spec is exported as ``VNX_WORKER_ROLE`` so
-    the worker-scope PreToolUse enforcement hook
+    Role half — mirrors ``TmuxInteractiveDispatch._spawn_session`` (the
+    claude/tmux lane): a genuinely-set role in the dispatch spec is exported as
+    ``VNX_WORKER_ROLE`` so the worker-scope PreToolUse enforcement hook
     (``scripts/hooks/pretooluse_worker_scope_enforce.py``) resolves the role's
     permission profile instead of the restrictive code-worker fallback (OI-1209).
     A missing role stays missing — nothing is exported and the fallback stands,
     which is the existing, desired behavior. ``normalize_role`` strips the empty
     sentinel and ``identity_unresolved`` so neither leaks into the worker env as
     a fabricated role.
+
+    Data-dir half (OI-1635): every provider-lane spawn (kimi/codex/deepseek-
+    harness/glm-harness/gemini/litellm) tells its worker, in the dispatch
+    instructions themselves, to write its completion report to literal
+    ``$VNX_DATA_DIR/unified_reports/<id>.md`` — but nothing used to actually SET
+    that env var in the worker's own process, so the worker was left to
+    independently resolve "VNX_DATA_DIR" however it saw fit. Measured
+    2026-09-05: a worker resolving via ``project_root.resolve_data_dir()`` (the
+    CLAUDE.md-documented helper) lands on the repo-local ``<project_root>/.vnx-data``
+    by default, while this module's own ``_resolve_data_dir()``/``_resolve_state_dir()``
+    (used by ``_emit_governance``/the envelope to write the receipt+report) resolve
+    the CENTRAL ``~/.vnx-data/<project_id>`` store — two different answers for the
+    same literal name, from the SAME process family. The worker's real report then
+    lands in a store the governance layer never looks at, and the central ledger
+    gets only the generic completion-text wrapper.
+
+    Fix: stamp the ALREADY-RESOLVED central ``data_dir``/``state_dir`` (computed
+    here, in the dispatcher process, BEFORE the worker's own worktree-scoped CWD
+    ever enters the picture) directly into the worker's subprocess env, exactly
+    mirroring the tmux lane's completion-command ``env_prefix`` (see
+    ``tmux_interactive_dispatch.py``'s ``VNX_STATE_DIR=... VNX_DATA_DIR=...
+    VNX_DATA_DIR_EXPLICIT=1``). Because the value is an absolute path baked in as
+    an env var — not re-derived by the worker from its own CWD — it survives
+    unchanged whether the worker resolves it via a bare ``$VNX_DATA_DIR`` shell
+    reference, via ``project_root.resolve_data_dir()``, or via
+    ``vnx_paths.resolve_paths()``: both of those helpers treat
+    ``VNX_DATA_DIR_EXPLICIT=1`` + ``VNX_DATA_DIR`` as their HIGHEST-precedence
+    override, ahead of any CWD/git-toplevel resolution. A worktree can therefore
+    never re-introduce this drift, because the worker is never asked to resolve
+    the path itself in the first place.
+
+    Best-effort: a data-dir resolution failure here must never break the spawn
+    (the existing role-only behavior is the fallback) — logged, not raised.
     """
-    resolved = normalize_role(role)
-    if not resolved:
-        return None
-    return {"VNX_WORKER_ROLE": resolved}
+    env: Dict[str, str] = {}
+    resolved_role = normalize_role(role)
+    if resolved_role:
+        env["VNX_WORKER_ROLE"] = resolved_role
+
+    try:
+        env["VNX_DATA_DIR"] = str(_resolve_data_dir())
+        env["VNX_STATE_DIR"] = str(_resolve_state_dir())
+        env["VNX_DATA_DIR_EXPLICIT"] = "1"
+    except Exception as exc:  # noqa: BLE001 — env overlay must never break a spawn
+        logger.warning(
+            "_worker_role_env: VNX_DATA_DIR resolution failed (worker env left "
+            "unset, worker will independently resolve — OI-1635 risk): %s",
+            exc,
+        )
+
+    return env or None
 
 
 def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
