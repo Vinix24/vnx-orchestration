@@ -278,7 +278,7 @@ class TestDispatchAttempts(_DbTestCase):
     def test_create_attempt(self):
         with self.conn() as conn:
             att = create_attempt(
-                conn, dispatch_id="d-att", terminal_id="T2", attempt_number=1
+                conn, dispatch_id="d-att", project_id="vnx-dev", terminal_id="T2", attempt_number=1
             )
             conn.commit()
         self.assertEqual(att["dispatch_id"], "d-att")
@@ -287,7 +287,7 @@ class TestDispatchAttempts(_DbTestCase):
 
     def test_update_attempt_success(self):
         with self.conn() as conn:
-            att = create_attempt(conn, dispatch_id="d-att", terminal_id="T2", attempt_number=1)
+            att = create_attempt(conn, dispatch_id="d-att", project_id="vnx-dev", terminal_id="T2", attempt_number=1)
             conn.commit()
             updated = update_attempt(conn, attempt_id=att["attempt_id"], state="succeeded")
             conn.commit()
@@ -295,7 +295,7 @@ class TestDispatchAttempts(_DbTestCase):
 
     def test_update_attempt_failure_records_reason(self):
         with self.conn() as conn:
-            att = create_attempt(conn, dispatch_id="d-att", terminal_id="T2", attempt_number=1)
+            att = create_attempt(conn, dispatch_id="d-att", project_id="vnx-dev", terminal_id="T2", attempt_number=1)
             conn.commit()
             updated = update_attempt(
                 conn, attempt_id=att["attempt_id"],
@@ -306,7 +306,7 @@ class TestDispatchAttempts(_DbTestCase):
 
     def test_attempt_events_appended(self):
         with self.conn() as conn:
-            att = create_attempt(conn, dispatch_id="d-att", terminal_id="T2", attempt_number=1)
+            att = create_attempt(conn, dispatch_id="d-att", project_id="vnx-dev", terminal_id="T2", attempt_number=1)
             conn.commit()
             events = get_events(conn, entity_id=att["attempt_id"])
         self.assertTrue(len(events) >= 1)

@@ -266,27 +266,50 @@ def create_attempt(
     conn: sqlite3.Connection,
     *,
     dispatch_id: str,
+    project_id: str,
     terminal_id: str,
     attempt_number: int,
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
 ) -> Dict[str, Any]:
-    """Create a new dispatch attempt record."""
+    """Create a new dispatch attempt record.
+
+    ADR-007: project_id is MANDATORY — no silent default, mirroring
+    register_dispatch(). Stamped on the INSERT row when the column exists
+    (mirrors register_dispatch's own _has_project_id_col guard); older stores
+    without the column are inserted exactly as before. OI-1625: the live
+    dispatch_attempts.project_id column is NOT NULL with no DEFAULT (post
+    migration 0031's adaptive-repair shape), so every prior INSERT here
+    raised sqlite3.IntegrityError and dispatch_attempts stayed permanently
+    empty despite 801+ rows in dispatches.
+    """
+    has_pid = _has_project_id_col(conn, "dispatch_attempts")
     attempt_id = _new_event_id()
     now = _now_utc()
-    conn.execute(
-        """
-        INSERT INTO dispatch_attempts
-            (attempt_id, dispatch_id, attempt_number, terminal_id, state, started_at, metadata_json)
-        VALUES (?, ?, ?, ?, 'pending', ?, ?)
-        """,
-        (attempt_id, dispatch_id, attempt_number, terminal_id, now, _dump(metadata)),
-    )
+    if has_pid:
+        conn.execute(
+            """
+            INSERT INTO dispatch_attempts
+                (attempt_id, dispatch_id, project_id, attempt_number, terminal_id, state, started_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (attempt_id, dispatch_id, project_id, attempt_number, terminal_id, now, _dump(metadata)),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO dispatch_attempts
+                (attempt_id, dispatch_id, attempt_number, terminal_id, state, started_at, metadata_json)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (attempt_id, dispatch_id, attempt_number, terminal_id, now, _dump(metadata)),
+        )
     _append_event(
         conn, event_type="attempt_created", entity_type="attempt",
         entity_id=attempt_id, from_state=None, to_state="pending", actor=actor,
         reason=f"attempt {attempt_number} for dispatch {dispatch_id}",
         metadata={"dispatch_id": dispatch_id, "terminal_id": terminal_id, "attempt_number": attempt_number},
+        project_id=project_id,
     )
     return dict(
         conn.execute("SELECT * FROM dispatch_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()

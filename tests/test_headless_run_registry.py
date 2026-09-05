@@ -71,6 +71,7 @@ class _RegistryTestCase(unittest.TestCase):
             attempt = create_attempt(
                 conn,
                 dispatch_id=dispatch_id,
+                project_id="vnx-dev",
                 terminal_id="T2",
                 attempt_number=1,
             )

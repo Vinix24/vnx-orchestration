@@ -404,6 +404,7 @@ class DispatchBroker:
             attempt_row = create_attempt(
                 conn,
                 dispatch_id=dispatch_id,
+                project_id=row.get("project_id"),
                 terminal_id=terminal_id,
                 attempt_number=attempt_number,
                 metadata={"actor": actor},
