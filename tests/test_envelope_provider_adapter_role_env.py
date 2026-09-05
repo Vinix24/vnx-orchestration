@@ -97,9 +97,12 @@ def test_spawn_receives_worker_role_overlay(provider_key, spawn_path, model):
     assert "extra_env" in kwargs, (
         f"{spawn_path} was called without an extra_env kwarg — the overlay is not threaded"
     )
-    assert kwargs["extra_env"] == {"VNX_WORKER_ROLE": "research-analyst"}, (
+    # OI-1635: the overlay also always carries VNX_DATA_DIR (see
+    # provider_dispatch._worker_role_env) — check role-key membership rather
+    # than exact dict equality.
+    assert kwargs["extra_env"].get("VNX_WORKER_ROLE") == "research-analyst", (
         f"{spawn_path} got extra_env={kwargs['extra_env']!r}, "
-        f"expected {{'VNX_WORKER_ROLE': 'research-analyst'}}"
+        f"expected VNX_WORKER_ROLE='research-analyst'"
     )
 
 
@@ -117,11 +120,16 @@ def test_kimi_spawn_receives_worker_role_overlay():
     mock_spawn.assert_called_once()
     kwargs = mock_spawn.call_args.kwargs
     assert "extra_env" in kwargs
-    assert kwargs["extra_env"] == {"VNX_WORKER_ROLE": "research-analyst"}
+    assert kwargs["extra_env"].get("VNX_WORKER_ROLE") == "research-analyst"
 
 
 def test_absent_role_threads_no_overlay():
-    """role=None must thread extra_env=None — never a fabricated default role."""
+    """role=None must thread no VNX_WORKER_ROLE key — never a fabricated default.
+
+    OI-1635: extra_env is no longer None in this case (it always carries the
+    VNX_DATA_DIR stamp — see provider_dispatch._worker_role_env), so the
+    assertion checks role-key absence rather than extra_env is None.
+    """
     plan = _plan(Provider.DEEPSEEK_HARNESS, role=None)
 
     with patch(
@@ -133,8 +141,9 @@ def test_absent_role_threads_no_overlay():
     mock_spawn.assert_called_once()
     kwargs = mock_spawn.call_args.kwargs
     assert "extra_env" in kwargs
-    assert kwargs["extra_env"] is None, (
-        f"absent role must thread extra_env=None, got {kwargs['extra_env']!r}"
+    assert kwargs["extra_env"] is not None
+    assert "VNX_WORKER_ROLE" not in kwargs["extra_env"], (
+        f"absent role must thread no VNX_WORKER_ROLE key, got {kwargs['extra_env']!r}"
     )
 
 
@@ -149,7 +158,7 @@ def test_identity_unresolved_sentinel_threads_no_overlay():
         ProviderAdapter().run(plan, "implement the change")
 
     mock_spawn.assert_called_once()
-    assert mock_spawn.call_args.kwargs["extra_env"] is None
+    assert "VNX_WORKER_ROLE" not in mock_spawn.call_args.kwargs["extra_env"]
 
 
 def test_local_gemma_receives_plan_role():
@@ -231,4 +240,4 @@ def test_explicit_role_wins_over_plan_role_for_harness():
     mock_spawn.assert_called_once()
     kwargs = mock_spawn.call_args.kwargs
     assert kwargs.get("role") == "backend-developer"
-    assert kwargs.get("extra_env") == {"VNX_WORKER_ROLE": "backend-developer"}
+    assert kwargs.get("extra_env", {}).get("VNX_WORKER_ROLE") == "backend-developer"
