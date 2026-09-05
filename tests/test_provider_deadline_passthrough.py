@@ -15,7 +15,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -461,6 +461,262 @@ class TestHarnessLaneDeadlinePassthrough:
         assert captured.get("total_deadline") == 900.0, (
             f"Without explicit total_deadline, spawn_claude should receive 900.0 "
             f"(its own default), got {captured.get('total_deadline')}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5b. OI-1627: _dispatch_codex (and same-parameter siblings _dispatch_kimi,
+#    _dispatch_gemini, _dispatch_litellm) must forward args.deadline_seconds
+#    as total_deadline to the spawn call. TestHarnessLaneDeadlinePassthrough
+#    above only proves spawn_deepseek_harness/spawn_glm_harness forward a
+#    total_deadline kwarg THEY WERE GIVEN — it never calls the actual
+#    provider_dispatch._dispatch_* routing functions, so it could not have
+#    caught the codex gap: spawn_codex was simply never given the kwarg at
+#    the call site (provider_dispatch.py, pre-fix). These tests exercise the
+#    real routing functions end-to-end so the same class of gap cannot recur
+#    at the argparse -> spawn boundary.
+# ---------------------------------------------------------------------------
+
+def _make_dispatch_spawn_result():
+    result = MagicMock()
+    result.returncode = 0
+    result.error = None
+    result.timed_out = False
+    result.event_writer_failures = 0
+    result.completion_text = ""
+    result.token_usage = {"input_tokens": 0, "output_tokens": 0}
+    result.model = None
+    return result
+
+
+class TestDispatchCodexDeadlinePassthrough:
+    """OI-1627: the reported defect. spawn_codex defaults total_deadline to
+    600.0 (codex_spawn.py); pre-fix, _dispatch_codex never passed the CLI's
+    --deadline-seconds value through, so a spec declaring 3600s silently ran
+    on a 600s clock."""
+
+    def _run(self, deadline_argv: list) -> tuple:
+        from provider_dispatch import _build_parser, _dispatch_codex
+
+        captured = {}
+
+        def fake_spawn(**kwargs):
+            captured["total_deadline"] = kwargs.get("total_deadline")
+            return _make_dispatch_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+
+        with patch("provider_dispatch._emit_governance", side_effect=lambda *a, **kw: None), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("provider_dispatch._resolve_codex_model", return_value="gpt-test"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.codex_spawn.spawn_codex", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", return_value=Path("/tmp/fake-wt-codex")), \
+             patch("provider_dispatch._remove_provider_worktree"):
+
+            args = _build_parser().parse_args([
+                "--provider", "codex",
+                "--terminal-id", "T1",
+                "--dispatch-id", "20260905-oi1627-codex-test",
+                "--instruction", "noop",
+                "--model", "gpt-test",
+                *deadline_argv,
+            ])
+            exit_code = _dispatch_codex(args)
+
+        return exit_code, captured.get("total_deadline")
+
+    def test_declared_deadline_reaches_spawn_codex(self):
+        """A dispatch declaring --deadline-seconds 3600 must make spawn_codex
+        receive total_deadline=3600.0 — not spawn_codex's own 600.0 default."""
+        exit_code, total_deadline = self._run(["--deadline-seconds", "3600"])
+
+        assert exit_code == 0
+        assert total_deadline == 3600.0, (
+            f"Expected spawn_codex to receive total_deadline=3600.0 (from "
+            f"--deadline-seconds), got {total_deadline!r}. Pre-fix, spawn_codex's "
+            f"own 600.0 default silently overrode the spec-declared deadline "
+            f"(OI-1627)."
+        )
+
+    def test_default_deadline_is_cli_900_not_spawn_600(self):
+        """Without an explicit --deadline-seconds, the CLI's own default (900,
+        'matches spawn_claude default' per --help) must reach spawn_codex —
+        not spawn_codex's unrelated 600.0 default."""
+        exit_code, total_deadline = self._run([])
+
+        assert exit_code == 0
+        assert total_deadline == 900.0, (
+            f"Expected spawn_codex to receive total_deadline=900.0 (the CLI "
+            f"default), got {total_deadline!r}."
+        )
+
+
+class TestDispatchKimiDeadlinePassthrough:
+    """Same gap, same parameter, found while sweeping provider_dispatch.py's
+    other spawn_* call sites for OI-1627: spawn_kimi accepts total_deadline
+    (default 900.0, kimi_spawn.py) but _dispatch_kimi never passed it."""
+
+    def test_declared_deadline_reaches_spawn_kimi(self):
+        from provider_dispatch import _build_parser, _dispatch_kimi
+
+        captured = {}
+
+        def fake_spawn(**kwargs):
+            captured["total_deadline"] = kwargs.get("total_deadline")
+            return _make_dispatch_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+
+        with patch("provider_dispatch._emit_governance", side_effect=lambda *a, **kw: None), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("provider_dispatch._resolve_kimi_model_label", return_value="kimi-default"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.kimi_spawn.spawn_kimi", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", return_value=Path("/tmp/fake-wt-kimi")), \
+             patch("provider_dispatch._remove_provider_worktree"):
+
+            args = _build_parser().parse_args([
+                "--provider", "kimi",
+                "--terminal-id", "T1",
+                "--dispatch-id", "20260905-oi1627-kimi-test",
+                "--instruction", "noop",
+                "--model", "sonnet",
+                "--deadline-seconds", "3600",
+            ])
+            exit_code = _dispatch_kimi(args)
+
+        assert exit_code == 0
+        assert captured.get("total_deadline") == 3600.0, (
+            f"Expected spawn_kimi to receive total_deadline=3600.0, got "
+            f"{captured.get('total_deadline')!r}."
+        )
+
+
+class TestDispatchGeminiDeadlinePassthrough:
+    """Same gap: spawn_gemini accepts total_deadline (default 600.0,
+    gemini_spawn.py) but _dispatch_gemini never passed it."""
+
+    def test_declared_deadline_reaches_spawn_gemini(self):
+        from provider_dispatch import _build_parser, _dispatch_gemini
+
+        captured = {}
+
+        def fake_spawn(**kwargs):
+            captured["total_deadline"] = kwargs.get("total_deadline")
+            return _make_dispatch_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+
+        with patch("provider_dispatch._emit_governance", side_effect=lambda *a, **kw: None), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.gemini_spawn.spawn_gemini", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", return_value=Path("/tmp/fake-wt-gemini")), \
+             patch("provider_dispatch._remove_provider_worktree"):
+
+            args = _build_parser().parse_args([
+                "--provider", "gemini",
+                "--terminal-id", "T1",
+                "--dispatch-id", "20260905-oi1627-gemini-test",
+                "--instruction", "noop",
+                "--model", "sonnet",
+                "--deadline-seconds", "3600",
+            ])
+            exit_code = _dispatch_gemini(args)
+
+        assert exit_code == 0
+        assert captured.get("total_deadline") == 3600.0, (
+            f"Expected spawn_gemini to receive total_deadline=3600.0, got "
+            f"{captured.get('total_deadline')!r}."
+        )
+
+
+class TestDispatchLiteLLMDeadlinePassthrough:
+    """Same gap on both litellm entry points: spawn_litellm (default 600.0)
+    and spawn_litellm_agentic (default None -> its own 1800s env-configurable
+    fallback) — neither received total_deadline from _dispatch_litellm."""
+
+    def test_declared_deadline_reaches_spawn_litellm(self):
+        from provider_dispatch import _build_parser, _dispatch_litellm
+
+        captured = {}
+
+        def fake_spawn(**kwargs):
+            captured["total_deadline"] = kwargs.get("total_deadline")
+            return _make_dispatch_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+
+        with patch.dict("os.environ", {
+            "VNX_LITELLM_MODEL": "deepseek/deepseek-v4-pro",
+            "DEEPSEEK_API_KEY": "sk-test",
+        }, clear=False), \
+             patch("provider_dispatch._emit_governance", side_effect=lambda *a, **kw: None), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.litellm_spawn.spawn_litellm", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", return_value=Path("/tmp/fake-wt-litellm")), \
+             patch("provider_dispatch._remove_provider_worktree"):
+
+            args = _build_parser().parse_args([
+                "--provider", "litellm:deepseek",
+                "--terminal-id", "T1",
+                "--dispatch-id", "20260905-oi1627-litellm-test",
+                "--instruction", "noop",
+                "--model", "sonnet",
+                "--deadline-seconds", "3600",
+            ])
+            exit_code = _dispatch_litellm(args)
+
+        assert exit_code == 0
+        assert captured.get("total_deadline") == 3600.0, (
+            f"Expected spawn_litellm to receive total_deadline=3600.0, got "
+            f"{captured.get('total_deadline')!r}."
+        )
+
+    def test_declared_deadline_reaches_spawn_litellm_agentic(self):
+        from provider_dispatch import _build_parser, _dispatch_litellm
+
+        captured = {}
+
+        def fake_spawn(**kwargs):
+            captured["total_deadline"] = kwargs.get("total_deadline")
+            return _make_dispatch_spawn_result()
+
+        mock_event_store = MagicMock()
+        mock_event_store.append = MagicMock()
+
+        with patch.dict("os.environ", {
+            "VNX_LITELLM_AGENTIC": "1",
+            "VNX_LITELLM_MODEL": "deepseek/deepseek-v4-pro",
+            "DEEPSEEK_API_KEY": "sk-test",
+        }, clear=False), \
+             patch("provider_dispatch._emit_governance", side_effect=lambda *a, **kw: None), \
+             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
+             patch("event_store.EventStore", return_value=mock_event_store), \
+             patch("provider_spawns.litellm_spawn.spawn_litellm_agentic", side_effect=fake_spawn), \
+             patch("provider_dispatch._create_provider_worktree", return_value=Path("/tmp/fake-wt-litellm-ag")), \
+             patch("provider_dispatch._remove_provider_worktree"):
+
+            args = _build_parser().parse_args([
+                "--provider", "litellm:deepseek",
+                "--terminal-id", "T1",
+                "--dispatch-id", "20260905-oi1627-litellm-agentic-test",
+                "--instruction", "noop",
+                "--model", "sonnet",
+                "--deadline-seconds", "3600",
+            ])
+            exit_code = _dispatch_litellm(args)
+
+        assert exit_code == 0
+        assert captured.get("total_deadline") == 3600.0, (
+            f"Expected spawn_litellm_agentic to receive total_deadline=3600.0, "
+            f"got {captured.get('total_deadline')!r}."
         )
 
 

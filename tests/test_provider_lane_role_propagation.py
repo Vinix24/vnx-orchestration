@@ -112,6 +112,7 @@ def _kimi_args(role: "str | None") -> argparse.Namespace:
         dispatch_paths="",
         pr_id=None,
         role=role,
+        deadline_seconds=900,
     )
 
 

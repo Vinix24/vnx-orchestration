@@ -20,7 +20,7 @@ def _args(**kw):
         provider="gemini", terminal_id="T1", dispatch_id="test-gemini-oi155",
         instruction="test", model="sonnet", max_retries=3, no_auto_commit=False,
         gate="", dispatch_paths="", pr_id=None, role="developer",
-        no_repo_map=False, tags=[],
+        no_repo_map=False, tags=[], deadline_seconds=900,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)

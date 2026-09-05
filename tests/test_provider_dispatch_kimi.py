@@ -28,6 +28,7 @@ def _build_args(**overrides):
         "dispatch_paths": "",
         "pr_id": None,
         "role": None,
+        "deadline_seconds": 900,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
