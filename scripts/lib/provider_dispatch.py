@@ -2000,7 +2000,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
             cwd=worker_cwd,
-            total_deadline=float(args.deadline_seconds),
+            total_deadline=float(getattr(args, "deadline_seconds", 900)),
             extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
@@ -2460,7 +2460,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 lane=lane_key,
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
-                total_deadline=float(args.deadline_seconds),
+                total_deadline=float(getattr(args, "deadline_seconds", 900)),
                 extra_env=_worker_role_env(getattr(args, "role", None)),
             )
         else:
@@ -2474,7 +2474,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
                 tool_call_shape=_tool_call_shape,
                 event_writer=event_store.append if event_store is not None else None,
                 cwd=worker_cwd,
-                total_deadline=float(args.deadline_seconds),
+                total_deadline=float(getattr(args, "deadline_seconds", 900)),
                 extra_env=_worker_role_env(getattr(args, "role", None)),
             )
         end_time = datetime.now(timezone.utc)
@@ -2589,7 +2589,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
                 (getattr(args, "task_class", "") or "").strip()
                 or (os.environ.get("VNX_TASK_CLASS", "") or "").strip()
             ) or None,
-            total_deadline=float(args.deadline_seconds),
+            total_deadline=float(getattr(args, "deadline_seconds", 900)),
             extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
@@ -2875,7 +2875,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             terminal_id=args.terminal_id,
             event_writer=event_store.append,
             cwd=worker_cwd,
-            total_deadline=float(args.deadline_seconds),
+            total_deadline=float(getattr(args, "deadline_seconds", 900)),
             extra_env=_worker_role_env(getattr(args, "role", None)),
         )
         end_time = datetime.now(timezone.utc)
