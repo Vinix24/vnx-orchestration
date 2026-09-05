@@ -248,10 +248,32 @@ def _normalize_complete_events(
     payload: dict,
     make: Callable,
 ) -> Optional[CanonicalEvent]:
-    """Handle error, turn.completed, result/message, token_count events."""
+    """Handle error, turn.completed, task_complete, result/message, token_count events."""
     if etype == "error":
         msg = payload.get("message", payload.get("error", payload.get("text", "")))
         return make("error", {"message": str(msg) if msg else str(payload)[:200]})
+    if etype == "task_complete":
+        # OI-1628, measured 2026-09-05 on three live dispatches
+        # (~/.codex/sessions/2026/09/05/rollout-*.jsonl): codex reports quota/
+        # usage-limit exhaustion as an `error` object nested inside its own
+        # `task_complete` event, not as a top-level `error` event type, e.g.
+        #   {"type": "task_complete", "error": {"message": "You've hit your
+        #    usage limit. ...", "codex_error_info": "usage_limit_exceeded"}}
+        # Before this branch, task_complete matched none of the cases here
+        # and fell through to the unknown-type passthrough below (mapped to
+        # "info"), discarding the error text before failure classification
+        # ever saw it.
+        err = payload.get("error")
+        if isinstance(err, dict) and err:
+            msg = err.get("message") or err.get("codex_error_info") or str(err)
+            info = err.get("codex_error_info")
+            if info and str(info) not in str(msg):
+                msg = f"{msg} (codex_error_info: {info})"
+            return make("error", {"message": str(msg)})
+        tc = _extract_token_count_payload(raw)
+        token_count = _normalize_token_count(tc) if tc else None
+        data: dict = {"token_count": token_count} if token_count else {}
+        return make("complete", data)
     if etype == "turn.completed":
         tc = _extract_token_count_payload(raw)
         token_count = _normalize_token_count(tc) if tc else None
@@ -541,6 +563,14 @@ def _drain_stream(
     stopped_early = False
     last_token_usage: Optional[Dict[str, Any]] = None
     last_stuck_log = 0.0
+    # OI-1628: capture the first in-stream "error" canonical event's message
+    # so it reaches CodexSpawnResult.error (and from there classify_failure).
+    # Previously this loop only inspected an error event's "reason" key (set
+    # by the drainer mixin's own synthetic timeout/stall errors) to flip
+    # timed_out — a real codex error/task_complete error's "message" text was
+    # read by no one, so the caller always fell back to the generic "codex
+    # stderr tail" surfacing below regardless of what the stream said.
+    captured_error: Optional[str] = None
 
     try:
         for canonical_event in normalizer.drain_stream(
@@ -559,9 +589,14 @@ def _drain_stream(
                 if tc:
                     last_token_usage = tc
             if canonical_event.event_type == "error":
-                reason = (canonical_event.data or {}).get("reason", "")
+                error_data = canonical_event.data or {}
+                reason = error_data.get("reason", "")
                 if "timeout" in (reason or "").lower():
                     timed_out = True
+                if captured_error is None:
+                    msg = error_data.get("message") or reason
+                    if msg:
+                        captured_error = str(msg)
 
             stop, last_stuck_log, writer_failed = _process_one_event(
                 canonical_event, terminal_id, dispatch_id,
@@ -588,7 +623,7 @@ def _drain_stream(
         _wait_proc(proc)
         return completion_parts, events_written, session_id, timed_out, stopped_early, last_token_usage, str(exc), _event_writer_failures
 
-    return completion_parts, events_written, session_id, timed_out, stopped_early, last_token_usage, None, _event_writer_failures
+    return completion_parts, events_written, session_id, timed_out, stopped_early, last_token_usage, captured_error, _event_writer_failures
 
 
 # ---------------------------------------------------------------------------

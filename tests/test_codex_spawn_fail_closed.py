@@ -192,6 +192,62 @@ class TestCodexSpawnTimeout:
 
 
 # ---------------------------------------------------------------------------
+# OI-1628: a task_complete-derived "error" canonical event's message must
+# reach CodexSpawnResult.error, not vanish (previously only "reason" was
+# read, to flip timed_out — a real error message was captured by no one and
+# the caller fell back to the generic "codex stderr tail" surfacing).
+# ---------------------------------------------------------------------------
+
+class TestCodexSpawnQuotaExhaustion:
+    """spawn_codex surfaces a codex quota/usage-limit error into result.error."""
+
+    def test_task_complete_usage_limit_error_reaches_result_error(self):
+        error_event = CanonicalEvent(
+            dispatch_id="test-quota",
+            terminal_id="T1",
+            provider="codex",
+            event_type="error",
+            data={
+                "message": (
+                    "You've hit your usage limit. Upgrade to Pro "
+                    "(https://chatgpt.com/explore/pro), visit "
+                    "https://chatgpt.com/codex/settings/usage to purchase "
+                    "more credits or try again at 2:27 PM. "
+                    "(codex_error_info: usage_limit_exceeded)"
+                )
+            },
+            observability_tier=1,
+        )
+
+        with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 1
+            proc.wait = MagicMock(return_value=1)
+            proc.poll = MagicMock(return_value=1)
+            stdin_mock = MagicMock()
+            proc.stdin = stdin_mock
+            proc.stderr = _mock_stderr(b"Reading prompt from stdin...\n")
+            MockPopen.return_value = proc
+
+            with patch(
+                "provider_spawns.codex_spawn._NormalizerHost.drain_stream",
+                return_value=iter([error_event]),
+            ):
+                result = spawn_codex(
+                    prompt="test",
+                    model="",
+                    dispatch_id="test-quota",
+                    terminal_id="T1",
+                )
+
+        assert result.error is not None, "Expected result.error to be populated"
+        assert "usage_limit_exceeded" in result.error, (
+            f"Expected the captured quota message in result.error, got: {result.error!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 4: on_event=False stops stream early
 # ---------------------------------------------------------------------------
 

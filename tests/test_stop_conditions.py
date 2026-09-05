@@ -80,6 +80,20 @@ def _kimi_403_failure_reason() -> str:
     )
 
 
+def _codex_quota_failure_reason() -> str:
+    # OI-1628: the exact shape a codex quota-exhaustion receipt carries once
+    # both codex_spawn.py's task_complete handling and
+    # failure_classification.py's credit_exhausted keywords are fixed —
+    # grounded on the real task_complete event measured 2026-09-05 on three
+    # live dispatches (~/.codex/sessions/2026/09/05/rollout-*.jsonl).
+    return (
+        "openai-api: credit/balance exhausted — You've hit your usage limit. "
+        "Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits "
+        "or try again at 2:27 PM. (codex_error_info: usage_limit_exceeded)"
+    )
+
+
 def _gate_result(pr_number, gate, *, status, reason=None, blocking_findings=None, recorded_at="2026-09-04T00:00:00Z"):
     d = {"pr_number": pr_number, "gate": gate, "status": status, "recorded_at": recorded_at}
     if reason is not None:
@@ -270,6 +284,30 @@ class TestProviderExhausted:
                 "failure_reason": _kimi_403_failure_reason(),
                 "dispatch_id": f"d{i}",
                 "timestamp": "2026-09-04T00:00:00Z",
+            }
+            for i in range(3)
+        ]
+        _write_receipt_lines(receipts, records)
+        result = check_provider_exhausted(receipts, threshold=3)
+        assert result.status == CheckStatus.TRIGGERED
+
+    def test_codex_quota_realistic_failure_reason_fixture(self, tmp_path):
+        # OI-1628: before this dispatch's fix, codex's usage-limit exhaustion
+        # classified as failure_class="no_verdict" — not in
+        # EXHAUSTION_FAILURE_CLASSES — so this check never fired for codex no
+        # matter how many consecutive quota failures piled up. Grounds the
+        # check against the exact receipt shape once classify_failure()
+        # correctly labels it credit_exhausted (fixture, not the live store).
+        receipts = tmp_path / "t0_receipts.ndjson"
+        records = [
+            {
+                "event_type": "task_complete",
+                "provider": "codex",
+                "status": "failure",
+                "failure_class": "credit_exhausted",
+                "failure_reason": _codex_quota_failure_reason(),
+                "dispatch_id": f"d{i}",
+                "timestamp": "2026-09-05T00:00:00Z",
             }
             for i in range(3)
         ]

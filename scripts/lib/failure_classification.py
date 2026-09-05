@@ -96,6 +96,19 @@ FAILURE_CLASSES = frozenset({
 # stable contract — a future variant that does not match one of these phrases
 # falls through to `unknown` below and must be added here explicitly once
 # observed, never silently absorbed back into a contentless placeholder.
+#
+# OI-1628, measured 2026-09-05 on three live dispatches
+# (~/.codex/sessions/2026/09/05/rollout-*.jsonl): codex reports its own
+# quota exhaustion inside a `task_complete` event's `error` object —
+# {"message": "You've hit your usage limit. ...", "codex_error_info":
+# "usage_limit_exceeded"}. "hit your usage limit" is deliberately narrower
+# than the bare phrase "usage limit": kimi's own 403 auth-rejection prose
+# ("reached your usage limit" / "usage limit for this billing cycle",
+# already GEMETEN OI-1433 2026-08-22) shares the "usage limit" substring
+# with a different verb, so the broad form would reclassify kimi's
+# auth_rejected as credit_exhausted. "hit your usage limit" was already
+# vetted codex-specific in governance_emit.py's _LANE_EXHAUSTED_MARKERS
+# (2026-08-26) — it did not yet exist in this receipt-facing taxonomy.
 CREDIT_EXHAUSTED_KEYWORDS = (
     "insufficient balance",
     "insufficient_balance",
@@ -103,6 +116,8 @@ CREDIT_EXHAUSTED_KEYWORDS = (
     "requires more credits",
     "add more credits",
     "openrouter_credits",
+    "hit your usage limit",
+    "usage_limit_exceeded",
 )
 
 # P3 (dispatch 20260821-q3-failure-class-split): three real, distinguishable
