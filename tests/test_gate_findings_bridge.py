@@ -33,10 +33,12 @@ PROJECT_B = "test-proj-b"
 
 
 def _build_db(tmp_path: Path) -> Path:
-    """State_dir with the track layer (0022-0030) + a dispatches.track_id column.
+    """State_dir with the track layer (0022-0030).
 
-    Mirrors dispatch_cli._persist_track_id: track_id is an additive ALTER TABLE, not
-    part of the original dispatches schema.
+    OI-1632: dispatch_cli._persist_track_id / receipt_provenance._link_pr_to_track /
+    gate_findings_bridge._resolve_dispatch_track all read the SAME dispatches.track
+    column registration writes (already part of the base CREATE TABLE below) — never
+    a separate track_id column.
     """
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
@@ -73,10 +75,6 @@ def _build_db(tmp_path: Path) -> Path:
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()
 
-    # track_id is an ADDITIVE column (dispatch_cli._persist_track_id), not part of any
-    # migration's base schema — added here exactly as production adds it lazily.
-    conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
-    conn.commit()
     conn.close()
     return state_dir
 
@@ -87,7 +85,7 @@ def _insert_dispatch(
     db = state_dir / "runtime_coordination.db"
     conn = sqlite3.connect(str(db))
     conn.execute(
-        "INSERT INTO dispatches (dispatch_id, project_id, track_id) VALUES (?, ?, ?)",
+        "INSERT INTO dispatches (dispatch_id, project_id, track) VALUES (?, ?, ?)",
         (dispatch_id, project_id, track_id),
     )
     conn.commit()
@@ -186,8 +184,8 @@ class TestRecordGateFinding:
         state_dir.mkdir(parents=True)
         db = state_dir / "runtime_coordination.db"
         conn = sqlite3.connect(str(db))
-        conn.execute("CREATE TABLE dispatches (dispatch_id TEXT, track_id TEXT)")
-        conn.execute("INSERT INTO dispatches (dispatch_id, track_id) VALUES ('d-5', 'feat-x')")
+        conn.execute("CREATE TABLE dispatches (dispatch_id TEXT, track TEXT)")
+        conn.execute("INSERT INTO dispatches (dispatch_id, track) VALUES ('d-5', 'feat-x')")
         conn.commit()
         conn.close()
 

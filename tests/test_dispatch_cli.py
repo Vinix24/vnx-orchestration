@@ -2354,11 +2354,14 @@ def _make_tracks_db(
     *,
     tracks: "dict[str, str] | None" = None,
     dispatches: "list[dict] | None" = None,
-    dispatches_has_track_id_col: bool = False,
 ) -> Path:
     """Build a minimal runtime_coordination.db with `tracks` (+ optionally `dispatches`).
 
     tracks: {track_id: phase}. dispatches: list of {dispatch_id, project_id, state}.
+
+    OI-1632: `dispatches.track` is part of the BASE schema (schemas/runtime_coordination.sql,
+    migration 0022) — never an additive column a caller can opt out of, unlike the old
+    (now-retired) `track_id` column this fixture used to build on request.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
     db_path = state_dir / "runtime_coordination.db"
@@ -2378,14 +2381,14 @@ def _make_tracks_db(
             (tid, phase),
         )
     if dispatches is not None:
-        track_col = ", track_id TEXT" if dispatches_has_track_id_col else ""
         conn.execute(
-            f"""
+            """
             CREATE TABLE dispatches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 dispatch_id TEXT NOT NULL,
                 project_id TEXT NOT NULL DEFAULT 'vnx-dev',
-                state TEXT NOT NULL DEFAULT 'queued'{track_col},
+                state TEXT NOT NULL DEFAULT 'queued',
+                track TEXT,
                 UNIQUE(dispatch_id, project_id)
             )
             """
@@ -2533,7 +2536,7 @@ class TestPersistTrackId:
 
         conn = sqlite3.connect(str(_tracks_db_path(state_dir)))
         row = conn.execute(
-            "SELECT track_id, state FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            "SELECT track, state FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
             ("d1", "vnx-dev"),
         ).fetchone()
         conn.close()
@@ -2541,15 +2544,22 @@ class TestPersistTrackId:
         assert row[0] == "my-track"
         assert row[1] == "queued", "persistence must never mutate the state column"
 
-    def test_adds_track_id_column_when_missing(self, tmp_path):
+    def test_noop_when_track_column_missing(self, tmp_path):
+        """OI-1632: _persist_track_id no longer lazily ALTER TABLEs a second column —
+        it writes the SAME `track` column registration uses. If that column is somehow
+        absent (a malformed/pre-migration store), the _has_col guard makes this a safe
+        no-op, never a crash and never a second, differently-named column."""
         state_dir = tmp_path / "state"
-        _make_tracks_db(
-            state_dir,
-            dispatches=[{"dispatch_id": "d1"}],
-            dispatches_has_track_id_col=False,
+        state_dir.mkdir(parents=True, exist_ok=True)
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE dispatches (dispatch_id TEXT, project_id TEXT, state TEXT)"
         )
-        conn = sqlite3.connect(str(_tracks_db_path(state_dir)))
-        assert not _has_col(conn, "dispatches", "track_id")
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state) VALUES ('d1', 'vnx-dev', 'queued')"
+        )
+        conn.commit()
         conn.close()
 
         spec = DispatchSpec(
@@ -2557,13 +2567,14 @@ class TestPersistTrackId:
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
             gate="codex_gate", dispatch_paths=(), track_id="my-track",
         )
-        _persist_track_id(spec, state_dir=state_dir)
+        _persist_track_id(spec, state_dir=state_dir)  # must not raise
 
-        conn = sqlite3.connect(str(_tracks_db_path(state_dir)))
-        assert _has_col(conn, "dispatches", "track_id")
-        row = conn.execute("SELECT track_id FROM dispatches WHERE dispatch_id = 'd1'").fetchone()
+        conn = sqlite3.connect(str(db_path))
+        assert not _has_col(conn, "dispatches", "track_id"), (
+            "must never create a second, differently-named column"
+        )
+        assert not _has_col(conn, "dispatches", "track")
         conn.close()
-        assert row[0] == "my-track"
 
     def test_noop_when_no_matching_row(self, tmp_path):
         """UPDATE-only: no pre-existing dispatches row (the leaseless claude-tmux lane's
@@ -2660,7 +2671,7 @@ class TestTrackIdEndToEnd:
 
         conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
         row = conn.execute(
-            "SELECT track_id FROM dispatches WHERE dispatch_id = ?", ("20260706-tl-e2e-valid",)
+            "SELECT track FROM dispatches WHERE dispatch_id = ?", ("20260706-tl-e2e-valid",)
         ).fetchone()
         conn.close()
         assert row[0] == "track-linkage-enforcement"
