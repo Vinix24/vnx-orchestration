@@ -39,6 +39,7 @@ from gate_recorder import (
     record_terminal_result,
     write_result_guarded,
 )
+from gate_request_handler import GateRequestHandlerMixin
 
 
 def _make_pass(**overrides):
@@ -493,3 +494,143 @@ class TestCorruptExistingResultFailsClosed:
         assert written is True
         assert result == payload
         assert json.loads(out.read_text(encoding="utf-8")) == payload
+
+
+# ---------------------------------------------------------------------------
+# Writer 4 (OI-1630): gate_request_handler._stamp_takeover_annotations
+#
+# The four writers above all build their "new" payload independently of
+# whatever is on disk, so a pre-seeded decided verdict and the writer's own
+# attempted write are two genuinely different records -- the guard's normal
+# shape. _stamp_takeover_annotations is structurally different: it READS the
+# existing result, merges takeover-provenance fields onto it, and writes the
+# merge straight back with a bare atomic_write_json, un-guarded and
+# un-locked. Seeding a conflicting record ahead of time proves nothing here,
+# because the writer would just read *that* record and re-merge onto it --
+# no downgrade in sight. The actual defect only shows up across the gap
+# between this writer's read and its write: a concurrent GUARDED writer (the
+# real gate run this same takeover request just kicked off) can land a
+# decided, evidenced verdict in that window, and this writer's stale,
+# pre-verdict copy stomps it on the way back to disk. The tests below inject
+# exactly that race at the one seam available in a single-threaded test: the
+# read call itself.
+# ---------------------------------------------------------------------------
+
+
+class _StubHandler(GateRequestHandlerMixin):
+    """Minimal stand-in for ReviewGateManager: only the two path helpers
+    ``_stamp_takeover_annotations`` calls. The method under test is real
+    production code."""
+
+    def __init__(self, state_dir: Path) -> None:
+        self.requests_dir = state_dir / "review_gates" / "requests"
+        self.results_dir = state_dir / "review_gates" / "results"
+        self.requests_dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+
+    def _request_path(self, gate: str, pr_number: int) -> Path:
+        return self.requests_dir / f"pr-{pr_number}-{gate}.json"
+
+    def _result_path(self, gate: str, pr_number: int) -> Path:
+        return self.results_dir / f"pr-{pr_number}-{gate}.json"
+
+
+_STALE_NOT_EXECUTABLE = {
+    "gate": "glm_gate",
+    "pr_number": 1762,
+    "status": "not_executable",
+    "reason": "provider_not_installed",
+    "contract_hash": "",
+    "report_path": "",
+}
+
+_RACED_DECIDED_PASS = {
+    "gate": "glm_gate",
+    "pr_number": 1762,
+    "status": "pass",
+    "contract_hash": "realevidencehash1",
+    "report_path": "/tmp/glm-report.md",
+    "dispatch_id": "glm-gate-pr1762-9",
+}
+
+
+class TestStampTakeoverAnnotationsOverwriteGuard:
+
+    def _stamp(self, handler, payload, pr_number):
+        return handler._stamp_takeover_annotations(
+            payload,
+            pr_number=pr_number,
+            takeover_from="codex_gate",
+            failure_reason=(
+                "codex_gate unavailable (lane_exhausted): quota -- "
+                "glm_gate substituted as reader"
+            ),
+            takeover_reason="lane_exhausted",
+            takeover_source_status="unavailable",
+        )
+
+    def test_refuses_a_verdict_that_lands_in_the_read_write_gap(self, tmp_path, monkeypatch):
+        """OI-1630 reproduction, live shape from pr-1762 (OI-1624): a
+        not_executable placeholder sits in the slot when this writer reads
+        it; before it writes its stale merge back, the real gate run this
+        takeover request kicked off lands a decided, evidenced pass. The
+        pass must survive."""
+        handler = _StubHandler(tmp_path / "state")
+        request_file = handler._request_path("glm_gate", 1762)
+        result_file = handler._result_path("glm_gate", 1762)
+        request_file.write_text(json.dumps(_STALE_NOT_EXECUTABLE), encoding="utf-8")
+        result_file.write_text(json.dumps(_STALE_NOT_EXECUTABLE), encoding="utf-8")
+
+        real_read_text = Path.read_text
+
+        def racing_read_text(self_path, *args, **kwargs):
+            text = real_read_text(self_path, *args, **kwargs)
+            if self_path == result_file:
+                self_path.write_text(json.dumps(_RACED_DECIDED_PASS), encoding="utf-8")
+            return text
+
+        monkeypatch.setattr(Path, "read_text", racing_read_text)
+        self._stamp(handler, dict(_STALE_NOT_EXECUTABLE), 1762)
+        monkeypatch.undo()
+
+        on_disk = json.loads(result_file.read_text(encoding="utf-8"))
+        assert on_disk == _RACED_DECIDED_PASS, (
+            "a takeover-annotation write must never stomp a decided, "
+            "evidenced verdict that landed concurrently (OI-1630)"
+        )
+
+    def test_merges_normally_onto_its_own_fresh_not_executable(self, tmp_path):
+        """The common, non-racing case: _dispatch_one_review just wrote a
+        fresh not_executable result for the takeover's new reader, and
+        stamping the takeover provenance onto that SAME record must still
+        land -- the guard only refuses a downgrade, it must not freeze the
+        slot shut."""
+        handler = _StubHandler(tmp_path / "state")
+        request_file = handler._request_path("glm_gate", 1700)
+        result_file = handler._result_path("glm_gate", 1700)
+        fresh = {**_STALE_NOT_EXECUTABLE, "pr_number": 1700}
+        request_file.write_text(json.dumps(fresh), encoding="utf-8")
+        result_file.write_text(json.dumps(fresh), encoding="utf-8")
+
+        self._stamp(handler, dict(fresh), 1700)
+
+        on_disk = json.loads(result_file.read_text(encoding="utf-8"))
+        assert on_disk["status"] == "not_executable"
+        assert on_disk["takeover"] is True
+        assert on_disk["takeover_from"] == "codex_gate"
+
+    def test_no_result_file_yet_only_annotates_the_request(self, tmp_path):
+        """No result has been written for this gate/pr at all -- the common
+        first-round shape. Nothing to merge onto, so the result slot must
+        stay untouched (never created out of thin air by the annotation
+        step)."""
+        handler = _StubHandler(tmp_path / "state")
+        request_file = handler._request_path("glm_gate", 1800)
+        result_file = handler._result_path("glm_gate", 1800)
+        request_file.write_text(json.dumps({**_STALE_NOT_EXECUTABLE, "pr_number": 1800}), encoding="utf-8")
+        assert not result_file.exists()
+
+        returned = self._stamp(handler, {**_STALE_NOT_EXECUTABLE, "pr_number": 1800}, 1800)
+
+        assert not result_file.exists()
+        assert returned["takeover"] is True
