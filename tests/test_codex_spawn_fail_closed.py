@@ -248,6 +248,122 @@ class TestCodexSpawnQuotaExhaustion:
 
 
 # ---------------------------------------------------------------------------
+# OI-1633: the first error to arrive on the stream must not automatically win
+# once a transient (mid-stream) error and a terminal (task_complete) error
+# both occur in the same run. Rank by terminality: a terminal error is
+# stronger evidence and must win over an earlier OR later transient one; a
+# terminal error must not be displaced by a later terminal either.
+# ---------------------------------------------------------------------------
+
+class TestCodexSpawnErrorRanking:
+    """spawn_codex ranks a task_complete (terminal) error above a mid-stream (transient) one."""
+
+    def _transient_reconnect_event(self, dispatch_id: str) -> CanonicalEvent:
+        """A codex top-level `error` event the process itself recovers from.
+
+        Real shape observed 2026-09-05 (15:33 run): codex emits this as a
+        top-level `error` NDJSON event, then keeps streaming and eventually
+        reaches task_complete. normalize_codex_event() marks this
+        non-terminal (terminal=False) for exactly this reason.
+        """
+        return CanonicalEvent(
+            dispatch_id=dispatch_id,
+            terminal_id="T1",
+            provider="codex",
+            event_type="error",
+            data={
+                "message": (
+                    "Reconnecting... 2/2 (stream disconnected before "
+                    "completion: idle timeout)"
+                ),
+                "terminal": False,
+            },
+            observability_tier=1,
+        )
+
+    def _terminal_quota_event(self, dispatch_id: str) -> CanonicalEvent:
+        """A task_complete-wrapped error — the real, terminal outcome of the turn."""
+        return CanonicalEvent(
+            dispatch_id=dispatch_id,
+            terminal_id="T1",
+            provider="codex",
+            event_type="error",
+            data={
+                "message": (
+                    "You've hit your usage limit. Upgrade to Pro "
+                    "(https://chatgpt.com/explore/pro), visit "
+                    "https://chatgpt.com/codex/settings/usage to purchase "
+                    "more credits or try again at 2:27 PM. "
+                    "(codex_error_info: usage_limit_exceeded)"
+                ),
+                "terminal": True,
+            },
+            observability_tier=1,
+        )
+
+    def _run_with_events(self, dispatch_id: str, events: List[CanonicalEvent]):
+        with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 1
+            proc.wait = MagicMock(return_value=1)
+            proc.poll = MagicMock(return_value=1)
+            proc.stdin = MagicMock()
+            proc.stderr = _mock_stderr(b"Reading prompt from stdin...\n")
+            MockPopen.return_value = proc
+
+            with patch(
+                "provider_spawns.codex_spawn._NormalizerHost.drain_stream",
+                return_value=iter(events),
+            ):
+                return spawn_codex(
+                    prompt="test",
+                    model="",
+                    dispatch_id=dispatch_id,
+                    terminal_id="T1",
+                )
+
+    def test_transient_then_terminal_keeps_terminal_reason(self):
+        """Run-1 order (transient arrives first): the terminal reason must win.
+
+        Pre-fix this was RED: first-wins captured the "Reconnecting..." text
+        and the terminal quota message was discarded.
+        """
+        events = [
+            self._transient_reconnect_event("test-rank-1"),
+            self._terminal_quota_event("test-rank-1"),
+        ]
+        result = self._run_with_events("test-rank-1", events)
+
+        assert result.error is not None
+        assert "usage_limit_exceeded" in result.error, (
+            f"expected the terminal quota reason to win, got: {result.error!r}"
+        )
+        assert "Reconnecting" not in result.error, (
+            f"transient reconnect text must not survive in the final reason, got: {result.error!r}"
+        )
+
+    def test_terminal_then_transient_keeps_terminal_reason(self):
+        """Reverse order (terminal arrives first): a later transient must not displace it.
+
+        Guards against overcorrecting into last-wins, which would fail this case.
+        """
+        events = [
+            self._terminal_quota_event("test-rank-2"),
+            self._transient_reconnect_event("test-rank-2"),
+        ]
+        result = self._run_with_events("test-rank-2", events)
+
+        assert result.error is not None
+        assert "usage_limit_exceeded" in result.error, (
+            f"expected the terminal quota reason to win, got: {result.error!r}"
+        )
+        assert "Reconnecting" not in result.error, (
+            f"a later transient must not displace the captured terminal reason, got: {result.error!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 4: on_event=False stops stream early
 # ---------------------------------------------------------------------------
 

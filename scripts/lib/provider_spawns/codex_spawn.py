@@ -250,8 +250,14 @@ def _normalize_complete_events(
 ) -> Optional[CanonicalEvent]:
     """Handle error, turn.completed, task_complete, result/message, token_count events."""
     if etype == "error":
+        # OI-1633: a top-level `error` event is mid-stream — codex can and does
+        # recover from these (e.g. its own "Reconnecting... N/2 (stream
+        # disconnected before completion: idle timeout)" retry messages) and
+        # keep streaming afterwards. Mark it non-terminal so _drain_stream's
+        # rank-by-terminality never lets it displace a later task_complete
+        # error, which IS the end-of-turn signal.
         msg = payload.get("message", payload.get("error", payload.get("text", "")))
-        return make("error", {"message": str(msg) if msg else str(payload)[:200]})
+        return make("error", {"message": str(msg) if msg else str(payload)[:200], "terminal": False})
     if etype == "task_complete":
         # OI-1628, measured 2026-09-05 on three live dispatches
         # (~/.codex/sessions/2026/09/05/rollout-*.jsonl): codex reports quota/
@@ -269,7 +275,9 @@ def _normalize_complete_events(
             info = err.get("codex_error_info")
             if info and str(info) not in str(msg):
                 msg = f"{msg} (codex_error_info: {info})"
-            return make("error", {"message": str(msg)})
+            # OI-1633: task_complete marks the end of a turn — this IS the
+            # terminal outcome, unlike a mid-stream `error` event above.
+            return make("error", {"message": str(msg), "terminal": True})
         tc = _extract_token_count_payload(raw)
         token_count = _normalize_token_count(tc) if tc else None
         data: dict = {"token_count": token_count} if token_count else {}
@@ -570,7 +578,28 @@ def _drain_stream(
     # timed_out — a real codex error/task_complete error's "message" text was
     # read by no one, so the caller always fell back to the generic "codex
     # stderr tail" surfacing below regardless of what the stream said.
+    #
+    # OI-1633: plain first-wins is wrong once a stream can recover from a
+    # mid-stream hiccup. Codex sometimes emits a transient top-level `error`
+    # (e.g. "Reconnecting... 2/2 (stream disconnected before completion: idle
+    # timeout)") that it then recovers from, followed by the real, terminal
+    # outcome in `task_complete`. First-wins let the transient message win the
+    # receipt over a genuine quota/usage-limit failure — same root cause,
+    # opposite classification, purely because of accidental timing. Rank by
+    # terminality instead of arrival order:
+    #   - a transient (mid-stream) error must never displace a captured
+    #     terminal (task_complete) error — the process recovered from it, so
+    #     it is weaker evidence than the turn's actual outcome;
+    #   - a terminal error DOES upgrade a captured transient — it is stronger
+    #     evidence once it arrives;
+    #   - a terminal error must never be displaced by a LATER terminal error
+    #     either — the first terminal is kept, so a downstream cleanup/retry
+    #     failure can't overwrite the real root cause.
+    # Do not "fix" this by flipping to last-wins: that reintroduces the same
+    # bug in the opposite direction (a late transient would then win over an
+    # earlier terminal).
     captured_error: Optional[str] = None
+    captured_error_terminal = False
 
     try:
         for canonical_event in normalizer.drain_stream(
@@ -593,10 +622,12 @@ def _drain_stream(
                 reason = error_data.get("reason", "")
                 if "timeout" in (reason or "").lower():
                     timed_out = True
-                if captured_error is None:
-                    msg = error_data.get("message") or reason
-                    if msg:
+                msg = error_data.get("message") or reason
+                if msg:
+                    is_terminal = bool(error_data.get("terminal"))
+                    if captured_error is None or (is_terminal and not captured_error_terminal):
                         captured_error = str(msg)
+                        captured_error_terminal = is_terminal
 
             stop, last_stuck_log, writer_failed = _process_one_event(
                 canonical_event, terminal_id, dispatch_id,
