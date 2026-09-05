@@ -50,6 +50,10 @@ from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel 
 # no longer carries its own hand-copied terminal-status sets; it resolves every
 # declared status through resolve_status_category() below.
 from event_outcome_semantics import UnknownStatusError, resolve_status_category
+# Closed provider vocabulary (golf1a-provider-enum). _normalise_provider below
+# is a thin wrapper around normalize_provider() — see provider_identity.py for
+# the full reconciliation with governance_emit._PROVIDER_RE.
+from provider_identity import ProviderIdentity, UnrecognizedProviderError, normalize_provider
 
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent  # scripts/ — append_receipt.py lives here
@@ -488,25 +492,15 @@ def _resolve_report_role(
 
 
 # ---------------------------------------------------------------------------
-# Provider string normalization (OI-1111)
+# Provider string normalization (OI-1111, golf1a-provider-enum)
 # ---------------------------------------------------------------------------
-
-# Canonical provider names as used by dispatch lanes. Every variant found in
-# the ledger (deepseek-harness, deepseek, litellm:deepseek, kimi-k3, kimi,
-# kimi-code/k3, glm-harness) normalises to one of these.
-_CANONICAL_PROVIDER_LANE = {
-    "deepseek-harness",
-    "deepseek",
-    "kimi",
-    "glm-harness",
-    "claude",
-    "codex",
-    "gemini",
-}
 
 
 def _normalise_provider(provider_raw: str) -> str:
-    """Normalise a provider string to its canonical lane value.
+    """Normalise a provider string to its closed ``ProviderIdentity`` value.
+
+    Thin wrapper around ``provider_identity.normalize_provider`` — see that
+    module for the full closed vocabulary and per-value provenance.
 
     Variants observed in the ledger as of 2026-08-09:
       deepseek-harness (294), deepseek (27), ``deepseek (harness, key-auth)``
@@ -515,32 +509,18 @@ def _normalise_provider(provider_raw: str) -> str:
     Without normalisation every cost aggregation over provider counts these as
     separate providers. The canonical lane values are the short forms the
     dispatch door uses.
+
+    Raises:
+        UnrecognizedProviderError: when *provider_raw* matches nothing in the
+        closed vocabulary. This replaces the old ``return p`` fail-open
+        passthrough (the mechanism by which free-text fragments — a literal
+        `` `. `` and a torn-off instruction sentence among them — reached
+        t0_receipts.ndjson verbatim on 2026-08-09). Callers must not swallow
+        this into an invented value; see
+        ``_build_receipt_from_report_core``'s handling, which books it as an
+        explicit ``"unrecognized_provider"`` contract violation instead.
     """
-    if not provider_raw or not provider_raw.strip():
-        return "unknown"
-    p = provider_raw.strip()
-    pl = p.lower()
-
-    # Already a canonical lane value — pass through.
-    if pl in _CANONICAL_PROVIDER_LANE:
-        return pl
-
-    # DeepSeek variants → deepseek-harness
-    if "deepseek" in pl:
-        return "deepseek-harness"
-
-    # Kimi variants (kimi-k3, kimi-code/k3, kimi) → kimi
-    if "kimi" in pl:
-        return "kimi"
-
-    # GLM variants → glm-harness.  parse_route_model_id maps glm-* model IDs
-    # to litellm:zai (the litellm provider flag for Zhipu AI); normalise that
-    # flag back to the canonical lane name.
-    if "glm" in pl or pl == "litellm:zai":
-        return "glm-harness"
-
-    # Unknown — return as-is rather than invent a value.
-    return p
+    return normalize_provider(provider_raw).value
 
 
 def _resolve_report_provider_model(
@@ -560,6 +540,15 @@ def _resolve_report_provider_model(
          — the lane's own record of which model was selected.
       2. Report body/frontmatter fields — fallback when no route decision
          exists (e.g. plan-gate seats that do not go through the smart router).
+
+    Raises:
+        UnrecognizedProviderError: propagated from the body-fallback call to
+        ``_normalise_provider`` (step 2) when NEITHER the lane nor the body
+        yields a recognisable provider. A lane-side normalisation failure
+        (step 1) is caught here and demoted to a WARNING + fall-through to
+        the body — a stale/malformed route-decision file is an auxiliary
+        hint, not the sole source of truth, so it must not by itself refuse
+        the receipt. Only exhausting BOTH sources raises.
     """
     provider: Optional[str] = None
     model: Optional[str] = None
@@ -569,11 +558,11 @@ def _resolve_report_provider_model(
         route_dec = _load_route_decision(dispatch_id, state_dir)
         if route_dec and route_dec.get("selected_model"):
             model_id = route_dec["selected_model"]
+            lane_provider: Optional[str] = None
+            lane_model: Optional[str] = None
             try:
                 from smart_router import parse_route_model_id  # noqa: PLC0415
                 lane_provider, lane_model = parse_route_model_id(model_id)
-                provider = _normalise_provider(lane_provider)
-                model = lane_model
             except Exception:
                 logger.debug(
                     "report_to_receipt_converter: provider/model lane resolution "
@@ -581,8 +570,21 @@ def _resolve_report_provider_model(
                     dispatch_id, model_id,
                     exc_info=True,
                 )
+            if lane_provider:
+                try:
+                    provider = _normalise_provider(lane_provider)
+                    model = lane_model
+                except UnrecognizedProviderError as exc:
+                    logger.warning(
+                        "report_to_receipt_converter: route decision for "
+                        "dispatch=%s carries unrecognized provider %r (%s) "
+                        "-- falling back to the report body",
+                        dispatch_id, lane_provider, exc,
+                    )
 
-    # Body fallback: only used when lane resolution produced nothing.
+    # Body fallback: only used when lane resolution produced nothing. Left
+    # UNPROTECTED by design — an UnrecognizedProviderError here means both
+    # sources are exhausted and must propagate (see docstring).
     if not provider:
         provider = _normalise_provider(merged.get("provider", "unknown"))
     if not model:
@@ -877,9 +879,27 @@ def _build_receipt_from_report_core(
     # is wrong. The lane's route decision holds the authoritative identity.
     # Provider strings are normalised to canonical lane values so every cost
     # aggregation counts one provider, not four variants of the same lane.
-    _resolved_provider, _resolved_model = _resolve_report_provider_model(
-        dispatch_id, merged, state_dir,
-    )
+    #
+    # golf1a-provider-enum: _resolve_report_provider_model raises
+    # UnrecognizedProviderError when NEITHER the lane nor the body yields a
+    # provider the closed ProviderIdentity vocabulary recognises. This is
+    # booked as an explicit contract violation (event_type=
+    # "report_contract_invalid" below) rather than left to propagate — this
+    # function's contract is "never raises" (see the caller-hardening comment
+    # in _convert_one_detailed), and inventing a provider string no source
+    # ever reported would be exactly the fail-open passthrough this replaces.
+    try:
+        _resolved_provider, _resolved_model = _resolve_report_provider_model(
+            dispatch_id, merged, state_dir,
+        )
+    except UnrecognizedProviderError as exc:
+        logger.warning(
+            "report_to_receipt_converter: unrecognized provider for dispatch=%s: "
+            "%s -- booking as report_contract_invalid instead of inventing a value",
+            dispatch_id, exc,
+        )
+        _resolved_provider, _resolved_model = ProviderIdentity.UNKNOWN.value, ""
+        contract_violations.append("unrecognized_provider")
 
     base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
