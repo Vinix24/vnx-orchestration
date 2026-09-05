@@ -335,6 +335,57 @@ _ppr_collect_pending() {
     log_too_old_cycle_summary
 }
 
+# Run the Python report_to_receipt_converter.py scan once, capturing stderr
+# so a fail-closed REJECTED warning (or any other converter log line) is
+# never silently discarded — every line is routed through log() instead of
+# being piped to /dev/null. Shared by both call sites that invoke the
+# converter (_ppr_process_rate_limited's catchup/manual sweep and
+# _poll_new_reports_cycle's periodic monitor-mode sweep) so a stderr-capture
+# fix here can never be applied to one call site and missed on the other —
+# exactly what happened before: OI-1753 (Cluster D) fixed the catchup call's
+# `2>/dev/null` but the monitor-loop's OWN separate `2>/dev/null` a few lines
+# below survived untouched, so the actual 24/7 polling path (the one that
+# runs in production) kept discarding the reason (golf3b / F1-2).
+#
+# D3: the converter fail-closed-refuses a report with no valid Model field
+# (scripts/lib/append_receipt_internals/validation.py::
+# _validate_model_present) and logs that refusal as a WARNING on its own
+# logger — which writes to stderr. main() always returns 0 even when it
+# rejected reports this scan (a rejection is not a crash), so an
+# exit-code-only fallback never fires for a REJECTED. Capture stderr
+# explicitly (independent of exit code, since exit code is not a reliable
+# signal here) and route every line through log() so a REJECTED is visible;
+# the non-fatal design itself is unchanged.
+#
+# golf3b: a raw count in report_to_receipt_converter's OWN beacon
+# (rejected_count) is not actionable on its own — it says HOW MANY, not
+# WHICH report or WHY. The captured stderr is additionally piped into
+# receipt_conversion_rejection_beacon.py, which parses each REJECTED line
+# into a {dispatch_id, file, reason} record and writes it as its own
+# heartbeat under health/ — the same already-wired reading paths
+# (hooks/sessionstart.sh's beacon digest, scripts/health_check.py, vnx
+# doctor, the dashboard) surface it without a new consumer needing to be
+# built. Best-effort: a beacon-write failure never aborts the scan.
+_run_receipt_converter_scan() {
+    local _converter_stderr _converter_rc
+    _converter_stderr="$(python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
+        --state-dir "$STATE_DIR" \
+        "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>&1 >/dev/null)"
+    _converter_rc=$?
+    if [ -n "$_converter_stderr" ]; then
+        while IFS= read -r _converter_line; do
+            [ -n "$_converter_line" ] && log "WARNING" "report_to_receipt_converter: $_converter_line"
+        done <<< "$_converter_stderr"
+    fi
+    if [ "$_converter_rc" -ne 0 ]; then
+        log "ERROR" "report_to_receipt_converter scan FAILED non-fatal, processor continues (exit $_converter_rc)"
+    fi
+    printf '%s' "$_converter_stderr" | python3 "$SCRIPTS_DIR/lib/receipt_conversion_rejection_beacon.py" \
+        --state-dir "$STATE_DIR" 2>>"$PROCESSING_LOG" \
+        || log "WARN" "Failed to record receipt-conversion-rejection beacon (non-fatal)"
+    return 0
+}
+
 # Process reports (passed as "$@") with rate limiting and watermark update.
 _ppr_process_rate_limited() {
     local processed_count=0
@@ -360,32 +411,9 @@ _ppr_process_rate_limited() {
     # Run Python converter after the Bash scan so YAML-frontmatter reports
     # not handled by report_parser.py also get receipts.  Non-fatal: a
     # crash here must never abort the processor loop (kept, unchanged).
-    #
-    # D3: the converter fail-closed-refuses a report with no valid Model
-    # field (scripts/lib/append_receipt_internals/validation.py::
-    # _validate_model_present) and logs that refusal as a WARNING on its
-    # own logger — which writes to stderr. main() always returns 0 even
-    # when it rejected reports this scan (a rejection is not a crash), so
-    # the old `|| log ERROR ... (exit $?)` fallback below never fired for
-    # a REJECTED — and the plain `2>/dev/null` threw the WARNING away
-    # regardless of exit code. Net effect: a refused report vanished from
-    # the audit trail with zero trace in this log. Capture stderr
-    # explicitly (independent of exit code, since exit code is not a
-    # reliable signal here) and route every line through log() so a
-    # REJECTED is visible; the non-fatal design itself is unchanged.
-    local _converter_stderr _converter_rc
-    _converter_stderr="$(python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
-        --state-dir "$STATE_DIR" \
-        "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>&1 >/dev/null)"
-    _converter_rc=$?
-    if [ -n "$_converter_stderr" ]; then
-        while IFS= read -r _converter_line; do
-            [ -n "$_converter_line" ] && log "WARNING" "report_to_receipt_converter: $_converter_line"
-        done <<< "$_converter_stderr"
-    fi
-    if [ "$_converter_rc" -ne 0 ]; then
-        log "ERROR" "report_to_receipt_converter catchup scan FAILED non-fatal, processor continues (exit $_converter_rc)"
-    fi
+    # See _run_receipt_converter_scan for why stderr is captured instead of
+    # discarded.
+    _run_receipt_converter_scan
 }
 
 # Process all pending reports with flood protection and rate limiting.
@@ -412,43 +440,52 @@ process_pending_reports() {
 # caused orphan fswatches, duplicate watchers, and fseventsd memory bloat
 # (5+ GB observed). Polling at 5s is effectively free (<1ms per cycle) and
 # eliminates the entire class of process-lifecycle bugs.
+# Run one polling cycle's body — extracted from _poll_new_reports (which is
+# an unconditional `while true` loop) so it is directly callable from tests
+# without needing to break out of an infinite loop. $1 is the 1-based cycle
+# number, $2 is the retry-cycles interval computed by the caller.
+_poll_new_reports_cycle() {
+    local _cycle="$1"
+    local _retry_cycles="$2"
+    local _poll_max_mtime=0
+    for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
+        [ -f "$report" ] || continue
+        if should_process_report "$report" && process_single_report "$report"; then
+            local _mtime
+            _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
+            if [ -n "$_mtime" ] && [ "$_mtime" -gt "$_poll_max_mtime" ]; then
+                _poll_max_mtime=$_mtime
+            fi
+        fi
+    done
+    log_too_old_cycle_summary
+    # Update watermark once after the full sweep with the maximum mtime seen.
+    if [ "$_poll_max_mtime" -gt 0 ]; then
+        echo "$_poll_max_mtime" > "$WATERMARK_FILE"
+    fi
+    # Generic YAML-frontmatter converter: runs every ~30 s (every 6 cycles).
+    # Handles reports written with --- YAML frontmatter that report_parser.py
+    # does not parse.  Owns its own dedup store
+    # (report_to_receipt_processed.txt) — does NOT read the Bash watermark
+    # to avoid format-conflation risk.  Non-fatal. See _run_receipt_converter_scan
+    # for why stderr is captured instead of discarded (golf3b / F1-2: this was
+    # the one call site OI-1753/Cluster D did NOT fix).
+    if [ $(( _cycle % 6 )) -eq 0 ]; then
+        _run_receipt_converter_scan
+    fi
+    if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
+        _retry_pending_receipts
+    fi
+}
+
 _poll_new_reports() {
     log "INFO" "Using polling mode (${POLL_INTERVAL}s intervals, receipt retry every ${RECEIPT_RETRY_INTERVAL}s)"
     local _retry_cycles=$(( RECEIPT_RETRY_INTERVAL / POLL_INTERVAL ))
     [ "$_retry_cycles" -lt 1 ] && _retry_cycles=1
     local _cycle=0
     while true; do
-        local _poll_max_mtime=0
-        for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
-            [ -f "$report" ] || continue
-            if should_process_report "$report" && process_single_report "$report"; then
-                local _mtime
-                _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
-                if [ -n "$_mtime" ] && [ "$_mtime" -gt "$_poll_max_mtime" ]; then
-                    _poll_max_mtime=$_mtime
-                fi
-            fi
-        done
-        log_too_old_cycle_summary
-        # Update watermark once after the full sweep with the maximum mtime seen.
-        if [ "$_poll_max_mtime" -gt 0 ]; then
-            echo "$_poll_max_mtime" > "$WATERMARK_FILE"
-        fi
-        # Generic YAML-frontmatter converter: runs every ~30 s (every 6 cycles).
-        # Handles reports written with --- YAML frontmatter that report_parser.py
-        # does not parse.  Owns its own dedup store
-        # (report_to_receipt_processed.txt) — does NOT read the Bash watermark
-        # to avoid format-conflation risk.  Non-fatal.
         _cycle=$(( _cycle + 1 ))
-        if [ $(( _cycle % 6 )) -eq 0 ]; then
-            python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
-                --state-dir "$STATE_DIR" \
-                "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>/dev/null \
-                || log "ERROR" "report_to_receipt_converter scan FAILED non-fatal, processor continues (exit $?)"
-        fi
-        if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
-            _retry_pending_receipts
-        fi
+        _poll_new_reports_cycle "$_cycle" "$_retry_cycles"
         sleep "$POLL_INTERVAL"
     done
 }
