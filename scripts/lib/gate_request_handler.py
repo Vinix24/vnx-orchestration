@@ -18,7 +18,7 @@ from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
-from gate_recorder import get_pr_head_sha
+from gate_recorder import get_pr_head_sha, write_result_guarded
 from governance_emit import _classify_lane_log_text
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
@@ -689,14 +689,26 @@ class GateRequestHandlerMixin:
         no multi-hop path to report, so the field is NEVER absent on a
         takeover record.
 
-        Both writes go through ``atomic_write_json`` (temp file in the same
-        directory + ``os.replace``), never a bare ``write_text``. These are
-        EVIDENCE files: a torn write here passes the existence check a reader
-        does first and only fails on the content it trusts -- worse than no
-        record at all, because it surfaces exactly when the record is
-        needed. Not suppressed with a `# vnx-atomic-write` marker: that
-        marker is for writes where a torn write is harmless, which a gate
-        evidence record is not.
+        The request write goes through ``atomic_write_json`` (temp file in
+        the same directory + ``os.replace``), never a bare ``write_text``.
+        That file is an EVIDENCE file: a torn write here passes the
+        existence check a reader does first and only fails on the content it
+        trusts -- worse than no record at all, because it surfaces exactly
+        when the record is needed. Not suppressed with a
+        `# vnx-atomic-write` marker: that marker is for writes where a torn
+        write is harmless, which a gate evidence record is not.
+
+        The result write (OI-1630) routes through
+        ``gate_recorder.write_result_guarded`` instead of a bare
+        ``atomic_write_json``. This method reads the on-disk result, merges
+        the takeover fields onto it, and writes the merge back -- a
+        read-modify-write with no lock across the gap. A concurrent GUARDED
+        writer (the real gate run this same takeover request just kicked
+        off) can land a decided, evidenced verdict in that gap; without the
+        guard, this method's stale copy of the pre-verdict record would
+        stomp it on the way back to disk. The guard refuses that stomp the
+        same way it already refuses every other writer of a
+        ``review_gates/results/`` record.
         """
         gate = payload.get("gate", "")
         if takeover_path is None:
@@ -729,7 +741,22 @@ class GateRequestHandlerMixin:
                     result_payload = None
                 if result_payload is not None:
                     result_payload.update(annotations)
-                    atomic_write_json(result_file, result_payload)
+                    _on_disk, written = write_result_guarded(
+                        result_file, result_payload, gate=gate, pr_ref=str(pr_number),
+                    )
+                    if not written:
+                        # gate_recorder.write_result_guarded already logged the
+                        # refusal; this makes the takeover-stamping caller's own
+                        # awareness explicit (OI-1630) -- a decided, evidenced
+                        # verdict that landed concurrently stands unannotated
+                        # rather than being stomped by this stale copy.
+                        logger.warning(
+                            "gate_request_handler: takeover-annotation write "
+                            "REFUSED for gate=%s pr=%s -- an existing terminal, "
+                            "evidenced result stands; this stamp never reached "
+                            "results/",
+                            gate, pr_number,
+                        )
         return payload
 
     def _chain_exhausted_path(self, gate: str, pr_number: int) -> Path:
