@@ -147,6 +147,29 @@ providers:
         price_source: "unverified: registry-authored"
         price_checked_at: "2026-06-07"
         task_classes: ["coding", "review"]
+      # Allowlist extension by operator decision 2026-09-05
+      # (dispatch-20260905-084500-registry-gpt6-astra): GPT-6 Astra released
+      # 2026-09-03, broad rollout 2026-09-05. Deliberate addition, not an
+      # automatic pickup — gpt-5.5/gpt-5.4 stay registered; DEFAULT_CODEX_MODEL
+      # in scripts/lib/provider_spawns/codex_spawn.py stays put.
+      # Cost notes that shaped this entry:
+      #   - prompts above 272K input tokens are billed at 2x input and 1.5x
+      #     output for the WHOLE request; the flat rates below apply under that
+      #     threshold and the surcharge is not modelled here.
+      #   - the codex lane at this operator runs on a ChatGPT login, not API
+      #     credits, so these prices are bookkeeping (chargeback/comparison),
+      #     not a meter that bills.
+      gpt-6-astra:
+        litellm_name: "openai/gpt-6-astra"
+        cost_input_per_mtok: 10.00
+        cost_output_per_mtok: 50.00
+        max_tokens: 128000
+        context_window: 1050000
+        supports_streaming: true
+        supports_tool_calls: true
+        price_source: "OpenAI public pricing, geverifieerd door operator 2026-09-05"
+        price_checked_at: "2026-09-05"
+        task_classes: ["coding-premium", "review", "analysis"]
   google:
     enabled: true
     api_key_env: GEMINI_API_KEY
