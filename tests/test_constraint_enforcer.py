@@ -517,6 +517,37 @@ class TestRoute1Requirements:
                 check_registry=True,
             )
 
+    def test_codex_gpt6_astra_passes_registry_gate(self):
+        """dispatch-20260905-084500-registry-gpt6-astra: gpt-6-astra is registered
+        under the openai section (registry key for provider 'codex') by operator
+        decision of 2026-09-05, so a codex dispatch asking for it must pass the
+        model-not-in-current-registry route check.
+
+        RED before the wave7_models.yaml entry exists (same rejection as the
+        measured 'gpt-5.2-codex' case above); GREEN after. The workers-kimi-pinned
+        warn is expected on T1 — it is not a registry rejection and must not be
+        blocking here either."""
+        violations = check_constraints(
+            provider="codex",
+            model="gpt-6-astra",
+            terminal_id="T1",
+            via="cli",
+            check_registry=True,
+        )
+        blocking = [v for v in violations if v.severity == "blocking"]
+        assert not any(v.code == "model-not-in-current-registry" for v in blocking), (
+            f"gpt-6-astra rejected by registry gate: {[v.message for v in blocking]}"
+        )
+        # enforce() raises on any blocking violation — the registry gate must not
+        # be among them.
+        ConstraintEnforcer().enforce(
+            provider="codex",
+            model="gpt-6-astra",
+            terminal_id="T1",
+            via="cli",
+            check_registry=True,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Dispatch-level _via per-sub-provider mapping (provider_dispatch.main integration)

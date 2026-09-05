@@ -240,6 +240,11 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
     ("anthropic", "fable-5"): (10.0, 50.0),
     ("openai", "gpt-5.5"): (5.0, 30.0),
     ("openai", "gpt-5.4"): (1.25, 10.0),
+    # dispatch-20260905-084500-registry-gpt6-astra: allowlist extension by
+    # operator decision 2026-09-05. Rates are the <=272K-input flat pair; above
+    # 272K input the whole request bills 2x input / 1.5x output (not modelled
+    # here). Codex lane runs on a ChatGPT login — bookkeeping, not billed.
+    ("openai", "gpt-6-astra"): (10.0, 50.0),
     ("google", "gemini-2.5-pro"): (1.25, 5.0),
     ("deepseek", "deepseek-v4-pro"): (0.435, 0.87),
     ("deepseek", "deepseek-v4-flash"): (0.14, 0.28),
@@ -285,6 +290,7 @@ _VERIFIED: set[tuple[str, str]] = {
     ("anthropic", "opus-4-6"),
     ("anthropic", "sonnet-5"),
     ("openai", "gpt-5.5"),
+    ("openai", "gpt-6-astra"),
     ("kimi_cli", "kimi-k3"),
 }
 
