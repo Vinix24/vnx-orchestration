@@ -113,7 +113,7 @@ def _make_run(registry, state_dir, dispatch_id=None, **kwargs):
     with get_connection(state_dir) as conn:
         register_dispatch(conn, dispatch_id=did, project_id="vnx-dev")
         attempt = create_attempt(
-            conn, dispatch_id=did, terminal_id="T1", attempt_number=1,
+            conn, dispatch_id=did, project_id="vnx-dev", terminal_id="T1", attempt_number=1,
         )
         conn.commit()
     defaults = {
@@ -175,7 +175,8 @@ class TestB1DurableIdentity:
         did = f"d-fields-{uuid.uuid4().hex[:8]}"
         with get_connection(state_dir) as conn:
             register_dispatch(conn, dispatch_id=did, project_id="vnx-dev")
-            attempt = create_attempt(conn, dispatch_id=did, terminal_id="T2", attempt_number=1)
+            attempt = create_attempt(
+                conn, dispatch_id=did, project_id="vnx-dev", terminal_id="T2", attempt_number=1)
             conn.commit()
         run = registry.create_run(
             dispatch_id=did,

@@ -1285,6 +1285,7 @@ def _persist_dispatch_row(
             attempt_row = _rc_create_attempt(
                 conn,
                 dispatch_id=spec.dispatch_id,
+                project_id=spec.project_id,
                 terminal_id=spec.target_slot,
                 attempt_number=new_count,
                 metadata={"worker_claude_override_reason": worker_claude_override_reason},

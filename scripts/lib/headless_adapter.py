@@ -394,6 +394,7 @@ class HeadlessAdapter:
             attempt = create_attempt(
                 conn,
                 dispatch_id=dispatch_id,
+                project_id=dispatch.get("project_id"),
                 terminal_id=terminal_id,
                 attempt_number=attempt_count,
                 metadata={"adapter": "headless", "actor": actor},
