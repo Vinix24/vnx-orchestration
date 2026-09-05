@@ -192,6 +192,54 @@ class TestErrorEvents:
         assert event.data["message"] == "unknown command"
 
 
+# ── task_complete → error (when it carries one) or complete ─────────────────
+# OI-1628: codex reports quota/usage-limit exhaustion inside its own
+# `task_complete` event's `error` object, not as a top-level `error` event
+# type. Measured 2026-09-05 on three live dispatches
+# (~/.codex/sessions/2026/09/05/rollout-*.jsonl), real shape reproduced below.
+
+class TestTaskCompleteEvents:
+    def test_task_complete_with_usage_limit_error_maps_to_error(self, adapter):
+        raw = {
+            "event_msg": {
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "01a07082-f05c-7530-8f40-e5e3aaa998e3",
+                    "last_agent_message": None,
+                    "error": {
+                        "message": (
+                            "You've hit your usage limit. Upgrade to Pro "
+                            "(https://chatgpt.com/explore/pro), visit "
+                            "https://chatgpt.com/codex/settings/usage to "
+                            "purchase more credits or try again at 2:27 PM."
+                        ),
+                        "codex_error_info": "usage_limit_exceeded",
+                    },
+                    "started_at": 1788594024,
+                    "completed_at": 1788594229,
+                }
+            }
+        }
+        event = adapter._normalize(raw)
+        assert_canonical(event, "error")
+        assert "hit your usage limit" in event.data["message"]
+        assert "usage_limit_exceeded" in event.data["message"]
+
+    def test_task_complete_without_error_maps_to_complete(self, adapter):
+        raw = {
+            "event_msg": {
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "01a07084-56f1-7191-85ba-5fc808983260",
+                    "last_agent_message": "Done.",
+                    "error": None,
+                }
+            }
+        }
+        event = adapter._normalize(raw)
+        assert_canonical(event, "complete")
+
+
 # ── turn.completed → complete (with token_count) ──────────────────────────────
 
 class TestCompleteEvents:

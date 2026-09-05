@@ -765,6 +765,64 @@ class TestP3FailureClassSplit(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestOI1628CodexQuotaExhaustion — dispatch 20260905-100002-oi1628-quota-klasse
+#
+# Codex reports its own quota exhaustion via a `task_complete` event's nested
+# `error` object: {"message": "You've hit your usage limit. ...",
+# "codex_error_info": "usage_limit_exceeded"}. Before this dispatch,
+# CREDIT_EXHAUSTED_KEYWORDS carried no phrase matching that text, so it fell
+# through every other bucket to `unknown` — or, once codex_spawn.py's stderr
+# tail fallback appended its own text, to `no_verdict` (the exact receipt
+# shape measured live: failure_class="no_verdict", failure_reason="codex
+# stderr tail: Reading prompt from stdin...").
+# ---------------------------------------------------------------------------
+
+class TestOI1628CodexQuotaExhaustion(unittest.TestCase):
+    """OI-1628: codex usage-limit exhaustion must classify as credit_exhausted."""
+
+    _CODEX_QUOTA_REASON = (
+        "You've hit your usage limit. Upgrade to Pro "
+        "(https://chatgpt.com/explore/pro), visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits "
+        "or try again at 2:27 PM. (codex_error_info: usage_limit_exceeded)"
+    )
+
+    def test_codex_usage_limit_recognized_as_credit_exhausted(self):
+        from failure_classification import classify_failure
+
+        result = classify_failure(
+            status="failure",
+            error=self._CODEX_QUOTA_REASON,
+            completion_text=None,
+            provider="codex",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "credit_exhausted")
+
+    def test_codex_usage_limit_wins_over_stderr_tail_no_verdict_marker(self):
+        """Real receipt shape: spawn_codex() always appends the generic
+        "codex stderr tail" fallback text after any captured error when
+        returncode != 0 (codex_spawn.py). credit_exhausted must still win
+        over the no_verdict markers ("codex stderr tail", "reading prompt
+        from stdin") sitting later in the same string — this is the exact
+        live-observed combination (OI-1628)."""
+        from failure_classification import classify_failure
+
+        combined = (
+            self._CODEX_QUOTA_REASON
+            + " | codex stderr tail: Reading prompt from stdin..."
+        )
+        result = classify_failure(
+            status="failure",
+            error=combined,
+            completion_text=None,
+            provider="codex",
+            returncode=1,
+        )
+        self.assertEqual(result["failure_class"], "credit_exhausted")
+
+
+# ---------------------------------------------------------------------------
 # TestP3VocabularySeparation — dispatch 20260821-q3-failure-class-split
 #
 # The dispatch measured a real two-vocabulary hazard:
