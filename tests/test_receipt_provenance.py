@@ -743,8 +743,8 @@ def _add_track_layer(state_dir):
             conn.execute(
                 "ALTER TABLE dispatches ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
             )
-        if not _has_col(conn, "dispatches", "track_id"):
-            conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
+        # OI-1632: track is part of the base runtime_coordination.sql schema
+        # (dispatches.track) — never a separate additive track_id column.
         conn.commit()
 
 
@@ -786,7 +786,7 @@ def _seed_track(conn, track_id, project_id, pr_ref=None):
 
 def _seed_dispatch(conn, dispatch_id, project_id, track_id):
     conn.execute(
-        "INSERT INTO dispatches (dispatch_id, project_id, state, track_id) VALUES (?, ?, ?, ?)",
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track) VALUES (?, ?, ?, ?)",
         (dispatch_id, project_id, "completed", track_id),
     )
     conn.commit()
@@ -882,7 +882,7 @@ class TestReconcileCommitProvenanceTrackLinkage:
         repo, _state_dir, conn, env = _make_project(tmp_path)
         _seed_track(conn, "T-001", "test-proj")
         conn.execute(
-            "INSERT INTO dispatches (dispatch_id, project_id, state, track_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO dispatches (dispatch_id, project_id, state, track) VALUES (?, ?, ?, ?)",
             (self.DISPATCH_ID, "test-proj", "completed", None),
         )
         conn.commit()

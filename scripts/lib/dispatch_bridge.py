@@ -180,6 +180,16 @@ def stage_spec_bundle(
     task_class: Optional[str] = None,
     tier_from: Optional[str] = None,
     tier_to: Optional[str] = None,
+    # OI-1632: the structural link to a tracks-table row (TL-D1, dispatch_spec.py's
+    # DispatchSpec.track_id). Was silently absent from every bridge-staged spec —
+    # this bridge is the ONLY writer for the four legacy callers (dispatch_deliver.sh,
+    # pool_worker_runner.py, headless_dispatch_daemon.py, claude_adapter.py), so a
+    # missing param here meant zero of those dispatches could ever carry a track,
+    # regardless of what the door itself already supports. Carrying it through here
+    # does NOT make a track required for every dispatch — VNX_REQUIRE_DISPATCH_TRACK
+    # stays default OFF (advisory-only absence) at the door; this parameter only
+    # fixes the OVERDRACHT (transfer) so a caller who HAS a track_id can hand it off.
+    track_id: Optional[str] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
 
@@ -278,6 +288,9 @@ def stage_spec_bundle(
         "parent_dispatch": (parent_dispatch or "").strip() or None,
         "tier_from": (tier_from or "").strip() or None,
         "tier_to": (tier_to or "").strip() or None,
+        # OI-1632: track_id — read by dispatch_spec.DispatchSpec.from_dict
+        # (raw.get("track_id")) exactly like the other chain-link fields above.
+        "track_id": (track_id or "").strip() or None,
         "deadline_seconds": int(deadline_seconds),
         "base_ref": base_ref or "origin/main",
         "isolation": "worktree",
@@ -317,6 +330,10 @@ def stage_escalation_bundle(
     now: Optional[float] = None,
     data_dir: Optional[Path] = None,
     retried: bool = False,
+    # OI-1632: an escalation continues the SAME dispatch chain as the rejected
+    # attempt, so it carries the same track_id (the caller's responsibility to
+    # supply — this function never guesses one from rejected_dispatch_id).
+    track_id: Optional[str] = None,
 ) -> Path:
     """Stage a QUALITY-escalation followup bundle (OI-1221, wired OI-1229).
 
@@ -393,6 +410,7 @@ def stage_escalation_bundle(
         task_class=task_class,
         tier_from=escalation.tier_from,
         tier_to=escalation.tier_to,
+        track_id=track_id,
     )
 
 
@@ -577,6 +595,9 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--gate", default="")
     parser.add_argument("--pr-id", default=None, dest="pr_id")
     parser.add_argument("--work-ref", default=None, dest="work_ref")
+    # OI-1632: structural track link (TL-D1) — optional, never required (see the
+    # track_id param comment on stage_spec_bundle for why absence stays advisory).
+    parser.add_argument("--track-id", default=None, dest="track_id")
     parser.add_argument("--parent-dispatch", default=None, dest="parent_dispatch")
     parser.add_argument("--task-class", default=None, dest="task_class")
     parser.add_argument("--tier-from", default=None, dest="tier_from")
@@ -640,6 +661,7 @@ def main(argv: Optional[list] = None) -> int:
         gate=args.gate,
         pr_id=args.pr_id,
         work_ref=args.work_ref,
+        track_id=args.track_id,
         parent_dispatch=args.parent_dispatch,
         task_class=args.task_class,
         tier_from=args.tier_from,

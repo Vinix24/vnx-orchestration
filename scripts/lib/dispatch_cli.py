@@ -1408,11 +1408,16 @@ def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
 
     Never INSERTs — row creation is the door's job (``_persist_dispatch_row``,
     invoked earlier in run_dispatch, right after validation + plan compile).
-    When that row exists this UPDATE stamps the track_id onto it; D2 treats an
-    absent/None track_id as a no-op, so a dispatch whose row could not be
-    created (e.g. no runtime_coordination.db yet) is a safe, anticipated case
-    here, not a partial failure. Adds the track_id column additively
-    (_has_col-guarded) when missing. Never raises.
+    When that row exists this UPDATE stamps the value onto the SAME ``track``
+    column ``_persist_dispatch_row`` already writes at registration (schema
+    since migration 0022, schemas/migrations/0022_track_layer.sql) — never a
+    second column or a second name (OI-1632: this function used to lazily
+    ALTER TABLE a separate ``track_id`` column that registration never wrote
+    and receipt_provenance/gate_findings_bridge never agreed on either, so the
+    UPDATE below and every reader of it silently talked past registration).
+    D2 treats an absent/None track as a no-op, so a dispatch whose row could
+    not be created (e.g. no runtime_coordination.db yet) is a safe, anticipated
+    case here, not a partial failure. Never raises.
     """
     track_id = (spec.track_id or "").strip()
     if not track_id:
@@ -1424,17 +1429,16 @@ def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
     try:
         conn = _sqlite3.connect(str(db_path), timeout=10.0)
         try:
-            if not _has_col(conn, "dispatches", "track_id"):
-                conn.execute("ALTER TABLE dispatches ADD COLUMN track_id TEXT")
-                conn.commit()
+            if not _has_col(conn, "dispatches", "track"):
+                return
             conn.execute(
-                "UPDATE dispatches SET track_id = ? WHERE dispatch_id = ? AND project_id = ?",
+                "UPDATE dispatches SET track = ? WHERE dispatch_id = ? AND project_id = ?",
                 (track_id, spec.dispatch_id, spec.project_id),
             )
             conn.commit()
         finally:
             conn.close()
-    except Exception as exc:  # vnx-silent-except: track_id linkage is best-effort; door must never block on it
+    except Exception as exc:  # vnx-silent-except: track linkage is best-effort; door must never block on it
         _record_bookkeeping_failure(
             "_persist_track_id", spec.dispatch_id, exc, state_dir=state_dir,
         )

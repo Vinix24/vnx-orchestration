@@ -542,21 +542,26 @@ def _link_pr_to_track(
     """Upsert ``pr_number`` onto ``tracks.pr_ref`` for the track this dispatch points to.
 
     Returns True when the track row was actually updated. Idempotent: a PR already
-    present is a no-op. Skips silently when the D1 ``track_id`` column is absent,
-    the dispatch has no track, or the track row does not exist.
+    present is a no-op. Skips silently when the ``track`` column is absent, the
+    dispatch has no track, or the track row does not exist.
+
+    OI-1632: reads the SAME ``dispatches.track`` column registration writes
+    (``dispatch_cli._persist_dispatch_row`` / ``_persist_track_id``) — this used
+    to read a separate ``track_id`` column that registration never populated, so
+    this lookup always missed even for a dispatch with a real, registered track.
     """
-    if not _has_column(state_conn, "dispatches", "track_id"):
+    if not _has_column(state_conn, "dispatches", "track"):
         return False
 
     has_project_id = _has_column(state_conn, "dispatches", "project_id")
     if has_project_id:
         row = state_conn.execute(
-            "SELECT track_id, project_id FROM dispatches WHERE dispatch_id = ?",
+            "SELECT track, project_id FROM dispatches WHERE dispatch_id = ?",
             (dispatch_id,),
         ).fetchone()
     else:
         row = state_conn.execute(
-            "SELECT track_id FROM dispatches WHERE dispatch_id = ?",
+            "SELECT track FROM dispatches WHERE dispatch_id = ?",
             (dispatch_id,),
         ).fetchone()
 

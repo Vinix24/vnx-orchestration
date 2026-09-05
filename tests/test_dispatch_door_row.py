@@ -8,8 +8,13 @@ starved three consumers:
 1. ``_persist_track_id`` (UPDATE-only) — its UPDATE hit zero rows (symptom 1);
 2. ``reconcile_all_dispatch_outcomes`` — empty dispatch-id population, so
    "nothing to reconcile" looked identical to "everything reconciled";
-3. TL-D2 ``receipt_provenance._link_pr_to_track`` — no track_id row to read,
+3. TL-D2 ``receipt_provenance._link_pr_to_track`` — no track row to read,
    so tracks.pr_ref auto-propagation on merge never fired.
+
+OI-1632: ``_persist_track_id`` writes the SAME ``dispatches.track`` column
+registration (``_persist_dispatch_row``) already writes — not a separate
+``track_id`` column. This file's fixtures/assertions read ``row["track"]``
+accordingly.
 
 Every test in this file is RED on origin/main (no row is ever created there)
 and GREEN on the fix branch. Tests run against a throwaway DB under tmp_path —
@@ -187,8 +192,8 @@ def test_door_creates_dispatch_row(tmp_path, monkeypatch):
     # -> accepted -> running -> completed (the lane executor is mocked to
     # succeed) — instead of parking it at 'proposed' forever.
     assert row["state"] == "completed"
-    # symptom 1 consumer: the track_id column _persist_track_id / D2 read
-    assert row["track_id"] == "oi-847-track"
+    # symptom 1 consumer: the track column _persist_track_id / D2 read
+    assert row["track"] == "oi-847-track"
     # symptom 2 consumer: created_at feeds the classifier's age computation
     assert row["created_at"]
 
@@ -217,7 +222,7 @@ def test_persist_track_id_hits_row_after_door(tmp_path, monkeypatch):
     # Blank the column, then prove _persist_track_id's UPDATE lands on a row.
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        "UPDATE dispatches SET track_id = NULL WHERE dispatch_id = ?",
+        "UPDATE dispatches SET track = NULL WHERE dispatch_id = ?",
         ("20260731-oi847-track-link",),
     )
     conn.commit()
@@ -228,8 +233,8 @@ def test_persist_track_id_hits_row_after_door(tmp_path, monkeypatch):
 
     row = _read_row(db_path, "20260731-oi847-track-link")
     assert row is not None, "no dispatches row — _persist_track_id updated zero rows"
-    assert row["track_id"] == "oi-847-track", (
-        "_persist_track_id must stamp track_id onto the door-created row"
+    assert row["track"] == "oi-847-track", (
+        "_persist_track_id must stamp track onto the door-created row"
     )
 
 

@@ -19,7 +19,7 @@ deferred and emitted ONLY AFTER that commit succeeds — at-most-once, non-fatal
 failure (logged, never rolled back; the reconciler can re-derive from the committed row).
 
 ADR-007 (tenant scoping): project_id is resolved FROM the dispatch's own row in
-``dispatches`` — never defaulted to ``vnx-dev``. A dispatch with no row, no track_id, or
+``dispatches`` — never defaulted to ``vnx-dev``. A dispatch with no row, no track, or
 no project_id is, from this module's perspective, UNLINKED: it degrades quietly (a single
 log line) and creates nothing. An unlinked gate finding is not a fabric open-item, and
 that is an accepted, intentional no-op (per the dispatch contract), not an error.
@@ -63,9 +63,14 @@ def _resolve_dispatch_track(
     """Resolve (track_id, project_id) for ``dispatch_id``, or None to degrade quietly.
 
     Fail-closed on tenancy (ADR-007): a dispatch row missing ``project_id`` (or
-    ``track_id``) is treated as unresolvable, NEVER defaulted to 'vnx-dev'. Any DB
+    ``track``) is treated as unresolvable, NEVER defaulted to 'vnx-dev'. Any DB
     error (locked/absent/malformed) also resolves to None — a gate must never crash
     because the fabric-linking read failed.
+
+    OI-1632: reads the SAME ``dispatches.track`` column registration writes
+    (``dispatch_cli._persist_dispatch_row`` / ``_persist_track_id``), not a
+    separate ``track_id`` column — the two never agreed before this fix, so a
+    dispatch with a real, registered track was still read here as unlinked.
     """
     if not dispatch_id or not dispatch_id.strip():
         return None
@@ -77,12 +82,12 @@ def _resolve_dispatch_track(
     except sqlite3.Error:
         return None
     try:
-        if not _has_col(conn, "dispatches", "track_id") or not _has_col(
+        if not _has_col(conn, "dispatches", "track") or not _has_col(
             conn, "dispatches", "project_id"
         ):
             return None
         row = conn.execute(
-            "SELECT track_id, project_id FROM dispatches WHERE dispatch_id = ?",
+            "SELECT track, project_id FROM dispatches WHERE dispatch_id = ?",
             (dispatch_id,),
         ).fetchone()
         if not row or not row[0] or not row[1]:
