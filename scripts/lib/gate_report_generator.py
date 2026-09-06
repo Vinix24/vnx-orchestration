@@ -22,6 +22,8 @@ class GateReportGeneratorMixin:
         reason_detail: str,
         contract_hash: str = "",
         dispatch_id: str = "",
+        branch: str = "",
+        commit_sha: str = "",
     ) -> Tuple[Dict[str, Any], bool]:
         """Write a not_executable result record (GATE-4).
 
@@ -35,6 +37,22 @@ class GateReportGeneratorMixin:
         verdict (e.g. a launchd worker missing the gate's CLI on PATH) would
         silently erase that verdict -- measured live against PR #1691's
         codex-gate pass (contract_hash ``466cd2ca75d7a7fb``).
+
+        ``branch``/``commit_sha`` (OI-1624): every caller already resolved
+        both before deciding the gate is unavailable -- the request payload
+        it builds around this call carries them (``_request_codex`` etc.
+        stamp ``branch``/``get_pr_head_sha(pr_number)`` unconditionally,
+        before branching on availability). Without them here, the resulting
+        not_executable record fails ``closure_verifier``'s scope match
+        (ADR-005/OI-1307: a result missing ``branch``/``commit_sha`` is
+        treated as stale evidence, same as a mismatched one) and reads as NO
+        RECORD AT ALL rather than as a confirmed absence -- measured live on
+        PR #1777's ``codex_gate`` not_executable record, which carried
+        neither field and was invisible to the merge door's scope matcher
+        before this fix. Both default to "" (never resolved / not
+        applicable, e.g. the contract-flow callers that pass no PR yet) so
+        every existing caller that does not pass them keeps writing the
+        exact same shape as before.
 
         Returns ``(payload_on_disk, written)``. ``payload_on_disk`` is the
         not_executable payload just built when the write landed, or the
@@ -58,6 +76,8 @@ class GateReportGeneratorMixin:
             "failure_reason": reason_detail,
             "summary": f"{gate} not executable: {reason_detail}",
             "contract_hash": contract_hash,
+            "branch": branch,
+            "commit_sha": commit_sha,
             "report_path": "",
             "blocking_findings": [],
             "advisory_findings": [],
