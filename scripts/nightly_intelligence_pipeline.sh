@@ -255,10 +255,13 @@ run_phase "10-recommendations" python3 "$SCRIPT_DIR/generate_t0_recommendations.
     --lookback 1440
 
 # ── Phase 11: Email digest (optional) ────────────────────────────────────────
-if [ -n "${VNX_DIGEST_EMAIL:-}" ] && [ -n "${VNX_SMTP_PASS:-}" ]; then
+# The sender resolves its own credential (VNX_SMTP_PASS, else the macOS
+# keychain item "vnx-smtp-pass") and fails loudly if both are empty — that
+# failure must reach run_phase as a failed phase, not be pre-empted here.
+if [ -n "${VNX_DIGEST_EMAIL:-}" ]; then
     run_phase "11-email-digest" python3 "$SCRIPT_DIR/send_digest_email.py"
 else
-    log_msg "Phase 11 (email): skipped — VNX_DIGEST_EMAIL or VNX_SMTP_PASS not set"
+    log_msg "Phase 11 (email): skipped — VNX_DIGEST_EMAIL not set"
 fi
 
 # ── Write pipeline health summary ─────────────────────────────────────────────
