@@ -22,7 +22,14 @@ Covers:
 
   general:
   - ALLOW: non-Bash tool calls (Write, Read, etc.)
-  - JSON output contract: decision + reason on block, empty on allow
+  - JSON output contract (OI-1643): PreToolUse deny is
+    {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+    "permissionDecision":"deny","permissionDecisionReason":"..."}}, empty on
+    allow. The deprecated flat {"decision":"block","reason":"..."} form is a
+    PostToolUse/Stop/UserPromptSubmit contract that Claude Code silently
+    ignores for PreToolUse — assert_blocked() below unwraps the envelope and
+    still returns {"decision": "block", "reason": ...} so existing assertions
+    read unchanged.
   - Exit code always 0
 """
 
@@ -74,15 +81,22 @@ def run_hook(tool_name: str, command: str | None = None) -> tuple[int, str]:
 
 
 def assert_blocked(tool_name: str, command: str) -> dict:
-    """Run hook; assert block decision. Returns parsed JSON."""
+    """Run hook; assert deny decision (PreToolUse hookSpecificOutput contract).
+    Returns the parsed hookSpecificOutput dict (not the outer envelope) so
+    existing callers keep reading .get("reason") unchanged.
+    """
     rc, out = run_hook(tool_name, command)
-    assert rc == 0, f"Hook must exit 0 even on block; got {rc}"
+    assert rc == 0, f"Hook must exit 0 even on deny; got {rc}"
     assert out.strip(), f"Blocked command produced no output: {command!r}"
     data = json.loads(out)
-    assert data.get("decision") == "block", (
-        f"Expected block for {command!r}, got {data.get('decision')!r}"
+    hso = data.get("hookSpecificOutput", {})
+    assert hso.get("hookEventName") == "PreToolUse", (
+        f"Expected PreToolUse hookSpecificOutput for {command!r}, got {data!r}"
     )
-    return data
+    assert hso.get("permissionDecision") == "deny", (
+        f"Expected deny for {command!r}, got {hso.get('permissionDecision')!r}"
+    )
+    return {"decision": "block", "reason": hso.get("permissionDecisionReason")}
 
 
 def assert_allowed(tool_name: str, command: str | None = None) -> None:
@@ -406,6 +420,20 @@ class TestHookOutputContract:
         _, out = run_hook("Bash", 'claude -p "test"')
         data = json.loads(out)
         assert isinstance(data, dict)
+
+    def test_block_uses_hookspecificoutput_envelope(self):
+        """OI-1643 regression guard: PreToolUse must use hookSpecificOutput.
+        permissionDecision, not the deprecated flat {"decision":"block"} form
+        (that form is the PostToolUse/Stop/UserPromptSubmit contract and is
+        silently ignored for PreToolUse — the bug this fix closes).
+        """
+        _, out = run_hook("Bash", 'claude -p "test"')
+        data = json.loads(out)
+        assert "decision" not in data, "deprecated flat form must not reappear"
+        hso = data["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert hso["permissionDecisionReason"]
 
     def test_block_has_decision_block(self):
         data = assert_blocked("Bash", 'claude -p "test"')

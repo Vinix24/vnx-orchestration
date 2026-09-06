@@ -6,10 +6,18 @@
 #          subprocess_dispatch.py or provider_dispatch.py, which spawn CLIs via
 #          Popen and always emit a receipt.
 #
-# Claude Code hook contract (2.1+):
+# Claude Code hook contract (2.1+), PreToolUse:
 #   stdin  : JSON {tool_name, tool_input, session_id, cwd, transcript_path}
-#   stdout : {"decision":"block","reason":"..."} to block, empty to allow
+#   stdout : {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+#             "permissionDecision":"deny","permissionDecisionReason":"..."}}
+#            to deny, empty to allow
 #   exit   : 0 always — decision is communicated via JSON output
+#
+# OI-1643: this hook used to emit the deprecated flat
+# {"decision":"block","reason":"..."} form, which is the PostToolUse/Stop/
+# UserPromptSubmit contract, not PreToolUse. Claude Code's PreToolUse event
+# reads hookSpecificOutput.permissionDecision instead, so blocked commands
+# were silently allowed through. Fixed to the hookSpecificOutput wrapper.
 #
 # Detection is delegated to pretooluse_spawn_detector.py (same directory)
 # for reliable cross-platform regex without bash heredoc/quoting issues.
@@ -61,7 +69,7 @@ DECISION="$(echo "$INPUT" | python3 "$DETECTOR")"
 
 # ── Emit JSON decision ────────────────────────────────────────────────────────
 if [[ "$DECISION" == "block" ]]; then
-  printf '{"decision":"block","reason":"Worker-dispatch moet via scripts/lib/subprocess_dispatch.py of provider_dispatch.py (governed, emit receipt). Rauwe claude -p/--dangerously-skip-permissions, kimi --print/-p, en codex exec bypassen de governance receipt-trail. Gebruik: python3 scripts/lib/provider_dispatch.py --provider <claude|kimi|codex> <dispatch_id>"}\n'
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Worker-dispatch moet via scripts/lib/subprocess_dispatch.py of provider_dispatch.py (governed, emit receipt). Rauwe claude -p/--dangerously-skip-permissions, kimi --print/-p, en codex exec bypassen de governance receipt-trail. Gebruik: python3 scripts/lib/provider_dispatch.py --provider <claude|kimi|codex> <dispatch_id>"}}\n'
 fi
 
 # ── Tool-call signal aggregation (receipt-quality PR-B2, additive) ───────────
