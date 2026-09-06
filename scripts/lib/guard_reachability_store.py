@@ -62,7 +62,23 @@ class FillRate:
 
 
 def _is_filled(value: object) -> bool:
-    return value not in (None, "", [], {})
+    """True when a guard's truthy test on this value would actually pass.
+
+    golf-4r2 (2026-09-06): the previous check (``value not in (None, "", [],
+    {})``) treated ``False`` and ``0`` as "filled" — they are not in that
+    tuple, since ``False == 0`` and neither equals ``None``/``""``/``[]``/
+    ``{}``. Every one of the real repo's staged specs carries
+    ``post_merge_verification: False`` (measured 2026-09-06, 365 of 365);
+    the guard at ``dispatch_cli.py:2209`` is a plain truthy test
+    (``and spec.post_merge_verification:``), so a stored ``False`` means
+    that guard can never fire — exactly the unreachable-guard shape this
+    detector exists to catch. The old check would have reported all 365 as
+    "filled" and printed a false [OK], the same laundering this ronde
+    exists to close on ``track_id``. Plain ``bool()`` already treats
+    ``""``/``[]``/``{}``/``None`` as falsy, so this is a strict fix, not a
+    behavior change for the string/collection fields already mapped.
+    """
+    return bool(value)
 
 
 def measure_ndjson_fill_rate(paths: Sequence[Path], field: str) -> FillRate:

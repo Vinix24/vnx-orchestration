@@ -73,6 +73,58 @@ def test_json_dir_fill_rate_counts_per_file_documents(tmp_path):
     assert rate.filled == 1
 
 
+def test_json_dir_fill_rate_treats_stored_false_as_not_filled(tmp_path):
+    """golf4r2 (OI-1640): spec.post_merge_verification is a plain bool guard
+    (``and spec.post_merge_verification:`` at dispatch_cli.py:2209). Every
+    staged spec in the real repo carries this key with the literal value
+    ``False`` (measured 2026-09-06: 365 of 365) — the guard's truthy test
+    can never pass. The old presence-based ``_is_filled`` counted ``False``
+    as "filled" (it is not in ``(None, "", [], {})``), which would have
+    printed a false [OK] on exactly this field.
+    """
+    specs = tmp_path / "pending"
+    specs.mkdir()
+    for i in range(5):
+        (specs / f"s{i}.json").write_text(
+            json.dumps({"dispatch_id": f"s{i}", "post_merge_verification": False}),
+            encoding="utf-8",
+        )
+    rate = measure_json_dir_fill_rate(specs, "*.json", field="post_merge_verification")
+    assert rate.total == 5
+    assert rate.filled == 0
+    assert rate.is_zero_fill is True
+
+
+def test_json_dir_fill_rate_counts_stored_true_as_filled(tmp_path):
+    """Nul is eerst een meetfout: the fix above must not also report a
+    real ``True`` as unfilled — test against a case that DOES exist."""
+    specs = tmp_path / "pending"
+    specs.mkdir()
+    (specs / "a.json").write_text(
+        json.dumps({"dispatch_id": "a", "post_merge_verification": True}), encoding="utf-8",
+    )
+    (specs / "b.json").write_text(
+        json.dumps({"dispatch_id": "b", "post_merge_verification": False}), encoding="utf-8",
+    )
+    rate = measure_json_dir_fill_rate(specs, "*.json", field="post_merge_verification")
+    assert rate.total == 2
+    assert rate.filled == 1
+    assert rate.is_zero_fill is False
+
+
+def test_ndjson_fill_rate_treats_numeric_zero_as_not_filled(tmp_path):
+    """Same _is_filled fix, other store shape: a stored ``0`` is not in
+    ``(None, "", [], {})`` either, so the old check counted it as filled."""
+    ledger = tmp_path / "t0_receipts.ndjson"
+    ledger.write_text(
+        "\n".join([json.dumps({"count": 0}), json.dumps({"count": 3})]) + "\n",
+        encoding="utf-8",
+    )
+    rate = measure_ndjson_fill_rate([ledger], field="count")
+    assert rate.total == 2
+    assert rate.filled == 1
+
+
 def test_sqlite_missing_db_reports_not_exists(tmp_path):
     rate = measure_sqlite_column_fill_rate(tmp_path / "nope.db", "dispatches", "track")
     assert rate.exists is False

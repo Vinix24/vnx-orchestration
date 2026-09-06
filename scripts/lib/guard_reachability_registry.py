@@ -82,32 +82,112 @@ class FieldMapping:
 # the real store that would prove whether it is ever filled. Extending this
 # list is the expected way to bring a new guarded field under measurement —
 # NOT adding a comment near the guard.
+#
+# EXPLICIT RULE (golf-4 ronde 2 / OI-1640, 2026-09-06): a field may carry
+# MORE THAN ONE StoreTarget, and each is measured and reported
+# INDEPENDENTLY (see ``build_findings`` — one ``FieldFinding`` per target).
+# When a field has several targets, the one the GUARD ITSELF READS is
+# authoritative for "is this guard reachable" and MUST be a target here —
+# a downstream store that something else WRITES after the guard already
+# ran (a persisted column, a derived ledger) may also be listed, but its
+# note must say so explicitly, and a healthy fill rate on it is NOT
+# evidence the guard is reachable. golf-4r2's own finding was the registry
+# doing exactly that: mapping ``track_id`` ONLY against the sqlite column
+# ``_persist_track_id`` writes downstream, never against the staged
+# ``dispatch-spec.json`` both ``_check_track_link_verdict`` (the door's
+# guard, dispatch_cli.py:1030) and ``_persist_track_id`` itself
+# (dispatch_cli.py:1423) actually read — a partially-filled downstream
+# column reported a clean [OK] on the exact case this detector exists to
+# catch (0 of 1115 staged specs had a track_id, measured 2026-09-06).
 FIELD_STORE_MAP: Tuple[FieldMapping, ...] = (
     FieldMapping(
         field="track_id",
         targets=(
+            StoreTarget(
+                kind="json_dir",
+                dir_relpath="dispatches",
+                glob="dispatch-spec.json",
+                note=(
+                    "AUTHORITATIVE for guard reachability: this is what both "
+                    "guard sites actually read — dispatch_cli.py:1030 "
+                    "(_check_track_link_verdict, 'if track_id:' on the local "
+                    "assigned from spec.track_id) and dispatch_cli.py:1423 "
+                    "(_persist_track_id, 'if not track_id: return'). Measured "
+                    "2026-09-06: 0 of 1115 staged dispatch-spec.json bundles "
+                    "had a track_id — OI-1640."
+                ),
+            ),
             StoreTarget(
                 kind="sqlite",
                 db_relpath="state/runtime_coordination.db",
                 table="dispatches",
                 column="track",
                 note=(
-                    "OI-1632 (#1774, 2026-09-05): registration writes "
-                    "dispatches.track; a nonexistent dispatches.track_id "
-                    "column was the pre-fix bug. Reads THIS column, not "
-                    "track_id, on purpose — see dispatch_cli.py:_persist_track_id."
+                    "DOWNSTREAM PERSISTENCE ONLY, not guard reachability: "
+                    "OI-1632 (#1774, 2026-09-05) fixed registration to write "
+                    "dispatches.track; _persist_track_id (dispatch_cli.py) "
+                    "UPDATEs this SAME column after the door's guard has "
+                    "already run. A nonzero fill rate here only proves "
+                    "_persist_track_id executed on a row that already had a "
+                    "track_id — it says nothing about whether the guard's "
+                    "OWN read of spec.track_id (the json_dir target above) "
+                    "is ever reachable. golf-4r2 (OI-1640, 2026-09-06): this "
+                    "column alone being partially filled (122/815) is what "
+                    "let a genuine zero-fill guard-source (0/1115, above) "
+                    "report a false [OK] — never read this target's rate as "
+                    "an answer to 'can the guard fire'."
                 ),
             ),
         ),
         note=(
             "spec.track_id (DispatchSpec) gates the plan-first-gate "
-            "enforcement branch in dispatch_cli._check_track_link_verdict. "
+            "enforcement branch in dispatch_cli._check_track_link_verdict, "
+            "and the persistence early-return in _persist_track_id. "
             "VNX_REQUIRE_DISPATCH_TRACK defaults OFF, so a nonzero-but-partial "
-            "fill rate is the designed advisory state, not a defect — only "
-            "an EXACT zero (the pre-#1774 state) is flagged."
+            "fill rate on the json_dir target is the designed advisory "
+            "state, not a defect — only an EXACT zero is flagged. The "
+            "sqlite target is informational only (see its own note)."
+        ),
+    ),
+    FieldMapping(
+        field="post_merge_verification",
+        targets=(
+            StoreTarget(
+                kind="json_dir",
+                dir_relpath="dispatches",
+                glob="dispatch-spec.json",
+                note=(
+                    "AUTHORITATIVE for guard reachability: dispatch_cli.py:2209 "
+                    "reads spec.post_merge_verification directly ('and "
+                    "spec.post_merge_verification:'), no local-var indirection. "
+                    "Measured 2026-09-06: every staged spec that carries this "
+                    "key (365 of 1116) carries it as the literal value False — "
+                    "OI-1639, a second, independent instance of the golf-4 "
+                    "unreachable-guard shape, found in the same ronde as "
+                    "OI-1640 above and deliberately NOT fixed by this dispatch "
+                    "(see the dispatch report's Open Items)."
+                ),
+            ),
+        ),
+        note=(
+            "spec.post_merge_verification (DispatchSpec) gates the "
+            "checkout-lag verification-reminder verdict in "
+            "run_dispatch (dispatch_cli.py:2209) — a truthy bool test, no "
+            "indirection. No caller in the repo sets it True on a staged "
+            "bundle (grep dispatch_bridge.py / the stage_spec_bundle CLI), "
+            "so that branch is currently unreachable in practice (OI-1639, "
+            "tracked separately from this dispatch's OI-1640 fix)."
         ),
     ),
 )
+
+# golf-4r2 (2026-09-06): "1364 unmeasured fields" is not itself a defect —
+# most guard fields in this repo are unrelated to this bug class — but it
+# must never SILENTLY become "0 mapped fields" (a registry that lost every
+# entry would report a permanently clean audit and nobody would notice,
+# the exact valkuil this whole detector exists to close). Bump this only
+# after actually adding a reviewed entry above, never to make room for one.
+MIN_MAPPED_FIELDS = 2
 
 
 @dataclass(frozen=True)
@@ -141,11 +221,21 @@ def validate_registry() -> None:
 
     A ``StoreTarget`` already validates its own shape in ``__post_init__``;
     this validates the registry-level invariants: no duplicate field
-    mappings, and no ``ACCEPTED_GAPS`` entry with an empty/whitespace reason
+    mappings, no ``ACCEPTED_GAPS`` entry with an empty/whitespace reason
     (the whole point of this module is that a reason is mandatory and
     reviewable — an empty string is the same failure mode as a doc-comment
-    nobody reads).
+    nobody reads), and the mapped-field count never silently drops below
+    ``MIN_MAPPED_FIELDS`` (golf-4r2: a registry that lost every entry would
+    report a permanently clean audit and look identical to "nothing to fix").
     """
+    if len(FIELD_STORE_MAP) < MIN_MAPPED_FIELDS:
+        raise ValueError(
+            f"FIELD_STORE_MAP has {len(FIELD_STORE_MAP)} entr(y/ies), below "
+            f"MIN_MAPPED_FIELDS={MIN_MAPPED_FIELDS} — a mapped-field count "
+            "silently dropping is indistinguishable from the registry "
+            "losing coverage, not from there being nothing left to map "
+            "(golf-4r2, 2026-09-06)"
+        )
     seen_fields = set()
     for mapping in FIELD_STORE_MAP:
         if not mapping.field or not mapping.field.strip():

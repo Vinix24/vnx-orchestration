@@ -23,9 +23,13 @@ Subcommands:
               still printed, with their reason, never silently dropped.
   selftest  — re-confirm the calibration case(s) in
               ``guard_reachability_calibration`` against their frozen,
-              real pre-fix source. Exits 1 (loud) if the detector can no
-              longer find a single known-bad case — see that module's
-              docstring for why this exists.
+              real pre-fix source, THEN run a live ``audit`` against the
+              real repo/data-dir and require at least one violation
+              (``run_live_violation_selftest``, golf-4 ronde 2). Exits 1
+              (loud) if the detector can no longer find a single known-bad
+              case, frozen OR live — see that module's and
+              ``run_live_violation_selftest``'s docstrings for why both
+              halves exist.
 
 Deliberately NOT wired into CI yet (see the dispatch report's Open Items):
 the first repo-wide `audit` run surfaces genuine, currently-unfixed findings
@@ -58,6 +62,7 @@ from guard_reachability_calibration import (  # noqa: E402
 from guard_reachability_registry import (  # noqa: E402
     ACCEPTED_GAPS,
     FIELD_STORE_MAP,
+    MIN_MAPPED_FIELDS,
     AcceptedGap,
     StoreTarget,
     validate_registry,
@@ -202,7 +207,9 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
     print(
         f"\n{len(violations)} violation(s), {len(suppressed)} suppressed, "
-        f"{len(ok)} ok, {len(unmeasured)} unmeasured field(s) (no registry mapping)"
+        f"{len(ok)} ok, {len(FIELD_STORE_MAP)} field(s) mapped (floor "
+        f"MIN_MAPPED_FIELDS={MIN_MAPPED_FIELDS}), {len(unmeasured)} "
+        "unmeasured field(s) (no registry mapping)"
     )
     if unmeasured and args.show_unmeasured:
         print("\nUnmeasured fields (candidates to triage into FIELD_STORE_MAP):")
@@ -210,6 +217,44 @@ def cmd_audit(args: argparse.Namespace) -> int:
             print(f"  {field}: {len(refs)} guard site(s), e.g. {refs[0].file}:{refs[0].lineno}")
 
     return 1 if violations else 0
+
+
+def run_live_violation_selftest(root: Path, data_dir: Path) -> List[str]:
+    """golf-4 ronde 2 (OI-1640, 2026-09-06) — the live half of the tripwire.
+
+    ``run_selftest`` (above) re-confirms the scanner against a FROZEN
+    historical fixture; it says nothing about whether ``build_findings``
+    run against the ACTUAL live repo right now still surfaces a real
+    problem. That gap is exactly how the original registry shipped: it
+    validated cleanly, ``run_selftest`` passed, and the live ``audit``
+    still reported a false [OK] on ``track_id`` because it was measured
+    against the wrong store (see ``guard_reachability_registry``'s
+    docstring). "0 violations" on a live audit is indistinguishable from
+    "the detector stopped measuring anything" unless something asserts
+    that at least one known-real finding still shows up.
+
+    Raises :class:`SelfTestFailure` when the live repo audit finds ZERO
+    violations — this is a hard stop, not a warning: it means either every
+    known defect this registry maps (OI-1639, OI-1640) has genuinely been
+    fixed (replace this tripwire's expectation with a fresh known-bad case
+    before removing it) or the registry/measurement has been broken or
+    laundered via ``ACCEPTED_GAPS``.
+    """
+    violations, _suppressed, _ok, _unmeasured = build_findings(root, data_dir)
+    if not violations:
+        raise SelfTestFailure(
+            "live audit against the real repo (root="
+            f"{root}, data_dir={data_dir}) found ZERO violations — this is "
+            "indistinguishable from a broken/mis-mapped detector. If every "
+            "known FIELD_STORE_MAP defect (OI-1639, OI-1640) is genuinely "
+            "fixed now, replace this tripwire's known-bad expectation with "
+            "a fresh one before relying on a clean audit again."
+        )
+    fields = sorted({f.field for f in violations})
+    return [
+        f"live audit: {len(violations)} violation(s) found on the real repo "
+        f"({', '.join(fields)}) — detector is live-verified, not just calibrated"
+    ]
 
 
 def cmd_selftest(args: argparse.Namespace) -> int:
@@ -221,6 +266,15 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         print("[guard-reachability selftest] FAIL")
         print(str(exc))
         return 1
+
+    data_dir = Path(args.data_dir).resolve() if args.data_dir else Path(vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+    try:
+        confirmations = confirmations + run_live_violation_selftest(root, data_dir)
+    except SelfTestFailure as exc:
+        print("[guard-reachability selftest] FAIL")
+        print(str(exc))
+        return 1
+
     print(f"[guard-reachability selftest] PASS ({len(CALIBRATION_CASES)} calibration case(s))")
     for line in confirmations:
         print(f"  {line}")
@@ -241,6 +295,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_audit.set_defaults(func=cmd_audit)
 
     p_selftest = sub.add_parser("selftest", help="re-confirm calibration cases")
+    p_selftest.add_argument("--data-dir", default=None)
     p_selftest.set_defaults(func=cmd_selftest)
 
     args = parser.parse_args(argv)

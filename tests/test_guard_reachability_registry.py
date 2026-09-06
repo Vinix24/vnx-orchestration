@@ -88,3 +88,35 @@ def test_calibration_field_is_not_in_accepted_gaps():
     check of this same invariant."""
     accepted_fields = {g.field for g in registry.ACCEPTED_GAPS}
     assert "track_id" not in accepted_fields
+
+
+def test_min_mapped_fields_floor_is_enforced(monkeypatch):
+    """golf4r2 (2026-09-06): 1364 unmeasured fields is not itself a defect,
+    but the MAPPED count must never silently drop below the floor — a
+    registry that lost every entry would report a permanently clean audit
+    and look identical to 'nothing left to fix'."""
+    monkeypatch.setattr(registry, "FIELD_STORE_MAP", ())
+    with pytest.raises(ValueError, match="MIN_MAPPED_FIELDS"):
+        validate_registry()
+
+
+def test_real_registry_meets_its_own_min_mapped_fields_floor():
+    assert len(registry.FIELD_STORE_MAP) >= registry.MIN_MAPPED_FIELDS
+
+
+def test_track_id_and_post_merge_verification_are_both_mapped():
+    """The two known golf-4 ronde 2 findings (OI-1640 fixed by this
+    dispatch, OI-1639 deliberately left open) must both be in the registry
+    — see the dispatch report's Open Items for why OI-1639 stays unfixed."""
+    fields = {m.field for m in registry.FIELD_STORE_MAP}
+    assert "track_id" in fields
+    assert "post_merge_verification" in fields
+
+
+def test_track_id_mapping_has_a_json_dir_target_authoritative_for_the_guard():
+    """The guard (dispatch_cli.py:1030 / :1423) reads spec.track_id from the
+    staged spec — NOT the persisted sqlite column _persist_track_id writes
+    downstream. Regressing to sqlite-only silently reintroduces OI-1640."""
+    mapping = next(m for m in registry.FIELD_STORE_MAP if m.field == "track_id")
+    kinds = {t.kind for t in mapping.targets}
+    assert "json_dir" in kinds
