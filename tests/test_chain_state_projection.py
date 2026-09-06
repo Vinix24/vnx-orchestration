@@ -7,6 +7,12 @@ Covers:
   - carry-forward summary and unresolved chain items surface
   - init_chain_state and record_state_transition lifecycle
   - audit trail append
+  - F2-4 (06-09, dispatch 20260906-f24-poortset-configureerbaar): the old
+    hardcoded ``REQUIRED_GATES = ("gemini_review", "codex_gate")`` ALL-of-two
+    rule is replaced by ``required_signer_gates()`` (sourced from the SAME
+    operator-configured review-gate takeover chain
+    ``gate_request_handler`` uses) plus an AT-LEAST-ONE-of-N certification
+    rule -- see ``TestAtLeastOneSigner`` below.
 """
 
 from __future__ import annotations
@@ -17,7 +23,17 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
+VNX_ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = VNX_ROOT / "scripts"
+LIB_DIR = SCRIPTS_DIR / "lib"
+# Both dirs, matching test_beta3_e1_review_gate_chain.py's own convention:
+# chain_state_projection now imports gate_request_handler (F2-4), whose own
+# transitive import of gate_recorder needs scripts/ on sys.path (append_receipt.py
+# lives there, not under scripts/lib/) on top of chain_state_projection's own
+# home under scripts/lib/.
+for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from chain_state_projection import (
     BLOCKED_STATES,
@@ -27,6 +43,7 @@ from chain_state_projection import (
     compute_advancement_truth,
     init_chain_state,
     record_state_transition,
+    required_signer_gates,
 )
 
 
@@ -57,7 +74,20 @@ def _write_open_items(state_dir: Path, items: list[dict]) -> None:
 
 
 def _write_gate_result(state_dir: Path, pr_num: int, gate: str, status: str,
-                        blocking: int = 0, contract_hash: str = "abc123") -> None:
+                        blocking: int = 0, contract_hash: str = "abc123",
+                        commit_sha: str = "", write_report: bool = True) -> None:
+    """Write a gate result record. ``write_report=True`` (default) creates a
+    REAL file at ``report_path`` -- F2-4's certification check requires the
+    report to exist on disk, not merely be named. Pass ``write_report=False``
+    to exercise the "report_path bestaat niet" guard-break scenario.
+    """
+    if write_report:
+        report_file = state_dir / "reports" / f"report-{pr_num}-{gate}.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text(f"# {gate} report for PR {pr_num}\n")
+        report_path = str(report_file)
+    else:
+        report_path = str(state_dir / "reports" / f"never-written-{pr_num}-{gate}.md")
     result = {
         "gate": gate,
         "pr_number": pr_num,
@@ -65,7 +95,8 @@ def _write_gate_result(state_dir: Path, pr_num: int, gate: str, status: str,
         "status": status,
         "blocking_count": blocking,
         "contract_hash": contract_hash,
-        "report_path": f"/tmp/report-{pr_num}-{gate}.md",
+        "report_path": report_path,
+        "commit_sha": commit_sha,
         "recorded_at": "2026-04-02T10:00:00Z",
     }
     path = state_dir / "review_gates" / "results" / f"pr-{pr_num}-{gate}.json"
@@ -199,7 +230,13 @@ class TestAdvancementTruth:
         assert any("not yet merged" in b for b in result["blockers"])
 
     def test_cannot_advance_when_gate_missing(self, state_dir: Path) -> None:
-        """Advancement requires gate certification — not just PR completion."""
+        """Advancement requires gate certification — not just PR completion.
+
+        F2-4: with zero result records, every configured candidate reads
+        "absent" (neither a missing-and-blocking gate nor a vote) and the
+        ZERO-certified-signers rule is what actually blocks — not a
+        per-gate "missing" blocker (that hardcoded pair no longer exists).
+        """
         pr_queue = {
             "prs": [
                 {"id": "PR-1", "status": "completed", "dependencies": []},
@@ -213,21 +250,23 @@ class TestAdvancementTruth:
             current_feature_id="PR-1",
         )
         assert result["can_advance"] is False
-        assert result["certification_status"]["gemini_review"] == "missing"
-        assert result["certification_status"]["codex_gate"] == "missing"
-        assert any("gemini_review" in b for b in result["blockers"])
-        assert any("codex_gate" in b for b in result["blockers"])
+        assert result["certification_status"]["codex_gate"] == "absent"
+        assert result["certification_status"]["gemini_review"] == "absent"
+        assert any("no valid signer" in b for b in result["blockers"])
 
     def test_cannot_advance_when_gate_not_certified(self, state_dir: Path) -> None:
+        """A decided-but-failing gate blocks even when another configured
+        gate certifies clean (F2-4 requirement 3: a dissenting vote never
+        loses to a passing one elsewhere)."""
         pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
-        _write_gate_result(state_dir, 1, "gemini_review", status="reject", blocking=1)
-        _write_gate_result(state_dir, 1, "codex_gate", status="approve", contract_hash="abc")
+        _write_gate_result(state_dir, 1, "codex_gate", status="reject", blocking=1)
+        _write_gate_result(state_dir, 1, "glm_gate", status="approve", contract_hash="abc")
         result = compute_advancement_truth(
             pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1"
         )
         assert result["can_advance"] is False
-        assert "not_certified" in result["certification_status"]["gemini_review"]
-        assert result["certification_status"]["codex_gate"] == "certified"
+        assert "not_certified" in result["certification_status"]["codex_gate"]
+        assert result["certification_status"]["glm_gate"] == "certified"
 
     def test_cannot_advance_with_blocker_open_item(self, state_dir: Path) -> None:
         pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
@@ -277,6 +316,163 @@ class TestAdvancementTruth:
             pr_queue=pr_queue, open_items=[done_item], state_dir=state_dir, current_feature_id="PR-1"
         )
         assert result["can_advance"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: F2-4 -- at least one certified signer from the configured chain
+# ---------------------------------------------------------------------------
+
+class TestAtLeastOneSigner:
+    """F2-4 (06-09, dispatch 20260906-f24-poortset-configureerbaar).
+
+    ``test_real_glm_pass_plus_codex_not_executable_pr1777`` uses the ACTUAL
+    values recorded on disk 2026-09-05/06 for PR #1777
+    (``~/.vnx-data/vnx-dev/state/review_gates/results/pr-1777-glm_gate.json``
+    and ``pr-1777-codex_gate.json``) — the live case this dispatch exists to
+    fix. Before this change: ``REQUIRED_GATES = ("gemini_review",
+    "codex_gate")`` read codex_gate's not_executable record as a missing
+    mandatory gate and gemini_review had no record at all, so BOTH required
+    gates were uncertified — NO-GO — even though glm_gate's own record was a
+    complete, evidenced PASS. This test proves the fix: GO.
+    """
+
+    def test_real_glm_pass_plus_codex_not_executable_pr1777(self, state_dir: Path) -> None:
+        report_file = state_dir / "reports" / "glm-gate-pr1777-report.md"
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text("# glm gate: pass (0 blocking finding(s))\n")
+        # Verbatim shape of the real pr-1777-glm_gate.json record (report_path
+        # repointed to a file that actually exists in THIS test's tmp_path).
+        glm_result = {
+            "gate": "glm_gate",
+            "pr_id": "1777",
+            "pr_number": 1777,
+            "test_run": False,
+            "status": "pass",
+            "reason": "verdict",
+            "summary": "glm gate: pass (0 blocking finding(s))",
+            "contract_hash": "549c0288ef98004e",
+            "report_path": str(report_file),
+            "provider": "glm-harness",
+            "model": "glm-5.2",
+            "dispatch_id": "glm-gate-pr1777-1788639375",
+            "blocking_findings": [],
+            "recorded_at": "2026-09-05T20:17:03Z",
+            "evidence_source": "live",
+            "branch": "dispatch/20260905-golf1b-report-store-split",
+            "commit_sha": "01f54411d975e39f41cb2b0d005fd8dcd5aad04a",
+        }
+        # Verbatim shape of the real pr-1777-codex_gate.json record.
+        codex_result = {
+            "gate": "codex_gate",
+            "pr_id": "1777",
+            "pr_number": 1777,
+            "status": "not_executable",
+            "reason": "provider_not_installed",
+            "reason_detail": "codex binary not found in PATH",
+            "failure_reason": "codex binary not found in PATH",
+            "summary": "codex_gate not executable: codex binary not found in PATH",
+            "contract_hash": "",
+            "report_path": "",
+            "blocking_findings": [],
+            "recorded_at": "2026-09-05T20:20:41Z",
+            "dispatch_id": "20260905-golf1b-report-store-split",
+        }
+        (state_dir / "review_gates" / "results" / "pr-1777-glm_gate.json").write_text(json.dumps(glm_result))
+        (state_dir / "review_gates" / "results" / "pr-1777-codex_gate.json").write_text(json.dumps(codex_result))
+
+        pr_queue = {"prs": [{"id": "1777", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(
+            pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="1777",
+        )
+        assert result["certification_status"]["codex_gate"] == "absent"
+        assert result["certification_status"]["glm_gate"] == "certified"
+        assert result["can_advance"] is True
+        assert result["blockers"] == []
+
+    def test_zero_valid_signers_is_still_no_go(self, state_dir: Path) -> None:
+        """The 'at least one' rule never degrades to 'zero is fine'."""
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(
+            pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1",
+        )
+        assert result["can_advance"] is False
+        assert any("no valid signer" in b for b in result["blockers"])
+
+    def test_guard_rejects_pass_record_with_wrong_commit_sha(self, state_dir: Path) -> None:
+        """Break the guard #1: a PASS whose commit_sha is not the PR head
+        must not certify, even though every other field looks clean."""
+        _write_gate_result(state_dir, 1, "codex_gate", status="pass", commit_sha="deadbeef")
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(
+            pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1",
+            pr_head_sha="cafef00d",
+        )
+        assert result["can_advance"] is False
+        assert "not_certified" in result["certification_status"]["codex_gate"]
+        assert "commit_sha" in result["certification_status"]["codex_gate"]
+
+    def test_guard_rejects_pass_record_without_contract_hash(self, state_dir: Path) -> None:
+        """Break the guard #2a: a PASS with an empty contract_hash must not
+        certify."""
+        _write_gate_result(state_dir, 1, "codex_gate", status="pass", contract_hash="")
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(
+            pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1",
+        )
+        assert result["can_advance"] is False
+        assert "contract_hash" in result["certification_status"]["codex_gate"]
+
+    def test_guard_rejects_pass_record_with_missing_report_file(self, state_dir: Path) -> None:
+        """Break the guard #2b: a PASS whose report_path does not exist on
+        disk must not certify."""
+        _write_gate_result(state_dir, 1, "codex_gate", status="pass", write_report=False)
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(
+            pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1",
+        )
+        assert result["can_advance"] is False
+        assert "report_path" in result["certification_status"]["codex_gate"]
+
+    def test_guard_a_pass_never_overrides_a_blocking_dissent(self, state_dir: Path) -> None:
+        """Break the guard #3: one gate's PASS sitting next to another
+        gate's blocking findings must still be NO-GO overall."""
+        _write_gate_result(state_dir, 1, "glm_gate", status="pass")
+        _write_gate_result(state_dir, 1, "codex_gate", status="fail", blocking=1)
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(
+            pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1",
+        )
+        assert result["certification_status"]["glm_gate"] == "certified"
+        assert "not_certified" in result["certification_status"]["codex_gate"]
+        assert result["can_advance"] is False
+
+    def test_unavailable_and_not_executable_are_absent_not_a_dissent(self, state_dir: Path) -> None:
+        """OI-1624 decision for this surface: an unavailable/not_executable
+        record is absent evidence -- neither a certifying vote nor a
+        blocking one -- so it must not stop a genuinely certified signer
+        elsewhere from reaching GO, and must never appear in blockers."""
+        _write_gate_result(state_dir, 1, "glm_gate", status="pass")
+        result_path = state_dir / "review_gates" / "results" / "pr-1-kimi_gate.json"
+        result_path.write_text(json.dumps({
+            "gate": "kimi_gate", "pr_number": 1, "status": "unavailable",
+            "reason": "dispatch_error", "contract_hash": "", "report_path": "",
+        }))
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(
+            pr_queue=pr_queue, open_items=[], state_dir=state_dir, current_feature_id="PR-1",
+        )
+        assert result["certification_status"]["kimi_gate"] == "absent"
+        assert result["can_advance"] is True
+        assert not any("kimi_gate" in b for b in result["blockers"])
+
+    def test_required_signer_gates_reads_the_configured_takeover_chain(self) -> None:
+        """No second, independently-drifting gate list: the candidate set
+        is sourced from gate_request_handler's own configured chain, plus
+        the always-eligible gemini_review carve-out (05-09 operator
+        decision)."""
+        gates = required_signer_gates()
+        assert "gemini_review" in gates
+        assert set(gates) >= {"codex_gate", "kimi_gate", "glm_gate", "deepseek_gate"}
 
 
 # ---------------------------------------------------------------------------
