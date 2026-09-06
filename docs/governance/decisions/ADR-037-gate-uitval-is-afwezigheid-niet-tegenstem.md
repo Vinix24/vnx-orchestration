@@ -100,3 +100,54 @@ in drie gevallen:
 De voorrangsregel en de zeven bewijs-invarianten uit het hoofd-ADR gelden onverkort voor
 de ondertekenende peer in geval (b); er is niets verzwakt, alleen de vraag "bestaat er
 een record" losgekoppeld van "is dat record in scope".
+
+## Addendum (OI-1645, 2026-09-06) — een peer is een review-poort; CI is een tweede, onafhankelijke eis, geen ondertekenaar
+
+Bij de merge van PR #1781 zei de deur letterlijk: "ci_gate droeg op dezelfde head
+zelfstandig een geldige, volledig bewezen pass en telt als ondertekenaar bij afwezigheid
+van de gedeclareerde poort". Een droge simulatie tegen een tmp results-dir met UITSLUITEND
+`pr-1781-codex_gate.json` (status `unavailable`) en `pr-1781-ci_gate.json` (status `pass`,
+alle zeven bewijs-invarianten aanwezig) bevestigde dit: GO, `evidence_gate="ci_gate"`, geen
+enkele review-poort aanwezig.
+
+`_find_peer_gate_results` (het hoofd-ADR hierboven) en `_find_takeover_successor_results`
+(OI-1576) begrensden de kandidatenverzameling allebei tot `_KNOWN_GATES` — de
+enum-afgeleide verzameling van poorten die de closure-verifier kan INTERPRETEREN. Dat is
+een andere bewering dan "dit is een review": `ci_gate` toetst CI-checks (tests, lint,
+build), nooit de codewijziging zelf, maar levert wel een volledig bewezen pass/fail-record
+op dat elke bewijs-invariant haalt die `_merge_door_record_verdict` toetst. Niets in de
+bewijsketen ving dit — de ketting was sterk, maar aan het verkeerde ding vastgemaakt.
+
+**Beslissing:** interpreteerbaar zijn en een review zijn zijn twee aparte beweringen.
+`closure_verifier._REVIEW_PEER_GATES` is een nieuwe, striktere verzameling — ook afgeleid
+van de `Gate`-enum met een uitsluitingslijst met reden per poort
+(`_NON_REVIEW_SIGNER_REASONS`), dezelfde discipline als `_GATES_NOT_IMPLEMENTED_BY_CLOSURE`
+— die BEIDE routes nu delen:
+
+- `ci_gate` uitgesloten: toetst CI-checks, geen code-review. Uitgesloten in BEIDE
+  richtingen — kan geen pass ondertekenen, en (nieuw) een `ci_gate`-record met een
+  `takeover_path` die een andere poort noemt telt ook niet als opvolger op de OI-1576-route.
+  Symmetrisch ook geen "echte afkeuring": een `ci_gate`-FAIL in de resultaatstore blokkeert
+  de peer-route niet langer. Dat is geen verzwakking — `pr_merge.main` roept
+  `_run_ci_gate` (een LIVE `gh`-statusCheckRollup-toets) vóór de review-poort aan en geeft
+  `EXIT_ERROR` bij een niet-groene CI-conclusie, dus een echte CI-afkeuring blokkeert de
+  merge al via die aparte, onafhankelijke weg. Een verouderd `ci_gate`-resultaatbestand ook
+  hier laten blokkeren zou dezelfde afkeuring dubbel tellen, geen extra veiligheid
+  toevoegen.
+- `wiring_gate` uitgesloten: staat al buiten `_KNOWN_GATES` (geen interpreteerbaar
+  bewijs), dus a fortiori geen ondertekenaar.
+- `claude_github_optional` blijft WEL een geldige peer. Het is optioneel — mag nooit
+  draaien — maar wanneer `state="completed"` bereikt wordt, is `result_status` een echte
+  Claude-code-review van de diff, geen CI-signaal (`claude_github_receipt.EVIDENCE_STATES`).
+  Optioneel-maar-echt telt; alleen niet-review-bewijs is uitgesloten. De eigen
+  afwezigheidstoestanden (`not_configured`, `configured_dry_run`) coderen sowieso nooit
+  naar een beslist verdict, dus een niet-gedraaide instantie draagt toch al niets bij.
+
+Een nieuwe enum-waarde die morgen wordt toegevoegd is automatisch ONGECLASSIFICEERD tot
+iemand hem in een van beide verzamelingen zet — vastgepind door de drift-test in
+`tests/test_oi1645_peer_is_review_gate.py`, naast de bestaande
+`test_closure_verifier_gate_enum_drift.py`.
+
+**Wat dit niet verandert:** de voorrangsregel en de zeven bewijs-invarianten uit het
+hoofd-ADR blijven ongewijzigd voor elke poort die WEL in `_REVIEW_PEER_GATES` zit. Alleen
+de kandidatenverzameling is versmald van "interpreteerbaar" naar "een review".
