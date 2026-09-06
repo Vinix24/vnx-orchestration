@@ -1153,6 +1153,18 @@ def _record_bookkeeping_failure(
     five (or a future sixth) call sites distinguishable in that ledger; "iets
     ging mis in de deur" would be too coarse to act on.
 
+    OI-1617 part 2: two more independent sinks were added alongside the
+    register-event above. First, a literal line written directly to
+    ``sys.stderr`` — never routed through ``logger.warning`` alone, because
+    this process's root logger carries no handler and a WARNING only reaches
+    stderr via Python's fragile lastResort handler (silenced the moment any
+    handler is attached to the root logger, e.g. pytest's ``caplog``).
+    Second, the same ``door_bookkeeping_failed`` fact is ALSO appended to
+    ``t0_receipts.ndjson`` (the actual receipt ledger, via the canonical
+    ``append_receipt`` path) — ``dispatch_register.ndjson`` is folded into
+    ``dispatch_register_events`` by ``build_t0_state.py`` alone; the receipt
+    ledger is what every other receipt reader already scans.
+
     Never raises: recording the failure must never itself become a second,
     worse failure. ``dispatch_register.append_event`` already swallows
     everything internally and returns False on any failure, so the try/except
@@ -1161,10 +1173,18 @@ def _record_bookkeeping_failure(
     other ``dispatch_register.append_event`` call site in this file already
     honors (see the register-emit and route-decision persist sites below):
     a test that lost its isolation must fail loudly, never be swallowed here.
+    The same re-raise contract applies to the ``append_receipt`` write below.
     """
     logger.warning(
         "[dispatch_cli] door bookkeeping failed site=%s dispatch=%s: %s",
         site, dispatch_id, exc,
+    )
+    # OI-1617 part 2: a direct stderr line, independent of logger handler
+    # configuration — see the docstring above for why logger.warning() alone
+    # is not a reliable stderr sink.
+    print(
+        f"[dispatch_cli] door bookkeeping failed site={site} dispatch={dispatch_id}: {exc}",
+        file=sys.stderr,
     )
     from vnx_paths import TestIsolationGuardError  # noqa: PLC0415
     try:
@@ -1180,6 +1200,29 @@ def _record_bookkeeping_failure(
     except Exception:  # vnx-silent-except: recording the failure must never raise a second, worse one
         logger.warning(
             "[dispatch_cli] door bookkeeping failure-record itself failed site=%s dispatch=%s",
+            site, dispatch_id,
+        )
+
+    try:
+        from append_receipt import append_receipt_payload  # noqa: PLC0415
+        append_receipt_payload(
+            {
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "event_type": "door_bookkeeping_failed",
+                "source": "dispatch_cli",
+                "dispatch_id": dispatch_id,
+                "site": site,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            receipts_file=str(state_dir / "t0_receipts.ndjson"),
+            cache_window_seconds=0,
+            skip_enrichment=True,
+        )
+    except TestIsolationGuardError:  # vnx-silent-except: OI-1079 — must fail the test loudly, never swallowed here
+        raise
+    except Exception:  # vnx-silent-except: recording the failure must never raise a second, worse one
+        logger.warning(
+            "[dispatch_cli] door bookkeeping failure-record (receipt ledger) itself failed site=%s dispatch=%s",
             site, dispatch_id,
         )
 
@@ -1326,8 +1369,10 @@ def _spec_is_writing(spec: DispatchSpec) -> bool:
     return role_grants_write(spec.role)
 
 
-def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
-    """Best-effort: register the review-gate obligation for a door-accepted dispatch.
+def _register_gate_obligation(
+    spec: DispatchSpec, *, state_dir: Path,
+) -> Optional[ConstraintVerdict]:
+    """Register the review-gate obligation for a door-accepted dispatch.
 
     OI-876/OI-881: before this hook, ``spec.gate`` was read exactly once (by
     ``load_spec``) and then never consumed — a dispatch could declare
@@ -1345,17 +1390,34 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
     trace. A writing dispatch with an empty gate never reaches here — the door
     refuses it earlier (see the gate-required reject in ``run_dispatch``).
 
-    Never raises: bookkeeping must never block the door (same contract as
-    ``_persist_dispatch_row``).
+    dispatch-20260906-a3-obligation-loud / OI-1617: the gate-bearing branch
+    (``gate`` non-empty) is no longer best-effort. Before this, EVERY
+    exception here — including ``register_obligation`` itself failing — was
+    swallowed and the fire proceeded with no obligation on record. That is
+    the exact 2026-09-03 incident (OI-1617): ``_register_gate_obligation``
+    failed silently, the gate later PASSed on real evidence, and the door
+    still answered "NOT READY — no review-gate obligation declared" with no
+    trace of why. A registration failure on the gate-bearing route is
+    returned as a BLOCKING ``ConstraintVerdict`` instead, so ``run_dispatch``
+    refuses the fire rather than let an unreviewed or untraceable dispatch
+    through. The failure is still recorded via ``_record_bookkeeping_failure``
+    (stderr + both ledgers) before the verdict is returned, so the refusal
+    itself is never silent either.
+
+    The no-gate branch (read-only dispatch, ``gate`` empty) keeps the
+    original best-effort contract: recording "no gate was required" is
+    housekeeping, not a review obligation — a failure there still only
+    records a fact and lets the dispatch proceed, same as
+    ``_persist_dispatch_row``.
     """
     gate = (spec.gate or "").strip()
-    try:
-        from gate_obligations import (
-            pr_number_from_pr_id,
-            register_no_gate_obligation,
-            register_obligation,
-        )
-        if not gate:
+
+    if not gate:
+        try:
+            from gate_obligations import (
+                pr_number_from_pr_id,
+                register_no_gate_obligation,
+            )
             register_no_gate_obligation(
                 state_dir,
                 dispatch_id=spec.dispatch_id,
@@ -1368,7 +1430,17 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
                     "— no review gate required"
                 ),
             )
-            return
+        except Exception as exc:  # vnx-silent-except: the no-gate record is housekeeping, not a review obligation — bookkeeping must never block the door
+            _record_bookkeeping_failure(
+                "_register_gate_obligation", spec.dispatch_id, exc, state_dir=state_dir,
+            )
+        return None
+
+    try:
+        from gate_obligations import (
+            pr_number_from_pr_id,
+            register_obligation,
+        )
         # OI-1462: stamp what THIS process (the eiser) resolved for the
         # gate-requirement flags at registration time, so a fulfiller running
         # later in a different environment can be checked against it
@@ -1376,7 +1448,10 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
         # two sides silently disagreeing. A capture FAILURE is a distinct,
         # loud state (status="failed") -- never collapsed into "never
         # attempted" (None), which would blind check_gate_requirement_mismatch
-        # to exactly the broken-read scenario OI-1462 exists to catch.
+        # to exactly the broken-read scenario OI-1462 exists to catch. This
+        # inner capture stays best-effort/non-blocking on purpose: it
+        # annotates the obligation, it does not gate whether one gets
+        # registered.
         try:
             import config_runtime
             gate_requirement_resolution = {
@@ -1403,10 +1478,24 @@ def _register_gate_obligation(spec: DispatchSpec, *, state_dir: Path) -> None:
             pr_id=spec.pr_id,
             gate_requirement_resolution=gate_requirement_resolution,
         )
-    except Exception as exc:  # vnx-silent-except: door bookkeeping must never raise
+    except Exception as exc:
         _record_bookkeeping_failure(
             "_register_gate_obligation", spec.dispatch_id, exc, state_dir=state_dir,
         )
+        return ConstraintVerdict(
+            code="gate-obligation-registration-failed",
+            severity="blocking",
+            message=(
+                f"dispatch={spec.dispatch_id!r} gate={gate!r}: the review-gate "
+                f"obligation could not be registered ({type(exc).__name__}: {exc}). "
+                "Firing without a registered obligation reproduces OI-1617 (a "
+                "gate can PASS on real evidence while the door still answers "
+                "\"no review-gate obligation declared\", with no trace of why); "
+                "refusing to fire rather than risk an unreviewed or untraceable "
+                "dispatch. Fix the underlying failure and refire."
+            ),
+        )
+    return None
 
 
 def _persist_track_id(spec: DispatchSpec, *, state_dir: Path) -> None:
@@ -3184,7 +3273,14 @@ def run_dispatch(
             # Registered here — right after the dispatch is irrevocably
             # accepted — so every accepted dispatch with gate=<name> has a
             # checkable evidence trail from this point on.
-            _register_gate_obligation(vspec.spec, state_dir=state_dir)
+            # OI-1617: a gate-bearing dispatch whose obligation could not be
+            # registered is refused here, before any worker/adapter is
+            # invoked — see _register_gate_obligation's docstring for why a
+            # swallowed failure on this route reproduces OI-1617.
+            gate_obligation_verdict = _register_gate_obligation(vspec.spec, state_dir=state_dir)
+            if gate_obligation_verdict is not None:
+                _emit_reject(Reject(gate_obligation_verdict.code, gate_obligation_verdict.message))
+                return 1
 
             # TL-D1: export the resolved track_id alongside VNX_CURRENT_DISPATCH_ID and
             # persist it onto the dispatch tracker row so D2 can propagate it to
