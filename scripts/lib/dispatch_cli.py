@@ -2612,6 +2612,11 @@ def _maybe_stage_escalation(plan, result, *, vspec, state_dir, data_dir) -> None
             env=dict(os.environ),
             state_dir=state_dir,
             data_dir=data_dir,
+            # OI-1634: an escalation continues the SAME dispatch chain as the
+            # rejected attempt (see stage_escalation_bundle's own comment on
+            # track_id — it never guesses), so it must inherit that attempt's
+            # track from the rejected dispatch's own validated spec.
+            track_id=spec.track_id,
         )
     except ValueError as exc:
         # A decision outcome that refuses to stage: unknown class, auth_rejected,
