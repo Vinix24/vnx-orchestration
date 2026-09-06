@@ -21,10 +21,19 @@ Feasibility proven by docs/investigations/spike-worker-scope-hook-feasibility.md
 (E1-E4): PreToolUse hooks fire under --dangerously-skip-permissions, worktree-
 local settings are honored via cwd-based discovery, and config live-reloads.
 
-Claude Code hook contract (2.1+):
+Claude Code hook contract (2.1+), PreToolUse:
   stdin  : JSON {tool_name, tool_input, session_id, cwd, transcript_path}
-  stdout : {"decision":"block","reason":"..."} to block, empty to allow
+  stdout : {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+            "permissionDecision":"deny","permissionDecisionReason":"..."}}
+           to deny, empty to allow
   exit   : 0 always — decision is communicated via JSON output, never exit code
+
+OI-1644: this hook used to emit the deprecated flat
+{"decision":"block","reason":"..."} form, which is the PostToolUse/Stop/
+UserPromptSubmit contract, not PreToolUse. Claude Code's PreToolUse event
+reads hookSpecificOutput.permissionDecision instead, so blocked tool calls
+were silently allowed through. Fixed to the hookSpecificOutput wrapper — same
+class as OI-1643 (#1789), which fixed the other two hooks.
 
 Gate: VNX_ENFORCE_WORKER_PERMISSIONS (see worker_permissions.
 worker_permission_enforcement_enabled(); default OFF since 15-08 — the flip was
@@ -278,7 +287,18 @@ def main() -> None:
         decision, reason = evaluate(payload)
 
         if decision == "block":
-            sys.stdout.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": reason,
+                        }
+                    }
+                )
+                + "\n"
+            )
             _emit_audit(tool_name_ctx, decision, reason)
     except Exception:  # absolute fail-open, never crash the hook
         logger.exception(
