@@ -16,14 +16,14 @@
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 569,
+      "line": 574,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 574,
+      "line": 579,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
@@ -1105,6 +1105,41 @@
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_pr_number_receipt_wiring.py",
+      "line": 44,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_pr_number_receipt_wiring.py",
+      "line": 44,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_pr_number_receipt_wiring.py",
+      "line": 45,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_pr_number_receipt_wiring.py",
+      "line": 100,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_pr_number_receipt_wiring.py",
+      "line": 131,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_deadline_passthrough.py",

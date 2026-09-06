@@ -96,3 +96,15 @@ class _AdapterResult:
     # actually ran, not a placeholder from the dispatch spec. None when the
     # adapter did not resolve a distinct model (caller falls back to spec.model).
     model: Optional[str] = None
+    # PRD bewijsketen F1-1: the PR number pr_enforcement.enforce_pr_exists
+    # resolved (found or created) when dispatch_envelope._enforce_push_pr ran
+    # the rij-7 push+PR obligation on this dispatch's own worktree/branch.
+    # None when enforcement was not applicable (clean worktree), was skipped
+    # (fix-forward onto an existing dispatch branch — see skip_pr), or has not
+    # run yet (adapter result fresh off EXECUTE, before _enforce_push_pr).
+    # _govern threads this into the receipt's pr_id field ONLY when
+    # spec.pr_id (a pre-known fix-forward target) is absent, so the two
+    # sources — pre-known target vs. resolved-this-run — never race: a
+    # fix-forward dispatch's spec.pr_id always wins, matching skip_pr always
+    # leaving this field None for that same dispatch.
+    pr_number: Optional[int] = None
