@@ -64,3 +64,39 @@ Zodra de gedeclareerde poort een bevestigde afwezigheid is (record bestaat, geen
 - OI-1469/OI-1470 — `gate_recorder._check_overwrite_guard`, de schrijfkant-wachter die dit ADR expliciet niet aanraakt.
 - `scripts/lib/gate_status.py` — de canonieke statuscategorieën (`PASS_STATES`, `FAIL_STATES`, `INCOMPLETE_STATES`, `UNAVAILABLE_STATES`, `is_terminal`) waarop dit ADR's "terminaal ≠ uitspraak"-onderscheid leunt.
 - `tests/test_oi1624_gate_absence_vs_rejection.py` — rode-naar-groene regressietests, inclusief een expliciete pin op het ongewijzigde OI-1576-contract (`TestNoRegressionOnZeroRecordAbsence`).
+
+## Addendum (OI-1642, 2026-09-06) — afwezigheid geldt ook buiten scope
+
+Bovenstaand ADR gaat ervan uit dat een bevestigde afwezigheid een IN-SCOPE record is:
+`_find_gate_result` vond het, met matchende `branch`/`project_id`/`commit_sha`. In de
+praktijk bleek dat een te sterke aanname. Zeven PR's (#1777-#1782, #1784) bleven na dit
+ADR alsnog NO-GO: hun `codex_gate`-record dateert van vóór de fix hierboven en draagt
+daarom geen `branch`/`commit_sha` — precies het veld dat `_record_matches_scope`
+onvoorwaardelijk eist. `_find_gate_result` gaf dus `None` terug, niet omdat de poort nooit
+gevraagd was, maar omdat het bestaande record de scope-toets niet haalde. De
+peer-route hierboven wordt alleen bereikt via `result is not None and
+_is_absent_without_verdict(result)` (regel "OI-1624" in
+`check_review_gate_for_merge`), dus bij `None` werd hij nooit geraadpleegd — en omdat
+`gate_recorder`'s overschrijfwachter (OI-1469/OI-1470) een terminaal record nooit
+opnieuw laat schrijven, is dat record blijvend onzichtbaar voor de lezer.
+
+De oplossing (`closure_verifier._find_gate_result_ignoring_scope` +
+`_consult_peers_for_absence`) splitst wat `result is None` voorheen op een hoop gooide,
+in drie gevallen:
+
+- **(a) geen enkel record voor dit gate+pr_id.** Ongewijzigd NO-GO, geen peer-route.
+  Dit blijft exact het contract van `TestUnrelatedRecordsNeverTakeOver`
+  (`tests/test_oi1576_merge_door_takeover_evidence.py`) — gemeten: een peer-route die
+  hier ONVOORWAARDELIJK zou lopen breekt die test twee keer (een losstaande pass en een
+  takeover-claim zonder de gedeclareerde poort in het pad worden dan allebei ten
+  onrechte een geldige ondertekenaar).
+- **(b) een record bestaat, buiten scope, en is zelf een bevestigde afwezigheid**
+  (`_is_absent_without_verdict`). Dezelfde peer-route als hierboven opent, via de
+  gedeelde `_consult_peers_for_absence` — geen tweede, kunnen-uiteenlopen-kopie.
+- **(c) een record bestaat buiten scope MET een uitspraak** (pass/fail op een andere
+  branch/sha). Verouderd bewijs, geen afwezigheid — blijft NO-GO met de bestaande
+  boodschap "geen review-gate resultaat gevonden".
+
+De voorrangsregel en de zeven bewijs-invarianten uit het hoofd-ADR gelden onverkort voor
+de ondertekenende peer in geval (b); er is niets verzwakt, alleen de vraag "bestaat er
+een record" losgekoppeld van "is dat record in scope".
