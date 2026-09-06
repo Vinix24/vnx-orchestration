@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -1275,6 +1276,134 @@ def test_cmd_plan_gate_run_records_the_scoring_seat_count_of_the_round(tmp_path,
     assert rounds[0][pgt.SCORED_SEATS_KEY] == 2
     # And that round now counts as READ, so the stop-rule can engage later.
     assert pgt.readable_round_count(ledger, "feat-count", "p1") == 1
+
+
+# --------------------------------------------------------------------------
+# Tiebreak outcome lands in decision_ref (OI-1618 follow-up)
+# --------------------------------------------------------------------------
+
+def _seed_previous_decision_ref(state_dir: Path, track_id: str, project_id: str) -> str:
+    """A REVISE panel-round decision_ref, as ``build_decision_ref`` would write it."""
+    payload = pgp.build_decision_ref(
+        "REVISE",
+        [
+            {"label": "opus", "dispatched": True,
+             "report_path": "plan-gate-x-opus-aaaaaaaa", "verdict": "revise",
+             "blocking_findings": ["gap one"], "rationale": "needs a rollback plan"},
+            {"label": "kimi", "dispatched": True,
+             "report_path": "plan-gate-x-kimi-bbbbbbbb", "verdict": "pass",
+             "blocking_findings": [], "rationale": "fine"},
+        ],
+        source="plan-gate", set_at="2026-09-01T00:00:00Z",
+    )
+    tracks.set_decision_ref(state_dir, track_id, project_id, payload, actor="system")
+    return payload
+
+
+def _write_tiebreak_report(track_id: str, hash_suffix: str) -> Path:
+    """Simulate the governed dispatch side effect: the tiebreak report file
+    landing in ``unified_reports/`` BEFORE ``run_tiebreaker`` returns."""
+    data_dir = Path(os.environ["VNX_DATA_DIR"])
+    reports_dir = data_dir / "unified_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report = reports_dir / f"plan-tiebreak-{track_id}-{hash_suffix}.md"
+    report.write_text(
+        f"# tiebreak\n\n**Dispatch-ID**: plan-tiebreak-{track_id}-{hash_suffix}\n"
+        "**Model**: deepseek-v4-pro\n**Provider**: deepseek-harness\n\n"
+        "## Summary\n\nok\n",
+        encoding="utf-8",
+    )
+    return report
+
+
+def test_cmd_plan_gate_run_tiebreaker_start_writes_tiebreak_decision_ref(tmp_path, monkeypatch):
+    """A tiebreaker START must land in ``decision_ref`` as ``tiebreak:START`` —
+    not leave the last panel round's REVISE standing, which a reader checking
+    decision_ref alone would otherwise mistake for the gate still being stuck.
+    """
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-tbref", "p1", "t", "shipped", phase="queued")
+    planning_cli._seed_plan_blocker(state_dir, "feat-tbref", "p1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+    ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
+    pgt.record_round(ledger, track_id="feat-tbref", project_id="p1",
+                     round_number=1, outcome="panel", scored_seats=1)
+    pgt.record_round(ledger, track_id="feat-tbref", project_id="p1",
+                     round_number=2, outcome="panel", scored_seats=1)
+
+    previous_payload = _seed_previous_decision_ref(state_dir, "feat-tbref", "p1")
+
+    def _start_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
+                          last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+        _write_tiebreak_report(track_id, "04990c59")
+        return pgt.TiebreakerResult(
+            outcome="START", model="deepseek-v4-pro", round=round_number,
+            required_change="", rationale="converged",
+        )
+
+    monkeypatch.setattr(pgt, "run_tiebreaker", _start_tiebreaker)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+
+    rc = planning_cli.cmd_plan_gate_run(_gate_args(state_dir, doc, track_id="feat-tbref"))
+    assert rc == 0
+
+    track = tracks.get_track(state_dir, "feat-tbref", "p1")
+    payload = json.loads(track["decision_ref"])
+    assert payload["decision"] == "tiebreak:START"
+    assert payload["source"] == "plan-gate-tiebreak"
+    assert payload["superseded_decision"] == "REVISE"
+    assert payload["tiebreaker_model"] == "deepseek-v4-pro"
+    assert payload["round"] == 3
+    assert payload["reports"][0] == "unified_reports/plan-tiebreak-feat-tbref-04990c59.md"
+    prev = json.loads(previous_payload)
+    assert payload["reports"][1:] == prev["reports"]
+    assert payload["rejected_alternatives"] == prev["rejected_alternatives"]
+
+    summary = planning_cli._format_decision_ref(track["decision_ref"])
+    assert summary == "tiebreak:START (3 report(s), 1 rejected alternative(s))"
+
+
+def test_cmd_plan_gate_run_tiebreaker_stop_writes_tiebreak_decision_ref(tmp_path, monkeypatch):
+    """A tiebreaker STOP must ALSO land in decision_ref as ``tiebreak:STOP`` —
+    the gate clears via open items rather than a PASS, but decision_ref must
+    still reflect the tiebreak, never the superseded panel REVISE."""
+    monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-tbstop", "p1", "t", "shipped", phase="queued")
+    planning_cli._seed_plan_blocker(state_dir, "feat-tbstop", "p1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+    ledger = _isolate_seat_ledger(monkeypatch, tmp_path)
+    pgt.record_round(ledger, track_id="feat-tbstop", project_id="p1",
+                     round_number=1, outcome="panel", scored_seats=1)
+    pgt.record_round(ledger, track_id="feat-tbstop", project_id="p1",
+                     round_number=2, outcome="panel", scored_seats=1)
+
+    _seed_previous_decision_ref(state_dir, "feat-tbstop", "p1")
+
+    def _stop_tiebreaker(doc_path, *, doc_text=None, track_id, project_id, round_number,
+                         last_round_findings, data_dir, timeout_seconds, config, model_arg=None):
+        _write_tiebreak_report(track_id, "deadbeef")
+        return pgt.TiebreakerResult(
+            outcome="STOP", model="deepseek-v4-pro", round=round_number,
+            required_change="tighten the rollback section", rationale="not converging",
+        )
+
+    monkeypatch.setattr(pgt, "run_tiebreaker", _stop_tiebreaker)
+    monkeypatch.setattr(planning_cli, "_emit_plan_gate_pass_record", lambda **kw: True)
+
+    rc = planning_cli.cmd_plan_gate_run(_gate_args(state_dir, doc, track_id="feat-tbstop"))
+    assert rc == 0  # STOP clears the gate (exit 0, like a PASS)
+
+    track = tracks.get_track(state_dir, "feat-tbstop", "p1")
+    payload = json.loads(track["decision_ref"])
+    assert payload["decision"] == "tiebreak:STOP"
+    assert payload["source"] == "plan-gate-tiebreak"
+    assert payload["superseded_decision"] == "REVISE"
+    assert payload["required_change"] == "tighten the rollback section"
+    assert payload["reports"][0] == "unified_reports/plan-tiebreak-feat-tbstop-deadbeef.md"
 
 
 if __name__ == "__main__":

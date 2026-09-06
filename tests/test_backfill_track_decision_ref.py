@@ -289,6 +289,161 @@ def test_print_report_without_reports_not_reduced_by_orphans(tmp_path, capsys):
     assert "tracks without plan-gate reports     : 1" in out
 
 
+# ---------------------------------------------------------------------------
+# Tiebreak reports (OI-1618 follow-up)
+# ---------------------------------------------------------------------------
+
+_TIEBREAK_FIXTURE = _ROOT / "tests" / "fixtures" / "plan-tiebreak-review-gate-secure-04990c59.md"
+
+
+def _tiebreak_report(outcome: str, required_change: str = "", rationale: str = "ok") -> str:
+    body = json.dumps({
+        "outcome": outcome, "required_change": required_change, "rationale": rationale,
+    })
+    return (
+        "# tiebreak\n\n**Dispatch-ID**: plan-tiebreak-x\n**Model**: deepseek-v4-pro\n"
+        "**Provider**: deepseek-harness\n\n## Summary\n\nok\n\n"
+        f"```vnx-plan-tiebreak\n{body}\n```\n"
+    )
+
+
+def test_parse_tiebreak_report_filename():
+    r = b._parse_tiebreak_report_filename("plan-tiebreak-review-gate-secure-04990c59.md")
+    assert r is not None
+    assert (r.track_id, r.hash) == ("review-gate-secure", "04990c59")
+
+
+def test_parse_tiebreak_report_filename_rejects_unparseable():
+    assert b._parse_tiebreak_report_filename("plan-gate-x-opus-deadbeef.md") is None
+    assert b._parse_tiebreak_report_filename("plan-tiebreak-nohash.md") is None
+    assert b._parse_tiebreak_report_filename("plan-tiebreak--deadbeef.md") is None  # empty track
+
+
+def test_apply_backfill_proposes_tiebreak_when_youngest_report_is_tiebreak(tmp_path):
+    """The real historical tiebreak report for review-gate-secure (byte-exact
+    fixture) is YOUNGER than its two panel reports — the backfill must propose
+    ``tiebreak:START`` with the tiebreak report first, the panel reports
+    inherited behind it, and the panel round's rejected alternative preserved.
+    """
+    import os
+
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+
+    tracks_lib.create_track(state_dir, "review-gate-secure", "proj-x", "T", "shipped")
+
+    panel_a = reports_dir / "plan-gate-review-gate-secure-opus-11111111.md"
+    panel_a.write_text(_report("revise", ["gap one"], "needs more"), encoding="utf-8")
+    panel_b = reports_dir / "plan-gate-review-gate-secure-kimi-22222222.md"
+    panel_b.write_text(_report("pass"), encoding="utf-8")
+    os.utime(panel_a, (1_000_000, 1_000_000))
+    os.utime(panel_b, (1_000_100, 1_000_100))
+
+    tb_path = reports_dir / _TIEBREAK_FIXTURE.name
+    tb_path.write_text(_TIEBREAK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    os.utime(tb_path, (2_000_000, 2_000_000))
+
+    report = b.apply_backfill(state_dir, reports_dir, "proj-x", set_at="2026-09-06T00:00:00Z")
+    assert report["filled"] == ["review-gate-secure"]
+    assert report["errors"] == []
+
+    payload = json.loads(_decision_ref(state_dir, "review-gate-secure"))
+    assert payload["decision"] == "tiebreak:START"
+    assert payload["source"] == "plan-gate-tiebreak"
+    assert payload["superseded_decision"] == "REVISE"
+    assert payload["tiebreaker_model"] == "deepseek-v4-pro"
+    assert payload["reports"][0] == f"unified_reports/{_TIEBREAK_FIXTURE.name}"
+    assert len(payload["reports"]) == 3  # tiebreak report + 2 panel reports
+    assert len(payload["rejected_alternatives"]) == 1  # only opus (revise)
+    assert payload["rejected_alternatives"][0]["panelist"] == "opus"
+
+
+def test_apply_backfill_tiebreak_only_track_has_no_superseded_decision(tmp_path):
+    """A track with ONLY a tiebreak report (no panel reports at all) is never
+    guessed at: ``superseded_decision`` is ``None`` and ``reports`` carries
+    just the tiebreak report itself.
+    """
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "feat-tbonly", "proj-x", "T", "shipped")
+    (reports_dir / "plan-tiebreak-feat-tbonly-cafef00d.md").write_text(
+        _tiebreak_report("STOP", "", "no panel history for this track"),
+        encoding="utf-8",
+    )
+
+    report = b.apply_backfill(state_dir, reports_dir, "proj-x", set_at="2026-09-06T00:00:00Z")
+    assert report["filled"] == ["feat-tbonly"]
+
+    payload = json.loads(_decision_ref(state_dir, "feat-tbonly"))
+    assert payload["decision"] == "tiebreak:STOP"
+    assert payload["superseded_decision"] is None
+    assert payload["reports"] == ["unified_reports/plan-tiebreak-feat-tbonly-cafef00d.md"]
+    assert payload["rejected_alternatives"] == []
+
+
+def test_backfill_dry_run_shows_tiebreak_proposal_without_writing(tmp_path, capsys):
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "review-gate-secure", "proj-x", "T", "shipped")
+    (reports_dir / _TIEBREAK_FIXTURE.name).write_text(
+        _TIEBREAK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    rc = b.dry_run(state_dir, reports_dir, "proj-x")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "review-gate-secure" in out
+    # The live store was not touched by the dry-run.
+    assert _decision_ref(state_dir, "review-gate-secure") is None
+
+
+def test_apply_backfill_panel_stays_on_panel_path_when_report_is_youngest(tmp_path):
+    """Regression: a track whose YOUNGEST report is a panel report is unaffected
+    by the new tiebreak-awareness, even when an OLDER tiebreak report also
+    exists for the same track (e.g. an earlier tie later re-reviewed by a
+    fresh panel round).
+    """
+    import os
+
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "feat-repanel", "proj-x", "T", "shipped")
+
+    old_tb = reports_dir / "plan-tiebreak-feat-repanel-99999999.md"
+    old_tb.write_text(_tiebreak_report("STOP", "x", "old"), encoding="utf-8")
+    os.utime(old_tb, (1_000_000, 1_000_000))
+
+    panel = reports_dir / "plan-gate-feat-repanel-opus-aaaaaaaa.md"
+    panel.write_text(_report("pass"), encoding="utf-8")
+    os.utime(panel, (2_000_000, 2_000_000))
+
+    report = b.apply_backfill(state_dir, reports_dir, "proj-x", set_at="2026-09-06T00:00:00Z")
+    assert report["filled"] == ["feat-repanel"]
+
+    payload = json.loads(_decision_ref(state_dir, "feat-repanel"))
+    assert payload["decision"] == "PASS"
+    assert payload["source"] == "backfill"
+
+
+def test_apply_backfill_unparseable_tiebreak_report_skipped_with_reason(tmp_path):
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "feat-badtb", "proj-x", "T", "shipped")
+    (reports_dir / "plan-tiebreak-feat-badtb-abcdef01.md").write_text(
+        "# tiebreak\n\nno fence here at all.\n", encoding="utf-8",
+    )
+
+    report = b.apply_backfill(state_dir, reports_dir, "proj-x", set_at="2026-09-06T00:00:00Z")
+    assert report["filled"] == []
+    assert any("feat-badtb" in e for e in report["errors"])
+    assert _decision_ref(state_dir, "feat-badtb") is None
+
+
 def test_apply_backfill_is_idempotent_second_run_is_noop(tmp_path):
     state_dir = _make_state_dir(tmp_path)
     reports_dir = tmp_path / "unified_reports"
@@ -303,3 +458,169 @@ def test_apply_backfill_is_idempotent_second_run_is_noop(tmp_path):
     assert first["filled"] == ["feat-a"]
     assert second["filled"] == []          # nothing left to fill
     assert second["already_filled"] == ["feat-a"]  # the first run's write is seen
+
+
+# ---------------------------------------------------------------------------
+# --track + --supersede-panel-with-tiebreak (PR #1801 fix-forward)
+#
+# Scoped, explicit override of the "never overwrite" rule: only for exactly
+# one operator-named track, and only when its youngest report on disk is a
+# parseable tiebreak report strictly younger (mtime) than the EXISTING
+# decision_ref's own "set_at". Every other track — including one with an
+# empty decision_ref sitting in the same store — must be provably untouched.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt  # noqa: E402
+
+
+def _iso_from_epoch(epoch: float) -> str:
+    return _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc).isoformat()
+
+
+def _seed_revise_decision_ref(state_dir: Path, track_id: str, project_id: str, set_at_iso: str) -> str:
+    payload = json.dumps({
+        "reports": [f"unified_reports/plan-gate-{track_id}-opus-11111111.md"],
+        "decision": "REVISE",
+        "rejected_alternatives": [
+            {"panelist": "opus", "verdict": "revise", "findings": ["gap one"], "rationale": "needs more"},
+        ],
+        "set_at": set_at_iso,
+        "source": "plan-gate",
+    }, sort_keys=True)
+    tracks_lib.set_decision_ref(state_dir, track_id, project_id, payload, actor="system")
+    return payload
+
+
+def test_generic_run_never_supersedes_existing_panel_decision_ref_even_with_younger_tiebreak(tmp_path):
+    """Regression on the pre-existing 'never overwrite' rule: a track that already
+    carries a panel decision_ref (REVISE) must stay untouched by the GENERIC
+    (unscoped) backfill even when a younger, parseable tiebreak report exists for
+    it on disk. Only the scoped --track --supersede-panel-with-tiebreak mode may
+    replace it.
+    """
+    import os
+
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "review-gate-secure", "proj-x", "T", "shipped")
+
+    existing = _seed_revise_decision_ref(
+        state_dir, "review-gate-secure", "proj-x", _iso_from_epoch(500_000)
+    )
+
+    tb_path = reports_dir / _TIEBREAK_FIXTURE.name
+    tb_path.write_text(_TIEBREAK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    os.utime(tb_path, (1_000_000, 1_000_000))
+
+    report = b.apply_backfill(state_dir, reports_dir, "proj-x", set_at="2026-09-06T00:00:00Z")
+    assert report["already_filled"] == ["review-gate-secure"]
+    assert report["filled"] == []
+    assert _decision_ref(state_dir, "review-gate-secure") == existing
+
+
+def test_supersede_panel_with_tiebreak_dry_run_shows_replacement_without_writing(tmp_path, capsys):
+    import os
+
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "review-gate-secure", "proj-x", "T", "shipped")
+
+    existing = _seed_revise_decision_ref(
+        state_dir, "review-gate-secure", "proj-x", _iso_from_epoch(500_000)
+    )
+    tb_path = reports_dir / _TIEBREAK_FIXTURE.name
+    tb_path.write_text(_TIEBREAK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    os.utime(tb_path, (1_000_000, 1_000_000))
+
+    rc = b.dry_run_supersede(state_dir, reports_dir, "proj-x", "review-gate-secure")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "review-gate-secure" in out
+    assert "REVISE" in out
+    assert "tiebreak:START" in out
+    # The live store is untouched by the dry-run.
+    assert _decision_ref(state_dir, "review-gate-secure") == existing
+
+
+def test_supersede_panel_with_tiebreak_apply_writes_and_second_apply_is_noop(tmp_path):
+    import os
+
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "review-gate-secure", "proj-x", "T", "shipped")
+
+    _seed_revise_decision_ref(
+        state_dir, "review-gate-secure", "proj-x", _iso_from_epoch(500_000)
+    )
+    tb_path = reports_dir / _TIEBREAK_FIXTURE.name
+    tb_path.write_text(_TIEBREAK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    os.utime(tb_path, (1_000_000, 1_000_000))
+
+    rc = b.apply_supersede_live(state_dir, reports_dir, "proj-x", "review-gate-secure")
+    assert rc == 0
+    payload = json.loads(_decision_ref(state_dir, "review-gate-secure"))
+    assert payload["decision"] == "tiebreak:START"
+    assert payload["superseded_decision"] == "REVISE"
+    assert payload["source"] == "plan-gate-tiebreak"
+    assert payload["reports"][0] == f"unified_reports/{_TIEBREAK_FIXTURE.name}"
+
+    # A second --apply is a no-op: the tiebreak report is no longer younger
+    # than the (now recent) decision_ref.set_at that the first apply wrote.
+    after_first = _decision_ref(state_dir, "review-gate-secure")
+    rc2 = b.apply_supersede_live(state_dir, reports_dir, "proj-x", "review-gate-secure")
+    assert rc2 == 0
+    assert _decision_ref(state_dir, "review-gate-secure") == after_first
+
+
+def test_supersede_panel_with_tiebreak_older_report_no_replacement(tmp_path):
+    import os
+
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "review-gate-secure", "proj-x", "T", "shipped")
+
+    existing = _seed_revise_decision_ref(
+        state_dir, "review-gate-secure", "proj-x", _iso_from_epoch(500_000)
+    )
+    tb_path = reports_dir / _TIEBREAK_FIXTURE.name
+    tb_path.write_text(_TIEBREAK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    os.utime(tb_path, (100_000, 100_000))  # older than the existing set_at (500_000)
+
+    result = b.compute_supersede_panel_with_tiebreak(
+        state_dir, reports_dir, "proj-x", "review-gate-secure", set_at="2026-09-06T00:00:00Z",
+    )
+    assert result.action == "skipped"
+    assert "not newer" in result.reason
+    assert _decision_ref(state_dir, "review-gate-secure") == existing
+
+
+def test_supersede_panel_with_tiebreak_leaves_other_tracks_untouched(tmp_path):
+    import os
+
+    state_dir = _make_state_dir(tmp_path)
+    reports_dir = tmp_path / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    tracks_lib.create_track(state_dir, "review-gate-secure", "proj-x", "T", "shipped")
+    tracks_lib.create_track(state_dir, "feat-untouched", "proj-x", "U", "shipped")
+
+    _seed_revise_decision_ref(
+        state_dir, "review-gate-secure", "proj-x", _iso_from_epoch(500_000)
+    )
+    tb_path = reports_dir / _TIEBREAK_FIXTURE.name
+    tb_path.write_text(_TIEBREAK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    os.utime(tb_path, (1_000_000, 1_000_000))
+
+    rc = b.apply_supersede_live(state_dir, reports_dir, "proj-x", "review-gate-secure")
+    assert rc == 0
+    assert _decision_ref(state_dir, "feat-untouched") is None
+
+
+def test_main_supersede_without_track_is_an_error(capsys):
+    rc = b.main(["--supersede-panel-with-tiebreak"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "--track" in err

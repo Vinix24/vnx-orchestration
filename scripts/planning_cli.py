@@ -3075,11 +3075,49 @@ def _run_tiebreaker_for_track(
     than one change) is a loud failure: exit 1, the track stays blocked, the
     operator sees the raw model output. We never silently fill in a decision.
     """
+    import plan_gate_panel
     import plan_gate_tiebreaker
 
     stderr_lines: list = []
     stdout_text: list = []
     stdout_json: Optional[str] = None
+
+    # Captured BEFORE the tiebreaker touches anything: the panel round's
+    # decision_ref (if any) is what the tiebreak payload below supersedes.
+    # Best-effort — a failed read just means the tiebreak payload carries no
+    # inherited history, never a hard dependency for the gate itself.
+    previous_decision_ref: Optional[str] = None
+    try:
+        pre_track = tracks_lib.get_track(state_dir, track_id, project_id)
+        previous_decision_ref = (pre_track or {}).get("decision_ref")
+    except Exception:  # vnx-silent-except: reading prior decision_ref is best-effort context only
+        previous_decision_ref = None
+
+    def _find_tiebreak_report_path() -> Optional[str]:
+        """The tiebreak report's own filename (no ``.md``), or ``None``.
+
+        ``run_tiebreaker`` generates its own dispatch id internally
+        (``plan-tiebreak-<track_id>-<8-hex>``) and does not return it, so the
+        actual report file is discovered post-hoc the same way the backfill
+        script does: youngest matching file by mtime wins. The hash suffix is
+        validated (8 lowercase hex chars) so a track_id that is itself a
+        prefix of another track_id (e.g. ``foo`` vs ``foo-bar``) cannot match
+        the wrong track's report.
+        """
+        reports_dir = Path(data_dir) / "unified_reports"
+        if not reports_dir.is_dir():
+            return None
+        prefix = f"plan-tiebreak-{track_id}-"
+        hexdigits = set("0123456789abcdef")
+        candidates = []
+        for p in reports_dir.glob(f"{prefix}*.md"):
+            suffix = p.stem[len(prefix):]
+            if len(suffix) == 8 and set(suffix) <= hexdigits:
+                candidates.append(p)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0].stem
 
     def _result(**kw) -> PlanGateRunResult:
         return PlanGateRunResult(
@@ -3152,6 +3190,36 @@ def _run_tiebreaker_for_track(
         governance_variant="tiebreaker", gov_trace=gov_trace,
         scored_seats=0,
     )
+
+    # Persist the durable half of the tiebreak decision onto the track — the
+    # SAME contract the panel path uses (OI-1190's build_decision_ref /
+    # set_decision_ref), but for the tiebreaker outcome. Without this the
+    # track's decision_ref keeps showing the last PANEL round (e.g. REVISE)
+    # even after a tiebreaker START clears the gate — a reader who only
+    # checks decision_ref never sees the actual clearing decision. Written for
+    # BOTH START and STOP, and BEFORE _resolve_plan_blocker below so a failed
+    # unblock never loses a decision_ref that was already recorded.
+    # Best-effort: a decision_ref write must never break the gate it hangs off
+    # (same contract as the panel path).
+    try:
+        tb_payload = plan_gate_panel.build_tiebreak_decision_ref(
+            {
+                "outcome": result.outcome,
+                "model": result.model,
+                "round": result.round,
+                "required_change": result.required_change,
+                "rationale": result.rationale,
+                "report_path": _find_tiebreak_report_path(),
+            },
+            previous_decision_ref=previous_decision_ref,
+        )
+        tracks_lib.set_decision_ref(
+            state_dir, track_id, project_id, tb_payload, actor="system"
+        )
+    except Exception as exc:  # vnx-silent-except: decision_ref persistence must never break the gate
+        stderr_lines.append(
+            f"WARNING: could not persist tiebreak decision_ref for track {track_id}: {exc}"
+        )
 
     if result.outcome == plan_gate_tiebreaker.STOP:
         # Punt 9: the last round's findings become open items via the existing
