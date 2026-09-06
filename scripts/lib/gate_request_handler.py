@@ -1003,6 +1003,15 @@ class GateRequestHandlerMixin:
         happens to the RESULT record below -- a request-time refusal is
         never allowed to go quiet even when the guard blocks the write it
         would otherwise cause (OI-1469/OI-1470/OI-1471).
+
+        OI-1624: ``branch``/``commit_sha`` are read straight off the
+        caller's own ``payload`` -- every real caller (``_request_codex``,
+        ``_request_gemini``, ``_request_kimi``, ``_request_ci_gate``, the
+        contract-flow builders) already stamped both before deciding
+        availability, so this never re-resolves anything; it only stops
+        dropping what the caller already knew on the way into the RESULT
+        record (see ``_write_not_executable_result``'s docstring for why
+        that mattered live on PR #1777).
         """
         reason, detail = self._classify_unavailable(gate)
         payload["reason"] = reason
@@ -1021,6 +1030,8 @@ class GateRequestHandlerMixin:
             reason=reason, reason_detail=detail,
             contract_hash=contract_hash,
             dispatch_id=dispatch_id,
+            branch=payload.get("branch") or "",
+            commit_sha=payload.get("commit_sha") or "",
         )
         if not written:
             # gate_recorder.write_result_guarded already logged the refusal
@@ -1473,6 +1484,8 @@ class GateRequestHandlerMixin:
                 gate="glm_gate", pr_number=pr_number, pr_id="",
                 reason=reason, reason_detail=reason_detail,
                 dispatch_id=dispatch_id,
+                branch=branch,
+                commit_sha=payload.get("commit_sha") or "",
             )
             if not written:
                 logger.warning(
@@ -1535,6 +1548,8 @@ class GateRequestHandlerMixin:
                 gate="deepseek_gate", pr_number=pr_number, pr_id="",
                 reason=reason, reason_detail=reason_detail,
                 dispatch_id=dispatch_id,
+                branch=branch,
+                commit_sha=payload.get("commit_sha") or "",
             )
             self._write_skip_rationale(
                 gate="deepseek_gate", pr_id=str(pr_number),

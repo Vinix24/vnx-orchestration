@@ -29,6 +29,7 @@ from codex_severity_translator import translate_findings as translate_codex_find
 from gate_status import (
     FAIL_STATES as _GATE_FAIL_STATES,
     PASS_STATES as _GATE_PASS_STATES,
+    UNAVAILABLE_STATES as _GATE_UNAVAILABLE_STATES,
     canonical_status as gate_canonical_status,
     has_complete_evidence as gate_has_complete_evidence,
     is_pass as gate_is_pass,
@@ -379,6 +380,48 @@ def _find_gate_result(
 # takeover-provenance route (OI-1576) may speak for it.
 _DECIDED_VERDICT_STATES = _GATE_PASS_STATES | _GATE_FAIL_STATES
 
+
+def _is_absent_without_verdict(result: Dict[str, Any]) -> bool:
+    """OI-1624: does ``result`` represent a gate that will render no verdict
+    for THIS attempt — an ABSENCE, never a rejection?
+
+    This is deliberately built as a distinction between two independent
+    axes, never as a name-list of "known outage statuses" — a status invented
+    tomorrow falls into the right bucket automatically as long as it is
+    classified by ``gate_status.py`` (the module that owns these categories),
+    not by a second hand-picked list living here:
+
+    - **terminal** (``gate_status.is_terminal``) answers "has this attempt
+      concluded" — ``not_executable`` is terminal precisely because the gate
+      was finally classified as unable to run, even though nothing executed.
+    - **verdict rendered** (``_DECIDED_VERDICT_STATES``, pass ∪ fail) answers
+      "did the attempt conclude WITH a decision" — a wholly separate
+      question. Terminal means "this attempt is over", never "a verdict was
+      reached"; only pass and a real rejection are verdicts.
+
+    A status can be terminal without a verdict (``not_executable``) or a
+    verdict without controversy (pass/fail, both terminal). What is
+    deliberately excluded from "absence" is the THIRD combination: a status
+    that is neither terminal nor a verdict AND is not a recognised outage
+    either — the ``INCOMPLETE_STATES`` family (pending/running/queued/
+    requested). Those mean "this same attempt may still mature into a
+    verdict on its own", so treating them as absence and consulting a peer
+    gate while they are still in flight would be premature — the merge door
+    must keep refusing them on "not terminal yet", exactly as it always has
+    (``_merge_door_record_verdict``'s first check, preserved unchanged).
+
+    Absence is therefore: NOT a decided verdict, AND (the attempt concluded
+    without one — ``is_terminal`` — OR it is an explicit outage status —
+    ``gate_status.UNAVAILABLE_STATES``, which is itself deliberately NOT
+    terminal because a rerun can still decide). Both routes read off
+    gate_status.py's own category sets.
+    """
+    status = gate_canonical_status(result)
+    if status in _DECIDED_VERDICT_STATES:
+        return False
+    return gate_is_terminal(result) or status in _GATE_UNAVAILABLE_STATES
+
+
 # Glob metacharacters that would change the meaning of a pr_id-derived glob
 # pattern (e.g. turn it into a wildcard match instead of a literal prefix).
 _GLOB_UNSAFE_CHARS = frozenset("*?[]")
@@ -570,6 +613,62 @@ def _merge_door_record_verdict(
     }
 
 
+def _find_peer_gate_results(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+    head_sha: Optional[str] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """OI-1624: other KNOWN gates' own rendered verdicts for this exact PR/sha.
+
+    Only reached when the declared gate is an established ABSENCE
+    (:func:`_is_absent_without_verdict`) with no OI-1576 takeover-successor
+    naming it either. Absence is not silence: a review round commonly
+    dispatches several gates for the same PR (measured live: codex_gate,
+    kimi_gate and glm_gate all requested and recorded for the same head),
+    and a gate that never rendered a verdict must not make the OTHER gates'
+    own, independently-reached verdicts invisible to the merge door.
+
+    Deliberately narrower than "any pass anywhere satisfies the obligation":
+
+    - Every candidate is looked up via :func:`_find_gate_result` — the SAME
+      pr_id/branch/project_id/head-sha scope matcher and offline-test-run
+      rejection the declared gate's own lookup already uses, never a second,
+      looser one.
+    - Only records with a RENDERED verdict (``_DECIDED_VERDICT_STATES`` —
+      pass or fail, never another absence status) are returned; an absent
+      peer contributes nothing either way.
+    - The candidate set is bounded to ``_KNOWN_GATES`` (the same enum-derived
+      set the declared-gate lookup trusts), never an unbounded directory
+      scan.
+
+    This does NOT relax ``TestUnrelatedRecordsNeverTakeOver`` (OI-1576): that
+    contract is about a declared gate with NO record at all (never even
+    asked) being handed a stranger's unrelated pass — genuinely unknowable
+    whether the seat is dead or merely not yet scheduled this round. This
+    function is only ever consulted once the declared gate's OWN record
+    already proves it will not render a verdict for this attempt.
+
+    Returns ``[(gate_name, record), ...]``, unordered beyond ``_KNOWN_GATES``
+    iteration order (sorted, for determinism).
+    """
+    peers: List[Tuple[str, Dict[str, Any]]] = []
+    for candidate_gate in sorted(_KNOWN_GATES):
+        if candidate_gate == gate:
+            continue
+        candidate = _find_gate_result(
+            candidate_gate, pr_id, results_dir,
+            branch=branch, project_id=project_id, head_sha=head_sha,
+        )
+        if candidate is None:
+            continue
+        if gate_canonical_status(candidate) in _DECIDED_VERDICT_STATES:
+            peers.append((candidate_gate, candidate))
+    return peers
+
+
 def check_review_gate_for_merge(
     pr_id: str,
     gate: str,
@@ -610,6 +709,24 @@ def check_review_gate_for_merge(
     successor carries about itself; it never walks the chain through other
     records. A decided verdict at the declared gate (pass or fail) always
     stands on its own and is never overridden by a successor.
+
+    OI-1624: a gate-UITVAL is an ABSENCE, never a rejection (see
+    :func:`_is_absent_without_verdict`) — ``not_executable``/``unavailable``
+    mean "this attempt concluded without a verdict", not "this attempt
+    concluded with a NO". When the declared gate is absent AND no formal
+    takeover successor names it either, the declared gate's own absent
+    record is never run back through :func:`_merge_door_record_verdict`
+    (that machinery judges "is this a valid pass", not "did anyone speak at
+    all" — feeding it an absent record used to read as "resultaat mist
+    contract_hash en/of report_path", indistinguishable from a botched
+    attempt). Instead every OTHER known gate's own rendered verdict for the
+    SAME PR/branch/sha is consulted (:func:`_find_peer_gate_results`): a real
+    rejection anywhere in that set still blocks the merge (an echte
+    afkeuring blijft blokkeren, ook naast een pass van een andere poort), a
+    fully-evidenced pass stands in as the signer, and zero rendered peer
+    verdicts is still NO-GO (nul geldige ondertekenaars blijft NO-GO) — now
+    honestly reported as absence rather than "incomplete evidence". See
+    ADR-037.
     """
     result = _find_gate_result(
         gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
@@ -669,6 +786,76 @@ def check_review_gate_for_merge(
             "override_reason": None,
             "gate": gate,
         }
+    if result is not None and _is_absent_without_verdict(result):
+        # OI-1624: the declared gate spoke (a record exists) and what it said
+        # is that it will render no verdict for this attempt — an ABSENCE,
+        # never a rejection. Unlike a decided fail, absence carries no
+        # information that should block the merge on its own; it just means
+        # this particular seat has nothing to say. Consult every OTHER known
+        # gate's own rendered verdict for the exact same PR/branch/sha before
+        # falling back to "no evidence at all".
+        peers = _find_peer_gate_results(
+            gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
+        )
+        peer_fails = [
+            (peer_gate, peer) for peer_gate, peer in peers
+            if gate_canonical_status(peer) in _GATE_FAIL_STATES
+        ]
+        if peer_fails:
+            # A real rejection blocks the merge regardless of what the
+            # absent declared gate has to say about it, and regardless of
+            # any OTHER peer's pass (harde grens: een echte afkeuring
+            # blijft blokkeren, ook naast een pass van een andere poort).
+            culprit_gate, culprit = sorted(peer_fails, key=lambda item: item[0])[0]
+            return {
+                "verdict": "NO-GO",
+                "message": (
+                    f"{gate} is afwezig voor {pr_id} (status={gate_canonical_status(result)!r}: "
+                    f"geen uitspraak gedaan) — {culprit_gate} keurde dezelfde head af "
+                    f"({gate_canonical_status(culprit)!r}): een echte afkeuring blokkeert "
+                    f"de merge, ook naast de afwezigheid van {gate}"
+                ),
+                "overridden": False,
+                "override_reason": None,
+                "gate": gate,
+            }
+        for peer_gate, peer in sorted(peers, key=lambda item: item[0]):
+            if gate_canonical_status(peer) not in _GATE_PASS_STATES:
+                continue
+            peer_verdict = _merge_door_record_verdict(peer, peer_gate, pr_id)
+            if peer_verdict["verdict"] == "GO":
+                return {
+                    "verdict": "GO",
+                    "message": (
+                        f"{gate} is afwezig voor {pr_id} (status={gate_canonical_status(result)!r}: "
+                        f"geen uitspraak gedaan) — {peer_gate} droeg op dezelfde head "
+                        "zelfstandig een geldige, volledig bewezen pass en telt als "
+                        "ondertekenaar bij afwezigheid van de gedeclareerde poort (OI-1624)"
+                    ),
+                    "overridden": False,
+                    "override_reason": None,
+                    "gate": gate,
+                    "evidence_gate": peer_gate,
+                }
+        # Zero valid signers: the declared gate is confirmed absent and no
+        # other known gate on this exact head rendered a usable verdict
+        # either. Still NO-GO (nul geldige ondertekenaars blijft NO-GO), but
+        # honestly reported as absence, never as "bewijs onvolledig" — that
+        # phrasing belongs to a record that attempted a verdict and fell
+        # short, not to one that never tried.
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"{gate} is afwezig voor {pr_id} (status={gate_canonical_status(result)!r}: "
+                "geen uitspraak gedaan, geen ondertekening) en geen andere poort op "
+                "deze head leverde een geldige, volledig bewezen uitspraak — nul "
+                "geldige ondertekenaars"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+
     if result is None:
         return {
             "verdict": "NO-GO",
