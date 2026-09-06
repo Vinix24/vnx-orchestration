@@ -1,0 +1,36 @@
+{
+  "gate": "codex_gate",
+  "pr_id": "1749",
+  "pr_number": 1749,
+  "status": "unavailable",
+  "reason": "gate_execution_degenerate",
+  "reason_detail": "the run produced 1 message(s) and 0 investigative action(s) (minimum 1); 0 shell call(s), 0 file read(s), 23914 input tokens — a verdict reached without looking at anything beyond the prompt is not gate evidence",
+  "duration_seconds": 18.078953791991808,
+  "partial_output_lines": 4,
+  "runner_pid": 10635,
+  "killed_at": "2026-09-04T08:17:02Z",
+  "summary": "codex_gate UNAVAILABLE (gate did not run — gate_execution_degenerate: the run produced 1 message(s) and 0 investigative action(s) (minimum 1); 0 shell call(s), 0 file read(s), 23914 input tokens — a verdict reached without looking at anything beyond the prompt is not gate evidence) — NOT a review fail",
+  "contract_hash": "",
+  "report_path": "",
+  "blocking_findings": [],
+  "advisory_findings": [],
+  "required_reruns": [
+    "codex_gate"
+  ],
+  "residual_risk": "Gate gate_execution_degenerate. Re-run required.",
+  "recorded_at": "2026-09-04T08:17:02Z",
+  "execution_depth": {
+    "parsed": true,
+    "investigative_actions": 0,
+    "shell_calls": 0,
+    "files_read": 0,
+    "agent_messages": 1,
+    "input_tokens": 23914,
+    "output_tokens": 591,
+    "unrecognised_item_types": []
+  },
+  "degenerate_report_path": "/Users/vincentvandeth/.vnx-data/vnx-dev/unified_reports/headless/20260904-081641-HEADLESS-codex_gate-pr-1749-4a6c8a.md",
+  "branch": "dispatch/20260903-deur-boekhouding-luid",
+  "commit_sha": "a9a2863e100b3cc18267d6a50f4af33101f91dbd",
+  "failure_reason": "the run produced 1 message(s) and 0 investigative action(s) (minimum 1); 0 shell call(s), 0 file read(s), 23914 input tokens — a verdict reached without looking at anything beyond the prompt is not gate evidence"
+}

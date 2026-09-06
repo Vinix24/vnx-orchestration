@@ -32,6 +32,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
+import gate_depth
 from gate_recorder import (
     ResultOverwriteRefused,
     record_failure,
@@ -40,6 +41,12 @@ from gate_recorder import (
     write_result_guarded,
 )
 from gate_request_handler import GateRequestHandlerMixin
+
+# OI-1618: record_terminal_result now requires execution_depth on every call.
+# This file is about the overwrite guard, not depth, so every call below
+# passes a single non-degenerate depth -- just enough to never trip the
+# (unrelated) gate_execution_degenerate reclassification.
+_OK_DEPTH = gate_depth.single_shot_depth(100, False)
 
 
 def _make_pass(**overrides):
@@ -68,7 +75,10 @@ class TestRecordTerminalResultOverwriteGuard:
         OpenRouter 402 must not erase the first run's real pass."""
         out = tmp_path / "pr-1691-glm_gate.json"
         pass_payload = _make_pass()
-        record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=pass_payload)
+        record_terminal_result(
+            gate="glm_gate", pr_id="1691", result_path=out, payload=pass_payload,
+            execution_depth=_OK_DEPTH,
+        )
         assert json.loads(out.read_text(encoding="utf-8"))["status"] == "pass"
 
         outage_payload = {
@@ -80,7 +90,10 @@ class TestRecordTerminalResultOverwriteGuard:
             "reason": "dispatch_error",
         }
         with pytest.raises(ResultOverwriteRefused):
-            record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=outage_payload)
+            record_terminal_result(
+                gate="glm_gate", pr_id="1691", result_path=out, payload=outage_payload,
+                execution_depth=_OK_DEPTH,
+            )
 
         # The existing pass must be completely untouched.
         assert json.loads(out.read_text(encoding="utf-8")) == pass_payload
@@ -91,7 +104,10 @@ class TestRecordTerminalResultOverwriteGuard:
         erase a decided pass either — it goes through the SAME function."""
         out = tmp_path / "pr-1691-glm_gate.json"
         pass_payload = _make_pass()
-        record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=pass_payload)
+        record_terminal_result(
+            gate="glm_gate", pr_id="1691", result_path=out, payload=pass_payload,
+            execution_depth=_OK_DEPTH,
+        )
 
         reprocess_refusal = {
             "gate": "glm_gate",
@@ -102,7 +118,10 @@ class TestRecordTerminalResultOverwriteGuard:
             "report_path": "",
         }
         with pytest.raises(ResultOverwriteRefused):
-            record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=reprocess_refusal)
+            record_terminal_result(
+                gate="glm_gate", pr_id="1691", result_path=out, payload=reprocess_refusal,
+                execution_depth=_OK_DEPTH,
+            )
         assert json.loads(out.read_text(encoding="utf-8")) == pass_payload
 
     def test_terminal_over_terminal_is_allowed(self, tmp_path):
@@ -110,26 +129,38 @@ class TestRecordTerminalResultOverwriteGuard:
         over an old pass — terminal may replace terminal."""
         out = tmp_path / "pr-1691-glm_gate.json"
         first_pass = _make_pass(dispatch_id="glm-gate-pr1691-1")
-        record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=first_pass)
+        record_terminal_result(
+            gate="glm_gate", pr_id="1691", result_path=out, payload=first_pass,
+            execution_depth=_OK_DEPTH,
+        )
 
         second_pass = _make_pass(
             contract_hash="freshhash123456", report_path="/tmp/glm-report-2.md",
             dispatch_id="glm-gate-pr1691-2",
         )
-        record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=second_pass)
+        record_terminal_result(
+            gate="glm_gate", pr_id="1691", result_path=out, payload=second_pass,
+            execution_depth=_OK_DEPTH,
+        )
         assert json.loads(out.read_text(encoding="utf-8")) == second_pass
 
     def test_fail_over_pass_is_allowed_when_both_carry_evidence(self, tmp_path):
         """A real fail (evidenced) may still supersede a real pass — the
         guard protects against DOWNGRADE, not against a real regression."""
         out = tmp_path / "pr-1691-glm_gate.json"
-        record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=_make_pass())
+        record_terminal_result(
+            gate="glm_gate", pr_id="1691", result_path=out, payload=_make_pass(),
+            execution_depth=_OK_DEPTH,
+        )
 
         fail_payload = _make_pass(
             status="fail", contract_hash="failhash1", report_path="/tmp/glm-fail.md",
             dispatch_id="glm-gate-pr1691-3",
         )
-        record_terminal_result(gate="glm_gate", pr_id="1691", result_path=out, payload=fail_payload)
+        record_terminal_result(
+            gate="glm_gate", pr_id="1691", result_path=out, payload=fail_payload,
+            execution_depth=_OK_DEPTH,
+        )
         assert json.loads(out.read_text(encoding="utf-8"))["status"] == "fail"
 
     def test_not_executable_may_freely_overwrite_a_prior_not_executable(self, tmp_path):
@@ -150,7 +181,10 @@ class TestRecordTerminalResultOverwriteGuard:
             "reason": "provider_not_configured", "contract_hash": "", "report_path": "",
             "dispatch_id": "kimi-gate-pr1-2",
         }
-        record_terminal_result(gate="kimi_gate", pr_id="1", result_path=out, payload=second)
+        record_terminal_result(
+            gate="kimi_gate", pr_id="1", result_path=out, payload=second,
+            execution_depth=_OK_DEPTH,
+        )
         assert json.loads(out.read_text(encoding="utf-8"))["reason"] == "provider_not_configured"
 
     def test_no_existing_file_writes_unconditionally(self, tmp_path):
@@ -159,7 +193,10 @@ class TestRecordTerminalResultOverwriteGuard:
             "gate": "kimi_gate", "pr_id": "99", "status": "unavailable",
             "contract_hash": "", "report_path": "",
         }
-        record_terminal_result(gate="kimi_gate", pr_id="99", result_path=out, payload=payload)
+        record_terminal_result(
+            gate="kimi_gate", pr_id="99", result_path=out, payload=payload,
+            execution_depth=_OK_DEPTH,
+        )
         assert json.loads(out.read_text(encoding="utf-8")) == payload
 
 
@@ -448,6 +485,7 @@ class TestCorruptExistingResultFailsClosed:
                 payload={"gate": "glm_gate", "pr_id": "1691", "status": "pass",
                          "contract_hash": "newhash", "report_path": "/tmp/r.md",
                          "dispatch_id": "glm-gate-pr1691-2"},
+                execution_depth=_OK_DEPTH,
             )
         # The corrupt content must survive untouched -- never silently
         # replaced, since we cannot verify it wasn't a decided verdict.

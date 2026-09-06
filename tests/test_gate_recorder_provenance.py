@@ -17,7 +17,14 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
+import gate_depth
 from gate_recorder import record_terminal_result
+
+# OI-1618: record_terminal_result now requires execution_depth on every call.
+# This file is about producer identity, not depth, so every call below passes
+# a single non-degenerate depth -- just enough to never trip the (unrelated)
+# gate_execution_degenerate reclassification these tests do not exercise.
+_OK_DEPTH = gate_depth.single_shot_depth(100, False)
 
 
 def test_terminal_pass_without_dispatch_id_is_refused(tmp_path):
@@ -32,7 +39,7 @@ def test_terminal_pass_without_dispatch_id_is_refused(tmp_path):
         record_terminal_result(
             gate="kimi_gate", pr_id="378",
             result_path=tmp_path / "pr-378-kimi_gate.json",
-            payload=payload,
+            payload=payload, execution_depth=_OK_DEPTH,
         )
     assert not (tmp_path / "pr-378-kimi_gate.json").exists(), (
         "refused write must not leave a partial file behind"
@@ -45,7 +52,7 @@ def test_terminal_fail_without_dispatch_id_is_refused(tmp_path):
         record_terminal_result(
             gate="kimi_gate", pr_id="378",
             result_path=tmp_path / "pr-378-kimi_gate.json",
-            payload=payload,
+            payload=payload, execution_depth=_OK_DEPTH,
         )
 
 
@@ -61,8 +68,11 @@ def test_terminal_result_with_dispatch_id_writes_unchanged(tmp_path):
     out = tmp_path / "pr-904-kimi_gate.json"
     result_path = record_terminal_result(
         gate="kimi_gate", pr_id="904", result_path=out, payload=payload,
+        execution_depth=_OK_DEPTH,
     )
     assert result_path == out
+    # payload is mutated in place (execution_depth stamped on it too), so the
+    # caller's own dict and the file agree -- this is not a no-op comparison.
     assert json.loads(out.read_text(encoding="utf-8")) == payload
 
 
@@ -71,14 +81,20 @@ def test_non_terminal_result_without_dispatch_id_is_not_held_to_identity(tmp_pat
     not required to carry producer identity."""
     payload = {"gate": "kimi_gate", "pr_id": "1", "status": "pending"}
     out = tmp_path / "pr-1-kimi_gate.json"
-    record_terminal_result(gate="kimi_gate", pr_id="1", result_path=out, payload=payload)
+    record_terminal_result(
+        gate="kimi_gate", pr_id="1", result_path=out, payload=payload,
+        execution_depth=_OK_DEPTH,
+    )
     assert json.loads(out.read_text(encoding="utf-8")) == payload
 
 
 def test_write_is_atomic_no_tmp_file_left_behind(tmp_path):
     payload = {"gate": "kimi_gate", "pr_id": "905", "status": "pass", "dispatch_id": "kimi-gate-pr905-1"}
     out = tmp_path / "pr-905-kimi_gate.json"
-    record_terminal_result(gate="kimi_gate", pr_id="905", result_path=out, payload=payload)
+    record_terminal_result(
+        gate="kimi_gate", pr_id="905", result_path=out, payload=payload,
+        execution_depth=_OK_DEPTH,
+    )
     assert out.exists()
     assert not (tmp_path / "pr-905-kimi_gate.json.tmp").exists()
 
@@ -86,5 +102,8 @@ def test_write_is_atomic_no_tmp_file_left_behind(tmp_path):
 def test_creates_parent_directory(tmp_path):
     out = tmp_path / "nested" / "results" / "pr-1-kimi_gate.json"
     payload = {"gate": "kimi_gate", "pr_id": "1", "status": "pass", "dispatch_id": "kimi-gate-pr1-1"}
-    record_terminal_result(gate="kimi_gate", pr_id="1", result_path=out, payload=payload)
+    record_terminal_result(
+        gate="kimi_gate", pr_id="1", result_path=out, payload=payload,
+        execution_depth=_OK_DEPTH,
+    )
     assert out.exists()

@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
@@ -91,11 +91,23 @@ class ExecutionDepth:
     and zeros that mean "not measured" must never be read as zeros that mean
     "did nothing" — that is the difference between an unmeasured gate and a
     degenerate one, and collapsing it would fail every gate whose lane emits
-    no event stream. Only codex_gate emits one today; kimi_gate and glm_gate
-    reports carry no events at all.
+    no event stream. Only codex_gate/gemini_review emit one today.
+
+    ``mode`` distinguishes the TWO shapes this dataclass now carries (OI-1618):
+    ``"agentic"`` (the tool-call stream above, measured by
+    :func:`measure_execution_depth`) and ``"single_shot"`` (a one-shot API
+    lane — glm_gate/kimi_gate — measured by :func:`single_shot_depth`).
+    ``investigative_actions``/``shell_calls``/``files_read``/
+    ``agent_messages``/``unrecognised_item_types`` only ever mean anything in
+    agentic mode; ``diff_chars``/``diff_truncated`` only ever mean anything in
+    single_shot mode. One dataclass, not two, so
+    :func:`gate_recorder.record_terminal_result` can hold every terminal
+    writer to the same requirement without knowing which lane produced the
+    measurement.
     """
 
     parsed: bool = False
+    mode: str = "agentic"
     investigative_actions: int = 0
     shell_calls: int = 0
     files_read: int = 0
@@ -103,9 +115,22 @@ class ExecutionDepth:
     input_tokens: int = 0
     output_tokens: int = 0
     unrecognised_item_types: tuple = ()
+    diff_chars: int = 0
+    diff_truncated: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        """JSON-shaped dict: ``unrecognised_item_types`` normalizes to a list.
+
+        ``asdict()`` alone preserves the field's tuple type. JSON has no tuple
+        type, so a round trip through disk (write, then ``json.loads`` it back)
+        already turns it into a list -- normalizing here means the in-memory
+        dict a caller stamps onto its own payload (record_terminal_result does
+        exactly this) agrees with what a reader gets back from the file,
+        instead of silently disagreeing only on this one field's type.
+        """
+        data = asdict(self)
+        data["unrecognised_item_types"] = list(data["unrecognised_item_types"])
+        return data
 
 
 def measure_execution_depth(stdout: str) -> ExecutionDepth:
@@ -172,6 +197,7 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
 
     return ExecutionDepth(
         parsed=True,
+        mode="agentic",
         investigative_actions=investigative,
         shell_calls=shell,
         files_read=reads,
@@ -182,6 +208,57 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
     )
 
 
+def single_shot_depth(diff_chars: int, diff_truncated: bool) -> ExecutionDepth:
+    """Depth for a single-shot review lane (glm_gate/kimi_gate): one API call
+    against a diff, no agentic tool loop to count shell calls or file reads
+    from (OI-1618). The diff IS the investigation — there is nothing else the
+    run could have looked at — so the only question degeneracy can ask here is
+    whether the diff carried anything at all.
+
+    ``diff_chars`` is the caller's own post-strip length (``len(diff.strip())``),
+    not the raw byte count — :func:`is_degenerate` trusts this value directly
+    rather than re-deriving it, so the "0 chars after strip" rule lives in one
+    place (the caller that already has the raw text) instead of two.
+    ``diff_truncated`` records whether the gate's own ``MAX_DIFF_CHARS`` cap
+    fired; it is carried for the evidence trail only, never treated as
+    degenerate on its own (see :func:`is_degenerate`).
+    """
+    return ExecutionDepth(
+        parsed=True,
+        mode="single_shot",
+        diff_chars=diff_chars,
+        diff_truncated=diff_truncated,
+    )
+
+
+def from_dict(data: Any) -> ExecutionDepth:
+    """Reconstruct an :class:`ExecutionDepth` from its own ``to_dict()`` output.
+
+    Used to carry a depth measurement FORWARD without re-measuring — a
+    re-anchored verdict (``gate_reanchor_cli.py``) reviewed nothing new, so it
+    takes the ORIGINAL run's depth rather than manufacturing a fresh one
+    (OI-1618), exactly as it already carries the original verdict forward.
+
+    Anything that is not a dict, or a dict with no recognisable fields (a
+    record written before this module tracked ``execution_depth`` at all),
+    reconstructs to the default ``parsed=False`` depth — which
+    :func:`is_degenerate` always reads as "not measured", never as
+    "degenerate". That is the same never-guess-on-absence rule this module
+    already applies to a stream it cannot parse; a stale record must not be
+    retroactively held to a floor it was never measured against.
+    """
+    if not isinstance(data, dict):
+        return ExecutionDepth()
+    known = {f.name for f in fields(ExecutionDepth)}
+    kwargs = {k: v for k, v in data.items() if k in known}
+    if kwargs.get("unrecognised_item_types") is not None:
+        kwargs["unrecognised_item_types"] = tuple(kwargs["unrecognised_item_types"])
+    try:
+        return ExecutionDepth(**kwargs)
+    except TypeError:
+        return ExecutionDepth()
+
+
 def is_degenerate(depth: ExecutionDepth) -> bool:
     """True when the run reached a verdict without taking a single action.
 
@@ -189,9 +266,17 @@ def is_degenerate(depth: ExecutionDepth) -> bool:
     event stream must keep working exactly as before: this check exists to
     stop a measured emptiness from being accepted, not to demand that every
     lane become measurable first.
+
+    Single-shot mode (OI-1618) asks a different question than agentic mode:
+    there are no tool calls to count, so degeneracy is EXCLUSIVELY an empty
+    diff (0 characters after strip). Truncation is a fact about size, never
+    about content, and is never degenerate on its own — a diff capped at
+    ``MAX_DIFF_CHARS`` still handed the model real material to review.
     """
     if not depth.parsed:
         return False
+    if depth.mode == "single_shot":
+        return depth.diff_chars == 0
     if depth.unrecognised_item_types:
         # The stream carried an item type this module cannot classify, so the
         # action count is a floor and not a measurement. Refusing on it would
@@ -203,6 +288,12 @@ def is_degenerate(depth: ExecutionDepth) -> bool:
 
 def degenerate_detail(depth: ExecutionDepth) -> str:
     """The human-readable why, carried into the result record's reason_detail."""
+    if depth.mode == "single_shot":
+        return (
+            f"single-shot gate reviewed a diff of {depth.diff_chars} character(s) "
+            f"after strip (diff_truncated={depth.diff_truncated}) — a verdict "
+            "reached against an empty diff is not gate evidence"
+        )
     return (
         f"the run produced {depth.agent_messages} message(s) and "
         f"{depth.investigative_actions} investigative action(s) "
@@ -217,6 +308,8 @@ __all__ = [
     "ExecutionDepth",
     "MIN_INVESTIGATIVE_ACTIONS",
     "degenerate_detail",
+    "from_dict",
     "is_degenerate",
     "measure_execution_depth",
+    "single_shot_depth",
 ]
