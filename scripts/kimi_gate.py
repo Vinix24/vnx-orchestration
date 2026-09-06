@@ -115,6 +115,11 @@ from gate_recorder import (
     stamp_request_identity,
 )
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
+from gate_prompt import (  # OI-1442: the diff is data, not instruction
+    build_review_prompt,
+    merge_scan_findings,
+    scan_diff_for_instructions,
+)
 from governance_emit import _classify_lane_log_text, _read_lane_log_text  # OI-1452: lift the real reason off the raw lane log — same classifier OI-1433 built, never a second marker scan
 from unified_report_schema import SchemaViolation, parse_frontmatter
 from gate_report_recovery import (
@@ -165,16 +170,19 @@ _VERDICT_CONTRACT = (
 
 
 def _build_prompt(diff_text: str, pr: str) -> str:
-    if len(diff_text) > MAX_DIFF_CHARS:
-        diff_text = diff_text[:MAX_DIFF_CHARS] + "\n\n[... diff truncated for the gate ...]"
-    return (
-        f"You are a strict code-review gate for PR {pr}. Review ONLY the unified diff "
-        "below. Look for correctness bugs, security issues, governance/contract "
-        "violations, and regressions introduced by THIS diff. Be a skeptic; do not "
-        "rubber-stamp, but do not invent issues.\n\n"
-        f"{_VERDICT_CONTRACT}\n"
-        "DIFF:\n"
-        f"{diff_text}\n"
+    """Build the review prompt with the diff as delimited, untrusted DATA.
+
+    OI-1442, identical defect and identical fix to ``glm_gate._build_prompt``:
+    the raw diff used to be the last thing in the prompt, unmarked. It now
+    sits in an explicitly delimited block with the instruction restated after
+    it. ``_VERDICT_CONTRACT`` stays this gate's own.
+    """
+    return build_review_prompt(
+        gate_name="kimi_gate",
+        pr=pr,
+        diff_text=diff_text,
+        verdict_contract=_VERDICT_CONTRACT,
+        max_chars=MAX_DIFF_CHARS,
     )
 
 
@@ -512,6 +520,11 @@ def main(argv: "list[str] | None" = None) -> int:
             return 1
         window_end = report_path_obj.stat().st_mtime
         prompt = None  # never fetched in reprocess mode — see contract_hash below
+        # OI-1442: --reprocess never re-fetches the diff, so there is nothing
+        # to scan. An empty list is the honest value — scanning the CURRENT
+        # diff would attach findings from one commit to a verdict formalized
+        # against another.
+        scan_findings: list = []
         duration = _frontmatter_duration_seconds(report_text)
     else:
         diff = _get_diff(args.pr, args.diff_file)
@@ -533,6 +546,10 @@ def main(argv: "list[str] | None" = None) -> int:
         # split, not a dispatch_id string check.
         dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout, role="review-gate")
         prompt = _build_prompt(diff, args.pr)
+        # OI-1442: the deterministic half — see glm_gate's identical call site.
+        # The prompt asks the model to report instruction-shaped text in the
+        # diff; this scan does not depend on it having done so.
+        scan_findings = scan_diff_for_instructions(diff)
 
         start = time.monotonic()
         report_text = ""
@@ -785,9 +802,16 @@ def main(argv: "list[str] | None" = None) -> int:
         "model": args.model,
         "dispatch_id": dispatch_id,
         "blocking_findings": blocking,
-        "advisory_findings": [
-            f for f in (verdict.get("findings") or []) if f not in blocking
-        ],
+        # OI-1442: the model's advisory findings PLUS the deterministic
+        # injection scan's, always — see glm_gate's identical record field. A
+        # model that read past an injection cannot suppress the scan's hit; a
+        # model that reported it produces the identical dict and is
+        # deduplicated. Scan findings are severity=warning by construction, so
+        # they can never reach ``blocking_findings``.
+        "advisory_findings": merge_scan_findings(
+            [f for f in (verdict.get("findings") or []) if f not in blocking],
+            scan_findings,
+        ),
         "required_reruns": [],
         "residual_risk": residual,
         # OI-1452 fix-forward (OI-1453 tracks the other four gates): also
