@@ -411,9 +411,17 @@ def test_batch_inherits_tiebreaker_after_two_panel_rounds(tmp_path, monkeypatch)
     # value — the same "meet de state" discipline as the tiebreaker suite).
     ledger = tmp_path / ".vnx-attest" / "plan-gate-seats.ndjson"
     monkeypatch.setattr(pgp, "_resolve_seat_ledger_path", lambda data_dir: ledger)
-    pgt.record_round(ledger, track_id="feat-tb", project_id="p1", round_number=1, outcome="panel")
-    pgt.record_round(ledger, track_id="feat-tb", project_id="p1", round_number=2, outcome="panel")
+    # OI-1280: the forced rounds are recorded as READ (``scored_seats=1``).
+    # The stop-rule now also requires that at least one round produced a
+    # readable verdict — without the flag these two rounds would be rounds
+    # nobody read, and the tiebreaker this test is about would correctly
+    # refuse to run.
+    pgt.record_round(ledger, track_id="feat-tb", project_id="p1",
+                     round_number=1, outcome="panel", scored_seats=1)
+    pgt.record_round(ledger, track_id="feat-tb", project_id="p1",
+                     round_number=2, outcome="panel", scored_seats=1)
     assert pgt.read_round_count(ledger, "feat-tb", "p1") == 2
+    assert pgt.readable_round_count(ledger, "feat-tb", "p1") == 2
 
     panel_calls = {"n": 0}
     tb_calls = {"n": 0}
