@@ -545,3 +545,61 @@ def test_glm_clean_diff_adds_no_scan_findings(glm_gate, tmp_path, monkeypatch):
         glm_gate, tmp_path, monkeypatch, _FAKE_DIFF, _REAL_PASS_REPORT, pr="4303",
     )
     assert record["advisory_findings"] == []
+
+
+# ---------------------------------------------------------------------------
+# 11. OI-1618: a verdict without investigation is no verdict, on a
+#     single-shot lane too. glm_gate has no agentic tool loop to measure --
+#     the diff IS the investigation, so degeneracy here means the diff
+#     itself carried nothing. main()'s own `if not diff:` guard only catches
+#     a truly empty string; a whitespace-only file is still truthy in Python
+#     (`bool(" \n")` is True) and reaches the dispatcher, so an empty-after-
+#     strip diff is the one shape that must be caught downstream, by the
+#     recorder. Truncation (MAX_DIFF_CHARS) is a fact about size, never
+#     about content, and must never be read as degenerate.
+# ---------------------------------------------------------------------------
+
+
+def test_pass_verdict_on_whitespace_only_diff_becomes_unavailable_degenerate(
+    glm_gate, tmp_path, monkeypatch,
+):
+    diff_file = tmp_path / "x.diff"
+    diff_file.write_text("   \n\t\n", encoding="utf-8")  # truthy string, strips to ""
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(
+        glm_gate, "_make_default_dispatcher", _fake_dispatcher_factory(data_dir, _REAL_PASS_REPORT),
+    )
+
+    rc = glm_gate.main(["--pr", "0", "--diff-file", str(diff_file), "--data-dir", str(data_dir)])
+    out = data_dir / "state" / "review_gates" / "results" / "pr-0-glm_gate.json"
+    record = json.loads(out.read_text(encoding="utf-8"))
+
+    assert rc == 1, "a degenerate verdict must exit as unavailable/infra, never 0 (pass) or 2 (fail)"
+    assert record["status"] == "unavailable"
+    assert record["reason"] == "gate_execution_degenerate"
+    assert record["contract_hash"] == ""
+    assert record["execution_depth"]["mode"] == "single_shot"
+    assert record["execution_depth"]["diff_chars"] == 0
+
+
+def test_pass_verdict_on_truncated_but_nonempty_diff_stays_pass(glm_gate, tmp_path, monkeypatch):
+    """A ~60000-character diff capped at MAX_DIFF_CHARS (50000) still handed
+    the model real content to review — truncation alone must never flip a
+    real pass into unavailable."""
+    big_diff = "diff --git a/x b/x\n" + ("+ok\n" * 15000)
+    assert len(big_diff) > glm_gate.MAX_DIFF_CHARS
+    diff_file = tmp_path / "x.diff"
+    diff_file.write_text(big_diff, encoding="utf-8")
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(
+        glm_gate, "_make_default_dispatcher", _fake_dispatcher_factory(data_dir, _REAL_PASS_REPORT),
+    )
+
+    rc = glm_gate.main(["--pr", "0", "--diff-file", str(diff_file), "--data-dir", str(data_dir)])
+    out = data_dir / "state" / "review_gates" / "results" / "pr-0-glm_gate.json"
+    record = json.loads(out.read_text(encoding="utf-8"))
+
+    assert rc == 0
+    assert record["status"] == "pass"
+    assert record["execution_depth"]["mode"] == "single_shot"
+    assert record["execution_depth"]["diff_truncated"] is True

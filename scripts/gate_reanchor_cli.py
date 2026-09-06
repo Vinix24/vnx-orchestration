@@ -43,6 +43,7 @@ for _p in (str(SCRIPT_DIR / "lib"), str(SCRIPT_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import gate_depth  # noqa: E402  OI-1618: carry the original run's depth forward, never re-measure
 import gate_reanchor  # noqa: E402
 from gate_artifacts import _compute_contract_hash  # noqa: E402  canonical hasher, never a second one
 from gate_register_emit import register_path  # noqa: E402  one resolver, not a second copy
@@ -315,6 +316,13 @@ def main(argv: Optional[list] = None) -> int:
     payload = build_reanchored_payload(
         record, new_sha=new_sha, new_branch=new_branch, decision=decision,
     )
+    # OI-1618: a re-anchor reviews nothing new — it carries the ORIGINAL run's
+    # own execution_depth forward, exactly as it already carries the original
+    # verdict forward, instead of manufacturing a fresh measurement.
+    # gate_depth.from_dict degrades gracefully to the unmeasured depth on a
+    # pre-OI-1618 record that has no execution_depth field at all, which
+    # record_terminal_result never reads as degenerate.
+    execution_depth = gate_depth.from_dict(record.get("execution_depth"))
     result_path = results_dir / f"pr-{args.pr}-{args.gate}.json"
     try:
         with exclusive_result_lock(result_path):
@@ -324,6 +332,7 @@ def main(argv: Optional[list] = None) -> int:
                 pr_id=str(args.pr),
                 result_path=result_path,
                 payload=payload,
+                execution_depth=execution_depth,
             )
     except (OSError, ValueError, ResultOverwriteRefused) as exc:
         print(f"gate-reanchor: the guarded write refused: {exc}", file=sys.stderr)

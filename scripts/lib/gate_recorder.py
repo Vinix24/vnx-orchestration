@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
 from governance_receipts import utc_now_iso
+import gate_depth
 
 logger = logging.getLogger(__name__)
 
@@ -613,6 +614,7 @@ def record_terminal_result(
     pr_id: str,
     result_path: Path,
     payload: Dict[str, Any],
+    execution_depth: gate_depth.ExecutionDepth,
 ) -> Path:
     """Atomically persist a terminal (pass/fail) gate result at an explicit path.
 
@@ -637,8 +639,48 @@ def record_terminal_result(
     less-decided one — see :func:`_check_overwrite_guard`. glm_gate.py and
     kimi_gate.py already catch ``(OSError, ValueError)`` around this call and
     fail loudly rather than silently overwrite (OI-1469/OI-1470).
+
+    ``execution_depth`` has no default (OI-1618): every writer must supply
+    the depth it actually measured — agentic
+    (:func:`gate_depth.measure_execution_depth`), single-shot
+    (:func:`gate_depth.single_shot_depth`), or carried forward from a prior
+    record (:func:`gate_depth.from_dict`, used by a re-anchor, which reviewed
+    nothing new). A default would be exactly the silent "some investigation
+    happened" assumption this parameter exists to remove. A pass/fail verdict
+    whose depth is degenerate (:func:`gate_depth.is_degenerate`) is
+    reclassified HERE, unconditionally, to ``unavailable``/
+    ``gate_execution_degenerate`` — the SAME reclassification
+    :func:`gate_artifacts.materialize_artifacts` already applies to the
+    codex/gemini lane (OI-1485), lifted to the one place every lane's
+    terminal write passes through so a single-shot lane (glm_gate/kimi_gate)
+    gets it without reimplementing the check itself. The reclassification
+    mutates ``payload`` in place — the same convention
+    :func:`_write_result_atomic` already uses for ``failure_reason`` — so a
+    caller inspecting its own dict after the call sees the same verdict the
+    file carries, never a stale pass/fail the write itself overturned.
+    Scoped to :data:`gate_status.PASS_STATES`/:data:`gate_status.FAIL_STATES`
+    only: a ``not_executable`` record never ran in the first place, so
+    "did it investigate" does not apply to it.
     """
-    from gate_status import is_terminal, has_producer_identity  # noqa: PLC0415
+    from gate_status import (  # noqa: PLC0415
+        FAIL_STATES, PASS_STATES, canonical_status, has_producer_identity, is_terminal,
+    )
+
+    if canonical_status(payload) in (PASS_STATES | FAIL_STATES) and gate_depth.is_degenerate(execution_depth):
+        detail = gate_depth.degenerate_detail(execution_depth)
+        logger.warning(
+            "gate_recorder: REFUSING a degenerate %s verdict pr=%s — %s",
+            gate, pr_id, detail,
+        )
+        payload["status"] = "unavailable"
+        payload["reason"] = "gate_execution_degenerate"
+        payload["reason_detail"] = detail
+        payload["summary"] = (
+            f"{gate} UNAVAILABLE (gate_execution_degenerate: {detail}) — NOT a review fail"
+        )
+        payload["contract_hash"] = ""
+        payload["blocking_findings"] = []
+    payload["execution_depth"] = execution_depth.to_dict()
 
     if is_terminal(payload) and not has_producer_identity(payload):
         raise ValueError(

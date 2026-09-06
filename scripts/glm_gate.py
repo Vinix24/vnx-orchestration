@@ -102,6 +102,7 @@ from gate_recorder import (
     record_terminal_result,
     stamp_request_identity,
 )
+import gate_depth  # OI-1618: a verdict without investigation is no verdict, on every lane
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
     build_review_prompt,
@@ -548,11 +549,26 @@ def main(argv: "list[str] | None" = None) -> int:
         # one commit to a verdict formalized against another.
         scan_findings: list = []
         duration = _frontmatter_duration_seconds(report_text)
+        # OI-1618: --reprocess never re-fetches the diff (see above), so there
+        # is nothing to measure here either — the "not measured" depth, which
+        # gate_depth.is_degenerate always reads as unmeasured rather than
+        # degenerate, never re-evaluated retroactively against a floor this
+        # run was never held to when it originally executed.
+        execution_depth = gate_depth.ExecutionDepth()
     else:
         diff = _get_diff(args.pr, args.diff_file)
         if not diff:
             print(f"glm_gate: no diff for PR {args.pr}", file=sys.stderr)
             return 1
+
+        # OI-1618: the diff IS the investigation for a single-shot lane — no
+        # agentic tool loop to measure. diff_chars is the post-strip length
+        # (the single-shot degeneracy floor), diff_truncated mirrors the same
+        # MAX_DIFF_CHARS cap gate_prompt.wrap_untrusted_diff applies to the
+        # raw (pre-strip) text.
+        execution_depth = gate_depth.single_shot_depth(
+            len(diff.strip()), len(diff) > MAX_DIFF_CHARS,
+        )
 
         # dispatch_id is already resolved above (shared with the request record).
         # role="review-gate" (dispatch-20260823-beta2-j): the default role of
@@ -900,6 +916,7 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         record_terminal_result(
             gate="glm_gate", pr_id=record["pr_id"], result_path=out, payload=record,
+            execution_depth=execution_depth,
         )
     except (OSError, ValueError) as exc:
         # A poort that cannot persist its own evidence must fail LOUDLY, not
@@ -907,6 +924,16 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"glm_gate: FAILED to write result record to {out}: {exc}", file=sys.stderr)
         return 1
     print(f"glm_gate: wrote {out}", file=sys.stderr)
+
+    # OI-1618: the recorder may have just downgraded a degenerate pass/fail to
+    # unavailable IN PLACE — `record` is the same dict object, so it already
+    # reflects that. Resync the locals so the printed VERDICT and the exit
+    # code below match what actually landed on disk, instead of echoing a
+    # verdict this run never earned.
+    status = record.get("status", status)
+    reason = record.get("reason", reason)
+    residual = record.get("residual_risk", residual)
+    blocking = record.get("blocking_findings", blocking)
 
     if args.json:
         print(json.dumps(record, indent=2))
