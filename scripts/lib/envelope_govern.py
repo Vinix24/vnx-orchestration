@@ -405,7 +405,25 @@ def _govern(
                     terminal_id=spec.terminal_id,
                     provider=spec.provider,
                     model=_cost_model,
-                    pr_id=spec.pr_id,
+                    # F1-1 (PRD bewijsketen): spec.pr_id is a pre-known
+                    # fix-forward target (set at dispatch-creation time) and
+                    # always wins when present. Otherwise fall back to the PR
+                    # dispatch_envelope._enforce_push_pr resolved THIS run
+                    # (found or auto-created) — previously discarded, the
+                    # reason a freshly-created PR never reached the receipt.
+                    # The two never race: skip_pr (fix-forward's own branch
+                    # already has a PR) always leaves pr_number None on the
+                    # adapter result for exactly the dispatches that carry a
+                    # spec.pr_id.
+                    pr_id=(
+                        spec.pr_id
+                        if spec.pr_id
+                        else (
+                            str(adapter_result.pr_number)
+                            if adapter_result.pr_number is not None
+                            else None
+                        )
+                    ),
                     status=_effective_status,
                     completion_pct=100 if _effective_status == "success" else 0,
                     risk=0.0,

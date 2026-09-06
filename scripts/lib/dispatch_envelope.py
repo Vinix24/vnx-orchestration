@@ -40,6 +40,7 @@ import hashlib
 import logging
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
@@ -238,6 +239,12 @@ def _enforce_push_pr(
             "envelope: PR-enforcement OK dispatch=%s state=%s pr=%s created=%s",
             dispatch_id, state, pr_result.pr_number, pr_result.created,
         )
+        # F1-1: thread the resolved PR number onto the adapter result so
+        # _govern can stamp it on the receipt — previously dropped here,
+        # the reason a successfully auto-PR'd dispatch's receipt still
+        # carried no PR number at all.
+        if pr_result.pr_number is not None:
+            return replace(result, pr_number=pr_result.pr_number)
         return result
 
     logger.warning(
