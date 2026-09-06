@@ -235,7 +235,7 @@ def _govern(
     _effective_status: str = adapter_result.status
     if report_path is not None:
         try:
-            from report_body_contract import validate_body  # noqa: PLC0415
+            from report_body_contract import CONTRACT_INVALID_STATUS, validate_body  # noqa: PLC0415
             _report_text = report_path.read_text(encoding="utf-8", errors="replace")
             _body_result = validate_body(_report_text)
             if not _body_result.valid:
@@ -253,7 +253,7 @@ def _govern(
                     "message": _violation_msg,
                 })
                 if adapter_result.status == "success":
-                    _effective_status = "contract_invalid"
+                    _effective_status = CONTRACT_INVALID_STATUS
         except OSError:
             pass  # can't read report file — skip validation, don't break receipt
 
@@ -262,15 +262,35 @@ def _govern(
     # clear still runs in finally, and the caller's work status is preserved.
     receipt_path: Optional[Path] = None
     _emit_failed = False  # OI-1179: guard so a raise and a None-return are not double-recorded
+    # OI-1637 hard invariant: a report that just failed the body contract
+    # (validate_body downgraded _effective_status away from the adapter's
+    # claimed status above) must never leave a stale "success" receipt
+    # standing on the ledger. Without this guard, the idempotent-dedup skip
+    # below (added for deliver_with_recovery's legacy safety-net receipt —
+    # see the module docstring) would silently defer to whatever an EARLIER
+    # write already claims, even though THIS governance pass just proved
+    # that claim false by reading the report body the earlier write could
+    # never have seen.
+    _contract_downgrade = bool(_contract_warnings) and _effective_status != adapter_result.status
     try:
         ndjson_path = spec.state_dir / "t0_receipts.ndjson"
-        if _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id):
+        _existing_receipt = _receipt_exists_for_dispatch(ndjson_path, spec.dispatch_id)
+        if _existing_receipt and not _contract_downgrade:
             logger.info(
                 "envelope._govern: receipt already exists for dispatch=%s — skipping (idempotent dedup)",
                 spec.dispatch_id,
             )
             receipt_path = ndjson_path
         else:
+            if _existing_receipt and _contract_downgrade:
+                logger.warning(
+                    "envelope._govern: dispatch=%s already has a receipt on the "
+                    "ledger, but this report just failed the body contract "
+                    "(adapter claimed %s) — appending a corrective %s record "
+                    "instead of the idempotent-dedup skip, so the pre-check "
+                    "claim never survives as the ledger's last word",
+                    spec.dispatch_id, adapter_result.status, _effective_status,
+                )
             try:
                 # receipt-quality PR-1 + W7 fix: resolve dispatch identity
                 # (role) just before the emit. The shared resolver prefers the

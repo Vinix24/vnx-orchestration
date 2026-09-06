@@ -29,6 +29,16 @@ from dataclasses import dataclass, field
 _DIRECTIVE_SENTINEL = "<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->"
 _REQUIRED_SECTIONS = ("## Summary", "## Changes", "## Verification", "## Open Items")
 
+# ADR (dispatch-20260906-oi1637-synthese-asymmetrie): the ONE receipt-status
+# value both governance seams (envelope_govern.py's provider/claude_headless
+# lanes, dispatch_govern.py's tmux lane) stamp when a report fails this
+# contract. Already canonical fleet-wide as a failure-category status
+# (event_outcome_semantics._STATUS_VOCABULARY, report_to_receipt_converter.py,
+# stop_conditions.py, contract_invalid_window.py) — converging both seams onto
+# it (instead of dispatch_govern's previous "failed") closes the vocabulary
+# split that let the two lanes drift out of sync in the first place.
+CONTRACT_INVALID_STATUS = "contract_invalid"
+
 # Aliases accepted by the validator so existing authored reports do not break.
 _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "## Changes": ("## Files Modified", "## Work Completed"),

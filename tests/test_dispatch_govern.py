@@ -609,7 +609,13 @@ def test_report_declares_failure_detects_body_and_frontmatter():
     assert _report_declares_failure("**Status**: unknown\n" + _valid_body()) is False
 
 
-def test_synthesize_contains_all_required_sections(tmp_data, tmp_state):
+def test_synthesize_never_passes_the_report_contract(tmp_data, tmp_state):
+    """ADR (dispatch-20260906-oi1637-synthese-asymmetrie): a synthesized body
+    must genuinely FAIL validate_body(), matching the envelope lanes' generic
+    wrapper (governance_emit's ## Response shape) — not fake compliance with
+    all four headings the way the pre-ADR shape did. A percentage that reads
+    validate_body() without also checking contract_status must not silently
+    inflate this lane relative to every other one (measured 9.1pts, golf-2)."""
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
 
@@ -617,8 +623,19 @@ def test_synthesize_contains_all_required_sections(tmp_data, tmp_state):
          patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
         body = _synthesize(spec, raw)
 
-    for section in ("## Summary", "## Changes", "## Verification", "## Open Items"):
-        assert section in body, f"Missing {section} in synthesized body"
+    result = validate_body(body)
+    assert not result.valid, (
+        f"synthesized body must fail validate_body like the envelope wrapper "
+        f"does — got valid=True (missing={result.missing})"
+    )
+    assert set(result.missing) >= {
+        "## Summary", "## Changes", "## Verification", "## Open Items",
+    }
+    # The evidence (git summary + diff stat) is preserved, just not under the
+    # four contract headings.
+    assert "## Response" in body
+    assert "feat: implement feature" in body
+    assert "scripts/lib/foo.py" in body
 
 
 def test_synthesize_never_contains_placeholder():
@@ -1868,9 +1885,13 @@ def test_synthesize_no_work_delivered_never_borrows_base_commit_message(
 
     assert "- delivery_verdict: no_work_delivered" in body
     assert "borrowed base commit message" not in body
-    summary_section = body.split("## Summary")[1].split("## Changes")[0]
-    assert "No work delivered" in summary_section
-    print(f"\n--- ## Summary ({status}) ---\n{summary_section}")
+    # ADR (dispatch-20260906-oi1637-synthese-asymmetrie): the evidence now
+    # lives under a single ## Response heading (no ## Summary/## Changes
+    # split) — assert on the body directly instead of slicing out a section
+    # that no longer exists.
+    assert "## Response" in body
+    assert "No work delivered" in body
+    print(f"\n--- ## Response ({status}) ---\n{body}")
 
 
 def test_synthesize_work_delivered_keeps_commit_message_and_verdict(tmp_path):
@@ -1894,5 +1915,4 @@ def test_synthesize_work_delivered_keeps_commit_message_and_verdict(tmp_path):
 
     assert "- delivery_verdict: work_delivered" in body
     assert "feat(oi-1363): real worker delivery" in body
-    summary_section = body.split("## Summary")[1].split("## Changes")[0]
-    print(f"\n--- ## Summary (work_delivered) ---\n{summary_section}")
+    print(f"\n--- ## Response (work_delivered) ---\n{body}")
