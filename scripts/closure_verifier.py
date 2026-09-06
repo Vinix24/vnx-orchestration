@@ -328,6 +328,41 @@ def _record_matches_scope(
     return True
 
 
+def _iter_gate_result_candidates(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+) -> Iterable[Dict[str, Any]]:
+    """Every on-disk record naming this exact gate+pr_id, contract file first
+    then the legacy glob — the shared path patterns and pr_id/gate matching
+    both ``_find_gate_result`` (scoped) and ``_find_gate_result_ignoring_scope``
+    (OI-1642, unscoped) read, so the two lookups can never grow a second,
+    diverging glob.
+
+    Branch/project_id/head_sha scope is NOT applied here — callers decide.
+    Offline test-run records ARE excluded unconditionally: never valid
+    evidence for a real PR, in or out of scope.
+    """
+    pr_slug = pr_id.lower().replace("-", "")
+    # Contract-based results: {pr_slug}-{gate}-contract.json
+    contract_path = results_dir / f"{pr_slug}-{gate}-contract.json"
+    if contract_path.exists():
+        try:
+            data = json.loads(_read_text(contract_path))
+            if not _is_test_run_record(data):
+                yield data
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Legacy pattern: pr-{number}-{gate}.json — require both pr_id AND gate to match
+    for path in results_dir.glob(f"*-{gate}*.json"):
+        try:
+            data = json.loads(_read_text(path))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("pr_id") == pr_id and data.get("gate") == gate and not _is_test_run_record(data):
+            yield data
+
+
 def _find_gate_result(
     gate: str,
     pr_id: str,
@@ -348,30 +383,63 @@ def _find_gate_result(
     If a result carries a ``report_path``, that file must exist on disk or the
     result is treated as stale and skipped.
     """
-
-    def _accept(data: Dict[str, Any]) -> bool:
-        return _record_matches_scope(data, pr_id, branch, project_id, head_sha)
-
-    pr_slug = pr_id.lower().replace("-", "")
-    # Contract-based results: {pr_slug}-{gate}-contract.json
-    contract_path = results_dir / f"{pr_slug}-{gate}-contract.json"
-    if contract_path.exists():
-        try:
-            data = json.loads(_read_text(contract_path))
-            if _accept(data):
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
-    # Legacy pattern: pr-{number}-{gate}.json — require both pr_id AND gate to match
-    for path in results_dir.glob(f"*-{gate}*.json"):
-        try:
-            data = json.loads(_read_text(path))
-            if data.get("pr_id") == pr_id and data.get("gate") == gate:
-                if _accept(data):
-                    return data
-        except (json.JSONDecodeError, OSError):
-            continue
+    for data in _iter_gate_result_candidates(gate, pr_id, results_dir):
+        if _record_matches_scope(data, pr_id, branch, project_id, head_sha):
+            return data
     return None
+
+
+def _find_gate_result_ignoring_scope(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    """OI-1642: does ANY record exist for this exact gate+pr_id at all,
+    regardless of branch/project_id/head_sha?
+
+    ``_find_gate_result`` returning ``None`` conflates two different facts:
+    the gate was never asked for this PR at all (case a — must stay NO-GO,
+    unchanged, per ``TestUnrelatedRecordsNeverTakeOver``/ADR-037's "geen enig
+    record krijgt geen peer-fallback"), versus a record exists but falls
+    outside the requested scope — e.g. a ``not_executable`` record written
+    before OI-1624 threaded ``branch``/``commit_sha`` through
+    (``gate_request_handler._write_not_executable_result``), which the
+    overwrite guard (OI-1469/OI-1470) then refuses to ever rerun once
+    terminal (measured live: PR #1777's ``codex_gate`` record).
+
+    Only ever consulted by ``check_review_gate_for_merge`` AFTER
+    ``_find_gate_result`` has already returned ``None`` — never a substitute
+    for the scoped lookup, and the caller still re-validates absence
+    (``_is_absent_without_verdict``) before treating this as evidence of
+    anything.
+
+    Same candidate set and read order as ``_find_gate_result``
+    (``_iter_gate_result_candidates``); returns the first candidate, matching
+    ``_find_gate_result``'s own first-match-wins behaviour.
+    """
+    for data in _iter_gate_result_candidates(gate, pr_id, results_dir):
+        return data
+    return None
+
+
+def _describe_scope_mismatch(
+    data: Dict[str, Any],
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+) -> str:
+    """Name which scope fields an out-of-scope record failed to satisfy, for
+    the OI-1642 peer-route message — so the operator sees WHY the declared
+    gate's own record could not stand for itself, not just that it could
+    not."""
+    failing: List[str] = []
+    if not _matches_required_field(branch, data.get("branch")):
+        failing.append(f"branch={data.get('branch')!r}")
+    if project_id is not None and not _matches_required_field(project_id, data.get("project_id")):
+        failing.append(f"project_id={data.get('project_id')!r}")
+    if not _matches_required_field(head_sha, data.get("commit_sha")):
+        failing.append(f"commit_sha={data.get('commit_sha')!r}")
+    return ", ".join(failing) if failing else "onbekende scope-afwijking"
 
 
 # A record whose coerced status is in this set reached its own verdict
@@ -669,6 +737,94 @@ def _find_peer_gate_results(
     return peers
 
 
+def _consult_peers_for_absence(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+    declared_status: str,
+    *,
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+    scope_note: str = "",
+) -> Dict[str, Any]:
+    """OI-1624/OI-1642: the shared peer-consultation verdict for a CONFIRMED
+    absent declared gate — reached either because the declared gate's own,
+    in-scope record is an absence (OI-1624), or because its only on-disk
+    record falls outside the requested branch/project_id/head_sha scope but
+    is itself an absence (OI-1642, e.g. a ``not_executable`` record written
+    before the scope fields were threaded through). Both call sites in
+    ``check_review_gate_for_merge`` route through this ONE function so they
+    can never drift apart on what counts as a valid peer signer.
+
+    ``declared_status`` is the declared gate's own canonical status, used only
+    for the message. ``scope_note``, when given, is folded into every returned
+    message so the operator sees WHY the declared gate's own record could not
+    stand for itself (OI-1642: which scope fields it failed to match).
+    """
+    peers = _find_peer_gate_results(
+        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
+    )
+    peer_fails = [
+        (peer_gate, peer) for peer_gate, peer in peers
+        if gate_canonical_status(peer) in _GATE_FAIL_STATES
+    ]
+    if peer_fails:
+        # A real rejection blocks the merge regardless of what the absent
+        # declared gate has to say about it, and regardless of any OTHER
+        # peer's pass (harde grens: een echte afkeuring blijft blokkeren,
+        # ook naast een pass van een andere poort).
+        culprit_gate, culprit = sorted(peer_fails, key=lambda item: item[0])[0]
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"{gate} is afwezig voor {pr_id} (status={declared_status!r}: "
+                f"geen uitspraak gedaan{scope_note}) — {culprit_gate} keurde dezelfde head af "
+                f"({gate_canonical_status(culprit)!r}): een echte afkeuring blokkeert "
+                f"de merge, ook naast de afwezigheid van {gate}"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+    for peer_gate, peer in sorted(peers, key=lambda item: item[0]):
+        if gate_canonical_status(peer) not in _GATE_PASS_STATES:
+            continue
+        peer_verdict = _merge_door_record_verdict(peer, peer_gate, pr_id)
+        if peer_verdict["verdict"] == "GO":
+            return {
+                "verdict": "GO",
+                "message": (
+                    f"{gate} is afwezig voor {pr_id} (status={declared_status!r}: "
+                    f"geen uitspraak gedaan{scope_note}) — {peer_gate} droeg op dezelfde head "
+                    "zelfstandig een geldige, volledig bewezen pass en telt als "
+                    "ondertekenaar bij afwezigheid van de gedeclareerde poort (OI-1624/OI-1642)"
+                ),
+                "overridden": False,
+                "override_reason": None,
+                "gate": gate,
+                "evidence_gate": peer_gate,
+            }
+    # Zero valid signers: the declared gate is confirmed absent and no other
+    # known gate on this exact head rendered a usable verdict either. Still
+    # NO-GO (nul geldige ondertekenaars blijft NO-GO), but honestly reported
+    # as absence, never as "bewijs onvolledig" — that phrasing belongs to a
+    # record that attempted a verdict and fell short, not to one that never
+    # tried.
+    return {
+        "verdict": "NO-GO",
+        "message": (
+            f"{gate} is afwezig voor {pr_id} (status={declared_status!r}: "
+            f"geen uitspraak gedaan{scope_note}, geen ondertekening) en geen andere poort op "
+            "deze head leverde een geldige, volledig bewezen uitspraak — nul "
+            "geldige ondertekenaars"
+        ),
+        "overridden": False,
+        "override_reason": None,
+        "gate": gate,
+    }
+
+
 def check_review_gate_for_merge(
     pr_id: str,
     gate: str,
@@ -720,13 +876,32 @@ def check_review_gate_for_merge(
     all" — feeding it an absent record used to read as "resultaat mist
     contract_hash en/of report_path", indistinguishable from a botched
     attempt). Instead every OTHER known gate's own rendered verdict for the
-    SAME PR/branch/sha is consulted (:func:`_find_peer_gate_results`): a real
-    rejection anywhere in that set still blocks the merge (an echte
-    afkeuring blijft blokkeren, ook naast een pass van een andere poort), a
-    fully-evidenced pass stands in as the signer, and zero rendered peer
-    verdicts is still NO-GO (nul geldige ondertekenaars blijft NO-GO) — now
-    honestly reported as absence rather than "incomplete evidence". See
-    ADR-037.
+    SAME PR/branch/sha is consulted (:func:`_consult_peers_for_absence` /
+    :func:`_find_peer_gate_results`): a real rejection anywhere in that set
+    still blocks the merge (an echte afkeuring blijft blokkeren, ook naast
+    een pass van een andere poort), a fully-evidenced pass stands in as the
+    signer, and zero rendered peer verdicts is still NO-GO (nul geldige
+    ondertekenaars blijft NO-GO) — now honestly reported as absence rather
+    than "incomplete evidence". See ADR-037.
+
+    OI-1642 (b): the same peer route also opens when the declared gate's OWN
+    record is not even found IN SCOPE (``_find_gate_result`` returned
+    ``None``), but a record for this exact gate+pr_id DOES exist somewhere
+    outside the requested branch/project_id/head_sha scope AND that record is
+    itself a confirmed absence (measured live: PR #1777's ``codex_gate``
+    record predates OI-1624 threading ``branch``/``commit_sha`` through, so it
+    carries neither field at all, and the overwrite guard (OI-1469/OI-1470)
+    permanently refuses to rerun it once terminal). This is NOT the same as
+    "no record at all" (case a, ``TestUnrelatedRecordsNeverTakeOver`` /
+    ADR-037's "geen enig record krijgt geen peer-fallback", which stays
+    unchanged): a gate that was genuinely never asked for this PR gets no
+    peer-fallback, but a gate that WAS asked and answered with an absence —
+    just not scoped the way this call expected — is exactly as confirmed an
+    absence as the in-scope case OI-1624 already handles, and is routed
+    through the identical :func:`_consult_peers_for_absence`. An out-of-scope
+    record that DOES carry a decided verdict (pass/fail on a different
+    branch/sha) is stale evidence, not an absence, and falls through to the
+    unchanged "no evidence found" message instead.
     """
     result = _find_gate_result(
         gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
@@ -787,76 +962,39 @@ def check_review_gate_for_merge(
             "gate": gate,
         }
     if result is not None and _is_absent_without_verdict(result):
-        # OI-1624: the declared gate spoke (a record exists) and what it said
-        # is that it will render no verdict for this attempt — an ABSENCE,
-        # never a rejection. Unlike a decided fail, absence carries no
-        # information that should block the merge on its own; it just means
-        # this particular seat has nothing to say. Consult every OTHER known
-        # gate's own rendered verdict for the exact same PR/branch/sha before
-        # falling back to "no evidence at all".
-        peers = _find_peer_gate_results(
-            gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
+        # OI-1624: the declared gate spoke (a record exists, in scope) and
+        # what it said is that it will render no verdict for this attempt —
+        # an ABSENCE, never a rejection. Consult every OTHER known gate's own
+        # rendered verdict for the exact same PR/branch/sha before falling
+        # back to "no evidence at all".
+        return _consult_peers_for_absence(
+            gate, pr_id, results_dir, gate_canonical_status(result),
+            branch=branch, project_id=project_id, head_sha=head_sha,
         )
-        peer_fails = [
-            (peer_gate, peer) for peer_gate, peer in peers
-            if gate_canonical_status(peer) in _GATE_FAIL_STATES
-        ]
-        if peer_fails:
-            # A real rejection blocks the merge regardless of what the
-            # absent declared gate has to say about it, and regardless of
-            # any OTHER peer's pass (harde grens: een echte afkeuring
-            # blijft blokkeren, ook naast een pass van een andere poort).
-            culprit_gate, culprit = sorted(peer_fails, key=lambda item: item[0])[0]
-            return {
-                "verdict": "NO-GO",
-                "message": (
-                    f"{gate} is afwezig voor {pr_id} (status={gate_canonical_status(result)!r}: "
-                    f"geen uitspraak gedaan) — {culprit_gate} keurde dezelfde head af "
-                    f"({gate_canonical_status(culprit)!r}): een echte afkeuring blokkeert "
-                    f"de merge, ook naast de afwezigheid van {gate}"
-                ),
-                "overridden": False,
-                "override_reason": None,
-                "gate": gate,
-            }
-        for peer_gate, peer in sorted(peers, key=lambda item: item[0]):
-            if gate_canonical_status(peer) not in _GATE_PASS_STATES:
-                continue
-            peer_verdict = _merge_door_record_verdict(peer, peer_gate, pr_id)
-            if peer_verdict["verdict"] == "GO":
-                return {
-                    "verdict": "GO",
-                    "message": (
-                        f"{gate} is afwezig voor {pr_id} (status={gate_canonical_status(result)!r}: "
-                        f"geen uitspraak gedaan) — {peer_gate} droeg op dezelfde head "
-                        "zelfstandig een geldige, volledig bewezen pass en telt als "
-                        "ondertekenaar bij afwezigheid van de gedeclareerde poort (OI-1624)"
-                    ),
-                    "overridden": False,
-                    "override_reason": None,
-                    "gate": gate,
-                    "evidence_gate": peer_gate,
-                }
-        # Zero valid signers: the declared gate is confirmed absent and no
-        # other known gate on this exact head rendered a usable verdict
-        # either. Still NO-GO (nul geldige ondertekenaars blijft NO-GO), but
-        # honestly reported as absence, never as "bewijs onvolledig" — that
-        # phrasing belongs to a record that attempted a verdict and fell
-        # short, not to one that never tried.
-        return {
-            "verdict": "NO-GO",
-            "message": (
-                f"{gate} is afwezig voor {pr_id} (status={gate_canonical_status(result)!r}: "
-                "geen uitspraak gedaan, geen ondertekening) en geen andere poort op "
-                "deze head leverde een geldige, volledig bewezen uitspraak — nul "
-                "geldige ondertekenaars"
-            ),
-            "overridden": False,
-            "override_reason": None,
-            "gate": gate,
-        }
 
     if result is None:
+        # OI-1642: no IN-SCOPE record exists, but a record for this exact
+        # gate+pr_id may still exist OUTSIDE the requested scope — most often
+        # because it predates OI-1624 threading branch/commit_sha through, and
+        # the overwrite guard (OI-1469/OI-1470) now permanently refuses to
+        # rerun it once terminal. That is a DIFFERENT fact than "this gate was
+        # never asked for this PR" (case a — stays NO-GO unchanged, per
+        # TestUnrelatedRecordsNeverTakeOver / ADR-037). Only when the
+        # out-of-scope record is ITSELF a confirmed absence does the same
+        # peer route open; an out-of-scope record carrying a decided verdict
+        # (pass/fail on a stale branch/sha) is stale evidence, not an
+        # absence, and falls through unchanged below.
+        out_of_scope = _find_gate_result_ignoring_scope(gate, pr_id, results_dir)
+        if out_of_scope is not None and _is_absent_without_verdict(out_of_scope):
+            scope_note = (
+                f"; eigen record buiten scope "
+                f"({_describe_scope_mismatch(out_of_scope, branch, project_id, head_sha)})"
+            )
+            return _consult_peers_for_absence(
+                gate, pr_id, results_dir, gate_canonical_status(out_of_scope),
+                branch=branch, project_id=project_id, head_sha=head_sha,
+                scope_note=scope_note,
+            )
         return {
             "verdict": "NO-GO",
             "message": f"geen review-gate resultaat gevonden voor {gate} op {pr_id}: merge niet toetsbaar",
