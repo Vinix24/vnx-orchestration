@@ -1761,3 +1761,78 @@ def build_decision_ref(
         "source": source,
     }
     return json.dumps(payload, sort_keys=True)
+
+
+def build_tiebreak_decision_ref(
+    result: Dict[str, Any],
+    *,
+    previous_decision_ref: Optional[str],
+    reports_base: str = "unified_reports",
+    set_at: Optional[str] = None,
+) -> str:
+    """Render the JSON ``decision_ref`` payload for a tiebreaker outcome.
+
+    A tiebreaker round resolves a plan blocker that a full panel round left
+    stuck (REVISE/BLOCK with no PASS after ``max_rounds``). Without this
+    builder, ``tracks.decision_ref`` keeps showing the last PANEL round's
+    verdict forever — a reader who only checks ``decision_ref`` never sees
+    that a tiebreaker actually cleared (or upheld) the gate.
+
+    ``result`` carries the tiebreaker's own facts: ``outcome`` ("START" or
+    "STOP"), ``report_path`` (the tiebreak report's own filename, with or
+    without ``.md`` — omitted from ``reports`` when falsy, e.g. the report
+    could not be located), and best-effort ``model`` / ``round`` /
+    ``required_change`` / ``rationale`` (a historical reconstruction, such as
+    the backfill, may not know all of them — an absent value renders as
+    empty/``None`` rather than being guessed at).
+
+    ``previous_decision_ref`` is the track's ``decision_ref`` BEFORE the
+    tiebreaker ran (typically the superseded panel round's
+    ``build_decision_ref`` payload). When present and parseable, its
+    ``reports`` and ``rejected_alternatives`` are carried forward (appended
+    after the tiebreak's own report) and its ``decision`` is recorded as
+    ``superseded_decision`` — so the full history (which panel reports were
+    read, which alternatives were rejected, and what round finally decided)
+    survives on the track. An absent or unparseable ``previous_decision_ref``
+    is never guessed at: the payload then carries only the tiebreak's own
+    report and ``superseded_decision: None``.
+
+    Returns a compact JSON string (the ``tracks.decision_ref`` payload written
+    via ``tracks.set_decision_ref``).
+    """
+    reports: List[str] = []
+    report_path = str(result.get("report_path") or "").strip()
+    if report_path:
+        path = report_path if report_path.endswith(".md") else f"{report_path}.md"
+        reports.append(f"{reports_base}/{path}")
+
+    rejected: List[Dict[str, Any]] = []
+    superseded_decision: Optional[str] = None
+    if previous_decision_ref:
+        try:
+            prev = json.loads(previous_decision_ref)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            prev = None
+        if isinstance(prev, dict):
+            superseded_decision = prev.get("decision")
+            prev_reports = prev.get("reports")
+            if isinstance(prev_reports, list):
+                reports.extend(str(r) for r in prev_reports)
+            prev_rejected = prev.get("rejected_alternatives")
+            if isinstance(prev_rejected, list):
+                rejected.extend(prev_rejected)
+
+    outcome = str(result.get("outcome") or "").strip()
+    payload = {
+        "decision": f"tiebreak:{outcome}",
+        "reports": reports,
+        "rejected_alternatives": rejected,
+        "superseded_decision": superseded_decision,
+        "tiebreaker_model": result.get("model") or "",
+        "round": result.get("round"),
+        "required_change": result.get("required_change") or "",
+        "rationale": result.get("rationale") or "",
+        "set_at": set_at or datetime.now(timezone.utc).isoformat(),
+        "source": "plan-gate-tiebreak",
+    }
+    return json.dumps(payload, sort_keys=True)

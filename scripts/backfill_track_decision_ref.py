@@ -63,11 +63,27 @@ if str(_LIB) not in sys.path:
 
 import tracks  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
+import plan_gate_tiebreaker as pgt  # noqa: E402
 
 DB_FILENAME = "runtime_coordination.db"
 REPORTS_DIRNAME = "unified_reports"
 _REPORT_PREFIX = "plan-gate-"
+_TIEBREAK_REPORT_PREFIX = "plan-tiebreak-"
 _HASH_RE = re.compile(r"[0-9a-f]{8}$")
+_MODEL_FIELD_RE = re.compile(r"^\*\*Model\*\*:\s*(.+)$", re.MULTILINE)
+
+
+def _extract_model_field(text: str) -> str:
+    """Best-effort ``**Model**: <value>`` extraction from a report body.
+
+    The report contract (CLAUDE.md) requires every dispatch report to carry a
+    Model/Provider identity block, so this is present on every real tiebreak
+    report; an absent match (a malformed/legacy report) yields "" rather than
+    raising — the tiebreaker_model field on the backfilled payload is
+    best-effort context, not a hard requirement.
+    """
+    m = _MODEL_FIELD_RE.search(text)
+    return m.group(1).strip() if m else ""
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +189,64 @@ def discover_reports(reports_dir: Path) -> list[ReportFile]:
     return found
 
 
+@dataclass(frozen=True)
+class TiebreakReportFile:
+    filename: str       # e.g. plan-tiebreak-<track>-<hash>.md
+    track_id: str
+    hash: str
+    mtime: float
+
+
+def _parse_tiebreak_report_filename(filename: str) -> Optional[TiebreakReportFile]:
+    """Parse ``plan-tiebreak-<track_id>-<hash>.md`` into its parts.
+
+    Right-anchored like ``_parse_report_filename``: the trailing
+    ``-<8-hex-hash>`` is stripped first, everything before is the track_id.
+    There is no label segment — exactly one tiebreaker runs per round, never a
+    panel of several seats.
+    """
+    stem = filename
+    if stem.endswith(".md"):
+        stem = stem[:-3]
+    if not stem.startswith(_TIEBREAK_REPORT_PREFIX):
+        return None
+    stem = stem[len(_TIEBREAK_REPORT_PREFIX):]
+    if not stem:
+        return None
+    m = _HASH_RE.search(stem)
+    if not m:
+        return None
+    hash_part = m.group(0)
+    track_id = stem[: m.start()].rstrip("-")
+    if not track_id:
+        return None
+    return TiebreakReportFile(filename=filename, track_id=track_id, hash=hash_part, mtime=0.0)
+
+
+def discover_tiebreak_reports(reports_dir: Path) -> list[TiebreakReportFile]:
+    """Scan ``reports_dir`` for ``plan-tiebreak-*.md`` files, parsing each filename.
+
+    Mirrors ``discover_reports``: files whose name does not parse are skipped
+    silently — out of scope for this backfill, not an error.
+    """
+    found: list[TiebreakReportFile] = []
+    if not reports_dir.is_dir():
+        return found
+    for path in sorted(reports_dir.glob(f"{_TIEBREAK_REPORT_PREFIX}*.md")):
+        parsed = _parse_tiebreak_report_filename(path.name)
+        if parsed is None:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        found.append(TiebreakReportFile(
+            filename=parsed.filename, track_id=parsed.track_id,
+            hash=parsed.hash, mtime=mtime,
+        ))
+    return found
+
+
 def _latest_per_label(reports: list[ReportFile]) -> list[ReportFile]:
     """Dedupe a track's reports to one per seat label (latest mtime wins).
 
@@ -231,6 +305,74 @@ def build_payload_for_track(
     )
 
 
+class TiebreakReportUnparseable(ValueError):
+    """The youngest report for a track is a tiebreak report with no parseable fence."""
+
+
+def build_tiebreak_payload_for_track(
+    reports_dir: Path,
+    track_id: str,
+    tiebreak_file: TiebreakReportFile,
+    panel_files: list[ReportFile],
+    *,
+    source: str,
+    set_at: str,
+) -> str:
+    """Reconstruct a track's decision_ref payload from a tiebreak report.
+
+    Parses the tiebreak report's ``vnx-plan-tiebreak`` fence via the SAME
+    strict parser the live tiebreaker uses (``plan_gate_tiebreaker.parse_tiebreaker``),
+    then wraps it with ``plan_gate_panel.build_tiebreak_decision_ref`` — the same
+    builder the live plan-gate uses on the tiebreaker path. When the track also
+    has panel report files, they are reconstructed into a panel-shaped payload
+    first (via ``build_payload_for_track``) and passed in as
+    ``previous_decision_ref`` so the tiebreak's inherited history (which
+    reports, which rejected alternatives, what decision it superseded) matches
+    a live write exactly.
+
+    Raises ``TiebreakReportUnparseable`` when the fence does not satisfy the
+    strict contract — the caller skips this track with a reason rather than
+    guessing a decision.
+    """
+    try:
+        text = (reports_dir / tiebreak_file.filename).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise TiebreakReportUnparseable(
+            f"could not read {tiebreak_file.filename}: {exc}"
+        ) from exc
+    try:
+        tb_result = pgt.parse_tiebreaker(text)
+    except pgt.TiebreakerParseError as exc:
+        raise TiebreakReportUnparseable(
+            f"tiebreak report {tiebreak_file.filename} has no parseable fence: {exc}"
+        ) from exc
+
+    previous_payload: Optional[str] = None
+    if panel_files:
+        previous_payload = build_payload_for_track(
+            reports_dir, track_id, _latest_per_label(panel_files),
+            source=source, set_at=set_at,
+        )
+
+    report_path = (
+        tiebreak_file.filename[:-3]
+        if tiebreak_file.filename.endswith(".md")
+        else tiebreak_file.filename
+    )
+    return pgp.build_tiebreak_decision_ref(
+        {
+            "outcome": tb_result.outcome,
+            "model": _extract_model_field(text),
+            "round": None,
+            "required_change": tb_result.required_change,
+            "rationale": tb_result.rationale,
+            "report_path": report_path,
+        },
+        previous_decision_ref=previous_payload,
+        set_at=set_at,
+    )
+
+
 def _track_decision_ref(state_dir: Path, track_id: str, project_id: str) -> Optional[str]:
     t = tracks.get_track(state_dir, track_id, project_id)
     return (t or {}).get("decision_ref")
@@ -283,9 +425,18 @@ def apply_backfill(
     for r in reports:
         by_track.setdefault(r.track_id, []).append(r)
 
-    for track_id, files in by_track.items():
+    tiebreak_reports = discover_tiebreak_reports(reports_dir)
+    tiebreak_by_track: dict[str, list[TiebreakReportFile]] = {}
+    for r in tiebreak_reports:
+        tiebreak_by_track.setdefault(r.track_id, []).append(r)
+
+    for track_id in sorted(set(by_track) | set(tiebreak_by_track)):
+        panel_files = by_track.get(track_id, [])
+        tb_files = tiebreak_by_track.get(track_id, [])
+
         if track_id not in db_track_ids:
-            report["orphan_reports"].extend((track_id, f.filename) for f in files)
+            report["orphan_reports"].extend((track_id, f.filename) for f in panel_files)
+            report["orphan_reports"].extend((track_id, f.filename) for f in tb_files)
             continue
         report["tracks_with_reports"] += 1
 
@@ -294,11 +445,35 @@ def apply_backfill(
             report["already_filled"].append(track_id)
             continue
 
+        # The YOUNGEST report for this track decides the proposal's shape
+        # (OI-1618 follow-up): a track whose latest activity is a tiebreaker
+        # round must be proposed as ``tiebreak:<outcome>`` (the actual
+        # clearing decision), never re-derived from the panel round it
+        # superseded. A track with no tiebreak reports at all falls straight
+        # through to the pre-existing panel-only path (regression-safe).
+        youngest_panel_mtime = max((f.mtime for f in panel_files), default=-1.0)
+        youngest_tb = max(tb_files, key=lambda f: f.mtime, default=None)
+
+        if youngest_tb is not None and youngest_tb.mtime > youngest_panel_mtime:
+            try:
+                payload = build_tiebreak_payload_for_track(
+                    reports_dir, track_id, youngest_tb, panel_files,
+                    source=source, set_at=set_at,
+                )
+            except TiebreakReportUnparseable as exc:
+                report["errors"].append(f"{track_id}: {exc}")
+                continue
+        else:
+            try:
+                payload = build_payload_for_track(
+                    reports_dir, track_id, _latest_per_label(panel_files),
+                    source=source, set_at=set_at,
+                )
+            except Exception as exc:  # vnx-silent-except: one bad track must not abort the run
+                report["errors"].append(f"{track_id}: {exc}")
+                continue
+
         try:
-            payload = build_payload_for_track(
-                reports_dir, track_id, _latest_per_label(files),
-                source=source, set_at=set_at,
-            )
             tracks.set_decision_ref(state_dir, track_id, project_id, payload, actor="system")
             report["filled"].append(track_id)
         except tracks.DecisionRefColumnMissingError:
