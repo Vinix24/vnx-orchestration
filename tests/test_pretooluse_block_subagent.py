@@ -68,8 +68,10 @@ def make_task_payload(session_id: str = "test-session", prompt: str = "Do a subt
     return json.dumps(payload)
 
 
-def run_hook(payload: str, state_dir: Path) -> tuple[int, str]:
+def run_hook(payload: str, state_dir: Path, signal_dir: Path | None = None) -> tuple[int, str]:
     env = dict(os.environ, VNX_STATE_DIR=str(state_dir))
+    if signal_dir is not None:
+        env["VNX_TMUX_SIGNAL_DIR"] = str(signal_dir)
     result = subprocess.run(
         ["bash", str(HOOK_SCRIPT)],
         input=payload,
@@ -258,6 +260,42 @@ class TestCLI:
         rc, out = run_hook(make_task_payload(), tmp_path)
         data = json.loads(out)
         assert data["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+# ── 6. Toolcall signal aggregation: a deny must be recorded as blocked ─────────
+# OI-1643 restpunt: the case pattern matched the JSON key/value with no space
+# (`"permissionDecision":"deny"`), but json.dumps' default separators put a
+# space after the colon (`"permissionDecision": "deny"`), so the pattern never
+# matched and every denied Task call was logged with blocked=false — the
+# tool_call_failures receipt field silently undercounted every block.
+
+class TestToolcallSignalAggregation:
+    def test_deny_is_recorded_as_blocked(self, tmp_path):
+        state_dir = tmp_path / "state"
+        signal_dir = tmp_path / "signal"
+        rc, out = run_hook(make_task_payload(), state_dir, signal_dir=signal_dir)
+        assert rc == 0
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        signal_path = signal_dir / "toolcalls.ndjson"
+        assert signal_path.is_file(), "a Task call must always produce a toolcall signal line"
+        lines = [ln for ln in signal_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["blocked"] is True, f"denied Task call must be blocked=true, got {entry!r}"
+
+    def test_allow_is_recorded_as_not_blocked(self, tmp_path):
+        state_dir = tmp_path / "state"
+        signal_dir = tmp_path / "signal"
+        write_marker(state_dir)
+        rc, out = run_hook(make_task_payload(), state_dir, signal_dir=signal_dir)
+        assert rc == 0
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "allow"
+        entry = json.loads(
+            (signal_dir / "toolcalls.ndjson").read_text(encoding="utf-8").strip().splitlines()[0]
+        )
+        assert entry["blocked"] is False
 
 
 # ── Static checks ───────────────────────────────────────────────────────────────

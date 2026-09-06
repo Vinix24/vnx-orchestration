@@ -78,7 +78,7 @@ fi
 if [[ -n "${VNX_TMUX_SIGNAL_DIR:-}" ]]; then
   _BLOCKED=0
   case "$OUTPUT" in
-    *'"permissionDecision":"deny"'*) _BLOCKED=1 ;;
+    *'"permissionDecision": "deny"'*) _BLOCKED=1 ;;
   esac
   printf '%s' "$INPUT" | python3 "${HOOK_DIR}/../lib/toolcall_signals.py" \
     --signal-dir "$VNX_TMUX_SIGNAL_DIR" --blocked "$_BLOCKED" >/dev/null 2>&1 || true
