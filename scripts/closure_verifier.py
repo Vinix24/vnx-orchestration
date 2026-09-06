@@ -72,6 +72,56 @@ _KNOWN_GATES = frozenset(
 )
 
 
+# OI-1645: which gates may stand in as a PEER SIGNER when the declared gate is
+# a confirmed absence (_consult_peers_for_absence) or an OI-1576 takeover
+# successor (_find_takeover_successor_results). Being in _KNOWN_GATES only
+# means the closure verifier can INTERPRET a gate's result record — it says
+# nothing about whether that record represents a code review. Signing power
+# is a strictly narrower claim.
+#
+# Measured live 2026-09-06 (PR #1781, main c41c7f36): with codex_gate
+# unavailable and only ci_gate carrying a full, all-seven-invariant-passing
+# PASS on the head, ``check_review_gate_for_merge`` returned GO with
+# ``evidence_gate="ci_gate"`` — zero review gates had spoken. ci_gate renders
+# a genuine, fully-evidenced pass/fail (it satisfies every invariant
+# ``_merge_door_record_verdict`` checks), so nothing in the evidence-quality
+# chain catches this; it verifies CI checks (tests, lint, build), never the
+# code change itself. ADR-037's addendum below names the distinction: a peer
+# is a review gate, CI is a second, independent merge requirement, never a
+# signer.
+#
+# Derived from the Gate enum with a reason per exclusion — the same
+# discipline _GATES_NOT_IMPLEMENTED_BY_CLOSURE already uses — so a gate added
+# to the enum tomorrow is UNCLASSIFIED (caught by the drift test in
+# tests/test_oi1645_peer_is_review_gate.py) instead of silently inheriting
+# peer-signing rights.
+#
+# claude_github_optional is deliberately NOT excluded: reading
+# claude_github_receipt.EVIDENCE_STATES / INTENTIONALLY_ABSENT_STATES and
+# gate_request_handler's ``completed`` branch, its terminal outcome
+# (``state="completed"`` + ``result_status="pass"|"fail"``) is a genuine
+# Claude code review of the diff, not a CI signal — it being optional
+# (may never run) only means its own absence states (not_configured,
+# configured_dry_run) never coerce to a decided status, so an unrun instance
+# contributes nothing to the peer route either way. Optional-but-real review
+# evidence still counts when it exists; only non-review evidence is excluded.
+_NON_REVIEW_SIGNER_REASONS: Dict[str, str] = {
+    "wiring_gate": (
+        "not implemented by the closure verifier at all — carries no "
+        "interpretable verdict to sign with (see _GATES_NOT_IMPLEMENTED_BY_CLOSURE)"
+    ),
+    "ci_gate": (
+        "verifies CI checks (tests, lint, build), not a code review of the "
+        "change — ADR-037 addendum (OI-1645): CI is a second, independent "
+        "merge requirement (enforced separately in pr_merge._run_ci_gate), "
+        "never a review peer signer"
+    ),
+}
+_REVIEW_PEER_GATES = frozenset(
+    g.value for g in Gate if g.value not in _NON_REVIEW_SIGNER_REASONS
+)
+
+
 def _run(cmd: Sequence[str], *, cwd: Optional[Path] = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(cmd),
@@ -581,6 +631,14 @@ def _find_takeover_successor_results(
         # this route only ever looks at OTHER gates' records.
         if not record_gate or record_gate == gate:
             continue
+        # OI-1645: a successor must itself be a review gate. A ci_gate (or
+        # any other _NON_REVIEW_SIGNER_REASONS gate) that annotates a
+        # takeover_path naming the declared gate has still never reviewed the
+        # code — the same reason it cannot sign via _find_peer_gate_results
+        # applies here, so both routes share _REVIEW_PEER_GATES rather than
+        # risking a second, diverging notion of "who may sign".
+        if record_gate not in _REVIEW_PEER_GATES:
+            continue
         if data.get("takeover") is not True:
             continue
         if not _record_matches_scope(data, pr_id, branch, project_id, head_sha):
@@ -708,9 +766,12 @@ def _find_peer_gate_results(
     - Only records with a RENDERED verdict (``_DECIDED_VERDICT_STATES`` —
       pass or fail, never another absence status) are returned; an absent
       peer contributes nothing either way.
-    - The candidate set is bounded to ``_KNOWN_GATES`` (the same enum-derived
-      set the declared-gate lookup trusts), never an unbounded directory
-      scan.
+    - The candidate set is bounded to ``_REVIEW_PEER_GATES`` (OI-1645) —
+      NOT ``_KNOWN_GATES``. ``_KNOWN_GATES`` only says the verifier can
+      interpret a gate's record; ``_REVIEW_PEER_GATES`` additionally
+      excludes gates whose record is not a code review at all (``ci_gate``:
+      CI checks, not review — see ``_NON_REVIEW_SIGNER_REASONS``). Never an
+      unbounded directory scan either way.
 
     This does NOT relax ``TestUnrelatedRecordsNeverTakeOver`` (OI-1576): that
     contract is about a declared gate with NO record at all (never even
@@ -719,11 +780,11 @@ def _find_peer_gate_results(
     function is only ever consulted once the declared gate's OWN record
     already proves it will not render a verdict for this attempt.
 
-    Returns ``[(gate_name, record), ...]``, unordered beyond ``_KNOWN_GATES``
-    iteration order (sorted, for determinism).
+    Returns ``[(gate_name, record), ...]``, unordered beyond
+    ``_REVIEW_PEER_GATES`` iteration order (sorted, for determinism).
     """
     peers: List[Tuple[str, Dict[str, Any]]] = []
-    for candidate_gate in sorted(_KNOWN_GATES):
+    for candidate_gate in sorted(_REVIEW_PEER_GATES):
         if candidate_gate == gate:
             continue
         candidate = _find_gate_result(
