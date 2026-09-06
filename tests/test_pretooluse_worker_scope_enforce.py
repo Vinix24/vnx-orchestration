@@ -16,7 +16,9 @@ are covered by TestDefaultEnforcement.
 
 Plus unit coverage of evaluate() semantics (role resolution, path relativizing,
 malformed payloads) and the JSON/exit-code hook contract (exit 0 always,
-{"decision":"block","reason":...} on stdout only for blocks).
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":
+"deny","permissionDecisionReason":...}} on stdout only for blocks — OI-1644,
+same class as OI-1643/#1789).
 
 Audit side effects are redirected to a tmp dir via VNX_DATA_DIR +
 VNX_DATA_DIR_EXPLICIT=1 so no test ever writes into real .vnx-data state.
@@ -107,13 +109,18 @@ def run_hook(
 
 
 def parse_block(stdout: str) -> dict:
-    """Assert stdout is exactly one block decision and return it."""
+    """Assert stdout is exactly one deny decision (PreToolUse hookSpecificOutput
+    contract, OI-1644) and return it unwrapped as {"decision": "block",
+    "reason": ...} so existing callers keep reading it unchanged."""
     lines = [ln for ln in stdout.strip().splitlines() if ln.strip()]
     assert len(lines) == 1, f"expected exactly one JSON line on stdout, got: {stdout!r}"
-    decision = json.loads(lines[0])
-    assert decision["decision"] == "block"
-    assert decision.get("reason")
-    return decision
+    data = json.loads(lines[0])
+    assert "decision" not in data, "deprecated flat form must not reappear"
+    hso = data["hookSpecificOutput"]
+    assert hso.get("hookEventName") == "PreToolUse"
+    assert hso.get("permissionDecision") == "deny"
+    assert hso.get("permissionDecisionReason")
+    return {"decision": "block", "reason": hso["permissionDecisionReason"]}
 
 
 class HookTestCase(unittest.TestCase):
@@ -404,6 +411,30 @@ class TestDefaultEnforcement(HookTestCase):
 
 class TestHookContract(HookTestCase):
     """Hook contract: exit 0 always; stdout empty unless blocking."""
+
+    def test_block_uses_hookspecificoutput_envelope(self):
+        """OI-1644 regression guard: PreToolUse must use hookSpecificOutput.
+        permissionDecision, not the deprecated flat {"decision":"block"} form
+        (that form is the PostToolUse/Stop/UserPromptSubmit contract and is
+        silently ignored for PreToolUse — the bug this fix closes; same class
+        as OI-1643, fixed for the other two hooks in #1789).
+        """
+        res = run_hook(
+            make_payload("Bash", {"command": "git push --force origin main"}),
+            enforce=True,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        lines = [ln for ln in res.stdout.strip().splitlines() if ln.strip()]
+        self.assertEqual(
+            len(lines), 1, f"expected exactly one JSON line on stdout, got: {res.stdout!r}"
+        )
+        data = json.loads(lines[0])
+        self.assertNotIn("decision", data, "deprecated flat form must not reappear")
+        hso = data["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PreToolUse")
+        self.assertEqual(hso["permissionDecision"], "deny")
+        self.assertTrue(hso["permissionDecisionReason"])
 
     def test_malformed_json_stdin_allow(self):
         res = run_hook("not json at all", enforce=True, data_dir=self.data_dir)
