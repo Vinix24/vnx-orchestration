@@ -128,9 +128,23 @@ print(p['VNX_DATA_DIR'])
         fi
       fi
 
+      # Contract-invalid counters (OI-1638): a dispatch whose latest receipt
+      # never satisfied the report-body contract (§9/§14 DISPATCH_RULES.md)
+      # used to be invisible outside t0_receipts.ndjson itself. Read from the
+      # cheap always-loaded t0_index.json (build_t0_state.py's compact form),
+      # not the deprecated t0_state.json, matching this section's own budget.
+      T0_CONTRACT_INVALID=""
+      _ci_file="$_VNX_STATE_DIR/t0_index.json"
+      if [ -f "$_ci_file" ]; then
+        _ci_total=$(jq -r '.contract_invalid.total // 0' "$_ci_file" 2>/dev/null || echo "0")
+        _ci_24h=$(jq -r '.contract_invalid.last_24h // 0' "$_ci_file" 2>/dev/null || echo "0")
+        T0_CONTRACT_INVALID="contract_invalid: ${_ci_total} (24u: ${_ci_24h})"
+      fi
+
       T0_STATE_SECTION="Terminals:
 $(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
-${T0_OPEN_ITEMS:-No open items data}"
+${T0_OPEN_ITEMS:-No open items data}
+${T0_CONTRACT_INVALID}"
     else
       # Not-found is a DIFFERENT state than found-but-empty (a genuinely
       # measured zero). Say so explicitly instead of falling through to a

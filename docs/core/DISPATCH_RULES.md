@@ -220,3 +220,55 @@ python3 scripts/receipt_query.py pull --state-dir <state-dir> --json
 - **OI-188 note:** this step belongs in the `t0-orchestrator` skill's cycle steps (`.claude/skills/t0-orchestrator/SKILL.md` §"2. Primary workflow"), mirroring the parked commit `24f71d22`'s intent. No lane can reliably write under `.claude/skills/` (Claude treats it read-only) — this section is the canonical, git-tracked source until an operator applies the equivalent edit to the skill file by hand. Track as an operator follow-up, not something to force through a lane edit.
 
 See also: `docs/operations/RECEIPT_PIPELINE.md` (pipeline mechanics), ADR-035 §5 (pull interface design), §5.3 (push retirement), §6.4 (`oi_pending` lifecycle + escalation).
+
+## 14. `contract_invalid` — meaning and consequences (OI-1638)
+
+§9's report contract is enforced at write time by `envelope_govern.py`'s
+`validate_body()` check: when a worker's report is missing a mandatory
+heading, the receipt's status is overridden to `contract_invalid` instead of
+whatever the worker/adapter claimed. Measured 05-09
+(`claudedocs/2026-09-05-golf2-contractpercentage-per-lane.md` §5a): this
+write side works correctly across every lane (350+ live receipts). Before
+OI-1638, nothing turned that recorded fact into a consequence — it sat in
+`t0_receipts.ndjson` as one more failure-bucket literal for digests and
+routing baselines, invisible at the one moment (SessionStart) a human could
+act on it.
+
+**What `contract_invalid` means, stated explicitly:** a dispatch with this
+status as its *latest* receipt has NOT delivered a governed report. It is
+not merely low-quality — it never satisfied the minimum shape governance
+requires to enter the audit trail as a completed unit of work. It must not
+be treated as done, closed, or safe to build on until either (a) a later
+dispatch attempt for the same `dispatch_id` produces a governed-success
+receipt, or (b) an operator explicitly overrides.
+
+**The three consequences OI-1638 wires up** (`scripts/lib/contract_invalid_ledger.py`):
+
+1. **Visible at SessionStart.** `scripts/build_t0_state.py` counts
+   contract_invalid receipts (total, last 24h, per provider) into the
+   `contract_invalid` key of `t0_state.json`, with a compact
+   `{total, last_24h}` form mirrored into the always-loaded `t0_index.json`.
+   A dispatch that fails the contract is no longer silent — the count is in
+   the file every session reads on arrival.
+2. **A list, not a flood.** `write_contract_invalid_open_ledger()` writes a
+   single ledger file (default name `contract_invalid_open.json`, one row
+   per still-open `dispatch_id` — not one open item per receipt). A dispatch
+   is open when its LATEST receipt on record is contract_invalid; a later
+   governed-success receipt for the same `dispatch_id` resolves it and drops
+   it from the list entirely.
+3. **Not silently closeable.** `is_deliverable_acceptable(dispatch_id,
+   receipts_path)` returns `(False, reason)` while the latest receipt for
+   that dispatch is contract_invalid, `(True, reason)` otherwise (including
+   the case where no receipt exists at all — absence is not this function's
+   concern, per the same "absence is never a rejection" precedent as
+   OI-1624). This dispatch (OI-1638) does not own `closure_verifier.py` —
+   the intended call site is `verify_pr_closure()`
+   (`scripts/closure_verifier.py:1405`), immediately after the "PR must be
+   completed per reconciliation" check (around line 1472), reading the
+   dispatch id off `pr_reconciled.provenance.get("dispatch_id")` and gating
+   the closure verdict on the result. A future PR must wire that call
+   explicitly — this module only provides the gate function.
+
+Staleness windowing (a frozen historical batch should not read as live
+churn) is delegated to the existing `contract_invalid_window.py` — not
+reimplemented in the ledger module.
