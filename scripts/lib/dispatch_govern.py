@@ -119,7 +119,12 @@ def _resolve_govern_role(spec: "GovernSpec") -> str:
 # Receipt dedup — authored > synthesized, newest timestamp wins within tier
 # ---------------------------------------------------------------------------
 
-_AUTHORITATIVE_STATUSES = frozenset({"done", "failed"})
+# "contract_invalid" joins the tier-1 pool alongside "done"/"failed" (ADR,
+# dispatch-20260906-oi1637-synthese-asymmetrie): it is the receipt_status a
+# non-authored (synthesized/violated) body now carries, and it must not lose
+# dedup priority to an "unknown" receipt just because the label changed from
+# the old "failed".
+_AUTHORITATIVE_STATUSES = frozenset({"done", "failed", "contract_invalid"})
 
 
 def _receipt_authority(receipt: dict) -> int:
@@ -549,7 +554,7 @@ def _govern_error_fallback(
 
 def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """Core govern logic. Called by govern(); any exception is caught there."""
-    from report_body_contract import BodyResult, validate_body  # noqa: PLC0415
+    from report_body_contract import CONTRACT_INVALID_STATUS, validate_body  # noqa: PLC0415
     from governance_emit import emit_unified_report  # noqa: PLC0415
 
     dispatch_id = spec.dispatch_id
@@ -665,7 +670,15 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
                 permission_enforcement="strict",
                 error=f"contract_violated: missing={final_bv.missing}",
             )
-        contract_status = "violated"
+        # ADR (dispatch-20260906-oi1637-synthese-asymmetrie): "violated" is
+        # reserved for a WORKER-authored report that tried and failed the
+        # contract. A synthesized body never claimed to satisfy it in the
+        # first place (see _synthesize's docstring) — relabeling it
+        # "violated" here would erase the "no report at all" signal the
+        # frontmatter/marker-based consumers (plan_gate_panel.py,
+        # plan_gate_tiebreaker.py) rely on. Only authored bodies downgrade.
+        if contract_status == "authored":
+            contract_status = "violated"
 
     permission_enforcement = "strict" if enforce else "soft"
 
@@ -674,12 +687,16 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     # that passes the body contract but declares failure (heartbeat_killed,
     # worker_process_gone, or an explicit "failed" status) must stay "failed";
     # only an authored report with no declared failure is "done". Non-authored
-    # (synthesized/violated) = no valid report = no evidence of completion.
-    receipt_status = (
-        "failed"
-        if (contract_status != "authored" or _report_declares_failure(body))
-        else "done"
-    )
+    # (synthesized/violated) = no valid report = no evidence of completion —
+    # stamped CONTRACT_INVALID_STATUS (ADR, dispatch-20260906-oi1637-synthese-
+    # asymmetrie), the same value envelope_govern.py's lanes already use for
+    # exactly this case, instead of the more overloaded generic "failed".
+    if contract_status != "authored":
+        receipt_status = CONTRACT_INVALID_STATUS
+    elif _report_declares_failure(body):
+        receipt_status = "failed"
+    else:
+        receipt_status = "done"
 
     # -- d. Emit report with final body ---------------------------------------
     # authored: force-write with frontmatter so ALL reports are schema-uniform.
@@ -823,28 +840,37 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
 
     Git is authoritative for what changed. Pane-scraping would serialize TUI
     chrome into content that looks authored but is garbage.
+
+    ADR (dispatch-20260906-oi1637-synthese-asymmetrie): this body deliberately
+    does NOT carry the four contract headings (## Summary/## Changes/
+    ## Verification/## Open Items) that ``report_body_contract.validate_body``
+    checks for. Before this change, a report the governance layer fabricated
+    because the worker never authored one still PASSED validate_body — the
+    tmux/claude lane's contract-percentage measured "did governance heal it",
+    not "did the worker deliver it", diverging from every envelope-governed
+    lane (kimi/glm-harness/deepseek-harness/codex/claude_headless), whose
+    generic wrapper (governance_emit.emit_unified_report's ``## Response``
+    shape) has always genuinely failed the contract. Measured 9.1 points of
+    inflation on a population of 41 synthesized reports (golf-2 analysis,
+    2026-09-05). The evidence (git summary + diff stat) is preserved under a
+    single ``## Response`` heading mirroring the envelope wrapper's shape, so
+    a synthesized/no-report outcome now measures the same as everyone else's.
     """
     dispatch_id = spec.dispatch_id
     status = (raw.receipt or {}).get("status", "unknown") if raw.receipt else "timeout"
 
-    # -- ## Summary -----------------------------------------------------------
     delivered = _work_delivered(spec)
     delivery_verdict = "work_delivered" if delivered else "no_work_delivered"
     summary = _git_summary(spec, status, delivered=delivered)
-
-    # -- ## Changes -----------------------------------------------------------
     changes = _git_changes(spec)
 
-    # -- ## Verification ------------------------------------------------------
-    verification = (
-        f"None — interactive lane (tmux-spawn). "
-        f"Report synthesized by governance layer; worker did not author a report file. "
-        f"[{SYNTHESIZED_REPORT_MARKER}]"
-    )
-
-    # -- ## Open Items --------------------------------------------------------
-    open_items = (
-        f"Report synthesized by tmux lane; worker did not author "
+    response = (
+        f"{summary}\n\n"
+        f"Changes (git diff --stat):\n\n{changes}\n\n"
+        f"Verification: none — interactive lane (tmux-spawn). Report synthesized "
+        f"by governance layer; worker did not author a report file. "
+        f"[{SYNTHESIZED_REPORT_MARKER}]\n\n"
+        f"Open items: report synthesized by tmux lane; worker did not author "
         f"unified_reports/{dispatch_id}.md. [{SYNTHESIZED_REPORT_MARKER}]"
     )
 
@@ -855,10 +881,7 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
         f"- contract_status: synthesized\n"
         f"- delivery_verdict: {delivery_verdict}\n"
         f"- {SYNTHESIZED_REPORT_MARKER}\n\n"
-        f"## Summary\n\n{summary}\n\n"
-        f"## Changes\n\n{changes}\n\n"
-        f"## Verification\n\n{verification}\n\n"
-        f"## Open Items\n\n{open_items}\n"
+        f"## Response\n\n{response}\n"
     )
 
     if spec.pr_id:
