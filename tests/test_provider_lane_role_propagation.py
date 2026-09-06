@@ -14,6 +14,17 @@ threads it into each provider spawn's ``extra_env``, mirroring the tmux lane's
 ``if role: export`` contract. A missing role stays missing — nothing is exported
 and the fallback stands.
 
+OI-1635 (2026-09-05): ``_worker_role_env`` also stamps ``VNX_DATA_DIR`` /
+``VNX_STATE_DIR`` / ``VNX_DATA_DIR_EXPLICIT=1`` onto the SAME env overlay — the
+worker's dispatch instructions tell it to write its report to literal
+``$VNX_DATA_DIR/unified_reports/<id>.md``, but nothing used to actually set that
+var in the worker's own process, so the worker independently re-resolved it
+(landing on the repo-local default instead of the central store the governance
+emitter uses — see ``tests/test_report_store_split_brain.py`` for the
+reproduction). The assertions below were updated from exact-dict-equality to
+membership checks for this reason: the env dict now legitimately carries more
+than just the role.
+
 These tests exercise the argv/env assembly path DIRECTLY (no real spawn). The
 dispatcher builds the worker argv with ``main``-branch code, so a worker running
 on a feature branch is itself launched by the OLD spawn (OI-1201, wontfix): a
@@ -50,26 +61,38 @@ class TestWorkerRoleEnvAssembly(unittest.TestCase):
     (not empty, not a default). ``normalize_role`` also strips the empty sentinel
     and the canonical ``identity_unresolved`` marker so neither leaks into the
     worker env as a fabricated role.
+
+    OI-1635: the overlay ALSO always carries VNX_DATA_DIR/VNX_STATE_DIR/
+    VNX_DATA_DIR_EXPLICIT=1 (mirroring the tmux lane's completion-command
+    env_prefix), independent of whether a role was set — so these assertions
+    check role-key membership rather than exact dict equality.
     """
 
     def test_backend_developer_role_exported(self):
         env = pd._worker_role_env("backend-developer")
-        self.assertEqual(env, {"VNX_WORKER_ROLE": "backend-developer"})
+        self.assertEqual(env.get("VNX_WORKER_ROLE"), "backend-developer")
+        self.assertEqual(env.get("VNX_DATA_DIR"), str(pd._resolve_data_dir()))
+        self.assertEqual(env.get("VNX_DATA_DIR_EXPLICIT"), "1")
 
     def test_security_engineer_role_exported(self):
         # The value follows the spec — it is not a constant.
         env = pd._worker_role_env("security-engineer")
-        self.assertEqual(env, {"VNX_WORKER_ROLE": "security-engineer"})
+        self.assertEqual(env.get("VNX_WORKER_ROLE"), "security-engineer")
+        self.assertEqual(env.get("VNX_DATA_DIR"), str(pd._resolve_data_dir()))
 
     def test_role_absent_when_none(self):
-        self.assertIsNone(pd._worker_role_env(None))
+        env = pd._worker_role_env(None)
+        self.assertNotIn("VNX_WORKER_ROLE", env)
+        # Absent role does not suppress the data-dir stamp — that half of the
+        # overlay is unconditional (OI-1635).
+        self.assertEqual(env.get("VNX_DATA_DIR"), str(pd._resolve_data_dir()))
 
     def test_role_absent_when_empty_or_sentinel(self):
-        # Not empty, not a default: an empty/sentinel role exports NOTHING, so the
-        # hook keeps its existing fallback behavior.
-        self.assertIsNone(pd._worker_role_env(""))
-        self.assertIsNone(pd._worker_role_env("   "))
-        self.assertIsNone(pd._worker_role_env("identity_unresolved"))
+        # Not empty, not a default: an empty/sentinel role exports no
+        # VNX_WORKER_ROLE key, so the hook keeps its existing fallback behavior.
+        for role in ("", "   ", "identity_unresolved"):
+            env = pd._worker_role_env(role)
+            self.assertNotIn("VNX_WORKER_ROLE", env)
 
 
 class TestHookResolvesRoleProfile(unittest.TestCase):
@@ -150,10 +173,9 @@ class TestProviderDispatchPassesRoleEnv(unittest.TestCase):
             pd._dispatch_kimi(args)
 
         mock_spawn.assert_called_once()
-        self.assertEqual(
-            mock_spawn.call_args.kwargs.get("extra_env"),
-            {"VNX_WORKER_ROLE": "backend-developer"},
-        )
+        extra_env = mock_spawn.call_args.kwargs.get("extra_env")
+        self.assertEqual(extra_env.get("VNX_WORKER_ROLE"), "backend-developer")
+        self.assertEqual(extra_env.get("VNX_DATA_DIR"), str(pd._resolve_data_dir()))
 
     def test_kimi_receives_no_role_env_when_absent(self):
         args = _kimi_args(None)
@@ -167,9 +189,12 @@ class TestProviderDispatchPassesRoleEnv(unittest.TestCase):
             pd._dispatch_kimi(args)
 
         mock_spawn.assert_called_once()
-        # Absent, not empty and not a default: extra_env is None so the child env
-        # carries no VNX_WORKER_ROLE key at all.
-        self.assertIsNone(mock_spawn.call_args.kwargs.get("extra_env"))
+        # Absent, not empty and not a default: no VNX_WORKER_ROLE key at all.
+        # extra_env itself is no longer None (OI-1635: it always carries the
+        # VNX_DATA_DIR stamp) — this is the split from the role-only contract.
+        extra_env = mock_spawn.call_args.kwargs.get("extra_env")
+        self.assertNotIn("VNX_WORKER_ROLE", extra_env)
+        self.assertEqual(extra_env.get("VNX_DATA_DIR"), str(pd._resolve_data_dir()))
 
 
 class TestTmuxLaneRegression(unittest.TestCase):
