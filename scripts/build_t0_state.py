@@ -94,6 +94,7 @@ if str(_LIB_DIR) not in sys.path:
 from health_status import worst_status  # noqa: E402
 from qi_db_health import is_empty_schema as _qi_db_is_empty_schema  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
+from contract_invalid_ledger import build_contract_invalid_summary as _build_contract_invalid_summary_counts  # noqa: E402
 try:
     from vnx_paths import resolve_central_data_dir  # noqa: E402
 except ImportError:
@@ -536,6 +537,38 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
         "completed_last_hour": completed_last_hour,
         "conflict_count": conflict,
     }
+
+
+# ---------------------------------------------------------------------------
+# Contract-invalid visibility (OI-1638)
+# ---------------------------------------------------------------------------
+#
+# envelope_govern.py's report-body-contract check already stamps
+# ``status: "contract_invalid"`` on a receipt when a worker's report fails
+# validate_body() — measured 05-09 at 350+ live receipts across every
+# provider lane. Nothing surfaced that count at SessionStart before this:
+# every existing reader (weekly_digest.py, learning_loop.py,
+# check_active_drain.py, ...) treats it as one more failure-bucket literal
+# for its own purpose, never as a standalone signal a human sees on arrival.
+# This reader mirrors _build_queues' central-store-aware receipts-path
+# resolution so the count reflects whichever ledger this session's tracks
+# actually live in (central per-project store when opted in, else local).
+
+def _build_contract_invalid_summary(state_dir: Path) -> Dict[str, Any]:
+    """SessionStart counters for contract_invalid receipts (OI-1638 gevolg 1).
+
+    Never raises: an absent/unreadable ledger degrades to an all-zero
+    summary via contract_invalid_ledger.build_contract_invalid_summary,
+    which itself never raises on a missing file.
+    """
+    _central = _central_state_dir_for(state_dir)
+    receipts_path = (_central if _central is not None else state_dir) / "t0_receipts.ndjson"
+    _project_id = (
+        (project_id_from_state_dir(state_dir) or os.environ.get("VNX_PROJECT_ID", "").strip())
+        if _central is not None
+        else None
+    )
+    return _build_contract_invalid_summary_counts(receipts_path, project_id=_project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2868,6 +2901,7 @@ def build_t0_state(
     human_gate_queue = _build_human_gate_queue(tracks_store, project_id)  # proposed deliverables awaiting operator promote
     dream_reviews = _build_dream_reviews(state_dir, project_id)  # auto-dream cycles awaiting T0 review (OI-896)
     permission_escalations = _build_permission_escalations(state_dir)  # pending worker-permission escalations (OI-1414)
+    contract_invalid = _build_contract_invalid_summary(state_dir)  # contract_invalid receipt counters (OI-1638)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _collect_open_items(project_id, state_dir)
@@ -2899,6 +2933,7 @@ def build_t0_state(
         "human_gate_queue": human_gate_queue,
         "dream_reviews": dream_reviews,
         "permission_escalations": permission_escalations,
+        "contract_invalid": contract_invalid,
         "pr_progress": pr_progress,
         "feature_state": feature_state,
         "open_items": open_items,
@@ -3079,7 +3114,21 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "recent_receipts": (state.get("recent_receipts") or [])[-3:],
         "health": _slim_health_for_index(state.get("system_health") or {}),
         "track_freshness": _track_freshness_summary(state.get("track_freshness")),
+        "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),
         "last_rebuild_seconds": state.get("_build_seconds"),
+    }
+
+
+def _contract_invalid_index_summary(ci: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact contract_invalid counters for the always-loaded t0_index.json
+    (OI-1638). The full per-provider breakdown stays in t0_state.json/detail;
+    the index carries only the two numbers a human needs to notice the
+    signal at all.
+    """
+    ci = ci or {}
+    return {
+        "total": ci.get("total", 0),
+        "last_24h": ci.get("last_24h", 0),
     }
 
 
