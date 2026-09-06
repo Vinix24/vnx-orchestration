@@ -309,6 +309,60 @@ class TiebreakReportUnparseable(ValueError):
     """The youngest report for a track is a tiebreak report with no parseable fence."""
 
 
+def _read_and_parse_tiebreak_report(reports_dir: Path, tiebreak_file: TiebreakReportFile):
+    """Read + strictly parse a tiebreak report's ``vnx-plan-tiebreak`` fence.
+
+    Shared by ``build_tiebreak_payload_for_track`` (generic empty-field backfill)
+    and ``build_supersede_tiebreak_payload`` (scoped --supersede-panel-with-tiebreak):
+    both need the same read-and-parse step before building their own
+    ``previous_decision_ref``. Returns ``(report_text, TiebreakResult)``.
+
+    Raises ``TiebreakReportUnparseable`` when the file cannot be read or the fence
+    does not satisfy the strict contract — the caller skips this track with a
+    reason rather than guessing a decision.
+    """
+    try:
+        text = (reports_dir / tiebreak_file.filename).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise TiebreakReportUnparseable(
+            f"could not read {tiebreak_file.filename}: {exc}"
+        ) from exc
+    try:
+        tb_result = pgt.parse_tiebreaker(text)
+    except pgt.TiebreakerParseError as exc:
+        raise TiebreakReportUnparseable(
+            f"tiebreak report {tiebreak_file.filename} has no parseable fence: {exc}"
+        ) from exc
+    return text, tb_result
+
+
+def _tiebreak_result_to_payload(
+    tiebreak_file: TiebreakReportFile,
+    text: str,
+    tb_result,
+    *,
+    previous_decision_ref: Optional[str],
+    set_at: str,
+) -> str:
+    report_path = (
+        tiebreak_file.filename[:-3]
+        if tiebreak_file.filename.endswith(".md")
+        else tiebreak_file.filename
+    )
+    return pgp.build_tiebreak_decision_ref(
+        {
+            "outcome": tb_result.outcome,
+            "model": _extract_model_field(text),
+            "round": None,
+            "required_change": tb_result.required_change,
+            "rationale": tb_result.rationale,
+            "report_path": report_path,
+        },
+        previous_decision_ref=previous_decision_ref,
+        set_at=set_at,
+    )
+
+
 def build_tiebreak_payload_for_track(
     reports_dir: Path,
     track_id: str,
@@ -334,18 +388,7 @@ def build_tiebreak_payload_for_track(
     strict contract — the caller skips this track with a reason rather than
     guessing a decision.
     """
-    try:
-        text = (reports_dir / tiebreak_file.filename).read_text(encoding="utf-8")
-    except OSError as exc:
-        raise TiebreakReportUnparseable(
-            f"could not read {tiebreak_file.filename}: {exc}"
-        ) from exc
-    try:
-        tb_result = pgt.parse_tiebreaker(text)
-    except pgt.TiebreakerParseError as exc:
-        raise TiebreakReportUnparseable(
-            f"tiebreak report {tiebreak_file.filename} has no parseable fence: {exc}"
-        ) from exc
+    text, tb_result = _read_and_parse_tiebreak_report(reports_dir, tiebreak_file)
 
     previous_payload: Optional[str] = None
     if panel_files:
@@ -354,28 +397,157 @@ def build_tiebreak_payload_for_track(
             source=source, set_at=set_at,
         )
 
-    report_path = (
-        tiebreak_file.filename[:-3]
-        if tiebreak_file.filename.endswith(".md")
-        else tiebreak_file.filename
+    return _tiebreak_result_to_payload(
+        tiebreak_file, text, tb_result,
+        previous_decision_ref=previous_payload, set_at=set_at,
     )
-    return pgp.build_tiebreak_decision_ref(
-        {
-            "outcome": tb_result.outcome,
-            "model": _extract_model_field(text),
-            "round": None,
-            "required_change": tb_result.required_change,
-            "rationale": tb_result.rationale,
-            "report_path": report_path,
-        },
-        previous_decision_ref=previous_payload,
-        set_at=set_at,
+
+
+def build_supersede_tiebreak_payload(
+    reports_dir: Path,
+    tiebreak_file: TiebreakReportFile,
+    existing_decision_ref: str,
+    *,
+    set_at: str,
+) -> str:
+    """Build the superseding payload for ``--track --supersede-panel-with-tiebreak``.
+
+    Unlike ``build_tiebreak_payload_for_track`` (which reconstructs the round
+    being superseded FROM REPORT FILES, for the generic empty-field backfill),
+    this takes the track's CURRENT ``decision_ref`` verbatim as
+    ``previous_decision_ref`` — the existing payload IS the panel decision being
+    superseded, whether it was written by a live plan-gate round or an earlier
+    backfill run. ``plan_gate_panel.build_tiebreak_decision_ref`` already treats
+    an unparseable ``previous_decision_ref`` as absent rather than raising, so a
+    malformed existing payload degrades to ``superseded_decision: None`` instead
+    of failing the whole operation.
+
+    Raises ``TiebreakReportUnparseable`` when the tiebreak report itself cannot
+    be read or its fence does not satisfy the strict contract.
+    """
+    text, tb_result = _read_and_parse_tiebreak_report(reports_dir, tiebreak_file)
+    return _tiebreak_result_to_payload(
+        tiebreak_file, text, tb_result,
+        previous_decision_ref=existing_decision_ref, set_at=set_at,
     )
 
 
 def _track_decision_ref(state_dir: Path, track_id: str, project_id: str) -> Optional[str]:
     t = tracks.get_track(state_dir, track_id, project_id)
     return (t or {}).get("decision_ref")
+
+
+def _youngest_tiebreak_if_latest(reports_dir: Path, track_id: str) -> Optional[TiebreakReportFile]:
+    """The track's youngest tiebreak report, but ONLY if it is also the track's
+    youngest report overall (mirrors the mtime rule ``apply_backfill`` already
+    applies fleet-wide). ``None`` when the track has no tiebreak reports, or
+    when a panel report is younger — a re-reviewed track must not be superseded
+    by a stale tiebreak file.
+    """
+    panel_files = [f for f in discover_reports(reports_dir) if f.track_id == track_id]
+    tb_files = [f for f in discover_tiebreak_reports(reports_dir) if f.track_id == track_id]
+    youngest_panel_mtime = max((f.mtime for f in panel_files), default=-1.0)
+    youngest_tb = max(tb_files, key=lambda f: f.mtime, default=None)
+    if youngest_tb is not None and youngest_tb.mtime > youngest_panel_mtime:
+        return youngest_tb
+    return None
+
+
+def _decision_ref_set_at_epoch(decision_ref_json: str) -> Optional[float]:
+    """Parse an existing ``decision_ref`` payload's own ``set_at`` into a POSIX
+    epoch, for comparison against a report file's mtime. ``None`` on anything
+    that is not parseable JSON with a non-empty ``set_at`` — the caller treats
+    that as "cannot establish a comparison, refuse rather than guess".
+    """
+    try:
+        data = json.loads(decision_ref_json)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    set_at = data.get("set_at")
+    if not set_at:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(set_at).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class SupersedeResult:
+    track_id: str
+    action: str  # "would_supersede" | "skipped"
+    reason: str
+    old_decision_ref: Optional[str]
+    new_decision_ref: Optional[str]
+
+
+def compute_supersede_panel_with_tiebreak(
+    state_dir: Path,
+    reports_dir: Path,
+    project_id: str,
+    track_id: str,
+    *,
+    set_at: str,
+) -> SupersedeResult:
+    """Compute (never write) the ``--track --supersede-panel-with-tiebreak`` outcome.
+
+    Scoped to exactly one track: reads its CURRENT decision_ref straight from the
+    store (whatever wrote it — live plan-gate or an earlier backfill run), and
+    proposes replacing it ONLY when ALL of:
+      (a) the track's youngest report on disk is a parseable tiebreak report, and
+      (b) that report's mtime is strictly younger than the existing payload's
+          own ``set_at``.
+    Every other track, and every other reason a track might be unreadable, is
+    out of scope for this function and is never touched — the caller applies
+    the result for exactly the one track_id given, nothing else.
+    """
+    track = tracks.get_track(state_dir, track_id, project_id)
+    if track is None:
+        return SupersedeResult(track_id, "skipped", f"track not found: {track_id!r}", None, None)
+
+    current = track.get("decision_ref")
+    if not current:
+        return SupersedeResult(
+            track_id, "skipped",
+            "decision_ref is already empty — nothing to supersede; use the generic "
+            "(unscoped) backfill for this track instead",
+            current, None,
+        )
+
+    youngest_tb = _youngest_tiebreak_if_latest(reports_dir, track_id)
+    if youngest_tb is None:
+        return SupersedeResult(
+            track_id, "skipped",
+            "the track's youngest report on disk is not a parseable tiebreak report",
+            current, None,
+        )
+
+    existing_set_at_epoch = _decision_ref_set_at_epoch(current)
+    if existing_set_at_epoch is None:
+        return SupersedeResult(
+            track_id, "skipped",
+            "existing decision_ref has no parseable set_at — refusing to supersede blindly",
+            current, None,
+        )
+
+    if youngest_tb.mtime <= existing_set_at_epoch:
+        return SupersedeResult(
+            track_id, "skipped",
+            f"tiebreak report {youngest_tb.filename} is not newer than the existing "
+            "decision_ref's set_at",
+            current, None,
+        )
+
+    try:
+        new_payload = build_supersede_tiebreak_payload(
+            reports_dir, youngest_tb, current, set_at=set_at,
+        )
+    except TiebreakReportUnparseable as exc:
+        return SupersedeResult(track_id, "skipped", str(exc), current, None)
+
+    return SupersedeResult(track_id, "would_supersede", "", current, new_payload)
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +736,69 @@ def apply_to_live(state_dir: Path, reports_dir: Path, project_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# --track + --supersede-panel-with-tiebreak — scoped, explicit override of the
+# "never overwrite" rule for exactly one operator-named track (PR #1801
+# fix-forward). Never touches any other track.
+# ---------------------------------------------------------------------------
+
+
+def print_supersede_result(result: SupersedeResult, file=None) -> None:
+    out = file or sys.stdout
+    print(f"\n{'='*64}", file=out)
+    print(f"  SUPERSEDE PANEL WITH TIEBREAK — track: {result.track_id}", file=out)
+    print(f"{'='*64}", file=out)
+    if result.action == "would_supersede":
+        print(f"  action                : REPLACE", file=out)
+        print(f"  old decision_ref      : {result.old_decision_ref}", file=out)
+        print(f"  new decision_ref      : {result.new_decision_ref}", file=out)
+    else:
+        print(f"  action                : SKIP", file=out)
+        print(f"  reason                : {result.reason}", file=out)
+        print(f"  current decision_ref  : {result.old_decision_ref}", file=out)
+    print(f"{'='*64}\n", file=out)
+
+
+def dry_run_supersede(state_dir: Path, reports_dir: Path, project_id: str, track_id: str) -> int:
+    print(
+        f"\n  DRY-RUN MODE (--track {track_id} --supersede-panel-with-tiebreak) — "
+        f"operating on a temp copy of: {state_dir / DB_FILENAME}"
+    )
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vnx_decision_ref_supersede_dryrun_"))
+    tmp_state = tmp_dir / "state"
+    tmp_state.mkdir(parents=True)
+    try:
+        shutil.copy2(str(state_dir / DB_FILENAME), str(tmp_state / DB_FILENAME))
+        result = compute_supersede_panel_with_tiebreak(
+            tmp_state, reports_dir, project_id, track_id, set_at=_utc_iso(),
+        )
+        print_supersede_result(result)
+        if result.action == "would_supersede":
+            print("  Dry-run successful. Review the proposed replacement, then run --apply.")
+        return 0
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def apply_supersede_live(state_dir: Path, reports_dir: Path, project_id: str, track_id: str) -> int:
+    print(
+        f"\n  --APPLY MODE (--track {track_id} --supersede-panel-with-tiebreak) — "
+        f"backfilling live store: {state_dir / DB_FILENAME}"
+    )
+    result = compute_supersede_panel_with_tiebreak(
+        state_dir, reports_dir, project_id, track_id, set_at=_utc_iso(),
+    )
+    print_supersede_result(result)
+    if result.action != "would_supersede":
+        print("  No change made.")
+        return 0
+    tracks.set_decision_ref(
+        state_dir, track_id, project_id, result.new_decision_ref, actor="system",
+    )
+    print("  Supersede complete.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -590,7 +825,27 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
         help="Project id to scope the backfill (default: env VNX_PROJECT_ID or 'vnx-dev').",
     )
+    parser.add_argument(
+        "--track",
+        default=None,
+        help="Scope to a single track_id. Required by --supersede-panel-with-tiebreak; "
+        "has no other effect on its own.",
+    )
+    parser.add_argument(
+        "--supersede-panel-with-tiebreak",
+        action="store_true",
+        help="Only with --track: replace that ONE track's existing decision_ref with a "
+        "younger tiebreak report's outcome. The only way this backfill ever overwrites "
+        "a non-empty decision_ref; every other track is unaffected.",
+    )
     args = parser.parse_args(argv)
+
+    if args.supersede_panel_with_tiebreak and not args.track:
+        print(
+            "  [ERROR] --supersede-panel-with-tiebreak requires --track <track_id>.",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.data_dir:
         data_dir = args.data_dir.expanduser().resolve()
@@ -612,6 +867,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
     if not reports_dir.is_dir():
         print(f"  [WARNING] unified_reports dir not found: {reports_dir} — nothing to backfill.")
+
+    if args.track and args.supersede_panel_with_tiebreak:
+        if args.apply:
+            return apply_supersede_live(state_dir, reports_dir, args.project_id, args.track)
+        return dry_run_supersede(state_dir, reports_dir, args.project_id, args.track)
 
     if args.apply:
         return apply_to_live(state_dir, reports_dir, args.project_id)
