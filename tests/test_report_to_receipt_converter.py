@@ -1862,6 +1862,29 @@ class TestNormaliseProvider:
         assert _normalise_provider("") == "unknown"
         assert _normalise_provider("  ") == "unknown"
 
+    def test_unrecognised_garbage_is_never_passed_through_raw(self):
+        """Fail-open regression guard (golf1a-provider-enum).
+
+        Measured 2026-08-09: a torn-off instruction fragment reached
+        t0_receipts.ndjson verbatim via the old ``return p`` passthrough at
+        the end of ``_normalise_provider`` -- still reproducible against an
+        unmodified converter (empirically confirmed before this fix: it
+        returns the string unchanged instead of raising). There is no
+        recognisable provider keyword in it at all, so the fix must REFUSE
+        it, never invent or preserve a free-text value in the closed field.
+
+        NB the OTHER value T0 measured from the same 2026-08-09 window --
+        "Moonshot AI (Kimi Code CLI)" -- does NOT reproduce: it already
+        normalises to "kimi" today (the "kimi" substring rule was added
+        2026-08-10, commit 575019c5, one day after those ledger rows were
+        written). That example predates its own fix and is covered instead
+        by test_kimi_variants_normalised's salvage behaviour.
+        """
+        from report_to_receipt_converter import _normalise_provider
+        garbage = "` regel. Zonder die identiteitsregels landt je receipt niet."
+        with pytest.raises(Exception):
+            _normalise_provider(garbage)
+
 
 class TestLaneIdentityResolution:
     """Provider and model come from the lane (route_decision), not the body.
@@ -2005,6 +2028,54 @@ class TestLaneIdentityResolution:
         )
         assert receipt is not None
         assert receipt["provider"] == "deepseek-harness"
+
+    def test_unrecognized_body_provider_books_contract_invalid_not_a_crash(self, tmp_path):
+        """End-to-end evidence for where the fail-loud raise lands
+        (golf1a-provider-enum). No route decision exists, and the body's
+        provider field is free text with no recognisable keyword at all --
+        _normalise_provider raises UnrecognizedProviderError deep inside
+        _resolve_report_provider_model. build_receipt_from_report must NOT
+        crash (its documented "never raises" contract) and must NOT invent
+        or preserve the garbage string as a provider value -- it books an
+        explicit "unrecognized_provider" contract violation instead.
+
+        No ``status`` field is declared (-> status_category "no_signal", per
+        OI-1408) so this test isolates the ONE violation under test: the
+        unrelated OI-1035 fail-closed checks (schema_version, branch-on-
+        origin) that a terminal-success report would additionally have to
+        satisfy are irrelevant to what this test verifies.
+        """
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        # No route_decision JSON written -- forces the body-fallback path.
+
+        report = tmp_path / "20260601-garbage-provider.md"
+        report.write_text(
+            "---\ndispatch_id: 20260601-garbage-provider\nmodel: sonnet\nterminal: T1\n---\n\n"
+            "## Summary\n\nReport with a corrupted free-text provider field, "
+            "no terminal status declared, real Summary length.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n\n"
+            # Bold-field body format (not YAML) so a torn-off instruction
+            # fragment — the actual 2026-08-09 corruption shape — doesn't
+            # trip the YAML parser itself before ever reaching provider
+            # normalisation.
+            "**Provider**: ` regel. Zonder die identiteitsregels landt je receipt niet.\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None, "must never crash, per _build_receipt_from_report_core's contract"
+        assert receipt["event_type"] == "report_contract_invalid"
+        assert "unrecognized_provider" in receipt["contract_violations"]
+        assert receipt["provider"] == "unknown", (
+            "must book the explicit UNKNOWN sentinel, never the raw garbage string"
+        )
 
     def test_kimi_lane_wins_and_normalises(self, tmp_path):
         """Route decision kimi-k3 → provider kimi, model kimi-k3."""

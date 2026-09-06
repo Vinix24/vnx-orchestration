@@ -582,6 +582,110 @@ def deliver_via_door(
 # ---------------------------------------------------------------------------
 
 def main(argv: Optional[list] = None) -> int:
+    """Dispatch to the `stage` subcommand, or the legacy stage+fire bridge CLI (OI-1639).
+
+    ``dispatch_bridge.py stage ...`` (recognized by a literal first token "stage") is a
+    NEW, stage-ONLY entry point (_main_stage): it calls stage_spec_bundle directly and
+    prints the spec file path — it never fires the dispatch, unlike the legacy CLI
+    below (_main_legacy), which stages a bundle and then immediately drives it through
+    run_dispatch via bridge_dispatch. Every other invocation — no args, or a first
+    token that isn't "stage" — keeps the original legacy CLI, byte-identical (no
+    existing caller passes a bare "stage" positional as its first token, so this
+    dispatch is unambiguous).
+    """
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    if raw_argv and raw_argv[0] == "stage":
+        return _main_stage(raw_argv[1:])
+    return _main_legacy(raw_argv)
+
+
+def _main_stage(argv: list) -> int:
+    """``dispatch_bridge.py stage`` — stage a dispatch-spec.json bundle WITHOUT firing
+    it; prints the spec file's absolute path on success (OI-1639).
+
+    Thin by design: parses flags and passes them straight to ``stage_spec_bundle`` — no
+    new staging logic. The door (``dispatch_cli.py``, reached via
+    ``vnx dispatch <printed-pending-id>`` or ``--spec-file <printed-path>``) still owns
+    validation, gating, and lane execution; this command only produces the bundle an
+    operator promotes into it.
+    """
+    import argparse  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(
+        prog="dispatch_bridge.py stage",
+        description="Stage a dispatch-spec.json bundle without firing it (OI-1639).",
+    )
+    parser.add_argument(
+        "--instruction", required=True, dest="instruction_path", type=Path,
+        help="Path to a file containing the instruction text",
+    )
+    parser.add_argument("--dispatch-id", required=True, dest="dispatch_id")
+    parser.add_argument("--role", required=True)
+    parser.add_argument(
+        "--slot", required=True, dest="target_slot", choices=("T0", "T1", "T2", "T3"),
+    )
+    parser.add_argument("--provider", default="claude")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--task-class", default=None, dest="task_class")
+    parser.add_argument("--deadline", type=int, default=3600, dest="deadline_seconds")
+    parser.add_argument(
+        "--tag", action="append", default=[], dest="tags",
+        help="Repeatable (pass multiple times for multiple tags)",
+    )
+    # OI-1639: the structural link to a tracks-table row (TL-D1) — optional, never
+    # required by this command; the door's _check_track_link_verdict is the one place
+    # that enforces existence/format, exactly as for a track_id staged any other way.
+    parser.add_argument("--track", default=None, dest="track_id")
+    parser.add_argument("--data-dir", default=None, dest="data_dir", type=Path)
+    args = parser.parse_args(argv)
+
+    # Same trust-boundary bounds check the legacy CLI applies (single source of truth:
+    # dispatch_spec.DEADLINE_SECONDS_MIN/MAX).
+    if not (DEADLINE_SECONDS_MIN <= args.deadline_seconds <= DEADLINE_SECONDS_MAX):
+        print(
+            f"[dispatch_bridge stage] REJECT [bad-deadline]: --deadline "
+            f"{args.deadline_seconds} is out of range "
+            f"[{DEADLINE_SECONDS_MIN}, {DEADLINE_SECONDS_MAX}]",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        instruction_text = args.instruction_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"[dispatch_bridge stage] cannot read --instruction {args.instruction_path}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not instruction_text.strip():
+        print("[dispatch_bridge stage] empty instruction", file=sys.stderr)
+        return 2
+
+    try:
+        spec_file = stage_spec_bundle(
+            instruction_text=instruction_text,
+            dispatch_id=args.dispatch_id,
+            role=args.role,
+            target_slot=args.target_slot,
+            provider=args.provider,
+            model=args.model,
+            task_class=args.task_class,
+            deadline_seconds=args.deadline_seconds,
+            tags=tuple(args.tags),
+            track_id=args.track_id,
+            data_dir=args.data_dir,
+        )
+    except (ValueError, OSError) as exc:
+        print(f"[dispatch_bridge stage] REJECT [staging-error]: {exc}", file=sys.stderr)
+        return 1
+
+    print(str(spec_file))
+    return 0
+
+
+def _main_legacy(argv: Optional[list] = None) -> int:
     import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(description="VNX legacy→door dispatch bridge (PR-12)")

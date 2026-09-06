@@ -156,10 +156,21 @@ def test_expected_component_names_is_just_the_names(fixture_scripts: Path) -> No
 
 
 def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
-    """Sanity check against the actual repo (measured 2026-08-30): 9
-    statically-resolvable HealthBeacon(...) call sites. subsystem_health.py
-    is the 10th HealthBeacon(...)-mentioning file but its call site is a
-    loop variable, so it is correctly excluded (see the fixture test above)."""
+    """Sanity check against the actual repo (measured 2026-09-05, was 9 on
+    2026-08-30): 10 statically-resolvable HealthBeacon(...) call sites.
+    subsystem_health.py is an 11th HealthBeacon(...)-mentioning file but its
+    call site is a loop variable, so it is correctly excluded (see the
+    fixture test above).
+
+    golf3b / F1-2 legitimately adds the 10th: receipt_processor.sh's own
+    stderr-capture fix pipes the converter's captured stderr into
+    scripts/lib/receipt_conversion_rejection_beacon.py, a NEW beacon writer
+    (component "receipt_conversion_rejections") that records per-report
+    dispatch_id/file/reason detail the converter's own beacon (counts only)
+    does not carry. This is the same category of deliberate addition the
+    D3a/D3b fix-forwards already bumped this measurement for — not a name
+    accidentally picked up by the scan.
+    """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
     assert names == {
@@ -172,4 +183,5 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "cleanup_worker_exit",
         "producer_freshness_monitor",
         "report_to_receipt_converter",
+        "receipt_conversion_rejections",
     }
