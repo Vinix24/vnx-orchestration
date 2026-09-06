@@ -18,6 +18,15 @@ from .common import (
     EXIT_LOCK_ERROR,
     facade,
 )
+from .outcome_identity import (
+    compute_outcome_id,
+    has_outcome_identity,
+    load_outcome_index,
+    record_outcome,
+    resolve_outcome_booking,
+    write_outcome_index,
+    _outcome_index_path_for,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -251,6 +260,48 @@ def _write_receipt_under_lock(
                     idempotency_key=idempotency_key,
                 )
 
+            # ADR-038: outcome identity + durable cross-window idempotency.
+            # The check above is a fast, short-window (cache_window_seconds)
+            # pre-filter keyed on IDEMPOTENCY_FIELDS — which includes route
+            # fields (source, report_path, ...) that legitimately differ
+            # between the two receipt-booking routes (the lane itself vs
+            # report_to_receipt_converter) for the SAME outcome. This second
+            # check is the durable backstop: it hashes ONLY the fields that
+            # identify the outcome (dispatch_id, event_type, status,
+            # commit_sha, gate, pr_number) against an on-disk index that
+            # spans the whole ledger, not a 5-minute window. Every receipt
+            # gets `outcome_id` stamped unconditionally (byte-identical
+            # append path otherwise, per ADR-038); the durable dedup/
+            # correction check itself only runs for receipts that carry a
+            # real dispatch_id (has_outcome_identity) — see that function's
+            # docstring for why a dispatch_id-less receipt is excluded from
+            # enforcement rather than risk collapsing distinct events onto
+            # one all-empty-fields outcome_id.
+            receipt["outcome_id"] = compute_outcome_id(receipt)
+            outcome_index_data: Optional[Dict[str, Any]] = None
+            outcome_booking = None
+            if has_outcome_identity(receipt):
+                outcome_index_path = _outcome_index_path_for(receipt_path)
+                try:
+                    outcome_index_data = load_outcome_index(outcome_index_path)
+                except Exception as exc:
+                    # Fail-open, matching the cache-write posture below: a
+                    # broken projection index must never block the durable
+                    # receipt write. Worst case a rare future duplicate that
+                    # this backstop would have caught, never a lost receipt.
+                    _log.warning("outcome index read failed (dedup skipped, fail-open): %s", exc)
+                    outcome_index_data = None
+                if outcome_index_data is not None:
+                    outcome_booking = resolve_outcome_booking(receipt, outcome_index_data)
+                    if outcome_booking.is_duplicate:
+                        return AppendResult(
+                            status="duplicate",
+                            receipts_file=receipt_path,
+                            idempotency_key=idempotency_key,
+                        )
+                    if outcome_booking.supersedes:
+                        receipt["supersedes"] = outcome_booking.supersedes
+
             if pre_write_hook is not None:
                 pre_write_hook(receipt)
 
@@ -275,6 +326,20 @@ def _write_receipt_under_lock(
                     )
             except OSError as exc:
                 raise AppendReceiptError("receipt_write_failed", EXIT_IO_ERROR, f"Failed to append receipt: {exc}") from exc
+
+            if outcome_index_data is not None and outcome_booking is not None:
+                record_outcome(receipt, outcome_index_data, outcome_booking)
+                try:
+                    write_outcome_index(outcome_index_path, outcome_index_data)
+                except Exception as exc:
+                    # Same fail-open posture as the idempotency cache write below:
+                    # the receipt is already durable. Worst case a rebuild is
+                    # needed later (--rebuild replays the ledger and re-derives
+                    # this index from scratch, ADR-005) — never a lost receipt.
+                    _log.warning(
+                        "outcome index write failed after receipt append (outcome_id=%s): %s",
+                        outcome_booking.outcome_id, exc,
+                    )
 
             cache_entries.append({"ts": time.time(), "key": idempotency_key})
             try:
