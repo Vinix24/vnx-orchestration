@@ -43,6 +43,10 @@ from append_receipt_internals.common import (
 )
 from append_receipt_internals.idempotency import (
     _compute_idempotency_key,
+    _resolve_receipts_file,
+)
+from append_receipt_internals.outcome_identity import (
+    rebuild_outcome_index,
 )
 from append_receipt_internals.validation import (
     _is_completion_event,
@@ -97,6 +101,7 @@ __all__ = [
     "_parse_input",
     "_register_quality_open_items",
     "_resolve_model_provider",
+    "_resolve_receipts_file",
     "_resolve_session_id",
     "_rsi_check_env_session",
     "_rsi_check_provider_files",
@@ -114,6 +119,7 @@ __all__ = [
     "get_changed_files",
     "is_headless_t0",
     "main",
+    "rebuild_outcome_index",
     "register_facade",
     "resolve_state_dir",
     "should_route_to_gate_stream",
@@ -160,7 +166,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--receipts-file", help="Override canonical receipts file path", default=None)
     parser.add_argument("--cache-window-seconds", type=int, default=300, help="Recent idempotency window in seconds")
     parser.add_argument("--skip-enrichment", action="store_true", default=False, help="Skip quality advisory and provenance enrichment (for state-mutation events)")
+    parser.add_argument(
+        "--rebuild-outcome-index",
+        action="store_true",
+        default=False,
+        help="Rebuild receipt_outcome_index.json from the ledger (ADR-038) and exit; takes no receipt input",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="With --rebuild-outcome-index: report counts without writing the index file",
+    )
     args = parser.parse_args(argv)
+
+    if args.rebuild_outcome_index:
+        receipts_path = _resolve_receipts_file(args.receipts_file).expanduser().resolve()
+        stats = rebuild_outcome_index(receipts_path, write=not args.dry_run)
+        _emit(
+            "INFO",
+            "outcome_index_rebuilt",
+            receipts_file=str(receipts_path),
+            written=not args.dry_run,
+            total_lines=stats.total_lines,
+            malformed_lines=stats.malformed_lines,
+            considered=stats.considered,
+            booked=stats.booked,
+            duplicates=stats.duplicates,
+            corrections=stats.corrections,
+        )
+        return EXIT_OK
 
     try:
         receipt = _parse_input(args.receipt, args.receipt_file)
