@@ -1,4 +1,4 @@
-# ADR-038 — De claude-lane stopt met zelf-genezende synthese; nooit-succes wordt een gedeelde invariant
+# ADR-039 — De claude-lane stopt met zelf-genezende synthese; nooit-succes wordt een gedeelde invariant
 
 **Status:** Accepted (dispatch 20260906-oi1637-synthese-asymmetrie)
 **Date:** 2026-09-06

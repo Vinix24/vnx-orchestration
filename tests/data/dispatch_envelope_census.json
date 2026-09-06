@@ -16,14 +16,14 @@
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 569,
+      "line": 574,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 574,
+      "line": 579,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
@@ -769,6 +769,48 @@
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_govern_wrapper_never_success.py",
+      "line": 44,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_govern_wrapper_never_success.py",
+      "line": 45,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_govern_wrapper_never_success.py",
+      "line": 45,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_govern_wrapper_never_success.py",
+      "line": 106,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_govern_wrapper_never_success.py",
+      "line": 108,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_govern_wrapper_never_success.py",
+      "line": 110,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
     },
     {
       "file": "tests/test_headless_worktree_isolation.py",
