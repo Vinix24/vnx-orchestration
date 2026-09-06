@@ -558,6 +558,9 @@ def merge_pr(
 
     # OI-1091: warn (never block) when another OPEN dispatch branch touches the same files as
     # the branch being merged. Best-effort; a git/network failure degrades to no warning.
+    # OI-1641: the scan itself is now bounded (one bulk fetch + one bulk gh lookup instead of a
+    # fetch/gh-call per branch, plus a per-command timeout and a wall-clock scan ceiling) so it
+    # can no longer turn into minutes of serial network round-trips on every merge.
     if result["branch"]:
         try:
             from file_scope_overlap import warn_overlaps  # noqa: PLC0415
