@@ -1249,6 +1249,79 @@ class TestRejectionVisibility:
         assert beacon["status"] == "ok"
 
 
+class TestRejectedDetailHistory:
+    """F1-3: a rejected_count integer alone is anonymous — nobody can tell
+    WHICH report was refused or WHY without re-running the scan by hand.
+    details.rejected on this beacon carries {dispatch_id, file, reason,
+    rejected_at} per rejection, accumulated across scans (bounded, oldest
+    evicted) so identity survives even once the offending report is fixed
+    or removed and the rejection stops recurring."""
+
+    def _rejected_entries(self, state_dir: Path) -> list:
+        beacon_path = state_dir.parent / "health" / "report_to_receipt_converter.json"
+        beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
+        return beacon["details"]["rejected"]
+
+    def test_rejected_detail_carries_dispatch_id_and_reason(self, reports_dir, state_dir):
+        _write_report_without_model(
+            reports_dir / "20260906-stranded-a.md", "20260906-stranded-a"
+        )
+
+        scan_and_convert([reports_dir], state_dir)
+
+        entries = self._rejected_entries(state_dir)
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["dispatch_id"] == "20260906-stranded-a"
+        assert entry["file"] == "20260906-stranded-a.md"
+        assert "model" in entry["reason"].lower()
+        assert entry["rejected_at"]  # non-empty ISO8601 timestamp
+
+    def test_rejected_history_accumulates_across_scans_not_overwritten(
+        self, reports_dir, state_dir
+    ):
+        """HealthBeacon.heartbeat() replaces the WHOLE payload on every call
+        — without reading prior history back first, scan 2's heartbeat would
+        wipe scan 1's rejection out of the record the moment the first
+        report stopped recurring (e.g. it got fixed by hand)."""
+        _write_report_without_model(
+            reports_dir / "20260906-stranded-a.md", "20260906-stranded-a"
+        )
+        scan_and_convert([reports_dir], state_dir)
+
+        # Scan 1's offending report is now "fixed" (removed) — a scan that
+        # only reflects the CURRENT cycle would show zero rejections here.
+        (reports_dir / "20260906-stranded-a.md").unlink()
+        _write_report_without_model(
+            reports_dir / "20260906-stranded-b.md", "20260906-stranded-b"
+        )
+        scan_and_convert([reports_dir], state_dir)
+
+        entries = self._rejected_entries(state_dir)
+        dispatch_ids = {e["dispatch_id"] for e in entries}
+        assert dispatch_ids == {"20260906-stranded-a", "20260906-stranded-b"}
+
+    def test_rejected_history_capped_oldest_evicted(self, reports_dir, state_dir):
+        """The history never grows without bound across an unattended
+        fleet — once it exceeds the cap, the OLDEST entries are dropped
+        first, not the newest."""
+        from report_to_receipt_converter import _HEALTH_REJECTED_HISTORY_MAX
+
+        # One rejection per scan cycle, one cycle more than the cap allows.
+        for i in range(_HEALTH_REJECTED_HISTORY_MAX + 1):
+            name = f"20260906-cap-{i:04d}"
+            report = reports_dir / f"{name}.md"
+            _write_report_without_model(report, name)
+            scan_and_convert([reports_dir], state_dir)
+            report.unlink()
+
+        entries = self._rejected_entries(state_dir)
+        assert len(entries) == _HEALTH_REJECTED_HISTORY_MAX
+        dispatch_ids = [e["dispatch_id"] for e in entries]
+        assert "20260906-cap-0000" not in dispatch_ids  # oldest evicted
+        assert f"20260906-cap-{_HEALTH_REJECTED_HISTORY_MAX:04d}" in dispatch_ids  # newest kept
+
+
 # ---------------------------------------------------------------------------
 # Part 11: fail-closed gate — OI-1035, OI-1011, OI-1002, OI-659, OI-1017
 # ---------------------------------------------------------------------------

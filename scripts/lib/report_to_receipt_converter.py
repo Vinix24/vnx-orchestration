@@ -1260,6 +1260,7 @@ def _convert_one_detailed(
     receipts_file: Optional[str] = None,
     cache_window_seconds: int = 300,
     dry_run: bool = False,
+    rejected_detail_sink: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Optional[Any], str]:  # (Optional[AppendResult], outcome_tag)
     """Convert one report file to a governed receipt; classify the outcome.
 
@@ -1433,6 +1434,13 @@ def _convert_one_detailed(
                 "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
                 receipt.get("dispatch_id"), report_path.name, exc.message,
             )
+            if rejected_detail_sink is not None:
+                rejected_detail_sink.append({
+                    "dispatch_id": str(receipt.get("dispatch_id") or ""),
+                    "file": report_path.name,
+                    "reason": exc.message,
+                    "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                })
             return None, "rejected"
         logger.warning(
             "report_to_receipt_converter: append failed for %s: %s",
@@ -1502,6 +1510,10 @@ def convert_report_to_receipt(
 
 _HEALTH_COMPONENT = "report_to_receipt_converter"
 _HEALTH_EXPECTED_INTERVAL_SECONDS = 3600
+# F1-3: bound on details.rejected history carried on this beacon (below) —
+# the oldest entries are evicted once the accumulated history exceeds this,
+# so the file never grows without bound across an unattended fleet.
+_HEALTH_REJECTED_HISTORY_MAX = 200
 
 
 @dataclass(frozen=True)
@@ -1534,6 +1546,12 @@ class ScanStats:
     # zero success", and _write_scan_heartbeat is skipped entirely for a
     # dry-run so this count never influences health status either way.
     would_append_count: int = 0
+    # F1-3: per-rejection detail ({dispatch_id, file, reason, rejected_at})
+    # for THIS scan's missing-model rejections — see _write_scan_heartbeat,
+    # which merges this into the beacon's accumulated details.rejected
+    # history. A tuple (not a list) so the frozen dataclass never exposes a
+    # mutable default shared across instances.
+    rejected: Tuple[Dict[str, Any], ...] = ()
 
     @property
     def attempted_count(self) -> int:
@@ -1544,6 +1562,30 @@ class ScanStats:
             + self.malformed_count
             + self.error_count
         )
+
+
+def _load_prior_rejected_history(state_dir: Path) -> List[Dict[str, Any]]:
+    """Load this beacon's OWN accumulated ``details.rejected`` history.
+
+    ``HealthBeacon.heartbeat()`` atomically REPLACES the whole payload on
+    every call (tmp + os.replace) — it has no append mode. Without reading
+    the prior history back first, each scan's heartbeat would overwrite the
+    previous scan's rejection list instead of accumulating it, and a
+    dispatch rejected once and never retried again (e.g. its report gets
+    fixed by hand) would silently drop out of view on the very next scan.
+
+    Best-effort: a missing, unreadable, or malformed health file yields an
+    empty history rather than raising — a corrupt beacon must never block a
+    scan from completing.
+    """
+    path = state_dir.parent / "health" / f"{_HEALTH_COMPONENT}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    details = payload.get("details") if isinstance(payload, dict) else None
+    prior = details.get("rejected") if isinstance(details, dict) else None
+    return [entry for entry in prior if isinstance(entry, dict)] if isinstance(prior, list) else []
 
 
 def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
@@ -1584,6 +1626,16 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     if stats.attempted_count > 0 and stats.new_count == 0 and stats.duplicate_count == 0:
         status = "fail"
 
+    # F1-3: rejected_count alone (below) is an anonymous number — a fleet
+    # operator sees "27 rejected" with no way to find out which reports or
+    # why without re-running the scan by hand. Accumulate per-rejection
+    # detail across scans (bounded, oldest evicted) so the identity of every
+    # rejection survives on this beacon, not just its count.
+    rejected_history = _load_prior_rejected_history(state_dir)
+    rejected_history.extend(stats.rejected)
+    if len(rejected_history) > _HEALTH_REJECTED_HISTORY_MAX:
+        rejected_history = rejected_history[-_HEALTH_REJECTED_HISTORY_MAX:]
+
     beacon = HealthBeacon(
         state_dir.parent, _HEALTH_COMPONENT, expected_interval_seconds=_HEALTH_EXPECTED_INTERVAL_SECONDS,
     )
@@ -1596,6 +1648,7 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
             "malformed_count": stats.malformed_count,
             "error_count": stats.error_count,
             "skipped_non_dispatch_count": stats.skipped_non_dispatch_count,
+            "rejected": rejected_history,
         },
     )
 
@@ -1661,6 +1714,7 @@ def scan_and_convert(
     error_count = 0
     skipped_non_dispatch_count = 0
     would_append_count = 0
+    rejected_details: List[Dict[str, Any]] = []
 
     for reports_dir in reports_dirs:
         if not isinstance(reports_dir, Path):
@@ -1685,6 +1739,7 @@ def scan_and_convert(
                     receipts_file=receipts_file,
                     cache_window_seconds=cache_window_seconds,
                     dry_run=dry_run,
+                    rejected_detail_sink=rejected_details,
                 )
             except Exception as exc:
                 # Belt-and-suspenders: _convert_one_detailed() already catches
@@ -1763,6 +1818,7 @@ def scan_and_convert(
         error_count=error_count,
         skipped_non_dispatch_count=skipped_non_dispatch_count,
         would_append_count=would_append_count,
+        rejected=tuple(rejected_details),
     )
     # dry_run: no write happened, so no heartbeat about a scan cycle either —
     # a dry-run must leave zero observable state behind.
@@ -1831,6 +1887,7 @@ def convert_dispatch_ids(
     error_count = 0
     skipped_non_dispatch_count = 0
     would_append_count = 0
+    rejected_details: List[Dict[str, Any]] = []
 
     for dispatch_id in ids:
         # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
@@ -1883,6 +1940,7 @@ def convert_dispatch_ids(
                 receipts_file=receipts_file,
                 cache_window_seconds=cache_window_seconds,
                 dry_run=dry_run,
+                rejected_detail_sink=rejected_details,
             )
         except Exception as exc:
             logger.error(
@@ -1946,6 +2004,7 @@ def convert_dispatch_ids(
         error_count=error_count,
         skipped_non_dispatch_count=skipped_non_dispatch_count,
         would_append_count=would_append_count,
+        rejected=tuple(rejected_details),
     )
     if not dry_run:
         _write_scan_heartbeat(state_dir, stats)

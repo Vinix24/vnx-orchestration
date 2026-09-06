@@ -169,6 +169,66 @@ Common causes: processor not running; report predates monitor-mode startup (use 
 
 As of ADR-035 §5.3 (§9 PR-8), `VNX_RECEIPT_T0_PUSH` defaults to `0` — the tmux pane paste is suppressed by default, and T0 is expected to pull instead: `python3 scripts/receipt_query.py pull --state-dir <state-dir>` (cadence + rationale: `docs/core/DISPATCH_RULES.md` §13). Set `VNX_RECEIPT_T0_PUSH=1` to re-enable the legacy pane push as a transition escape hatch — it works from a CLI or desktop tmux session but not from a mobile remote-control session. Either way, if receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check the delivery/pull surface before suspecting the pipeline — the audit write already succeeded.
 
+### Stranded reports — refused for a missing/invalid model
+
+`append_receipt_internals/validation.py::_validate_model_present` fail-closed
+refuses (`AppendReceiptError` code `missing_model` / `invalid_model_shape`)
+any dispatch-lane report whose resolved `model` is absent or a sentinel
+value (`"unknown"`, `"none"`, ...). Unlike a malformed report, this is never
+auto-retried into success: the report sits in `unified_reports/` forever
+once the converter has logged the refusal, because nothing re-derives the
+model on its own.
+
+The converter's own health beacon (`health/report_to_receipt_converter.json`)
+carries `details.rejected_count` (an integer, per scan) AND, as of F1-3
+(20260906-f13-gestrande-rapporten), `details.rejected` — a history of
+`{dispatch_id, file, reason, rejected_at}` per rejection, accumulated across
+scans and capped at 200 entries (oldest evicted). A bare count with no name
+attached is not actionable; read `details.rejected` first to see WHICH
+reports are stranded before reaching for the recovery tool below.
+
+```bash
+jq '.details.rejected' .vnx-data/health/report_to_receipt_converter.json
+```
+
+`scripts/restore_stranded_reports.py` recovers these reports — but ONLY when
+a real model can be VERIFIED, never guessed or defaulted:
+
+```bash
+# Scan only — lists every stranded report and its candidate source (or
+# "UNRESTORABLE" when none exists). Makes no changes.
+python3 scripts/restore_stranded_reports.py --list
+
+# Restore + book receipts for every report a source was found for.
+python3 scripts/restore_stranded_reports.py --apply
+```
+
+Verified sources, tried in this fixed order — the first hit wins:
+
+1. the dispatch's own `dispatch-spec.json` (`model`/`provider`);
+2. an earlier ledger receipt for the same `dispatch_id` that carries a real
+   `model` (any `event_type` — not scoped to a specific one, since the
+   canonical dispatch-lifecycle events this might suggest do not occur in
+   practice; see the module docstring for the measurement);
+3. the report's own frontmatter `model:`/`provider:`, or a bullet-form
+   `- Model: x` line the converter's own parser does not recognise (it only
+   reads `**Model**:` bold fields).
+
+A report with no verifiable source in any of the three is listed
+UNRESTORABLE and is never touched — no default, no guessed value, ever.
+
+Restoring never rewrites a report's existing bytes: it only APPENDS a
+`## Restored identity` section at the end (which source, and when), after
+the receipt has been booked with `identity_restored: true`. The resulting
+receipt still goes through every OTHER fail-closed check the converter
+itself applies (branch-on-origin, body contract, ...) — supplying the model
+unblocks the model check specifically, it does not bypass the rest of the
+pipeline, so a restored report can still legitimately land as `task_failed`
+if e.g. its branch was since deleted from origin. Re-running `--apply` on an
+already-restored report is a no-op (the `## Restored identity` marker is
+checked before anything else runs) — safe to run repeatedly, e.g. after
+fixing one more `dispatch-spec.json` by hand.
+
 ### Verify ledger integrity
 
 ```bash
@@ -188,4 +248,5 @@ python3 scripts/audit_chain.py walk   .vnx-data/state/t0_receipts.ndjson | tail 
 - `scripts/receipt_processor.sh`, `scripts/report_parser.py`, `scripts/append_receipt.py` — Path 2
 - `scripts/lib/append_receipt_internals/idempotency.py::_write_receipt_under_lock` — the shared append primitive both paths write through
 - `scripts/receipt_query.py` — the pull/by-dispatch/by-pr/since/by-track/digest/reconcile-oi-pending interface
+- `scripts/restore_stranded_reports.py` — recovers reports fail-closed refused for a missing/invalid model (verified sources only, never a guessed value)
 - `scripts/lib/report_body_contract.py` — the mandatory report contract
