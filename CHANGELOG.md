@@ -4,6 +4,17 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.6.1] — 2026-09-06
+
+- **The nightly digest sender resolves its own SMTP credential (#1751,
+  2026-09-04)** — `send_digest_email.py` falls back to the macOS keychain
+  item `vnx-smtp-pass` via `_read_smtp_pass_from_keychain()` when
+  `VNX_SMTP_PASS` is empty, and fails loudly when both are empty.
+- **Phase 11 of the nightly pipeline no longer pre-empts that fallback** —
+  the phase gate checked `VNX_SMTP_PASS` itself, so removing the variable
+  from the operator's shell profile (the point of the keychain fallback)
+  made phase 11 skip outright instead of reaching the sender.
+
 ## [1.6.0] — 2026-08-20
 
 Minor release since v1.5.0. The user-visible shape: a review gate can no
