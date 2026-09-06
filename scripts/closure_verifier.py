@@ -117,8 +117,44 @@ _NON_REVIEW_SIGNER_REASONS: Dict[str, str] = {
         "never a review peer signer"
     ),
 }
-_REVIEW_PEER_GATES = frozenset(
-    g.value for g in Gate if g.value not in _NON_REVIEW_SIGNER_REASONS
+
+
+def classify_gate_signers(
+    enum_values: Iterable[str],
+    not_implemented: frozenset,
+    non_review_reasons: Dict[str, str],
+) -> frozenset:
+    """Derive the review-peer gate set, refusing to let a gate the closure
+    verifier cannot even read (``not_implemented``) inherit peer-signing
+    rights by omission (OI-1645 follow-up, A6).
+
+    Before this function existed, ``_REVIEW_PEER_GATES`` was a plain
+    complement of ``_NON_REVIEW_SIGNER_REASONS`` with nothing comparing it to
+    ``_GATES_NOT_IMPLEMENTED_BY_CLOSURE``. A gate added to the enum and to
+    ``_GATES_NOT_IMPLEMENTED_BY_CLOSURE`` but forgotten in
+    ``_NON_REVIEW_SIGNER_REASONS`` would silently fall out of the complement
+    as a review peer — a gate the verifier cannot interpret would gain
+    signing power. This function makes that omission a hard failure instead.
+    """
+    non_review_set = frozenset(non_review_reasons)
+
+    unreadable_without_reason = sorted(not_implemented - non_review_set)
+    if unreadable_without_reason:
+        raise ValueError(
+            "gate(s) excluded from closure verification (not_implemented) "
+            "but missing a non-review-signer reason, so they cannot be "
+            f"classified as either a peer or a non-signer: {unreadable_without_reason}"
+        )
+
+    empty_reason = sorted(g for g, reason in non_review_reasons.items() if not reason)
+    if empty_reason:
+        raise ValueError(f"non-review-signer reason is empty for: {empty_reason}")
+
+    return frozenset(g for g in enum_values if g not in non_review_set)
+
+
+_REVIEW_PEER_GATES = classify_gate_signers(
+    (g.value for g in Gate), _GATES_NOT_IMPLEMENTED_BY_CLOSURE, _NON_REVIEW_SIGNER_REASONS
 )
 
 
