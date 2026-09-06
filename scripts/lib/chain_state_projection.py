@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -52,11 +55,90 @@ BLOCKED_STATES = frozenset({"ADVANCEMENT_BLOCKED", "CHAIN_HALTED", "FEATURE_FAIL
 # States where operator action is required
 RECOVERY_NEEDED_STATES = frozenset({"RECOVERY_PENDING", "CHAIN_HALTED"})
 
-# Required gate providers per FEATURE_PLAN.md review-stack
-REQUIRED_GATES = ("gemini_review", "codex_gate")
-
 # Maximum requeue attempts before escalation (contract rule R-2/R-3)
 MAX_REQUEUE_ATTEMPTS = 3
+
+# gemini_review was removed from the mandatory set by the 05-09 operator
+# decision (gemini-cli stays available but is never required) but stays a
+# LEGAL signer whenever it actually runs and produces evidence -- dropping
+# it from consideration entirely would silently discard a real PASS a
+# gemini run had already earned. Appended unconditionally by
+# required_signer_gates(); never part of the takeover-chain config itself.
+_OPTIONAL_LEGACY_SIGNER = "gemini_review"
+
+
+def required_signer_gates() -> Tuple[str, ...]:
+    """Gate names eligible to certify chain-advancement (F2-4, 06-09).
+
+    Replaces the old ``REQUIRED_GATES = ("gemini_review", "codex_gate")``
+    literal -- a hardcoded ALL-of-two requirement that went dark the moment
+    both named providers were unavailable on the same evening (gemini-cli
+    not installed, codex on a weekly quota cap) even though a THIRD gate
+    (glm_gate) had produced a full, evidenced PASS on that very PR (#1777,
+    measured 2026-09-05/06). One provider outage should never be able to
+    stall every merge on a fleet with four configured review-gate
+    providers.
+
+    Sourced from the SAME operator-configured review-gate takeover chain
+    ``gate_request_handler`` already resolves
+    (``VNX_REVIEW_GATE_TAKEOVER_CHAIN``, registered in
+    ``config_registry.py``) -- never a second, independently maintained
+    gate list that could silently drift from it. Resolved FRESH on every
+    call, the same discipline
+    ``gate_request_handler._build_review_gate_takeover_chain`` already
+    applies, so an operator's config edit takes effect on the very next
+    check instead of needing a process restart.
+
+    ``gemini_review`` is ALWAYS appended (see ``_OPTIONAL_LEGACY_SIGNER``)
+    even though it is absent from the takeover chain's default string and
+    from the mandatory set: the 05-09 operator decision keeps it a legal,
+    optional signer.
+
+    Malformed operator config (an unknown gate name, or a name repeated --
+    a cycle) raises ``gate_request_handler.ReviewGateTakeoverConfigError``,
+    the SAME fail-loud behaviour the takeover chain itself has; never a
+    silent fallback to a stale default.
+
+    An explicit ``VNX_REVIEW_GATE_TAKEOVER_CHAIN=""`` (operator disabled
+    automated takeover entirely) leaves exactly one eligible signer:
+    ``gemini_review``. Known, narrow edge -- left as an Open Item rather
+    than papered over with a second "gates eligible to sign" knob separate
+    from "gates eligible for takeover", which is exactly the second
+    configuration layer this deliverable was told not to invent.
+
+    When ``config_runtime``/``gate_request_handler`` cannot be imported at
+    all (e.g. a bare script invocation whose sys.path lacks scripts/lib's
+    sibling modules), degrades to the same single-signer fallback -- logged
+    as a WARNING, never silent, mirroring ``config_runtime``'s own
+    fail-soft-but-loud philosophy. It deliberately does NOT fall back to a
+    hardcoded copy of the chain's default string: duplicating that literal
+    here would recreate the exact two-lists-that-can-drift defect this
+    function exists to remove.
+    """
+    try:
+        import config_runtime
+        from gate_request_handler import (
+            _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN,
+            _parse_review_gate_takeover_chain,
+        )
+    except Exception as exc:  # vnx-silent-except: import-time unavailability of the wider config stack must degrade this gate list, never crash a caller merely checking advancement truth -- logged loudly so the degradation is never silent
+        logger.warning(
+            "chain_state_projection: kon config_runtime/gate_request_handler niet "
+            "importeren (%s) -- geen enkele geconfigureerde ondertekenaar "
+            "beschikbaar; alleen %s blijft geldig",
+            exc, _OPTIONAL_LEGACY_SIGNER,
+        )
+        names: List[str] = []
+    else:
+        raw = config_runtime.get("VNX_REVIEW_GATE_TAKEOVER_CHAIN")
+        if raw is None:
+            raw = _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
+        _parse_review_gate_takeover_chain(raw)  # fail-loud: unknown name / cycle
+        names = [item.strip() for item in raw.split(",") if item.strip()]
+
+    if _OPTIONAL_LEGACY_SIGNER not in names:
+        names.append(_OPTIONAL_LEGACY_SIGNER)
+    return tuple(names)
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +193,7 @@ def _load_carry_forward(state_dir: Path) -> Dict[str, Any]:
     }
 
 
-def _load_gate_results(state_dir: Path, pr_id: str) -> Dict[str, Any]:
+def _load_gate_results(state_dir: Path, pr_id: str, gates: Iterable[str]) -> Dict[str, Any]:
     """Return gate certification results keyed by gate name for a given PR."""
     results_dir = state_dir / "review_gates" / "results"
     if not results_dir.is_dir():
@@ -121,7 +203,7 @@ def _load_gate_results(state_dir: Path, pr_id: str) -> Dict[str, Any]:
     except (ValueError, IndexError):
         pr_num = pr_id.lower().replace("pr-", "").replace("pr", "")
     gate_results: Dict[str, Any] = {}
-    for gate in REQUIRED_GATES:
+    for gate in gates:
         data = _safe_load_json(results_dir / f"pr-{pr_num}-{gate}.json")
         if data is not None:
             gate_results[gate] = {
@@ -129,17 +211,91 @@ def _load_gate_results(state_dir: Path, pr_id: str) -> Dict[str, Any]:
                 "contract_hash": data.get("contract_hash", ""),
                 "report_path": data.get("report_path", ""),
                 "blocking_count": int(data.get("blocking_count") or 0),
+                "blocking_findings": data.get("blocking_findings") or [],
+                "commit_sha": data.get("commit_sha", ""),
                 "recorded_at": data.get("recorded_at", ""),
             }
     return gate_results
 
 
-def _is_gate_certified(gate_result: Dict[str, Any]) -> bool:
-    """A gate is certified when: status is approve/pass AND contract_hash is non-empty."""
-    status = str(gate_result.get("status", "")).lower()
-    contract_hash = str(gate_result.get("contract_hash", "")).strip()
-    blocking = int(gate_result.get("blocking_count") or 0)
-    return status in {"approve", "pass", "passed"} and bool(contract_hash) and blocking == 0
+_DECIDED_ABSENT_STATES = frozenset({"unavailable", "not_executable"})
+_PASS_STATUSES = frozenset({"approve", "pass", "passed"})
+
+
+def _classify_gate_signer(
+    result: Dict[str, Any], pr_head_sha: Optional[str]
+) -> Tuple[str, str]:
+    """Classify one gate result record for chain-advancement signing.
+
+    Three outcomes (OI-1624's open design question, decided HERE for this
+    surface):
+
+      - ``"absent"``        no usable evidence either way. Covers
+                             ``status in {unavailable, not_executable}`` --
+                             a provider outage or a gate whose runner does
+                             not exist yet (deepseek_gate pre-E2). Neither a
+                             vote FOR nor AGAINST advancement: an
+                             unavailable provider must never silently pass,
+                             but it must also never be the one thing
+                             standing between a genuinely evidenced PASS
+                             elsewhere and a GO.
+      - ``"certified"``     every invariant holds: a pass-like status, zero
+                             blocking findings/count, a populated
+                             ``contract_hash``, a ``report_path`` that
+                             exists ON DISK, and (when ``pr_head_sha`` is
+                             known) a ``commit_sha`` that matches it.
+      - ``"not_certified"`` a DECIDED record (the gate actually ran and
+                             produced a terminal outcome) that fails at
+                             least one invariant -- a real fail/reject
+                             verdict, blocking findings, incomplete
+                             evidence, or evidence for the wrong commit.
+                             This is a genuine blocker: it stands even when
+                             another gate in the same set certifies clean
+                             -- a dissenting vote never loses to a passing
+                             one (F2-4 requirement 3).
+
+    Returns ``(label, detail)`` -- ``detail`` is "" for ``absent``/
+    ``certified``, and a human-readable reason for ``not_certified``.
+    """
+    status = str(result.get("status", "")).lower()
+    if status in _DECIDED_ABSENT_STATES:
+        return "absent", ""
+
+    blocking_findings = result.get("blocking_findings") or []
+    blocking_len = len(blocking_findings) if isinstance(blocking_findings, list) else 0
+    blocking_count = result.get("blocking_count")
+    blocking_count = blocking_count if isinstance(blocking_count, int) else 0
+    is_blocking = blocking_len > 0 or blocking_count > 0
+
+    contract_hash = str(result.get("contract_hash", "")).strip()
+    report_path = str(result.get("report_path", "")).strip()
+    report_exists = bool(report_path) and Path(report_path).is_file()
+    commit_sha = str(result.get("commit_sha", "")).strip()
+    sha_matches = pr_head_sha is None or (bool(commit_sha) and commit_sha == pr_head_sha)
+
+    if (
+        status in _PASS_STATUSES
+        and not is_blocking
+        and contract_hash
+        and report_exists
+        and sha_matches
+    ):
+        return "certified", ""
+
+    reasons: List[str] = []
+    if status not in _PASS_STATUSES:
+        reasons.append(f"status={status or 'unknown'}")
+    if is_blocking:
+        reasons.append(f"blocking={blocking_count or blocking_len}")
+    if not contract_hash:
+        reasons.append("contract_hash ontbreekt")
+    if not report_path:
+        reasons.append("report_path ontbreekt")
+    elif not report_exists:
+        reasons.append(f"report_path bestaat niet op schijf: {report_path}")
+    if pr_head_sha is not None and not sha_matches:
+        reasons.append(f"commit_sha={commit_sha or 'leeg'} komt niet overeen met head {pr_head_sha}")
+    return "not_certified", "; ".join(reasons) if reasons else "onbekende reden"
 
 
 def _pr_sequence_from_queue(pr_queue: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -184,24 +340,46 @@ def _find_next_feature(pr_queue: Dict[str, Any], current_pr_id: Optional[str]) -
 # ---------------------------------------------------------------------------
 
 def _compute_gate_certification(
-    state_dir: Path, feature_id: str, blockers: List[str]
+    state_dir: Path,
+    feature_id: str,
+    blockers: List[str],
+    pr_head_sha: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Populate blockers for any uncertified gates; return certification_status dict."""
-    gate_results = _load_gate_results(state_dir, feature_id)
+    """Populate blockers and return the per-gate certification_status dict.
+
+    F2-4 (06-09): advancement requires AT LEAST ONE certified signer from
+    ``required_signer_gates()`` -- not all-of-N. A decided-but-invalid
+    record (``not_certified``) still blocks on its own even when another
+    gate in the same set certifies clean; an absent/unavailable record
+    blocks nothing by itself. Zero certified signers is recorded as its OWN
+    explicit blocker, so ``len(blockers) == 0`` never accidentally reads as
+    advanceable just because no SINGLE gate individually failed (e.g. every
+    configured gate is merely absent).
+    """
+    candidate_gates = required_signer_gates()
+    gate_results = _load_gate_results(state_dir, feature_id, candidate_gates)
     certification_status: Dict[str, str] = {}
-    for gate in REQUIRED_GATES:
+    certified_count = 0
+    for gate in candidate_gates:
         result = gate_results.get(gate)
         if result is None:
-            certification_status[gate] = "missing"
-            blockers.append(f"{gate} not certified for {feature_id}: no result record")
-        elif not _is_gate_certified(result):
-            certification_status[gate] = f"not_certified:{result.get('status', 'unknown')}"
-            blockers.append(
-                f"{gate} not certified for {feature_id}: "
-                f"status={result.get('status')}, blocking={result.get('blocking_count')}"
-            )
-        else:
+            certification_status[gate] = "absent"
+            continue
+        label, detail = _classify_gate_signer(result, pr_head_sha)
+        if label == "certified":
             certification_status[gate] = "certified"
+            certified_count += 1
+        elif label == "absent":
+            certification_status[gate] = "absent"
+        else:
+            certification_status[gate] = f"not_certified:{detail}"
+            blockers.append(f"{gate} not certified for {feature_id}: {detail}")
+    if certified_count == 0:
+        blockers.append(
+            f"no valid signer for {feature_id} among configured gates "
+            f"({', '.join(candidate_gates)}): at least one certified review-gate "
+            "result is required"
+        )
     return certification_status
 
 
@@ -210,13 +388,16 @@ def compute_advancement_truth(
     open_items: List[Dict[str, Any]],
     state_dir: Path,
     current_feature_id: Optional[str],
+    pr_head_sha: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Derive whether the chain can advance to the next feature.
 
-    Advancement requires (contract Section 3.2):
+    Advancement requires (contract Section 3.2, gate rule updated by F2-4):
     1. Current feature PR has status 'completed' in pr_queue_state.json
     2. No open items with severity 'blocker' and status 'open'
-    3. All required gate providers have terminal success with non-empty contract_hash
+    3. At least one gate from ``required_signer_gates()`` has terminal
+       success with complete, on-disk evidence (see
+       ``_classify_gate_signer``) -- not all configured gates at once.
     """
     if current_feature_id is None:
         return {"can_advance": False, "blockers": ["no active feature identified"], "certification_status": {}}
@@ -252,7 +433,9 @@ def compute_advancement_truth(
         blockers.append(f"{len(blocker_findings)} unresolved blocker finding(s) in carry-forward")
 
     # Check 3: Gate certification
-    certification_status = _compute_gate_certification(state_dir, current_feature_id, blockers)
+    certification_status = _compute_gate_certification(
+        state_dir, current_feature_id, blockers, pr_head_sha
+    )
 
     return {"can_advance": len(blockers) == 0, "blockers": blockers, "certification_status": certification_status}
 
@@ -442,7 +625,8 @@ def build_chain_projection(state_dir: str | Path) -> Dict[str, Any]:
     next_pr_record = _find_next_feature(pr_queue, current_feature_id)
 
     advancement = compute_advancement_truth(
-        pr_queue=pr_queue, open_items=open_items, state_dir=state_root, current_feature_id=current_feature_id
+        pr_queue=pr_queue, open_items=open_items, state_dir=state_root, current_feature_id=current_feature_id,
+        pr_head_sha=(current_pr_record or {}).get("head_sha"),
     )
     cf_summary = build_carry_forward_summary(carry_forward, open_items)
     unresolved = _build_unresolved_chain_items(carry_forward, open_items)
