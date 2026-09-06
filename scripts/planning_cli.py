@@ -3141,12 +3141,16 @@ def _run_tiebreaker_for_track(
 
     # Record the tiebreaker round in the seat ledger (outcome names the
     # decision so the round history is auditable alongside the seat verdicts).
+    # scored_seats=0 is a fact, not a placeholder: no panel seats sat in a
+    # tiebreaker round, so this round contributes nothing to the readable-round
+    # count the stop-rule reads (OI-1280).
     plan_gate_tiebreaker.record_round(
         seat_ledger_path,
         track_id=track_id, project_id=project_id,
         round_number=round_number,
         outcome=f"tiebreak:{result.outcome}", model=result.model,
         governance_variant="tiebreaker", gov_trace=gov_trace,
+        scored_seats=0,
     )
 
     if result.outcome == plan_gate_tiebreaker.STOP:
@@ -3517,17 +3521,19 @@ def run_plan_gate_for_track(
 
     seat_ledger_path = plan_gate_panel._resolve_seat_ledger_path(data_dir)
     tb_cfg = plan_gate_tiebreaker.load_tiebreaker_config()
-    rounds_done = plan_gate_tiebreaker.read_round_count(
-        seat_ledger_path, track_id, project_id,
-    )
-    if plan_gate_tiebreaker.should_run_tiebreaker(
+    # OI-1280: the stop-rule now needs BOTH the round count and whether any of
+    # those rounds was read by a seat. One call answers both and carries the
+    # reason, so the operator is told why the tiebreaker did NOT fire — a silent
+    # fall-through to the full panel at round 3+ would look like a bug.
+    tb_gate = plan_gate_tiebreaker.tiebreaker_gate_status(
         seat_ledger_path, track_id, project_id,
         max_rounds=tb_cfg["max_rounds"],
-    ):
+    )
+    rounds_done = tb_gate["rounds_done"]
+    if tb_gate["should_run"]:
         stderr_lines.append(
-            f"plan-gate stop-rule: {rounds_done} panel round(s) done "
-            f"(threshold {tb_cfg['max_rounds']}) — running the tiebreaker "
-            f"(model={tb_cfg['model']}) instead of the full panel."
+            f"plan-gate stop-rule: {tb_gate['rationale']} "
+            f"(model={tb_cfg['model']})."
         )
         return _run_tiebreaker_for_track(
             state_dir=state_dir, track_id=track_id, project_id=project_id,
@@ -3538,6 +3544,10 @@ def run_plan_gate_for_track(
             plan_source=source, plan_source_info=plan_source_info,
             ignored_goal=ignored_goal,
         )
+    elif rounds_done >= tb_gate["threshold"]:
+        # At/above the threshold but held back: say so out loud. The full panel
+        # below is the deliberate fallback, not a missed branch.
+        stderr_lines.append(f"plan-gate stop-rule: {tb_gate['rationale']}.")
 
     try:
         result = plan_gate_panel.run_panel(
@@ -3554,12 +3564,20 @@ def run_plan_gate_for_track(
     # persists across restarts. Recorded for EVERY non-PASS outcome (a PASS
     # clears the gate; no further round is needed). Best-effort: a failed
     # record must never break the gate (same contract as the seat records).
+    #
+    # OI-1280: the record carries how many seats actually READ the plan this
+    # round, not just that a round happened. That number is what
+    # tiebreaker_gate_status reads back to decide whether there is a tie worth
+    # breaking at all.
     if result["decision"] != "PASS":
         plan_gate_tiebreaker.record_round(
             seat_ledger_path,
             track_id=track_id, project_id=project_id,
             round_number=rounds_done + 1, outcome="panel",
             governance_variant=variant, gov_trace=weight["gov_trace"],
+            scored_seats=plan_gate_panel.count_scoring_seats(
+                result.get("panelists") or []
+            ),
         )
 
     # OI-1190: persist the durable half of the plan decision onto the track — the

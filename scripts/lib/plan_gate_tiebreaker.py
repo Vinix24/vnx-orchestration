@@ -12,7 +12,10 @@ cases; seats 4 and 5 each moved the outcome 1.7%. A third full round buys
      — a ``plan_gate_round`` record is appended per round, and the counter is the
      highest ``round`` for the track read back from that ledger. No second store.
      Above ``max_rounds`` (default 2, configurable in
-     ``configs/plan_gate_panel.yaml``) the gate runs NO full panel.
+     ``configs/plan_gate_panel.yaml``) the gate runs NO full panel — PROVIDED at
+     least one of those rounds was actually read by a seat (``scored_seats >= 1``
+     on the round record). Rounds that ran with every lane down do not buy a
+     tiebreaker: there is no tie to break on a plan nobody read (OI-1280).
 
   2. Tiebreaker (punt 8) — at the threshold ONE tiebreaker decides instead of the
      seats. It has a deliberately different brief than a panel seat:
@@ -55,6 +58,12 @@ import plan_gate_panel as pgp  # noqa: PLC0415  (sibling module, on sys.path)
 # panel round per track; the counter is the highest ``round`` read back. This is
 # the "existing plan-gate state" the dispatch names — no second store.
 ROUND_RECORD_TYPE = "plan_gate_round"
+
+# The per-round count of seats that actually produced a readable verdict
+# (OI-1280). Written on every round record from 2026-09-06 on; ABSENT on every
+# record written before that. The absence is meaningful and is treated as
+# "unknown", never as zero-with-confidence — see readable_round_count.
+SCORED_SEATS_KEY = "scored_seats"
 
 # The tiebreaker verdict fence. Distinct from VERDICT_FENCE so a panel seat's
 # report and a tiebreaker's report can never be confused for each other (and so
@@ -359,22 +368,19 @@ def _round_ledger_path(seat_ledger_path: Optional[Path]) -> Optional[Path]:
     return seat_ledger_path
 
 
-def read_round_count(
+def _iter_round_records(
     seat_ledger_path: Optional[Path], track_id: str, project_id: str,
-) -> int:
-    """The highest ``round`` number recorded for ``(track_id, project_id)``.
+):
+    """Yield the ``plan_gate_round`` records for ``(track_id, project_id)``.
 
-    Reads the seat ledger (the existing plan-gate state) and returns the max
-    ``round`` across ``plan_gate_round`` records for this track. ``0`` when the
-    ledger is absent or has no round records for the track yet — the gate has
-    not run a round. Read-only; never raises (a corrupt ledger line is skipped,
-    mirroring ``walk_chain``'s tolerance, so a damaged tail never blocks the
-    gate). This is the value the dispatch's persistence test reads back: write,
-    discard the writer, read again, believe the file — not the return value.
+    The one reader of the round ledger. ``read_round_count`` and
+    ``readable_round_count`` both go through it so they can never disagree on
+    which records belong to a track. Read-only and non-raising: a corrupt line
+    is skipped (mirroring ``walk_chain``'s tolerance, so a damaged tail never
+    blocks the gate), an unreadable file yields nothing.
     """
     if seat_ledger_path is None or not seat_ledger_path.exists():
-        return 0
-    highest = 0
+        return
     try:
         with seat_ledger_path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -393,15 +399,73 @@ def read_round_count(
                     continue
                 if rec.get("project_id") not in (None, project_id):
                     continue
-                try:
-                    rnd = int(rec.get("round", 0))
-                except (TypeError, ValueError):
-                    continue
-                if rnd > highest:
-                    highest = rnd
+                yield rec
     except OSError:
-        return 0
+        return
+
+
+def read_round_count(
+    seat_ledger_path: Optional[Path], track_id: str, project_id: str,
+) -> int:
+    """The highest ``round`` number recorded for ``(track_id, project_id)``.
+
+    Reads the seat ledger (the existing plan-gate state) and returns the max
+    ``round`` across ``plan_gate_round`` records for this track. ``0`` when the
+    ledger is absent or has no round records for the track yet — the gate has
+    not run a round. Read-only; never raises (a corrupt ledger line is skipped,
+    mirroring ``walk_chain``'s tolerance, so a damaged tail never blocks the
+    gate). This is the value the dispatch's persistence test reads back: write,
+    discard the writer, read again, believe the file — not the return value.
+
+    This counts rounds that RAN. It cannot tell whether any of them was read —
+    a round in which every lane was down leaves exactly the same trace as a
+    round three seats reviewed. ``readable_round_count`` is the counter that
+    makes that distinction, and the stop-rule needs BOTH (OI-1280).
+    """
+    highest = 0
+    for rec in _iter_round_records(seat_ledger_path, track_id, project_id):
+        try:
+            rnd = int(rec.get("round", 0))
+        except (TypeError, ValueError):
+            continue
+        if rnd > highest:
+            highest = rnd
     return highest
+
+
+def readable_round_count(
+    seat_ledger_path: Optional[Path], track_id: str, project_id: str,
+) -> int:
+    """How many of this track's rounds were actually READ by at least one seat (OI-1280).
+
+    A round counts as readable when its record carries ``scored_seats >= 1``: at
+    least one panelist produced a verdict the gate could read. This is the
+    distinction ``read_round_count`` cannot make — it counts rounds that RAN,
+    and a round in which every lane was down runs exactly as visibly as a round
+    three seats reviewed. Two rounds of total lane breakage used to satisfy the
+    stop-rule and hand the plan to a tiebreaker that was deciding on a document
+    nobody had read.
+
+    A record MISSING ``scored_seats`` (written before 2026-09-06) is UNKNOWN, not
+    zero: it is not counted. The consequence is deliberate and self-healing — a
+    track whose only rounds predate the field runs one more full panel, which
+    writes the field, and the stop-rule applies from there. The reverse default
+    (grandfathering old records as readable) would let exactly the unreviewed
+    plans this guard exists for slip through on the strength of a missing field.
+
+    Read-only; never raises.
+    """
+    total = 0
+    for rec in _iter_round_records(seat_ledger_path, track_id, project_id):
+        if SCORED_SEATS_KEY not in rec:
+            continue  # older-schema record: unknown, not zero — and not readable
+        try:
+            scored = int(rec.get(SCORED_SEATS_KEY) or 0)
+        except (TypeError, ValueError):
+            continue
+        if scored >= 1:
+            total += 1
+    return total
 
 
 def record_round(
@@ -415,6 +479,7 @@ def record_round(
     timestamp: Optional[str] = None,
     governance_variant: str = "",
     gov_trace: str = "",
+    scored_seats: int = 0,
 ) -> bool:
     """Append a ``plan_gate_round`` record to the seat ledger.
 
@@ -436,6 +501,15 @@ def record_round(
     synthetic/legacy writer leaves them empty). A record MISSING the field is
     an older-schema record, not a same-schema empty one — the distinction is
     load-bearing for a later sweep that diffs old vs new records.
+
+    ``scored_seats`` (OI-1280) follows the same always-present contract: how many
+    panelists in THIS round produced a readable verdict
+    (``plan_gate_panel.count_scoring_seats`` over the round's result). ``0`` is a
+    real, recorded fact — "this round was run and nobody read the plan" — and it
+    is what stops the tiebreaker from breaking a tie nobody voted in. A
+    tiebreaker round records ``0``: no seats sat in it. The field is absent on
+    every record written before 2026-09-06, and ``readable_round_count`` treats
+    that absence as unknown rather than as a recorded zero.
 
     Append-only and hash-chained via ``append_chained_entry`` (the same
     primitive the seat records use), so the round history is tamper-evident
@@ -461,12 +535,84 @@ def record_round(
             "model": model,
             "governance_variant": governance_variant,
             "gov_trace": gov_trace,
+            SCORED_SEATS_KEY: max(0, int(scored_seats)),
             "recorded_at": timestamp or datetime.now(timezone.utc).isoformat(),
         }
         append_chained_entry(ledger, record)
         return True
     except Exception:  # vnx-silent-except: round persistence must never break the gate
         return False
+
+
+def tiebreaker_gate_status(
+    seat_ledger_path: Optional[Path],
+    track_id: str,
+    project_id: str,
+    *,
+    max_rounds: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Whether the tiebreaker may run for this track, WITH the reason either way.
+
+    TWO conditions, both required (OI-1280):
+
+      1. ``read_round_count >= threshold`` — the track has had enough rounds.
+      2. ``readable_round_count >= 1`` — at least one of those rounds was
+         actually READ: some seat, in some round, produced a verdict the gate
+         could parse.
+
+    Condition 2 is the one that was missing. The counter the stop-rule used
+    counts rounds that RAN. Two rounds in which every lane was down — a dead
+    litellm proxy, an expired kimi quota, a claude lane refusing to spawn —
+    advanced that counter exactly as fast as two rounds of real review, and the
+    gate then handed the plan to a single tiebreaker with the instruction "the
+    seats have had their say". They had not. The tiebreaker decided START or
+    STOP on a plan that no model had read, and START clears the gate.
+
+    So: zero readable rounds means no tiebreaker. The panel keeps running, which
+    is the pre-stop-rule behaviour and the correct one here — a panel with no
+    readable verdicts already returns INFRA_FAIL, the loud signal that the lanes
+    are broken. An infrastructure failure must not be resolved by promoting one
+    model to sole judge.
+
+    Returns the decision plus everything needed to explain it:
+    ``should_run``, ``rounds_done``, ``readable_rounds``, ``threshold``,
+    ``rationale``. ``max_rounds < 1`` is treated as the default (a guard against
+    a malformed runtime override; ``load_tiebreaker_config`` already rejects it
+    at load, but this keeps the runtime path safe too).
+    """
+    threshold = max_rounds if max_rounds is not None and max_rounds >= 1 else DEFAULT_MAX_ROUNDS
+    rounds_done = read_round_count(seat_ledger_path, track_id, project_id)
+    readable = readable_round_count(seat_ledger_path, track_id, project_id)
+
+    if rounds_done < threshold:
+        return {
+            "should_run": False, "rounds_done": rounds_done,
+            "readable_rounds": readable, "threshold": threshold,
+            "rationale": (
+                f"{rounds_done} panel round(s) done, threshold {threshold} — "
+                "below the stop-rule threshold; the full panel runs"
+            ),
+        }
+    if readable < 1:
+        return {
+            "should_run": False, "rounds_done": rounds_done,
+            "readable_rounds": readable, "threshold": threshold,
+            "rationale": (
+                f"{rounds_done} panel round(s) done (threshold {threshold}) but ZERO of "
+                "them produced a readable verdict from any seat — no tiebreaker. A "
+                "tiebreaker breaks a tie between seats that reviewed the plan; here no "
+                "seat has read it yet, so there is no tie to break. This is a lane "
+                "failure, not a plan judgment: fix the lanes and re-run the panel"
+            ),
+        }
+    return {
+        "should_run": True, "rounds_done": rounds_done,
+        "readable_rounds": readable, "threshold": threshold,
+        "rationale": (
+            f"{rounds_done} panel round(s) done (threshold {threshold}), "
+            f"{readable} of them read by at least one seat — the tiebreaker decides"
+        ),
+    }
 
 
 def should_run_tiebreaker(
@@ -476,18 +622,16 @@ def should_run_tiebreaker(
     *,
     max_rounds: Optional[int] = None,
 ) -> bool:
-    """True when the track has reached the round threshold.
+    """True when the track has reached the round threshold AND a round was read.
 
-    The threshold is ``max_rounds`` (resolved from the config when ``None``):
-    at/above that count the gate runs the tiebreaker instead of the full panel.
-    The decision is read from the persisted round count (the seat ledger), NOT
-    from an in-memory counter — so a restart after two rounds still sees the
-    threshold reached. ``max_rounds < 1`` is treated as the default (a guard
-    against a malformed runtime override; load_tiebreaker_config already
-    rejects this at load, but this keeps the runtime path safe too).
+    Thin boolean over ``tiebreaker_gate_status`` — one rule, two callers, no
+    second copy of the condition. See that function for the reasoning; a caller
+    that needs to TELL the operator why the tiebreaker did or did not fire
+    should call it directly and use its ``rationale``.
     """
-    threshold = max_rounds if max_rounds is not None and max_rounds >= 1 else DEFAULT_MAX_ROUNDS
-    return read_round_count(seat_ledger_path, track_id, project_id) >= threshold
+    return tiebreaker_gate_status(
+        seat_ledger_path, track_id, project_id, max_rounds=max_rounds,
+    )["should_run"]
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,8 @@ implementation. This module runs that panel:
     plan doc + rubric  ->  N panelist lanes (opus / kimi / glm-5.2-harness)
                             each via provider_dispatch (governed: report -> receipt)
                        ->  parse each panelist's structured verdict
+                       ->  a seat that reviewed in PROSE gets one cheap second
+                           extraction on the same lane before any re-dispatch
                        ->  apply the panel pass/fail rule (PM-SKILL)
                        ->  PASS | REVISE | BLOCK | INFRA_FAIL (0 readable verdicts —
                            an infrastructure outcome, never a plan judgment)
@@ -112,6 +114,54 @@ DEFAULT_PANEL: List[Dict[str, str]] = [
 ]
 
 VERDICT_FENCE = "vnx-plan-verdict"
+
+# ---------------------------------------------------------------------------
+# Seat status (OI-1434) — WHY a seat did or did not score, by name.
+#
+# Before this, an EMPTY report and a report carrying a full prose review with no
+# verdict fence both came back as ``parse_error=True``. Only the free-text
+# rationale ("empty report" vs "no verdict block found") told them apart, and the
+# decision rule read neither: both fell into the same non-scoring "abstained"
+# bucket. A seat that had reviewed the entire plan and written "Verdict: revise"
+# in prose counted exactly like a seat that returned nothing at all.
+#
+# Measured on track ``review-gate-kimi-codex-glm`` (2026-08-22, runs at 10:31 and
+# 10:35): "only 1 readable verdict(s) of 3 - below quorum" on a panel where two
+# seats had in fact delivered a complete review — see
+# ``tests/fixtures/plan_gate_prose_report_20260822.md``.
+#
+# ``seat_status`` is carried on ``PanelistResult``, named in the decision
+# rationale, and persisted in the seat ledger, so "empty" and "unreadable" can
+# never again share one word.
+SEAT_SCORED = "scored"                                    # the seat's own report carried a readable verdict
+SEAT_SCORED_VIA_REEXTRACTION = "scored_via_reextraction"  # readable only after the second extraction
+SEAT_NO_REPORT = "no_report"                              # the lane returned an empty body
+SEAT_PROSE_NO_FENCE = "prose_no_fence"                    # real content, zero verdict fences
+SEAT_UNPARSEABLE_FENCE = "unparseable_fence"              # a fence exists, no body parses into a verdict
+SEAT_LANE_NO_ANSWER = "lane_no_answer"                    # governance synthesized the body (timeout/error/no file)
+SEAT_DISPATCH_FAILED = "dispatch_failed"                  # the dispatch call itself raised
+
+# The statuses that COUNT toward the panel's quorum and its pass/fail arithmetic.
+# Everything else is non-scoring. Membership is the single source of truth — the
+# rule below asks this set, never a list of flags.
+SCORING_SEAT_STATUSES: frozenset = frozenset({SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION})
+
+SEAT_STATUSES: frozenset = frozenset({
+    SEAT_SCORED, SEAT_SCORED_VIA_REEXTRACTION, SEAT_NO_REPORT, SEAT_PROSE_NO_FENCE,
+    SEAT_UNPARSEABLE_FENCE, SEAT_LANE_NO_ANSWER, SEAT_DISPATCH_FAILED,
+})
+
+# The second-extraction deadline (OI-1434). Deliberately an order of magnitude
+# below DEFAULT_SEAT_TIMEOUT_SECONDS: the re-extraction re-reads a report that
+# already exists and emits one small JSON block — it does no review work, so a
+# lane that cannot answer that in two minutes is not going to answer at all.
+# Same env-knob style as VNX_PANEL_RETRY / VNX_PLAN_GATE_SEAT_TIMEOUT.
+DEFAULT_REEXTRACTION_TIMEOUT_SECONDS = 120
+
+# At most ONE re-extraction per seat per round. The budget is spent on the first
+# prose-no-fence report and is NOT refilled by the retry: a lane that answers in
+# prose twice has answered the question about its formatting.
+REEXTRACTION_BUDGET_PER_SEAT = 1
 
 
 def _default_panel_config_path() -> Path:
@@ -549,6 +599,74 @@ def build_generic_fileref_instruction(doc_path: str, report_path: str) -> str:
     )
 
 
+def build_verdict_reextraction_instruction(report_text: str) -> str:
+    """Render the SECOND-EXTRACTION instruction for a seat that reviewed in prose (OI-1434).
+
+    The seat already did the expensive work: it read the plan and formed a judgment. What
+    is missing is only the machine-readable block. So this instruction asks for exactly
+    that and nothing else — no re-review, no new findings, no change of opinion. The seat's
+    OWN report is the sole input.
+
+    The report is passed through ``_sanitize_doc``, the same neutralization the untrusted
+    plan doc gets. Two reasons, both load-bearing:
+
+      - a fence in the input is disarmed, so the block ``parse_verdict`` reads back can only
+        have come from the re-extraction itself and never be an echo of the input. On the
+        live path the input provably carries no fence (that is what ``prose_no_fence``
+        means), but the guard must not depend on the caller having checked — the moment this
+        is reused for a seat whose report DOES carry a fence, the spoofing hole would be
+        wide open;
+      - the length cap keeps the instruction inside ARG_MAX on the provider lanes, which
+        pass it as a subprocess argument.
+    """
+    safe = _sanitize_doc(report_text)
+    return (
+        "You already reviewed an implementation plan and wrote the review below. Your "
+        "review is complete and CORRECT — this is not a request to review anything "
+        "again.\n\n"
+        "The only thing missing is the machine-readable verdict block. Read your own "
+        "review and emit the block that matches the judgment you ALREADY reached.\n\n"
+        "Rules:\n"
+        "- Do NOT change your judgment, your findings, or your reasoning.\n"
+        "- Do NOT re-read or re-review the plan.\n"
+        "- Do NOT add anything outside the block: no preamble, no explanation, no closing "
+        "line.\n"
+        "- If your review concluded the plan is sound, the verdict is pass; if it named "
+        "fixable gaps, revise; if it named a fundamental flaw, block.\n\n"
+        "----- YOUR REVIEW -----\n"
+        f"{safe}\n"
+        "----- END REVIEW -----\n\n"
+        "Output EXACTLY this fenced block and nothing else:\n"
+        f"```{VERDICT_FENCE}\n"
+        "{\n"
+        '  "verdict": "pass" | "revise" | "block",\n'
+        '  "blocking_findings": ["the concrete issues your review named", "..."],\n'
+        '  "rationale": "one or two sentences, taken from your own review"\n'
+        "}\n"
+        "```\n"
+    )
+
+
+def _reextraction_timeout(explicit: "int | None" = None) -> int:
+    """The second extraction's deadline (``VNX_PLAN_GATE_REEXTRACT_TIMEOUT``, default 120).
+
+    Same resolution contract as ``_seat_timeout``: an explicit caller value wins outright,
+    then the env var when it is a valid positive int, then the default. A malformed or
+    non-positive value falls back to the default rather than widening the deadline to
+    infinity or clamping a real value away.
+    """
+    if explicit is not None:
+        return max(1, int(explicit))
+    raw = os.environ.get("VNX_PLAN_GATE_REEXTRACT_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_REEXTRACTION_TIMEOUT_SECONDS
+    try:
+        val = int(raw)
+    except ValueError:
+        return DEFAULT_REEXTRACTION_TIMEOUT_SECONDS
+    return val if val >= 1 else DEFAULT_REEXTRACTION_TIMEOUT_SECONDS
+
+
 def _strip_trailing_commas(text: str) -> str:
     """Remove a trailing comma immediately before a closing ``}``/``]`` (a recurring
     codex/glm flake: ``{"a": 1,}``)."""
@@ -637,13 +755,33 @@ def parse_verdict(report_text: str) -> Dict[str, Any]:
 
     Fail-safe by design: if NO fence parses into a valid verdict, the result is ``revise`` with
     ``parse_error=True`` so a missing/garbled verdict can never silently PASS.
+
+    OI-1434 — the result also carries a ``seat_status`` naming WHICH failure this was, because
+    ``parse_error`` alone folded three unlike outcomes into one word:
+
+      - ``no_report``        — the lane returned an empty body. Nothing was reviewed.
+      - ``prose_no_fence``   — real content, zero verdict fences. The plan WAS reviewed; only
+                               the machine-readable block is missing. This is the status
+                               ``run_panel`` re-extracts from (``_reextract_verdict``) before
+                               it pays for a full re-dispatch.
+      - ``unparseable_fence``— a fence exists but no body parses into a valid verdict. The
+                               tolerant repair pass above already ran and still failed, so a
+                               re-extraction of the same text buys nothing; the seat falls
+                               through to the retry.
+      - ``scored``           — a readable verdict.
+
+    The three failure rationales are unchanged verbatim; the status is the machine-readable
+    half of the same statement.
     """
     empty = {"verdict": "revise", "blocking_findings": [], "rationale": "", "parse_error": True}
     if not report_text:
-        return {**empty, "rationale": "empty report"}
+        return {**empty, "rationale": "empty report", "seat_status": SEAT_NO_REPORT}
     bodies = _iter_fence_bodies(report_text)
     if not bodies:
-        return {**empty, "rationale": "no verdict block found"}
+        return {
+            **empty, "rationale": "no verdict block found",
+            "seat_status": SEAT_PROSE_NO_FENCE,
+        }
 
     last_reason = "verdict block is not valid JSON"
     for body in reversed(bodies):
@@ -666,8 +804,9 @@ def parse_verdict(report_text: str) -> Dict[str, Any]:
             "blocking_findings": [str(x) for x in findings],
             "rationale": str(data.get("rationale", "")),
             "parse_error": False,
+            "seat_status": SEAT_SCORED,
         }
-    return {**empty, "rationale": last_reason}
+    return {**empty, "rationale": last_reason, "seat_status": SEAT_UNPARSEABLE_FENCE}
 
 
 @dataclass
@@ -695,6 +834,66 @@ class PanelistResult:
     raw_text: str = ""               # OI-839: the lane's raw report, kept ONLY on
                                      # parse_error so the unparseable output survives
                                      # for diagnosis instead of vanishing with the tempfile
+    # OI-1434: the named reason this seat did or did not score — one of
+    # SEAT_STATUSES. Every production path sets it (``_dispatch_one`` /
+    # ``_reextract_verdict``). It stays "" for a result built by hand without one
+    # (the effectiveness probe, backfill_track_decision_ref, older tests): an
+    # empty status means "not classified", never a status of its own, and the
+    # rationale then names the seat without a status suffix rather than guessing
+    # which flavor of unreadable it was.
+    seat_status: str = ""
+    # The dispatch id of the second extraction, when one ran. Non-empty ONLY when
+    # a re-extraction was attempted — its presence is the seat's provenance trail
+    # from the resolved verdict back to the governed dispatch that produced it.
+    reextraction_dispatch_id: str = ""
+
+
+def is_scoring(result: "PanelistResult") -> bool:
+    """True when this seat's verdict counts toward the panel arithmetic.
+
+    One definition, used by the rule, the retry loop, and the seat ledger, so
+    "scoring" can never mean three slightly different things in three places.
+    A seat with an explicit ``seat_status`` is judged by that status alone
+    (``SCORING_SEAT_STATUSES``); a result built without one falls back to the
+    original three flags.
+    """
+    if result.seat_status:
+        return result.seat_status in SCORING_SEAT_STATUSES
+    return result.dispatched and not result.parse_error and not result.no_verdict
+
+
+def _labelled(results: List["PanelistResult"]) -> str:
+    """``label (seat_status)`` per seat, comma-joined — the naming the rationale uses.
+
+    A seat with no recorded status renders as the bare label, so the rationale
+    never invents a status it does not have (and the pre-OI-1434 rationale text
+    stays a prefix of the new one).
+    """
+    return ", ".join(
+        f"{r.label} ({r.seat_status})" if r.seat_status else r.label for r in results
+    )
+
+
+def count_scoring_seats(panelists: List[Dict[str, Any]]) -> int:
+    """How many seats in a ``run_panel`` result actually scored.
+
+    Takes the ``panelists`` list in its ``PanelistResult.__dict__`` form (what
+    ``run_panel`` returns and ``planning_cli`` holds) and counts the seats whose
+    ``seat_status`` is in ``SCORING_SEAT_STATUSES``. This is the number
+    ``plan_gate_tiebreaker.record_round`` persists as ``scored_seats``, so the
+    stop-rule can tell a round that was READ from a round that merely RAN
+    (OI-1280). A seat dict without a status falls back to the three flags, the
+    same way ``is_scoring`` does.
+    """
+    total = 0
+    for p in panelists:
+        status = str(p.get("seat_status") or "")
+        if status:
+            if status in SCORING_SEAT_STATUSES:
+                total += 1
+        elif p.get("dispatched") and not p.get("parse_error") and not p.get("no_verdict"):
+            total += 1
+    return total
 
 
 def _decision(decision: str, block: int, revise: int, passes: int, rationale: str) -> Dict[str, Any]:
@@ -736,6 +935,12 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     under their own label (``no-verdict (timeout/no-report)``) so the one-line summary
     distinguishes them from the abstained seats.
 
+    OI-1434: every named lane in the rationale carries its ``seat_status`` in parentheses
+    — ``glm-5.2-harness (prose_no_fence)`` reads differently from
+    ``glm-5.2-harness (no_report)``, and an operator reading "below quorum" can now see
+    whether the missing voices reviewed the plan and mis-formatted, or never delivered at
+    all. The category a seat lands in is unchanged; only its silence now has a name.
+
     Over the SCORING (readable) lanes only:
     - infra floor: ZERO readable verdicts is NOT a plan judgment — the plan was never
       reviewed. That returns INFRA_FAIL (an infrastructure outcome, distinct from every
@@ -755,18 +960,15 @@ def apply_panel_rule(results: List[PanelistResult]) -> Dict[str, Any]:
     #   scoring    — dispatched, no parse error, NOT no-verdict (the verdicts that count)
     #   no_verdict — the lane never delivered a verdict at all (timeout/synthesized/no file)
     #   abstained  — a real report whose fence would not parse (the 2026-06-24 non-scoring lane)
-    scoring = [r for r in results if r.dispatched and not r.parse_error and not r.no_verdict]
+    scoring = [r for r in results if is_scoring(r)]
     no_verdict = [r for r in results if r.no_verdict]
-    abstained = [
-        r for r in results
-        if not (r.dispatched and not r.parse_error and not r.no_verdict) and not r.no_verdict
-    ]
+    abstained = [r for r in results if not is_scoring(r) and not r.no_verdict]
     nv_note = (
-        f"; no-verdict (timeout/no-report): {', '.join(r.label for r in no_verdict)}"
+        f"; no-verdict (timeout/no-report): {_labelled(no_verdict)}"
         if no_verdict else ""
     )
     ns_note = (
-        f"; non-scoring (abstained): {', '.join(r.label for r in abstained)}"
+        f"; non-scoring (abstained): {_labelled(abstained)}"
         if abstained else ""
     )
     block = sum(1 for r in scoring if r.verdict == "block")
@@ -1158,6 +1360,7 @@ def _dispatch_one(
             label=member["label"], provider=member["provider"],
             model=member.get("model_arg", ""),
             dispatched=False, error=str(exc), report_path=dispatch_id,
+            seat_status=SEAT_DISPATCH_FAILED,
         )
     # OI-1066: detect the synthesized marker BEFORE parse_verdict. A fabricated
     # body has no verdict fence, so parse_verdict would otherwise return its
@@ -1172,6 +1375,7 @@ def _dispatch_one(
             verdict="revise", rationale="lane produced no verdict (synthesized report)",
             dispatched=True, parse_error=False, no_verdict=True,
             report_path=dispatch_id,
+            seat_status=SEAT_LANE_NO_ANSWER,
         )
     parsed = parse_verdict(report_text)
     # OI-839: on parse_error the raw lane output is the ONLY diagnostic that tells
@@ -1185,6 +1389,77 @@ def _dispatch_one(
         rationale=parsed["rationale"], parse_error=parsed["parse_error"],
         dispatched=True, report_path=dispatch_id,
         raw_text=report_text if parsed["parse_error"] else "",
+        seat_status=parsed["seat_status"],
+    )
+
+
+def _reextract_verdict(
+    dispatcher: DispatcherFn,
+    member: Dict[str, str],
+    result: PanelistResult,
+    dispatch_id: str,
+) -> PanelistResult:
+    """Second, cheap extraction of a verdict from a seat's OWN prose report (OI-1434).
+
+    A ``prose_no_fence`` seat reviewed the whole plan and then wrote its judgment in
+    sentences. The review exists; only the fence is missing. Rather than throw the review
+    away — which is what counting the seat as non-scoring does — this hands the seat's own
+    report back to the SAME lane with one job: emit the fenced block that belongs to this
+    review, change nothing else.
+
+    ORDER (deliberate, and pinned by test): this runs BEFORE ``run_panel``'s retry. The
+    retry re-dispatches the entire seat — the plan, the rubric, a fresh full review at the
+    full seat deadline. The re-extraction re-reads a report that already exists and asks
+    for one small JSON block at a 120s deadline. Paying the expensive one first while the
+    cheap one would have sufficed is pure waste, so the cheap one goes first and a success
+    means the retry never fires at all.
+
+    FAILURE CONTRACT — three ways this can fail, one outcome for all three: the seat is
+    returned EXACTLY as it came in (``parse_error=True``, ``seat_status=prose_no_fence``,
+    non-scoring). A second extraction never upgrades a seat except by producing a real,
+    parseable verdict block:
+
+      1. the extra dispatch raises (lane down, timeout, no report file);
+      2. the answer is empty;
+      3. the answer parses no verdict — no fence, or a fence that will not read.
+
+    Never a pass by default, never a fabricated verdict. The returned result carries
+    ``reextraction_dispatch_id`` either way, so a failed attempt is as visible in the seat
+    ledger as a successful one.
+    """
+    def _unchanged(note: str) -> PanelistResult:
+        """Hand the seat back exactly as it came in, with the reason appended."""
+        result.reextraction_dispatch_id = dispatch_id
+        result.error = f"{result.error}; {note}" if result.error else note
+        return result
+
+    try:
+        answer = dispatcher(
+            member["provider"], member["model_arg"],
+            build_verdict_reextraction_instruction(result.raw_text),
+            dispatch_id,
+        )
+    except Exception as exc:  # vnx-silent-except: a failed re-extraction leaves the seat exactly as it was
+        return _unchanged(f"verdict re-extraction failed: {exc}")
+    if not (answer or "").strip():
+        return _unchanged("verdict re-extraction returned an empty answer")
+    parsed = parse_verdict(answer)
+    if parsed["parse_error"]:
+        return _unchanged(
+            f"verdict re-extraction produced no readable block ({parsed['rationale']})"
+        )
+    return PanelistResult(
+        label=result.label, provider=result.provider, model=result.model,
+        verdict=parsed["verdict"], blocking_findings=parsed["blocking_findings"],
+        rationale=parsed["rationale"], parse_error=False,
+        dispatched=True, no_verdict=False,
+        # The seat's report path stays the ORIGINAL report: that is where the review
+        # lives. The re-extraction id is carried separately so the provenance of the
+        # VERDICT (a second governed dispatch) is never confused with the provenance of
+        # the REVIEW.
+        report_path=result.report_path,
+        seat_status=SEAT_SCORED_VIA_REEXTRACTION,
+        reextraction_dispatch_id=dispatch_id,
     )
 
 
@@ -1273,8 +1548,21 @@ def _emit_seat_records(
                 "responded": result.dispatched,
                 "parse_error": result.parse_error,
                 "no_verdict": result.no_verdict,
+                # OI-1434: the NAMED reason, alongside the three booleans it
+                # subsumes. Written on every record (empty string when the result
+                # was built without one) so a later sweep can tell a same-schema
+                # "not classified" from an older-schema record that never had the
+                # field at all — the same missing-vs-empty contract record_round
+                # holds for its governance fields.
+                "seat_status": result.seat_status,
                 "run_at": now,
             }
+            # Provenance: this seat's verdict did not come from its own report but
+            # from a second, governed extraction dispatch over the same lane. The
+            # id is written whenever an extraction was ATTEMPTED — a failed attempt
+            # is as much a fact about this seat as a successful one.
+            if result.reextraction_dispatch_id:
+                record["reextraction_dispatch_id"] = result.reextraction_dispatch_id
             # OI-839: carry the raw lane output on parse-error records so the
             # unparseable text is preserved in the durable, hash-chained ledger
             # for diagnosis — a later parser hardening can be built against the
@@ -1297,6 +1585,7 @@ def run_panel(
     data_dir: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
     seat_ledger_path: Optional[Path] = None,
+    reextract_dispatcher: Optional[DispatcherFn] = None,
 ) -> Dict[str, Any]:
     """Run the plan-first panel over ``doc_path`` (or ``doc_text``) and return the verdict.
 
@@ -1315,10 +1604,39 @@ def run_panel(
     ``_seat_timeout`` — the same env-var-knob style as ``VNX_PANEL_RETRY``. An
     explicit kwarg (the ``--seat-timeout`` CLI flag) wins outright. Only the
     default dispatcher consumes it; an injected ``dispatcher`` ignores it.
+
+    ``reextract_dispatcher`` (OI-1434): the lane the SECOND extraction runs on for a
+    seat that reviewed in prose. When ``run_panel`` builds its own dispatcher it
+    builds a second one at the much shorter re-extraction deadline
+    (``VNX_PLAN_GATE_REEXTRACT_TIMEOUT``, default 120) — the extraction re-reads an
+    existing report and emits one JSON block, so it has no business holding a
+    900-second seat deadline. That second lane is built LAZILY, on the first seat
+    that needs it, so a round in which every seat emits its fence builds exactly
+    one lane as before. An INJECTED ``dispatcher`` is reused for both calls unless
+    a separate one is passed: a test double has no deadline, and the two calls are
+    told apart by their instruction and their dispatch id (``<seat-id>-reextract``),
+    never by which lane object served them.
     """
     panel = panel or DEFAULT_PANEL
     resolved_timeout = _seat_timeout(timeout_seconds)
+    caller_supplied_lane = dispatcher is not None
     dispatcher = dispatcher or _make_default_dispatcher(data_dir, resolved_timeout)
+
+    # The extraction lane. An injected dispatcher serves both calls (a test double
+    # has no deadline, and the two calls are told apart by their instruction and
+    # dispatch id, never by which object served them). Otherwise it is built
+    # LAZILY on the first seat that actually needs it: most rounds see no
+    # prose_no_fence seat at all, and a lane nobody calls should not be built.
+    reextract_lane: Optional[DispatcherFn] = reextract_dispatcher
+    if reextract_lane is None and caller_supplied_lane:
+        reextract_lane = dispatcher
+
+    def _extraction_lane() -> DispatcherFn:
+        nonlocal reextract_lane
+        if reextract_lane is None:
+            reextract_lane = _make_default_dispatcher(data_dir, _reextraction_timeout())
+        return reextract_lane
+
     if doc_text is None:
         if doc_path is None:
             raise ValueError("run_panel: a plan source is required — pass doc_path or doc_text")
@@ -1335,7 +1653,15 @@ def run_panel(
         # retry also flakes we keep its (still non-scoring) result, which then abstains via
         # apply_panel_rule. Never more than `retries` extra attempts — each is a fresh governed
         # dispatch id so the retry lands its own report -> receipt.
+        #
+        # OI-1434: in FRONT of that retry sits the cheap step. A seat whose report is
+        # prose_no_fence has already done the review; only the block is missing. Re-extracting
+        # it costs one small call at a 120s deadline, where the retry costs a whole second
+        # review at the full seat deadline. So: dispatch -> (prose? re-extract) -> retry.
+        # The re-extraction budget is per SEAT per ROUND, not per attempt — the retry does not
+        # refill it (REEXTRACTION_BUDGET_PER_SEAT).
         result: PanelistResult
+        reextractions_left = REEXTRACTION_BUDGET_PER_SEAT
         for _ in range(retries + 1):
             did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
             result = _dispatch_one(dispatcher, member, instruction, did)
@@ -1344,8 +1670,15 @@ def run_panel(
             # governance-synthesized) is retryable too — the lane may deliver on
             # a fresh dispatch id — so the retry continues past it just as it
             # continues past a parse_error or a raised dispatch.
-            if result.dispatched and not result.parse_error and not result.no_verdict:
+            if is_scoring(result):
                 break  # readable verdict — no retry needed
+            if result.seat_status == SEAT_PROSE_NO_FENCE and reextractions_left > 0:
+                reextractions_left -= 1
+                result = _reextract_verdict(
+                    _extraction_lane(), member, result, f"{did}-reextract",
+                )
+                if is_scoring(result):
+                    break  # the review was readable after all — the retry never fires
         results.append(result)
 
     summary = apply_panel_rule(results)
