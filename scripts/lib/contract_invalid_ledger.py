@@ -27,15 +27,16 @@ at session start. This module is the missing read side:
 
 Staleness windowing is delegated to the existing
 ``contract_invalid_window.is_stale_contract_invalid`` / the effective
-timestamp it defines — never reimplemented here — and outcome
-classification (is a given receipt a *governed success*?) is delegated to
-``event_outcome_semantics.classify_event_outcome`` for the same reason.
+timestamp it defines — never reimplemented here. Both "open" and "acceptable"
+below are decided purely from the ``contract_invalid`` status/event_type
+literal on the latest receipt (``_is_contract_invalid``); no broader
+success/failure classification is needed for that, so this module does not
+delegate to ``event_outcome_semantics.classify_event_outcome``.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,8 +46,8 @@ _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+from atomic_io import atomic_write_json  # noqa: E402
 from contract_invalid_window import contract_invalid_effective_timestamp  # noqa: E402
-from event_outcome_semantics import classify_event_outcome  # noqa: E402
 
 CONTRACT_INVALID_STATUS = "contract_invalid"
 CONTRACT_INVALID_EVENT_TYPE = "report_contract_invalid"
@@ -83,12 +84,6 @@ def _is_contract_invalid(record: Dict[str, Any]) -> bool:
     status = str(record.get("status") or "").strip().lower()
     event_type = str(record.get("event_type") or record.get("event") or "").strip().lower()
     return status == CONTRACT_INVALID_STATUS or event_type == CONTRACT_INVALID_EVENT_TYPE
-
-
-def _is_governed_success(record: Dict[str, Any]) -> bool:
-    event_type = record.get("event_type") or record.get("event")
-    status = record.get("status")
-    return classify_event_outcome(event_type, status) == "success"
 
 
 def _read_receipts(receipts_path: Path) -> List[Dict[str, Any]]:
@@ -239,10 +234,13 @@ def write_contract_invalid_open_ledger(
 ) -> Dict[str, Any]:
     """Write the single-file open-items ledger atomically.
 
-    Atomic write (tmp + os.replace) — this file is read at SessionStart
-    while a dispatch may concurrently be appending to the ledger it is
-    derived from; a bare ``open(path, 'w')`` could hand a reader a
-    truncated/partial file mid-write.
+    Atomic write via ``atomic_io.atomic_write_json`` — this file is read at
+    SessionStart while a dispatch may concurrently be appending to the
+    ledger it is derived from; a bare ``open(path, 'w')`` could hand a
+    reader a truncated/partial file mid-write, and a scratch name derived
+    only from ``output_path`` would be shared by every concurrent writer of
+    this same destination (OI-1486) — ``atomic_write_json`` uses a
+    per-writer ``mkstemp`` name instead.
     """
     open_items = collect_contract_invalid_open(receipts_path, project_id=project_id)
     payload = {
@@ -250,10 +248,7 @@ def write_contract_invalid_open_ledger(
         "open_count": len(open_items),
         "items": open_items,
     }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp_path, output_path)
+    atomic_write_json(output_path, payload, indent=2)
     return payload
 
 
