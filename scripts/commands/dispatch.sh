@@ -169,6 +169,11 @@ _d_single_entry_dispatch() {
   local dry_run_flag=""
   local pending_id=""
   local force_release_class=""
+  # OI-1639: door flags this wrapper does not itself enumerate (--refire,
+  # --reopen-lane, --reopen-reason, --override-stop-conditions, --track, ...) are
+  # collected here and passed through verbatim below — the door is the single
+  # source of truth on which flags it accepts, this wrapper is not a second list.
+  local -a extra_door_args=()
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -211,6 +216,11 @@ Single-entry gate (the default lane). Staged forms route through the door:
                                Does NOT kill the holder — use the printed pid if needed.
   VNX_DISPATCH_LEGACY=1        Force legacy path even when gate is on
 
+Any other --flag (with its value, if any) is passed through verbatim to the door
+(dispatch_cli.py), which decides whether it recognizes it — e.g. --refire REASON,
+--reopen-lane PROVIDER, --reopen-reason REASON, --override-stop-conditions REASON,
+--track TRACK_ID.
+
 Headless lane: set allow_headless=true + headless_reason in dispatch-spec.json.
   Billing is auth-derived, not lane-derived (dispatch_plan.claude_auth_is_api_metered):
   without an own ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL a headless dispatch bills as
@@ -225,6 +235,21 @@ HELP
         # actionable error instead of the generic unknown-flag reject.
         err "[dispatch] single-entry gate: '${1%%=*}' is a legacy raw-file override; it is not valid with a staged <pending-id> (the spec already defines terminal/model/adapter). Drop the flag, or use the raw form (vnx dispatch <file.md>)."
         return 1 ;;
+      --*=*)
+        extra_door_args+=("$1"); shift ;;
+      --*)
+        # Unknown-to-THIS-WRAPPER door flag: pass it (and its value, if any) through
+        # verbatim to dispatch_cli.py, which decides whether IT recognizes it. Every
+        # such flag today (--refire, --reopen-lane, --reopen-reason,
+        # --override-stop-conditions, --track) takes a value, so a following token
+        # that doesn't itself look like a flag is consumed as that value.
+        extra_door_args+=("$1")
+        if [ -n "${2:-}" ] && [[ "${2:-}" != -* ]]; then
+          extra_door_args+=("$2"); shift 2
+        else
+          shift
+        fi
+        ;;
       -*)
         err "[dispatch] single-entry gate: unknown flag: $1"
         return 1 ;;
@@ -284,13 +309,30 @@ HELP
 
   # P1-#7: no trailing colon (avoids CWD on sys.path when PYTHONPATH is unset)
   PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
-    "$VNX_PYTHON" "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run}
+    "$VNX_PYTHON" "$dispatch_cli_script" --spec-file "$spec_file" ${dry_run_flag:+--dry-run} \
+    ${extra_door_args[@]+"${extra_door_args[@]}"}
   return $?
 }
 
 # ── Main command ───────────────────────────────────────────────────────────
 
 cmd_dispatch() {
+  # OI-1639: `vnx dispatch stage ...` is a STAGE-ONLY entry (dispatch_bridge.py stage):
+  # it never fires — it writes a dispatch-spec.json bundle and prints its path, for an
+  # operator to promote through the door afterwards. Checked before the routing split
+  # below, independent of VNX_SINGLE_ENTRY_DISPATCH (staging is always available).
+  if [ "${1:-}" = "stage" ]; then
+    shift
+    local bridge_script="${VNX_HOME}/scripts/lib/dispatch_bridge.py"
+    if [ ! -f "$bridge_script" ]; then
+      err "[dispatch] stage: dispatch_bridge.py not found: $bridge_script"
+      return 1
+    fi
+    PYTHONPATH="${VNX_HOME}/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}" \
+      "$VNX_PYTHON" "$bridge_script" stage "$@"
+    return $?
+  fi
+
   # Routing (flag contract — also documented in --help). The door owns STAGED forms only;
   # raw `vnx dispatch <file.md>` stays on the legacy lane (deprecated, removed in 1.x per ADR-025):
   #   door enabled  + staged form (--spec-file / <pending-id> with a bundle / --force-release-lock)

@@ -248,7 +248,7 @@ def _emit_reject(r: Reject) -> None:
     print(f"[dispatch_cli] REJECT [{r.code}]: {r.reason}", file=sys.stderr)
 
 
-def _print_plan(plan: ExecutionPlan, fp: str) -> None:
+def _print_plan(plan: ExecutionPlan, fp: str, *, spec: "Optional[DispatchSpec]" = None) -> None:
     print(f"[dispatch_cli] DRY RUN — fingerprint: {fp}")
     print(f"  dispatch_id:  {plan.dispatch_id}")
     print(f"  provider:     {plan.provider.value}")
@@ -266,6 +266,12 @@ def _print_plan(plan: ExecutionPlan, fp: str) -> None:
         print(f"  task_class:   {plan.task_class}")
     if plan.tier_from or plan.tier_to:
         print(f"  tier:         {plan.tier_from or '-'} -> {plan.tier_to or '-'}")
+    # OI-1639: track_id is NOT a plan field (ExecutionPlan carries no track_id — see
+    # dispatch_plan.py), so it is read off the spec directly here, same rationale as
+    # parent_dispatch/task_class above: prove a --track stamp landed before --dry-run
+    # returns (a dry run never reaches _persist_track_id, which only runs on a real fire).
+    if spec is not None and spec.track_id:
+        print(f"  track_id:     {spec.track_id}")
     for w in plan.warnings:
         print(f"  [WARN] {w}")
 
@@ -2913,6 +2919,7 @@ def run_dispatch(
     dry_run: bool = False,
     refire_reason: Optional[str] = None,
     stop_conditions_override_reason: Optional[str] = None,
+    track_id_override: Optional[str] = None,
 ) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
@@ -2967,6 +2974,14 @@ def run_dispatch(
     except Exception as exc:
         print(f"[dispatch_cli] REJECT [spec-parse-error]: {exc}", file=sys.stderr)
         return 1
+
+    # OI-1639: --track stamps spec.track_id BEFORE validate()/build_runtime_snapshot(), so
+    # the existing TL-D1 machinery (_check_track_link_verdict's existence/format check,
+    # _persist_track_id's write on a real fire) sees it exactly as if the staged spec had
+    # carried the value itself — no second code path, no second column. An empty/whitespace
+    # override is treated as "not given" (never overwrites a staged track_id with blank).
+    if track_id_override and track_id_override.strip():
+        spec = dataclasses.replace(spec, track_id=track_id_override.strip())
 
     # Point 1 (golf 1A) — hervuur-wachter: refuse a dispatch_id that already
     # carries a terminal receipt, a route decision, or a runtime end-state,
@@ -3224,7 +3239,7 @@ def run_dispatch(
             _register_dispatch_created(plan, permit, vspec.spec, state_dir=state_dir)
 
         if dry_run:
-            _print_plan(plan, fp)
+            _print_plan(plan, fp, spec=vspec.spec)
             return 0
 
         # Point 3 (golf 1A): claimed -> delivering — the door is about to
@@ -3419,6 +3434,13 @@ def main(argv: Optional[list] = None) -> int:
              "condition is re-measured live on the next fire and must be "
              "overridden again if it is still triggered",
     )
+    parser.add_argument(
+        "--track", dest="track_id_override", metavar="TRACK_ID", default=None,
+        help="Stamp spec.track_id with TRACK_ID before validation (OI-1639). The "
+             "existing TL-D1 door check (_check_track_link_verdict) still runs: a "
+             "TRACK_ID that does not reference a live track for this project is a "
+             "blocking reject, exactly as if the staged spec had carried it.",
+    )
     args = parser.parse_args(argv)
 
     if args.force_release_class is not None:
@@ -3438,6 +3460,7 @@ def main(argv: Optional[list] = None) -> int:
     return run_dispatch(
         args.spec_file, dry_run=args.dry_run, refire_reason=args.refire_reason,
         stop_conditions_override_reason=args.stop_conditions_override_reason,
+        track_id_override=args.track_id_override,
     )
 
 
