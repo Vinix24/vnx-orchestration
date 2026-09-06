@@ -16,6 +16,10 @@ APPROVED_WRITERS = {
     "report_watcher.sh",
     "heartbeat_ack_monitor.py",
     "check_active_drain.py",
+    # restore_stranded_reports.py: recovers reports stranded by a missing
+    # model, and books the receipt ONLY from a verified model source, with
+    # identity_restored=true (F1-3, 20260906-f13-gestrande-rapporten).
+    "restore_stranded_reports.py",
 }
 
 APPEND_HELPER_MARKERS = (
