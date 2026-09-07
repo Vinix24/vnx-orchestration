@@ -84,6 +84,7 @@ __all__ = [
     "ForgePublishRefused",
     "ForgeStatusUnmapped",
     "ForgeVerdict",
+    "auto_merge_is_armed",
     "check_run_name",
     "classify_record",
     "conclusion_for",
@@ -563,26 +564,78 @@ def _gh_pr_json(pr_number: int, field: str) -> Dict[str, Any]:
     return data
 
 
+def auto_merge_is_armed(pr_number: int) -> bool:
+    """Whether this PR will merge itself once its checks go green.
+
+    Raises :class:`ForgePublishRefused` when the answer cannot be established —
+    see :func:`_gh_pr_json`. "I could not look" is not "no".
+    """
+    data = _gh_pr_json(pr_number, "autoMergeRequest")
+    return bool(data.get("autoMergeRequest"))
+
+
 def refuse_if_auto_merge_is_armed(pr_number: int) -> None:
-    """Refuse any publication on a PR that has auto-merge queued.
+    """Refuse a ``success`` publication on a PR that has auto-merge queued.
 
     ``pr_merge.py:430`` adds ``--auto`` as soon as the repo allows it, and the
     repo does not (``allow_auto_merge: false``, held there by B1's drift
-    check). If that ever flips, an armed PR turns this publisher into the thing
-    that performs the merge: GitHub merges the moment the last required check
-    goes green, with no human between the check-run and ``main``.
+    check). If that ever flips, an armed PR turns a GREEN check-run into the
+    thing that performs the merge: GitHub merges the moment the last required
+    check passes, with no human between the check-run and ``main``.
 
-    So the refusal covers EVERY conclusion, not just ``success``. A queued
-    auto-merge means a human already handed the decision to a robot, and this
-    robot declines to be the one that pulls it — whatever it was about to say.
+    **Only green.** The refusal used to cover every conclusion, on the reading
+    that a queued auto-merge means a human handed the decision to a robot and
+    this robot declines to pull the trigger. That reading inverts on a red
+    conclusion. Withholding a ``failure`` does not stop the merge — it leaves
+    whatever the head already carries standing, and if that is a stale
+    ``success`` from an earlier run, branch protection stays satisfied and the
+    auto-merge proceeds on evidence this very gate just contradicted. The red
+    check-run is the brake, so refusing to publish it removes the brake.
+
+    ``success`` is the only conclusion that can COMPLETE a merge, and it is the
+    only one refused here. Callers publish red regardless (and say so out loud:
+    :func:`_note_red_over_armed_auto_merge`).
     """
-    data = _gh_pr_json(pr_number, "autoMergeRequest")
-    if data.get("autoMergeRequest"):
+    if auto_merge_is_armed(pr_number):
         raise ForgePublishRefused(
-            f"PR #{pr_number} heeft een actieve auto-merge (autoMergeRequest): elke "
-            "publicatie is geweigerd, want een groene check zou hier de merge zelf "
-            "uitvoeren. Zet auto-merge uit (`gh pr merge --disable-auto`) en publiceer "
-            "daarna opnieuw."
+            f"PR #{pr_number} heeft een actieve auto-merge (autoMergeRequest): een "
+            "success-publicatie is geweigerd, want een groene check zou hier de merge "
+            "zelf uitvoeren. Zet auto-merge uit (`gh pr merge --disable-auto`) en "
+            "publiceer daarna opnieuw."
+        )
+
+
+def _note_red_over_armed_auto_merge(pr_number: int, gate: str, conclusion: str) -> None:
+    """Say out loud that a red conclusion is going out onto a self-merging PR.
+
+    Advisory only, and deliberately unable to stop anything: the auto-merge
+    state cannot change what a red publication does, so a ``gh`` outage here
+    must never become the reason a failing gate stays invisible on the PR. That
+    would rebuild the stale-green hole this narrowing just closed, one level
+    further down.
+
+    Warning level either way. "Auto-merge armed" is precisely the state in
+    which an operator wants to know a machine just wrote a verdict onto that
+    PR, and an unanswerable lookup on the path where the answer no longer
+    blocks is worth one line too — otherwise a permanently broken ``gh`` would
+    be indistinguishable from a permanently unarmed PR.
+    """
+    try:
+        armed = auto_merge_is_armed(pr_number)
+    except ForgePublishRefused as exc:
+        logger.warning(
+            "forge_gate_publisher: auto-merge-status van PR #%s niet vast te stellen (%s); "
+            "%s voor %s wordt tóch gepubliceerd — een rode uitkomst houdt een eventuele "
+            "auto-merge juist tegen, dus deze onbekende blokkeert niets",
+            pr_number, exc, conclusion, check_run_name(gate),
+        )
+        return
+    if armed:
+        logger.warning(
+            "forge_gate_publisher: PR #%s heeft een actieve auto-merge en krijgt tóch %s "
+            "voor %s — een rode check houdt die auto-merge tegen; alleen een success "
+            "wordt hier geweigerd",
+            pr_number, conclusion, check_run_name(gate),
         )
 
 
@@ -661,8 +714,15 @@ def _emit_publication_event(
     # filesystem and a lock — an open-ended surface, and every failure in it is
     # a missing line, not a wrong check-run.
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "forge_gate_publisher: geen event geschreven (%s) voor gate=%s pr=%s: %s",
+        # WARNING, not debug. A check-run mutates state on GitHub; if the
+        # ADR-005 line behind it is lost, the ledger silently disagrees with
+        # what the world now looks like. Swallowing that at debug level makes
+        # an audit gap indistinguishable from a quiet success — the trace is
+        # allowed to fail, it is not allowed to fail invisibly.
+        logger.warning(
+            "forge_gate_publisher: ADR-005-gebeurtenis NIET weggeschreven (%s) voor "
+            "gate=%s pr=%s: %s — de check-run-mutatie staat wél op GitHub, dus het "
+            "gebeurtenissenspoor mist hier een regel",
             outcome, gate, pr_number, exc,
         )
 
@@ -693,14 +753,20 @@ def publish_for_record(
     read a different file than the one that was written — publishing a stale
     ``success`` over a verdict that had just failed.
 
-    Two refusals, both before anything is sent: an armed auto-merge
-    (:func:`refuse_if_auto_merge_is_armed`), and a ``success`` for a record
-    that is not a proven pass on this head. The second one re-asks
-    :func:`_proven_pass_on_head` rather than trusting the conclusion it was
-    just handed. That is not distrust of :func:`classify_record` — it is the
-    one place where a mistake anywhere upstream turns into a green light on
-    ``main``, so the predicate that DEFINES "proven" is consulted at the exact
-    moment the green light would be given.
+    **Two refusals, and both are about ``success`` alone.** An armed auto-merge
+    (:func:`refuse_if_auto_merge_is_armed`) and a record that is not a proven
+    pass on this head. The second one re-asks :func:`_proven_pass_on_head`
+    rather than trusting the conclusion it was just handed. That is not
+    distrust of :func:`classify_record` — it is the one place where a mistake
+    anywhere upstream turns into a green light on ``main``, so the predicate
+    that DEFINES "proven" is consulted at the exact moment the green light
+    would be given.
+
+    Which is why the conclusion is computed BEFORE either refusal runs.
+    ``failure`` and ``action_required`` are published unconditionally: they
+    cannot complete a merge, they are what holds an armed auto-merge back, and
+    withholding one would leave a stale ``success`` on the head as the last
+    thing branch protection sees.
     """
     resolved_head = _require_head(head_sha)
 
@@ -718,25 +784,29 @@ def publish_for_record(
 
     record: Optional[Dict[str, Any]] = None
     try:
-        # An explicit path is resolved here, before the ``gh`` round-trip, so a
-        # publication that names a file nobody wrote costs nothing and fails
-        # where the fault is.
+        # The record and its conclusion FIRST, before any ``gh`` round-trip.
+        # Not merely cheaper (a publication that names a file nobody wrote
+        # costs nothing and fails where the fault is): the conclusion is what
+        # decides whether the auto-merge question is even asked, so it cannot be
+        # asked before the conclusion exists.
         if record_path is not None:
             record = read_result_record_at(Path(record_path))
-
-        refuse_if_auto_merge_is_armed(pr_number)
-
-        if record_path is None:
+        else:
             record = read_result_record(pr_number, gate, results_dir=results_dir)
         verdict = classify_record(record, resolved_head)
 
         if verdict.conclusion == CONCLUSION_SUCCESS:
+            refuse_if_auto_merge_is_armed(pr_number)
             proven, why = _proven_pass_on_head(record, resolved_head)
             if not proven:
                 raise ForgePublishRefused(
                     f"weiger success voor {check_run_name(gate)} op {resolved_head[:12]}: "
                     f"het record is geen bewezen pass op deze kop — {why}"
                 )
+        elif not dry_run:
+            # Red goes out whatever the auto-merge state is; the operator still
+            # gets told. A rehearsal posts nothing, so it has nothing to note.
+            _note_red_over_armed_auto_merge(pr_number, gate, verdict.conclusion)
 
         name = check_run_name(gate)
         payload: Dict[str, Any] = {

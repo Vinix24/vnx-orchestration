@@ -36,6 +36,10 @@ import gate_status  # noqa: E402
 HEAD = "a" * 40
 OTHER_HEAD = "b" * 40
 
+#: What ``gh pr view --json autoMergeRequest`` returns on a PR that will merge
+#: itself the moment its last required check goes green.
+ARMED_AUTO_MERGE = {"autoMergeRequest": {"enabledAt": "2026-09-08T00:00:00Z"}}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -401,6 +405,144 @@ def test_publish_refuses_when_the_auto_merge_lookup_itself_fails(
     with pytest.raises(fcr.ForgePublishRefused):
         fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# The auto-merge refusal covers ``success`` and nothing else
+# ---------------------------------------------------------------------------
+
+
+def test_a_failure_is_published_even_when_auto_merge_is_armed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """Refusing the RED update is what would be dangerous here.
+
+    The refusal exists so that ``publish --pr N`` cannot finish a merge after a
+    gate went red. That argument is about ``success`` only. Withholding a
+    ``failure`` on a PR with auto-merge queued leaves whatever check-run the
+    head already carries — a stale ``success`` included — as the last word
+    branch protection sees, and the merge proceeds on evidence that has since
+    been contradicted. Publishing the red one is the thing that STOPS it.
+    """
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path, status="fail"))
+    _gh_returning(monkeypatch, ARMED_AUTO_MERGE)
+    calls = _capture_publish(monkeypatch)
+
+    payload = fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    assert payload["conclusion"] == "failure"
+    assert [c["conclusion"] for c in calls] == ["failure"], (
+        "een rode uitkomst houdt een armed auto-merge tegen en moet dus juist wél landen"
+    )
+
+
+def test_action_required_is_published_even_when_auto_merge_is_armed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """Same rule for the blocking non-verdict: a record for another head."""
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path, commit_sha=OTHER_HEAD))
+    _gh_returning(monkeypatch, ARMED_AUTO_MERGE)
+    calls = _capture_publish(monkeypatch)
+
+    payload = fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    assert payload["conclusion"] == "action_required"
+    assert [c["conclusion"] for c in calls] == ["action_required"]
+
+
+def test_a_proven_pass_is_still_refused_when_auto_merge_is_armed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """The narrowing changes the SCOPE of the refusal, never its content: the
+    one conclusion that could perform the merge is refused with the same reason
+    and the same repair instruction as before."""
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path))
+    _gh_returning(monkeypatch, ARMED_AUTO_MERGE)
+    calls = _capture_publish(monkeypatch)
+
+    with pytest.raises(fcr.ForgePublishRefused) as excinfo:
+        fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    message = str(excinfo.value)
+    assert "auto-merge" in message
+    assert "autoMergeRequest" in message
+    assert "gh pr merge --disable-auto" in message
+    assert calls == [], "een groene check zou hier de merge zelf uitvoeren"
+
+
+def test_a_red_publication_over_an_armed_auto_merge_is_logged_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Publishing red onto a self-merging PR is a state an operator must see.
+
+    Not because anything went wrong — it is the correct outcome — but because
+    "auto-merge armed" is exactly the situation where a human wants to know a
+    machine just decided something on that PR.
+    """
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path, status="fail"))
+    _gh_returning(monkeypatch, ARMED_AUTO_MERGE)
+    _capture_publish(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="forge_gate_publisher"):
+        fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "auto-merge" in logged
+    assert "failure" in logged
+    assert "tegen" in logged, "de reden hoort erbij: rood houdt de auto-merge juist tegen"
+
+
+def test_a_failed_auto_merge_lookup_never_blocks_a_red_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fail CLOSED applies to ``success``; a red check has nothing to fail into.
+
+    ``test_publish_refuses_when_the_auto_merge_lookup_itself_fails`` keeps the
+    strict rule where it belongs. Here the answer cannot change the decision, so
+    a gh outage must not be the reason a failing gate stays invisible on the PR
+    — that would recreate the stale-green hole through the back door.
+    """
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path, status="fail"))
+    _gh_returning(monkeypatch, None, returncode=1)
+    calls = _capture_publish(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="forge_gate_publisher"):
+        payload = fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    assert payload["conclusion"] == "failure"
+    assert [c["conclusion"] for c in calls] == ["failure"]
+    assert "auto-merge" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, "success"),
+        ({"status": "fail"}, "failure"),
+        ({"status": "unavailable"}, "action_required"),
+    ],
+)
+def test_without_an_armed_auto_merge_every_conclusion_publishes_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None,
+    overrides: Dict[str, Any], expected: str,
+) -> None:
+    """The control arm: narrowing the refusal changed nothing on a normal PR."""
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path, **overrides))
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+
+    payload = fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    assert payload["conclusion"] == expected
+    assert [c["conclusion"] for c in calls] == [expected]
 
 
 def test_publish_dry_run_shows_the_payload_and_posts_nothing(
@@ -953,3 +1095,36 @@ def test_an_event_store_failure_never_breaks_the_publication(
 
     assert payload["conclusion"] == "success"
     assert len(calls) == 1
+
+
+def test_a_swallowed_audit_line_is_visible_at_warning_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A check-run mutated on GitHub with no ledger line behind it is a gap.
+
+    The line may not break the publication (the test above), but swallowing it
+    at ``debug`` means the state mutation happened, the ADR-005 trail does not
+    show it, and nothing anywhere says so. Warning level is what makes a
+    missing trace an observable event instead of a silent one.
+    """
+    import event_store
+
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path))
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    _capture_publish(monkeypatch)
+
+    def exploding_append(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("de schijf is vol")
+
+    monkeypatch.setattr(event_store.EventStore, "append", exploding_append)
+
+    with caplog.at_level(logging.WARNING, logger="forge_gate_publisher"):
+        fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "een ingeslikte auditregel hoort zichtbaar te zijn"
+    logged = "\n".join(r.getMessage() for r in warnings)
+    assert "de schijf is vol" in logged, "de reden hoort in de melding"
+    assert "glm_gate" in logged and "1811" in logged
