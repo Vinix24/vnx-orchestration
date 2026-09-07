@@ -83,6 +83,39 @@ def _load_receipts(path: Path) -> List[Dict[str, Any]]:
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
+def _outcome_ci(dispatch_id: str, timestamp: str, **overrides) -> Dict[str, Any]:
+    """A worker outcome receipt that failed the report-body contract."""
+    rec = {
+        "timestamp": timestamp, "event_type": "task_complete",
+        "status": "contract_invalid", "dispatch_id": dispatch_id,
+        "report_path": f"/reports/{dispatch_id}.md",
+    }
+    rec.update(overrides)
+    return rec
+
+
+def _outcome_success(dispatch_id: str, timestamp: str, **overrides) -> Dict[str, Any]:
+    rec = {
+        "timestamp": timestamp, "event_type": "task_complete",
+        "status": "success", "dispatch_id": dispatch_id,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def _gate_request(dispatch_id: str, timestamp: str, **overrides) -> Dict[str, Any]:
+    """The gate-plane receipt gate_request_handler.py writes on the SAME
+    dispatch_id after the worker's outcome — the receipt that masked the
+    check on all 8 measured cases."""
+    rec = {
+        "timestamp": timestamp, "event_type": "review_gate_request",
+        "receipt_kind": "review_gate", "status": "requested",
+        "dispatch_id": dispatch_id, "pr_number": 1,
+    }
+    rec.update(overrides)
+    return rec
+
+
 def _go_gate(**kw):
     gate = {"verdict": "GO", "message": "ok", "overridden": False, "override_reason": None}
     gate.update(kw)
@@ -297,3 +330,232 @@ class TestMainContractInvalidGateWiring:
         out = json.loads(stdout[stdout.index("{"):])
         assert out["success"] is False
         assert did in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# The gate must fire on the GOVERNED path, not just on a synthetic one-receipt
+# chain (07-09 fix-forward). Every case below is measured against the live
+# ledger: 8 dispatch-ids merged over a contract_invalid receipt and the gate
+# as shipped would have said GO on all 8.
+# ---------------------------------------------------------------------------
+
+class TestOutcomeReceiptFiltering:
+    def test_gate_request_after_contract_invalid_still_no_go(self, vnx_env):
+        """The realistic chain (#1786-shaped): outcome contract_invalid, then
+        the review gate writes review_gate_request on the SAME dispatch_id.
+        Judging "the latest receipt" reads the gate request and passes."""
+        did = "20260906-oi1641-overlap-scan"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T11:36:00Z"),
+            _gate_request(did, "2026-09-06T11:50:54Z"),
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(did)
+
+        assert gate["verdict"] == "NO-GO"
+        assert did in gate["message"]
+        assert "contract_invalid" in gate["message"]
+
+    def test_real_outcome_success_after_gate_request_is_go(self, vnx_env):
+        did = "20260906-healed-for-real"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T11:36:00Z"),
+            _gate_request(did, "2026-09-06T11:50:54Z"),
+            _outcome_success(did, "2026-09-06T12:05:00Z"),
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(did)
+
+        assert gate["verdict"] == "GO"
+
+    def test_only_gate_plane_receipts_is_go_with_no_outcome_reason(self, vnx_env):
+        did = "20260906-gate-plane-only"
+        _write_receipts(vnx_env["receipts_path"], [
+            _gate_request(did, "2026-09-06T11:50:54Z"),
+            {"timestamp": "2026-09-06T11:55:00Z", "event_type": "state_mutation",
+             "status": "success", "dispatch_id": did},
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(did)
+
+        assert gate["verdict"] == "GO"
+        assert "geen uitkomst-receipt" in gate["message"]
+
+    def test_main_refuses_the_realistic_chain_before_merging(
+        self, vnx_env, monkeypatch, capsys,
+    ):
+        did = "20260906-a1-diff-sandwich"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T17:20:00Z"),
+            _gate_request(did, "2026-09-06T17:32:33Z"),
+        ])
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", "1", "--dispatch-id", did])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls, "a gate-plane receipt must not unlock the merge"
+        assert did in capsys.readouterr().err
+
+
+class TestUnreadableLedgerFailsClosed:
+    def test_unreadable_ledger_is_no_go_with_the_cause(self, vnx_env):
+        """A directory where t0_receipts.ndjson should be — the read raises,
+        and an I/O failure must never read as "absence, not a rejection"."""
+        vnx_env["receipts_path"].mkdir(parents=True)
+
+        gate = pr_merge._run_contract_invalid_gate("d-any")
+
+        assert gate["verdict"] == "NO-GO"
+        assert "grootboek onleesbaar" in gate["message"]
+        assert "afwezigheid" not in gate["message"]
+
+    def test_main_refuses_on_unreadable_ledger(self, vnx_env, monkeypatch, capsys):
+        vnx_env["receipts_path"].mkdir(parents=True)
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", "1", "--dispatch-id", "d-any"])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls
+        assert "grootboek onleesbaar" in capsys.readouterr().err
+
+
+class TestDispatchIdResolvedFromPrNumber:
+    """A missing --dispatch-id was a reasonless escape hatch: merge_pr itself
+    resolves the id from the PR number to stamp the receipt (pr_merge.py's
+    _lookup_dispatch_id_by_pr_number), so the gate can resolve the same chain.
+    The real lookup runs here against a real register file in the tmp state
+    dir — only the register content is a fixture, not the lookup."""
+
+    PR = 424242
+
+    def _write_register(self, vnx_env, dispatch_id: str, pr_number: int) -> None:
+        (vnx_env["state_dir"] / "dispatch_register.ndjson").write_text(
+            json.dumps({
+                "timestamp": "2026-09-06T11:00:00Z", "event": "dispatch_completed",
+                "dispatch_id": dispatch_id, "pr_number": pr_number, "terminal": "T0",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_gate_runs_and_refuses_on_resolved_dispatch_id(self, vnx_env, monkeypatch):
+        monkeypatch.setenv("VNX_PROJECT_ID", "")  # no central merge-read
+        did = "20260907-b7-resolved-from-pr"
+        self._write_register(vnx_env, did, self.PR)
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T11:36:00Z"),
+            _gate_request(did, "2026-09-06T11:50:54Z"),
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate("", pr_number=self.PR)
+
+        assert gate["verdict"] == "NO-GO"
+        assert gate["resolved_from_pr"] is True
+        assert gate["skipped"] is False
+        assert did in gate["message"]
+
+    def test_main_refuses_without_dispatch_id_flag(self, vnx_env, monkeypatch, capsys):
+        monkeypatch.setenv("VNX_PROJECT_ID", "")
+        did = "20260907-b7-resolved-main"
+        self._write_register(vnx_env, did, self.PR)
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T11:36:00Z"),
+            _gate_request(did, "2026-09-06T11:50:54Z"),
+        ])
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", str(self.PR)])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls, "omitting --dispatch-id must not bypass the gate"
+        assert did in capsys.readouterr().err
+
+    def test_unresolvable_pr_still_skips_loudly(self, vnx_env, monkeypatch):
+        monkeypatch.setenv("VNX_PROJECT_ID", "")
+
+        gate = pr_merge._run_contract_invalid_gate("", pr_number=self.PR)
+
+        assert gate["verdict"] == "GO"
+        assert gate["skipped"] is True
+        assert "geen dispatch-id" in gate["message"]
+        assert str(self.PR) in gate["message"]
+
+
+class TestOverrideOnlyStampsARealBypass:
+    """--override-contract-invalid short-circuited BEFORE the ledger read, so
+    the flag alone produced overridden=True on a clean chain and main()
+    stamped contract_invalid_override onto the receipt — an audit field
+    claiming a bypass that never happened."""
+
+    def test_clean_chain_reports_the_flag_as_unnecessary(self, vnx_env):
+        did = "20260907-b7-clean-chain"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_success(did, "2026-09-06T11:36:00Z"),
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(did, override_reason="voor de zekerheid")
+
+        assert gate["verdict"] == "GO"
+        assert gate["overridden"] is False
+        assert gate["override_unnecessary"] is True
+        assert gate["override_reason"] is None
+        assert "niet nodig" in gate["message"]
+
+    def test_clean_chain_leaves_no_audit_field_on_the_receipt(
+        self, vnx_env, monkeypatch, capsys,
+    ):
+        did = "20260907-b7-clean-chain-main"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_success(did, "2026-09-06T11:36:00Z"),
+        ])
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main([
+            "--pr", "1", "--dispatch-id", did,
+            "--override-contract-invalid", "voor de zekerheid",
+        ])
+
+        assert rc == pr_merge.EXIT_OK
+        assert do_merge_calls
+        assert "niet nodig" in capsys.readouterr().out
+
+        merged = [
+            r for r in _load_receipts(vnx_env["receipts_path"])
+            if r.get("event_type") == "pr_merged" and r.get("dispatch_id") == did
+        ]
+        assert len(merged) == 1
+        assert "contract_invalid_override" not in merged[0], (
+            "an override field on a clean chain reads in the trail as a "
+            "governed failure someone waved through"
+        )
+
+    def test_dirty_chain_still_merges_and_stamps(self, vnx_env, monkeypatch):
+        did = "20260907-b7-dirty-chain"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T11:36:00Z"),
+            _gate_request(did, "2026-09-06T11:50:54Z"),
+        ])
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main([
+            "--pr", "1", "--dispatch-id", did,
+            "--override-contract-invalid", "handmatig geverifieerd",
+        ])
+
+        assert rc == pr_merge.EXIT_OK
+        assert do_merge_calls
+        merged = [
+            r for r in _load_receipts(vnx_env["receipts_path"])
+            if r.get("event_type") == "pr_merged" and r.get("dispatch_id") == did
+        ]
+        assert len(merged) == 1
+        assert merged[0]["contract_invalid_override"] == {
+            "flag": "--override-contract-invalid",
+            "reason": "handmatig geverifieerd",
+        }

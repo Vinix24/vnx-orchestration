@@ -22,8 +22,17 @@ at session start. This module is the missing read side:
     one open item per receipt (gevolg 2, "een lijst, geen vloed").
   - ``is_deliverable_acceptable``: the gate a closer must call before
     treating a dispatch's deliverable as done (gevolg 3, "niet stil
-    sluitbaar"). See this dispatch's report for the exact call site this
-    module does not own.
+    sluitbaar"). Its call site is the merge door (``pr_merge.py``'s
+    ``_run_contract_invalid_gate``).
+
+Which receipts that gate may judge is itself the thing that decides whether
+it fires at all. Every plane writes on the SAME dispatch_id — the worker's
+outcome, the review gate's request, state mutations — so "the latest
+receipt for this dispatch" is normally a gate-plane record, not the
+deliverable. Measured 07-09 over the live ledger: all 8 dispatch-ids with a
+contract_invalid receipt before their ``pr_merged`` had a
+``review_gate_request`` in between, so the unfiltered version passed all 8.
+``DELIVERABLE_OUTCOME_EVENT_TYPES`` is the fix and carries the counts.
 
 Staleness windowing is delegated to the existing
 ``contract_invalid_window.is_stale_contract_invalid`` / the effective
@@ -54,7 +63,55 @@ CONTRACT_INVALID_EVENT_TYPE = "report_contract_invalid"
 
 OPEN_LEDGER_FILENAME = "contract_invalid_open.json"
 
+# Receipts that carry a DELIVERABLE OUTCOME for a dispatch — the only ones
+# ``is_deliverable_acceptable`` may judge on.
+#
+# Measured 07-09 over the live ledger (29.386 records,
+# ~/.vnx-data/vnx-dev/state/t0_receipts.ndjson): the event types that ever
+# carry the contract_invalid literal are ``report_contract_invalid`` (3323),
+# ``task_complete`` (35) and ``subprocess_completion`` (4). ``task_failed``
+# is in this set as the fourth deliverable outcome (a governed failure
+# resolves a chain just as a governed success does) even though it never
+# carries the literal itself.
+#
+# Everything else on a dispatch_id belongs to the GATE or STATE plane and
+# says nothing about the deliverable: ``review_gate_request`` alone has 844
+# records and is written by gate_request_handler.py on the SAME dispatch_id
+# AFTER the worker's outcome receipt. Judging "the latest receipt" without
+# this filter therefore reads the gate request, not the deliverable. Measured
+# on the same ledger: of the 8 dispatch-ids that had a contract_invalid
+# receipt before their pr_merged, ALL 8 had a ``review_gate_request`` as
+# their last receipt before the merge — the gate would have said GO on every
+# single one.
+#
+# What this filter does NOT fix, measured on the same 8: it refuses 6. The
+# other 2 (20260830-140500-d6a2…, 20260830-145100-d5…) have a later
+# ``task_complete`` outcome with ``status: "unknown"``, which this module
+# accepts because it is not the contract_invalid literal — while
+# ``event_outcome_semantics.classify_event_outcome("task_complete",
+# "unknown")`` returns None, i.e. neither success nor failure. 3897 records
+# carry that status. Widening "not contract_invalid" to "a governed success"
+# is a separate policy change with a much larger blast radius (it would also
+# flip task_failed/timeout/no_signal chains) and is deliberately NOT made
+# here; it is reported as an open item for the operator to decide.
+DELIVERABLE_OUTCOME_EVENT_TYPES = frozenset({
+    "report_contract_invalid",
+    "task_complete",
+    "subprocess_completion",
+    "task_failed",
+})
+
 _MIN_AWARE_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+class ReceiptsUnreadableError(OSError):
+    """The receipts ledger exists but could not be read.
+
+    Raised by ``_read_receipts_strict`` and surfaced to the merge door so an
+    I/O failure becomes a refusal with its cause, never an empty read that
+    looks like "no receipt on record" (which fails OPEN). The advisory
+    readers keep the soft ``_read_receipts`` and never see this.
+    """
 
 
 def _parse_ts(value: Optional[Any]) -> Optional[datetime]:
@@ -86,19 +143,32 @@ def _is_contract_invalid(record: Dict[str, Any]) -> bool:
     return status == CONTRACT_INVALID_STATUS or event_type == CONTRACT_INVALID_EVENT_TYPE
 
 
-def _read_receipts(receipts_path: Path) -> List[Dict[str, Any]]:
-    """Read every well-formed JSON object line from an NDJSON receipts file.
+def _is_outcome_receipt(record: Dict[str, Any]) -> bool:
+    """True when this receipt reports a deliverable outcome for its dispatch.
 
-    Absence, an unreadable file, and malformed individual lines all degrade
-    to being skipped rather than raising — this is an advisory reader
-    (surfacing at SessionStart / a gate check), not a write path.
+    Decided on the event type alone (``DELIVERABLE_OUTCOME_EVENT_TYPES``), not
+    on the status: a gate-plane receipt is not a statement about the
+    deliverable regardless of what status it happens to carry.
+    """
+    event_type = str(record.get("event_type") or record.get("event") or "").strip().lower()
+    return event_type in DELIVERABLE_OUTCOME_EVENT_TYPES
+
+
+def _read_receipts_strict(receipts_path: Path) -> List[Dict[str, Any]]:
+    """Read every well-formed JSON object line from an NDJSON receipts file,
+    raising ``ReceiptsUnreadableError`` when the file exists but cannot be read.
+
+    A file that does not exist is a legitimate absence (a fresh store, an
+    isolated state dir) and yields ``[]`` here too — only a real I/O failure
+    on an existing path is an error. Malformed individual lines are still
+    skipped: one corrupt line must not blind the reader to the other 29.385.
     """
     if not receipts_path.exists():
         return []
     try:
         text = receipts_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
+    except OSError as exc:
+        raise ReceiptsUnreadableError(f"{receipts_path}: {exc}") from exc
     records: List[Dict[str, Any]] = []
     for line in text.splitlines():
         line = line.strip()
@@ -111,6 +181,22 @@ def _read_receipts(receipts_path: Path) -> List[Dict[str, Any]]:
         if isinstance(rec, dict):
             records.append(rec)
     return records
+
+
+def _read_receipts(receipts_path: Path) -> List[Dict[str, Any]]:
+    """Soft read for the ADVISORY readers: absence, an unreadable file, and
+    malformed individual lines all degrade to being skipped rather than
+    raising — a SessionStart counter must not crash a session over a
+    permission bit.
+
+    The merge gate does NOT use this: see ``_read_receipts_strict`` /
+    ``is_deliverable_acceptable(strict=True)``, where the same I/O failure
+    must become a refusal instead of an empty read.
+    """
+    try:
+        return _read_receipts_strict(receipts_path)
+    except ReceiptsUnreadableError:
+        return []
 
 
 def _filter_project(records: List[Dict[str, Any]], project_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -257,40 +343,71 @@ def is_deliverable_acceptable(
     receipts_path: Path,
     *,
     project_id: Optional[str] = None,
+    strict: bool = True,
 ) -> Tuple[bool, str]:
-    """False while the LATEST receipt on record for ``dispatch_id`` is
-    contract_invalid (OI-1638 gevolg 3) — a dispatch must not be silently
-    closed on the strength of a report that never satisfied the report-body
-    contract, even if an earlier attempt for the same dispatch_id succeeded.
+    """False while the latest DELIVERABLE-OUTCOME receipt on record for
+    ``dispatch_id`` is contract_invalid (OI-1638 gevolg 3) — a dispatch must
+    not be silently closed on the strength of a report that never satisfied
+    the report-body contract, even if an earlier attempt for the same
+    dispatch_id succeeded.
 
-    A dispatch with no receipt on record at all is NOT this function's
-    concern (fail-open, True): that is an absence, and per the fleet's own
-    precedent (OI-1624, "a gate outage is absence, never a rejection") an
-    absence must not read as a rejection. Callers needing "did this dispatch
-    even run" own that separate check themselves.
+    "Latest outcome receipt", not "latest receipt": every receipt plane
+    shares the dispatch_id, so the plain latest is usually a gate-plane
+    record. Measured 07-09 on the live ledger, all 8 dispatch-ids that
+    carried a contract_invalid receipt before their merge had a
+    ``review_gate_request`` written on the same dispatch_id in between — the
+    unfiltered version said GO on every one of them. Only
+    ``DELIVERABLE_OUTCOME_EVENT_TYPES`` is judged; see that constant for the
+    per-event-type counts behind it.
+
+    A dispatch with no outcome receipt on record at all is NOT this
+    function's concern (fail-open, True): that is an absence, and per the
+    fleet's own precedent (OI-1624, "a gate outage is absence, never a
+    rejection") an absence must not read as a rejection. Callers needing "did
+    this dispatch even run" own that separate check themselves.
+
+    ``strict`` (default True, this is a GATE function): an existing but
+    unreadable ledger returns ``(False, "grootboek onleesbaar: ...")`` rather
+    than degrading to an empty read that would look like that same
+    fail-open absence. ``strict=False`` restores the advisory soft read for a
+    caller that only wants a hint.
     """
     did = (dispatch_id or "").strip()
     if not did:
         return False, "empty dispatch_id"
 
-    records = _filter_project(_read_receipts(receipts_path), project_id)
-    matching = [r for r in records if str(r.get("dispatch_id") or "").strip() == did]
+    try:
+        records = _read_receipts_strict(receipts_path) if strict else _read_receipts(receipts_path)
+    except ReceiptsUnreadableError as exc:
+        return False, f"grootboek onleesbaar: {exc}"
+
+    records = _filter_project(records, project_id)
+    matching = [
+        r for r in records
+        if str(r.get("dispatch_id") or "").strip() == did and _is_outcome_receipt(r)
+    ]
     if not matching:
-        return True, "no receipt on record for dispatch_id (absence, not a rejection)"
+        return True, (
+            f"geen uitkomst-receipt op record voor {did} "
+            f"(afwezigheid is geen weigering)"
+        )
 
     latest = sorted(matching, key=_sort_key)[-1]
     if _is_contract_invalid(latest):
+        event_type = str(latest.get("event_type") or latest.get("event") or "")
         return False, (
-            f"latest receipt for {did} is contract_invalid "
-            f"(report_path={latest.get('report_path')!r})"
+            f"latest outcome receipt for {did} is contract_invalid "
+            f"(event_type={event_type!r}, report_path={latest.get('report_path')!r})"
         )
-    return True, "latest receipt is not contract_invalid"
+    return True, "latest outcome receipt is not contract_invalid"
 
 
 __all__ = [
     "CONTRACT_INVALID_STATUS",
     "CONTRACT_INVALID_EVENT_TYPE",
+    "DELIVERABLE_OUTCOME_EVENT_TYPES",
     "OPEN_LEDGER_FILENAME",
+    "ReceiptsUnreadableError",
     "build_contract_invalid_summary",
     "collect_contract_invalid_open",
     "write_contract_invalid_open_ledger",

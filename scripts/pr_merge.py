@@ -48,18 +48,28 @@ Usage:
     python3 scripts/pr_merge.py --pr 123 --override-reason 'gate flaked, re-verified'
 
 contract_invalid gate (Golf B, B7 / OI-1638 gevolg 3): a third fail-closed
-check runs after the review gate — the LATEST receipt on record for
-``--dispatch-id`` must not be ``contract_invalid`` (see
+check runs after the review gate — the latest DELIVERABLE-OUTCOME receipt on
+record for the dispatch must not be ``contract_invalid`` (see
 ``contract_invalid_ledger.is_deliverable_acceptable``): a dispatch whose
 deliverable never satisfied the report-body contract must not be silently
-closed by a merge. An empty ``--dispatch-id`` skips the check (existing
-behaviour — the door has no chain to check without one). The escape hatch is
-its own flag, ``--override-contract-invalid``, separate from
-``--override-reason``: accepting a contract_invalid deliverable anyway is a
-distinct judgment call from overriding a flaky CI run or an unrun review
-gate. A non-empty reason overrides visibly and is stamped onto the
-``pr_merged`` receipt as ``contract_invalid_override``; an empty reason is
-refused (no silent bypass).
+closed by a merge. "Outcome receipt", not "latest receipt": the review gate
+writes ``review_gate_request`` on the same dispatch_id between the worker's
+report and the merge, and judging the plain latest therefore read the gate
+request instead of the deliverable — measured 07-09, that masked all 8
+dispatch-ids in the live ledger that merged over a contract_invalid receipt.
+An unreadable ledger is a refusal with its cause, never an empty read.
+An empty ``--dispatch-id`` is resolved from the PR number first (the same
+lookup that stamps the receipt), so omitting the flag is not a bypass; only
+a PR with no dispatch_id in the register skips the check, loudly.
+
+The escape hatch is its own flag, ``--override-contract-invalid``, separate
+from ``--override-reason``: accepting a contract_invalid deliverable anyway
+is a distinct judgment call from overriding a flaky CI run or an unrun
+review gate. It is resolved AFTER the check: on a chain that is clean anyway
+the flag is reported as unnecessary and nothing is stamped, so
+``contract_invalid_override`` on a receipt always marks a real bypass. On a
+refused chain a non-empty reason overrides visibly and is stamped onto the
+``pr_merged`` receipt; an empty reason is refused (no silent bypass).
 
 Receipt written to t0_receipts.ndjson:
     event_type  : "pr_merged"
@@ -395,10 +405,12 @@ def _run_adr_gate(pr_number: int, *, pr_data: Optional[Dict[str, Any]] = None) -
 def _run_contract_invalid_gate(
     dispatch_id: str,
     *,
+    pr_number: Optional[int] = None,
     override_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Fail-closed merge gate (Golf B, B7): the LATEST receipt on record for
-    ``dispatch_id`` must not be ``contract_invalid`` (OI-1638 gevolg 3).
+    """Fail-closed merge gate (Golf B, B7): the latest DELIVERABLE-OUTCOME
+    receipt on record for ``dispatch_id`` must not be ``contract_invalid``
+    (OI-1638 gevolg 3).
 
     DISPATCH_RULES.md §14 gevolg 3 names ``is_deliverable_acceptable`` as the
     gate a closer must call before treating a dispatch's deliverable as
@@ -414,62 +426,98 @@ def _run_contract_invalid_gate(
     ``t0_receipts.ndjson``) — the check and the write it gates must see the
     same ledger.
 
-    An empty ``dispatch_id`` skips the check LOUDLY: ``pr_merge`` has never
-    required ``--dispatch-id`` (existing behaviour), so a dispatch-id-less
-    merge simply has no chain to check here — not a new hole this gate opens.
+    An empty ``dispatch_id`` no longer walks straight past the gate: the door
+    resolves it from ``pr_number`` first, via the SAME
+    ``_lookup_dispatch_id_by_pr_number`` that ``merge_pr`` already uses to
+    stamp the ``pr_merged`` receipt. Omitting ``--dispatch-id`` therefore
+    stops being an escape hatch that needs no reason — the merge still gets
+    the receipt chain stamped on it either way, so the gate must judge that
+    same chain. Only when the register has no dispatch_id for this PR does
+    the check skip, LOUDLY (``pr_merge`` has never required ``--dispatch-id``
+    — an unresolvable PR genuinely has no chain to check).
 
     ``override_reason`` (``--override-contract-invalid``) is a SEPARATE
     escape hatch from ``--override-reason`` (already wired to the CI and
     review gates): accepting a contract_invalid deliverable anyway is a
     distinct judgment call from overriding a flaky CI run or an unrun review
     gate, so it gets its own flag rather than silently piggy-backing on
-    ``--override-reason``. Same resolution order as the other gates' escape
-    hatch (checked BEFORE running the read): non-empty reason overrides
-    visibly without touching the ledger read, empty is refused (no silent
-    bypass), ``None`` runs the normal check.
+    ``--override-reason``.
+
+    Unlike the other gates' hatch, this one is resolved AFTER the ledger read,
+    not before it. Checked before, the flag alone produced ``overridden:
+    True`` on a chain that was clean anyway, and ``main()`` then stamped
+    ``contract_invalid_override`` onto the ``pr_merged`` receipt — an audit
+    field claiming a bypass that never happened, which reads in the trail as
+    a governed failure someone waved through. So: run the check first, and
+    only let the flag matter when the verdict without it would have been
+    NO-GO. On a clean chain the flag is reported as unnecessary and nothing
+    is stamped; on a dirty chain a non-empty reason overrides visibly and an
+    empty one is refused (no silent bypass).
     """
     did = (dispatch_id or "").strip()
+    resolved_from_pr = False
+    if not did and pr_number is not None:
+        did = _lookup_dispatch_id_by_pr_number(pr_number).strip()
+        resolved_from_pr = bool(did)
+
     if not did:
+        suffix = f" (en niet af te leiden uit PR #{pr_number})" if pr_number is not None else ""
         return {
             "verdict": "GO",
-            "message": "contract_invalid-check overgeslagen: geen dispatch-id",
+            "message": f"contract_invalid-check overgeslagen: geen dispatch-id{suffix}",
             "skipped": True,
             "overridden": False,
             "override_reason": None,
-        }
-
-    # ── Escape hatch (same resolution order as the CI/review gates) ───────
-    if override_reason is not None:
-        reason = override_reason.strip()
-        if not reason:
-            return {
-                "verdict": "NO-GO",
-                "message": (
-                    "override zonder reden geweigerd: --override-contract-invalid "
-                    "vereist een niet-lege reden (geen stille bypass)"
-                ),
-                "skipped": False,
-                "overridden": True,
-                "override_reason": reason,
-            }
-        return {
-            "verdict": "GO",
-            "message": f"contract_invalid-check overgeslagen voor {did} ({reason})",
-            "skipped": False,
-            "overridden": True,
-            "override_reason": reason,
+            "override_unnecessary": False,
+            "resolved_from_pr": False,
         }
 
     paths = ensure_env()
     receipts_path = Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
     acceptable, reason = is_deliverable_acceptable(did, receipts_path)
-    return {
+
+    origin = f" (dispatch-id afgeleid uit PR #{pr_number})" if resolved_from_pr else ""
+    result: Dict[str, Any] = {
         "verdict": "GO" if acceptable else "NO-GO",
-        "message": reason,
+        "message": f"{reason}{origin}",
         "skipped": False,
         "overridden": False,
         "override_reason": None,
+        "override_unnecessary": False,
+        "resolved_from_pr": resolved_from_pr,
     }
+
+    if override_reason is None:
+        return result
+
+    # ── Escape hatch, resolved against the verdict the check just produced ──
+    if acceptable:
+        result["message"] = (
+            f"{result['message']} — --override-contract-invalid was niet nodig "
+            f"(de keten is schoon); geen override op de receipt"
+        )
+        result["override_unnecessary"] = True
+        return result
+
+    reason_text = override_reason.strip()
+    if not reason_text:
+        result["verdict"] = "NO-GO"
+        result["message"] = (
+            "override zonder reden geweigerd: --override-contract-invalid "
+            "vereist een niet-lege reden (geen stille bypass)"
+        )
+        result["overridden"] = True
+        result["override_reason"] = reason_text
+        return result
+
+    result["verdict"] = "GO"
+    result["message"] = (
+        f"contract_invalid-check overgeslagen voor {did} ({reason_text}) — "
+        f"zonder de vlag was dit NO-GO: {reason}"
+    )
+    result["overridden"] = True
+    result["override_reason"] = reason_text
+    return result
 
 
 _HEAD_MOVED_MARKERS = (
@@ -878,10 +926,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         return EXIT_ERROR
     print(f"ADR gate: {adr_gate['message']}")
 
-    # ── contract_invalid gate: the LATEST receipt for --dispatch-id must ────
-    # not be contract_invalid (Golf B, B7). No effect without --dispatch-id.
+    # ── contract_invalid gate: the latest OUTCOME receipt for the dispatch ──
+    # must not be contract_invalid (Golf B, B7). A missing --dispatch-id is
+    # resolved from the PR number first, so omitting the flag is not a bypass.
     contract_gate = _run_contract_invalid_gate(
-        args.dispatch_id, override_reason=args.override_contract_invalid,
+        args.dispatch_id,
+        pr_number=args.pr,
+        override_reason=args.override_contract_invalid,
     )
     if contract_gate["verdict"] != "GO":
         if args.json:

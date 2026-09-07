@@ -22,6 +22,7 @@ fallback blocked).
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -262,13 +263,172 @@ def test_is_deliverable_acceptable_true_for_absent_dispatch(tmp_path: Path) -> N
     ok, reason = cil.is_deliverable_acceptable("never-ran", receipts)
 
     assert ok is True
-    assert "no receipt" in reason
+    assert "geen uitkomst-receipt" in reason
+    assert "afwezigheid is geen weigering" in reason
 
 
 def test_is_deliverable_acceptable_false_for_empty_dispatch_id(tmp_path: Path) -> None:
     receipts = tmp_path / "t0_receipts.ndjson"
     ok, reason = cil.is_deliverable_acceptable("", receipts)
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# is_deliverable_acceptable: only DELIVERABLE-OUTCOME receipts are judged
+# ---------------------------------------------------------------------------
+
+def _gate_request_receipt(dispatch_id: str, timestamp: str, **overrides) -> dict:
+    """A review_gate_request receipt — the gate plane, on the SAME dispatch_id.
+
+    Shape mirrors what gate_request_handler.py emits (event_type
+    review_gate_request, status requested); 844 of these sit in the live
+    ledger and every one of the 8 measured masking cases had one as its last
+    receipt before the merge.
+    """
+    rec = {
+        "dispatch_id": dispatch_id,
+        "provider": "claude",
+        "status": "requested",
+        "event_type": "review_gate_request",
+        "receipt_kind": "review_gate",
+        "timestamp": timestamp,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def test_gate_plane_receipt_does_not_mask_contract_invalid(tmp_path: Path) -> None:
+    """The measured masking case: worker outcome contract_invalid, then the
+    review gate writes on the same dispatch_id. The deliverable is still
+    unacceptable — a gate request says nothing about the report body."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-masked", "kimi", "2026-09-06T11:36:00Z"),
+        _gate_request_receipt("d-masked", "2026-09-06T11:50:54Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-masked", receipts)
+
+    assert ok is False
+    assert "contract_invalid" in reason
+
+
+def test_only_gate_plane_receipts_reads_as_no_outcome(tmp_path: Path) -> None:
+    """Gate/state-plane receipts alone are not an outcome — absence, so no
+    rejection, but the reason must say WHY it is an absence."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _gate_request_receipt("d-gate-only", "2026-09-06T11:50:54Z"),
+        {"dispatch_id": "d-gate-only", "event_type": "state_mutation",
+         "status": "success", "timestamp": "2026-09-06T11:55:00Z"},
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-gate-only", receipts)
+
+    assert ok is True
+    assert "geen uitkomst-receipt" in reason
+
+
+def test_real_outcome_success_after_gate_receipt_resolves(tmp_path: Path) -> None:
+    """A LATER genuine outcome still resolves the chain — the filter narrows
+    which receipts count, it does not freeze the first verdict."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-really-healed", "kimi", "2026-09-06T11:36:00Z"),
+        _gate_request_receipt("d-really-healed", "2026-09-06T11:50:54Z"),
+        _success_receipt("d-really-healed", "kimi", "2026-09-06T12:05:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-really-healed", receipts)
+
+    assert ok is True
+    assert "not contract_invalid" in reason
+
+
+def test_subprocess_completion_counts_as_outcome(tmp_path: Path) -> None:
+    """subprocess_completion carries the literal 4x in the live ledger, so it
+    is in DELIVERABLE_OUTCOME_EVENT_TYPES and must be judged."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-sub", "kimi", "2026-09-06T10:00:00Z",
+                    event_type="subprocess_completion"),
+        _gate_request_receipt("d-sub", "2026-09-06T10:30:00Z"),
+    ])
+
+    ok, _ = cil.is_deliverable_acceptable("d-sub", receipts)
+    assert ok is False
+
+
+def test_outcome_event_type_set_matches_measurement() -> None:
+    """Pin the set: measured 07-09 over 29.386 live records, the event types
+    that ever carry the contract_invalid literal are report_contract_invalid,
+    task_complete and subprocess_completion; task_failed is the fourth
+    deliverable outcome. review_gate_request must never be in here."""
+    assert cil.DELIVERABLE_OUTCOME_EVENT_TYPES == frozenset({
+        "report_contract_invalid",
+        "task_complete",
+        "subprocess_completion",
+        "task_failed",
+    })
+    assert "review_gate_request" not in cil.DELIVERABLE_OUTCOME_EVENT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# is_deliverable_acceptable: an unreadable ledger fails CLOSED
+# ---------------------------------------------------------------------------
+
+def test_unreadable_ledger_is_a_refusal_not_an_absence(tmp_path: Path) -> None:
+    """A directory where the ledger should be: read raises, and the gate must
+    refuse with the cause instead of degrading to an empty read (which reads
+    as "no outcome receipt" and fails OPEN)."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    ok, reason = cil.is_deliverable_acceptable("d-any", receipts)
+
+    assert ok is False
+    assert "grootboek onleesbaar" in reason
+    assert "afwezigheid" not in reason
+
+
+def test_unreadable_ledger_permission_bit_is_a_refusal(tmp_path: Path) -> None:
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [_ci_receipt("d-any", "kimi", "2026-09-06T10:00:00Z")])
+    receipts.chmod(0o000)
+    try:
+        if os.access(receipts, os.R_OK):  # running as root: chmod cannot deny
+            pytest.skip("read permission not enforceable for this user")
+        ok, reason = cil.is_deliverable_acceptable("d-any", receipts)
+    finally:
+        receipts.chmod(0o644)
+
+    assert ok is False
+    assert "grootboek onleesbaar" in reason
+
+
+def test_strict_false_keeps_the_soft_read(tmp_path: Path) -> None:
+    """The advisory contract is still available explicitly — strict=False
+    degrades an unreadable ledger to an empty read, as before."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    ok, reason = cil.is_deliverable_acceptable("d-any", receipts, strict=False)
+
+    assert ok is True
+    assert "geen uitkomst-receipt" in reason
+
+
+def test_advisory_readers_keep_soft_behaviour_on_unreadable_ledger(tmp_path: Path) -> None:
+    """build_contract_invalid_summary / collect_contract_invalid_open surface
+    at SessionStart — an I/O failure there must not crash a session."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    summary = cil.build_contract_invalid_summary(receipts)
+    open_items = cil.collect_contract_invalid_open(receipts)
+
+    assert summary["total"] == 0
+    assert open_items == []
 
 
 # ---------------------------------------------------------------------------
