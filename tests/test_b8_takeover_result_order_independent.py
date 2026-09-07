@@ -154,11 +154,14 @@ def test_record_not_executable_with_takeover_request_carries_takeover_path(tmp_p
 #    -- only the model call is mocked, never the recorder or the filesystem.
 # ---------------------------------------------------------------------------
 
+# The review-poort's diff sanitizer (gate_prompt.py) rewrites any literal
+# ```json fence it finds, so this fixture builds the fence from parts.
+_FENCE = "`" * 3
 _REAL_PASS_REPORT = (
     "Reviewed the diff, no issues.\n\n"
-    "```json\n"
-    '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
-    "```\n"
+    + _FENCE + "json\n"
+    + '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+    + _FENCE + "\n"
 )
 
 _FAKE_DIFF = "diff --git a/x b/x\n+ok\n"
