@@ -1345,6 +1345,20 @@
       "symbol": "_verification_from_report"
     },
     {
+      "file": "tests/test_report_path.py",
+      "line": 383,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_report_path.py",
+      "line": 384,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
       "file": "tests/test_role_applied_provider_lane.py",
       "line": 46,
       "mechanism": "direct-call",
