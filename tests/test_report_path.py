@@ -362,18 +362,96 @@ def test_worker_rules_footer_produces_canonical_path():
 
 
 def test_base_worker_md_contains_canonical_path():
-    """base_worker.md must prescribe the canonical path, not the old _report.md form."""
+    """base_worker.md must prescribe the canonical path, not the old _report.md
+    form -- and, since A-bis-2 (PR #1802), not a literal bare $VNX_DATA_DIR
+    string either.
+
+    base_worker.md now carries the {{REPORT_PATH}} placeholder instead of a
+    literal path: PromptAssembler.assemble() fills it in with the absolute
+    path under the central data dir, <data_dir>/unified_reports/<dispatch_id>.md
+    -- the exact path envelope_adapters_claude.ClaudeSubprocessAdapter also
+    exports to the worker's own shell as VNX_REPORT_PATH, so the worker never
+    has to guess where VNX_DATA_DIR actually resolves to (see
+    prompt_assembler._resolve_report_path). If someone reverts base_worker.md
+    to a literal bare "$VNX_DATA_DIR/..." string as the only report-path
+    indication, the placeholder has nothing left to replace: the rendered
+    prompt below keeps the bare text instead of the filled absolute path, and
+    this test goes red.
+    """
+    from unittest.mock import patch
+
+    from envelope_adapters_claude import ClaudeSubprocessAdapter
+    from envelope_types import EnvelopeSpec
+    from prompt_assembler import PromptAssembler
+
     path = Path(__file__).resolve().parent.parent / "scripts" / "lib" / "prompts" / "base_worker.md"
     content = path.read_text()
 
-    # Must have canonical env-var form
-    assert "$VNX_DATA_DIR/unified_reports" in content
+    # The raw template must carry the placeholder, not a literal path baked in
+    assert content.count("{{REPORT_PATH}}") == 2
 
     # Must NOT have old _report suffix
     assert "_report.md" not in content
 
     # Must NOT have old repo-local path
     assert ".vnx-data/unified_reports/" not in content
+
+    dispatch_id = "20260907-abis2-report-path-test"
+    data_dir = Path(tempfile.gettempdir()) / "vnx-canonical-path-test"
+    canonical_path = str(data_dir / "unified_reports" / f"{dispatch_id}.md")
+
+    prompt = PromptAssembler().assemble(
+        dispatch_metadata={
+            "role": "backend-developer",
+            "dispatch_id": dispatch_id,
+            "data_dir": str(data_dir),
+        },
+        instruction="Do the thing.",
+    )
+
+    # The rendered prompt must carry the filled absolute path, not the bare
+    # fallback -- that fallback only fires when dispatch_id/data_dir cannot
+    # be resolved at all. Scoped to Layer 1 (base_worker.md) only: Layer 2
+    # role prompts may legitimately carry their own separate "$VNX_DATA_DIR"
+    # reference, out of scope for this fix.
+    layer1_only = prompt.context.split("\n\n---\n\n", 1)[0]
+    assert canonical_path in layer1_only
+    assert "{{REPORT_PATH}}" not in layer1_only
+    assert "$VNX_DATA_DIR/unified_reports/<dispatch_id>.md" not in layer1_only
+
+    # The same absolute path must be what the headless lane exports to the
+    # worker's own shell as VNX_REPORT_PATH -- one canonical path, not two
+    # independent mechanisms that can silently drift apart.
+    class _OkSpawnResult:
+        returncode = 0
+        error = None
+        timed_out = False
+        stopped_early = False
+        completion_text = "done"
+        session_id = "sess-1"
+        token_usage = {"input_tokens": 1, "output_tokens": 1}
+        model = None
+
+    spec = EnvelopeSpec(
+        dispatch_id=dispatch_id,
+        terminal_id="T1",
+        provider="claude",
+        model="sonnet",
+        instruction="do the thing",
+        role="backend-developer",
+        pr_id=None,
+        state_dir=data_dir / "state",
+        data_dir=data_dir,
+        deadline_seconds=900,
+    )
+
+    with patch(
+        "provider_spawns.claude_spawn.spawn_claude", return_value=_OkSpawnResult()
+    ) as mock_spawn:
+        ClaudeSubprocessAdapter().run(spec)
+
+    kwargs = mock_spawn.call_args.kwargs
+    assert kwargs["extra_env"].get("VNX_REPORT_PATH") == canonical_path
 
 
 # ---------------------------------------------------------------------------
