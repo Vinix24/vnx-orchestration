@@ -937,6 +937,83 @@ def check_t0_state_freshness(paths: Dict[str, str]) -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# Branch-protection drift (Golf B, B1)
+# ---------------------------------------------------------------------------
+
+def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
+    """Live branch protection on main must match
+    ``scripts/forge/branch_protection.yaml`` — the same comparison
+    ``pr_merge.py``'s merge preflight and ``apply_branch_protection.py`` use
+    (``forge_protection_drift.compare``), so this can never disagree with
+    what the door itself would refuse on.
+
+    Read-only: this check never writes. A missing YAML on disk (not yet
+    added, or a repo checked out before this dispatch landed) and an
+    unreachable/unparseable live-state read both degrade to WARN, not FAIL —
+    neither is evidence of drift, only of "this check could not run" (a
+    fresh clone with no ``gh`` auth must not report a FAIL it never actually
+    verified). An invalid YAML, or a genuine diff between live and the YAML,
+    is a FAIL.
+    """
+    vnx_home = Path(paths["VNX_HOME"])
+    yaml_path = vnx_home / "scripts" / "forge" / "branch_protection.yaml"
+
+    try:
+        from forge_protection_drift import (
+            ProtectionConfigError,
+            ProtectionDriftError,
+            compare as compare_protection_state,
+            fetch_live_protection,
+            load_protection_config,
+            to_normalized_dict as protection_to_normalized_dict,
+        )
+    except ImportError as exc:
+        return [CheckResult(
+            "branch_protection_drift", WARN,
+            f"forge_protection_drift niet importeerbaar: {exc}",
+        )]
+
+    if not yaml_path.exists():
+        return [CheckResult(
+            "branch_protection_drift", WARN,
+            "scripts/forge/branch_protection.yaml ontbreekt: drift niet toetsbaar",
+            remediation="voeg scripts/forge/branch_protection.yaml toe (golf B, B1)",
+        )]
+
+    try:
+        config = load_protection_config(yaml_path)
+    except ProtectionConfigError as exc:
+        return [CheckResult(
+            "branch_protection_drift", FAIL, f"branch_protection.yaml ongeldig: {exc}",
+            remediation="corrigeer scripts/forge/branch_protection.yaml",
+        )]
+
+    try:
+        live_norm = fetch_live_protection(vnx_home, branch="main")
+    except ProtectionDriftError as exc:
+        return [CheckResult(
+            "branch_protection_drift", WARN,
+            f"live branch-protection niet leesbaar: {exc}",
+            remediation="controleer gh-authenticatie en netwerktoegang",
+        )]
+
+    diffs = compare_protection_state(protection_to_normalized_dict(config), live_norm)
+    if not diffs:
+        return [CheckResult(
+            "branch_protection_drift", PASS,
+            "branch-protection op main komt overeen met scripts/forge/branch_protection.yaml",
+        )]
+
+    fields = sorted({d["field"] for d in diffs})
+    return [CheckResult(
+        "branch_protection_drift", FAIL,
+        f"branch-protection wijkt af van de YAML: {', '.join(fields)}",
+        remediation="python3 scripts/forge/apply_branch_protection.py (of --dry-run om te bekijken)",
+        details=fields,
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Runtime checks (delegates to vnx_doctor_runtime.py)
 # ---------------------------------------------------------------------------
 
@@ -1000,6 +1077,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_state_root_location(paths))
     results.extend(check_dream_cycle(paths))
     results.extend(check_t0_state_freshness(paths))
+    results.extend(check_branch_protection_drift(paths))
 
     if package_check:
         vnx_home = Path(paths["VNX_HOME"])

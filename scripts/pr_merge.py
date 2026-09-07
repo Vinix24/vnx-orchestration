@@ -90,6 +90,18 @@ Register event written to dispatch_register.ndjson:
     dispatch_id : <str, optional>
     terminal    : "T0"
 
+Branch-protection preflight (Golf B, B1): a fourth fail-closed gate after
+contract_invalid — live branch protection on main must match
+``scripts/forge/branch_protection.yaml`` as committed on main, and this PR's
+own copy of that YAML must not weaken main's (see
+``_run_branch_protection_gate`` and ``scripts/lib/forge_protection_drift.py``
+for the full four-step check). A 404 on that exact path when reading main's
+YAML is the bootstrap case (no PR has ever applied one yet) and is a loud
+no-op, not a refusal. The only override is ``--allow-weaken "<reason>"``,
+which accepts ONLY a weakening the PR's own YAML edit introduces relative to
+main — a drift between live state and main's own declared YAML has no
+override at all (run ``apply_branch_protection.py`` first).
+
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
 
@@ -116,6 +128,16 @@ from governance_receipts import emit_governance_receipt
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 from merge_preflight_adr_check import check_adr_numbers_for_pr
 from contract_invalid_ledger import is_deliverable_acceptable
+from forge_protection_drift import (
+    PROTECTION_YAML_RELATIVE_PATH,
+    ProtectionConfigError,
+    compare as compare_protection_state,
+    fetch_live_protection,
+    fetch_yaml_from_ref,
+    is_weakening as protection_is_weakening,
+    parse_protection_config,
+    to_normalized_dict as protection_to_normalized_dict,
+)
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -520,6 +542,174 @@ def _run_contract_invalid_gate(
     return result
 
 
+def _no_go_protection(message: str) -> Dict[str, Any]:
+    return {"verdict": "NO-GO", "message": message, "overridden": False, "override_reason": None}
+
+
+def _door_blob_hash_gate(project_root: Path) -> Dict[str, Any]:
+    """Golf B, B1: the merge door only runs any of the branch-protection
+    preflight checks above from the checkout ON main — a fix-forward pushed
+    straight to a feature branch (bypassing review of pr_merge.py itself)
+    must not be able to weaken what this door enforces just by running from
+    a stale or edited local checkout. Compares the git blob hash of the
+    RUNNING ``scripts/pr_merge.py`` (``git hash-object``, computed locally)
+    against the sha GitHub reports for that same path on ``main`` (the
+    contents API's ``sha`` field IS a git blob hash — measured equal on this
+    repo's own ``scripts/pr_merge.py`` on 2026-09-07). Any mismatch refuses;
+    an unreadable local or remote hash refuses too (fail-closed).
+    """
+    local = subprocess.run(
+        ["git", "hash-object", "scripts/pr_merge.py"],
+        cwd=str(project_root), capture_output=True, text=True, timeout=15,
+    )
+    if local.returncode != 0:
+        return _no_go_protection(
+            "git hash-object op scripts/pr_merge.py faalde: deur-integriteit niet toetsbaar "
+            f"({(local.stderr or '').strip()[:200]})"
+        )
+    local_hash = (local.stdout or "").strip()
+
+    remote = _gh([
+        "api", "repos/{owner}/{repo}/contents/scripts/pr_merge.py?ref=main",
+        "--jq", ".sha",
+    ])
+    if remote.returncode != 0:
+        return _no_go_protection(
+            "sha van scripts/pr_merge.py op main kon niet worden opgevraagd: deur-integriteit "
+            f"niet toetsbaar ({(remote.stderr or '').strip()[:200]})"
+        )
+    remote_hash = (remote.stdout or "").strip()
+    if not remote_hash or local_hash != remote_hash:
+        return _no_go_protection(
+            "de draaiende scripts/pr_merge.py wijkt af van de versie op main: de deur draait "
+            "alleen uit de hoofd-checkout op main"
+        )
+    return {
+        "verdict": "GO", "message": "deur-integriteit: pr_merge.py identiek aan main",
+        "overridden": False, "override_reason": None,
+    }
+
+
+def _run_branch_protection_gate(
+    pr_number: int,
+    *,
+    pr_data: Optional[Dict[str, Any]] = None,
+    allow_weaken_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fail-closed merge gate (Golf B, B1): live branch protection on main
+    must match ``scripts/forge/branch_protection.yaml`` as committed on
+    main, and this PR's own copy of that YAML must not weaken main's.
+
+    Four checks, in order, each a refusal on its own:
+
+    (a) Read main's YAML via the contents API (never a local ref — the door
+        never fetches). A 404 on EXACTLY that path is the bootstrap case (no
+        PR has ever applied a branch_protection.yaml to main yet): a no-op
+        GO, loudly. Any other read/parse failure blocks.
+    (b) Live protection on main must match main's own declared YAML — any
+        drift blocks, with the differing fields named. No override: a drift
+        here means ``apply_branch_protection.py`` must be run first, not
+        that this merge should be waved through.
+    (c) This PR's own version of the YAML (read at the PR's head sha, same
+        contents API) must not weaken main's version
+        (``forge_protection_drift.is_weakening``). Deleting the file counts
+        as the ultimate weakening. Blocks without ``--allow-weaken
+        "<reason>"`` (empty reason refused, no silent bypass).
+    (d) The RUNNING ``scripts/pr_merge.py`` must be byte-identical to main's
+        (``_door_blob_hash_gate``) — the door only runs any of the above
+        from the main checkout.
+
+    No override besides ``--allow-weaken`` — a drift found in (b) or an
+    unreadable/unparseable state anywhere has no escape hatch.
+    """
+    project_root = SCRIPT_DIR.parent
+
+    main_yaml = fetch_yaml_from_ref(project_root, "main", PROTECTION_YAML_RELATIVE_PATH)
+    if main_yaml.not_found:
+        return {
+            "verdict": "GO",
+            "message": "branch-protection-drift: geen YAML op main, preflight overgeslagen",
+            "bootstrap": True,
+            "overridden": False,
+            "override_reason": None,
+        }
+    if main_yaml.error:
+        return _no_go_protection(f"branch-protection-YAML op main niet leesbaar: {main_yaml.error}")
+    try:
+        main_config = parse_protection_config(main_yaml.text or "")
+    except ProtectionConfigError as exc:
+        return _no_go_protection(f"branch-protection-YAML op main ongeldig: {exc}")
+    main_norm = protection_to_normalized_dict(main_config)
+
+    try:
+        live_norm = fetch_live_protection(project_root, branch="main")
+    except Exception as exc:  # noqa: BLE001 — any unreadable live state blocks
+        return _no_go_protection(f"live branch-protection niet leesbaar: {exc}")
+    diffs = compare_protection_state(main_norm, live_norm)
+    if diffs:
+        fields = ", ".join(sorted({d["field"] for d in diffs}))
+        return _no_go_protection(
+            f"branch-protection wijkt af van scripts/forge/branch_protection.yaml op main: {fields}"
+        )
+
+    head_sha = (pr_data or {}).get("headRefOid") or ""
+    if not head_sha:
+        return _no_go_protection(
+            f"PR-head kon niet worden bepaald voor #{pr_number}: branch-protection-preflight niet toetsbaar"
+        )
+    pr_yaml = fetch_yaml_from_ref(project_root, head_sha, PROTECTION_YAML_RELATIVE_PATH)
+    if pr_yaml.not_found:
+        return _no_go_protection(
+            f"deze PR verwijdert {PROTECTION_YAML_RELATIVE_PATH}: branch-protection kan niet "
+            "meer worden gehandhaafd"
+        )
+    if pr_yaml.error:
+        return _no_go_protection(f"branch-protection-YAML op de PR-head niet leesbaar: {pr_yaml.error}")
+    try:
+        pr_config = parse_protection_config(pr_yaml.text or "")
+    except ProtectionConfigError as exc:
+        return _no_go_protection(f"branch-protection-YAML op de PR-head ongeldig: {exc}")
+    pr_norm = protection_to_normalized_dict(pr_config)
+
+    weakening, weak_fields = protection_is_weakening(main_norm, pr_norm)
+    reason = None
+    if weakening:
+        reason = (allow_weaken_reason or "").strip()
+        if allow_weaken_reason is None:
+            return _no_go_protection(
+                "deze PR verzwakt branch-protection t.o.v. main zonder --allow-weaken: "
+                + ", ".join(weak_fields)
+            )
+        if not reason:
+            return {
+                "verdict": "NO-GO",
+                "message": "override zonder reden geweigerd: --allow-weaken vereist een niet-lege reden",
+                "overridden": True,
+                "override_reason": reason,
+            }
+
+    door_check = _door_blob_hash_gate(project_root)
+    if door_check["verdict"] != "GO":
+        return door_check
+
+    if weakening:
+        return {
+            "verdict": "GO",
+            "message": (
+                f"OVERRIDE: branch-protection-verzwakking geaccepteerd ({reason}): "
+                + ", ".join(weak_fields)
+            ),
+            "overridden": True,
+            "override_reason": reason,
+        }
+    return {
+        "verdict": "GO",
+        "message": "branch-protection: geen drift, PR verzwakt niets",
+        "overridden": False,
+        "override_reason": None,
+    }
+
+
 _HEAD_MOVED_MARKERS = (
     "head branch is not up to date",
     "head branch was modified",
@@ -873,6 +1063,12 @@ def main(argv: Optional[list[str]] = None) -> int:
              "contract_invalid, with this required reason (empty is refused). Separate "
              "from --override-reason.",
     )
+    parser.add_argument(
+        "--allow-weaken", default=None,
+        help="Escape hatch (golf B, B1): accept a PR that weakens "
+             "scripts/forge/branch_protection.yaml relative to main, with this required "
+             "reason (empty is refused). No other override applies to this gate.",
+    )
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args(argv)
 
@@ -948,6 +1144,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"OVERRIDE: {contract_gate['message']}")
     else:
         print(f"contract_invalid gate: {contract_gate['message']}")
+
+    # ── Branch-protection preflight (Golf B, B1): main's live protection ───
+    # must match scripts/forge/branch_protection.yaml, and this PR must not
+    # weaken that YAML relative to main. Only --allow-weaken overrides a
+    # weakening; drift between live and main's own YAML has no override.
+    protection_gate = _run_branch_protection_gate(
+        args.pr, pr_data=pr_data, allow_weaken_reason=args.allow_weaken,
+    )
+    if protection_gate["verdict"] != "GO":
+        if args.json:
+            print(json.dumps({
+                "success": False, "pr_number": args.pr,
+                "error": protection_gate["message"],
+                "branch_protection_gate": protection_gate,
+            }, indent=2))
+        else:
+            print(f"NO-GO: {protection_gate['message']}", file=sys.stderr)
+        return EXIT_ERROR
+    if protection_gate.get("overridden"):
+        print(f"OVERRIDE: {protection_gate['message']}")
+    else:
+        print(f"Branch-protection gate: {protection_gate['message']}")
 
     # The head SHA the gates approved is established once in _run_ci_gate; the
     # merge is pinned to it (--match-head-commit) so a post-gate push is refused.
