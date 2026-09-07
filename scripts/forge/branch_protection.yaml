@@ -70,3 +70,5 @@ repo:
 # Checked, never applied — apply_branch_protection.py never writes rulesets.
 # GET /repos/{owner}/{repo}/rulesets returned [] when this was measured.
 rulesets: []
+
+# Operator-stap uit docs/operations/FORGE_GATE.md: het `app:`-blok (slug + app_id) komt hier terug zodra de App bestaat; de schemalezer accepteert het al sinds deze PR (Golf B, B2a fix-forward 3).
