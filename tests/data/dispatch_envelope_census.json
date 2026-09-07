@@ -624,6 +624,20 @@
       "symbol": "_govern"
     },
     {
+      "file": "tests/test_envelope_claude_adapter_report_env.py",
+      "line": 27,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_envelope_claude_adapter_report_env.py",
+      "line": 28,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
       "file": "tests/test_envelope_govern_contract_enforce.py",
       "line": 39,
       "mechanism": "direct-call",
