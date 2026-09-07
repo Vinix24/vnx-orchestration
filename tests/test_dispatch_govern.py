@@ -71,6 +71,7 @@ def _make_spec(data_dir: Path, state_dir: Path, **kwargs) -> GovernSpec:
         task_class=kwargs.get("task_class"),
         tier_from=kwargs.get("tier_from"),
         tier_to=kwargs.get("tier_to"),
+        repo_root=kwargs.get("repo_root"),
     )
 
 
@@ -1916,3 +1917,119 @@ def test_synthesize_work_delivered_keeps_commit_message_and_verdict(tmp_path):
     assert "- delivery_verdict: work_delivered" in body
     assert "feat(oi-1363): real worker delivery" in body
     print(f"\n--- ## Response (work_delivered) ---\n{body}")
+
+
+# ---------------------------------------------------------------------------
+# A-bis-2: GOVERN adopts a stray worker report before synthesizing.
+#
+# A worker that could not see VNX_DATA_DIR guesses "$VNX_DATA_DIR/unified_reports/
+# <id>.md" from wherever its cwd happens to resolve — sometimes the ephemeral
+# per-dispatch worktree (torn down by the time GOVERN runs on the headless
+# lane), sometimes the outer checkout's own .vnx-data (repo_root, which
+# survives worktree teardown). Measured 2026-09-06: five real worker reports
+# landed in the outer checkout's .vnx-data/unified_reports/ while the central
+# store received a synthesized wrapper for the same dispatches.
+# ---------------------------------------------------------------------------
+
+def test_govern_adopts_stray_report_from_repo_root(tmp_data, tmp_state, tmp_path):
+    """A valid worker report sitting in <repo_root>/.vnx-data/unified_reports/
+    with nothing central is adopted: outcome is authored, the file is moved to
+    the central path, the stray original is gone, and the receipt records a
+    report_relocated_from warning."""
+    repo_root = tmp_path / "repo"
+    stray_dir = repo_root / ".vnx-data" / "unified_reports"
+    stray_dir.mkdir(parents=True)
+    stray_path = stray_dir / "test-govern-001.md"
+    stray_path.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, repo_root=repo_root)
+    raw = GovernRaw(receipt=None, duration_seconds=5.0)
+
+    outcome = govern(spec, raw, lane="claude_headless")
+
+    assert outcome.contract_status == "authored"
+    central_path = tmp_data / "unified_reports" / "test-govern-001.md"
+    assert outcome.report_path == central_path
+    assert central_path.exists()
+    assert "Implemented the feature correctly" in central_path.read_text(encoding="utf-8")
+    assert not stray_path.exists(), "stray original must be relocated, not copied"
+
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+    receipt = json.loads(receipts_file.read_text().splitlines()[0])
+    warnings = receipt.get("warnings") or []
+    assert any(
+        w.get("code") == "report_relocated" and str(stray_path) in w.get("message", "")
+        for w in warnings
+    ), f"expected a report_relocated warning naming {stray_path}, got {warnings!r}"
+
+
+def test_govern_invalid_repo_root_stray_report_still_synthesizes(tmp_data, tmp_state, tmp_path):
+    """An INVALID stray report at repo_root falls through to synthesis exactly
+    as before (regression guard) — and is left in place, not moved."""
+    repo_root = tmp_path / "repo"
+    stray_dir = repo_root / ".vnx-data" / "unified_reports"
+    stray_dir.mkdir(parents=True)
+    stray_path = stray_dir / "test-govern-001.md"
+    stray_path.write_text("not a valid report body\n", encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state, repo_root=repo_root)
+    raw = GovernRaw(receipt=None, duration_seconds=5.0)
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: something real with enough chars to pass the fifty-char minimum check"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        outcome = govern(spec, raw, lane="claude_headless")
+
+    assert outcome.contract_status == "synthesized"
+    assert stray_path.exists(), "an invalid stray report must not be relocated"
+    assert stray_path.read_text(encoding="utf-8") == "not a valid report body\n"
+
+
+def test_govern_worktree_report_wins_over_repo_root(tmp_data, tmp_state, tmp_path):
+    """Search order: worktree_path is consulted BEFORE repo_root. When both
+    hold a valid report, the worktree one is adopted and the repo_root one is
+    left untouched."""
+    worktree = tmp_path / "worktree"
+    worktree_stray_dir = worktree / ".vnx-data" / "unified_reports"
+    worktree_stray_dir.mkdir(parents=True)
+    worktree_stray = worktree_stray_dir / "test-govern-001.md"
+    worktree_stray.write_text(
+        _valid_body().replace("Implemented the feature correctly", "WORKTREE body marker"),
+        encoding="utf-8",
+    )
+
+    repo_root = tmp_path / "repo"
+    repo_root_stray_dir = repo_root / ".vnx-data" / "unified_reports"
+    repo_root_stray_dir.mkdir(parents=True)
+    repo_root_stray = repo_root_stray_dir / "test-govern-001.md"
+    repo_root_stray.write_text(
+        _valid_body().replace("Implemented the feature correctly", "REPO ROOT body marker"),
+        encoding="utf-8",
+    )
+
+    spec = _make_spec(tmp_data, tmp_state, worktree_path=worktree, repo_root=repo_root)
+    raw = GovernRaw(receipt=None, duration_seconds=5.0)
+
+    outcome = govern(spec, raw, lane="claude_headless")
+
+    assert outcome.contract_status == "authored"
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert "WORKTREE body marker" in content
+    assert "REPO ROOT body marker" not in content
+    assert not worktree_stray.exists(), "the adopted worktree stray must be relocated"
+    assert repo_root_stray.exists(), "the un-adopted repo_root stray must be left in place"
+
+
+def test_govern_repo_root_none_does_not_break_normal_synthesis(tmp_data, tmp_state):
+    """Regression: spec.repo_root defaults to None and must not change the
+    existing no-worker-report synthesis path."""
+    spec = _make_spec(tmp_data, tmp_state)
+    assert spec.repo_root is None
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: implement X with full coverage. Worker status: done. Synthesized."), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 +++++"):
+        outcome = govern(spec, raw, lane="claude_headless")
+
+    assert outcome.contract_status == "synthesized"

@@ -186,6 +186,7 @@ def ensure_receipt(
     contract_status: str,
     permission_enforcement: str,
     status: Optional[str] = None,
+    report_relocated_from: Optional[str] = None,
 ) -> None:
     """Append a lane-synthesized completion receipt when the worker never emitted one.
 
@@ -196,6 +197,11 @@ def ensure_receipt(
     The synthesized receipt uses source="tmux_interactive_lane_synthesized" so
     dedup_completion_receipts() can distinguish it from a worker-authored one.
     If the worker later emits its own receipt, the authored one wins on readback.
+
+    ``report_relocated_from`` (A-bis-2): set by ``_govern_impl`` to the ORIGINAL
+    stray path when it adopted a worker report found outside the central store
+    (worktree or repo-root). Stamped as a ``warnings`` entry on the receipt so
+    the relocation is auditable, never silent.
     """
     if os.environ.get("VNX_RECEIPT_FALLBACK", "1").strip() == "0":
         return
@@ -262,6 +268,13 @@ def ensure_receipt(
         permission_allow_pattern_count=_posture.get("permission_allow_pattern_count"),
     ).to_dict()
 
+    if report_relocated_from:
+        synthesized_receipt["warnings"] = [{
+            "code": "report_relocated",
+            "severity": "info",
+            "message": f"report_relocated_from={report_relocated_from}",
+        }]
+
     try:
         if _SCRIPTS_DIR not in sys.path:
             sys.path.insert(0, _SCRIPTS_DIR)
@@ -324,6 +337,17 @@ class GovernSpec:
     # govern() callers), in which case ensure_receipt() omits the fields
     # exactly as before this change (no default-changing behavior).
     permission_posture: Optional[dict] = None
+    # A-bis-2: the MAIN checkout root — distinct from worktree_path (an
+    # ephemeral per-dispatch worktree that may already be torn down, or may
+    # simply be a different directory than the outer checkout the worker
+    # guessed relative to). A worker that could not see VNX_DATA_DIR
+    # sometimes resolves "$VNX_DATA_DIR/unified_reports/<id>.md" against the
+    # outer checkout's own .vnx-data instead of the central store or the
+    # worktree — that report survives worktree teardown (unlike a copy left
+    # under worktree_path) but is invisible to govern() without this second
+    # search location. None when the caller does not know it, in which case
+    # the stray-report search below simply has one fewer candidate.
+    repo_root: Optional[Path] = None
 
 
 @dataclass
@@ -552,6 +576,65 @@ def _govern_error_fallback(
     )
 
 
+# A-bis-2: adopt a stray worker report before synthesizing over it. The
+# worker guesses "$VNX_DATA_DIR/unified_reports/<id>.md" whenever the caller
+# never exported VNX_DATA_DIR — resolve_report_path() already covers the
+# central store and spec.worktree_path; this adds spec.repo_root (the outer
+# checkout) as a THIRD, lower-priority search location, only consulted when
+# neither of the first two found anything.
+def _resolve_worker_report_with_adoption(
+    dispatch_id: str,
+    data_dir: "Path",
+    *,
+    worktree_path: "Optional[Path]" = None,
+    repo_root: "Optional[Path]" = None,
+) -> "tuple[Optional[Path], Optional[Path]]":
+    """Resolve the worker-authored report, locating a stray copy for adoption.
+
+    Search order: central (``<data_dir>/unified_reports/<id>.md``), then
+    ``<worktree_path>/.vnx-data/unified_reports/<id>.md``, then
+    ``<repo_root>/.vnx-data/unified_reports/<id>.md``.
+
+    Takes plain values rather than a ``GovernSpec`` so callers with no
+    worktree/repo-root concept of their own (the envelope lane's
+    ``EnvelopeSpec`` carries neither field) can call it with just what they
+    have — ``envelope_govern._govern`` derives ``worktree_path``/``repo_root``
+    itself (via ``dispatch_worktree_isolation``) and passes them through here.
+
+    Returns ``(candidate_path, stray_path)``: ``candidate_path`` is the file
+    to read as the worker-authored body (or ``None`` if nothing was found
+    anywhere); ``stray_path`` is set to the same path when it was found
+    somewhere OTHER than the central location (signalling that, once
+    validated, it should be relocated there) and ``None`` when the candidate
+    is already at the canonical central path or nothing was found.
+    """
+    from report_path import resolve_report_path  # noqa: PLC0415
+
+    central_path = Path(data_dir) / "unified_reports" / f"{dispatch_id}.md"
+
+    resolved = resolve_report_path(
+        dispatch_id, data_dir=data_dir,
+        repo_root=worktree_path,
+    )
+    candidate_path = resolved.path if resolved is not None else None
+
+    if candidate_path is None and repo_root is not None:
+        stray = Path(repo_root) / ".vnx-data" / "unified_reports" / f"{dispatch_id}.md"
+        if stray.is_file():
+            candidate_path = stray
+
+    if candidate_path is None:
+        return None, None
+
+    try:
+        if candidate_path.resolve() == central_path.resolve():
+            return candidate_path, None
+    except OSError:
+        pass
+
+    return candidate_path, candidate_path
+
+
 def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """Core govern logic. Called by govern(); any exception is caught there."""
     from report_body_contract import CONTRACT_INVALID_STATUS, validate_body  # noqa: PLC0415
@@ -567,17 +650,17 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     body: Optional[str] = None
     contract_status = "synthesized"
 
-    # OI-989/OI-993: use the shared resolver instead of hand-rolling path
-    # candidates. The resolver checks all three filename forms (canonical
-    # <id>.md, legacy dispatch-<id>.md, legacy <id>_report.md) and sets
-    # ambiguous=True when more than one exists — govern() logs that so the
-    # receipt never silently picks the wrong file.
-    from report_path import resolve_report_path
-    resolved = resolve_report_path(
-        dispatch_id, data_dir=spec.data_dir,
-        repo_root=spec.worktree_path,
+    # OI-989/OI-993 + A-bis-2: use the shared resolver instead of hand-rolling
+    # path candidates, extended with a stray-report adoption search (central
+    # store, then worktree_path, then repo_root — see
+    # _resolve_worker_report_with_adoption's docstring). ``_stray_path`` is
+    # set only when the candidate was found somewhere other than the central
+    # location, in which case it is relocated there once validated as authored.
+    candidate_path, _stray_path = _resolve_worker_report_with_adoption(
+        spec.dispatch_id, spec.data_dir,
+        worktree_path=spec.worktree_path,
+        repo_root=spec.repo_root,
     )
-    candidate_path = resolved.path if resolved is not None else None
 
     if candidate_path is not None:
         try:
@@ -637,6 +720,27 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
                     )
         except OSError as exc:
             logger.warning("govern: could not read worker report for %s: %s", dispatch_id, exc)
+
+    # -- a2. Relocate an adopted stray report to the central path -------------
+    # Only a VALIDATED authored candidate gets relocated — an invalid stray
+    # report (placeholder/missing headings) falls through to synthesis exactly
+    # as before, and is left where it was found (A-bis-2 regression guard).
+    _report_relocated_from: Optional[str] = None
+    if contract_status == "authored" and _stray_path is not None:
+        _central_path = Path(spec.data_dir) / "unified_reports" / f"{dispatch_id}.md"
+        try:
+            _central_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(_stray_path, _central_path)
+            _report_relocated_from = str(_stray_path)
+            logger.info(
+                "govern: adopted stray worker report for dispatch=%s: %s -> %s",
+                dispatch_id, _stray_path, _central_path,
+            )
+        except OSError as exc:
+            logger.warning(
+                "govern: could not relocate stray report %s -> %s for dispatch=%s: %s",
+                _stray_path, _central_path, dispatch_id, exc,
+            )
 
     # -- b. Synthesize if no valid authored body found ------------------------
     if body is None:
@@ -810,6 +914,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
             contract_status=contract_status,
             permission_enforcement=permission_enforcement,
             status=receipt_status,
+            report_relocated_from=_report_relocated_from,
         )
         return GovernedOutcome(
             report_path=None,
@@ -825,6 +930,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         contract_status=contract_status,
         permission_enforcement=permission_enforcement,
         status=receipt_status,
+        report_relocated_from=_report_relocated_from,
     )
 
     return GovernedOutcome(

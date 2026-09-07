@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -819,7 +820,28 @@ def run_envelope_headless_plan(
         work_ref=plan.work_ref,
     )
 
-    enriched_instruction = _prepare(spec)
+    # A-bis-2: _prepare() (via _inject_skill_context -> PromptAssembler.assemble())
+    # fills base_worker.md's REPORT_PATH_PLACEHOLDER from dispatch_metadata["data_dir"]
+    # when present, else the ambient VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 two-key
+    # contract already used fleet-wide (plan_gate_panel._resolve_data_dir). The
+    # headless lane's dispatch_metadata carries no data_dir key, so the ambient
+    # contract is set here — scoped and restored so a resolved data_dir never leaks
+    # into an unrelated dispatch processed later in the same orchestrator process.
+    _prev_vnx_data_dir = os.environ.get("VNX_DATA_DIR")
+    _prev_vnx_data_dir_explicit = os.environ.get("VNX_DATA_DIR_EXPLICIT")
+    os.environ["VNX_DATA_DIR"] = str(spec.data_dir)
+    os.environ["VNX_DATA_DIR_EXPLICIT"] = "1"
+    try:
+        enriched_instruction = _prepare(spec)
+    finally:
+        if _prev_vnx_data_dir is None:
+            os.environ.pop("VNX_DATA_DIR", None)
+        else:
+            os.environ["VNX_DATA_DIR"] = _prev_vnx_data_dir
+        if _prev_vnx_data_dir_explicit is None:
+            os.environ.pop("VNX_DATA_DIR_EXPLICIT", None)
+        else:
+            os.environ["VNX_DATA_DIR_EXPLICIT"] = _prev_vnx_data_dir_explicit
     enriched_spec = EnvelopeSpec(
         dispatch_id=spec.dispatch_id,
         terminal_id=spec.terminal_id,

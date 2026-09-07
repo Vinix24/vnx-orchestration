@@ -122,6 +122,21 @@ class ClaudeSubprocessAdapter:
         from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS  # noqa: PLC0415
         from provider_spawns.claude_spawn import spawn_claude  # noqa: PLC0415
 
+        # A-bis-2: the headless lane never exported VNX_DATA_DIR into the
+        # worker's own shell, so a worker guessing "$VNX_DATA_DIR/unified_reports/
+        # <id>.md" (base_worker.md) resolved it wherever its cwd happened to
+        # land — often not the central store GOVERN reads back from (measured
+        # 2026-09-06: reports orphaned in a repo-local .vnx-data instead of the
+        # central one). VNX_REPORT_PATH gives the worker the exact absolute
+        # file to write, no guessing required; VNX_DATA_DIR/_EXPLICIT mirror
+        # the two-key contract other lanes already export (plan_gate_panel.py).
+        _report_path = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
+        extra_env = {
+            "VNX_DATA_DIR": str(spec.data_dir),
+            "VNX_DATA_DIR_EXPLICIT": "1",
+            "VNX_REPORT_PATH": str(_report_path),
+        }
+
         try:
             result = spawn_claude(
                 prompt=spec.instruction,
@@ -133,6 +148,7 @@ class ClaudeSubprocessAdapter:
                 role=spec.role,
                 total_deadline=float(spec.deadline_seconds),
                 scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
+                extra_env=extra_env,
             )
         except BrokenPipeError as exc:
             return _AdapterResult(

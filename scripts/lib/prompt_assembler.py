@@ -19,6 +19,7 @@ BILLING SAFETY: No Anthropic SDK imports. No api.anthropic.com calls. CLI-only.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,18 @@ _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 # Regex to strip [[TARGET:TX]] dispatch header line
 _TARGET_HEADER_RE = re.compile(r"^\[\[TARGET:T\d+\]\]\s*\n?", re.MULTILINE)
+
+# A-bis-2: base_worker.md carries this placeholder instead of a bare
+# "$VNX_DATA_DIR" reference. assemble() fills it in with the absolute report
+# path so the worker never has to guess where VNX_DATA_DIR actually resolves
+# to (the headless lane does not export that variable into the worker's own
+# shell — see envelope_adapters_claude.ClaudeSubprocessAdapter.run).
+REPORT_PATH_PLACEHOLDER = "{{REPORT_PATH}}"
+
+# Fallback text when dispatch_id or data_dir cannot be resolved — byte-identical
+# to the historical templated text so callers that supply neither key keep
+# their previous prompt content instead of leaking the raw placeholder token.
+_REPORT_PATH_FALLBACK = "$VNX_DATA_DIR/unified_reports/<dispatch_id>.md"
 
 
 @dataclass
@@ -145,6 +158,10 @@ class PromptAssembler:
         else:
             context = f"{layer1}\n\n---\n\n{layer2}"
 
+        context = context.replace(
+            REPORT_PATH_PLACEHOLDER, self._resolve_report_path(dispatch_metadata)
+        )
+
         # ---- Layer 3: Dispatch payload ------------------------------------
         cleaned_instruction = _TARGET_HEADER_RE.sub("", instruction).strip()
         layer3 = self._build_layer3(cleaned_instruction, dispatch_metadata)
@@ -176,6 +193,37 @@ class PromptAssembler:
     # ------------------------------------------------------------------
     # Layer loaders
     # ------------------------------------------------------------------
+
+    def _resolve_report_path(self, dispatch_metadata: dict) -> str:
+        """Resolve the text that fills base_worker.md's REPORT_PATH_PLACEHOLDER.
+
+        A-bis-2: the worker used to see a bare ``$VNX_DATA_DIR`` reference and
+        had to guess the real directory — the headless lane never exported
+        that variable into the worker's own shell, so reports landed wherever
+        the guess resolved (often not the store GOVERN reads back from).
+
+        Resolution order:
+          1. ``dispatch_metadata["data_dir"]`` — explicit override (tests,
+             programmatic callers).
+          2. The ambient ``VNX_DATA_DIR`` + ``VNX_DATA_DIR_EXPLICIT=1``
+             two-key contract already used fleet-wide (e.g.
+             ``plan_gate_panel._resolve_data_dir``) — a bare inherited
+             ``VNX_DATA_DIR`` is pollution, not config, so it is only honored
+             with the explicit flag set.
+          3. Falls back to the historical templated text when dispatch_id or
+             data_dir cannot be resolved, so the placeholder never leaks into
+             the prompt unresolved.
+        """
+        dispatch_id = str(dispatch_metadata.get("dispatch_id") or "").strip()
+
+        raw_data_dir = dispatch_metadata.get("data_dir")
+        data_dir = str(raw_data_dir).strip() if raw_data_dir else ""
+        if not data_dir and os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+            data_dir = os.environ.get("VNX_DATA_DIR", "").strip()
+
+        if dispatch_id and data_dir:
+            return str(Path(data_dir) / "unified_reports" / f"{dispatch_id}.md")
+        return _REPORT_PATH_FALLBACK
 
     def _load_base(self) -> str:
         """Load Layer 1 from scripts/lib/prompts/base_worker.md."""

@@ -604,3 +604,98 @@ def test_for_litellm_provider_returns_messages_with_system_role(assembler: Promp
     assert result["messages"][1]["content"] == "litellm-test"
     assert "system" not in result
     assert result["metadata"]["provider"] == "kimi"
+
+
+# ---------------------------------------------------------------------------
+# A-bis-2: REPORT_PATH_PLACEHOLDER fill-in — the worker sees the absolute
+# report path, not a bare "$VNX_DATA_DIR" it has to guess (the headless lane
+# never exported that variable into the worker's own shell).
+# ---------------------------------------------------------------------------
+
+def test_report_path_filled_from_explicit_data_dir(
+    assembler: PromptAssembler, basic_instruction: str, monkeypatch,
+) -> None:
+    """dispatch_metadata["data_dir"] resolves the absolute report path — the
+    bare $VNX_DATA_DIR template must not survive into the assembled prompt."""
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+    prompt = assembler.assemble(
+        dispatch_metadata={
+            "role": "backend-developer",
+            "dispatch_id": "20260907-abis2-report-path-central",
+            "data_dir": "/Users/ops/.vnx-data/vnx-dev",
+        },
+        instruction=basic_instruction,
+    )
+
+    expected = "/Users/ops/.vnx-data/vnx-dev/unified_reports/20260907-abis2-report-path-central.md"
+    assert expected in prompt.context
+    assert "{{REPORT_PATH}}" not in prompt.context
+    # Layer 1 (base_worker.md) must no longer show the bare template — Layer 2
+    # role prompts (out of scope for this fix) may still legitimately carry
+    # their own separate "$VNX_DATA_DIR" reference, so the check is scoped to
+    # the Layer-1-only slice, not the whole combined context.
+    layer1_only = prompt.context.split("\n\n---\n\n", 1)[0]
+    assert "$VNX_DATA_DIR" not in layer1_only
+    assert layer1_only.count(expected) == 2, (
+        "base_worker.md references the report path in two places "
+        "(Expected Output Structure + Report Location)"
+    )
+
+
+def test_report_path_falls_back_without_data_dir(
+    assembler: PromptAssembler, basic_instruction: str, monkeypatch,
+) -> None:
+    """No data_dir anywhere (metadata or ambient env) -> the historical
+    templated text is used, never the raw unresolved placeholder token."""
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+    prompt = assembler.assemble(
+        dispatch_metadata={"role": "backend-developer", "terminal": "T1"},
+        instruction=basic_instruction,
+    )
+
+    assert "$VNX_DATA_DIR/unified_reports/<dispatch_id>.md" in prompt.context
+    assert "{{REPORT_PATH}}" not in prompt.context
+
+
+def test_report_path_filled_from_ambient_two_key_contract(
+    assembler: PromptAssembler, basic_instruction: str, monkeypatch,
+) -> None:
+    """No explicit data_dir in metadata: falls back to the ambient VNX_DATA_DIR
+    + VNX_DATA_DIR_EXPLICIT=1 two-key contract already used fleet-wide
+    (plan_gate_panel._resolve_data_dir et al.)."""
+    monkeypatch.setenv("VNX_DATA_DIR", "/tmp/ambient-vnx-data")
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    prompt = assembler.assemble(
+        dispatch_metadata={
+            "role": "backend-developer",
+            "dispatch_id": "ambient-001",
+        },
+        instruction=basic_instruction,
+    )
+
+    assert "/tmp/ambient-vnx-data/unified_reports/ambient-001.md" in prompt.context
+
+
+def test_report_path_ignores_ambient_data_dir_without_explicit_flag(
+    assembler: PromptAssembler, basic_instruction: str, monkeypatch,
+) -> None:
+    """A bare inherited VNX_DATA_DIR without VNX_DATA_DIR_EXPLICIT=1 is
+    pollution, not config — same rule as plan_gate_panel._resolve_data_dir."""
+    monkeypatch.setenv("VNX_DATA_DIR", "/tmp/should-not-be-used")
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+    prompt = assembler.assemble(
+        dispatch_metadata={
+            "role": "backend-developer",
+            "dispatch_id": "ambient-002",
+        },
+        instruction=basic_instruction,
+    )
+
+    assert "/tmp/should-not-be-used" not in prompt.context
+    assert "$VNX_DATA_DIR/unified_reports/<dispatch_id>.md" in prompt.context

@@ -624,6 +624,20 @@
       "symbol": "_govern"
     },
     {
+      "file": "tests/test_envelope_claude_adapter_report_env.py",
+      "line": 27,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_envelope_claude_adapter_report_env.py",
+      "line": 28,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
       "file": "tests/test_envelope_govern_contract_enforce.py",
       "line": 39,
       "mechanism": "direct-call",
@@ -668,6 +682,48 @@
     {
       "file": "tests/test_envelope_govern_contract_enforce.py",
       "line": 136,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 40,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 41,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 41,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 113,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 115,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 117,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_receipt_exists_for_dispatch"
@@ -1287,6 +1343,20 @@
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_verification_from_report"
+    },
+    {
+      "file": "tests/test_report_path.py",
+      "line": 383,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_report_path.py",
+      "line": 384,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_role_applied_provider_lane.py",

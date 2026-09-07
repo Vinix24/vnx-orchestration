@@ -74,11 +74,11 @@ Dispatch-ID: <dispatch_id>
 2. Run relevant tests and record exact pass/fail counts
 3. Commit changes with conventional commit message
 4. Push to branch (unless dispatch says otherwise)
-5. Write completion report to `$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
+5. Write completion report to `{{REPORT_PATH}}`
 
 ## Report Location
 Write your completion report to:
-`$VNX_DATA_DIR/unified_reports/<dispatch_id>.md`
+`{{REPORT_PATH}}`
 
 Use the dispatch ID from the dispatch metadata footer.
 
