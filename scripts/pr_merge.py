@@ -86,6 +86,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
+from merge_preflight_adr_check import check_adr_numbers_for_pr
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -327,6 +328,49 @@ def _run_review_gate(
         head_sha=head_sha,
     )
     return gate, pr_data
+
+
+def _run_adr_gate(pr_number: int, *, pr_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Fail-closed merge gate (Golf B, B6): an ADR file added by this PR must
+    not reuse a number already on the real base branch.
+
+    Delegates to ``merge_preflight_adr_check.check_adr_numbers_for_pr``, which
+    reads the PR's added files and the real base-branch tree via the GitHub
+    API — never a local ``origin/main`` ref (see that module's docstring for
+    why: the door never fetches, so a local ref is only as fresh as the last
+    incidental fetch). No override: a colliding ADR number is always a
+    refusal.
+
+    OI-1518 recovery (leeszetel finding 2): ``pr_data`` — already resolved by
+    ``_run_ci_gate`` — carries the PR's ``state``. When ``state == "MERGED"``,
+    this call is the OI-1518 recovery route: an operator re-running
+    ``pr_merge.py --pr N`` after a merge whose receipt did not land. The PR's
+    own ADR file is by then already sitting on the base branch (the merge put
+    it there), so the live check would refuse every such recovery run on an
+    ADR PR by construction (#1790/#1792 measured NO-GO once merged). Skipped
+    here, loudly, ONLY for an already-merged PR — never via an override flag,
+    which would defeat "a colliding number is always a refusal" for a PR that
+    is still open.
+
+    Leeszetel finding 7: the base branch to check against is the PR's own
+    ``baseRefName`` from ``pr_data``, not a hardcoded ``"main"`` — a PR
+    targeting a non-main base is compared against its real base instead of
+    silently assuming main.
+    """
+    if (pr_data or {}).get("state") == "MERGED":
+        return {
+            "verdict": "GO",
+            "message": (
+                f"ADR-preflight overgeslagen: PR #{pr_number} staat al op GitHub als "
+                "MERGED (OI-1518-herstelroute: dit ADR-nummer staat door de merge zelf "
+                "al op de basisbranch)"
+            ),
+            "colliding_number": None,
+            "pr_file": None,
+            "main_file": None,
+        }
+    base_ref = (pr_data or {}).get("baseRefName") or "main"
+    return check_adr_numbers_for_pr(pr_number, project_root=SCRIPT_DIR.parent, base_ref=base_ref)
 
 
 _HEAD_MOVED_MARKERS = (
@@ -700,6 +744,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"OVERRIDE: {review_gate['message']}")
     else:
         print(f"Review gate: {review_gate['message']}")
+
+    # ── ADR-number preflight: an added ADR file must not collide with a ────
+    # number already on main (Golf B, B6). No override — always a refusal.
+    adr_gate = _run_adr_gate(args.pr, pr_data=pr_data)
+    if adr_gate["verdict"] != "GO":
+        if args.json:
+            print(json.dumps({"success": False, "pr_number": args.pr,
+                               "error": adr_gate["message"], "adr_gate": adr_gate}, indent=2))
+        else:
+            print(f"NO-GO: {adr_gate['message']}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"ADR gate: {adr_gate['message']}")
 
     # The head SHA the gates approved is established once in _run_ci_gate; the
     # merge is pinned to it (--match-head-commit) so a post-gate push is refused.

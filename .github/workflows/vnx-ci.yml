@@ -154,12 +154,16 @@ jobs:
             #   * test_docs_archive.py         — docs/_archive integrity and the
             #                                    ARCHIVED_MANIFEST matches disk
             #   * test_subsystems_md_exists.py — docs/core/SUBSYSTEMS.md SSOT
-            # All three are stdlib-only (no DB, no heavy deps) and also run in
+            #   * test_adr_numbers_unique.py   — a docs-only PR can add a new
+            #                                    ADR-*.md; this catches a
+            #                                    duplicate number on disk (B6)
+            # All four are stdlib-only (no DB, no heavy deps) and also run in
             # the full sweep below, so they stay green on main.
             pytest -q \
               "$GITHUB_WORKSPACE/tests/test_docs_index.py" \
               "$GITHUB_WORKSPACE/tests/test_docs_archive.py" \
               "$GITHUB_WORKSPACE/tests/test_subsystems_md_exists.py" \
+              "$GITHUB_WORKSPACE/tests/test_adr_numbers_unique.py" \
               -p no:cacheprovider
             exit 0
           fi

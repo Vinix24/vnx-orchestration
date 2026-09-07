@@ -279,6 +279,54 @@ def _stub_gate_identity_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate_recorder.subprocess, "run", fake_run)
 
 
+@pytest.fixture(autouse=True)
+def _stub_adr_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Golfb-b6 fix-forward (leeszetel finding 1): keep pr_merge's ADR gate offline.
+
+    ``pr_merge.main()`` runs a third gate, ``_run_adr_gate``, which delegates
+    to ``merge_preflight_adr_check.check_adr_numbers_for_pr`` — a real
+    ``gh api pulls/<n>/files`` + ``gh api contents/...`` network call for
+    whatever PR number the test happens to drive ``main()`` with. Before this
+    fixture, only ``tests/test_pr_merge_ci_gate.py`` mocked that call per-file;
+    every other test that drives ``pr_merge.main()`` through the CI/review
+    gates also hit this live call. In CI (no ``GH_TOKEN``) it fails
+    fail-closed and turned unrelated CI/review-gate tests into a false NO-GO
+    (measured: CI run 34108139082, 7 failures across three files that never
+    touch the ADR gate:
+    ``test_pr_merge_match_head.py``, ``test_pr_merge_outcome_exitcode.py``,
+    ``test_pr_merge_review_gate.py``).
+
+    Stubs the NETWORK CALL (``pr_merge.check_adr_numbers_for_pr``, the name
+    ``_run_adr_gate`` calls into), not ``_run_adr_gate`` itself: the gate
+    function's own OI-1518-recovery and base-ref logic
+    (tests/test_merge_preflight_adr_check.py::TestRunAdrGateOi1518Recovery)
+    still runs for real against this stub. Tests that specifically exercise
+    the ADR gate's verdict (tests/test_merge_preflight_adr_check.py::
+    TestPrMergeAdrGateWiring) override ``_run_adr_gate`` wholesale in the test
+    body — same monkeypatch instance, later call wins.
+    """
+    try:
+        import pr_merge
+    except ImportError:
+        # pr_merge (scripts/, not scripts/lib/) is only on sys.path once a
+        # pr_merge test module has been collected and inserted it — see the
+        # sys.path.insert calls at the top of tests/test_pr_merge_*.py. A
+        # test run that never collects one of those files never imports
+        # pr_merge either, so there is nothing to stub.
+        return
+    monkeypatch.setattr(
+        pr_merge,
+        "check_adr_numbers_for_pr",
+        lambda *a, **k: {
+            "verdict": "GO",
+            "message": "Geen nieuwe ADR-bestanden in deze PR: geen ADR-nummerbotsing mogelijk",
+            "colliding_number": None,
+            "pr_file": None,
+            "main_file": None,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB / registry fixtures  (shared with test_burnin_certification)
 # ---------------------------------------------------------------------------
