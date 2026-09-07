@@ -52,21 +52,6 @@ def _no_go_gate(message="Geen VNX CI-run gevonden: deze merge is niet toetsbaar"
     }
 
 
-def _go_adr_gate():
-    """GO verdict for the ADR-number preflight (golfb-b6). Without this mock,
-    main() would run the real check (an unmocked `gh` call) — see
-    test_merge_preflight_adr_check.py::TestPrMergeAdrGateWiring for that gate's
-    own coverage; here it just needs to stay out of the way for CI-gate tests.
-    """
-    return {
-        "verdict": "GO",
-        "message": "Geen ADR-nummerbotsing: 0 nieuw(e) ADR-bestand(en) getoetst tegen main",
-        "colliding_number": None,
-        "pr_file": None,
-        "main_file": None,
-    }
-
-
 class TestRunCiGate:
     def test_go_uses_pr_head_and_branch(self, monkeypatch):
         """A resolvable PR head is passed to the check verbatim (exact head SHA)."""
@@ -180,7 +165,6 @@ class TestMainGateWiring:
         merge_called = []
         monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (_go_gate(), None))
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (_go_gate(), None))
-        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr: _go_adr_gate())
         monkeypatch.setattr(
             pr_merge, "merge_pr",
             lambda **k: merge_called.append(1) or self._ok_result(),
@@ -203,7 +187,6 @@ class TestMainGateWiring:
             ),
         )
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (_go_gate(), None))
-        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr: _go_adr_gate())
         monkeypatch.setattr(pr_merge, "merge_pr", lambda **k: self._ok_result())
 
         rc = pr_merge.main(["--pr", "5", "--dry-run"])

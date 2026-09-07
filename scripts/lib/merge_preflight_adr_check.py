@@ -9,20 +9,25 @@ neither run could see the other PR's number claim. A CI test on the merge-ref
 diff can never catch this; only a check that runs at merge time, against the
 REAL main, can.
 
-This module answers one question: does an ADR file *added* by this PR reuse
-a number that already exists on the real ``main``? It never trusts a local
-``origin/main`` ref (that is only as fresh as the last ``git fetch`` the door
-happened to run, and the door itself never fetches) — both sides are read
-live via the GitHub API:
+This module answers one question: does an ADR file *added* (or renamed/copied
+into a NEW number) by this PR reuse a number that already exists on the real
+base branch (``main`` by default)? It never trusts a local ``origin/main``
+ref (that is only as fresh as the last ``git fetch`` the door happened to
+run, and the door itself never fetches) — both sides are read live via the
+GitHub API:
 
   1. The PR's changed files, via ``gh api repos/{owner}/{repo}/pulls/<N>/files``
      — this endpoint carries a ``status`` per file (``added``, ``modified``,
-     ``removed``, ``renamed``, ...), which is exactly what distinguishes "this
-     PR claims a new number" from "this PR edits an existing ADR" (a rename or
-     a wording fix on an existing ADR is not a collision).
-  2. The real main's ADR directory listing, via
-     ``gh api repos/{owner}/{repo}/contents/docs/governance/decisions?ref=main``
-     — the live tree at the tip of main, not a cached/local ref.
+     ``removed``, ``renamed``, ``copied``, ...) plus a ``previous_filename``
+     for renames/copies. A rename/copy whose OWN number changes (the ADR
+     number embedded in ``previous_filename`` differs from the one in
+     ``filename``) is treated the same as ``added`` — it claims a new number
+     just as much as a brand-new file does. A rename/copy that keeps the same
+     number (a wording fix) is not a collision.
+  2. The base branch's ADR directory listing, via
+     ``gh api repos/{owner}/{repo}/contents/docs/governance/decisions?ref=<base_ref>``
+     — the live tree at the tip of ``base_ref`` (default ``main``, override
+     with the PR's actual ``baseRefName`` when known), not a cached/local ref.
 
 ADR-007 (composite ``project_id`` key on the central ``adrs`` DB table) does
 NOT apply here: this check never touches that table. Two projects may both
@@ -104,14 +109,22 @@ def _go(message: str, **extra: Any) -> Dict[str, Any]:
     return base
 
 
+STATUSES_THAT_CAN_CLAIM_A_NEW_NUMBER = frozenset({"added", "renamed", "copied"})
+
+
 def get_pr_added_adr_files(
     pr_number: int, *, gh_bin: str = "gh", project_root: Optional[Path] = None
 ) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, Any]]]:
-    """Return ({number: path}, None) for ADR files ADDED by this PR, or (None, no_go).
+    """Return ({number: path}, None) for ADR files ADDED (or renamed/copied
+    into a NEW number) by this PR, or (None, no_go).
 
-    Only files whose ``status`` (from the GitHub API) is ``"added"`` count —
-    a modified or renamed existing ADR file is not a new-number claim and is
-    deliberately excluded here, not filtered by the caller.
+    A plain ``"modified"`` status is never a new-number claim and is excluded.
+    ``"renamed"``/``"copied"`` are ambiguous on their own: they cover both "I
+    reworded ADR-038" (same number before and after — not a claim) and "I
+    renamed ADR-031 into ADR-038" (claims 038 exactly as much as a brand-new
+    ``ADR-038-*.md`` would). The two are told apart by comparing the ADR
+    number in ``filename`` against the one in ``previous_filename`` — only a
+    CHANGED number counts.
     """
     result, err = _capture(
         [gh_bin, "api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files", "--paginate"],
@@ -147,41 +160,53 @@ def get_pr_added_adr_files(
     for entry in files:
         if not isinstance(entry, dict):
             continue
-        if entry.get("status") != "added":
+        status = entry.get("status")
+        if status not in STATUSES_THAT_CAN_CLAIM_A_NEW_NUMBER:
             continue
         path = entry.get("filename") or ""
         m = ADR_PATH_RE.match(path)
-        if m:
-            added[str(int(m.group(1)))] = path
+        if not m:
+            continue
+        number = str(int(m.group(1)))
+        if status in ("renamed", "copied"):
+            prev_m = ADR_PATH_RE.match(entry.get("previous_filename") or "")
+            if prev_m and str(int(prev_m.group(1))) == number:
+                # Same ADR number before and after: a wording/rename fix on
+                # the PR's own claim, not a new-number claim.
+                continue
+        added[number] = path
     return added, None
 
 
 def get_main_adr_numbers(
-    *, gh_bin: str = "gh", project_root: Optional[Path] = None
+    *, gh_bin: str = "gh", project_root: Optional[Path] = None, base_ref: str = "main"
 ) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, Any]]]:
-    """Return ({number: filename}, None) for ADR files on the real main, or (None, no_go).
+    """Return ({number: filename}, None) for ADR files on ``base_ref``, or (None, no_go).
 
     Reads the live directory listing via the contents API scoped to
-    ``ref=main`` — never a local ``origin/main`` ref, which the door never
-    freshens (see module docstring).
+    ``ref=<base_ref>`` — never a local ``origin/<base_ref>`` ref, which the
+    door never freshens (see module docstring). Defaults to ``"main"``, the
+    base every VNX PR targets today; pass the PR's actual ``baseRefName`` when
+    it is known so a PR targeting something other than main is compared
+    against its real base instead of silently assuming main.
     """
     result, err = _capture(
-        [gh_bin, "api", f"repos/{{owner}}/{{repo}}/contents/{ADR_DECISIONS_DIR}?ref=main"],
+        [gh_bin, "api", f"repos/{{owner}}/{{repo}}/contents/{ADR_DECISIONS_DIR}?ref={base_ref}"],
         timeout=GH_CONTENTS_TIMEOUT,
         cwd=str(project_root) if project_root else None,
     )
     if err == "missing":
         return None, _no_go(
-            "gh CLI niet beschikbaar: ADR-preflight is niet toetsbaar (main-listing)"
+            "gh CLI niet beschikbaar: ADR-preflight is niet toetsbaar (base-ref-listing)"
         )
     if err == "timeout":
         return None, _no_go(
-            "gh api contents-listing liep vast: ADR-preflight is niet toetsbaar (main-listing)"
+            "gh api contents-listing liep vast: ADR-preflight is niet toetsbaar (base-ref-listing)"
         )
     if result is None or result.returncode != 0:
         stderr = (result.stderr if result else "").strip()
         return None, _no_go(
-            f"gh api contents-listing van {ADR_DECISIONS_DIR} op main faalde: "
+            f"gh api contents-listing van {ADR_DECISIONS_DIR} op {base_ref} faalde: "
             "ADR-preflight is niet toetsbaar" + (f" ({stderr[:160]})" if stderr else "")
         )
     try:
@@ -210,14 +235,20 @@ def get_main_adr_numbers(
 
 
 def check_adr_numbers_for_pr(
-    pr_number: int, *, gh_bin: str = "gh", project_root: Optional[Path] = None
+    pr_number: int,
+    *,
+    gh_bin: str = "gh",
+    project_root: Optional[Path] = None,
+    base_ref: str = "main",
 ) -> Dict[str, Any]:
     """Fail-closed: an ADR file added by this PR must not reuse a number
-    already present on the real main.
+    already present on the real base branch (``main`` by default).
 
     Returns ``{"verdict": "GO"|"NO-GO", "message": str, ...}``. No new ADR
     files added by the PR is a GO (nothing to check). There is no override —
-    a colliding number is always refused.
+    a colliding number is always refused. Pass the PR's actual ``baseRefName``
+    as ``base_ref`` when known; a PR targeting something other than main is
+    otherwise silently compared against main's numbers instead of its own base.
     """
     if shutil.which(gh_bin) is None:
         return _no_go("gh CLI niet beschikbaar: ADR-preflight is niet toetsbaar")
@@ -230,7 +261,9 @@ def check_adr_numbers_for_pr(
     if not pr_adrs:
         return _go("Geen nieuwe ADR-bestanden in deze PR: geen ADR-nummerbotsing mogelijk")
 
-    main_numbers, err = get_main_adr_numbers(gh_bin=gh_bin, project_root=project_root)
+    main_numbers, err = get_main_adr_numbers(
+        gh_bin=gh_bin, project_root=project_root, base_ref=base_ref
+    )
     if err is not None:
         return err
     assert main_numbers is not None
@@ -239,16 +272,17 @@ def check_adr_numbers_for_pr(
         if number in main_numbers:
             pr_file = pr_adrs[number]
             main_file = main_numbers[number]
+            padded = f"{int(number):03d}"
             return _no_go(
-                f"ADR-{number} botst: deze PR voegt '{pr_file}' toe, maar ADR-{number} "
-                f"staat al op main als '{main_file}'. Kies een vrij ADR-nummer.",
+                f"ADR-{padded} botst: deze PR voegt '{pr_file}' toe, maar ADR-{padded} "
+                f"staat al op {base_ref} als '{main_file}'. Kies een vrij ADR-nummer.",
                 colliding_number=number,
                 pr_file=pr_file,
                 main_file=main_file,
             )
 
     return _go(
-        f"Geen ADR-nummerbotsing: {len(pr_adrs)} nieuw(e) ADR-bestand(en) getoetst tegen main"
+        f"Geen ADR-nummerbotsing: {len(pr_adrs)} nieuw(e) ADR-bestand(en) getoetst tegen {base_ref}"
     )
 
 

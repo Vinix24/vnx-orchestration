@@ -57,6 +57,39 @@ class TestGetPrAddedAdrFiles:
         assert err is None
         assert added == {"38": "docs/governance/decisions/ADR-038-x.md"}
 
+    def test_renamed_to_a_different_number_is_a_new_number_claim(self, monkeypatch):
+        """A rename that changes the ADR NUMBER (not just wording) claims the
+        new number exactly as much as a brand-new file would — unlike
+        test_only_added_status_counts's rename, which keeps the same number.
+        """
+        entries = [
+            {"filename": "docs/governance/decisions/ADR-038-my-new-decision.md",
+             "status": "renamed",
+             "previous_filename": "docs/governance/decisions/ADR-031-orchestration-target-ratification.md"},
+        ]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert err is None
+        assert added == {"38": "docs/governance/decisions/ADR-038-my-new-decision.md"}
+
+    def test_copied_to_a_different_number_is_a_new_number_claim(self, monkeypatch):
+        entries = [
+            {"filename": "docs/governance/decisions/ADR-040-copy.md", "status": "copied",
+             "previous_filename": "docs/governance/decisions/ADR-010-source.md"},
+        ]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert err is None
+        assert added == {"40": "docs/governance/decisions/ADR-040-copy.md"}
+
     def test_no_added_adr_files_yields_empty_dict(self, monkeypatch):
         entries = [{"filename": "scripts/pr_merge.py", "status": "modified"}]
         monkeypatch.setattr(
@@ -181,9 +214,10 @@ class TestCheckAdrNumbersForPr:
         result = adr_check.check_adr_numbers_for_pr(1790)
 
         assert result["verdict"] == "NO-GO"
-        assert "038" in result["message"]
-        assert "ADR-038-x.md" in result["message"]
-        assert "ADR-038-y.md" in result["message"]
+        assert result["message"] == (
+            "ADR-038 botst: deze PR voegt 'docs/governance/decisions/ADR-038-x.md' toe, "
+            "maar ADR-038 staat al op main als 'ADR-038-y.md'. Kies een vrij ADR-nummer."
+        )
         assert result["colliding_number"] == "38"
         assert result["pr_file"] == "docs/governance/decisions/ADR-038-x.md"
         assert result["main_file"] == "ADR-038-y.md"
@@ -257,6 +291,29 @@ class TestCheckAdrNumbersForPr:
         assert result["verdict"] == "NO-GO"
         assert "gh CLI niet beschikbaar" in result["message"]
 
+    def test_renamed_into_a_number_already_on_main_is_a_collision(self, monkeypatch):
+        """Leeszetel finding 3: main has ADR-038; a PR renames an UNRELATED
+        existing ADR (031) to claim 038 too. Before the fix, status="renamed"
+        was skipped outright and this returned a false GO with a message that
+        claimed "no new ADR files" even though the PR does claim a new number.
+        """
+        self._mock_gh(
+            monkeypatch,
+            pr_entries=[{
+                "filename": "docs/governance/decisions/ADR-038-my-new-decision.md",
+                "status": "renamed",
+                "previous_filename": "docs/governance/decisions/ADR-031-orchestration-target-ratification.md",
+            }],
+            main_names=["ADR-038-receipt-outcome-identity.md"],
+        )
+
+        result = adr_check.check_adr_numbers_for_pr(1790)
+
+        assert result["verdict"] == "NO-GO"
+        assert result["colliding_number"] == "38"
+        assert result["pr_file"] == "docs/governance/decisions/ADR-038-my-new-decision.md"
+        assert result["main_file"] == "ADR-038-receipt-outcome-identity.md"
+
 
 class TestPrMergeAdrGateWiring:
     """pr_merge.main() refuses before merge on an ADR-number collision, in the
@@ -306,7 +363,7 @@ class TestPrMergeAdrGateWiring:
         merge_called = []
         monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (self._go_gate(), None))
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (self._go_gate(), None))
-        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr: self._no_go_adr())
+        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr, **k: self._no_go_adr())
         monkeypatch.setattr(
             pr_merge, "merge_pr",
             lambda **k: merge_called.append(1) or self._ok_dry_run_result(),
@@ -322,15 +379,26 @@ class TestPrMergeAdrGateWiring:
         assert "botst" in err
 
     def test_adr_collision_json_output(self, monkeypatch, capsys):
+        """Leeszetel finding 4: without --dry-run and a merge_pr mock, a GO
+        verdict here (e.g. if the ADR gate regresses) would fall through into
+        a REAL `gh pr merge` on a real PR number. Mirrors the sibling test
+        above: --dry-run plus a merge_pr mock that proves it never ran.
+        """
         import pr_merge
 
+        merge_called = []
         monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (self._go_gate(), None))
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (self._go_gate(), None))
-        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr: self._no_go_adr())
+        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr, **k: self._no_go_adr())
+        monkeypatch.setattr(
+            pr_merge, "merge_pr",
+            lambda **k: merge_called.append(1) or self._ok_dry_run_result(),
+        )
 
-        rc = pr_merge.main(["--pr", "1790", "--json"])
+        rc = pr_merge.main(["--pr", "1790", "--dry-run", "--json"])
 
         assert rc == pr_merge.EXIT_ERROR
+        assert not merge_called, "merge_pr must not run when the ADR gate is NO-GO"
         # Pre-existing, out-of-scope quirk: main() unconditionally prints plain
         # "CI gate: ..." / "Review gate: ..." text on a GO verdict, ignoring
         # --json, so stdout is not pure JSON once an earlier gate has already
@@ -349,7 +417,7 @@ class TestPrMergeAdrGateWiring:
         merge_called = []
         monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (self._go_gate(), None))
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (self._go_gate(), None))
-        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr: self._go_adr())
+        monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr, **k: self._go_adr())
         monkeypatch.setattr(
             pr_merge, "merge_pr",
             lambda **k: merge_called.append(1) or self._ok_dry_run_result(),
@@ -360,3 +428,91 @@ class TestPrMergeAdrGateWiring:
         assert rc == pr_merge.EXIT_OK
         assert merge_called, "merge_pr must run when all three gates are GO"
         assert "ADR gate" in capsys.readouterr().out
+
+
+class TestRunAdrGateOi1518Recovery:
+    """pr_merge._run_adr_gate's own logic (leeszetel findings 2 + 7): the
+    OI-1518-recovery skip for an already-MERGED PR, and reading the check's
+    base branch from the PR's real ``baseRefName`` instead of a hardcoded
+    "main". These call ``pr_merge._run_adr_gate`` directly (not via
+    ``main()``) and stub only ``pr_merge.check_adr_numbers_for_pr`` — the
+    live-gh delegate — so the gate function's own branching runs for real.
+    """
+
+    def test_already_merged_pr_skips_the_live_check_entirely(self, monkeypatch):
+        import pr_merge
+
+        called = []
+        monkeypatch.setattr(
+            pr_merge, "check_adr_numbers_for_pr",
+            lambda *a, **k: called.append(1) or {"verdict": "NO-GO", "message": "must not run"},
+        )
+
+        result = pr_merge._run_adr_gate(
+            1790, pr_data={"state": "MERGED", "mergedAt": "2026-09-06T10:00:00Z"}
+        )
+
+        assert result["verdict"] == "GO"
+        assert "MERGED" in result["message"]
+        assert not called, "an already-merged PR must skip the live ADR check entirely"
+
+    def test_open_pr_still_runs_the_live_check(self, monkeypatch):
+        import pr_merge
+
+        seen = {}
+
+        def fake_check(pr_number, *, project_root=None, base_ref="main"):
+            seen["pr_number"] = pr_number
+            seen["base_ref"] = base_ref
+            return {"verdict": "GO", "message": "checked"}
+
+        monkeypatch.setattr(pr_merge, "check_adr_numbers_for_pr", fake_check)
+
+        result = pr_merge._run_adr_gate(1790, pr_data={"state": "OPEN"})
+
+        assert result == {"verdict": "GO", "message": "checked"}
+        assert seen["pr_number"] == 1790
+
+    def test_closed_but_not_merged_pr_still_runs_the_live_check(self, monkeypatch):
+        """CLOSED (never merged) is not MERGED: the collision can still be real."""
+        import pr_merge
+
+        called = []
+        monkeypatch.setattr(
+            pr_merge, "check_adr_numbers_for_pr",
+            lambda *a, **k: called.append(1) or {"verdict": "GO", "message": "checked"},
+        )
+
+        pr_merge._run_adr_gate(1790, pr_data={"state": "CLOSED"})
+
+        assert called, "a CLOSED-but-not-merged PR must still run the live check"
+
+    def test_base_ref_is_taken_from_pr_datas_base_ref_name(self, monkeypatch):
+        import pr_merge
+
+        seen = {}
+
+        def fake_check(pr_number, *, project_root=None, base_ref="main"):
+            seen["base_ref"] = base_ref
+            return {"verdict": "GO", "message": "checked"}
+
+        monkeypatch.setattr(pr_merge, "check_adr_numbers_for_pr", fake_check)
+
+        pr_merge._run_adr_gate(1790, pr_data={"state": "OPEN", "baseRefName": "release/1.6"})
+
+        assert seen["base_ref"] == "release/1.6"
+
+    def test_missing_pr_data_defaults_base_ref_to_main(self, monkeypatch):
+        import pr_merge
+
+        seen = {}
+
+        def fake_check(pr_number, *, project_root=None, base_ref="main"):
+            seen["base_ref"] = base_ref
+            return {"verdict": "GO", "message": "checked"}
+
+        monkeypatch.setattr(pr_merge, "check_adr_numbers_for_pr", fake_check)
+
+        pr_merge._run_adr_gate(1790)
+
+        assert seen["base_ref"] == "main"

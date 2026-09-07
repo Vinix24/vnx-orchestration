@@ -53,6 +53,22 @@ def _format_duplicates(duplicates: Dict[str, List[str]]) -> str:
 
 class TestAdrNumbersUniqueOnRealTree:
     def test_no_duplicate_adr_numbers(self):
+        # Leeszetel finding 8: Path.glob() on a non-existent directory returns
+        # a silently empty iterator, not an error, so a moved/renamed
+        # decisions dir would make find_duplicate_adr_numbers return {} and
+        # this test would pass having checked nothing. Assert the directory
+        # exists and holds a real population of ADR files before trusting an
+        # empty duplicates dict as "no collisions" rather than "nothing found".
+        assert DECISIONS_DIR.is_dir(), (
+            f"{DECISIONS_DIR} bestaat niet: de uniciteits-invariant hieronder "
+            "zou dan stil slagen zonder ooit een ADR-nummer te hebben geteld"
+        )
+        adr_files = list(DECISIONS_DIR.glob("ADR-*.md"))
+        assert len(adr_files) >= 30, (
+            f"slechts {len(adr_files)} ADR-bestand(en) gevonden op {DECISIONS_DIR}: "
+            "te weinig om de uniciteits-invariant hieronder zinvol te laten falen"
+        )
+
         duplicates = find_duplicate_adr_numbers(DECISIONS_DIR)
         assert not duplicates, (
             "ADR-nummer(s) dubbel geclaimd op docs/governance/decisions/: "
