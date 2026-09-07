@@ -51,7 +51,17 @@ jobs:
           # build is required by tests/test_wheel_build.py::test_wheel_builds
           # (python -m build --wheel); without it that test fails in this image
           # with "No module named build" (OI-953).
-          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2 build
+          # pyjwt[crypto] carries the forge check-run client (golf B, B2a):
+          # scripts/lib/forge_check_run.py signs a GitHub-App JWT with RS256 and
+          # tests/test_forge_check_run_client.py verifies that signature against
+          # a keypair it generates itself. The [crypto] extra is not optional —
+          # bare PyJWT has no asymmetric backend and raises NotImplementedError
+          # on RS256, and the test's keypair fixture imports `cryptography`
+          # directly, so the extra is what makes both halves of that test real
+          # instead of a mock. Measured 2026-09-07 on head 5fd261fd, run
+          # 34143589349: without it the whole file dies at collection with
+          # "No module named 'jwt'" and the gate never runs.
+          pip install pytest pyyaml pytest-timeout jsonschema psutil watchdog hypothesis jinja2 build "pyjwt[crypto]"
 
       - name: Prepare expected repo layout
         run: |

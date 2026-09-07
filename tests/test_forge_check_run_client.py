@@ -13,6 +13,7 @@ public key.
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import sys
@@ -23,8 +24,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import jwt
 import pytest
 import yaml
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
@@ -384,6 +386,26 @@ def test_read_installation_id_rejects_non_numeric(monkeypatch: pytest.MonkeyPatc
 # ---------------------------------------------------------------------------
 
 
+def _b64url_decode(segment: str) -> bytes:
+    """Decode one JWT segment, restoring the padding a JWT strips."""
+    return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _load_public_key(public_pem: str):
+    return serialization.load_pem_public_key(public_pem.encode("utf-8"))
+
+
+def _verify_rs256(public_pem: str, signing_input: str, signature: bytes) -> None:
+    """Check an RS256 signature with cryptography, raising InvalidSignature."""
+    _load_public_key(public_pem).verify(
+        signature, signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256()
+    )
+
+
 def test_app_jwt_carries_iss_and_a_bounded_exp(rsa_keypair: Tuple[str, str]) -> None:
     private_pem, public_pem = rsa_keypair
     before = datetime.now(timezone.utc)
@@ -426,6 +448,87 @@ def test_app_jwt_verification_fails_against_a_foreign_public_key(
     token = fcr.build_app_jwt(987654, private_pem)
     with pytest.raises(jwt.InvalidSignatureError):
         jwt.decode(token, other_public, algorithms=["RS256"])
+
+
+def test_app_jwt_signature_verifies_with_cryptography_alone(
+    rsa_keypair: Tuple[str, str],
+) -> None:
+    """The signature is checked WITHOUT PyJWT, and the claims are read raw.
+
+    ``test_app_jwt_carries_iss_and_a_bounded_exp`` signs and verifies through
+    the same library, so it proves the round trip and not the artefact. Here the
+    token is split by hand and the signature checked against the public key with
+    cryptography's primitives: what GitHub will do, minus GitHub.
+    """
+    private_pem, public_pem = rsa_keypair
+    before = datetime.now(timezone.utc)
+    token = fcr.build_app_jwt(987654, private_pem)
+
+    header_b64, payload_b64, signature_b64 = token.split(".")
+    _verify_rs256(public_pem, f"{header_b64}.{payload_b64}", _b64url_decode(signature_b64))
+
+    assert json.loads(_b64url_decode(header_b64))["alg"] == "RS256"
+    claims = json.loads(_b64url_decode(payload_b64))
+    assert claims["iss"] == "987654", "iss must be the app id, as a string"
+    exp = datetime.fromtimestamp(claims["exp"], tz=timezone.utc)
+    assert exp <= before + timedelta(minutes=10), "GitHub rejects an exp beyond 10 minutes"
+    assert exp > before
+
+
+def test_app_jwt_signature_breaks_when_the_payload_is_changed(
+    rsa_keypair: Tuple[str, str],
+) -> None:
+    """Re-issuing the same token under another app id must not validate.
+
+    This is the negative half of the test above: if it stayed green after the
+    payload changed, the "verification" there would be checking nothing.
+    """
+    private_pem, public_pem = rsa_keypair
+    header_b64, payload_b64, signature_b64 = fcr.build_app_jwt(987654, private_pem).split(".")
+
+    claims = json.loads(_b64url_decode(payload_b64))
+    assert claims["iss"] == "987654"
+    claims["iss"] = "111111"
+    forged_payload = _b64url_encode(json.dumps(claims).encode("utf-8"))
+    forged = f"{header_b64}.{forged_payload}.{signature_b64}"
+
+    with pytest.raises(InvalidSignature):
+        _verify_rs256(public_pem, f"{header_b64}.{forged_payload}", _b64url_decode(signature_b64))
+    with pytest.raises(jwt.InvalidSignatureError):
+        jwt.decode(forged, public_pem, algorithms=["RS256"])
+
+
+def test_app_jwt_names_the_install_when_pyjwt_is_absent(
+    monkeypatch: pytest.MonkeyPatch, rsa_keypair: Tuple[str, str]
+) -> None:
+    """A missing PyJWT fails like every other credential gap here: loud, with the repair."""
+    private_pem, _ = rsa_keypair
+    # A None entry in sys.modules is what the import machinery itself uses to
+    # mark a module as unimportable, so `import jwt` inside build_app_jwt takes
+    # the real ImportError path rather than a stubbed one.
+    monkeypatch.setitem(sys.modules, "jwt", None)
+
+    with pytest.raises(fcr.ForgeCheckRunError) as excinfo:
+        fcr.build_app_jwt(987654, private_pem)
+    assert "pyjwt[crypto]" in str(excinfo.value)
+
+
+def test_app_jwt_names_the_extra_when_rs256_has_no_backend(
+    monkeypatch: pytest.MonkeyPatch, rsa_keypair: Tuple[str, str]
+) -> None:
+    """Bare PyJWT imports fine and only fails at signing — with its own message."""
+    private_pem, _ = rsa_keypair
+
+    def _no_asymmetric_backend(*args: Any, **kwargs: Any) -> str:
+        raise NotImplementedError("Algorithm 'RS256' could not be found.")
+
+    monkeypatch.setattr(jwt, "encode", _no_asymmetric_backend)
+
+    with pytest.raises(fcr.ForgeCheckRunError) as excinfo:
+        fcr.build_app_jwt(987654, private_pem)
+    message = str(excinfo.value)
+    assert "pyjwt[crypto]" in message
+    assert "RS256" in message
 
 
 # ---------------------------------------------------------------------------

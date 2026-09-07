@@ -357,7 +357,22 @@ def _github_headers(token: str) -> Dict[str, str]:
 
 def build_app_jwt(app_id: int, private_key_pem: str, *, now: Optional[datetime] = None) -> str:
     """An RS256 App JWT: ``iss`` = app id, backdated ``iat``, 9-minute ``exp``."""
-    import jwt  # noqa: PLC0415  (imported here so the module loads without PyJWT)
+    # Imported here rather than at module scope: PyJWT is NOT in
+    # pyproject.toml [project.dependencies], so a plain `pip install
+    # vnx-orchestration` has no ``jwt`` module — and every other importer of
+    # this module would then die on an import it never reaches. The ImportError
+    # is re-raised in this module's own shape for the same reason every
+    # keychain read does: a bare ModuleNotFoundError names the module but not
+    # the install that repairs it, and this is the one dependency an operator
+    # will not already have. CI installs it in .github/workflows/vnx-ci.yml.
+    try:
+        import jwt  # noqa: PLC0415
+    except ImportError as exc:
+        raise ForgeCheckRunError(
+            "PyJWT ontbreekt, dus er kan geen App-JWT ondertekend worden. "
+            "Herstel: pip install 'pyjwt[crypto]'. "
+            f"Runbook: {RUNBOOK_PATH}"
+        ) from exc
 
     moment = now or datetime.now(timezone.utc)
     claims = {
@@ -367,6 +382,17 @@ def build_app_jwt(app_id: int, private_key_pem: str, *, now: Optional[datetime] 
     }
     try:
         return jwt.encode(claims, private_key_pem, algorithm="RS256")
+    # PyJWT installed WITHOUT its asymmetric backend: `import jwt` succeeds and
+    # only RS256 is absent, so the gap surfaces here at signing time instead of
+    # at import time above. Kept separate from the key errors below because the
+    # key was never even looked at — telling an operator to re-add a perfectly
+    # good .pem would send them down the wrong repair.
+    except NotImplementedError as exc:
+        raise ForgeCheckRunError(
+            "PyJWT kent RS256 niet: de [crypto]-extra ontbreekt, dus er is geen "
+            "asymmetrische backend. Herstel: pip install 'pyjwt[crypto]'. "
+            f"Runbook: {RUNBOOK_PATH}"
+        ) from exc
     # A malformed PEM surfaces as cryptography's ValueError ("Could not
     # deserialize key data"), a non-string key as TypeError, and a key of the
     # wrong type for RS256 as PyJWTError. All three mean the same thing to a
