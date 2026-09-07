@@ -365,6 +365,71 @@ def result_is_for_head(result: Dict[str, Any], head_sha: str) -> bool:
     return (result.get("commit_sha") or "").strip() == head_sha.strip()
 
 
+# ``not_executable`` books two different KINDS of fact under one status, and
+# only one of them is a statement about the PR (OI-1669).
+#
+# A PROVIDER refusal — ``provider_not_installed``, ``provider_disabled``,
+# ``provider_not_configured``, a quota or auth refusal — says the reader was
+# asked and could not answer. That IS evidence about this head: it is the
+# record of a gate that was reached for and produced nothing, and the
+# OI-1469/OI-1470 protection over it is unchanged.
+#
+# A ROUTING announcement says nothing about the PR, the provider, or the code.
+# It is the EXECUTOR describing itself. The reasons collected here are exactly
+# those, and a record carrying one may always be replaced by the gate's own
+# result for the same head — including a less-decided one such as
+# ``unavailable``.
+#
+# Measured live twice on 2026-09-07 (T0), PR #1810, in
+# ``state/review_gates/results/pr-1810-kimi_gate.json``. The seat walk handed
+# kimi_gate the codex seat after codex hit its usage limit (``takeover: true``,
+# ``takeover_from: codex_gate``); ``gate_runner.GateRunner.run`` cannot drive a
+# script-runner gate, so it booked ``status=not_executable``,
+# ``reason=gate_not_subprocess_routable`` with the detail "…it is not a CLI
+# this runner can drive with a prompt. Run it directly: python3
+# scripts/kimi_gate.py --pr 1810". That very command then failed::
+#
+#     gate_recorder: REFUSING to overwrite terminal result gate=kimi_gate
+#       pr=1810 existing_status='not_executable' with non-terminal
+#       status='unavailable'
+#     kimi_gate: FAILED to write result record to .../pr-1810-kimi_gate.json
+#
+# Both records name the same head (``a49cfc81…``), so OI-1668's head scoping
+# never engaged. With codex exhausted and its designated successor unable to
+# sign, all four review lanes stood still at once.
+#
+# Deliberately narrow. ``gate_runner_missing`` and ``unsupported_gate_type``
+# are the executor talking about itself too, but nothing can write a verdict
+# over either of them anyway (no runner on disk; no route to one), so widening
+# the hole for them buys nothing and costs the protection. A reason enters
+# this set on a measurement, not on a resemblance.
+NON_VERDICT_NOT_EXECUTABLE_REASONS: frozenset = frozenset({
+    "gate_not_subprocess_routable",
+})
+
+
+def is_routing_announcement(result: Dict[str, Any]) -> bool:
+    """Is this record the executor describing ITSELF rather than the PR?
+
+    True only for a ``not_executable`` record whose ``reason`` is in
+    :data:`NON_VERDICT_NOT_EXECUTABLE_REASONS`. Both halves are required: the
+    reason string on its own, carried by a record with any other status, is
+    not the shape that was measured, and an escape hatch built for one shape
+    must not open for another that merely quotes it.
+
+    A missing, non-string or unrecognised ``reason`` reads as False — the
+    default is the protection, never the exemption.
+    """
+    from gate_status import canonical_status  # noqa: PLC0415
+
+    if canonical_status(result) != "not_executable":
+        return False
+    reason = result.get("reason")
+    if not isinstance(reason, str):
+        return False
+    return reason.strip() in NON_VERDICT_NOT_EXECUTABLE_REASONS
+
+
 class _CorruptResult:
     """Sentinel: the result file exists but could not be parsed as a dict.
 
@@ -449,6 +514,18 @@ def _check_overwrite_guard(
     write is for", the other is "that record never said which head it
     judged", and only the second is a statement about the record being
     displaced.
+
+    OI-1669 removes one more class of record from the set of things that can
+    hold this slot, on a different axis than the head: a ROUTING ANNOUNCEMENT
+    (:func:`is_routing_announcement`) is the executor describing what it
+    cannot drive, so it is not a verdict at all and yields on every head,
+    including this one. Measured on PR #1810 the same day: kimi_gate was
+    handed the codex seat, the executor booked
+    ``not_executable``/``gate_not_subprocess_routable`` in the slot, and
+    kimi's own run — the one that record's detail text tells the operator to
+    start — could then not write its ``unavailable``. See
+    :data:`NON_VERDICT_NOT_EXECUTABLE_REASONS` for why that is a narrow set
+    and why a PROVIDER refusal is not in it.
     """
     from gate_status import is_terminal, has_complete_evidence, canonical_status  # noqa: PLC0415
 
@@ -479,6 +556,28 @@ def _check_overwrite_guard(
         return
     existing_status = canonical_status(existing)
     new_status = canonical_status(new_payload)
+    if is_routing_announcement(existing):
+        # OI-1669. The record in the slot is the executor saying it cannot
+        # drive this gate — a fact about the router, not about the head. It
+        # was never evidence, so there is nothing here to downgrade and the
+        # write proceeds whatever its status. Checked BEFORE the head branch
+        # because it holds on every head, including this one; checked AFTER
+        # the corrupt-file refusal above, because a torn write may be hiding a
+        # decided verdict and "it might have been an announcement" is not
+        # something the guard may assume.
+        #
+        # One-directional: this excuses a record from HOLDING the slot, never
+        # licenses one to TAKE it. An announcement written over a decided,
+        # evidenced verdict still meets the evidence check below, exactly as
+        # it does today.
+        logger.info(
+            "gate_recorder: replacing routing announcement gate=%s pr=%s "
+            "existing_status=%r reason=%r with status=%r — a statement about "
+            "what this executor can drive is not a verdict about the PR, so "
+            "it does not hold the slot against the gate itself (OI-1669)",
+            gate, pr_ref, existing_status, existing.get("reason"), new_status,
+        )
+        return
     new_sha = (new_payload.get("commit_sha") or "").strip()
     if new_sha and not result_is_for_head(existing, new_sha):
         # OI-1668: the existing record judges a different commit (or none at

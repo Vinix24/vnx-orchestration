@@ -17,7 +17,11 @@ no second vocabulary):
     not_executable), the write is refused too — a decided verdict must not
     be demoted to an evidence-less placeholder.
   - A terminal record WITHOUT complete evidence (e.g. an existing
-    not_executable) is not "decided" and stays freely overwritable.
+    not_executable) is not "decided" and stays freely overwritable BY ANOTHER
+    TERMINAL RECORD. Against a NON-terminal write (an outage) it still holds
+    the slot — which is correct for a provider refusal (asserted below) and
+    was the OI-1669 defect for a routing announcement (asserted in
+    tests/test_oi1669_routing_announcement_is_not_a_verdict.py).
 """
 from __future__ import annotations
 
@@ -186,6 +190,36 @@ class TestRecordTerminalResultOverwriteGuard:
             execution_depth=_OK_DEPTH,
         )
         assert json.loads(out.read_text(encoding="utf-8"))["reason"] == "provider_not_configured"
+
+    def test_a_provider_refusal_still_blocks_a_non_terminal_write(self, tmp_path):
+        """The mirror of the OI-1669 escape hatch, kept here where the guard's
+        own contract is documented. A ``not_executable`` booked because the
+        PROVIDER could not be reached IS a statement about this head — the
+        gate was asked and produced nothing — so an outage write must not
+        replace it, even though the record carries no complete evidence. Only
+        a routing announcement (the executor describing itself) is exempt; see
+        tests/test_oi1669_routing_announcement_is_not_a_verdict.py."""
+        out = tmp_path / "pr-1810-kimi_gate.json"
+        refusal = {
+            "gate": "kimi_gate", "pr_id": "1810", "status": "not_executable",
+            "reason": "provider_not_installed",
+            "reason_detail": "kimi binary not found in PATH",
+            "contract_hash": "", "report_path": "",
+            "dispatch_id": "kimi-gate-pr1810-1",
+        }
+        out.write_text(json.dumps(refusal), encoding="utf-8")
+
+        with pytest.raises(ResultOverwriteRefused):
+            record_terminal_result(
+                gate="kimi_gate", pr_id="1810", result_path=out,
+                payload={
+                    "gate": "kimi_gate", "pr_id": "1810", "status": "unavailable",
+                    "reason": "dispatch_error", "contract_hash": "", "report_path": "",
+                    "dispatch_id": "kimi-gate-pr1810-2",
+                },
+                execution_depth=_OK_DEPTH,
+            )
+        assert json.loads(out.read_text(encoding="utf-8")) == refusal
 
     def test_no_existing_file_writes_unconditionally(self, tmp_path):
         out = tmp_path / "pr-99-kimi_gate.json"
