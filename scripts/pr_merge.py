@@ -86,6 +86,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
+from merge_preflight_adr_check import check_adr_numbers_for_pr
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -327,6 +328,20 @@ def _run_review_gate(
         head_sha=head_sha,
     )
     return gate, pr_data
+
+
+def _run_adr_gate(pr_number: int) -> Dict[str, Any]:
+    """Fail-closed merge gate (Golf B, B6): an ADR file added by this PR must
+    not reuse a number already on the real main.
+
+    Delegates to ``merge_preflight_adr_check.check_adr_numbers_for_pr``, which
+    reads the PR's added files and the real main tree via the GitHub API —
+    never a local ``origin/main`` ref (see that module's docstring for why:
+    the door never fetches, so a local ref is only as fresh as the last
+    incidental fetch). No override: a colliding ADR number is always a
+    refusal.
+    """
+    return check_adr_numbers_for_pr(pr_number, project_root=SCRIPT_DIR.parent)
 
 
 _HEAD_MOVED_MARKERS = (
@@ -700,6 +715,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"OVERRIDE: {review_gate['message']}")
     else:
         print(f"Review gate: {review_gate['message']}")
+
+    # ── ADR-number preflight: an added ADR file must not collide with a ────
+    # number already on main (Golf B, B6). No override — always a refusal.
+    adr_gate = _run_adr_gate(args.pr)
+    if adr_gate["verdict"] != "GO":
+        if args.json:
+            print(json.dumps({"success": False, "pr_number": args.pr,
+                               "error": adr_gate["message"], "adr_gate": adr_gate}, indent=2))
+        else:
+            print(f"NO-GO: {adr_gate['message']}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"ADR gate: {adr_gate['message']}")
 
     # The head SHA the gates approved is established once in _run_ci_gate; the
     # merge is pinned to it (--match-head-commit) so a post-gate push is refused.
