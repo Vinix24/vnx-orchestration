@@ -73,8 +73,12 @@ _KNOWN_TOP_LEVEL_FIELDS = frozenset({
 #: from :class:`ProtectionConfig` and :func:`to_normalized_dict`: a key that
 #: never enters the normalized dict can never register as drift or as a
 #: weakening. This is an allowlist of exactly one key, not an opening of the
-#: schema — an unrecognized top-level key is still refused.
+#: schema — an unrecognized top-level key is still refused. Being optional at
+#: the top level only excuses its ABSENCE; when present, its own shape is
+#: still validated (see :func:`_validate_app_block`) — an unknown key inside
+#: ``app:`` is refused exactly like everywhere else in this schema.
 _OPTIONAL_TOP_LEVEL_FIELDS = frozenset({"app"})
+_KNOWN_APP_FIELDS = frozenset({"slug", "app_id"})
 _KNOWN_RSC_FIELDS = frozenset({"strict", "checks"})
 _KNOWN_CHECK_FIELDS = frozenset({"context", "app_id"})
 _KNOWN_PPR_FIELDS = frozenset({
@@ -170,6 +174,25 @@ def _require_bool(obj: Dict[str, Any], field: str, where: str) -> bool:
     return value
 
 
+def _validate_app_block(app: Any) -> None:
+    """Validate the optional ``app:`` block's own shape.
+
+    Never feeds :class:`ProtectionConfig` or :func:`to_normalized_dict` — the
+    block is read by ``forge_check_run.py.load_app_config``, not by anything
+    here. Presence is optional (see ``_OPTIONAL_TOP_LEVEL_FIELDS``), but a
+    present block is validated with the same rigor as every other object in
+    this schema: both keys required, no extra key tolerated.
+    """
+    _require_object_fields(app, _KNOWN_APP_FIELDS, "app")
+    slug = app["slug"]
+    if not isinstance(slug, str) or not slug:
+        raise ProtectionConfigError("app.slug moet een niet-lege string zijn")
+    app_id = app["app_id"]
+    # bool is an int subclass; `app_id: true` is a typo, not an identifier.
+    if app_id is not None and (isinstance(app_id, bool) or not isinstance(app_id, int)):
+        raise ProtectionConfigError("app.app_id moet een integer of null zijn")
+
+
 def normalize_bypass_allowances(raw: Any) -> List[str]:
     """A ``bypass_pull_request_allowances`` object flattened to sorted
     ``"<kind>:<name>"`` strings.
@@ -240,6 +263,8 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
         doc, _KNOWN_TOP_LEVEL_FIELDS, "branch_protection.yaml",
         optional=_OPTIONAL_TOP_LEVEL_FIELDS,
     )
+    if "app" in doc:
+        _validate_app_block(doc["app"])
 
     if not isinstance(doc["branch"], str) or not doc["branch"]:
         raise ProtectionConfigError("branch moet een niet-lege string zijn")

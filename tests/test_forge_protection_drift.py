@@ -181,6 +181,94 @@ class TestParseProtectionConfig:
             assert names["Some Other Check"] is None
 
 
+class TestAppBlock:
+    """Golf B, B2a fix-forward 2: the top-level ``app:`` block is optional
+    (already true since B2a's own commit), but its INTERNAL shape was never
+    validated -- any garbage nested under ``app:`` parsed silently. This
+    class locks in that the block, when present, is validated with the same
+    rigor as every other object in this schema.
+    """
+
+    def test_app_block_is_accepted(self):
+        doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": None})
+        config = fpd.parse_protection_config(yaml.safe_dump(doc))
+        assert config.branch == "main"
+
+    def test_app_block_with_a_bound_app_id_is_accepted(self):
+        doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": 987654})
+        config = fpd.parse_protection_config(yaml.safe_dump(doc))
+        assert config.branch == "main"
+
+    def test_app_block_with_unknown_key_is_rejected(self):
+        doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": None, "bogus": 1})
+        with pytest.raises(fpd.ProtectionConfigError, match="onbekende velden"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+    def test_app_block_missing_slug_is_rejected(self):
+        doc = _base_config_dict(app={"app_id": None})
+        with pytest.raises(fpd.ProtectionConfigError, match="verplichte velden"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+    def test_app_block_missing_app_id_is_rejected(self):
+        doc = _base_config_dict(app={"slug": "vnx-gate"})
+        with pytest.raises(fpd.ProtectionConfigError, match="verplichte velden"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+    def test_app_slug_must_be_a_non_empty_string(self):
+        doc = _base_config_dict(app={"slug": "", "app_id": None})
+        with pytest.raises(fpd.ProtectionConfigError, match="app.slug"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+    def test_app_id_must_be_an_integer_or_null(self):
+        doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": "987654"})
+        with pytest.raises(fpd.ProtectionConfigError, match="app.app_id"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+    def test_app_id_true_is_rejected_not_treated_as_an_integer(self):
+        """bool is an int subclass; `app_id: true` is a typo, not an id."""
+        doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": True})
+        with pytest.raises(fpd.ProtectionConfigError, match="app.app_id"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+    def test_app_block_not_a_mapping_is_rejected(self):
+        doc = _base_config_dict(app="vnx-gate")
+        with pytest.raises(fpd.ProtectionConfigError, match="app"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+    def test_compare_is_identical_with_and_without_an_app_block(self):
+        """(3) the app: block never enters the normalized dict, so its
+        presence or absence can never register as drift."""
+        without = fpd.to_normalized_dict(fpd.parse_protection_config(_yaml_text()))
+        with_app = fpd.to_normalized_dict(
+            fpd.parse_protection_config(_yaml_text(app={"slug": "vnx-gate", "app_id": None}))
+        )
+        assert fpd.compare(without, with_app) == []
+
+    def test_is_weakening_is_identical_with_and_without_an_app_block(self):
+        without = fpd.to_normalized_dict(fpd.parse_protection_config(_yaml_text()))
+        with_app = fpd.to_normalized_dict(
+            fpd.parse_protection_config(_yaml_text(app={"slug": "vnx-gate", "app_id": 1}))
+        )
+        assert fpd.is_weakening(without, with_app) == (False, [])
+        assert fpd.is_weakening(with_app, without) == (False, [])
+
+    def test_apply_put_payload_never_contains_an_app_key(self):
+        """The PUT body apply_branch_protection.py sends is built entirely
+        from ProtectionConfig fields, which never carry ``app`` -- see
+        ProtectionConfig's field list. Confirmed end-to-end here rather than
+        just by inspection, against a config parsed from a YAML that DOES
+        declare the block."""
+        forge_dir = VNX_ROOT / "scripts" / "forge"
+        sys.path.insert(0, str(forge_dir))
+        import apply_branch_protection as abp
+
+        doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": 987654})
+        config = fpd.parse_protection_config(yaml.safe_dump(doc))
+        payload = abp.build_put_payload(config)
+        assert "app" not in payload
+        assert "slug" not in json.dumps(payload)
+
+
 # ---------------------------------------------------------------------------
 # compare()
 # ---------------------------------------------------------------------------
