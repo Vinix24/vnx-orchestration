@@ -37,6 +37,7 @@ Efficiency: risk ≤ 0.3 + success + no blockers → fast path, skip deep verifi
 - **CI workflow conclusion (mandatory):** `gh run list --branch <head> --workflow "VNX CI" --limit 1 --json conclusion --jq '.[0].conclusion'` must equal `success`. `gh pr checks` listing green names is NOT sufficient — a multi-step job can still produce a `failure` conclusion.
 - **Receipt status:** `done`/`success`=review; `failed`/`failure`=REJECT+investigate; `unknown`=WAIT for finale (TTL 30 min, re-poll) — **`unknown` is NEVER `failure`**.
 - **Post-merge sequence (mandatory):** after `gh pr merge`, run `git pull --ff-only` then `vnx objective reconcile --project-id <pid>` to auto-close any track whose `pr_ref` points to the just-merged PR (advisory CHECK by default; add `--apply` to write).
+- **Branch-protection preflight (golf B, B1):** `pr_merge.py` refuses a merge when live branch protection on `main` drifts from `scripts/forge/branch_protection.yaml`, or when the PR's own copy of that YAML weakens it (`--allow-weaken "<reason>"` is the only override). Operator setup (GitHub App `vnx-gate`, keychain, first apply, migration, rollback): `docs/operations/FORGE_GATE.md`.
 
 ### 2.1 The governed merge contract (`scripts/pr_merge.py`)
 
