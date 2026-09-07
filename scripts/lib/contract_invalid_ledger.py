@@ -43,11 +43,14 @@ it fires at all, and it takes TWO filters to get there:
 
 Staleness windowing is delegated to the existing
 ``contract_invalid_window.is_stale_contract_invalid`` / the effective
-timestamp it defines — never reimplemented here. Both "open" and "acceptable"
-below are decided purely from the ``contract_invalid`` status/event_type
-literal on the latest receipt (``_is_contract_invalid``); no broader
-success/failure classification is needed for that, so this module does not
-delegate to ``event_outcome_semantics.classify_event_outcome``.
+timestamp it defines — never reimplemented here. The VERDICT itself, both
+for "open" and for "acceptable", is still read purely from the
+``contract_invalid`` status/event_type literal (``_is_contract_invalid``) —
+the two filters above only decide WHICH receipt that literal is read from.
+So no success/failure classification is needed, and this module does not
+delegate to ``event_outcome_semantics.classify_event_outcome``; where its
+judgment is relevant (``task_complete``/``unknown`` classifying as neither),
+it is cited as corroboration, never called.
 """
 
 from __future__ import annotations
