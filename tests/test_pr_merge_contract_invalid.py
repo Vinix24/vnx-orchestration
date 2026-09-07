@@ -399,6 +399,100 @@ class TestOutcomeReceiptFiltering:
         assert did in capsys.readouterr().err
 
 
+class TestUndecidedOutcomeDoesNotLiftTheRefusal:
+    """The plane filter alone still passed 2 of the 8 measured cases. Both had
+    a ``task_complete``/``unknown`` written about a minute after the
+    contract_invalid, and an ``unknown`` was read as "resolved". Chains below
+    reproduce those two field-for-field: the contract_invalid receipt has no
+    ``ingested_at`` at all, and the ``unknown`` one carries a raw
+    ``timestamp`` EARLIER than the contract_invalid's while its ``ingested_at``
+    is later — so it genuinely is the last outcome receipt."""
+
+    D6A2 = [
+        {"timestamp": "2026-08-30T12:11:42Z", "event_type": "task_complete",
+         "status": "contract_invalid", "dispatch_id": "20260830-140500-d6a2",
+         "report_path": "/reports/20260830-140500-d6a2.md"},
+        {"timestamp": "2026-08-30T12:11:42.852911+00:00", "ingested_at": "2026-08-30T12:12:59Z",
+         "event_type": "task_complete", "status": "unknown",
+         "dispatch_id": "20260830-140500-d6a2"},
+    ]
+
+    def test_unknown_outcome_after_contract_invalid_is_no_go(self, vnx_env):
+        _write_receipts(vnx_env["receipts_path"], self.D6A2)
+
+        gate = pr_merge._run_contract_invalid_gate("20260830-140500-d6a2")
+
+        assert gate["verdict"] == "NO-GO"
+        assert "contract_invalid" in gate["message"]
+        assert "20260830-140500-d6a2" in gate["message"]
+
+    def test_main_refuses_the_unknown_masked_chain(self, vnx_env, monkeypatch, capsys):
+        _write_receipts(vnx_env["receipts_path"], self.D6A2)
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", "1", "--dispatch-id", "20260830-140500-d6a2"])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls, "an undecided outcome must not unlock the merge"
+        assert "20260830-140500-d6a2" in capsys.readouterr().err
+
+    def test_success_after_contract_invalid_still_merges(self, vnx_env, monkeypatch):
+        """Same chain, decided last outcome: the merge goes through. The filter
+        narrows which receipts may be chosen, it does not freeze the verdict."""
+        did = "20260830-140500-d6a2-really-healed"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-08-30T12:11:42Z"),
+            {"timestamp": "2026-08-30T12:11:42.852911+00:00",
+             "ingested_at": "2026-08-30T12:12:59Z", "event_type": "task_complete",
+             "status": "success", "dispatch_id": did},
+        ])
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", "1", "--dispatch-id", did])
+
+        assert rc == pr_merge.EXIT_OK
+        assert do_merge_calls
+
+    def test_only_undecided_outcomes_is_go_with_its_own_reason(self, vnx_env):
+        """3897 unknown records live in that ledger. Skipped, not refused —
+        refusing on them would be a merge blockade, not a fix. The reason must
+        say WHY it passed, distinct from "no outcome receipt at all"."""
+        did = "20260907-only-unknown"
+        _write_receipts(vnx_env["receipts_path"], [
+            {"timestamp": "2026-09-06T10:00:00Z", "event_type": "task_complete",
+             "status": "unknown", "dispatch_id": did},
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(did)
+
+        assert gate["verdict"] == "GO"
+        assert "geen besliste uitkomst" in gate["message"]
+        assert "geen uitkomst-receipt" not in gate["message"]
+
+    def test_override_still_forces_the_masked_chain_through(self, vnx_env, monkeypatch):
+        """The escape hatch keeps working on the newly-refused chain, and the
+        bypass is stamped on the receipt — it is a real bypass now."""
+        _write_receipts(vnx_env["receipts_path"], self.D6A2)
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main([
+            "--pr", "1", "--dispatch-id", "20260830-140500-d6a2",
+            "--override-contract-invalid", "rapport handmatig nagelezen",
+        ])
+
+        assert rc == pr_merge.EXIT_OK
+        assert do_merge_calls
+        merged = [
+            r for r in _load_receipts(vnx_env["receipts_path"])
+            if r.get("event_type") == "pr_merged"
+        ]
+        assert len(merged) == 1
+        assert merged[0]["contract_invalid_override"]["reason"] == "rapport handmatig nagelezen"
+
+
 class TestUnreadableLedgerFailsClosed:
     def test_unreadable_ledger_is_no_go_with_the_cause(self, vnx_env):
         """A directory where t0_receipts.ndjson should be — the read raises,

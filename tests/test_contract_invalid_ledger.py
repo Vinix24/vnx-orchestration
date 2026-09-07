@@ -374,6 +374,181 @@ def test_outcome_event_type_set_matches_measurement() -> None:
 
 
 # ---------------------------------------------------------------------------
+# is_deliverable_acceptable: only DECIDED outcomes are chosen
+#
+# The plane filter above still passed 2 of the 8 measured cases: both had a
+# ``task_complete``/``unknown`` written about a minute after the
+# contract_invalid, and "not the contract_invalid literal" was read as
+# "resolved". An undecided status decides nothing and must be skipped at
+# selection time, not counted as a resolution.
+# ---------------------------------------------------------------------------
+
+def _outcome_receipt(dispatch_id: str, status: str, timestamp: str, **overrides) -> dict:
+    """A deliverable-outcome receipt with an arbitrary status literal."""
+    rec = {
+        "dispatch_id": dispatch_id,
+        "provider": "claude",
+        "status": status,
+        "event_type": "task_complete",
+        "timestamp": timestamp,
+        "ingested_at": timestamp,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def test_unknown_outcome_after_contract_invalid_is_still_no_go(tmp_path: Path) -> None:
+    """The measured case, field-for-field (20260830-140500-d6a2…): the
+    contract_invalid receipt has NO ``ingested_at`` and the later ``unknown``
+    one carries an EARLIER raw ``timestamp`` than its own ingest, so the
+    effective-timestamp ordering really does put the unknown last."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d6a2", "claude", "2026-08-30T12:11:42Z", ingested_at=None),
+        _outcome_receipt(
+            "d6a2", "unknown", "2026-08-30T12:11:42.852911+00:00",
+            ingested_at="2026-08-30T12:12:59Z",
+        ),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d6a2", receipts)
+
+    assert ok is False
+    assert "contract_invalid" in reason
+    assert "d6a2" in reason
+
+
+def test_success_outcome_after_contract_invalid_is_go(tmp_path: Path) -> None:
+    """The same chain with a DECIDED last outcome resolves — the filter
+    narrows which receipts may be chosen, it does not freeze the verdict."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-decided", "claude", "2026-08-30T12:11:42Z", ingested_at=None),
+        _outcome_receipt(
+            "d-decided", "success", "2026-08-30T12:11:42.852911+00:00",
+            ingested_at="2026-08-30T12:12:59Z",
+        ),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-decided", receipts)
+
+    assert ok is True
+    assert "not contract_invalid" in reason
+
+
+def test_only_undecided_outcomes_is_go_with_geen_besliste_uitkomst(tmp_path: Path) -> None:
+    """No decided outcome at all is an ABSENCE, not a refusal — and the
+    reason must name it as such, distinct from "no outcome receipt"."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _outcome_receipt("d-undecided", "unknown", "2026-09-06T10:00:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-undecided", receipts)
+
+    assert ok is True
+    assert "geen besliste uitkomst" in reason
+    assert "unknown" in reason
+    assert "afwezigheid is geen weigering" in reason
+    assert "geen uitkomst-receipt" not in reason
+
+
+@pytest.mark.parametrize("status", ["unknown", "no_signal", "", "   "])
+def test_no_signal_and_empty_status_behave_like_unknown(tmp_path: Path, status: str) -> None:
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-u", "claude", "2026-09-06T10:00:00Z"),
+        _outcome_receipt("d-u", status, "2026-09-06T10:05:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-u", receipts)
+
+    assert ok is False, f"status {status!r} must not resolve a contract_invalid chain"
+    assert "contract_invalid" in reason
+
+
+def test_missing_status_field_behaves_like_undecided(tmp_path: Path) -> None:
+    """134 outcome receipts in the live ledger carry an empty status; a
+    receipt with no status KEY at all must read the same way, not crash."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-nostatus", "claude", "2026-09-06T10:00:00Z"),
+        {"dispatch_id": "d-nostatus", "event_type": "task_complete",
+         "timestamp": "2026-09-06T10:05:00Z"},
+    ])
+
+    ok, _ = cil.is_deliverable_acceptable("d-nostatus", receipts)
+
+    assert ok is False
+
+
+@pytest.mark.parametrize("status", ["blocked", "completed", "in_progress",
+                                    "done — awaiting ci + t0 gate"])
+def test_unrecognized_status_does_not_heal_the_chain(tmp_path: Path, status: str) -> None:
+    """ALLOWLIST, not a blocklist of {unknown, no_signal, empty}: these four
+    literals all exist in the live ledger outside the enumerated set. A status
+    this module has never seen makes no statement about the deliverable, so it
+    must fail closed rather than silently unlock the merge."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-novel", "claude", "2026-09-06T10:00:00Z"),
+        _outcome_receipt("d-novel", status, "2026-09-06T10:05:00Z"),
+    ])
+
+    ok, _ = cil.is_deliverable_acceptable("d-novel", receipts)
+
+    assert ok is False
+
+
+def test_contract_invalid_receipt_without_status_is_still_decided(tmp_path: Path) -> None:
+    """``_is_decided_outcome`` short-circuits on the contract_invalid literal
+    BEFORE the status allowlist, so an old ``report_contract_invalid`` record
+    carrying no status field cannot drop out of its own check."""
+    rec = {
+        "dispatch_id": "legacy-ci",
+        "event_type": "report_contract_invalid",
+        "timestamp": "2026-06-03T08:51:09Z",
+    }
+    assert cil._is_decided_outcome(rec) is True
+
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [rec])
+
+    ok, reason = cil.is_deliverable_acceptable("legacy-ci", receipts)
+
+    assert ok is False
+    assert "contract_invalid" in reason
+
+
+def test_decided_status_set_matches_measurement() -> None:
+    """Pin the allowlist: measured 07-09 over 23.698 deliverable-outcome
+    receipts in the live ledger. unknown (3897), no_signal (35) and the empty
+    status (134) are the enumerated undecided ones and must stay out."""
+    assert cil.DECIDED_OUTCOME_STATUSES == frozenset({
+        "success", "done", "complete", "failed", "failure", "timeout",
+        "contract_invalid",
+    })
+    for undecided in ("unknown", "no_signal", ""):
+        assert undecided not in cil.DECIDED_OUTCOME_STATUSES
+
+
+def test_undecided_receipts_do_not_block_a_dispatch_of_their_own(tmp_path: Path) -> None:
+    """Skipped, not refused: turning 3897 unknown records into refusals of
+    their own would be a merge blockade, not a fix."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _outcome_receipt("d-mixed", "unknown", "2026-09-06T10:00:00Z"),
+        _success_receipt("d-mixed", "claude", "2026-09-06T10:05:00Z"),
+        _outcome_receipt("d-mixed", "unknown", "2026-09-06T10:10:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-mixed", receipts)
+
+    assert ok is True
+    assert "not contract_invalid" in reason
+
+
+# ---------------------------------------------------------------------------
 # is_deliverable_acceptable: an unreadable ledger fails CLOSED
 # ---------------------------------------------------------------------------
 
