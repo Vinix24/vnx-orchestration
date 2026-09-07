@@ -773,6 +773,109 @@ def annotate_refused_write(
     return annotated
 
 
+def publish_forge_check_run(
+    payload: Dict[str, Any], *, gate: str, result_path: Path
+) -> None:
+    """Publish the just-written result as a GitHub check-run (Golf B, B2b).
+
+    Called AFTER the atomic write has landed and after the slot lock is
+    released, and NEVER able to change the outcome of that write. A gate run
+    exists to record a verdict; publishing that verdict to the forge is a
+    consequence of the record, never a condition for it. So every failure here
+    — a locked keychain, an App that was never registered, a GitHub 500 — is
+    logged with the command that repairs it and then swallowed. The record on
+    disk is already the truth; the check-run is a copy of it, and a missing
+    copy is repaired by :data:`forge_check_run.RECOVERY_COMMAND_TEMPLATE`,
+    not by failing the gate run that produced the evidence.
+
+    The publisher is imported lazily and inside the ``try``. It reaches
+    ``closure_verifier`` (for the merge door's own invariant chain) and
+    therefore a long import tail; loading that on every ``import
+    gate_recorder`` would tax every gate run for a side effect most of them do
+    not reach. Inside the ``try`` because an ImportError is exactly as
+    non-fatal here as a keychain failure.
+
+    ``forge_gate_publisher``, not ``forge_check_run``: the first is the policy
+    layer that decides which conclusion a record earns, the second is the bare
+    transport it calls. Reaching past it into the client from here would put
+    that decision in two places.
+
+    Two identity fields decide whether there is anything to publish at all,
+    and both come from the payload that was just written rather than from any
+    ambient lookup: ``pr_number`` (the check-run needs a PR) and
+    ``commit_sha`` (branch protection matches a check-run to ONE commit; a
+    record with no head belongs to no head, and falling back to the local
+    ``git rev-parse HEAD`` would attach the verdict to whatever the process
+    cwd happened to be — OI-1307).
+
+    ``result_path`` is the third, and it is passed for exactly the same reason
+    as the other two. The publisher can resolve a record itself, from
+    ``${VNX_STATE_DIR}/review_gates/results``; handing it the path this call
+    just wrote is what makes it publish THIS record instead of whatever that
+    store holds for the same PR and gate. The two are not the same file
+    whenever the writer used a non-default store — which in this project is
+    every gate run, since they all run with
+    ``VNX_DATA_DIR=~/.vnx-data/vnx-dev``. A re-resolved lookup could therefore
+    publish a stale ``success`` over a verdict that had just failed: a
+    false-positive gate closure produced by the publication of a record nobody
+    asked for. A path that does not exist is refused loudly by the publisher
+    and logged here, never quietly replaced by the store's copy.
+    """
+    pr_number = payload.get("pr_number")
+    head_sha = (payload.get("commit_sha") or "").strip()
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or not head_sha:
+        logger.debug(
+            "gate_recorder: no forge check-run for gate=%s — pr_number=%r head_sha=%r "
+            "(a record without both cannot be attached to a commit on a PR)",
+            gate, pr_number, head_sha,
+        )
+        return
+
+    try:
+        from forge_gate_publisher import (  # noqa: PLC0415
+            RECOVERY_COMMAND_TEMPLATE, ForgeAppConfigError, publish_for_record,
+        )
+
+        publish_for_record(pr_number, gate, head_sha, record_path=result_path)
+    # vnx-broad-except: this hook may not be able to fail a gate run, and the
+    # publisher's failure surface is open-ended by nature (keychain, JWT,
+    # DNS, GitHub, YAML, a lazy import). Narrowing it to the Forge exception
+    # tree would let anything outside that tree take down a write that has
+    # already succeeded. Nothing is silent: every branch logs with the repair
+    # command.
+    except Exception as exc:  # noqa: BLE001
+        try:
+            recovery = RECOVERY_COMMAND_TEMPLATE.format(pr=pr_number, gate=gate)
+            app_not_registered = isinstance(exc, ForgeAppConfigError)
+        except NameError:
+            # The import itself is what failed.
+            recovery = (
+                f"python3 scripts/lib/forge_gate_publisher.py publish --pr {pr_number} "
+                f"--gate {gate}"
+            )
+            app_not_registered = False
+        if app_not_registered:
+            # The expected state until the operator has registered the App and
+            # filled app_id in scripts/forge/branch_protection.yaml (runbook
+            # §1/§3). A pending operator step is not a malfunction, and logging
+            # it as one on every single gate write would train the reader to
+            # ignore this line — which is the line that has to be believed on
+            # the day the keychain really is locked.
+            logger.info(
+                "gate_recorder: geen check-run gepubliceerd voor gate=%s pr=%s — de "
+                "vnx-gate App is nog niet geregistreerd (%s). Operator-stap uit het "
+                "runbook; daarna: %s",
+                gate, pr_number, exc, recovery,
+            )
+            return
+        logger.warning(
+            "gate_recorder: check-run PUBLICATIE MISLUKT voor gate=%s pr=%s head=%s — "
+            "%s: %s. Het resultaat op schijf is ongewijzigd en blijft geldig; "
+            "herstel met: %s",
+            gate, pr_number, head_sha[:12], type(exc).__name__, exc, recovery,
+        )
+
+
 def write_result_guarded(
     result_path: Path,
     payload: Dict[str, Any],
@@ -824,6 +927,11 @@ def write_result_guarded(
             on_disk = existing if isinstance(existing, dict) else {}
             return on_disk or payload, False
         _write_result_atomic(result_path, payload)
+    # Outside the lock, and only on a write that landed: a refused write left
+    # another writer's record standing, so publishing here would describe a
+    # write that never happened (the same reason record_failure gates its
+    # register emit on ``written``, OI-1469/OI-1470).
+    publish_forge_check_run(payload, gate=gate, result_path=result_path)
     return payload, True
 
 
@@ -910,6 +1018,11 @@ def record_terminal_result(
     with slot_lock(result_path):
         _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
         _write_result_atomic(result_path, payload)
+    # After the write, outside the lock, non-fatal — see
+    # :func:`publish_forge_check_run`. A refusal from the overwrite guard
+    # raises above and never reaches this line, so the same "only publish a
+    # write that landed" rule holds here as in write_result_guarded.
+    publish_forge_check_run(payload, gate=gate, result_path=result_path)
     return result_path
 
 
