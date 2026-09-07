@@ -29,7 +29,11 @@ def _proc(stdout: str, returncode: int = 0, stderr: str = "") -> subprocess.Comp
 
 
 def _pr_files_json(entries: List[Dict[str, Any]]) -> str:
-    return json.dumps(entries)
+    """Simulate ``gh api ... --paginate --slurp`` output: a single outer
+    array wrapping one page (the entries list itself). Multi-page slurped
+    output is exercised separately in TestGetPrAddedAdrFilesPagination.
+    """
+    return json.dumps([entries])
 
 
 def _main_listing_json(names: List[str]) -> str:
@@ -134,6 +138,74 @@ class TestGetPrAddedAdrFiles:
         assert "niet te parsen" in err["message"]
 
 
+class TestGetPrAddedAdrFilesPagination:
+    """B6 fix-forward 2: ``gh api --paginate`` without ``--slurp`` prints one
+    JSON document PER PAGE back-to-back, which is not valid JSON once a PR
+    has more files than fit on one page. ``--slurp`` wraps all pages into a
+    single outer JSON array of pages; this module must flatten that, and
+    must refuse (not crash) on the old, un-slurped shape.
+    """
+
+    def test_multi_page_slurped_output_is_flattened_and_page_two_adr_is_caught(self, monkeypatch):
+        page_one = [
+            {"filename": "docs/governance/decisions/ADR-020-x.md", "status": "modified"},
+            {"filename": "scripts/pr_merge.py", "status": "modified"},
+        ]
+        page_two = [
+            {"filename": "docs/governance/decisions/ADR-041-late-page.md", "status": "added"},
+        ]
+        slurped_stdout = json.dumps([page_one, page_two])
+        seen_argv: List[List[str]] = []
+
+        def fake_capture(argv, *, timeout, cwd=None):
+            seen_argv.append(argv)
+            return _proc(slurped_stdout), None
+
+        monkeypatch.setattr(adr_check, "_capture", fake_capture)
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert err is None
+        assert added == {"41": "docs/governance/decisions/ADR-041-late-page.md"}
+        assert "--paginate" in seen_argv[0]
+        assert "--slurp" in seen_argv[0]
+
+    def test_unslurped_multi_document_output_is_no_go_not_a_crash(self, monkeypatch):
+        """The old, buggy shape: two JSON documents concatenated back-to-back
+        (what ``--paginate`` alone produces on a multi-page PR). This must
+        never crash the preflight — it must NO-GO with a message that points
+        at pagination/slurping, not a generic parse error.
+        """
+        unslurped_stdout = (
+            json.dumps([{"filename": "docs/governance/decisions/ADR-020-x.md", "status": "modified"}])
+            + json.dumps([{"filename": "docs/governance/decisions/ADR-041-y.md", "status": "added"}])
+        )
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(unslurped_stdout), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert err["verdict"] == "NO-GO"
+        assert "slurp" in err["message"].lower() or "paginering" in err["message"].lower()
+
+    def test_slurped_page_that_is_not_an_array_is_no_go(self, monkeypatch):
+        """A slurped page must itself be an array (the files endpoint returns
+        an array per page); anything else is an unexpected shape, refused.
+        """
+        malformed_stdout = json.dumps([{"not": "an array"}])
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(malformed_stdout), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert err["verdict"] == "NO-GO"
+        assert "onverwacht antwoordformaat" in err["message"]
+
+
 class TestGetMainAdrNumbers:
     def test_parses_directory_listing(self, monkeypatch):
         monkeypatch.setattr(
@@ -178,6 +250,27 @@ class TestGetMainAdrNumbers:
         assert numbers is None
         assert err["verdict"] == "NO-GO"
         assert "niet toetsbaar" in err["message"]
+
+    def test_base_ref_with_special_characters_is_url_encoded(self, monkeypatch):
+        """B6 fix-forward 2: ``base_ref`` is spliced straight into a query
+        string (``?ref={base_ref}``); a branch name carrying '?' or '&' must
+        be percent-encoded, not pasted in literally.
+        """
+        seen_argv: List[List[str]] = []
+
+        def fake_capture(argv, *, timeout, cwd=None):
+            seen_argv.append(argv)
+            return _proc(_main_listing_json([])), None
+
+        monkeypatch.setattr(adr_check, "_capture", fake_capture)
+
+        numbers, err = adr_check.get_main_adr_numbers(base_ref="weird?ref&name")
+
+        assert err is None
+        assert numbers == {}
+        call = " ".join(seen_argv[0])
+        assert "ref=weird%3Fref%26name" in call
+        assert "ref=weird?ref&name" not in call
 
 
 class TestCheckAdrNumbersForPr:

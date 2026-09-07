@@ -16,14 +16,20 @@ ref (that is only as fresh as the last ``git fetch`` the door happened to
 run, and the door itself never fetches) — both sides are read live via the
 GitHub API:
 
-  1. The PR's changed files, via ``gh api repos/{owner}/{repo}/pulls/<N>/files``
-     — this endpoint carries a ``status`` per file (``added``, ``modified``,
+  1. The PR's changed files, via
+     ``gh api repos/{owner}/{repo}/pulls/<N>/files --paginate --slurp`` — this
+     endpoint carries a ``status`` per file (``added``, ``modified``,
      ``removed``, ``renamed``, ``copied``, ...) plus a ``previous_filename``
      for renames/copies. A rename/copy whose OWN number changes (the ADR
      number embedded in ``previous_filename`` differs from the one in
      ``filename``) is treated the same as ``added`` — it claims a new number
      just as much as a brand-new file does. A rename/copy that keeps the same
-     number (a wording fix) is not a collision.
+     number (a wording fix) is not a collision. ``--paginate`` alone prints
+     each page as a SEPARATE JSON document back-to-back (confirmed via
+     ``gh api --help``: "Each page is a separate JSON array or object"), which
+     is not valid JSON once a PR has more files than one page (30-100
+     depending on the endpoint) — ``--slurp`` wraps all pages into a single
+     outer JSON array of pages, which this module flattens.
   2. The base branch's ADR directory listing, via
      ``gh api repos/{owner}/{repo}/contents/docs/governance/decisions?ref=<base_ref>``
      — the live tree at the tip of ``base_ref`` (default ``main``, override
@@ -53,6 +59,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 # Matches an ADR file's repo-relative path, e.g.
 # "docs/governance/decisions/ADR-038-receipt-outcome-identity.md".
@@ -127,7 +134,13 @@ def get_pr_added_adr_files(
     CHANGED number counts.
     """
     result, err = _capture(
-        [gh_bin, "api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files", "--paginate"],
+        [
+            gh_bin,
+            "api",
+            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files",
+            "--paginate",
+            "--slurp",
+        ],
         timeout=GH_PR_FILES_TIMEOUT,
         cwd=str(project_root) if project_root else None,
     )
@@ -138,23 +151,39 @@ def get_pr_added_adr_files(
             f"gh api pulls/{pr_number}/files liep vast: ADR-preflight is niet toetsbaar"
         )
     if result is None or result.returncode != 0:
+        # Fail-closed also catches an old gh binary that does not know
+        # --slurp yet (non-zero exit, "unknown flag" on stderr): there is no
+        # silent fallback to unpaginated/unslurped output here.
         stderr = (result.stderr if result else "").strip()
         return None, _no_go(
             f"gh api pulls/{pr_number}/files faalde: ADR-preflight is niet toetsbaar"
             + (f" ({stderr[:160]})" if stderr else "")
         )
     try:
-        files = json.loads(result.stdout)
+        pages = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
+        # Most likely cause: gh's --paginate prints one JSON document PER
+        # PAGE back-to-back without --slurp, which is not valid JSON as a
+        # whole once there is more than one page.
         return None, _no_go(
-            f"gh-uitvoer voor pulls/{pr_number}/files niet te parsen: "
-            f"ADR-preflight is niet toetsbaar ({exc})"
+            f"gh-uitvoer voor pulls/{pr_number}/files niet te parsen als geslurpte "
+            f"paginering (elke pagina moet een JSON-array binnen de buitenste "
+            f"array zijn): ADR-preflight is niet toetsbaar ({exc})"
         )
-    if not isinstance(files, list):
+    if not isinstance(pages, list):
         return None, _no_go(
             f"onverwacht antwoordformaat voor pulls/{pr_number}/files: "
             "ADR-preflight is niet toetsbaar"
         )
+
+    files: List[Any] = []
+    for page in pages:
+        if not isinstance(page, list):
+            return None, _no_go(
+                f"onverwacht antwoordformaat voor pulls/{pr_number}/files "
+                "(geslurpte pagina is geen array): ADR-preflight is niet toetsbaar"
+            )
+        files.extend(page)
 
     added: Dict[str, str] = {}
     for entry in files:
@@ -190,8 +219,13 @@ def get_main_adr_numbers(
     it is known so a PR targeting something other than main is compared
     against its real base instead of silently assuming main.
     """
+    encoded_base_ref = quote(base_ref, safe="")
     result, err = _capture(
-        [gh_bin, "api", f"repos/{{owner}}/{{repo}}/contents/{ADR_DECISIONS_DIR}?ref={base_ref}"],
+        [
+            gh_bin,
+            "api",
+            f"repos/{{owner}}/{{repo}}/contents/{ADR_DECISIONS_DIR}?ref={encoded_base_ref}",
+        ],
         timeout=GH_CONTENTS_TIMEOUT,
         cwd=str(project_root) if project_root else None,
     )
