@@ -112,6 +112,7 @@ from gate_recorder import (
     get_pr_head_sha,
     persist_request,
     record_terminal_result,
+    result_file_path,
     stamp_request_identity,
 )
 import gate_depth  # OI-1618: a verdict without investigation is no verdict, on every lane
@@ -857,15 +858,29 @@ def main(argv: "list[str] | None" = None) -> int:
     # checkout HEAD. Offline runs (--diff-file) are not tied to a live PR and
     # legitimately carry neither. Reuses the SAME branch/commit_sha resolved
     # once above (for the request record) instead of a second gh lookup.
-    stamp_request_identity(
-        record,
-        {
-            "gate": record["gate"],
-            "pr_id": record["pr_id"],
-            "branch": branch,
-            "commit_sha": commit_sha,
-        },
-    )
+    #
+    # B8 (golf B, 2026-09-07): read the request record fresh from disk here
+    # instead of handing stamp_request_identity a dict that carries only
+    # gate/pr_id/branch/commit_sha — see glm_gate.py's identical stamp for the
+    # full timing rationale (gate_request_handler
+    # ._stamp_takeover_annotations can land its takeover provenance on THIS
+    # SAME request file any time during this gate's own governed dispatch
+    # call above). Offline runs and any run where the request file is
+    # missing/unreadable fall back to exactly the pre-B8 minimal dict.
+    request_file = result_file_path(requests_dir, "kimi_gate", pr_number=pr_number, pr_id="")
+    disk_request_payload: "dict | None" = None
+    if request_file is not None and request_file.exists():
+        try:
+            loaded = json.loads(request_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict):
+            disk_request_payload = loaded
+    if disk_request_payload is None:
+        disk_request_payload = {"gate": record["gate"], "pr_id": record["pr_id"]}
+    disk_request_payload["branch"] = branch
+    disk_request_payload["commit_sha"] = commit_sha
+    stamp_request_identity(record, disk_request_payload)
 
     # Unconditional, and resolved from the SAME base_data_dir the report path
     # above is built from (never the raw, possibly-empty ``data_dir`` CLI

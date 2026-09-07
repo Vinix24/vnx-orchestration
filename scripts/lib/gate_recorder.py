@@ -250,6 +250,23 @@ def get_pr_head_branch(pr_number: Optional[int]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# The five takeover-provenance fields gate_request_handler
+# ._stamp_takeover_annotations stamps onto a request record — mirrored onto
+# the result by stamp_request_identity below (B8) but ONLY as a group, and
+# ONLY when the request carries ``takeover: true``. ``failure_reason`` is
+# deliberately excluded: it is the PREDECESSOR's cause, not this result's, and
+# a result-side writer already derives its OWN ``failure_reason``
+# (:func:`derive_failure_reason`) — copying the request's here would stomp
+# that with the wrong gate's reason.
+_TAKEOVER_FIELDS: Tuple[str, ...] = (
+    "takeover",
+    "takeover_from",
+    "takeover_reason",
+    "takeover_source_status",
+    "takeover_path",
+)
+
+
 def stamp_request_identity(
     result_payload: Dict[str, Any],
     request_payload: Dict[str, Any],
@@ -268,6 +285,26 @@ def stamp_request_identity(
     produced evidence that is unjoinable rather than quietly emitting a
     branch-less record. An empty commit_sha is equally loud (B6/A3): a result
     without a head sha can never match a head-sha-scoped merge check.
+
+    B8 (golf B, 2026-09-07): also copies the five takeover-provenance fields
+    (:data:`_TAKEOVER_FIELDS`) from the request onto the result, but ONLY
+    when the request itself carries ``takeover: true`` (``is True``, never a
+    merely-truthy value) — a request without takeover leaves those keys
+    ABSENT on the result (their existing meaning), and this never stamps a
+    literal ``takeover: false``.
+    ``gate_request_handler._stamp_takeover_annotations`` (:665-734) already
+    writes these same fields onto BOTH the request and, separately, the
+    result record — but the result write only fires ``if
+    result_file.exists()`` at stamp time (:711). A successor gate
+    (glm_gate.py/kimi_gate.py) that writes its OWN terminal result later —
+    after that stamp already ran and found no result file yet — never
+    inherited the annotation, even though every production writer of a
+    result record reaches disk through this function. Copying the fields
+    here, unconditionally on every call, closes that ordering gap for every
+    writer at once instead of requiring each one to remember it separately.
+    Every request that legitimately carries ``takeover: true`` sets all five
+    fields together (see ``_stamp_takeover_annotations``), so a plain
+    ``.get()`` with no additional per-field presence check is enough.
     """
     branch = (request_payload.get("branch") or "").strip()
     if not branch:
@@ -289,6 +326,9 @@ def stamp_request_identity(
         )
     result_payload["branch"] = branch
     result_payload["commit_sha"] = commit_sha
+    if request_payload.get("takeover") is True:
+        for field in _TAKEOVER_FIELDS:
+            result_payload[field] = request_payload.get(field)
     return result_payload
 
 
