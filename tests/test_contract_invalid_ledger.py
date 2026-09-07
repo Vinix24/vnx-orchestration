@@ -22,6 +22,7 @@ fallback blocked).
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -262,13 +263,347 @@ def test_is_deliverable_acceptable_true_for_absent_dispatch(tmp_path: Path) -> N
     ok, reason = cil.is_deliverable_acceptable("never-ran", receipts)
 
     assert ok is True
-    assert "no receipt" in reason
+    assert "geen uitkomst-receipt" in reason
+    assert "afwezigheid is geen weigering" in reason
 
 
 def test_is_deliverable_acceptable_false_for_empty_dispatch_id(tmp_path: Path) -> None:
     receipts = tmp_path / "t0_receipts.ndjson"
     ok, reason = cil.is_deliverable_acceptable("", receipts)
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# is_deliverable_acceptable: only DELIVERABLE-OUTCOME receipts are judged
+# ---------------------------------------------------------------------------
+
+def _gate_request_receipt(dispatch_id: str, timestamp: str, **overrides) -> dict:
+    """A review_gate_request receipt — the gate plane, on the SAME dispatch_id.
+
+    Shape mirrors what gate_request_handler.py emits (event_type
+    review_gate_request, status requested); 844 of these sit in the live
+    ledger and every one of the 8 measured masking cases had one as its last
+    receipt before the merge.
+    """
+    rec = {
+        "dispatch_id": dispatch_id,
+        "provider": "claude",
+        "status": "requested",
+        "event_type": "review_gate_request",
+        "receipt_kind": "review_gate",
+        "timestamp": timestamp,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def test_gate_plane_receipt_does_not_mask_contract_invalid(tmp_path: Path) -> None:
+    """The measured masking case: worker outcome contract_invalid, then the
+    review gate writes on the same dispatch_id. The deliverable is still
+    unacceptable — a gate request says nothing about the report body."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-masked", "kimi", "2026-09-06T11:36:00Z"),
+        _gate_request_receipt("d-masked", "2026-09-06T11:50:54Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-masked", receipts)
+
+    assert ok is False
+    assert "contract_invalid" in reason
+
+
+def test_only_gate_plane_receipts_reads_as_no_outcome(tmp_path: Path) -> None:
+    """Gate/state-plane receipts alone are not an outcome — absence, so no
+    rejection, but the reason must say WHY it is an absence."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _gate_request_receipt("d-gate-only", "2026-09-06T11:50:54Z"),
+        {"dispatch_id": "d-gate-only", "event_type": "state_mutation",
+         "status": "success", "timestamp": "2026-09-06T11:55:00Z"},
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-gate-only", receipts)
+
+    assert ok is True
+    assert "geen uitkomst-receipt" in reason
+
+
+def test_real_outcome_success_after_gate_receipt_resolves(tmp_path: Path) -> None:
+    """A LATER genuine outcome still resolves the chain — the filter narrows
+    which receipts count, it does not freeze the first verdict."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-really-healed", "kimi", "2026-09-06T11:36:00Z"),
+        _gate_request_receipt("d-really-healed", "2026-09-06T11:50:54Z"),
+        _success_receipt("d-really-healed", "kimi", "2026-09-06T12:05:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-really-healed", receipts)
+
+    assert ok is True
+    assert "not contract_invalid" in reason
+
+
+def test_subprocess_completion_counts_as_outcome(tmp_path: Path) -> None:
+    """subprocess_completion carries the literal 4x in the live ledger, so it
+    is in DELIVERABLE_OUTCOME_EVENT_TYPES and must be judged."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-sub", "kimi", "2026-09-06T10:00:00Z",
+                    event_type="subprocess_completion"),
+        _gate_request_receipt("d-sub", "2026-09-06T10:30:00Z"),
+    ])
+
+    ok, _ = cil.is_deliverable_acceptable("d-sub", receipts)
+    assert ok is False
+
+
+def test_outcome_event_type_set_matches_measurement() -> None:
+    """Pin the set: measured 07-09 over 29.386 live records, the event types
+    that ever carry the contract_invalid literal are report_contract_invalid,
+    task_complete and subprocess_completion; task_failed is the fourth
+    deliverable outcome. review_gate_request must never be in here."""
+    assert cil.DELIVERABLE_OUTCOME_EVENT_TYPES == frozenset({
+        "report_contract_invalid",
+        "task_complete",
+        "subprocess_completion",
+        "task_failed",
+    })
+    assert "review_gate_request" not in cil.DELIVERABLE_OUTCOME_EVENT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# is_deliverable_acceptable: only DECIDED outcomes are chosen
+#
+# The plane filter above still passed 2 of the 8 measured cases: both had a
+# ``task_complete``/``unknown`` written about a minute after the
+# contract_invalid, and "not the contract_invalid literal" was read as
+# "resolved". An undecided status decides nothing and must be skipped at
+# selection time, not counted as a resolution.
+# ---------------------------------------------------------------------------
+
+def _outcome_receipt(dispatch_id: str, status: str, timestamp: str, **overrides) -> dict:
+    """A deliverable-outcome receipt with an arbitrary status literal."""
+    rec = {
+        "dispatch_id": dispatch_id,
+        "provider": "claude",
+        "status": status,
+        "event_type": "task_complete",
+        "timestamp": timestamp,
+        "ingested_at": timestamp,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def test_unknown_outcome_after_contract_invalid_is_still_no_go(tmp_path: Path) -> None:
+    """The measured case, field-for-field (20260830-140500-d6a2…): the
+    contract_invalid receipt has NO ``ingested_at`` and the later ``unknown``
+    one carries an EARLIER raw ``timestamp`` than its own ingest, so the
+    effective-timestamp ordering really does put the unknown last."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d6a2", "claude", "2026-08-30T12:11:42Z", ingested_at=None),
+        _outcome_receipt(
+            "d6a2", "unknown", "2026-08-30T12:11:42.852911+00:00",
+            ingested_at="2026-08-30T12:12:59Z",
+        ),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d6a2", receipts)
+
+    assert ok is False
+    assert "contract_invalid" in reason
+    assert "d6a2" in reason
+
+
+def test_success_outcome_after_contract_invalid_is_go(tmp_path: Path) -> None:
+    """The same chain with a DECIDED last outcome resolves — the filter
+    narrows which receipts may be chosen, it does not freeze the verdict."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-decided", "claude", "2026-08-30T12:11:42Z", ingested_at=None),
+        _outcome_receipt(
+            "d-decided", "success", "2026-08-30T12:11:42.852911+00:00",
+            ingested_at="2026-08-30T12:12:59Z",
+        ),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-decided", receipts)
+
+    assert ok is True
+    assert "not contract_invalid" in reason
+
+
+def test_only_undecided_outcomes_is_go_with_geen_besliste_uitkomst(tmp_path: Path) -> None:
+    """No decided outcome at all is an ABSENCE, not a refusal — and the
+    reason must name it as such, distinct from "no outcome receipt"."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _outcome_receipt("d-undecided", "unknown", "2026-09-06T10:00:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-undecided", receipts)
+
+    assert ok is True
+    assert "geen besliste uitkomst" in reason
+    assert "unknown" in reason
+    assert "afwezigheid is geen weigering" in reason
+    assert "geen uitkomst-receipt" not in reason
+
+
+@pytest.mark.parametrize("status", ["unknown", "no_signal", "", "   "])
+def test_no_signal_and_empty_status_behave_like_unknown(tmp_path: Path, status: str) -> None:
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-u", "claude", "2026-09-06T10:00:00Z"),
+        _outcome_receipt("d-u", status, "2026-09-06T10:05:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-u", receipts)
+
+    assert ok is False, f"status {status!r} must not resolve a contract_invalid chain"
+    assert "contract_invalid" in reason
+
+
+def test_missing_status_field_behaves_like_undecided(tmp_path: Path) -> None:
+    """134 outcome receipts in the live ledger carry an empty status; a
+    receipt with no status KEY at all must read the same way, not crash."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-nostatus", "claude", "2026-09-06T10:00:00Z"),
+        {"dispatch_id": "d-nostatus", "event_type": "task_complete",
+         "timestamp": "2026-09-06T10:05:00Z"},
+    ])
+
+    ok, _ = cil.is_deliverable_acceptable("d-nostatus", receipts)
+
+    assert ok is False
+
+
+@pytest.mark.parametrize("status", ["blocked", "completed", "in_progress",
+                                    "done — awaiting ci + t0 gate"])
+def test_unrecognized_status_does_not_heal_the_chain(tmp_path: Path, status: str) -> None:
+    """ALLOWLIST, not a blocklist of {unknown, no_signal, empty}: these four
+    literals all exist in the live ledger outside the enumerated set. A status
+    this module has never seen makes no statement about the deliverable, so it
+    must fail closed rather than silently unlock the merge."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _ci_receipt("d-novel", "claude", "2026-09-06T10:00:00Z"),
+        _outcome_receipt("d-novel", status, "2026-09-06T10:05:00Z"),
+    ])
+
+    ok, _ = cil.is_deliverable_acceptable("d-novel", receipts)
+
+    assert ok is False
+
+
+def test_contract_invalid_receipt_without_status_is_still_decided(tmp_path: Path) -> None:
+    """``_is_decided_outcome`` short-circuits on the contract_invalid literal
+    BEFORE the status allowlist, so an old ``report_contract_invalid`` record
+    carrying no status field cannot drop out of its own check."""
+    rec = {
+        "dispatch_id": "legacy-ci",
+        "event_type": "report_contract_invalid",
+        "timestamp": "2026-06-03T08:51:09Z",
+    }
+    assert cil._is_decided_outcome(rec) is True
+
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [rec])
+
+    ok, reason = cil.is_deliverable_acceptable("legacy-ci", receipts)
+
+    assert ok is False
+    assert "contract_invalid" in reason
+
+
+def test_decided_status_set_matches_measurement() -> None:
+    """Pin the allowlist: measured 07-09 over 23.698 deliverable-outcome
+    receipts in the live ledger. unknown (3897), no_signal (35) and the empty
+    status (134) are the enumerated undecided ones and must stay out."""
+    assert cil.DECIDED_OUTCOME_STATUSES == frozenset({
+        "success", "done", "complete", "failed", "failure", "timeout",
+        "contract_invalid",
+    })
+    for undecided in ("unknown", "no_signal", ""):
+        assert undecided not in cil.DECIDED_OUTCOME_STATUSES
+
+
+def test_undecided_receipts_do_not_block_a_dispatch_of_their_own(tmp_path: Path) -> None:
+    """Skipped, not refused: turning 3897 unknown records into refusals of
+    their own would be a merge blockade, not a fix."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [
+        _outcome_receipt("d-mixed", "unknown", "2026-09-06T10:00:00Z"),
+        _success_receipt("d-mixed", "claude", "2026-09-06T10:05:00Z"),
+        _outcome_receipt("d-mixed", "unknown", "2026-09-06T10:10:00Z"),
+    ])
+
+    ok, reason = cil.is_deliverable_acceptable("d-mixed", receipts)
+
+    assert ok is True
+    assert "not contract_invalid" in reason
+
+
+# ---------------------------------------------------------------------------
+# is_deliverable_acceptable: an unreadable ledger fails CLOSED
+# ---------------------------------------------------------------------------
+
+def test_unreadable_ledger_is_a_refusal_not_an_absence(tmp_path: Path) -> None:
+    """A directory where the ledger should be: read raises, and the gate must
+    refuse with the cause instead of degrading to an empty read (which reads
+    as "no outcome receipt" and fails OPEN)."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    ok, reason = cil.is_deliverable_acceptable("d-any", receipts)
+
+    assert ok is False
+    assert "grootboek onleesbaar" in reason
+    assert "afwezigheid" not in reason
+
+
+def test_unreadable_ledger_permission_bit_is_a_refusal(tmp_path: Path) -> None:
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [_ci_receipt("d-any", "kimi", "2026-09-06T10:00:00Z")])
+    receipts.chmod(0o000)
+    try:
+        if os.access(receipts, os.R_OK):  # running as root: chmod cannot deny
+            pytest.skip("read permission not enforceable for this user")
+        ok, reason = cil.is_deliverable_acceptable("d-any", receipts)
+    finally:
+        receipts.chmod(0o644)
+
+    assert ok is False
+    assert "grootboek onleesbaar" in reason
+
+
+def test_strict_false_keeps_the_soft_read(tmp_path: Path) -> None:
+    """The advisory contract is still available explicitly — strict=False
+    degrades an unreadable ledger to an empty read, as before."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    ok, reason = cil.is_deliverable_acceptable("d-any", receipts, strict=False)
+
+    assert ok is True
+    assert "geen uitkomst-receipt" in reason
+
+
+def test_advisory_readers_keep_soft_behaviour_on_unreadable_ledger(tmp_path: Path) -> None:
+    """build_contract_invalid_summary / collect_contract_invalid_open surface
+    at SessionStart — an I/O failure there must not crash a session."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    summary = cil.build_contract_invalid_summary(receipts)
+    open_items = cil.collect_contract_invalid_open(receipts)
+
+    assert summary["total"] == 0
+    assert open_items == []
 
 
 # ---------------------------------------------------------------------------
