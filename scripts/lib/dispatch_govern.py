@@ -583,13 +583,23 @@ def _govern_error_fallback(
 # checkout) as a THIRD, lower-priority search location, only consulted when
 # neither of the first two found anything.
 def _resolve_worker_report_with_adoption(
-    spec: "GovernSpec",
+    dispatch_id: str,
+    data_dir: "Path",
+    *,
+    worktree_path: "Optional[Path]" = None,
+    repo_root: "Optional[Path]" = None,
 ) -> "tuple[Optional[Path], Optional[Path]]":
     """Resolve the worker-authored report, locating a stray copy for adoption.
 
     Search order: central (``<data_dir>/unified_reports/<id>.md``), then
     ``<worktree_path>/.vnx-data/unified_reports/<id>.md``, then
     ``<repo_root>/.vnx-data/unified_reports/<id>.md``.
+
+    Takes plain values rather than a ``GovernSpec`` so callers with no
+    worktree/repo-root concept of their own (the envelope lane's
+    ``EnvelopeSpec`` carries neither field) can call it with just what they
+    have — ``envelope_govern._govern`` derives ``worktree_path``/``repo_root``
+    itself (via ``dispatch_worktree_isolation``) and passes them through here.
 
     Returns ``(candidate_path, stray_path)``: ``candidate_path`` is the file
     to read as the worker-authored body (or ``None`` if nothing was found
@@ -600,17 +610,16 @@ def _resolve_worker_report_with_adoption(
     """
     from report_path import resolve_report_path  # noqa: PLC0415
 
-    dispatch_id = spec.dispatch_id
-    central_path = Path(spec.data_dir) / "unified_reports" / f"{dispatch_id}.md"
+    central_path = Path(data_dir) / "unified_reports" / f"{dispatch_id}.md"
 
     resolved = resolve_report_path(
-        dispatch_id, data_dir=spec.data_dir,
-        repo_root=spec.worktree_path,
+        dispatch_id, data_dir=data_dir,
+        repo_root=worktree_path,
     )
     candidate_path = resolved.path if resolved is not None else None
 
-    if candidate_path is None and spec.repo_root is not None:
-        stray = Path(spec.repo_root) / ".vnx-data" / "unified_reports" / f"{dispatch_id}.md"
+    if candidate_path is None and repo_root is not None:
+        stray = Path(repo_root) / ".vnx-data" / "unified_reports" / f"{dispatch_id}.md"
         if stray.is_file():
             candidate_path = stray
 
@@ -647,7 +656,11 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     # _resolve_worker_report_with_adoption's docstring). ``_stray_path`` is
     # set only when the candidate was found somewhere other than the central
     # location, in which case it is relocated there once validated as authored.
-    candidate_path, _stray_path = _resolve_worker_report_with_adoption(spec)
+    candidate_path, _stray_path = _resolve_worker_report_with_adoption(
+        spec.dispatch_id, spec.data_dir,
+        worktree_path=spec.worktree_path,
+        repo_root=spec.repo_root,
+    )
 
     if candidate_path is not None:
         try:

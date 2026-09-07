@@ -687,6 +687,48 @@
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 40,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 41,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 41,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 113,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 115,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_adoption.py",
+      "line": 117,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
       "file": "tests/test_envelope_provider_adapter_role_env.py",
       "line": 37,
       "mechanism": "direct-call",
