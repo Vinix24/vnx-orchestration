@@ -675,3 +675,281 @@ def test_publication_never_shells_out_from_the_recorder_on_import() -> None:
         if line.startswith("import forge_") or line.startswith("from forge_")
     ]
     assert module_level == []
+
+
+# ---------------------------------------------------------------------------
+# The explicit path — publish the record that was written, or nothing
+# ---------------------------------------------------------------------------
+
+
+def test_the_recorder_publishes_the_record_it_just_wrote_not_the_store_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """The store holds a PASS for this PR and gate; the write that just landed
+    is a FAIL, in a DIFFERENT store.
+
+    Not a contrived split: every gate run in this project writes with
+    ``VNX_DATA_DIR=~/.vnx-data/vnx-dev``, so "the record just written" and "the
+    record the default store resolves to" are routinely two different files. A
+    publisher that re-derives its own source can therefore publish a stale
+    ``success`` over a verdict that had just failed — a green required check
+    for a gate that said no.
+    """
+    default_store = tmp_path / "default_store"
+    _write_record(default_store, 1811, "glm_gate", _proven_pass(tmp_path))
+    monkeypatch.setattr(fcr, "_default_results_dir", lambda: default_store)
+
+    written_dir = tmp_path / "vnx-dev" / "review_gates" / "results"
+    written_dir.mkdir(parents=True)
+    result_path = written_dir / "pr-1811-glm_gate.json"
+
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+
+    payload = _recorder_payload()
+    payload["status"] = "fail"
+    payload["summary"] = "glm_gate FAIL"
+    payload["blocking_findings"] = [{"message": "kapot"}]
+
+    _on_disk, written = gate_recorder.write_result_guarded(
+        result_path, payload, gate="glm_gate", pr_ref="1811"
+    )
+
+    assert written is True
+    assert len(calls) == 1, (
+        "precies een publicatie hoort bij precies een geslaagde schrijf "
+        f"(kreeg {calls!r})"
+    )
+    assert calls[0]["conclusion"] == "failure", (
+        "de publicatie beschrijft het record dat zojuist geschreven is, nooit het "
+        "pass-record dat in de standaardopslag voor dezelfde PR en poort staat"
+    )
+
+
+def test_terminal_result_publishes_from_the_path_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """The same rule on the other writer (``record_terminal_result``), which
+    resolves its own ``result_path`` and is the one free-form gates use."""
+    import gate_depth
+
+    default_store = tmp_path / "default_store"
+    _write_record(default_store, 1811, "glm_gate", _proven_pass(tmp_path))
+    monkeypatch.setattr(fcr, "_default_results_dir", lambda: default_store)
+
+    written_dir = tmp_path / "vnx-dev" / "review_gates" / "results"
+    written_dir.mkdir(parents=True)
+    result_path = written_dir / "pr-1811-glm_gate.json"
+
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+
+    payload = _recorder_payload()
+    payload["status"] = "fail"
+    payload["blocking_findings"] = [{"message": "kapot"}]
+
+    gate_recorder.record_terminal_result(
+        gate="glm_gate",
+        pr_id="1811",
+        result_path=result_path,
+        payload=payload,
+        execution_depth=gate_depth.single_shot_depth(4096, False),
+    )
+
+    assert [c["conclusion"] for c in calls] == ["failure"]
+
+
+def test_an_explicit_record_path_that_is_absent_refuses_and_never_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """No record at the named path is a plumbing fault, not an absent verdict.
+
+    The store's own copy is a proven pass here, so a fallback would not merely
+    be sloppy — it would publish ``success``.
+    """
+    default_store = tmp_path / "default_store"
+    _write_record(default_store, 1811, "glm_gate", _proven_pass(tmp_path))
+    monkeypatch.setattr(fcr, "_default_results_dir", lambda: default_store)
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+
+    missing = tmp_path / "nergens" / "pr-1811-glm_gate.json"
+    with pytest.raises(fcr.ForgePublishRefused) as excinfo:
+        fcr.publish_for_record(1811, "glm_gate", HEAD, record_path=missing)
+
+    assert str(missing) in str(excinfo.value)
+    assert calls == [], "een ontbrekend pad publiceert niets, ook niet uit de opslag"
+
+
+def test_an_explicit_record_path_that_is_corrupt_refuses_and_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    default_store = tmp_path / "default_store"
+    _write_record(default_store, 1811, "glm_gate", _proven_pass(tmp_path))
+    monkeypatch.setattr(fcr, "_default_results_dir", lambda: default_store)
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+
+    torn = tmp_path / "pr-1811-glm_gate.json"
+    torn.write_text("{ dit is geen json", encoding="utf-8")
+
+    with pytest.raises(fcr.ForgePublishRefused) as excinfo:
+        fcr.publish_for_record(1811, "glm_gate", HEAD, record_path=torn)
+
+    assert "onleesbaar" in str(excinfo.value)
+    assert calls == []
+
+
+def test_the_recorder_hands_the_publisher_the_path_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The contract itself: the hook names the file, the publisher never has to
+    guess which one."""
+    result_path = tmp_path / "vnx-dev" / "pr-1811-glm_gate.json"
+    result_path.parent.mkdir(parents=True)
+    seen: Dict[str, Any] = {}
+
+    def recording(pr_number: int, gate: str, head_sha: str, **kwargs: Any) -> Dict[str, Any]:
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(fcr, "publish_for_record", recording)
+
+    gate_recorder.write_result_guarded(
+        result_path, _recorder_payload(), gate="glm_gate", pr_ref="1811"
+    )
+
+    assert seen.get("record_path") == result_path
+    assert "results_dir" not in seen, "de haak wijst een bestand aan, geen opslag"
+
+
+def test_a_missing_path_from_the_recorder_is_logged_and_never_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    _registered_app: None,
+) -> None:
+    """The refusal is loud in the log and still cannot fail the gate run."""
+    result_path = tmp_path / "pr-1811-glm_gate.json"
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+    monkeypatch.setattr(fcr, "_default_results_dir", lambda: tmp_path / "leeg")
+    monkeypatch.setattr(
+        fcr, "read_result_record_at",
+        lambda _p: (_ for _ in ()).throw(fcr.ForgePublishRefused("bestaat niet")),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gate_recorder"):
+        _payload, written = gate_recorder.write_result_guarded(
+            result_path, _recorder_payload(), gate="glm_gate", pr_ref="1811"
+        )
+
+    assert written is True
+    assert json.loads(result_path.read_text())["status"] == "pass"
+    assert calls == []
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PUBLICATIE MISLUKT" in logged
+
+
+def test_the_cli_publishes_from_the_results_dir_flag_not_a_single_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """The CLI route is unchanged: ``--results-dir`` still names a STORE, and
+    ``publish --pr N`` still resolves the record inside it."""
+    flag_dir = tmp_path / "flag_store"
+    _write_record(flag_dir, 1811, "glm_gate", _proven_pass(tmp_path))
+    empty_default = tmp_path / "default_store"
+    empty_default.mkdir()
+    monkeypatch.setattr(fcr, "_default_results_dir", lambda: empty_default)
+    monkeypatch.setattr(fcr, "_resolve_head_sha", lambda _pr: HEAD)
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+
+    rc = fcr.main(
+        ["publish", "--pr", "1811", "--gate", "glm_gate", "--results-dir", str(flag_dir)]
+    )
+
+    assert rc == 0
+    assert [c["conclusion"] for c in calls] == ["success"]
+
+
+# ---------------------------------------------------------------------------
+# The audit line (ADR-005)
+# ---------------------------------------------------------------------------
+
+
+def _forge_events() -> List[Dict[str, Any]]:
+    """Every event in the publisher's own lane (conftest pins the data dir)."""
+    from event_store import EventStore
+
+    return list(EventStore().tail(fcr.FORGE_EVENT_LANE))
+
+
+def test_a_publication_leaves_one_ndjson_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path))
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    _capture_publish(monkeypatch)
+
+    fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    events = _forge_events()
+    assert [e["type"] for e in events] == ["forge_check_run_published"]
+    data = events[0]["data"]
+    assert data["conclusion"] == "success"
+    assert data["check_run_name"] == "vnx-gate/glm_gate"
+    assert data["head_sha"] == HEAD
+    assert data["pr_number"] == 1811
+
+
+def test_a_refused_publication_leaves_an_ndjson_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """A publication that did NOT happen is exactly the one worth a trace."""
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path))
+    _gh_returning(monkeypatch, {"autoMergeRequest": {"enabledAt": "2026-09-08T00:00:00Z"}})
+    _capture_publish(monkeypatch)
+
+    with pytest.raises(fcr.ForgePublishRefused):
+        fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    events = _forge_events()
+    assert [e["type"] for e in events] == ["forge_check_run_failed"]
+    assert "auto-merge" in events[0]["data"]["detail"]
+
+
+def test_a_dry_run_leaves_no_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """A rehearsal posts nothing, so there is nothing to record."""
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path))
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    _capture_publish(monkeypatch)
+
+    fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir, dry_run=True)
+
+    assert _forge_events() == []
+
+
+def test_an_event_store_failure_never_breaks_the_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _registered_app: None
+) -> None:
+    """The trace may never take down the thing it traces."""
+    import event_store
+
+    results_dir = tmp_path / "results"
+    _write_record(results_dir, 1811, "glm_gate", _proven_pass(tmp_path))
+    _gh_returning(monkeypatch, {"autoMergeRequest": None})
+    calls = _capture_publish(monkeypatch)
+
+    def exploding_append(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("de schijf is vol")
+
+    monkeypatch.setattr(event_store.EventStore, "append", exploding_append)
+
+    payload = fcr.publish_for_record(1811, "glm_gate", HEAD, results_dir=results_dir)
+
+    assert payload["conclusion"] == "success"
+    assert len(calls) == 1

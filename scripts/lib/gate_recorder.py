@@ -674,7 +674,9 @@ def annotate_refused_write(
     return annotated
 
 
-def publish_forge_check_run(payload: Dict[str, Any], *, gate: str) -> None:
+def publish_forge_check_run(
+    payload: Dict[str, Any], *, gate: str, result_path: Path
+) -> None:
     """Publish the just-written result as a GitHub check-run (Golf B, B2b).
 
     Called AFTER the atomic write has landed and after the slot lock is
@@ -706,6 +708,19 @@ def publish_forge_check_run(payload: Dict[str, Any], *, gate: str) -> None:
     record with no head belongs to no head, and falling back to the local
     ``git rev-parse HEAD`` would attach the verdict to whatever the process
     cwd happened to be — OI-1307).
+
+    ``result_path`` is the third, and it is passed for exactly the same reason
+    as the other two. The publisher can resolve a record itself, from
+    ``${VNX_STATE_DIR}/review_gates/results``; handing it the path this call
+    just wrote is what makes it publish THIS record instead of whatever that
+    store holds for the same PR and gate. The two are not the same file
+    whenever the writer used a non-default store — which in this project is
+    every gate run, since they all run with
+    ``VNX_DATA_DIR=~/.vnx-data/vnx-dev``. A re-resolved lookup could therefore
+    publish a stale ``success`` over a verdict that had just failed: a
+    false-positive gate closure produced by the publication of a record nobody
+    asked for. A path that does not exist is refused loudly by the publisher
+    and logged here, never quietly replaced by the store's copy.
     """
     pr_number = payload.get("pr_number")
     head_sha = (payload.get("commit_sha") or "").strip()
@@ -722,7 +737,7 @@ def publish_forge_check_run(payload: Dict[str, Any], *, gate: str) -> None:
             RECOVERY_COMMAND_TEMPLATE, ForgeAppConfigError, publish_for_record,
         )
 
-        publish_for_record(pr_number, gate, head_sha)
+        publish_for_record(pr_number, gate, head_sha, record_path=result_path)
     # vnx-broad-except: this hook may not be able to fail a gate run, and the
     # publisher's failure surface is open-ended by nature (keychain, JWT,
     # DNS, GitHub, YAML, a lazy import). Narrowing it to the Forge exception
@@ -817,7 +832,7 @@ def write_result_guarded(
     # another writer's record standing, so publishing here would describe a
     # write that never happened (the same reason record_failure gates its
     # register emit on ``written``, OI-1469/OI-1470).
-    publish_forge_check_run(payload, gate=gate)
+    publish_forge_check_run(payload, gate=gate, result_path=result_path)
     return payload, True
 
 
@@ -908,7 +923,7 @@ def record_terminal_result(
     # :func:`publish_forge_check_run`. A refusal from the overwrite guard
     # raises above and never reaches this line, so the same "only publish a
     # write that landed" rule holds here as in write_result_guarded.
-    publish_forge_check_run(payload, gate=gate)
+    publish_forge_check_run(payload, gate=gate, result_path=result_path)
     return result_path
 
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,7 @@ __all__ = [
     "CONCLUSION_FAILURE",
     "CONCLUSION_SUCCESS",
     "FORGE_CONCLUSIONS",
+    "FORGE_EVENT_LANE",
     "RECOVERY_COMMAND_TEMPLATE",
     "ForgeAPIError",
     "ForgeAppConfigError",
@@ -89,9 +91,12 @@ __all__ = [
     "main",
     "publish_for_record",
     "read_result_record",
+    "read_result_record_at",
     "refuse_if_auto_merge_is_armed",
     "result_record_path",
 ]
+
+logger = logging.getLogger(__name__)
 
 CONCLUSION_SUCCESS = "success"
 CONCLUSION_FAILURE = "failure"
@@ -116,6 +121,13 @@ RECOVERY_COMMAND_TEMPLATE = (
 )
 
 _GH_TIMEOUT_SECONDS = 15
+
+#: The event stream a publication attempt leaves its NDJSON line in (ADR-005).
+#: Its OWN lane, never ``T{n}``: ``.vnx-data/events/T{n}.ndjson`` is a
+#: per-dispatch ring buffer, and appending a publication to it under the
+#: record's ``dispatch_id`` would trip ``EventStore``'s dispatch-boundary
+#: rotation and archive a running terminal's stream out from under it.
+FORGE_EVENT_LANE = "forge"
 
 
 class ForgeStatusUnmapped(ForgeCheckRunError):
@@ -419,6 +431,45 @@ def result_record_path(results_dir: Path, pr_number: int, gate: str) -> Optional
     return None
 
 
+def read_result_record_at(record_path: Path) -> Dict[str, Any]:
+    """The record at an EXPLICIT path — that file or nothing, never the store.
+
+    The path variant of :func:`read_result_record`, and the only one a WRITER
+    may use. A writer already knows which file it just wrote; re-deriving that
+    file from ``${VNX_STATE_DIR}`` would answer a different question ("what
+    does the default store hold for this PR and gate") whose answer is a
+    different record whenever the writer used a store that is not the default
+    one — which in this project is every gate run, since they all run with
+    ``VNX_DATA_DIR=~/.vnx-data/vnx-dev``. Publishing that other record can turn
+    a fresh failure into a stale green check.
+
+    So a missing or unreadable path REFUSES instead of returning None. Absent
+    is a legitimate answer to "does the store have a record" (it publishes
+    ``action_required``) and never a legitimate answer to "read the file I just
+    wrote" — there the absence is a plumbing fault, and falling back to the
+    store would hide it behind whatever that store happens to hold.
+    """
+    path = Path(record_path)
+    if not path.exists():
+        raise ForgePublishRefused(
+            f"het opgegeven schijf-record {path} bestaat niet — publicatie geweigerd. "
+            "Een expliciet pad wordt nooit vervangen door de standaardopslag: dat zou "
+            "een ander record publiceren dan de schrijver bedoelde."
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ForgePublishRefused(
+            f"het schijf-record {path} bestaat maar is onleesbaar ({exc}) — een "
+            "beschadigd record levert geen conclusie op, en 'afwezig' zou hier liegen"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ForgePublishRefused(
+            f"het schijf-record {path} is geen object maar {type(data).__name__}"
+        )
+    return data
+
+
 def read_result_record(
     pr_number: int,
     gate: str,
@@ -433,24 +484,20 @@ def read_result_record(
     ``gate_recorder._read_existing_result`` already draws), and reading a torn
     write as "never ran" would publish ``action_required`` while hiding that
     something corrupted the evidence.
+
+    ``record_path`` names the file directly and is handed to
+    :func:`read_result_record_at`, which refuses rather than returns None when
+    that file is absent. Only the store-resolved route can answer None, because
+    only there is "no record" a real state of the world.
     """
-    path = record_path or result_record_path(
+    if record_path is not None:
+        return read_result_record_at(Path(record_path))
+    path = result_record_path(
         results_dir if results_dir is not None else _default_results_dir(), pr_number, gate
     )
     if path is None or not path.exists():
         return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ForgePublishRefused(
-            f"het schijf-record {path} bestaat maar is onleesbaar ({exc}) — een "
-            "beschadigd record levert geen conclusie op, en 'afwezig' zou hier liegen"
-        ) from exc
-    if not isinstance(data, dict):
-        raise ForgePublishRefused(
-            f"het schijf-record {path} is geen object maar {type(data).__name__}"
-        )
-    return data
+    return read_result_record_at(path)
 
 
 def gates_with_a_record(results_dir: Path, pr_number: int) -> List[str]:
@@ -565,6 +612,61 @@ def _check_run_summary(gate: str, verdict: ForgeVerdict, head_sha: str, pr_numbe
     return "\n".join(lines)
 
 
+def _emit_publication_event(
+    *,
+    pr_number: int,
+    gate: str,
+    head_sha: str,
+    outcome: str,
+    detail: str,
+    conclusion: str = "",
+    record: Optional[Dict[str, Any]] = None,
+) -> None:
+    """One NDJSON line per publication attempt (ADR-005), best-effort.
+
+    A check-run mutates state on GitHub, so the attempt belongs in the audit
+    trail whichever way it went — ``published`` and ``failed`` both write a
+    line. Never raises: this is a trace OF the publication, and a trace that
+    can break the thing it traces is worse than a missing line (the same rule
+    ``gate_recorder.publish_forge_check_run`` applies one level up).
+
+    ``dispatch_id`` is deliberately left empty on the envelope and carried in
+    ``data`` instead. The envelope field is what drives ``EventStore``'s
+    per-dispatch ring-buffer rotation; stamping it here would make every
+    publication from a new dispatch archive and truncate the lane, so the
+    producing dispatch is recorded as data rather than as a rotation key.
+    """
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+
+        EventStore().append(
+            FORGE_EVENT_LANE,
+            {
+                "type": f"forge_check_run_{outcome}",
+                "dispatch_id": "",
+                "data": {
+                    "pr_number": pr_number,
+                    "gate": gate,
+                    "check_run_name": check_run_name(gate),
+                    "head_sha": head_sha,
+                    "outcome": outcome,
+                    "conclusion": conclusion,
+                    "detail": detail,
+                    "record_dispatch_id": str((record or {}).get("dispatch_id") or ""),
+                },
+            },
+        )
+    # vnx-broad-except: the audit line may never take down the publication it
+    # describes. Event-store resolution reaches the data-dir resolver, the
+    # filesystem and a lock — an open-ended surface, and every failure in it is
+    # a missing line, not a wrong check-run.
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "forge_gate_publisher: geen event geschreven (%s) voor gate=%s pr=%s: %s",
+            outcome, gate, pr_number, exc,
+        )
+
+
 def publish_for_record(
     pr_number: int,
     gate: str,
@@ -580,6 +682,16 @@ def publish_for_record(
     Reads the record, maps it, and posts. Returns the payload that was sent
     (or, under ``dry_run``, the payload that would have been) — the mapping's
     decision is always visible to the caller, never only to GitHub.
+
+    **Which record.** Three ways to name it, and a writer may only use the
+    first: ``record_path`` is THE file, read as given
+    (:func:`read_result_record_at`, which refuses a missing one rather than
+    falling back); ``results_dir`` is the CLI's store; neither is the default
+    store. The recorder hook passes the path it just wrote, because every gate
+    run in this project runs against a non-default store
+    (``VNX_DATA_DIR=~/.vnx-data/vnx-dev``) and a re-resolved lookup would then
+    read a different file than the one that was written — publishing a stale
+    ``success`` over a verdict that had just failed.
 
     Two refusals, both before anything is sent: an armed auto-merge
     (:func:`refuse_if_auto_merge_is_armed`), and a ``success`` for a record
@@ -604,39 +716,71 @@ def publish_for_record(
     if not dry_run:
         load_app_config()
 
-    refuse_if_auto_merge_is_armed(pr_number)
+    record: Optional[Dict[str, Any]] = None
+    try:
+        # An explicit path is resolved here, before the ``gh`` round-trip, so a
+        # publication that names a file nobody wrote costs nothing and fails
+        # where the fault is.
+        if record_path is not None:
+            record = read_result_record_at(Path(record_path))
 
-    record = read_result_record(
-        pr_number, gate, results_dir=results_dir, record_path=record_path
-    )
-    verdict = classify_record(record, resolved_head)
+        refuse_if_auto_merge_is_armed(pr_number)
 
-    if verdict.conclusion == CONCLUSION_SUCCESS:
-        proven, why = _proven_pass_on_head(record, resolved_head)
-        if not proven:
-            raise ForgePublishRefused(
-                f"weiger success voor {check_run_name(gate)} op {resolved_head[:12]}: het "
-                f"record is geen bewezen pass op deze kop — {why}"
-            )
+        if record_path is None:
+            record = read_result_record(pr_number, gate, results_dir=results_dir)
+        verdict = classify_record(record, resolved_head)
 
-    name = check_run_name(gate)
-    payload: Dict[str, Any] = {
-        "pr_number": pr_number,
-        "gate": gate,
-        "name": name,
-        "head_sha": resolved_head,
-        "conclusion": verdict.conclusion,
-        "reason": verdict.reason,
-        "summary": _check_run_summary(gate, verdict, resolved_head, pr_number),
-        "dry_run": dry_run,
-    }
-    if dry_run:
-        return payload
+        if verdict.conclusion == CONCLUSION_SUCCESS:
+            proven, why = _proven_pass_on_head(record, resolved_head)
+            if not proven:
+                raise ForgePublishRefused(
+                    f"weiger success voor {check_run_name(gate)} op {resolved_head[:12]}: "
+                    f"het record is geen bewezen pass op deze kop — {why}"
+                )
 
-    response = publish_check_run(
-        resolved_head, name, verdict.conclusion, payload["summary"], project_root=project_root
-    )
+        name = check_run_name(gate)
+        payload: Dict[str, Any] = {
+            "pr_number": pr_number,
+            "gate": gate,
+            "name": name,
+            "head_sha": resolved_head,
+            "conclusion": verdict.conclusion,
+            "reason": verdict.reason,
+            "summary": _check_run_summary(gate, verdict, resolved_head, pr_number),
+            "dry_run": dry_run,
+        }
+        # A rehearsal posts nothing, so there is no publication to record.
+        if dry_run:
+            return payload
+
+        response = publish_check_run(
+            resolved_head, name, verdict.conclusion, payload["summary"], project_root=project_root
+        )
+    # vnx-broad-except: every way this can end without a check-run — a refusal,
+    # a corrupt record, GitHub saying no — is one line in the trail, and the
+    # exception is re-raised unchanged. Catching only ForgeCheckRunError would
+    # leave the surprises, which are the ones worth a trace, untraced.
+    except Exception as exc:  # noqa: BLE001
+        _emit_publication_event(
+            pr_number=pr_number,
+            gate=gate,
+            head_sha=resolved_head,
+            outcome="failed",
+            detail=f"{type(exc).__name__}: {exc}",
+            record=record,
+        )
+        raise
+
     payload["check_run_id"] = response.get("id")
+    _emit_publication_event(
+        pr_number=pr_number,
+        gate=gate,
+        head_sha=resolved_head,
+        outcome="published",
+        detail=str(payload["reason"]),
+        conclusion=str(payload["conclusion"]),
+        record=record,
+    )
     return payload
 
 
