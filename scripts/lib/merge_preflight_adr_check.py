@@ -44,9 +44,14 @@ globally unique regardless of project_id.
 
 Fail-closed: any unreadable/unparseable API response (``gh`` missing, not
 authenticated, a non-zero exit, invalid JSON, an unexpected shape) is a NO-GO
-with its own message — never a silent pass. There is no override for this
-check (unlike the CI/review gates): a colliding ADR number is always wrong,
-never a legitimate reason to bypass.
+with its own message — never a silent pass. That holds per ENTRY too: a single
+element of either listing that is not an object, or that misses a field this
+check reads (``filename``/``status`` on the PR side, ``name``/``type`` on the
+base side), refuses the whole check naming that entry's index. Skipping it
+instead would build an incomplete picture out of a response the check could
+not read, and an incomplete picture reads exactly like "nothing collides".
+There is no override for this check (unlike the CI/review gates): a colliding
+ADR number is always wrong, never a legitimate reason to bypass.
 """
 
 from __future__ import annotations
@@ -118,6 +123,42 @@ def _go(message: str, **extra: Any) -> Dict[str, Any]:
 
 STATUSES_THAT_CAN_CLAIM_A_NEW_NUMBER = frozenset({"added", "renamed", "copied"})
 
+# A malformed entry is quoted back in the NO-GO message so the operator can
+# recognise WHICH entry broke the read, but capped: an API response can carry
+# an arbitrarily large blob and the merge output must stay readable.
+MALFORMED_ENTRY_PREVIEW_CHARS = 120
+
+
+def _describe_entry(entry: Any) -> str:
+    """Short, safe rendering of one API entry for a NO-GO message."""
+    try:
+        rendered = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        rendered = repr(entry)
+    if len(rendered) > MALFORMED_ENTRY_PREVIEW_CHARS:
+        rendered = rendered[:MALFORMED_ENTRY_PREVIEW_CHARS] + "..."
+    return rendered
+
+
+def _malformed_entry_reason(entry: Any, required_fields: Tuple[str, ...]) -> Optional[str]:
+    """Why ``entry`` is unusable for this check, or None when it is readable.
+
+    Fail-closed: the check may only conclude "no collision" from entries it
+    fully understands. An entry that is not an object, or that misses (or
+    carries a non-string in) a field the check reads, is a refusal — never a
+    skip, because skipping builds an incomplete picture that reads exactly
+    like "nothing collides".
+    """
+    if not isinstance(entry, dict):
+        return "is geen object"
+    for field in required_fields:
+        if field not in entry:
+            return f"mist het veld '{field}'"
+        value = entry[field]
+        if not isinstance(value, str) or not value:
+            return f"heeft geen bruikbare string in '{field}'"
+    return None
+
 
 def get_pr_added_adr_files(
     pr_number: int, *, gh_bin: str = "gh", project_root: Optional[Path] = None
@@ -186,19 +227,33 @@ def get_pr_added_adr_files(
         files.extend(page)
 
     added: Dict[str, str] = {}
-    for entry in files:
-        if not isinstance(entry, dict):
-            continue
-        status = entry.get("status")
+    for index, entry in enumerate(files):
+        reason = _malformed_entry_reason(entry, ("filename", "status"))
+        if reason is not None:
+            return None, _no_go(
+                f"misvormde entry {index} in pulls/{pr_number}/files ({reason}): "
+                f"{_describe_entry(entry)} — ADR-preflight is niet toetsbaar"
+            )
+        status = entry["status"]
         if status not in STATUSES_THAT_CAN_CLAIM_A_NEW_NUMBER:
             continue
-        path = entry.get("filename") or ""
+        path = entry["filename"]
         m = ADR_PATH_RE.match(path)
         if not m:
             continue
         number = str(int(m.group(1)))
         if status in ("renamed", "copied"):
-            prev_m = ADR_PATH_RE.match(entry.get("previous_filename") or "")
+            previous = entry.get("previous_filename")
+            if previous is not None and not isinstance(previous, str):
+                # Feeding a non-string into the regex would raise out of the
+                # gate instead of refusing; an unreadable rename source is the
+                # same malformed-entry case as the fields above.
+                return None, _no_go(
+                    f"misvormde entry {index} in pulls/{pr_number}/files (heeft geen "
+                    f"bruikbare string in 'previous_filename'): {_describe_entry(entry)} "
+                    "— ADR-preflight is niet toetsbaar"
+                )
+            prev_m = ADR_PATH_RE.match(previous or "")
             if prev_m and str(int(prev_m.group(1))) == number:
                 # Same ADR number before and after: a wording/rename fix on
                 # the PR's own claim, not a new-number claim.
@@ -256,12 +311,16 @@ def get_main_adr_numbers(
         )
 
     numbers: Dict[str, str] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
+    for index, entry in enumerate(entries):
+        reason = _malformed_entry_reason(entry, ("name", "type"))
+        if reason is not None:
+            return None, _no_go(
+                f"misvormde entry {index} in de {ADR_DECISIONS_DIR}-listing op {base_ref} "
+                f"({reason}): {_describe_entry(entry)} — ADR-preflight is niet toetsbaar"
+            )
+        if entry["type"] != "file":
             continue
-        if entry.get("type") != "file":
-            continue
-        name = entry.get("name") or ""
+        name = entry["name"]
         m = ADR_FILENAME_RE.match(name)
         if m:
             numbers[str(int(m.group(1)))] = name

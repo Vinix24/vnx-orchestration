@@ -206,6 +206,186 @@ class TestGetPrAddedAdrFilesPagination:
         assert "onverwacht antwoordformaat" in err["message"]
 
 
+class TestMalformedApiEntriesFailClosed:
+    """B6 fix-forward 3 (codex round 2): an entry the check cannot READ must
+    never be skipped. A ``continue`` on a malformed entry lets a partially
+    unreadable response build an incomplete picture and answer "no collision"
+    — a silent pass through a fail-closed gate. Both live reads (the PR's file
+    list and the base-branch contents listing) must refuse instead, naming the
+    index of the offending entry.
+    """
+
+    def test_pr_files_non_dict_entry_between_valid_ones_is_no_go_with_its_index(self, monkeypatch):
+        entries = [
+            {"filename": "docs/governance/decisions/ADR-020-x.md", "status": "modified"},
+            "not-an-object",
+            {"filename": "docs/governance/decisions/ADR-041-y.md", "status": "added"},
+        ]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert err["verdict"] == "NO-GO"
+        assert "entry 1" in err["message"]
+        assert "not-an-object" in err["message"]
+        assert "niet toetsbaar" in err["message"]
+
+    def test_pr_entry_without_filename_is_no_go(self, monkeypatch):
+        entries = [{"status": "added"}]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert err["verdict"] == "NO-GO"
+        assert "entry 0" in err["message"]
+        assert "filename" in err["message"]
+
+    def test_pr_entry_without_status_is_no_go(self, monkeypatch):
+        entries = [{"filename": "docs/governance/decisions/ADR-041-y.md"}]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert err["verdict"] == "NO-GO"
+        assert "entry 0" in err["message"]
+        assert "status" in err["message"]
+
+    def test_pr_entry_with_non_string_filename_is_no_go(self, monkeypatch):
+        entries = [{"filename": 42, "status": "added"}]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert err["verdict"] == "NO-GO"
+        assert "filename" in err["message"]
+
+    def test_rename_with_non_string_previous_filename_is_no_go_not_a_crash(self, monkeypatch):
+        """``previous_filename`` is fed straight into a regex; a non-string
+        value would raise TypeError out of the gate instead of refusing.
+        """
+        entries = [
+            {"filename": "docs/governance/decisions/ADR-041-y.md", "status": "renamed",
+             "previous_filename": {"unexpected": "object"}},
+        ]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert err["verdict"] == "NO-GO"
+        assert "previous_filename" in err["message"]
+
+    def test_main_listing_non_dict_entry_is_no_go_with_its_index(self, monkeypatch):
+        entries = [
+            {"name": "ADR-038-x.md", "type": "file"},
+            ["not", "an", "object"],
+        ]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(json.dumps(entries)), None)
+        )
+
+        numbers, err = adr_check.get_main_adr_numbers()
+
+        assert numbers is None
+        assert err["verdict"] == "NO-GO"
+        assert "entry 1" in err["message"]
+        assert "niet toetsbaar" in err["message"]
+
+    def test_main_listing_entry_without_name_is_no_go(self, monkeypatch):
+        entries = [{"type": "file"}]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(json.dumps(entries)), None)
+        )
+
+        numbers, err = adr_check.get_main_adr_numbers()
+
+        assert numbers is None
+        assert err["verdict"] == "NO-GO"
+        assert "name" in err["message"]
+
+    def test_main_listing_entry_without_type_is_no_go(self, monkeypatch):
+        entries = [{"name": "ADR-038-x.md"}]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(json.dumps(entries)), None)
+        )
+
+        numbers, err = adr_check.get_main_adr_numbers()
+
+        assert numbers is None
+        assert err["verdict"] == "NO-GO"
+        assert "type" in err["message"]
+
+    def test_malformed_entry_preview_is_truncated(self, monkeypatch):
+        """A huge malformed blob must not flood the merge output: the entry is
+        shown in shortened form, not in full.
+        """
+        entries = [{"filename": "docs/governance/decisions/ADR-041-y.md", "status": "added"}, "z" * 5000]
+        monkeypatch.setattr(
+            adr_check, "_capture", lambda argv, *, timeout, cwd=None: (_proc(_pr_files_json(entries)), None)
+        )
+
+        added, err = adr_check.get_pr_added_adr_files(1)
+
+        assert added is None
+        assert len(err["message"]) < 600
+
+    def test_check_refuses_end_to_end_on_a_malformed_pr_files_entry(self, monkeypatch):
+        """The whole gate, not just the reader: a malformed PR-files response
+        must reach pr_merge as NO-GO, never as 'no new ADR files -> GO'.
+        """
+        def fake_capture(argv, *, timeout, cwd=None):
+            joined = " ".join(argv)
+            if "pulls" in joined:
+                return _proc(json.dumps([["not-an-object"]])), None
+            return _proc(_main_listing_json(["ADR-038-x.md"])), None
+
+        monkeypatch.setattr(adr_check, "_capture", fake_capture)
+        monkeypatch.setattr(adr_check.shutil, "which", lambda b: "/usr/bin/gh")
+
+        result = adr_check.check_adr_numbers_for_pr(1790)
+
+        assert result["verdict"] == "NO-GO"
+        assert "niet toetsbaar" in result["message"]
+
+    def test_check_refuses_end_to_end_on_a_malformed_main_listing_entry(self, monkeypatch):
+        """Same for the base-branch listing: an unreadable entry there could
+        hide a real collision, so it must refuse before the comparison. The
+        READABLE listing entries here do not collide with the PR's number, so
+        the old ``continue`` answered GO on a response it could not fully read.
+        """
+        def fake_capture(argv, *, timeout, cwd=None):
+            joined = " ".join(argv)
+            if "pulls" in joined:
+                return _proc(
+                    _pr_files_json(
+                        [{"filename": "docs/governance/decisions/ADR-038-x.md", "status": "added"}]
+                    )
+                ), None
+            return _proc(json.dumps([{"name": "ADR-039-y.md", "type": "file"}, 7])), None
+
+        monkeypatch.setattr(adr_check, "_capture", fake_capture)
+        monkeypatch.setattr(adr_check.shutil, "which", lambda b: "/usr/bin/gh")
+
+        result = adr_check.check_adr_numbers_for_pr(1790)
+
+        assert result["verdict"] == "NO-GO"
+        assert "niet toetsbaar" in result["message"]
+
+
 class TestGetMainAdrNumbers:
     def test_parses_directory_listing(self, monkeypatch):
         monkeypatch.setattr(
