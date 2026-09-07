@@ -204,13 +204,20 @@ def test_load_app_config_unreadable_path_raises(tmp_path: Path) -> None:
         fcr.load_app_config(tmp_path / "does-not-exist.yaml")
 
 
-def test_repo_yaml_carries_the_app_block() -> None:
-    """The shipped YAML has the app: block B2b will read."""
-    path = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
-    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert "app" in doc, "scripts/forge/branch_protection.yaml mist het app:-blok"
-    assert doc["app"]["slug"] == "vnx-gate"
-    assert "app_id" in doc["app"]
+def test_app_block_shape_is_slug_and_app_id() -> None:
+    """The app: block B2b will read carries slug + app_id.
+
+    Golf B, B2a fix-forward 3 pulled the block back OUT of the shipped
+    ``scripts/forge/branch_protection.yaml``: the schema reader that accepts
+    it landed in the same PR that would have introduced the field, so the
+    field itself is deferred to the operator's App step
+    (docs/operations/FORGE_GATE.md). This test builds its own fixture rather
+    than leaning on the shipped file, which no longer carries the block.
+    """
+    doc = _base_protection_doc(app={"slug": "vnx-gate", "app_id": None})
+    parsed = yaml.safe_load(yaml.safe_dump(doc, sort_keys=False))
+    assert parsed["app"]["slug"] == "vnx-gate"
+    assert "app_id" in parsed["app"]
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +266,9 @@ def test_b1_still_refuses_a_genuinely_unknown_key() -> None:
 
 
 def test_shipped_yaml_parses_and_applies_clean(tmp_path: Path) -> None:
-    """The real file still round-trips through B1 with the app: block on it."""
+    """The real file still round-trips through B1 -- app: is optional, so its
+    absence from the shipped YAML (Golf B, B2a fix-forward 3) changes nothing
+    here."""
     path = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
     config = fpd.load_protection_config(path)
     assert config.branch == "main"

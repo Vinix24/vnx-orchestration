@@ -71,20 +71,4 @@ repo:
 # GET /repos/{owner}/{repo}/rulesets returned [] when this was measured.
 rulesets: []
 
-# Golf B, B2a: the identity `scripts/lib/forge_check_run.py` authenticates as
-# when it publishes a check-run. Read by that client, never applied and never
-# compared — it describes WHO writes a check, not what `main` requires, so it
-# is an optional key to the B1 schema reader and absent from the normalized
-# dict `compare()` diffs (an entry here can therefore never register as drift),
-# exactly like pending_checks above. The block's own shape (slug/app_id) is
-# still validated by the schema reader -- only its PRESENCE is optional.
-#
-# `app_id` stays null until the operator registers the App; the client refuses
-# loudly on null rather than guessing. Once registered, B3 uses this same
-# app_id to bind the vnx-gate/review required check (see pending_checks above)
-# to this app -- the schema's vnx-gate/* guard on checks[] is what enforces
-# that every vnx-gate/* entry carries a bound app_id once it lands there.
-# Filling it in is an operator step: see docs/operations/FORGE_GATE.md.
-app:
-  slug: vnx-gate
-  app_id: null
+# Operator-stap uit docs/operations/FORGE_GATE.md: het `app:`-blok (slug + app_id) komt hier terug zodra de App bestaat; de schemalezer accepteert het al sinds deze PR (Golf B, B2a fix-forward 3).
