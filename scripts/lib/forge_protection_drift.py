@@ -66,6 +66,15 @@ _KNOWN_TOP_LEVEL_FIELDS = frozenset({
     "allow_fork_syncing", "block_creations", "lock_branch",
     "required_conversation_resolution", "restrictions", "repo", "rulesets",
 })
+#: Keys the YAML may carry that describe something OTHER than what the branch
+#: requires, so they are parsed past rather than compared. ``app`` (Golf B,
+#: B2a) names the GitHub App that PUBLISHES a check-run — an identity used by
+#: ``forge_check_run.py``, never a protection setting. Deliberately absent
+#: from :class:`ProtectionConfig` and :func:`to_normalized_dict`: a key that
+#: never enters the normalized dict can never register as drift or as a
+#: weakening. This is an allowlist of exactly one key, not an opening of the
+#: schema — an unrecognized top-level key is still refused.
+_OPTIONAL_TOP_LEVEL_FIELDS = frozenset({"app"})
 _KNOWN_RSC_FIELDS = frozenset({"strict", "checks"})
 _KNOWN_CHECK_FIELDS = frozenset({"context", "app_id"})
 _KNOWN_PPR_FIELDS = frozenset({
@@ -227,7 +236,10 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
         doc = yaml.safe_load(raw_text)
     except yaml.YAMLError as exc:
         raise ProtectionConfigError(f"branch_protection.yaml is geen geldige YAML: {exc}") from exc
-    _require_object_fields(doc, _KNOWN_TOP_LEVEL_FIELDS, "branch_protection.yaml")
+    _require_object_fields(
+        doc, _KNOWN_TOP_LEVEL_FIELDS, "branch_protection.yaml",
+        optional=_OPTIONAL_TOP_LEVEL_FIELDS,
+    )
 
     if not isinstance(doc["branch"], str) or not doc["branch"]:
         raise ProtectionConfigError("branch moet een niet-lege string zijn")

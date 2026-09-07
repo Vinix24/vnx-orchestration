@@ -70,3 +70,16 @@ repo:
 # Checked, never applied — apply_branch_protection.py never writes rulesets.
 # GET /repos/{owner}/{repo}/rulesets returned [] when this was measured.
 rulesets: []
+
+# Golf B, B2a: the identity `scripts/lib/forge_check_run.py` authenticates as
+# when it publishes a check-run. Read by that client, never applied and never
+# compared — it describes WHO writes a check, not what `main` requires, so it
+# is an optional key to the B1 schema reader and absent from the normalized
+# dict `compare()` diffs (an entry here can therefore never register as drift).
+#
+# `app_id` stays null until the operator registers the App; the client refuses
+# loudly on null rather than guessing. Filling it in is an operator step:
+# see docs/operations/FORGE_GATE.md.
+app:
+  slug: vnx-gate
+  app_id: null
