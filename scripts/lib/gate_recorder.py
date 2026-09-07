@@ -337,6 +337,34 @@ class ResultOverwriteRefused(ValueError):
     decided one (OI-1469/OI-1470)."""
 
 
+def result_is_for_head(result: Dict[str, Any], head_sha: str) -> bool:
+    """Does this result record judge ``head_sha``? (OI-1668)
+
+    A gate verdict is a statement about ONE commit. The result record carries
+    the commit it judged in ``commit_sha`` (stamped by
+    :func:`stamp_request_identity` on every production writer), and the merge
+    door already joins on exactly that field — a result whose ``commit_sha``
+    is not the PR head is not evidence the door can use.
+
+    Three answers, and the third is why this is a function rather than a
+    comparison written out at each call site:
+
+    - ``head_sha`` is empty: the head is UNKNOWN, not different. ``gh`` may be
+      absent, unauthenticated or rate-limited, and a lookup failure must never
+      silently reclassify existing evidence. Returns True — every caller then
+      behaves exactly as it did before this function existed.
+    - the record's ``commit_sha`` is empty: it belongs to NO head, so it is
+      not this one's. Returns False. Callers log that loudly; an unanchored
+      verdict losing its slot is something an operator has to be able to see.
+    - both present: a plain equality. Never a prefix match — an abbreviated
+      sha and a full one are two different strings, and accepting a prefix
+      would let a 7-char collision pass as evidence.
+    """
+    if not (head_sha or "").strip():
+        return True
+    return (result.get("commit_sha") or "").strip() == head_sha.strip()
+
+
 class _CorruptResult:
     """Sentinel: the result file exists but could not be parsed as a dict.
 
@@ -395,6 +423,32 @@ def _check_overwrite_guard(
     record with NO complete evidence (e.g. an existing not_executable) is
     not "decided" and stays freely overwritable — it must not permanently
     freeze the slot.
+
+    OI-1668 scopes all of the above to ONE HEAD. Measured live on PR #1808
+    (2026-09-07): codex_gate signed ``completed`` on head ``5fd261fd``, a
+    fix-forward moved the head to ``1f8c985f``, and three re-gate attempts
+    for the new head were refused — ``write_refused: true``,
+    ``attempted_commit_sha: 1f8c985f``. The slot stayed pinned to a verdict
+    about code that no longer existed, and the merge door reported ``geen
+    review-gate resultaat gevonden voor codex_gate op 1808: merge niet
+    toetsbaar``. The guard was comparing decidedness and evidence, and never
+    asked which commit either record was about.
+
+    So: when this write names a head (``commit_sha``) the existing record
+    does not carry, that record is not evidence about this head and the write
+    proceeds — even when it is less decided. That is not a downgrade; there
+    was nothing here to downgrade. Everything the guard protected against
+    still holds WITHIN one head, which is the only scope in which "this
+    verdict is more decided than that one" was ever a meaningful comparison.
+
+    A write with no ``commit_sha`` of its own names no head, so it gets
+    today's behaviour unchanged: the escape hatch needs a head to be about,
+    and a sha-less writer must not silently lose the protection. The
+    asymmetry with an EXISTING record's empty ``commit_sha`` (which does
+    yield, loudly) is deliberate — one side is "I cannot say which head this
+    write is for", the other is "that record never said which head it
+    judged", and only the second is a statement about the record being
+    displaced.
     """
     from gate_status import is_terminal, has_complete_evidence, canonical_status  # noqa: PLC0415
 
@@ -425,6 +479,32 @@ def _check_overwrite_guard(
         return
     existing_status = canonical_status(existing)
     new_status = canonical_status(new_payload)
+    new_sha = (new_payload.get("commit_sha") or "").strip()
+    if new_sha and not result_is_for_head(existing, new_sha):
+        # OI-1668: the existing record judges a different commit (or none at
+        # all), so it is not evidence about the head being written now. Two
+        # log lines, not one: an operator reading this needs to tell "the head
+        # moved on, as it does after every fix-forward" apart from "a verdict
+        # that never recorded what it judged just lost its slot", and the
+        # second is the one worth chasing.
+        existing_sha = (existing.get("commit_sha") or "").strip()
+        if not existing_sha:
+            logger.warning(
+                "gate_recorder: replacing terminal result gate=%s pr=%s "
+                "existing_status=%r that carries no commit_sha with status=%r "
+                "for head=%s — an unanchored verdict is evidence for no head, "
+                "so it cannot hold this slot (OI-1668)",
+                gate, pr_ref, existing_status, new_status, new_sha,
+            )
+        else:
+            logger.info(
+                "gate_recorder: replacing terminal result gate=%s pr=%s "
+                "existing_status=%r recorded against head=%s with status=%r "
+                "for head=%s — a verdict about another commit does not gate "
+                "this one (OI-1668)",
+                gate, pr_ref, existing_status, existing_sha, new_status, new_sha,
+            )
+        return
     if not is_terminal(new_payload):
         logger.warning(
             "gate_recorder: REFUSING to overwrite terminal result gate=%s pr=%s "

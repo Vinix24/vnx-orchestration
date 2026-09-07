@@ -28,6 +28,31 @@ turns a result into ``decided_pass`` refuses to count a record whose commit is
 not the head being merged. The annotation alone would not be enough: a flag
 only protects a caller that reads it, and the harm happens in a caller that
 reads ``status`` and ``contract_hash``.
+
+SUPERSEDED IN PART BY OI-1668 (2026-09-07), and the split runs exactly along
+the "load-bearing" line above. The second half — ``sha_binding`` in
+``gate_executor._execute_requested_gates``, the six tests at the bottom of this
+file — is untouched and still the protection.
+
+The first half assumed a cross-head write would be REFUSED, and that
+assumption was itself the next defect. Measured on PR #1808: codex signed
+``completed`` on head ``5fd261fd``, a fix-forward moved the head to
+``1f8c985f``, and every attempt to record a verdict for the new head was
+refused because a decided verdict for the OLD head held the slot. The merge
+door then reported ``geen review-gate resultaat gevonden voor codex_gate op
+1808: merge niet toetsbaar`` — the same "a verdict about another commit is not
+evidence about this one" principle this file opens with, arriving one level
+further down and blocking a legitimate merge. OI-1668 makes the overwrite
+guard head-scoped, so a write naming a head the stored record does not carry
+now lands.
+
+The three refusal tests below therefore no longer describe a cross-head
+write. They describe a SAME-head refusal, which is the case
+``annotate_refused_write`` still exists for: an outage that would erase a
+decided verdict about the very commit under review. That is the invariant
+OI-1488 was protecting; only the fixture's sha moved. The cross-head case is
+pinned as its own test, so the supersession is visible here rather than only
+in the file that changed the guard.
 """
 from __future__ import annotations
 
@@ -83,10 +108,14 @@ def dirs(tmp_path):
     return requests, results, state
 
 
-def _request_payload():
+def _request_payload(commit_sha=REQUESTED_SHA):
+    # OI-1668: the sha is now a parameter because it decides whether the guard
+    # engages at all. A refusal only happens on the SAME head as the stored
+    # record; a request naming a different head is a different scenario, not a
+    # variation of this one.
     return {
         "gate": "codex_gate", "pr_id": "1705", "pr_number": 1705,
-        "branch": "fix/whatever", "commit_sha": REQUESTED_SHA,
+        "branch": "fix/whatever", "commit_sha": commit_sha,
         "contract_hash": "088a30754169bb91",
     }
 
@@ -101,7 +130,7 @@ def test_a_refused_not_executable_is_marked_as_not_written(dirs):
     payload = record_not_executable(
         gate="codex_gate", pr_number=1705, pr_id="",
         reason="provider_unavailable", reason_detail="codex quota exhausted",
-        request_payload=_request_payload(),
+        request_payload=_request_payload(PRIOR_SHA),
         requests_dir=requests, results_dir=results, state_dir=state,
     )
 
@@ -114,9 +143,10 @@ def test_a_refused_not_executable_is_marked_as_not_written(dirs):
         "actually wrote"
     )
     assert payload.get("attempted_status") == "not_executable"
-    assert payload.get("attempted_commit_sha") == REQUESTED_SHA, (
-        "without the attempted sha beside the preserved one, a reader cannot "
-        "see that the two are about different commits"
+    assert payload.get("attempted_commit_sha") == PRIOR_SHA, (
+        "the attempted sha must still be reported beside the preserved record "
+        "— after OI-1668 the two always name the same head on a refusal, and a "
+        "reader has to be able to CHECK that rather than assume it"
     )
 
 
@@ -129,13 +159,43 @@ def test_a_refused_failure_is_marked_as_not_written(dirs):
             "reason": "timeout", "reason_detail": "codex stalled at 900s",
             "duration_seconds": 900.0, "partial_output_lines": 0, "runner_pid": 42,
         },
-        request_payload=_request_payload(),
+        request_payload=_request_payload(PRIOR_SHA),
         requests_dir=requests, results_dir=results,
     )
 
     assert payload["status"] == "fail"
     assert payload.get("write_refused") is True
     assert payload.get("attempted_status") == "unavailable"
+
+
+def test_a_write_for_a_new_head_is_no_longer_refused(dirs):
+    """The half of OI-1488 that OI-1668 supersedes, pinned where it is read.
+
+    Identical to the test above except for one field: the request names a
+    head the stored record does not carry. Before OI-1668 that was refused
+    identically, which is how a decided verdict about deleted code came to
+    block PR #1808's merge. It must now land — and the preserved-record
+    annotation must be ABSENT, because nothing was preserved.
+    """
+    requests, results, _state = dirs
+
+    payload = record_failure(
+        gate="codex_gate", pr_number=1705, pr_id="",
+        result={
+            "reason": "timeout", "reason_detail": "codex stalled at 900s",
+            "duration_seconds": 900.0, "partial_output_lines": 0, "runner_pid": 42,
+        },
+        request_payload=_request_payload(REQUESTED_SHA),
+        requests_dir=requests, results_dir=results,
+    )
+
+    assert "write_refused" not in payload
+    assert payload["status"] == "unavailable"
+    on_disk = json.loads((results / "pr-1705-codex_gate.json").read_text(encoding="utf-8"))
+    assert on_disk["commit_sha"] == REQUESTED_SHA, (
+        "a verdict about 109181d2 cannot keep the slot the head 1425faa1 "
+        "needs — that is the OI-1668 merge blockage (PR #1808)"
+    )
 
 
 def test_a_landed_write_is_not_marked_refused(dirs):
@@ -161,7 +221,7 @@ def test_the_decided_record_on_disk_is_untouched(dirs):
     record_not_executable(
         gate="codex_gate", pr_number=1705, pr_id="",
         reason="provider_unavailable", reason_detail="quota",
-        request_payload=_request_payload(),
+        request_payload=_request_payload(PRIOR_SHA),
         requests_dir=requests, results_dir=results, state_dir=state,
     )
 

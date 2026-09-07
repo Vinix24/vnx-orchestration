@@ -18,7 +18,7 @@ from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
-from gate_recorder import get_pr_head_sha, write_result_guarded
+from gate_recorder import get_pr_head_sha, result_is_for_head, write_result_guarded
 from governance_emit import _classify_lane_log_text
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
@@ -858,6 +858,28 @@ class GateRequestHandlerMixin:
         is still ``lane_exhausted``, that is a NAMED terminal end-state
         (``_chain_exhausted_result``) -- never a silent fallback to
         re-dispatching the originally-requested ``gate``.
+
+        HEAD SCOPING (OI-1668): every one of those decisions rests on a
+        candidate's last recorded result, and a result is a statement about
+        ONE commit. A record produced against an earlier head says nothing
+        about the head under review now, so it may not decide whether this
+        seat gets skipped -- ``gate_recorder.result_is_for_head`` answers
+        that, and a record belonging to another head (or to none) STOPS the
+        walk exactly as a missing record does: the candidate is dispatched
+        live. Live shape this closes, PR #1808 on 2026-09-07: codex's seat
+        held an exhaustion recorded against head ``5fd261fd`` while the PR had
+        already moved to ``1f8c985f``, and the walk kept routing around a seat
+        that had never been asked about the current code.
+
+        The head sha is resolved LAZILY -- once, on the first candidate that
+        actually has a prior result -- so the common first-round shape (no
+        record anywhere) still costs no GitHub round-trip, and a multi-hop
+        walk costs one lookup rather than one per hop. When it cannot be
+        resolved at all (``""``: gh missing, unauthenticated, or a PR that
+        does not resolve) the head question is unanswerable, and
+        ``result_is_for_head`` answers True so the walk behaves exactly as it
+        did before -- a failed lookup must never silently redirect a takeover
+        decision.
         """
         if chain is None:
             chain = _build_review_gate_takeover_chain()
@@ -874,9 +896,22 @@ class GateRequestHandlerMixin:
 
         path: List[Dict[str, Any]] = []
         current = gate
+        head_sha: Optional[str] = None  # resolved lazily; see docstring
         while True:
             existing_result = self._read_existing_gate_result(current, pr_number)
             if existing_result is None:
+                break
+            if head_sha is None:
+                head_sha = get_pr_head_sha(pr_number)
+            if not result_is_for_head(existing_result, head_sha):
+                logger.info(
+                    "gate_request_handler: ignoring gate=%s result for pr=%s "
+                    "recorded against head=%r while the PR head is %r -- a "
+                    "verdict about another commit cannot decide whether this "
+                    "seat is skipped; dispatching it live (OI-1668)",
+                    current, pr_number,
+                    (existing_result.get("commit_sha") or ""), head_sha,
+                )
                 break
             seat_state = self._classify_review_seat_failure(existing_result)
             if seat_state != "lane_exhausted":
