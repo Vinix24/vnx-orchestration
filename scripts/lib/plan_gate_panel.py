@@ -49,7 +49,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
-TMUX_INTERACTIVE_DISPATCH = HERE / "tmux_interactive_dispatch.py"
 _SCRIPTS_DIR = HERE.parent
 PANEL_CONFIG_RELATIVE_PATH = Path("configs") / "plan_gate_panel.yaml"
 
@@ -89,11 +88,32 @@ DEFAULT_GOAL_MIN_CHARS = 200
 SEAT_LEDGER_RELPATH = ".vnx-attest/plan-gate-seats.ndjson"
 SEAT_RECORD_TYPE = "plan_gate_seat"
 
-# Claude is NOT a provider-lane provider — provider_dispatch refuses it. Claude lanes
-# route via the TMUX-SPAWN lane (interactive `claude` in an ephemeral isolated worktree),
-# which keeps billing on the SUBSCRIPTION (CLAUDE.md "June-15 escape"). They must NOT use
-# headless `claude -p`: post-cutover that bills API credits.
+# Claude is NOT a provider-lane provider — provider_dispatch refuses it. A claude seat
+# runs on the HEADLESS lane: `claude -p` through the door's own ClaudeSubprocessAdapter,
+# in the shared checkout (a plan review reads; it never commits). Billing stays on the
+# Max SUBSCRIPTION — measured 2026-08-11 from the auth state (no ANTHROPIC_API_KEY /
+# ANTHROPIC_BASE_URL, keychain subscriptionType: max) — and the single-entry door has
+# routed claude through this lane by default since A2 (2026-08-26).
+#
+# Until 2026-09-07 these seats ran on the TMUX-SPAWN lane instead, on the premise that
+# headless `claude -p` "bills API credits post-cutover". That premise was never true:
+# Anthropic never carried out that cutover. And the lane cost the gate its claude
+# verdict — bracketed-paste delivery handed the worker only the LAST LINE of the
+# instruction ("...as the very last step."), three times on 2026-09-06, so the opus seat
+# asked what it was supposed to do and then sat there until its deadline (906s, 907s,
+# 2400s). Every plan-gate with a claude seat that day ended without that seat's verdict
+# and was decided by the tiebreaker.
 _CLAUDE_PROVIDERS = {"claude"}
+
+# The lane label stamped on a claude seat's receipt — the same string the door's
+# headless lane uses (dispatch_envelope.run_envelope_headless_plan), so a seat receipt
+# and a door receipt name the same lane instead of two.
+_HEADLESS_LANE = "claude_headless"
+
+# The terminal every panel seat books its lane work under. Matches the --terminal-id the
+# provider branch below already passes, so seat receipts from both lanes land under one
+# name rather than splitting the audit trail by lane.
+_PANEL_TERMINAL_ID = "plan-gate"
 
 # Full diverse-family assurance panel: (label, provider string, model_arg).
 # One panelist per provider family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI) so a
@@ -449,7 +469,7 @@ _VERDICT_CONTRACT = (
 # 60_000 was a 10x-too-conservative guess. Measured on this platform (macOS):
 # `getconf ARG_MAX` = 1_048_576 bytes — the ceiling execve() enforces on the COMBINED argv +
 # inherited-environment size for the provider_dispatch.py subprocess this doc is inlined
-# into (the claude/tmux lane instead writes the doc to a temp file and never inlines it, so
+# into (the claude seat instead writes the doc to a temp file and never inlines it, so
 # this cap only bites the kimi/glm/deepseek/codex provider lanes). Budget:
 #   - this module's own wrapper text (rubric + verdict contract + track/report boilerplate)
 #     measures ~1.2k chars around the doc body — negligible;
@@ -531,8 +551,8 @@ def build_plan_review_instruction(doc_text: str, track_id: str) -> str:
     """Render the plan-review instruction handed to each panelist (inline-doc form).
 
     Used by provider lanes (kimi, glm) where the instruction is passed as a
-    subprocess argument and the full inline doc is acceptable.  The claude/tmux
-    lane uses ``build_plan_review_instruction_fileref`` instead so the ~50k-char
+    subprocess argument and the full inline doc is acceptable.  The claude seat
+    uses ``build_plan_review_instruction_fileref`` instead so the ~50k-char
     doc body never inflates the instruction string.
     """
     doc_text = _sanitize_doc(doc_text)
@@ -550,11 +570,13 @@ def build_plan_review_instruction(doc_text: str, track_id: str) -> str:
 def build_plan_review_instruction_fileref(
     doc_path: str, track_id: str, report_path: str
 ) -> str:
-    """Render the plan-review instruction for the claude/tmux lane.
+    """Render the plan-review instruction for the claude seat.
 
     The plan doc is passed by FILE REFERENCE (not inlined) so the instruction
-    string stays short — avoiding the >120s bracketed-paste ingestion that trips
-    the WORK_START_GATE timeout on a large doc.
+    string stays short. It was written for the tmux lane, where a ~50k-char body
+    took >120s to ingest and tripped the WORK_START_GATE timeout; it survives the
+    move to the headless lane because a short prompt argument is worth having
+    there too — the seat reads the plan from disk with the tool it already has.
 
     ``report_path``: the absolute path where the worker MUST write its report.
     This makes the expectation explicit so the worker does not have to guess the
@@ -577,17 +599,17 @@ def build_plan_review_instruction_fileref(
 
 
 def build_generic_fileref_instruction(doc_path: str, report_path: str) -> str:
-    """Render a generic (NON-plan-review) file-ref instruction for the claude/tmux lane.
+    """Render a generic (NON-plan-review) file-ref instruction for the claude seat.
 
     OI-811: ``_make_default_dispatcher`` is reused by callers whose instruction is NOT a
     plan review — e.g. the deliberation panel's diverge/contrarian/verify/synthesis
     stages. Wrapping their prompt in ``build_plan_review_instruction_fileref`` (which
     tells the worker "you are an independent plan reviewer... review the IMPLEMENTATION
     PLAN") caused a plan-reviewer-role worker to correctly reject the file as not a plan,
-    corrupting the panel stage. This variant carries the file-ref benefit (short
-    instruction string, avoids the bracketed-paste ingestion timeout on a large prompt)
-    WITHOUT the plan-review framing — the worker is simply told to follow the referenced
-    instruction and write its response to ``report_path``.
+    corrupting the panel stage. This variant carries the file-ref benefit (a short
+    instruction string, whatever the size of the referenced prompt) WITHOUT the
+    plan-review framing — the worker is simply told to follow the referenced instruction
+    and write its response to ``report_path``.
     """
     return (
         f"Read your complete instruction from this file:\n\n"
@@ -1079,9 +1101,9 @@ def _resolve_data_dir(data_dir: Optional[str]) -> Path:
     gate will never find.
 
     A ``None`` base means ``_read_report``'s base-fallback path can never resolve the
-    claude/tmux-lane report: unlike ``provider_dispatch``, that lane prints no ``Report:``
-    stderr line, so the opus seat's authored report is never found -> NO-VERDICT rc=1
-    "staging_validator: unstaged dispatch override" (#1102 class bug).
+    claude seat's report: unlike ``provider_dispatch``, the headless lane prints no
+    ``Report:`` stderr line, so the opus seat's authored report is never found ->
+    NO-VERDICT rc=1 "staging_validator: unstaged dispatch override" (#1102 class bug).
     """
     if data_dir:
         return Path(data_dir)
@@ -1115,60 +1137,209 @@ def _resolve_data_dir(data_dir: Optional[str]) -> Path:
     return resolve_central_data_dir(project_id)
 
 
+def _seat_checkout() -> Path:
+    """The checkout a claude seat runs ``claude -p`` in.
+
+    A plan review READS: the plan from the temp file the instruction names, and the
+    repository it is reviewing against (git log/diff/show, grep — the whole bash
+    allow-list of the plan-reviewer profile). It WRITES exactly one file, the verdict
+    report, at an absolute path the instruction names. So the seat runs in the SHARED
+    checkout: no ``git worktree add`` per seat (on a large repo that cost more than the
+    review itself and timed the seat out), and the review is grounded against the real
+    tree instead of a copy of it.
+
+    Resolved from the INVOCATION context, never from this module's own location: in a
+    central install the panel code sits under ``~/.vnx-system/versions/<v>/``, and a seat
+    spawned there would review the keystone instead of the operator's project — the same
+    trap ``_resolve_data_dir`` documents for the data dir.
+    """
+    env_root = os.environ.get("VNX_PROJECT_ROOT", "").strip()
+    if env_root and Path(env_root).is_dir():
+        return Path(env_root).resolve()
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    from project_root import resolve_project_root  # noqa: PLC0415
+    return resolve_project_root()
+
+
+def _seat_lane_outcome(result: Any) -> str:
+    """One line naming what the lane did, stamped on the seat's synthesized receipt.
+
+    ``dispatch_govern.ensure_receipt`` writes this into ``failure_reason``. The tmux
+    lane's default there was a fixed literal ("tmux_receipt_deadline_exceeded") that
+    claimed a deadline for every outcome including success; the headless lane holds the
+    adapter result in-process, so the receipt can carry what actually happened.
+    """
+    if result.status == "success":
+        return "claude_headless_completed"
+    if result.status == "timeout":
+        return f"claude_headless_deadline_exceeded (rc={result.returncode})"
+    return (
+        f"claude_headless_{result.status} (rc={result.returncode}): "
+        f"{result.error or 'no error text from the lane'}"
+    )
+
+
+def _run_claude_headless_seat(
+    *,
+    dispatch_id: str,
+    model: str,
+    instruction: str,
+    role: str,
+    base: Path,
+    timeout_seconds: int,
+) -> str:
+    """Run ONE claude seat on the headless lane and return its report text.
+
+    Reuses the door's building blocks rather than growing a second ``claude -p``
+    wrapper: ``ClaudeSubprocessAdapter`` is the same adapter
+    ``dispatch_envelope.run_envelope_headless_plan`` runs the door's headless dispatches
+    through, and ``dispatch_govern.govern`` is the same GOVERN step the lanes share.
+    What this does NOT reuse is the envelope around them — a permit-carrying
+    ExecutionPlan, an isolated worktree, and push+PR enforcement are the shape of a
+    dispatch that DELIVERS code, and a plan review delivers a verdict file.
+
+    The env pins are set on ``os.environ`` for the duration of the run, not passed as a
+    child-only mapping, because they have to bind in BOTH directions:
+      - the child inherits them (``SubprocessAdapter.deliver`` builds the worker env
+        from ``os.environ.copy()``), which is what OI-1153 asks for — the seat's report
+        write path and ``_read_report``'s read-back base stay one directory;
+      - ``VNX_WORKER_SCOPED=1`` is read HERE, in this process, while
+        ``subprocess_adapter._build_worker_scope_args`` builds the argv. Without it the
+        seat spawns with blanket ``--dangerously-skip-permissions`` instead of the
+        plan-reviewer profile's read-only tool scope, which in a shared checkout is the
+        difference between a reviewer and a writer.
+    They are restored afterwards, so a seat never leaves a process-wide side effect
+    behind for the next seat or for the caller.
+
+    GOVERN always runs, exactly as the door's lanes do: the seat's report and receipt do
+    not become optional because the worker went quiet. That is also what keeps the panel's
+    three-way seat classification honest — when the worker authors nothing, govern writes
+    the body carrying ``SYNTHESIZED_REPORT_MARKER`` and the seat reads back as
+    ``no_verdict`` ("the lane never delivered") instead of as an abstention.
+
+    Raises RuntimeError when not even govern left a readable report — the seat then books
+    ``dispatched=False`` and the message carries the lane's own failure reason.
+    """
+    from envelope_adapters_claude import ClaudeSubprocessAdapter  # noqa: PLC0415
+    from envelope_types import EnvelopeSpec  # noqa: PLC0415
+
+    checkout = _seat_checkout()
+    spec = EnvelopeSpec(
+        dispatch_id=dispatch_id,
+        terminal_id=_PANEL_TERMINAL_ID,
+        provider="claude",
+        model=model,
+        instruction=instruction,
+        role=role,
+        pr_id=None,
+        state_dir=base / "state",
+        data_dir=base,
+        deadline_seconds=timeout_seconds,
+        # OI-1422: a seat is a read-only verdict worker, never a delivery worker.
+        # Same task_class the provider branch stamps, for the same reason — it is the
+        # fabric's canonical class for reviewer work and a member of
+        # phantom_guard.REVIEW_TASK_CLASSES.
+        task_class="research_structured",
+    )
+
+    pins = {
+        "VNX_DATA_DIR": str(base),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_WORKER_SCOPED": "1",
+    }
+    restore = {key: os.environ.get(key) for key in pins}
+    start = datetime.now(timezone.utc)
+    try:
+        os.environ.update(pins)
+        result = ClaudeSubprocessAdapter().run(spec, cwd=checkout)
+    finally:
+        for key, previous in restore.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+    duration = (datetime.now(timezone.utc) - start).total_seconds()
+
+    from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
+    govern(
+        GovernSpec(
+            dispatch_id=dispatch_id,
+            terminal_id=_PANEL_TERMINAL_ID,
+            instruction=instruction,
+            data_dir=base,
+            state_dir=base / "state",
+            worktree_path=checkout,
+            model=model,
+            role=role,
+            task_class=spec.task_class,
+        ),
+        # receipt=None is what arms ensure_receipt's fallback: a seat worker writes a
+        # report, never its own receipt, so without this the seat's run would leave no
+        # ledger row at all.
+        GovernRaw(
+            receipt=None,
+            duration_seconds=duration,
+            failure_reason=_seat_lane_outcome(result),
+        ),
+        lane=_HEADLESS_LANE,
+    )
+
+    report = _read_report(base, dispatch_id, "")
+    if report is None:
+        raise RuntimeError(
+            f"no report for {dispatch_id} (rc={result.returncode} "
+            f"status={result.status}): {result.error or 'no error text from the lane'} "
+            f"| completion: {(result.completion_text or '')[-400:]}"
+        )
+    return report
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer",
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
-    INTERIM — PR-12 consolidation target. This calls the lane scripts DIRECTLY, which is a
-    side door. Once the single-entry dispatch door (`vnx dispatch` / dispatch_bridge) is
-    wired and flipped, this MUST route through that one door instead. The split below is
-    exactly what the door decides internally:
-      claude            -> tmux-spawn lane (interactive claude, ephemeral worktree;
-                           billing stays on the SUBSCRIPTION per the June-15 escape).
-                           NOT provider_dispatch (refuses claude), NOT headless `claude -p`
-                           (bills API credits post-cutover).
+    INTERIM — PR-12 consolidation target. This dispatches WITHOUT going through the
+    single-entry door (`vnx dispatch` / dispatch_bridge), which is a side door. Once the
+    door is wired and flipped, this MUST route through that one door instead. The split
+    below is exactly what the door decides internally:
+      claude            -> headless lane, `claude -p` via ClaudeSubprocessAdapter, on
+                           the SUBSCRIPTION (measured 2026-08-11; the door's default for
+                           claude since A2, 2026-08-26). NOT provider_dispatch — it
+                           refuses claude.
       kimi/glm/deepseek -> provider_dispatch (constraint-safe per provider).
 
     ``role``: OI-811 — this factory is reused by callers whose instruction is NOT a plan
     review (e.g. the deliberation panel's diverge/contrarian/verify/synthesis stages).
     Defaults to "plan-reviewer" for backward compatibility with ``run_panel``. A caller
     with a different role gets the generic (non-plan-framed) file-ref instruction on the
-    claude/tmux lane, and that role is stamped on both lanes' ``--role`` so govern() and
-    the phantom-guard evaluate it correctly instead of being told it is a plan review.
+    claude seat, and that role is stamped on both lanes so govern() and the phantom-guard
+    evaluate it correctly instead of being told it is a plan review.
     """
     base = _resolve_data_dir(data_dir)
 
     def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
         env = dict(os.environ)
         # OI-1153: pin the seat subprocess to the SAME data dir this dispatcher
-        # resolved (`base`), or the lane re-resolves its own. provider_dispatch /
-        # tmux_interactive_dispatch both honor the two-key VNX_DATA_DIR +
-        # VNX_DATA_DIR_EXPLICIT=1 contract (see their _resolve_data_dir/
-        # _resolve_state_dir); without it the seat's report write path can land
+        # resolved (`base`), or the lane re-resolves its own. provider_dispatch
+        # honors the two-key VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 contract (see
+        # its _resolve_data_dir); without it the seat's report write path can land
         # outside the dir _read_report reads back from (e.g. the legacy
         # ~/.vnx-data/unified_reports root), and the seat report is silently
-        # never found. This applies to BOTH lanes: the claude/tmux branch below
-        # and the provider branch.
+        # never found. The claude branch pins the same two keys — see
+        # _run_claude_headless_seat, which sets them on os.environ because on that
+        # lane they must bind in this process as well as in the child.
         env["VNX_DATA_DIR"] = str(base)
         env["VNX_DATA_DIR_EXPLICIT"] = "1"
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _CLAUDE_PROVIDERS:
-                # Scoped-spawn fix (2026-07-14): --working-tree-only's commit/push deny
-                # only binds in the scoped detached spawn; tmux_interactive_dispatch.dispatch()
-                # fails CLOSED otherwise (its D2.2 scoping precondition), refusing the dispatch
-                # before any report is written -> silent NO-VERDICT for this seat. Opt this
-                # subprocess's env into the scoped posture so the --working-tree-only flag this
-                # lane already passes is actually honored. Provider (kimi/glm/deepseek) lanes
-                # below are untouched — this only applies to the claude/tmux branch.
-                env["VNX_WORKER_SCOPED"] = "1"
-
                 # BUG-2 FIX (file-ref): the instruction already has the full plan doc inlined
-                # by run_panel's build_plan_review_instruction call. For the claude/tmux lane
-                # we replace it with a compact file-ref instruction so the ~50k-char body never
-                # inflates the bracketed-paste and does not trip the WORK_START_GATE timeout.
+                # by run_panel's build_plan_review_instruction call. For the claude seat we
+                # replace it with a compact file-ref instruction so the ~50k-char body never
+                # has to travel as one prompt argument.
                 #
                 # We write the original inline instruction to a temp file so the worker can
                 # read the plan + rubric + verdict contract from a stable on-disk path.
@@ -1205,68 +1376,53 @@ def _make_default_dispatcher(
                         report_path=report_path_str,
                     )
 
-                cmd = [
-                    sys.executable, str(TMUX_INTERACTIVE_DISPATCH),
-                    "--dispatch-id", dispatch_id,
-                    "--model", model_arg,
-                    "--role", role,
-                    "--instruction", claude_instruction,
-                    "--deadline-seconds", str(timeout_seconds),
-                    # A plan review is READ-ONLY (reads the doc file, writes a verdict report) —
-                    # it needs no isolated worktree. --shared-worktree skips the expensive
-                    # `git worktree add`, which on a large repo (e.g. SEOcrawler) blows the
-                    # deadline and times opus out; it also grounds the review against the REAL
-                    # checkout.
-                    "--shared-worktree",
-                    "--allow-unstaged",
-                    # D2.2: a plan-review is working-tree-only — it reads the doc and
-                    # writes a verdict report; it must NOT commit/push (OI-097). The
-                    # flag denies git commit/push at the tool-permission layer.
-                    "--working-tree-only",
-                    "--reason", f"plan-gate panel {dispatch_id}",
-                ]
-                run_timeout = timeout_seconds + 180  # tmux warmup + teardown headroom
-            else:
-                claude_instruction = instruction  # provider lane: inline doc OK
-                cmd = [
-                    sys.executable, str(PROVIDER_DISPATCH),
-                    "--provider", provider,
-                    "--terminal-id", "plan-gate",
-                    "--dispatch-id", dispatch_id,
-                    "--model", model_arg,
-                    "--role", role,
-                    # OI-1422: every seat this dispatcher builds (plan-reviewer,
-                    # deliberation-panelist) is a read-only verdict/analysis worker —
-                    # it reads a doc and writes a report, it never touches repo files.
-                    # Without an explicit --task-class, provider_dispatch.py's
-                    # argparse default ("") falls through to VNX_TASK_CLASS, which is
-                    # unset here, so _build_frontmatter's own fallback stamps
-                    # task_class="implementation" on the receipt (provider_dispatch.py
-                    # _build_frontmatter). kimi_spawn.py's completion-vs-execution
-                    # fabrication guard (_finalize_kimi_result) keys off task_class
-                    # ALONE — it has no role parameter — so "implementation" leaves a
-                    # clean-worktree kimi seat classified as a delivery worker that
-                    # produced nothing, and the guard fires a false "completion
-                    # without execution" failure on real panel/review output.
-                    # "research_structured" is the fabric's own canonical task_class
-                    # for reviewer/architect/planner/security-engineer/data-analyst
-                    # work (dispatch_router.py SKILL_TO_TASK_CLASS) and is already a
-                    # member of phantom_guard.REVIEW_TASK_CLASSES, so this exempts the
-                    # seat through both guards without widening either SSOT.
-                    "--task-class", "research_structured",
-                    "--instruction", instruction,
-                    "--no-auto-commit",
-                ]
-                run_timeout = timeout_seconds
+                return _run_claude_headless_seat(
+                    dispatch_id=dispatch_id,
+                    model=model_arg,
+                    instruction=claude_instruction,
+                    role=role,
+                    base=base,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            cmd = [
+                sys.executable, str(PROVIDER_DISPATCH),
+                "--provider", provider,
+                "--terminal-id", "plan-gate",
+                "--dispatch-id", dispatch_id,
+                "--model", model_arg,
+                "--role", role,
+                # OI-1422: every seat this dispatcher builds (plan-reviewer,
+                # deliberation-panelist) is a read-only verdict/analysis worker —
+                # it reads a doc and writes a report, it never touches repo files.
+                # Without an explicit --task-class, provider_dispatch.py's
+                # argparse default ("") falls through to VNX_TASK_CLASS, which is
+                # unset here, so _build_frontmatter's own fallback stamps
+                # task_class="implementation" on the receipt (provider_dispatch.py
+                # _build_frontmatter). kimi_spawn.py's completion-vs-execution
+                # fabrication guard (_finalize_kimi_result) keys off task_class
+                # ALONE — it has no role parameter — so "implementation" leaves a
+                # clean-worktree kimi seat classified as a delivery worker that
+                # produced nothing, and the guard fires a false "completion
+                # without execution" failure on real panel/review output.
+                # "research_structured" is the fabric's own canonical task_class
+                # for reviewer/architect/planner/security-engineer/data-analyst
+                # work (dispatch_router.py SKILL_TO_TASK_CLASS) and is already a
+                # member of phantom_guard.REVIEW_TASK_CLASSES, so this exempts the
+                # seat through both guards without widening either SSOT.
+                "--task-class", "research_structured",
+                "--instruction", instruction,
+                "--no-auto-commit",
+            ]
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=run_timeout, check=False, env=env,
+                cmd, capture_output=True, text=True, timeout=timeout_seconds,
+                check=False, env=env,
             )
             report = _read_report(base, dispatch_id, proc.stderr)
             if report is None:
-                # tmux_interactive_dispatch's CLI prints the InteractiveDispatchResult (incl.
-                # the actionable `failure_reason`) as JSON to STDOUT, not stderr -- surfacing
-                # only stderr here previously masked the real cause (e.g. the D2.2 scoping
-                # refusal) behind an unrelated last-stderr-line red herring.
+                # provider_dispatch prints its actionable detail across both streams —
+                # surfacing only stderr once masked the real cause behind an unrelated
+                # last-stderr-line red herring for a full day.
                 raise RuntimeError(
                     f"no report for {dispatch_id} (rc={proc.returncode}): "
                     f"stdout: {(proc.stdout or '')[-800:]} | stderr: {(proc.stderr or '')[-400:]}"
