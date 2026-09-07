@@ -261,13 +261,21 @@ receipt, or (b) an operator explicitly overrides.
    that dispatch is contract_invalid, `(True, reason)` otherwise (including
    the case where no receipt exists at all — absence is not this function's
    concern, per the same "absence is never a rejection" precedent as
-   OI-1624). This dispatch (OI-1638) does not own `closure_verifier.py` —
-   the intended call site is `verify_pr_closure()`
-   (`scripts/closure_verifier.py:1405`), immediately after the "PR must be
-   completed per reconciliation" check (around line 1472), reading the
-   dispatch id off `pr_reconciled.provenance.get("dispatch_id")` and gating
-   the closure verdict on the result. A future PR must wire that call
-   explicitly — this module only provides the gate function.
+   OI-1624). **Wired (Golf B, B7):** the call site is the merge door itself
+   — `pr_merge.py::main()`'s `_run_contract_invalid_gate`, run after the CI
+   gate, the review gate, and the ADR-number preflight, before the merge —
+   not `closure_verifier.py::verify_pr_closure()` as originally planned here:
+   the closure verifier only reads *after* a merge already happened and
+   cannot stop one in flight, while the merge door is the one place that
+   sees the real `main` at the moment of merge. Given `--dispatch-id`
+   (skipped loudly when absent — existing `pr_merge` behaviour, not a new
+   hole), a `contract_invalid` latest receipt refuses the merge with the
+   dispatch id and the reason on stderr/exit-nonzero. The escape hatch is
+   its own flag, `--override-contract-invalid "<reason>"`, separate from
+   `--override-reason` (which already drives the CI and review gates): a
+   non-empty reason overrides visibly and is stamped onto the `pr_merged`
+   receipt as `contract_invalid_override` (`{"flag", "reason"}`); an empty
+   reason is refused (no silent bypass).
 
 Staleness windowing (a frozen historical batch should not read as live
 churn) is delegated to the existing `contract_invalid_window.py` — not
