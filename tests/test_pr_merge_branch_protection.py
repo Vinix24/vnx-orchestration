@@ -2,13 +2,14 @@
 """Tests for the branch-protection merge gate wired into pr_merge.py
 (Golf B, B1).
 
-``_run_branch_protection_gate`` runs four checks in order: (a) read main's
-own YAML (a 404 on that exact path is the bootstrap no-op), (b) live vs
-main's YAML drift (no override), (c) the PR's own YAML must not weaken
-main's (``--allow-weaken`` is the only override), (d) the running
-``scripts/pr_merge.py`` must hash-match main's copy. Only the two network
-primitives (``fetch_yaml_from_ref``, ``fetch_live_protection``) and the door
-hash-check are mocked per test — ``compare``/``is_weakening`` run for real.
+``_run_branch_protection_gate`` runs four checks in order: (a) every file
+the door's verdict depends on must hash-match main's copy, (b) read main's
+own YAML (a 404 on that exact path, at a confirmed ref, is the bootstrap
+no-op), (c) live vs main's YAML drift (no override), (d) the PR's own YAML
+must not weaken main's (``--allow-weaken`` is the only override). Only the
+two network primitives (``fetch_yaml_from_ref``, ``fetch_live_protection``)
+and the door hash-check are mocked per test — ``compare``/``is_weakening``
+run for real.
 """
 
 from __future__ import annotations
@@ -67,6 +68,14 @@ def _stub_matching_door_hash(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pr_merge, "_door_blob_hash_gate", lambda project_root: _go())
 
 
+#: The REAL door-integrity check, captured at import time. tests/conftest.py
+#: carries an autouse fixture that stubs ``pr_merge._door_blob_hash_gate`` to
+#: GO for the whole suite (it is the gate's first step since the B1
+#: fix-forward and shells out to git + gh), so the two classes that exercise
+#: the check itself must hold their own reference to it.
+_REAL_DOOR_BLOB_HASH_GATE = pr_merge._door_blob_hash_gate
+
+
 # ---------------------------------------------------------------------------
 # _door_blob_hash_gate — direct
 # ---------------------------------------------------------------------------
@@ -82,25 +91,103 @@ class TestDoorBlobHashGate:
 
     def test_matching_hashes_is_go(self, monkeypatch):
         monkeypatch.setattr(pr_merge.subprocess, "run", self._fake_run(local_hash="x", remote_hash="x"))
-        result = pr_merge._door_blob_hash_gate(VNX_ROOT)
+        result = _REAL_DOOR_BLOB_HASH_GATE(VNX_ROOT)
         assert result["verdict"] == "GO"
 
     def test_mismatched_hashes_is_no_go(self, monkeypatch):
         """(l) blob-hash of the running pr_merge.py differs from main: refused."""
         monkeypatch.setattr(pr_merge.subprocess, "run", self._fake_run(local_hash="local", remote_hash="onmain"))
-        result = pr_merge._door_blob_hash_gate(VNX_ROOT)
+        result = _REAL_DOOR_BLOB_HASH_GATE(VNX_ROOT)
         assert result["verdict"] == "NO-GO"
         assert "main" in result["message"]
 
     def test_local_git_failure_is_no_go(self, monkeypatch):
         monkeypatch.setattr(pr_merge.subprocess, "run", self._fake_run(local_rc=1))
-        result = pr_merge._door_blob_hash_gate(VNX_ROOT)
+        result = _REAL_DOOR_BLOB_HASH_GATE(VNX_ROOT)
         assert result["verdict"] == "NO-GO"
 
     def test_remote_gh_failure_is_no_go(self, monkeypatch):
         monkeypatch.setattr(pr_merge.subprocess, "run", self._fake_run(remote_rc=1))
-        result = pr_merge._door_blob_hash_gate(VNX_ROOT)
+        result = _REAL_DOOR_BLOB_HASH_GATE(VNX_ROOT)
         assert result["verdict"] == "NO-GO"
+
+
+class TestDoorBlobHashCoversTheWholeDoor:
+    """Fix-forward punt 4: hashing only the entry point leaves every file
+    that actually renders the verdict unguarded. A one-line edit to
+    ``is_weakening`` in ``forge_protection_drift.py`` keeps
+    ``scripts/pr_merge.py`` byte-identical to main, so the integrity check
+    passed while the door's judgment was neutralized.
+    """
+
+    #: The files whose content decides what the door refuses. Mutating any of
+    #: them changes a verdict without touching scripts/pr_merge.py.
+    DOOR_FILES = (
+        "scripts/pr_merge.py",
+        "scripts/lib/forge_protection_drift.py",
+        "scripts/lib/merge_preflight_adr_check.py",
+        "scripts/lib/merge_preflight_ci_check.py",
+        "scripts/lib/contract_invalid_ledger.py",
+    )
+
+    def _fake_run(self, *, local_overrides: Optional[Dict[str, str]] = None,
+                  remote_overrides: Optional[Dict[str, str]] = None,
+                  seen: Optional[List[str]] = None):
+        local_overrides = local_overrides or {}
+        remote_overrides = remote_overrides or {}
+
+        def fake(argv, **kwargs):
+            if argv[:2] == ["git", "hash-object"]:
+                path = argv[-1]
+                if seen is not None:
+                    seen.append(path)
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=f"{local_overrides.get(path, 'same-' + path)}\n", stderr="",
+                )
+            assert argv[0] == "gh"
+            endpoint = next(a for a in argv if "contents/" in a)
+            path = endpoint.split("contents/", 1)[1].split("?", 1)[0]
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=f"{remote_overrides.get(path, 'same-' + path)}\n", stderr="",
+            )
+
+        return fake
+
+    def test_every_door_file_is_hashed_against_main(self, monkeypatch):
+        seen: List[str] = []
+        monkeypatch.setattr(pr_merge.subprocess, "run", self._fake_run(seen=seen))
+        result = _REAL_DOOR_BLOB_HASH_GATE(VNX_ROOT)
+        assert result["verdict"] == "GO"
+        assert set(seen) == set(self.DOOR_FILES)
+
+    @pytest.mark.parametrize("mutated", [
+        "scripts/lib/forge_protection_drift.py",
+        "scripts/lib/merge_preflight_adr_check.py",
+        "scripts/lib/merge_preflight_ci_check.py",
+        "scripts/lib/contract_invalid_ledger.py",
+    ])
+    def test_a_mutated_library_file_refuses_and_is_named(self, monkeypatch, mutated):
+        monkeypatch.setattr(
+            pr_merge.subprocess, "run",
+            self._fake_run(local_overrides={mutated: "locally-edited"}),
+        )
+        result = _REAL_DOOR_BLOB_HASH_GATE(VNX_ROOT)
+        assert result["verdict"] == "NO-GO"
+        assert mutated in result["message"]
+
+    def test_a_file_missing_on_main_refuses(self, monkeypatch):
+        def fake(argv, **kwargs):
+            if argv[:2] == ["git", "hash-object"]:
+                return subprocess.CompletedProcess(argv, 0, stdout="x\n", stderr="")
+            endpoint = next(a for a in argv if "contents/" in a)
+            if "forge_protection_drift" in endpoint:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="gh: Not Found (HTTP 404)")
+            return subprocess.CompletedProcess(argv, 0, stdout="x\n", stderr="")
+
+        monkeypatch.setattr(pr_merge.subprocess, "run", fake)
+        result = _REAL_DOOR_BLOB_HASH_GATE(VNX_ROOT)
+        assert result["verdict"] == "NO-GO"
+        assert "forge_protection_drift.py" in result["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +195,14 @@ class TestDoorBlobHashGate:
 # ---------------------------------------------------------------------------
 
 class TestRunBranchProtectionGate:
+    @pytest.fixture(autouse=True)
+    def _door_hash_go_by_default(self, monkeypatch):
+        """The door-integrity check is the FIRST step since the fix-forward
+        (punt 2), so every test in this class now passes through it. Default
+        it to GO; the tests that exercise it re-patch in their own body
+        (same monkeypatch instance, later call wins)."""
+        monkeypatch.setattr(pr_merge, "_door_blob_hash_gate", lambda project_root: _go())
+
     def test_bootstrap_noop_when_main_has_no_yaml(self, monkeypatch):
         """(i) 404 on exactly the YAML path: no-op with the loud bootstrap message."""
         calls: List[str] = []
@@ -129,6 +224,43 @@ class TestRunBranchProtectionGate:
         assert "geen YAML op main" in result["message"]
         assert calls == ["main"]
         assert not live_calls, "the bootstrap no-op must not go on to read live state"
+
+    def test_the_door_hash_check_also_guards_the_bootstrap_branch(self, monkeypatch):
+        """Fix-forward punt 2: the bootstrap no-op returned GO while skipping
+        every later step, the door-integrity check included -- so the one
+        check that proves the door itself is unedited sat behind the branch
+        that skips it."""
+        monkeypatch.setattr(pr_merge, "fetch_yaml_from_ref", lambda *a, **k: _not_found())
+        monkeypatch.setattr(
+            pr_merge, "_door_blob_hash_gate",
+            lambda project_root: {"verdict": "NO-GO", "message": "deur draait niet op main",
+                                  "overridden": False, "override_reason": None},
+        )
+
+        result = pr_merge._run_branch_protection_gate(1, pr_data=PR_DATA)
+
+        assert result["verdict"] == "NO-GO"
+        assert "deur draait niet op main" in result["message"]
+
+    def test_the_door_hash_check_runs_before_any_network_read(self, monkeypatch):
+        order: List[str] = []
+        monkeypatch.setattr(
+            pr_merge, "_door_blob_hash_gate",
+            lambda project_root: order.append("door") or _go(),
+        )
+        monkeypatch.setattr(
+            pr_merge, "fetch_yaml_from_ref",
+            lambda project_root, ref, *a, **k: order.append(f"yaml:{ref}") or _found(_real_yaml_text()),
+        )
+        monkeypatch.setattr(
+            pr_merge, "fetch_live_protection",
+            lambda *a, **k: order.append("live") or _real_norm(),
+        )
+
+        result = pr_merge._run_branch_protection_gate(1, pr_data=PR_DATA)
+
+        assert result["verdict"] == "GO"
+        assert order[0] == "door", f"door-integrity must be step one, got {order}"
 
     def test_main_yaml_unreadable_blocks(self, monkeypatch):
         """(i) a non-404 fault (500/403) on the YAML read is a refusal."""
@@ -291,7 +423,7 @@ class TestRunBranchProtectionGate:
             assert result["verdict"] == "NO-GO"
             assert "vnx-gate/review" in result["message"]
 
-    def test_door_hash_check_runs_after_a_clean_pr_and_its_no_go_propagates(self, monkeypatch):
+    def test_door_hash_check_no_go_propagates(self, monkeypatch):
         self._stub_main_matches_live(monkeypatch)
         monkeypatch.setattr(
             pr_merge, "_door_blob_hash_gate",

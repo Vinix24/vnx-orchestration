@@ -27,9 +27,13 @@ makes for a PR's own YAML edit, applied here at write time instead of at
 merge time. ``--dry-run`` never writes regardless, so it is not gated by
 this refusal: it always prints the built object.
 
-Every non-dry-run invocation writes a receipt (before/after normalized
-state, the weaken reason if one was used) via ``governance_receipts`` — see
-``_emit_apply_receipt``.
+Every non-dry-run invocation writes a receipt via ``governance_receipts``
+from a ``finally``, not from the success path: the runs that most need a
+trace are the ones that do NOT reach the end — a PUT that lands followed by
+a ``required_signatures`` call that fails leaves main mutated, and a refused
+weakening is the record of someone trying. The receipt carries the calls
+that actually ran, the ones that never did, the verdict, the diffed fields
+and the weaken reason. See ``_emit_apply_receipt``.
 
 The FIRST apply against the real repo is an operator step, not something
 this dispatch runs automatically (see the dispatch report's Open Items):
@@ -58,6 +62,7 @@ from forge_protection_drift import (  # noqa: E402
     ProtectionConfig,
     ProtectionConfigError,
     ProtectionDriftError,
+    bypass_allowances_to_api_object,
     compare,
     fetch_live_protection,
     is_weakening,
@@ -77,18 +82,28 @@ def build_put_payload(config: ProtectionConfig) -> Dict[str, Any]:
     whole object, so every field the YAML tracks is always sent, not just
     the ones that changed.
     """
+    reviews: Optional[Dict[str, Any]] = None
+    if config.required_pull_request_reviews_present:
+        reviews = {
+            "dismiss_stale_reviews": config.dismiss_stale_reviews,
+            "require_code_owner_reviews": config.require_code_owner_reviews,
+            "require_last_push_approval": config.require_last_push_approval,
+            "required_approving_review_count": config.required_approving_review_count,
+        }
+        # Only sent when the YAML grants one. The PUT replaces the whole
+        # object, so an omitted key clears any grant living on the branch —
+        # which is exactly what a YAML that stays silent about bypasses means.
+        if config.bypass_pull_request_allowances:
+            reviews["bypass_pull_request_allowances"] = bypass_allowances_to_api_object(
+                config.bypass_pull_request_allowances
+            )
     return {
         "required_status_checks": {
             "strict": config.strict,
             "checks": [{"context": c.context, "app_id": c.app_id} for c in config.checks],
         },
         "enforce_admins": config.enforce_admins,
-        "required_pull_request_reviews": {
-            "dismiss_stale_reviews": config.dismiss_stale_reviews,
-            "require_code_owner_reviews": config.require_code_owner_reviews,
-            "require_last_push_approval": config.require_last_push_approval,
-            "required_approving_review_count": config.required_approving_review_count,
-        },
+        "required_pull_request_reviews": reviews,
         "restrictions": None,
         "required_linear_history": config.required_linear_history,
         "allow_force_pushes": config.allow_force_pushes,
@@ -155,20 +170,46 @@ def _diff_buckets(diffs: List[Dict[str, Any]]) -> Dict[str, bool]:
     return buckets
 
 
+#: The three write surfaces, in the order ``run_apply`` fires them. Used to
+#: report which ones a half-finished apply never reached.
+_WRITE_SURFACES = ("protection", "required_signatures", "repo.allow_auto_merge")
+
+_RECEIPT_STATUS_BY_VERDICT = {"OK": "success", "REFUSED": "blocked"}
+
+
 def _emit_apply_receipt(
-    *, before: Dict[str, Any], after: Dict[str, Any], reason: Optional[str], applied: bool,
-    receipts_file: Optional[str] = None,
+    *, before: Dict[str, Any], after: Optional[Dict[str, Any]], reason: Optional[str],
+    applied: bool, verdict: str, calls: List[str], pending_calls: List[str],
+    diffs: List[Dict[str, Any]], weak_fields: List[str], receipts_file: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """The trace for ONE apply attempt, whatever became of it.
+
+    ``after`` is the resulting state only where that is a claim this function
+    can stand behind: the YAML on a completed apply, the untouched live state
+    on a no-op or a refusal, and ``None`` on anything partial or failed —
+    a half-applied branch is in a state nobody has read back, and saying
+    "after = the YAML" there would put a mutation in the ledger that never
+    happened.
+    """
     return emit_governance_receipt(
         "branch_protection_applied",
         receipt_kind="state_mutation",
-        status="success",
+        status=_RECEIPT_STATUS_BY_VERDICT.get(verdict, "failure"),
         terminal="T0",
         source="apply_branch_protection",
         receipts_file=receipts_file,
         before=before,
         after=after,
         applied=applied,
+        partial=applied and verdict != "OK",
+        # NOT "verdict": append_receipt enriches every receipt with its own
+        # `verdict` object (decision/reason), which would silently overwrite
+        # ours -- measured on this file's own tests.
+        apply_verdict=verdict,
+        calls=calls,
+        pending_calls=pending_calls,
+        diff_fields=sorted({d["field"] for d in diffs}),
+        weak_fields=weak_fields,
         weaken_reason=reason,
     )
 
@@ -200,65 +241,94 @@ def run_apply(
             "payload": payload, "diffs": diffs, "weak_fields": weak_fields,
         }
 
-    if not diffs:
-        _emit_apply_receipt(
-            before=live_norm, after=live_norm, reason=None, applied=False, receipts_file=receipts_file,
-        )
-        return {
-            "verdict": "OK", "applied": False, "changed": False,
-            "message": "nul wijzigingen: live branch-protection komt al overeen met de YAML",
-            "diffs": [],
-        }
-
-    reason: Optional[str] = None
-    if weakening:
-        reason = (allow_weaken_reason or "").strip()
-        if not reason:
-            return {
-                "verdict": "REFUSED", "applied": False, "changed": True,
-                "message": "verzwakking geweigerd zonder --allow-weaken: " + ", ".join(weak_fields),
-                "diffs": diffs, "weak_fields": weak_fields,
-            }
-
-    buckets = _diff_buckets(diffs)
+    # Everything from here on can mutate live protection, so everything from
+    # here on is inside the try: the receipt is written in the finally, from
+    # the calls that actually ran. Returning before writing it — which is
+    # what a failing second call used to do — leaves a mutated branch and a
+    # ledger that never heard about it.
     calls: List[str] = []
-
-    if buckets["protection"]:
-        proc = _put_protection(project_root, branch, payload, gh_bin=gh_bin)
-        if proc.returncode != 0:
-            return {
-                "verdict": "ERROR", "applied": False, "diffs": diffs,
-                "message": f"PUT protection faalde: {(proc.stderr or '').strip()[:300]}",
+    pending: List[str] = []
+    reason: Optional[str] = None
+    outcome: Dict[str, Any] = {}
+    try:
+        if not diffs:
+            outcome = {
+                "verdict": "OK", "applied": False, "changed": False,
+                "message": "nul wijzigingen: live branch-protection komt al overeen met de YAML",
+                "diffs": [],
             }
-        calls.append("protection")
+            return outcome
 
-    if buckets["required_signatures"]:
-        proc = _patch_required_signatures(project_root, branch, config.required_signatures, gh_bin=gh_bin)
-        if proc.returncode != 0:
-            return {
-                "verdict": "ERROR", "applied": bool(calls), "diffs": diffs,
-                "message": f"required_signatures faalde: {(proc.stderr or '').strip()[:300]}",
-            }
-        calls.append("required_signatures")
+        if weakening:
+            reason = (allow_weaken_reason or "").strip()
+            if not reason:
+                outcome = {
+                    "verdict": "REFUSED", "applied": False, "changed": True,
+                    "message": "verzwakking geweigerd zonder --allow-weaken: " + ", ".join(weak_fields),
+                    "diffs": diffs, "weak_fields": weak_fields,
+                }
+                return outcome
 
-    if buckets["repo.allow_auto_merge"]:
-        proc = _patch_repo_auto_merge(project_root, config.allow_auto_merge, gh_bin=gh_bin)
-        if proc.returncode != 0:
-            return {
-                "verdict": "ERROR", "applied": bool(calls), "diffs": diffs,
-                "message": f"repo.allow_auto_merge faalde: {(proc.stderr or '').strip()[:300]}",
-            }
-        calls.append("repo.allow_auto_merge")
+        buckets = _diff_buckets(diffs)
+        pending = [surface for surface in _WRITE_SURFACES if buckets[surface]]
 
-    _emit_apply_receipt(before=live_norm, after=yaml_norm, reason=reason, applied=True, receipts_file=receipts_file)
+        if buckets["protection"]:
+            proc = _put_protection(project_root, branch, payload, gh_bin=gh_bin)
+            if proc.returncode != 0:
+                outcome = {
+                    "verdict": "ERROR", "applied": False, "diffs": diffs,
+                    "message": f"PUT protection faalde: {(proc.stderr or '').strip()[:300]}",
+                }
+                return outcome
+            calls.append("protection")
+            pending.remove("protection")
 
-    message = f"toegepast: {', '.join(calls) if calls else 'geen schrijfacties'}"
-    if reason:
-        message += f" (OVERRIDE: {reason})"
-    return {
-        "verdict": "OK", "applied": True, "changed": True, "message": message,
-        "diffs": diffs, "weak_fields": weak_fields, "calls": calls,
-    }
+        if buckets["required_signatures"]:
+            proc = _patch_required_signatures(project_root, branch, config.required_signatures, gh_bin=gh_bin)
+            if proc.returncode != 0:
+                outcome = {
+                    "verdict": "ERROR", "applied": bool(calls), "diffs": diffs,
+                    "message": f"required_signatures faalde: {(proc.stderr or '').strip()[:300]}",
+                }
+                return outcome
+            calls.append("required_signatures")
+            pending.remove("required_signatures")
+
+        if buckets["repo.allow_auto_merge"]:
+            proc = _patch_repo_auto_merge(project_root, config.allow_auto_merge, gh_bin=gh_bin)
+            if proc.returncode != 0:
+                outcome = {
+                    "verdict": "ERROR", "applied": bool(calls), "diffs": diffs,
+                    "message": f"repo.allow_auto_merge faalde: {(proc.stderr or '').strip()[:300]}",
+                }
+                return outcome
+            calls.append("repo.allow_auto_merge")
+            pending.remove("repo.allow_auto_merge")
+
+        message = f"toegepast: {', '.join(calls) if calls else 'geen schrijfacties'}"
+        if reason:
+            message += f" (OVERRIDE: {reason})"
+        outcome = {
+            "verdict": "OK", "applied": True, "changed": True, "message": message,
+            "diffs": diffs, "weak_fields": weak_fields, "calls": calls,
+        }
+        return outcome
+    finally:
+        verdict = str(outcome.get("verdict") or "EXCEPTION")
+        if verdict == "OK":
+            after: Optional[Dict[str, Any]] = yaml_norm if calls else live_norm
+        elif verdict == "REFUSED":
+            after = live_norm
+        else:
+            after = None
+        try:
+            _emit_apply_receipt(
+                before=live_norm, after=after, reason=reason, applied=bool(calls),
+                verdict=verdict, calls=list(calls), pending_calls=list(pending),
+                diffs=diffs, weak_fields=list(weak_fields), receipts_file=receipts_file,
+            )
+        except Exception as exc:  # receipt failure must not mask the outcome
+            print(f"WAARSCHUWING: apply-receipt niet geschreven: {exc}", file=sys.stderr)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

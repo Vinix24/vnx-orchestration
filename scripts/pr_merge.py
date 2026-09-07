@@ -546,46 +546,68 @@ def _no_go_protection(message: str) -> Dict[str, Any]:
     return {"verdict": "NO-GO", "message": message, "overridden": False, "override_reason": None}
 
 
-def _door_blob_hash_gate(project_root: Path) -> Dict[str, Any]:
-    """Golf B, B1: the merge door only runs any of the branch-protection
-    preflight checks above from the checkout ON main — a fix-forward pushed
-    straight to a feature branch (bypassing review of pr_merge.py itself)
-    must not be able to weaken what this door enforces just by running from
-    a stale or edited local checkout. Compares the git blob hash of the
-    RUNNING ``scripts/pr_merge.py`` (``git hash-object``, computed locally)
-    against the sha GitHub reports for that same path on ``main`` (the
-    contents API's ``sha`` field IS a git blob hash — measured equal on this
-    repo's own ``scripts/pr_merge.py`` on 2026-09-07). Any mismatch refuses;
-    an unreadable local or remote hash refuses too (fail-closed).
-    """
-    local = subprocess.run(
-        ["git", "hash-object", "scripts/pr_merge.py"],
-        cwd=str(project_root), capture_output=True, text=True, timeout=15,
-    )
-    if local.returncode != 0:
-        return _no_go_protection(
-            "git hash-object op scripts/pr_merge.py faalde: deur-integriteit niet toetsbaar "
-            f"({(local.stderr or '').strip()[:200]})"
-        )
-    local_hash = (local.stdout or "").strip()
+#: Every file whose CONTENT decides what this door refuses. Hashing only the
+#: entry point was not enough: the entry point delegates its actual judgment
+#: to these libraries, so a one-line edit to ``is_weakening`` neutralizes the
+#: branch-protection preflight while ``scripts/pr_merge.py`` stays
+#: byte-identical to main and the integrity check reports GO (measured by the
+#: B1 read-seat on 2026-09-07 — that exact mutation passed unseen while 14
+#: tests went red on it).
+_DOOR_INTEGRITY_PATHS = (
+    "scripts/pr_merge.py",
+    "scripts/lib/forge_protection_drift.py",
+    "scripts/lib/merge_preflight_adr_check.py",
+    "scripts/lib/merge_preflight_ci_check.py",
+    "scripts/lib/contract_invalid_ledger.py",
+)
 
-    remote = _gh([
-        "api", "repos/{owner}/{repo}/contents/scripts/pr_merge.py?ref=main",
-        "--jq", ".sha",
-    ])
-    if remote.returncode != 0:
-        return _no_go_protection(
-            "sha van scripts/pr_merge.py op main kon niet worden opgevraagd: deur-integriteit "
-            f"niet toetsbaar ({(remote.stderr or '').strip()[:200]})"
+
+def _door_blob_hash_gate(project_root: Path) -> Dict[str, Any]:
+    """Golf B, B1: the merge door only runs its preflight checks from the
+    checkout ON main — a fix-forward pushed straight to a feature branch
+    (bypassing review of the door's own code) must not be able to weaken
+    what this door enforces just by running from a stale or edited local
+    checkout. Compares the git blob hash of every file in
+    ``_DOOR_INTEGRITY_PATHS`` (``git hash-object``, computed locally) against
+    the sha GitHub reports for that same path on ``main`` (the contents API's
+    ``sha`` field IS a git blob hash — measured equal on this repo's own
+    ``scripts/pr_merge.py`` on 2026-09-07). Any mismatch refuses, naming the
+    files that differ; an unreadable local or remote hash refuses too
+    (fail-closed).
+    """
+    mismatched: list[str] = []
+    for path in _DOOR_INTEGRITY_PATHS:
+        local = subprocess.run(
+            ["git", "hash-object", path],
+            cwd=str(project_root), capture_output=True, text=True, timeout=15,
         )
-    remote_hash = (remote.stdout or "").strip()
-    if not remote_hash or local_hash != remote_hash:
+        if local.returncode != 0:
+            return _no_go_protection(
+                f"git hash-object op {path} faalde: deur-integriteit niet toetsbaar "
+                f"({(local.stderr or '').strip()[:200]})"
+            )
+        local_hash = (local.stdout or "").strip()
+
+        remote = _gh([
+            "api", f"repos/{{owner}}/{{repo}}/contents/{path}?ref=main", "--jq", ".sha",
+        ])
+        if remote.returncode != 0:
+            return _no_go_protection(
+                f"sha van {path} op main kon niet worden opgevraagd: deur-integriteit "
+                f"niet toetsbaar ({(remote.stderr or '').strip()[:200]})"
+            )
+        remote_hash = (remote.stdout or "").strip()
+        if not remote_hash or local_hash != remote_hash:
+            mismatched.append(path)
+
+    if mismatched:
         return _no_go_protection(
-            "de draaiende scripts/pr_merge.py wijkt af van de versie op main: de deur draait "
-            "alleen uit de hoofd-checkout op main"
+            "de draaiende deur wijkt af van de versie op main (" + ", ".join(mismatched)
+            + "): de deur draait alleen uit de hoofd-checkout op main"
         )
     return {
-        "verdict": "GO", "message": "deur-integriteit: pr_merge.py identiek aan main",
+        "verdict": "GO",
+        "message": f"deur-integriteit: {len(_DOOR_INTEGRITY_PATHS)} deurbestanden identiek aan main",
         "overridden": False, "override_reason": None,
     }
 
@@ -602,27 +624,38 @@ def _run_branch_protection_gate(
 
     Four checks, in order, each a refusal on its own:
 
-    (a) Read main's YAML via the contents API (never a local ref — the door
-        never fetches). A 404 on EXACTLY that path is the bootstrap case (no
-        PR has ever applied a branch_protection.yaml to main yet): a no-op
-        GO, loudly. Any other read/parse failure blocks.
-    (b) Live protection on main must match main's own declared YAML — any
+    (a) The RUNNING door must be byte-identical to main's copy
+        (``_door_blob_hash_gate`` over ``_DOOR_INTEGRITY_PATHS``) — the door
+        only runs any of the checks below from the main checkout. FIRST, not
+        last: every step after this one has a branch that returns early, and
+        a check that proves the door is unedited is worthless when the
+        edited door can route around it. The bootstrap no-op in (b) did
+        exactly that.
+    (b) Read main's YAML via the contents API (never a local ref — the door
+        never fetches). A 404 on EXACTLY that path, at a ref confirmed to
+        exist, is the bootstrap case (no PR has ever applied a
+        branch_protection.yaml to main yet): a no-op GO, loudly. Any other
+        read/parse failure blocks — including a 404 whose ref cannot be
+        confirmed, which is indistinguishable from an unknown ref or an
+        unresolvable repo (see ``forge_protection_drift._confirm_ref_exists``).
+    (c) Live protection on main must match main's own declared YAML — any
         drift blocks, with the differing fields named. No override: a drift
         here means ``apply_branch_protection.py`` must be run first, not
         that this merge should be waved through.
-    (c) This PR's own version of the YAML (read at the PR's head sha, same
+    (d) This PR's own version of the YAML (read at the PR's head sha, same
         contents API) must not weaken main's version
         (``forge_protection_drift.is_weakening``). Deleting the file counts
         as the ultimate weakening. Blocks without ``--allow-weaken
         "<reason>"`` (empty reason refused, no silent bypass).
-    (d) The RUNNING ``scripts/pr_merge.py`` must be byte-identical to main's
-        (``_door_blob_hash_gate``) — the door only runs any of the above
-        from the main checkout.
 
-    No override besides ``--allow-weaken`` — a drift found in (b) or an
+    No override besides ``--allow-weaken`` — a drift found in (c) or an
     unreadable/unparseable state anywhere has no escape hatch.
     """
     project_root = SCRIPT_DIR.parent
+
+    door_check = _door_blob_hash_gate(project_root)
+    if door_check["verdict"] != "GO":
+        return door_check
 
     main_yaml = fetch_yaml_from_ref(project_root, "main", PROTECTION_YAML_RELATIVE_PATH)
     if main_yaml.not_found:
@@ -687,10 +720,6 @@ def _run_branch_protection_gate(
                 "overridden": True,
                 "override_reason": reason,
             }
-
-    door_check = _door_blob_hash_gate(project_root)
-    if door_check["verdict"] != "GO":
-        return door_check
 
     if weakening:
         return {

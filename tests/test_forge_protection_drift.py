@@ -415,11 +415,33 @@ class TestFetchLiveProtection:
 # fetch_yaml_from_ref() — 404 vs other failures (i)
 # ---------------------------------------------------------------------------
 
+def _contents_and_commits(
+    *, contents: "subprocess.CompletedProcess[str]", commits: "subprocess.CompletedProcess[str]",
+):
+    """A gh stub that answers the contents read and the ref-confirmation read
+    separately -- ``fetch_yaml_from_ref`` makes the second call only after a
+    404 on the first (see ``_confirm_ref_exists``)."""
+
+    def fake_run(argv, **kwargs):
+        joined = " ".join(argv)
+        if "/contents/" in joined:
+            return contents
+        if "/commits/" in joined:
+            return commits
+        raise AssertionError(f"unexpected gh call: {joined}")
+
+    return fake_run
+
+
 class TestFetchYamlFromRef:
     def test_404_is_not_found_not_error(self, monkeypatch, tmp_path):
+        """A 404 on the path AT A REF THAT EXISTS is the named not-found case."""
         monkeypatch.setattr(
             fpd.subprocess, "run",
-            lambda argv, **k: _err("gh: Not Found (HTTP 404)", 1),
+            _contents_and_commits(
+                contents=_err("gh: Not Found (HTTP 404)", 1),
+                commits=_ok("d" * 40),
+            ),
         )
         result = fpd.fetch_yaml_from_ref(tmp_path, "main")
         assert result.not_found is True
@@ -473,3 +495,228 @@ class TestFetchYamlFromRef:
         result = fpd.fetch_yaml_from_ref(tmp_path, "main")
         assert result.not_found is False
         assert result.error is not None
+
+
+class TestNotFoundRequiresAConfirmedRef:
+    """Fix-forward punt 2: a 404 is only "this ref has no such file" once the
+    ref itself is confirmed to exist. ``gh`` returns the same ``HTTP 404``
+    marker for an unknown ref and for an unresolvable repo, and the merge
+    door turns exactly that marker into a GO that skips every remaining
+    check -- so an unconfirmed ref must be a fail-closed error instead.
+    """
+
+    def test_404_on_an_unknown_ref_is_an_error_not_not_found(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            fpd.subprocess, "run",
+            _contents_and_commits(
+                contents=_err("gh: No commit found for the ref refs/heads/does-not-exist-xyz (HTTP 404)", 1),
+                commits=_err("gh: No commit found for the ref refs/heads/does-not-exist-xyz (HTTP 404)", 1),
+            ),
+        )
+        result = fpd.fetch_yaml_from_ref(tmp_path, "does-not-exist-xyz")
+        assert result.not_found is False
+        assert result.error is not None
+        assert "does-not-exist-xyz" in result.error
+
+    def test_404_on_an_unresolvable_repo_is_an_error_not_not_found(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            fpd.subprocess, "run",
+            _contents_and_commits(
+                contents=_err("gh: Not Found (HTTP 404)", 1),
+                commits=_err("gh: Not Found (HTTP 404)", 1),
+            ),
+        )
+        result = fpd.fetch_yaml_from_ref(tmp_path, "main")
+        assert result.not_found is False
+        assert result.error is not None
+
+    def test_an_empty_sha_from_the_confirmation_is_an_error(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            fpd.subprocess, "run",
+            _contents_and_commits(
+                contents=_err("gh: Not Found (HTTP 404)", 1),
+                commits=_ok(""),
+            ),
+        )
+        result = fpd.fetch_yaml_from_ref(tmp_path, "main")
+        assert result.not_found is False
+        assert result.error is not None
+
+    def test_a_missing_gh_during_confirmation_is_an_error(self, monkeypatch, tmp_path):
+        def fake_run(argv, **kwargs):
+            if "/contents/" in " ".join(argv):
+                return _err("gh: Not Found (HTTP 404)", 1)
+            raise FileNotFoundError("gh not found")
+
+        monkeypatch.setattr(fpd.subprocess, "run", fake_run)
+        result = fpd.fetch_yaml_from_ref(tmp_path, "main")
+        assert result.not_found is False
+        assert result.error is not None
+
+    def test_a_confirmed_head_sha_still_yields_not_found(self, monkeypatch, tmp_path):
+        """The PR-side use: the head sha exists, the file does not."""
+        head = "e" * 40
+        monkeypatch.setattr(
+            fpd.subprocess, "run",
+            _contents_and_commits(contents=_err("gh: Not Found (HTTP 404)", 1), commits=_ok(head)),
+        )
+        result = fpd.fetch_yaml_from_ref(tmp_path, head)
+        assert result.not_found is True
+        assert result.error is None
+
+
+# ---------------------------------------------------------------------------
+# An ABSENT required_pull_request_reviews block (fix-forward punt 1)
+# ---------------------------------------------------------------------------
+
+def _gh_live_stub(protection_payload: Dict[str, Any], *, allow_auto_merge: bool = False):
+    def fake_run(argv, **kwargs):
+        joined = " ".join(argv)
+        if "branches/main/protection" in joined:
+            return _ok(protection_payload)
+        if "rulesets" in joined:
+            return _ok([])
+        if argv[-1] == "repos/{owner}/{repo}":
+            return _ok({"allow_auto_merge": allow_auto_merge})
+        raise AssertionError(f"unexpected gh call: {joined}")
+
+    return fake_run
+
+
+def _single_check_yaml_norm(**overrides: Any) -> Dict[str, Any]:
+    """A YAML normalization whose checks[] matches ``_PROTECTION_PAYLOAD``'s
+    single entry, so a comparison against that payload isolates the field
+    under test instead of drowning it in check diffs."""
+    doc = _base_config_dict(**overrides)
+    doc["required_status_checks"]["checks"] = [{"context": "Profile A", "app_id": 15368}]
+    return fpd.to_normalized_dict(fpd.parse_protection_config(yaml.safe_dump(doc)))
+
+
+class TestAbsentPullRequestReviewsBlock:
+    """Fix-forward punt 1: GitHub OMITS ``required_pull_request_reviews``
+    from the GET when "Require a pull request before merging" is off --
+    exactly as it omits ``restrictions`` when unset. Normalizing an absent
+    block into the same zero/false object the YAML declares makes the most
+    consequential setting of the whole object invisible to both watchers.
+    """
+
+    def _live_without_the_block(self, monkeypatch, tmp_path) -> Dict[str, Any]:
+        payload = dict(_PROTECTION_PAYLOAD)
+        payload.pop("required_pull_request_reviews")
+        monkeypatch.setattr(fpd.subprocess, "run", _gh_live_stub(payload))
+        return fpd.fetch_live_protection(tmp_path, branch="main")
+
+    def test_control_the_block_present_gives_zero_drift(self, monkeypatch, tmp_path):
+        """The baseline that makes a zero below a measurement, not a bug."""
+        monkeypatch.setattr(fpd.subprocess, "run", _gh_live_stub(_PROTECTION_PAYLOAD))
+        live = fpd.fetch_live_protection(tmp_path, branch="main")
+        assert fpd.compare(_single_check_yaml_norm(), live) == []
+
+    def test_absent_block_normalizes_to_none_not_to_zeroes(self, monkeypatch, tmp_path):
+        live = self._live_without_the_block(monkeypatch, tmp_path)
+        assert live["required_pull_request_reviews"] is None
+
+    def test_absent_block_is_drift_against_a_yaml_that_declares_one(self, monkeypatch, tmp_path):
+        live = self._live_without_the_block(monkeypatch, tmp_path)
+        diffs = fpd.compare(_single_check_yaml_norm(), live)
+        assert [d["field"] for d in diffs] == ["required_pull_request_reviews"]
+        assert diffs[0]["a_present"] is True
+        assert diffs[0]["b_present"] is False
+
+    def test_absent_block_counts_as_a_weakening(self, monkeypatch, tmp_path):
+        live = self._live_without_the_block(monkeypatch, tmp_path)
+        weak, fields = fpd.is_weakening(_single_check_yaml_norm(), live)
+        assert weak is True
+        assert "required_pull_request_reviews" in fields
+
+    def test_adding_the_block_where_it_was_absent_is_not_a_weakening(self, monkeypatch, tmp_path):
+        live = self._live_without_the_block(monkeypatch, tmp_path)
+        weak, fields = fpd.is_weakening(live, _single_check_yaml_norm())
+        assert weak is False
+        assert fields == []
+
+    def test_a_present_block_still_diffs_field_by_field(self, monkeypatch, tmp_path):
+        """Control: the per-field comparison is untouched by the presence model."""
+        payload = json.loads(json.dumps(_PROTECTION_PAYLOAD))
+        payload["required_pull_request_reviews"]["required_approving_review_count"] = 2
+        monkeypatch.setattr(fpd.subprocess, "run", _gh_live_stub(payload))
+        live = fpd.fetch_live_protection(tmp_path, branch="main")
+        diffs = fpd.compare(_single_check_yaml_norm(), live)
+        assert [d["field"] for d in diffs] == [
+            "required_pull_request_reviews.required_approving_review_count"
+        ]
+
+    def test_yaml_may_declare_the_block_absent_with_an_explicit_null(self):
+        doc = _base_config_dict(required_pull_request_reviews=None)
+        config = fpd.parse_protection_config(yaml.safe_dump(doc))
+        assert config.required_pull_request_reviews_present is False
+        assert fpd.to_normalized_dict(config)["required_pull_request_reviews"] is None
+
+    def test_a_partial_block_in_the_yaml_is_still_refused(self):
+        doc = _base_config_dict()
+        del doc["required_pull_request_reviews"]["dismiss_stale_reviews"]
+        with pytest.raises(fpd.ProtectionConfigError, match="verplichte velden"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))
+
+
+class TestBypassPullRequestAllowances:
+    """Fix-forward punt 5: a bypass grant on the PR requirement lets named
+    users/teams/apps merge around it. Dropped in normalization, it is
+    invisible to the merge door and to ``vnx doctor`` alike.
+    """
+
+    def _live_with_a_bypass(self, monkeypatch, tmp_path) -> Dict[str, Any]:
+        payload = json.loads(json.dumps(_PROTECTION_PAYLOAD))
+        payload["required_pull_request_reviews"]["bypass_pull_request_allowances"] = {
+            "users": [{"login": "vincent"}],
+            "teams": [],
+            "apps": [{"slug": "some-bot"}],
+        }
+        monkeypatch.setattr(fpd.subprocess, "run", _gh_live_stub(payload))
+        return fpd.fetch_live_protection(tmp_path, branch="main")
+
+    def test_a_live_grant_survives_normalization(self, monkeypatch, tmp_path):
+        live = self._live_with_a_bypass(monkeypatch, tmp_path)
+        assert live["required_pull_request_reviews"]["bypass_pull_request_allowances"] == [
+            "apps:some-bot", "users:vincent",
+        ]
+
+    def test_a_live_grant_is_drift_against_a_yaml_without_one(self, monkeypatch, tmp_path):
+        live = self._live_with_a_bypass(monkeypatch, tmp_path)
+        diffs = fpd.compare(_single_check_yaml_norm(), live)
+        assert [d["field"] for d in diffs] == [
+            "required_pull_request_reviews.bypass_pull_request_allowances"
+        ]
+
+    def test_a_live_grant_counts_as_a_weakening(self, monkeypatch, tmp_path):
+        live = self._live_with_a_bypass(monkeypatch, tmp_path)
+        weak, fields = fpd.is_weakening(_single_check_yaml_norm(), live)
+        assert weak is True
+        assert "required_pull_request_reviews.bypass_pull_request_allowances" in fields
+
+    def test_removing_a_grant_is_not_a_weakening(self, monkeypatch, tmp_path):
+        live = self._live_with_a_bypass(monkeypatch, tmp_path)
+        weak, fields = fpd.is_weakening(live, _single_check_yaml_norm())
+        assert weak is False
+
+    def test_no_grant_anywhere_is_an_empty_list_not_a_missing_key(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(fpd.subprocess, "run", _gh_live_stub(_PROTECTION_PAYLOAD))
+        live = fpd.fetch_live_protection(tmp_path, branch="main")
+        assert live["required_pull_request_reviews"]["bypass_pull_request_allowances"] == []
+        assert _single_check_yaml_norm()["required_pull_request_reviews"][
+            "bypass_pull_request_allowances"
+        ] == []
+
+    def test_the_yaml_may_declare_a_grant_explicitly(self):
+        doc = _base_config_dict()
+        doc["required_pull_request_reviews"]["bypass_pull_request_allowances"] = {
+            "users": ["vincent"], "teams": [], "apps": [],
+        }
+        config = fpd.parse_protection_config(yaml.safe_dump(doc))
+        assert config.bypass_pull_request_allowances == ("users:vincent",)
+
+    def test_a_malformed_grant_in_the_yaml_is_refused(self):
+        doc = _base_config_dict()
+        doc["required_pull_request_reviews"]["bypass_pull_request_allowances"] = ["vincent"]
+        with pytest.raises(fpd.ProtectionConfigError, match="bypass_pull_request_allowances"):
+            fpd.parse_protection_config(yaml.safe_dump(doc))

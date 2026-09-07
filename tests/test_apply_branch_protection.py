@@ -134,7 +134,19 @@ class TestWeakenRefusal:
         assert result["verdict"] == "REFUSED"
         assert not put_calls
         assert any("checks[" in f for f in result["weak_fields"])
-        assert _load_receipts(receipts_path) == []
+
+        # Fix-forward punt 3: a refusal is a governance event too -- it is the
+        # moment someone tried to weaken live protection. Silence here means
+        # the attempt only ever existed in one terminal's scrollback.
+        applied = [
+            r for r in _load_receipts(receipts_path)
+            if r.get("event_type") == "branch_protection_applied"
+        ]
+        assert len(applied) == 1
+        assert applied[0]["apply_verdict"] == "REFUSED"
+        assert applied[0]["applied"] is False
+        assert applied[0]["calls"] == []
+        assert any("checks[" in f for f in applied[0]["weak_fields"])
 
     def test_empty_reason_is_refused(self, monkeypatch, receipts_path):
         live = self._live_with_an_extra_check()
@@ -238,3 +250,120 @@ class TestWriteBucketing:
 
         assert result["verdict"] == "ERROR"
         assert "422" in result["message"]
+
+
+class TestEveryOutcomeLeavesATrace:
+    """Fix-forward punt 3: ``_emit_apply_receipt`` sat after the three write
+    blocks, so exactly the runs that need a trace most -- a PUT that lands
+    followed by a second call that fails -- returned without writing one.
+    The mutation is real; the ledger did not know about it.
+    """
+
+    def _yaml_wanting_signatures_on(self, tmp_path: Path) -> Path:
+        """A YAML whose only extra demand over live is required_signatures:
+        true. Turning signatures ON is a STRENGTHENING, so nothing is refused
+        and both write buckets fire."""
+        text = YAML_PATH.read_text(encoding="utf-8")
+        assert "required_signatures: false" in text
+        patched = text.replace("required_signatures: false", "required_signatures: true")
+        path = tmp_path / "branch_protection.yaml"
+        path.write_text(patched, encoding="utf-8")
+        return path
+
+    def _live_needing_both_buckets(self) -> Dict[str, Any]:
+        live = _real_norm()
+        live["allow_force_pushes"] = True  # yaml says false -> protection PUT
+        live["required_signatures"] = False  # yaml says true -> signatures POST
+        return live
+
+    def test_a_half_applied_run_still_writes_a_receipt(self, monkeypatch, tmp_path, receipts_path):
+        monkeypatch.setattr(abp, "fetch_live_protection", lambda *a, **k: self._live_needing_both_buckets())
+        put_calls: List[Any] = []
+        monkeypatch.setattr(abp, "_put_protection", lambda *a, **k: put_calls.append(a) or _ok())
+        monkeypatch.setattr(
+            abp, "_patch_required_signatures", lambda *a, **k: _ok(1, stderr="API rate limit exceeded"),
+        )
+
+        result = abp.run_apply(
+            yaml_path=self._yaml_wanting_signatures_on(tmp_path), project_root=VNX_ROOT,
+        )
+
+        assert result["verdict"] == "ERROR"
+        assert result["applied"] is True
+        assert put_calls, "the PUT landed -- live protection was mutated"
+
+        applied = [
+            r for r in _load_receipts(receipts_path)
+            if r.get("event_type") == "branch_protection_applied"
+        ]
+        assert len(applied) == 1
+        receipt = applied[0]
+        assert receipt["apply_verdict"] == "ERROR"
+        assert receipt["applied"] is True
+        assert receipt["calls"] == ["protection"]
+        assert receipt["pending_calls"] == ["required_signatures"]
+        assert receipt["partial"] is True
+        assert receipt["after"] is None, "a partial mutation must not claim the YAML's state"
+        assert receipt["before"]["allow_force_pushes"] is True
+        assert receipt["status"] == "failure"
+
+    def test_a_failing_first_call_writes_a_receipt_with_nothing_applied(
+        self, monkeypatch, receipts_path,
+    ):
+        live = _real_norm()
+        live["allow_force_pushes"] = True
+        monkeypatch.setattr(abp, "fetch_live_protection", lambda *a, **k: live)
+        monkeypatch.setattr(abp, "_put_protection", lambda *a, **k: _ok(1, stderr="422 nope"))
+
+        result = abp.run_apply(yaml_path=YAML_PATH, project_root=VNX_ROOT)
+
+        assert result["verdict"] == "ERROR"
+        applied = [
+            r for r in _load_receipts(receipts_path)
+            if r.get("event_type") == "branch_protection_applied"
+        ]
+        assert len(applied) == 1
+        assert applied[0]["applied"] is False
+        assert applied[0]["calls"] == []
+        assert applied[0]["after"] is None
+
+    def test_a_full_apply_records_the_yaml_as_the_after_state(self, monkeypatch, receipts_path):
+        live = _real_norm()
+        live["allow_force_pushes"] = True
+        monkeypatch.setattr(abp, "fetch_live_protection", lambda *a, **k: live)
+        monkeypatch.setattr(abp, "_put_protection", lambda *a, **k: _ok())
+
+        result = abp.run_apply(yaml_path=YAML_PATH, project_root=VNX_ROOT)
+
+        assert result["verdict"] == "OK"
+        applied = [
+            r for r in _load_receipts(receipts_path)
+            if r.get("event_type") == "branch_protection_applied"
+        ]
+        assert len(applied) == 1
+        assert applied[0]["partial"] is False
+        assert applied[0]["after"]["allow_force_pushes"] is False
+        assert applied[0]["status"] == "success"
+
+    def test_an_exception_mid_apply_still_writes_a_receipt(self, monkeypatch, receipts_path):
+        """A timeout inside a write call is not a returned verdict at all --
+        the trace has to survive the exception on its way out."""
+        live = _real_norm()
+        live["allow_force_pushes"] = True
+        monkeypatch.setattr(abp, "fetch_live_protection", lambda *a, **k: live)
+
+        def boom(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+        monkeypatch.setattr(abp, "_put_protection", boom)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            abp.run_apply(yaml_path=YAML_PATH, project_root=VNX_ROOT)
+
+        applied = [
+            r for r in _load_receipts(receipts_path)
+            if r.get("event_type") == "branch_protection_applied"
+        ]
+        assert len(applied) == 1
+        assert applied[0]["apply_verdict"] == "EXCEPTION"
+        assert applied[0]["applied"] is False

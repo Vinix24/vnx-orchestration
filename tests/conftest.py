@@ -343,12 +343,22 @@ def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> No
     ``GH_TOKEN``), fail closed the same way the ADR-gate stub above
     (``_stub_adr_gate_gh_calls``) was added to prevent.
 
-    Stubs the NETWORK CALL (``pr_merge.fetch_yaml_from_ref``, the name
-    ``_run_branch_protection_gate`` calls first), not the gate function
-    itself — mirrors the ADR-gate stub's own reasoning. Tests that
-    specifically exercise this gate override ``pr_merge.fetch_yaml_from_ref``
-    / ``pr_merge.fetch_live_protection`` (or ``_run_branch_protection_gate``
-    wholesale) in the test body — same monkeypatch instance, later call wins.
+    Stubs the two OFFLINE-BREAKING steps, not the gate function itself —
+    mirrors the ADR-gate stub's own reasoning:
+
+    - ``pr_merge._door_blob_hash_gate``, the gate's FIRST step since the B1
+      fix-forward, which shells out to ``git hash-object`` plus one ``gh api
+      contents/...`` read per door file. It used to sit last, behind the
+      bootstrap branch below, so this fixture never had to account for it.
+    - ``pr_merge.fetch_yaml_from_ref``, the contents read of main's
+      ``scripts/forge/branch_protection.yaml``.
+
+    Tests that specifically exercise this gate override these names (or
+    ``_run_branch_protection_gate`` wholesale) in the test body — same
+    monkeypatch instance, later call wins. The door-integrity check has its
+    own direct coverage in tests/test_pr_merge_branch_protection.py
+    (``TestDoorBlobHashGate``, ``TestDoorBlobHashCoversTheWholeDoor``), so
+    defaulting it to GO here hides nothing.
     """
     try:
         import pr_merge
@@ -356,6 +366,13 @@ def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> No
         return
     from forge_protection_drift import YamlFetchResult
 
+    monkeypatch.setattr(
+        pr_merge, "_door_blob_hash_gate",
+        lambda project_root: {
+            "verdict": "GO", "message": "deur-integriteit: gestubd in de testsuite",
+            "overridden": False, "override_reason": None,
+        },
+    )
     monkeypatch.setattr(
         pr_merge, "fetch_yaml_from_ref",
         lambda *a, **k: YamlFetchResult(text=None, not_found=True, error=None),

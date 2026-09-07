@@ -72,7 +72,17 @@ _KNOWN_PPR_FIELDS = frozenset({
     "required_approving_review_count", "dismiss_stale_reviews",
     "require_code_owner_reviews", "require_last_push_approval",
 })
+#: Present in the PUT body and in a GET only once configured. Optional in the
+#: YAML (an absent key means "no bypass granted"), so a config written before
+#: this field was modelled keeps parsing — but it is COMPARED either way, so
+#: a grant appearing on live is drift against a YAML that stays silent.
+_OPTIONAL_PPR_FIELDS = frozenset({"bypass_pull_request_allowances"})
 _KNOWN_REPO_FIELDS = frozenset({"allow_auto_merge"})
+
+#: The three actor kinds a bypass allowance can name. Flattened to sorted
+#: ``"<kind>:<name>"`` strings so the live shape (objects carrying
+#: ``login``/``slug``) and the YAML shape (plain names) compare as equals.
+_BYPASS_KINDS = ("users", "teams", "apps")
 
 _BOOL_TOP_LEVEL_FIELDS = (
     "enforce_admins", "required_signatures", "required_linear_history",
@@ -106,10 +116,18 @@ class ProtectionConfig:
     strict: bool
     checks: Tuple[RequiredCheck, ...]
     pending_checks: Tuple[str, ...]
+    #: False when the YAML declares ``required_pull_request_reviews: null``,
+    #: i.e. "no pull-request requirement at all". Distinct from a present
+    #: block asking for zero approvals: GitHub OMITS the whole subobject from
+    #: a GET when the requirement is off (the same way it omits
+    #: ``restrictions`` when unset), so without this flag the strongest
+    #: setting in the object and its complete absence normalize identically.
+    required_pull_request_reviews_present: bool
     required_approving_review_count: int
     dismiss_stale_reviews: bool
     require_code_owner_reviews: bool
     require_last_push_approval: bool
+    bypass_pull_request_allowances: Tuple[str, ...]
     enforce_admins: bool
     required_signatures: bool
     required_linear_history: bool
@@ -123,13 +141,15 @@ class ProtectionConfig:
     rulesets: Tuple[str, ...]
 
 
-def _require_object_fields(obj: Any, known: frozenset, where: str) -> None:
+def _require_object_fields(
+    obj: Any, known: frozenset, where: str, *, optional: frozenset = frozenset(),
+) -> None:
     if not isinstance(obj, dict):
         raise ProtectionConfigError(f"{where} moet een object zijn, kreeg {type(obj).__name__}")
     missing = known - set(obj)
     if missing:
         raise ProtectionConfigError(f"{where} mist verplichte velden: {sorted(missing)}")
-    unknown = set(obj) - known
+    unknown = set(obj) - known - optional
     if unknown:
         raise ProtectionConfigError(f"{where} heeft onbekende velden: {sorted(unknown)}")
 
@@ -139,6 +159,63 @@ def _require_bool(obj: Dict[str, Any], field: str, where: str) -> bool:
     if not isinstance(value, bool):
         raise ProtectionConfigError(f"{where}.{field} moet een boolean zijn, kreeg {type(value).__name__}")
     return value
+
+
+def normalize_bypass_allowances(raw: Any) -> List[str]:
+    """A ``bypass_pull_request_allowances`` object flattened to sorted
+    ``"<kind>:<name>"`` strings.
+
+    Accepts both shapes it is fed: the live GET's objects (``{"users":
+    [{"login": "x"}]}``) and the YAML's plain names (``{"users": ["x"]}``).
+    Anything unrecognizable normalizes away rather than raising — the strict
+    side is :func:`_parse_bypass_allowances`, which validates the YAML at
+    parse time; a live response is not this repo's to validate, only to
+    compare.
+    """
+    if not isinstance(raw, dict):
+        return []
+    names: List[str] = []
+    for kind in _BYPASS_KINDS:
+        for entry in raw.get(kind) or []:
+            name: Any = entry
+            if isinstance(entry, dict):
+                name = entry.get("login") or entry.get("slug") or entry.get("name")
+            if isinstance(name, str) and name:
+                names.append(f"{kind}:{name}")
+    return sorted(set(names))
+
+
+def bypass_allowances_to_api_object(entries: Tuple[str, ...]) -> Dict[str, List[str]]:
+    """The inverse of :func:`normalize_bypass_allowances` for the PUT body."""
+    obj: Dict[str, List[str]] = {kind: [] for kind in _BYPASS_KINDS}
+    for entry in entries:
+        kind, _, name = entry.partition(":")
+        if kind in obj and name:
+            obj[kind].append(name)
+    return {kind: sorted(values) for kind, values in obj.items()}
+
+
+def _parse_bypass_allowances(raw: Any, where: str) -> Tuple[str, ...]:
+    """Strict YAML-side parse. Absent/null means "no bypass granted"."""
+    field = f"{where}.bypass_pull_request_allowances"
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise ProtectionConfigError(
+            f"{field} moet een object zijn met users/teams/apps, kreeg {type(raw).__name__}"
+        )
+    unknown = set(raw) - set(_BYPASS_KINDS)
+    if unknown:
+        raise ProtectionConfigError(f"{field} heeft onbekende velden: {sorted(unknown)}")
+    names: List[str] = []
+    for kind in _BYPASS_KINDS:
+        values = raw.get(kind)
+        if values is None:
+            continue
+        if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
+            raise ProtectionConfigError(f"{field}.{kind} moet een lijst van niet-lege strings zijn")
+        names.extend(f"{kind}:{v}" for v in values)
+    return tuple(sorted(set(names)))
 
 
 def parse_protection_config(raw_text: str) -> ProtectionConfig:
@@ -188,16 +265,31 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
     if not isinstance(pending_raw, list) or not all(isinstance(p, str) for p in pending_raw):
         raise ProtectionConfigError("pending_checks moet een lijst van strings zijn")
 
+    # An explicit `null` here declares "no pull-request requirement at all",
+    # which is what GitHub reports by omitting the subobject entirely. The
+    # values below are then unused (to_normalized_dict emits None for the
+    # whole block, build_put_payload sends null) — they are not a default
+    # standing in for a missing declaration.
     ppr = doc["required_pull_request_reviews"]
-    _require_object_fields(ppr, _KNOWN_PPR_FIELDS, "required_pull_request_reviews")
-    review_count = ppr["required_approving_review_count"]
-    if not isinstance(review_count, int) or isinstance(review_count, bool) or review_count < 0:
-        raise ProtectionConfigError(
-            "required_pull_request_reviews.required_approving_review_count moet een niet-negatieve integer zijn"
+    ppr_present = ppr is not None
+    review_count = 0
+    dismiss_stale = require_code_owner = require_last_push = False
+    bypass_allowances: Tuple[str, ...] = ()
+    if ppr_present:
+        _require_object_fields(
+            ppr, _KNOWN_PPR_FIELDS, "required_pull_request_reviews", optional=_OPTIONAL_PPR_FIELDS,
         )
-    dismiss_stale = _require_bool(ppr, "dismiss_stale_reviews", "required_pull_request_reviews")
-    require_code_owner = _require_bool(ppr, "require_code_owner_reviews", "required_pull_request_reviews")
-    require_last_push = _require_bool(ppr, "require_last_push_approval", "required_pull_request_reviews")
+        review_count = ppr["required_approving_review_count"]
+        if not isinstance(review_count, int) or isinstance(review_count, bool) or review_count < 0:
+            raise ProtectionConfigError(
+                "required_pull_request_reviews.required_approving_review_count moet een niet-negatieve integer zijn"
+            )
+        dismiss_stale = _require_bool(ppr, "dismiss_stale_reviews", "required_pull_request_reviews")
+        require_code_owner = _require_bool(ppr, "require_code_owner_reviews", "required_pull_request_reviews")
+        require_last_push = _require_bool(ppr, "require_last_push_approval", "required_pull_request_reviews")
+        bypass_allowances = _parse_bypass_allowances(
+            ppr.get("bypass_pull_request_allowances"), "required_pull_request_reviews",
+        )
 
     bool_values = {f: _require_bool(doc, f, "branch_protection.yaml") for f in _BOOL_TOP_LEVEL_FIELDS}
 
@@ -217,10 +309,12 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
         strict=strict,
         checks=tuple(checks),
         pending_checks=tuple(pending_raw),
+        required_pull_request_reviews_present=ppr_present,
         required_approving_review_count=review_count,
         dismiss_stale_reviews=dismiss_stale,
         require_code_owner_reviews=require_code_owner,
         require_last_push_approval=require_last_push,
+        bypass_pull_request_allowances=bypass_allowances,
         enforce_admins=bool_values["enforce_admins"],
         required_signatures=bool_values["required_signatures"],
         required_linear_history=bool_values["required_linear_history"],
@@ -248,12 +342,15 @@ def to_normalized_dict(config: ProtectionConfig) -> Dict[str, Any]:
             "strict": config.strict,
             "checks": [{"context": c.context, "app_id": c.app_id} for c in config.checks],
         },
-        "required_pull_request_reviews": {
+        # None, not a zero-filled object, when the YAML declares no
+        # pull-request requirement — see ProtectionConfig's field comment.
+        "required_pull_request_reviews": ({
             "required_approving_review_count": config.required_approving_review_count,
             "dismiss_stale_reviews": config.dismiss_stale_reviews,
             "require_code_owner_reviews": config.require_code_owner_reviews,
             "require_last_push_approval": config.require_last_push_approval,
-        },
+            "bypass_pull_request_allowances": list(config.bypass_pull_request_allowances),
+        } if config.required_pull_request_reviews_present else None),
         "enforce_admins": config.enforce_admins,
         "required_signatures": config.required_signatures,
         "required_linear_history": config.required_linear_history,
@@ -335,7 +432,22 @@ def fetch_live_protection(
             "app_id": app_id if isinstance(app_id, int) and app_id != ANY_APP_ID else None,
         })
 
-    ppr = protection.get("required_pull_request_reviews") or {}
+    # GitHub omits this subobject entirely when "Require a pull request
+    # before merging" is off — the same omission it makes for `restrictions`.
+    # Normalizing that absence into zeroes would make turning the PR
+    # requirement off produce no drift and no weakening at all.
+    raw_ppr = protection.get("required_pull_request_reviews")
+    ppr_norm: Optional[Dict[str, Any]] = None
+    if isinstance(raw_ppr, dict):
+        ppr_norm = {
+            "required_approving_review_count": int(raw_ppr.get("required_approving_review_count", 0)),
+            "dismiss_stale_reviews": bool(raw_ppr.get("dismiss_stale_reviews", False)),
+            "require_code_owner_reviews": bool(raw_ppr.get("require_code_owner_reviews", False)),
+            "require_last_push_approval": bool(raw_ppr.get("require_last_push_approval", False)),
+            "bypass_pull_request_allowances": normalize_bypass_allowances(
+                raw_ppr.get("bypass_pull_request_allowances")
+            ),
+        }
 
     def _enabled(field: str) -> bool:
         block = protection.get(field)
@@ -343,12 +455,7 @@ def fetch_live_protection(
 
     return {
         "required_status_checks": {"strict": bool(rsc.get("strict", False)), "checks": checks},
-        "required_pull_request_reviews": {
-            "required_approving_review_count": int(ppr.get("required_approving_review_count", 0)),
-            "dismiss_stale_reviews": bool(ppr.get("dismiss_stale_reviews", False)),
-            "require_code_owner_reviews": bool(ppr.get("require_code_owner_reviews", False)),
-            "require_last_push_approval": bool(ppr.get("require_last_push_approval", False)),
-        },
+        "required_pull_request_reviews": ppr_norm,
         "enforce_admins": _enabled("enforce_admins"),
         "required_signatures": _enabled("required_signatures"),
         "required_linear_history": _enabled("required_linear_history"),
@@ -376,10 +483,13 @@ class YamlFetchResult:
     """The result of fetching ``branch_protection.yaml`` at one git ref.
 
     ``not_found`` is a NAMED case, distinct from ``error``: a 404 on exactly
-    the queried path means "this ref has no such file" (the bootstrap case
-    when queried against main, or "this PR deletes the file" when queried
-    against a PR head) — never conflated with an unreadable/unparseable
-    response, which is a fail-closed ``error`` instead.
+    the queried path AT A REF THAT EXISTS means "this ref has no such file"
+    (the bootstrap case when queried against main, or "this PR deletes the
+    file" when queried against a PR head) — never conflated with an
+    unreadable/unparseable response, which is a fail-closed ``error``
+    instead. The "at a ref that exists" half is not free: it costs the
+    second call in :func:`_confirm_ref_exists`, because ``gh``'s 404 text is
+    identical for an unknown ref, an unresolvable repo, and a missing path.
     """
 
     text: Optional[str]
@@ -388,6 +498,38 @@ class YamlFetchResult:
 
 
 _HTTP_404_MARKERS = ("HTTP 404", "Not Found (HTTP 404)")
+
+
+def _confirm_ref_exists(
+    project_root: Path, ref: str, *, gh_bin: str, timeout: int,
+) -> Optional[str]:
+    """``None`` when ``ref`` demonstrably exists in this repo, otherwise the
+    reason it could not be confirmed.
+
+    A 404 from the contents API says nothing about WHICH part of the request
+    was not found. ``gh`` reports "Not Found (HTTP 404)" for an unresolvable
+    repo, "No commit found for the ref ... (HTTP 404)" for an unknown ref,
+    and the very same text for the one case the caller wants to act on: this
+    ref exists, that path does not. The merge door turns that case into a GO
+    that skips every remaining check, so an unconfirmed ref must not reach
+    it — this second call is what separates the three.
+    """
+    argv = [
+        gh_bin, "api", f"repos/{{owner}}/{{repo}}/commits/{quote(ref, safe='/')}", "--jq", ".sha",
+    ]
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(project_root), capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        return f"gh CLI niet beschikbaar: {exc}"
+    except subprocess.TimeoutExpired:
+        return f"gh api commits/{ref} liep vast na {timeout}s"
+    if proc.returncode != 0:
+        return f"gh api commits/{ref} faalde (rc={proc.returncode}): {(proc.stderr or '').strip()[:200]}"
+    if not (proc.stdout or "").strip().strip('"'):
+        return f"gh api commits/{ref} gaf geen sha terug"
+    return None
 
 
 def fetch_yaml_from_ref(
@@ -420,7 +562,17 @@ def fetch_yaml_from_ref(
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         if any(marker in stderr for marker in _HTTP_404_MARKERS):
-            return YamlFetchResult(text=None, not_found=True, error=None)
+            unconfirmed = _confirm_ref_exists(project_root, ref, gh_bin=gh_bin, timeout=timeout)
+            if unconfirmed is None:
+                return YamlFetchResult(text=None, not_found=True, error=None)
+            return YamlFetchResult(
+                text=None, not_found=False,
+                error=(
+                    f"404 op contents/{path}?ref={ref}, maar ref '{ref}' is zelf niet bevestigd "
+                    f"({unconfirmed}): niet te onderscheiden van een onbekende ref of een "
+                    "onbereikbare repo"
+                ),
+            )
         return YamlFetchResult(
             text=None, not_found=False,
             error=f"gh api contents/{path}?ref={ref} faalde (rc={proc.returncode}): {stderr[:200]}",
@@ -517,11 +669,29 @@ def compare(a: Dict[str, Any], b: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "b_present": bv is not _ABSENT,
             })
 
-    a_ppr = a.get("required_pull_request_reviews") or {}
-    b_ppr = b.get("required_pull_request_reviews") or {}
-    for f in ("required_approving_review_count", "dismiss_stale_reviews",
-              "require_code_owner_reviews", "require_last_push_approval"):
-        scalar(f"required_pull_request_reviews.{f}", a_ppr.get(f), b_ppr.get(f))
+    # Presence first, fields second: an absent block and a present block
+    # asking for zero approvals are DIFFERENT states (see
+    # ProtectionConfig.required_pull_request_reviews_present). Comparing
+    # field-by-field across that boundary would report them as equal.
+    a_ppr = a.get("required_pull_request_reviews")
+    b_ppr = b.get("required_pull_request_reviews")
+    a_ppr_present = isinstance(a_ppr, dict)
+    b_ppr_present = isinstance(b_ppr, dict)
+    if a_ppr_present != b_ppr_present:
+        diffs.append({
+            "field": "required_pull_request_reviews",
+            "a": a_ppr, "b": b_ppr,
+            "a_present": a_ppr_present, "b_present": b_ppr_present,
+        })
+    elif a_ppr_present:
+        for f in ("required_approving_review_count", "dismiss_stale_reviews",
+                  "require_code_owner_reviews", "require_last_push_approval"):
+            scalar(f"required_pull_request_reviews.{f}", a_ppr.get(f), b_ppr.get(f))
+        scalar(
+            "required_pull_request_reviews.bypass_pull_request_allowances",
+            sorted(a_ppr.get("bypass_pull_request_allowances") or []),
+            sorted(b_ppr.get("bypass_pull_request_allowances") or []),
+        )
 
     for f in _BOOL_TOP_LEVEL_FIELDS:
         scalar(f, a.get(f), b.get(f))
@@ -557,6 +727,18 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
         field = diff["field"]
         if field.startswith("required_status_checks.checks["):
             if diff["a_present"] and not diff["b_present"]:
+                weak_fields.append(field)
+            continue
+        if field == "required_pull_request_reviews":
+            # The whole pull-request requirement dropped: the single most
+            # consequential weakening the object can express.
+            if diff["a_present"] and not diff["b_present"]:
+                weak_fields.append(field)
+            continue
+        if field == "required_pull_request_reviews.bypass_pull_request_allowances":
+            # Any actor granted a bypass that did not have one merges around
+            # the requirement, however strong the rest of the block reads.
+            if set(diff["b"] or []) - set(diff["a"] or []):
                 weak_fields.append(field)
             continue
         if field == "required_pull_request_reviews.required_approving_review_count":
