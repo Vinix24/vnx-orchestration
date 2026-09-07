@@ -1149,6 +1149,41 @@
       "symbol": "_resolve_phantom_diff"
     },
     {
+      "file": "tests/test_plan_gate_panel.py",
+      "line": 33,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_plan_gate_panel.py",
+      "line": 1334,
+      "mechanism": "patch.object-attr",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_plan_gate_panel.py",
+      "line": 1335,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_plan_gate_panel.py",
+      "line": 1675,
+      "mechanism": "patch.object-attr",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_plan_gate_panel.py",
+      "line": 1676,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
       "file": "tests/test_provider_deadline_passthrough.py",
       "line": 66,
       "mechanism": "direct-call",
