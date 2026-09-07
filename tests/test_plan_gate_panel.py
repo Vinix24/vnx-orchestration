@@ -8,8 +8,11 @@ injectable dispatcher so the rule is tested without a live provider.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
 import sys
+import unittest.mock as mock
 from pathlib import Path
 
 import pytest
@@ -26,7 +29,14 @@ import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
 import planning_cli  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
+import envelope_adapters_claude  # noqa: E402
+from envelope_types import _AdapterResult  # noqa: E402
 from ndjson_hash_chain import walk_chain  # noqa: E402
+
+# Captured before any test patches plan_gate_panel.subprocess (which IS the stdlib
+# module), so a helper that intercepts lane spawns can still let ordinary
+# subprocesses — the git rev-parse that resolves the seat's checkout — through.
+_REAL_SUBPROCESS_RUN = subprocess.run
 
 
 @pytest.fixture(autouse=True)
@@ -1286,7 +1296,201 @@ def test_seat_ledger_no_verdict_value_is_not_abstain(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# BUG-2 (file-ref): the instruction passed to the claude/tmux lane must NOT
+# The claude seat runs on the HEADLESS lane (2026-09-07).
+#
+# These helpers patch the door's OWN ClaudeSubprocessAdapter by name, not a seam
+# the panel exposes for testing: a test that passes here proves the seat reached
+# `claude -p` through the same adapter run_envelope_headless_plan uses, and a
+# rename on the door's side breaks these tests instead of silently passing them.
+# --------------------------------------------------------------------------
+
+def _adapter_ok() -> _AdapterResult:
+    """What the adapter returns for a seat that ran to completion."""
+    return _AdapterResult(returncode=0, completion_text="", status="success")
+
+
+def _adapter_timeout() -> _AdapterResult:
+    """What the adapter returns for a seat that hit its deadline."""
+    return _AdapterResult(
+        returncode=1, completion_text="", status="timeout", timed_out=True,
+    )
+
+
+def _patch_headless_seat(calls: list, *, report_body=None, result=None):
+    """Patch ClaudeSubprocessAdapter.run and record every seat run.
+
+    ``report_body`` None means the worker authored nothing — the case
+    dispatch_govern covers by synthesizing a body carrying
+    SYNTHESIZED_REPORT_MARKER, which the panel reads as no_verdict.
+    """
+    def _run(self, spec, event_writer=None, cwd=None):
+        calls.append({"spec": spec, "cwd": cwd, "env": dict(os.environ)})
+        if report_body is not None:
+            out = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(report_body, encoding="utf-8")
+        return result if result is not None else _adapter_ok()
+
+    return mock.patch.object(
+        envelope_adapters_claude.ClaudeSubprocessAdapter, "run", _run,
+    )
+
+
+def _forbid_lane_subprocess(cmd, **kwargs):
+    """subprocess.run stand-in that fails the test if a seat shells out to a LANE.
+
+    ``plan_gate_panel.subprocess`` is the stdlib module itself, so patching it
+    intercepts every subprocess in the call tree — including the ``git rev-parse``
+    that resolves the seat's checkout. Only a lane script is the thing under test.
+    """
+    joined = " ".join(str(c) for c in cmd)
+    if "_dispatch.py" in joined:
+        raise AssertionError(
+            "the claude seat shelled out to a lane script instead of running "
+            f"headless: {joined}"
+        )
+    return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+
+
+def _single_claude_panel():
+    return [{"label": "opus", "provider": "claude", "model_arg": "opus"}]
+
+
+def test_claude_seat_runs_on_the_headless_lane_not_tmux(tmp_path):
+    """A claude seat reaches `claude -p` through the door's ClaudeSubprocessAdapter.
+
+    Until 2026-09-07 it shelled out to tmux_interactive_dispatch.py. That lane's
+    bracketed-paste delivery handed the worker only the LAST LINE of the
+    instruction ("...as the very last step."): on 2026-09-06 three opus seats
+    asked what the task was and then sat until their deadline (906s / 907s /
+    2400s), so every plan-gate with a claude seat that day ended without its
+    verdict and was decided by the tiebreaker.
+    """
+    calls: list = []
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
+    did = "plan-gate-feat-headless-aaa11111"
+
+    with _patch_headless_seat(calls, report_body=_make_report_with_fence("pass")):
+        with mock.patch.object(
+            pgp.subprocess, "run", side_effect=_forbid_lane_subprocess,
+        ):
+            report = dispatcher("claude", "opus", "PLAN_BODY_MARKER_HEADLESS\n", did)
+
+    assert pgp.VERDICT_FENCE in report
+    assert len(calls) == 1, "the claude seat must run exactly one headless dispatch"
+    spec = calls[0]["spec"]
+    assert spec.provider == "claude"
+    assert spec.model == "opus", "the seat's model_arg must reach the lane"
+    assert spec.role == "plan-reviewer"
+    assert spec.deadline_seconds == 60, "the seat timeout must be the lane deadline"
+    assert spec.dispatch_id == did
+    assert Path(spec.data_dir) == tmp_path
+    # The file-ref instruction survives the lane switch: the plan body is read
+    # from disk, never inlined into the prompt (BUG-2 stays fixed).
+    assert "PLAN_BODY_MARKER_HEADLESS" not in spec.instruction
+    assert "independent plan reviewer" in spec.instruction.lower()
+    assert str(tmp_path / "unified_reports" / f"{did}.md") in spec.instruction
+    # cwd is the shared checkout — a plan review reads, it never needs a worktree.
+    assert calls[0]["cwd"] is not None
+    assert Path(calls[0]["cwd"]).is_dir()
+
+
+def test_claude_seat_headless_pins_data_dir_and_scoped_env(tmp_path, monkeypatch):
+    """OI-1153 on the headless lane: the pins bind, and they are scoped to the seat.
+
+    ``VNX_DATA_DIR`` + ``VNX_DATA_DIR_EXPLICIT=1`` keep the seat's report write
+    path and ``_read_report``'s read-back base the same directory.
+    ``VNX_WORKER_SCOPED=1`` is what makes subprocess_adapter build the argv from
+    the plan-reviewer permission profile instead of the blanket
+    ``--dangerously-skip-permissions`` (subprocess_adapter._build_worker_scope_args
+    reads the flag in THIS process while building the argv, so a child-only env
+    would not bind it).
+    """
+    # An ambient value that is NOT the dispatcher's base, so a pass proves the seat
+    # pinned its own dir rather than inheriting whatever the process happened to carry.
+    ambient = tmp_path / "_ambient_store"
+    ambient.mkdir()
+    monkeypatch.setenv("VNX_DATA_DIR", str(ambient))
+    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
+
+    calls: list = []
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
+    with _patch_headless_seat(calls, report_body=_make_report_with_fence("pass")):
+        dispatcher("claude", "opus", "plan text", "plan-gate-feat-env-bbb22222")
+
+    env = calls[0]["env"]
+    assert env.get("VNX_DATA_DIR") == str(tmp_path)
+    assert env.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    assert env.get("VNX_WORKER_SCOPED") == "1"
+    # The pin is a seat-scoped loan: restored exactly, including the two keys that
+    # did not exist before the run.
+    assert os.environ.get("VNX_DATA_DIR") == str(ambient)
+    assert "VNX_DATA_DIR_EXPLICIT" not in os.environ
+    assert "VNX_WORKER_SCOPED" not in os.environ
+
+
+def test_headless_seat_that_authors_a_fenced_report_scores(tmp_path):
+    """A headless run whose worker writes a fenced report at the expected path scores."""
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
+
+    calls: list = []
+    with _patch_headless_seat(calls, report_body=_make_report_with_fence("pass")):
+        out = pgp.run_panel(
+            doc,
+            track_id="feat-headless-scores",
+            project_id="p1",
+            panel=_single_claude_panel(),
+            data_dir=str(tmp_path),
+        )
+
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["dispatched"] is True
+    assert opus["parse_error"] is False
+    assert opus["no_verdict"] is False
+    assert opus["verdict"] == "pass"
+    assert out["decision"] == "PASS"
+
+
+def test_headless_seat_that_writes_no_report_is_no_verdict_not_a_crash(
+    tmp_path, monkeypatch,
+):
+    """A headless run that authors nothing books no_verdict — it must not crash.
+
+    govern() synthesizes the body (SYNTHESIZED_REPORT_MARKER) exactly as it does
+    on the tmux lane, so the seat lands in the OI-1066 no-verdict category ("the
+    lane never delivered") rather than the abstain category ("the lane answered
+    but malformed its fence"), and the report + receipt still exist.
+    """
+    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Problem\n", encoding="utf-8")
+
+    calls: list = []
+    with _patch_headless_seat(calls, report_body=None, result=_adapter_timeout()):
+        out = pgp.run_panel(
+            doc,
+            track_id="feat-headless-silent",
+            project_id="p1",
+            panel=_single_claude_panel(),
+            data_dir=str(tmp_path),
+        )
+
+    opus = next(p for p in out["panelists"] if p["label"] == "opus")
+    assert opus["dispatched"] is True
+    assert opus["no_verdict"] is True
+    assert opus["parse_error"] is False
+    # Every seat no-verdict -> the infrastructure floor, never a content REVISE.
+    assert out["decision"] == "INFRA_FAIL"
+    # Governance still produced the seat's report on the path the panel reads.
+    emitted = tmp_path / "unified_reports" / f"{opus['report_path']}.md"
+    assert emitted.is_file()
+    assert pgp.SYNTHESIZED_REPORT_MARKER in emitted.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# BUG-2 (file-ref): the instruction passed to the claude seat must NOT
 # contain the full plan doc body.
 # --------------------------------------------------------------------------
 
@@ -1326,92 +1530,59 @@ def test_claude_lane_instruction_does_not_contain_full_doc_body(tmp_path):
 
 def test_claude_lane_dispatcher_writes_temp_file_and_cleans_up(tmp_path):
     """The claude-lane dispatcher must write a temp file, pass its path, and clean up."""
-    import glob
-    import os
-    import tempfile as _tempfile
-
     plan_content = "PLAN_BODY_FOR_TEMPFILE_TEST\n"
     doc = tmp_path / "plan.md"
     doc.write_text(plan_content, encoding="utf-8")
 
-    seen_instructions: list = []
-    seen_tmp_paths: list = []
-
-    def _mock_subprocess_run(cmd, **kwargs):
-        # Intercept the subprocess call to tmux_interactive_dispatch.
-        # Extract the --instruction value from the command.
-        try:
-            idx = cmd.index("--instruction")
-            instr = cmd[idx + 1]
-            seen_instructions.append(instr)
-            # Find any temp file path referenced in the instruction (lines with absolute paths).
-            for line in instr.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("/") and "vnx_plan_review" in stripped:
-                    seen_tmp_paths.append(stripped)
-        except (ValueError, IndexError):
-            pass
-
-        import subprocess as _sp
-        result = _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-        return result
-
-    import plan_gate_panel as _pgp
-    import unittest.mock as mock
-
-    authored_report = _make_report_with_fence("pass")
-    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
-        with mock.patch.object(_pgp, "_read_report", return_value=authored_report):
-            out = pgp.run_panel(
-                doc,
-                track_id="feat-tempfile",
-                project_id="p1",
-                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
-                data_dir=str(tmp_path),
-            )
+    calls: list = []
+    with _patch_headless_seat(calls, report_body=_make_report_with_fence("pass")):
+        out = pgp.run_panel(
+            doc,
+            track_id="feat-tempfile",
+            project_id="p1",
+            panel=_single_claude_panel(),
+            data_dir=str(tmp_path),
+        )
 
     assert out["decision"] == "PASS"
-    # The instruction given to the tmux lane must NOT contain the plan body.
-    assert len(seen_instructions) == 1
-    assert "PLAN_BODY_FOR_TEMPFILE_TEST" not in seen_instructions[0], (
+    # The instruction given to the headless lane must NOT contain the plan body.
+    assert len(calls) == 1
+    instruction = calls[0]["spec"].instruction
+    assert "PLAN_BODY_FOR_TEMPFILE_TEST" not in instruction, (
         "full plan doc was inlined into the claude-lane instruction — BUG-2 not fixed"
     )
-    # The temp file must have been cleaned up after the subprocess returned.
+    # The temp file must have been cleaned up after the lane returned.
+    seen_tmp_paths = [
+        line.strip()
+        for line in instruction.splitlines()
+        if line.strip().startswith("/") and "vnx_plan_review" in line
+    ]
+    assert seen_tmp_paths, "the instruction must reference the temp plan doc"
     for p in seen_tmp_paths:
         assert not os.path.exists(p), f"temp doc file not cleaned up: {p}"
 
 
 # --------------------------------------------------------------------------
 # OI-811: _make_default_dispatcher is reused by non-plan-review callers (the vnx
-# deliberation panel). A caller-supplied ``role`` must (a) route the claude/tmux lane
+# deliberation panel). A caller-supplied ``role`` must (a) route the claude seat
 # through the GENERIC file-ref instruction, never the "you are an independent plan
-# reviewer... review the IMPLEMENTATION PLAN" framing, and (b) be stamped as --role on
-# both the claude/tmux lane and the provider lane so govern()/phantom-guard evaluate the
+# reviewer... review the IMPLEMENTATION PLAN" framing, and (b) be stamped as the role on
+# both the headless lane and the provider lane so govern()/phantom-guard evaluate the
 # dispatch under its real role instead of a hardcoded plan-reviewer.
 # --------------------------------------------------------------------------
 
 def test_default_role_is_still_plan_reviewer_for_backward_compat(tmp_path):
     """run_panel's own dispatcher (no role kwarg) must keep routing as plan-reviewer."""
-    import unittest.mock as mock
-
-    seen_cmds = []
-
-    def _mock_subprocess_run(cmd, **kwargs):
-        seen_cmds.append(cmd)
-        import subprocess as _sp
-        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
+    calls: list = []
     dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
 
-    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
-        with mock.patch.object(pgp, "_read_report", return_value=_make_report_with_fence("pass")):
-            dispatcher("claude", "opus", "some plan text", "plan-gate-feat-x-opus-abc123")
+    with _patch_headless_seat(calls, report_body=_make_report_with_fence("pass")):
+        dispatcher("claude", "opus", "some plan text", "plan-gate-feat-x-opus-abc123")
 
-    assert len(seen_cmds) == 1
-    cmd = seen_cmds[0]
-    assert cmd[cmd.index("--role") + 1] == "plan-reviewer"
-    instr = cmd[cmd.index("--instruction") + 1]
-    assert "independent plan reviewer" in instr.lower()
+    assert len(calls) == 1
+    spec = calls[0]["spec"]
+    assert spec.role == "plan-reviewer"
+    assert "independent plan reviewer" in spec.instruction.lower()
 
 
 def test_non_plan_role_claude_lane_uses_generic_instruction_not_plan_framing(tmp_path):
@@ -1419,29 +1590,21 @@ def test_non_plan_role_claude_lane_uses_generic_instruction_not_plan_framing(tmp
     'independent plan reviewer... IMPLEMENTATION PLAN' review — that framing caused a
     plan-reviewer-role worker to correctly reject a non-plan artifact ('this is not a
     plan'), corrupting the deliberation panel's stage output."""
-    import unittest.mock as mock
-
-    seen_cmds = []
-
-    def _mock_subprocess_run(cmd, **kwargs):
-        seen_cmds.append(cmd)
-        import subprocess as _sp
-        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
+    calls: list = []
     dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60, role="deliberation-panelist")
 
-    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
-        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
-            dispatcher(
-                "claude", "sonnet",
-                "You are one seat on a deliberation panel. QUESTION: audit src/",
-                "panel-sweep-diverge-0-abc123",
-            )
+    with _patch_headless_seat(calls, report_body="panel seat analysis"):
+        dispatcher(
+            "claude", "sonnet",
+            "You are one seat on a deliberation panel. QUESTION: audit src/",
+            "panel-sweep-diverge-0-abc123",
+        )
 
-    assert len(seen_cmds) == 1
-    cmd = seen_cmds[0]
-    assert cmd[cmd.index("--role") + 1] == "deliberation-panelist"
-    instr = cmd[cmd.index("--instruction") + 1]
+    assert len(calls) == 1
+    spec = calls[0]["spec"]
+    assert spec.role == "deliberation-panelist"
+    assert spec.model == "sonnet"
+    instr = spec.instruction
     assert "independent plan reviewer" not in instr.lower()
     assert "implementation plan" not in instr.lower()
     # the file-ref benefit (short instruction, doc read from disk) is preserved
@@ -1475,56 +1638,57 @@ def test_non_plan_role_provider_lane_passes_role_through(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# scoped-spawn fix (2026-07-14): tmux_interactive_dispatch.dispatch()'s D2.2 scoping
-# precondition (tmux_interactive_dispatch.py, "D2.2 scoping precondition" -- fail-closed:
-# a working_tree_only dispatch is refused unless the env carries VNX_WORKER_SCOPED=1 or
-# VNX_ENFORCE_WORKER_PERMISSIONS=1) is deterministic and already has direct test coverage
-# in tests/test_working_tree_only.py (test_default_env_working_tree_only_is_rejected /
-# test_scoped_opt_in_working_tree_only_is_accepted_by_precondition) -- not duplicated here.
-# What's new in THIS module: the claude/tmux-lane subprocess env plan_gate_panel builds
-# must actually set the flag so that precondition is satisfied instead of tripping it.
+# scoped-spawn (2026-07-14, carried to the headless lane 2026-09-07): the tmux lane
+# needed VNX_WORKER_SCOPED=1 to satisfy its D2.2 --working-tree-only precondition. On the
+# headless lane the same flag does the job that precondition was standing in for: it
+# makes subprocess_adapter build the seat's argv from the ROLE's permission profile
+# instead of the blanket --dangerously-skip-permissions. So the pin is not a leftover —
+# without it a plan-review seat would run in the shared checkout with full write rights.
 # --------------------------------------------------------------------------
 
-def test_claude_lane_dispatcher_sets_scoped_spawn_env(tmp_path, monkeypatch):
-    """The claude/tmux-lane subprocess env must carry VNX_WORKER_SCOPED=1.
+def test_claude_seat_scoped_pin_binds_the_read_only_plan_reviewer_profile(
+    tmp_path, monkeypatch,
+):
+    """Under the dispatcher's pin, the seat's argv is role-scoped, not skip-permissions.
 
-    Without it, tmux_interactive_dispatch.dispatch()'s D2.2 scoping precondition
-    refuses every --working-tree-only dispatch this lane sends (working_tree_only
-    requires a scoped detached spawn) before any report is written -- the opus/claude
-    seat's silent NO-VERDICT root cause. The base env must NOT already carry the flag,
-    so a pass here proves the dispatcher sets it rather than an ambient leak.
+    Fed through the REAL subprocess_adapter._build_worker_scope_args (the function
+    that builds the claude argv head) so this proves the flag's effect, not just
+    its presence in a dict.
     """
     monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
-    doc = tmp_path / "plan.md"
-    doc.write_text("## Problem\n", encoding="utf-8")
+    monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
 
-    seen_envs: list = []
+    import subprocess_adapter
 
-    def _mock_subprocess_run(cmd, **kwargs):
-        seen_envs.append(kwargs.get("env"))
-        import subprocess as _sp
-        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+    calls: list = []
+    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
+    scope_args: list = []
 
-    import plan_gate_panel as _pgp
-    import unittest.mock as mock
+    def _run(self, spec, event_writer=None, cwd=None):
+        calls.append(spec)
+        scope_args.extend(subprocess_adapter._build_worker_scope_args(spec.role))
+        out = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_make_report_with_fence("pass"), encoding="utf-8")
+        return _adapter_ok()
 
-    authored_report = _make_report_with_fence("pass")
-    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
-        with mock.patch.object(_pgp, "_read_report", return_value=authored_report):
-            pgp.run_panel(
-                doc,
-                track_id="feat-scoped",
-                project_id="p1",
-                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
-                data_dir=str(tmp_path),
-            )
+    with mock.patch.object(
+        envelope_adapters_claude.ClaudeSubprocessAdapter, "run", _run,
+    ):
+        dispatcher("claude", "opus", "plan text", "plan-gate-feat-scoped-ccc33333")
 
-    assert len(seen_envs) == 1
-    assert seen_envs[0] is not None
-    assert seen_envs[0].get("VNX_WORKER_SCOPED") == "1", (
-        "claude/tmux-lane subprocess env must set VNX_WORKER_SCOPED=1 so the "
-        "--working-tree-only D2.2 fail-closed precondition is satisfied"
+    assert len(calls) == 1
+    assert "--dangerously-skip-permissions" not in scope_args, (
+        "the seat must not run with blanket permissions in the shared checkout"
     )
+    assert "--allowedTools" in scope_args
+    allowed = scope_args[scope_args.index("--allowedTools") + 1].split(",")
+    assert "Edit" not in allowed and "MultiEdit" not in allowed, (
+        "the plan-reviewer profile denies Edit — a review never mutates code"
+    )
+    assert "--disallowedTools" in scope_args
+    denied = scope_args[scope_args.index("--disallowedTools") + 1].split(",")
+    assert "Edit" in denied
 
 
 def test_provider_lane_dispatcher_does_not_set_scoped_spawn_env(tmp_path, monkeypatch):
@@ -1566,39 +1730,13 @@ def test_provider_lane_dispatcher_does_not_set_scoped_spawn_env(tmp_path, monkey
 # --------------------------------------------------------------------------
 # OI-1153: the seat subprocess must inherit VNX_DATA_DIR (+ VNX_DATA_DIR_EXPLICIT=1)
 # pinned to the data dir the dispatcher resolved, or the lane re-resolves its own
-# (provider_dispatch._resolve_data_dir / tmux lane _resolve_state_dir) and the seat
-# report lands outside the dir _read_report reads back from — e.g. the legacy
-# ~/.vnx-data/unified_reports root. The base env must NOT already carry the flag so a
-# pass proves the dispatcher sets it rather than an ambient leak.
+# (provider_dispatch._resolve_data_dir) and the seat report lands outside the dir
+# _read_report reads back from — e.g. the legacy ~/.vnx-data/unified_reports root. The
+# base env must NOT already carry the flag so a pass proves the dispatcher sets it
+# rather than an ambient leak. The claude seat's half of this lives in
+# test_claude_seat_headless_pins_data_dir_and_scoped_env (same two keys, plus the
+# restore-after check the subprocess form could not make).
 # --------------------------------------------------------------------------
-
-def test_claude_lane_dispatcher_sets_vnx_data_dir_env(tmp_path, monkeypatch):
-    """The claude/tmux-lane subprocess env must carry VNX_DATA_DIR + EXPLICIT pinned
-    to the dispatcher's resolved base so the seat writes its report where the panel
-    reads it back, not the legacy ~/.vnx-data/unified_reports root."""
-    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
-    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
-
-    seen_envs: list = []
-
-    def _mock_subprocess_run(cmd, **kwargs):
-        seen_envs.append(kwargs.get("env"))
-        import subprocess as _sp
-        return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
-
-    import plan_gate_panel as _pgp
-    import unittest.mock as mock
-
-    dispatcher = pgp._make_default_dispatcher(str(tmp_path), 60)
-    with mock.patch.object(pgp.subprocess, "run", side_effect=_mock_subprocess_run):
-        with mock.patch.object(pgp, "_read_report", return_value="panel seat analysis"):
-            dispatcher("claude", "sonnet", "panel prompt", "panel-sweep-diverge-0-abc123")
-
-    assert len(seen_envs) == 1
-    assert seen_envs[0] is not None
-    assert seen_envs[0].get("VNX_DATA_DIR") == str(tmp_path)
-    assert seen_envs[0].get("VNX_DATA_DIR_EXPLICIT") == "1"
-
 
 def test_provider_lane_dispatcher_sets_vnx_data_dir_env(tmp_path, monkeypatch):
     """OI-1153 applies to provider lanes too: kimi/glm/deepseek route through
@@ -1732,49 +1870,43 @@ def test_provider_lane_task_class_disarms_kimi_fabrication_guard_on_clean_worktr
     mock_check.assert_not_called()
 
 
-def test_claude_lane_no_report_error_surfaces_stdout_failure_reason(tmp_path):
-    """The 'no report' RuntimeError must include proc.stdout, not just stderr.
+def test_claude_seat_no_report_error_surfaces_the_lane_failure(tmp_path, monkeypatch):
+    """When even govern() leaves no report, the seat error must name the lane failure.
 
-    tmux_interactive_dispatch's CLI prints the InteractiveDispatchResult (incl. the
-    actionable failure_reason, e.g. the D2.2 scoping refusal) as JSON to STDOUT. The
-    previous stderr-only message masked the real cause behind an unrelated red herring
-    (a stray 'staging_validator: unstaged dispatch override' stderr line) for a full day.
+    On the tmux lane the actionable reason (e.g. the D2.2 scoping refusal) was
+    printed as JSON to STDOUT and the stderr-only message masked it behind an
+    unrelated red herring for a full day. The headless lane hands that reason
+    back in-process on the adapter result, so it must reach the seat's error
+    instead of being swallowed.
     """
-    import json
-
+    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
-    def _mock_subprocess_run(cmd, **kwargs):
-        import subprocess as _sp
-        stdout = json.dumps({
-            "success": False,
-            "dispatch_id": "whatever",
-            "failure_reason": "working_tree_only requires a scoped detached spawn",
-        })
-        return _sp.CompletedProcess(
-            cmd, returncode=1, stdout=stdout,
-            stderr="staging_validator: unstaged dispatch override",
-        )
+    failed = _AdapterResult(
+        returncode=1,
+        completion_text="",
+        status="failure",
+        error="unknown_role: plan-reviewer absent from every register",
+    )
 
-    import plan_gate_panel as _pgp
-    import unittest.mock as mock
-
-    with mock.patch.object(_pgp.subprocess, "run", side_effect=_mock_subprocess_run):
-        with mock.patch.object(_pgp, "_read_report", return_value=None):
+    calls: list = []
+    with _patch_headless_seat(calls, report_body=None, result=failed):
+        # govern() emits nothing either -> the seat has no report at all.
+        with mock.patch.object(pgp, "_read_report", return_value=None):
             out = pgp.run_panel(
                 doc,
                 track_id="feat-diag",
                 project_id="p1",
-                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+                panel=_single_claude_panel(),
                 data_dir=str(tmp_path),
             )
 
     opus = next(p for p in out["panelists"] if p["label"] == "opus")
     assert opus["dispatched"] is False
-    assert "working_tree_only requires a scoped detached spawn" in opus["error"], (
-        "the real failure_reason (printed to stdout by tmux_interactive_dispatch's CLI) "
-        "must be surfaced, not swallowed behind a stderr-only error message"
+    assert "unknown_role" in opus["error"], (
+        "the adapter's failure reason must be surfaced, not swallowed behind a "
+        "bare returncode"
     )
 
 
@@ -1976,21 +2108,13 @@ def test_resolve_data_dir_unresolvable_project_id_fails_loudly(tmp_path, monkeyp
         pgp._resolve_data_dir(None)
 
 
-def _completed_process():
-    import subprocess as _sp
-    return _sp.CompletedProcess([], returncode=0, stdout="", stderr="")
-
-
 def test_claude_lane_report_path_uses_resolved_data_dir_when_none(tmp_path, monkeypatch):
     # Regression for the opus-seat NO-VERDICT bug: when run_panel is called with no
-    # data_dir, the claude/tmux lane's report path (and the read-back base) must still
+    # data_dir, the claude seat's report path (and the read-back base) must still
     # resolve to a real directory, not None -- _read_report(None, ...) can never find the
-    # worker-authored report when the tmux lane prints no `Report:` stderr line.
-    import unittest.mock as mock
-    import plan_gate_panel as _pgp
-
+    # worker-authored report, because the headless lane prints no `Report:` stderr line.
     fake_base = tmp_path / "resolved-data-dir"
-    monkeypatch.setattr(_pgp, "_resolve_data_dir", lambda data_dir: fake_base)
+    monkeypatch.setattr(pgp, "_resolve_data_dir", lambda data_dir: fake_base)
 
     authored_report = _make_report_with_fence("pass")
     seen_bases = []
@@ -2002,14 +2126,14 @@ def test_claude_lane_report_path_uses_resolved_data_dir_when_none(tmp_path, monk
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
-    with mock.patch.object(_pgp.subprocess, "run") as mock_run:
-        mock_run.return_value = _completed_process()
-        with mock.patch.object(_pgp, "_read_report", side_effect=_fake_read_report):
+    calls: list = []
+    with _patch_headless_seat(calls):
+        with mock.patch.object(pgp, "_read_report", side_effect=_fake_read_report):
             out = pgp.run_panel(
                 doc,
                 track_id="feat-nodatadir",
                 project_id="p1",
-                panel=[{"label": "opus", "provider": "claude", "model_arg": "opus"}],
+                panel=_single_claude_panel(),
                 # data_dir intentionally omitted -> None
             )
 
@@ -2017,6 +2141,11 @@ def test_claude_lane_report_path_uses_resolved_data_dir_when_none(tmp_path, monk
     assert len(seen_bases) == 1
     assert seen_bases[0] == fake_base
     assert seen_bases[0] is not None
+    # The same resolved base reaches the lane, so the seat writes where the panel reads.
+    assert Path(calls[0]["spec"].data_dir) == fake_base
+    assert str(fake_base / "unified_reports" / f"{calls[0]['spec'].dispatch_id}.md") in (
+        calls[0]["spec"].instruction
+    )
 
 
 # --------------------------------------------------------------------------
