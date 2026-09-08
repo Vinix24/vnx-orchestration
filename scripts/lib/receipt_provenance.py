@@ -459,9 +459,30 @@ def register_provenance_link(
     )
 
 
+_SQUASH_SUFFIX_RE = re.compile(r"\(#(\d+)\)\s*$")
+
+
 def _extract_pr_number(message: str) -> Optional[int]:
-    """Return the first ``#NNN`` PR number found in a commit message, or None."""
-    match = re.search(r"#(\d+)", message)
+    """Return the PR number from the GitHub squash-merge ``(#NNN)`` suffix
+    at the end of the commit's SUBJECT line (first line of ``message``), or
+    None.
+
+    Deliberately NOT a scan for the first ``#NNN`` anywhere in the body: a
+    fix-forward commit routinely names an unrelated PR or open item in
+    prose before its own suffix (e.g. "addresses codex blocking findings on
+    PR #1218", "(golf Bx, D1, OI-1663) (#1817)") -- a first-match scan
+    silently mislinks every ``Dispatch-ID`` trailer in that body to the
+    wrong PR (OI-1681, measured on main: 42 of ~2000 commits have a first
+    ``#NNN`` that differs from the actual suffix).
+
+    A commit without a squash suffix (a direct commit, a non-squash merge)
+    has no reliable self-reference in its text -- any ``#NNN`` still found
+    there names something else. Returning None here is the deliberate
+    fallback: a missing provenance link is a visible gap, a wrong one
+    silently corrupts ``tracks.pr_ref`` for every dispatch in the commit.
+    """
+    subject = message.split("\n", 1)[0]
+    match = _SQUASH_SUFFIX_RE.search(subject)
     return int(match.group(1)) if match else None
 
 
