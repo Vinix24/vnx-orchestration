@@ -82,6 +82,24 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
     return receipts
 
 
+#: Event types whose failure-shaped status records a governed REFUSAL, not a
+#: failed dispatch. ``pr_merge_refused`` (Golf Bx, D3) carries
+#: ``status="blocked"`` — the canonical governed-failure literal, chosen there
+#: because inventing a "refused" status would be a fleet-wide vocabulary change
+#: — plus the dispatch_id of the work it refused. Without this exemption the
+#: merge door refusing PR #N would mark dispatch N failed for 24 hours, even
+#: once the gate cleared and the PR merged that same day.
+#:
+#: An event_type filter rather than "a later success outranks an earlier
+#: failure": that alternative would change how EVERY event type in the ledger
+#: is counted, dropping real failures behind any later success, which is a far
+#: larger change to a governance metric than the defect being repaired. This
+#: exemption is scoped to the one receipt that means "the door said no".
+#: Absence of a readable event_type is not an exemption — an unclassified
+#: failure stays a failure.
+NON_FAILURE_EVENT_TYPES = frozenset({"pr_merge_refused"})
+
+
 def _build_evidence_map(receipts: List[Dict]) -> Dict[str, Any]:
     """Build dispatch-level evidence maps from recent receipts."""
     dispatch_ids: List[str] = []
@@ -90,9 +108,16 @@ def _build_evidence_map(receipts: List[Dict]) -> Dict[str, Any]:
     for r in receipts:
         did = r.get("dispatch_id") or r.get("task_id") or ""
         status = str(r.get("status", "")).lower()
+        # ``event`` is the legacy alias for ``event_type`` on older ledger
+        # lines; both are resolved, matching outcome_identity's reader.
+        event_type = str(r.get("event_type") or r.get("event") or "")
         if did and did not in dispatch_ids:
             dispatch_ids.append(did)
-        if did and status in ("failed", "fail", "error", "blocked"):
+        if (
+            did
+            and status in ("failed", "fail", "error", "blocked")
+            and event_type not in NON_FAILURE_EVENT_TYPES
+        ):
             if did not in failed_ids:
                 failed_ids.append(did)
 
