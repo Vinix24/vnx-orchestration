@@ -26,7 +26,9 @@ this file is the broader, whole-directory sweep plus the XML check.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -36,6 +38,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import path_parity  # noqa: E402
 
 LAUNCHD_TEMPLATES_DIR = REPO_ROOT / "scripts" / "launchd"
+GATE_OBLIGATION_RUNNER_PLIST = LAUNCHD_TEMPLATES_DIR / "com.vnx.gate-obligation-runner.plist"
 
 
 def _real_requires_python() -> Optional[str]:
@@ -227,3 +230,77 @@ def test_real_repo_launchd_templates_clear_the_guard(monkeypatch) -> None:
     for c in result["consumers"]:
         if c["label"] in (gate_obligation_runner_label, "com.vnx.ledger-health"):
             assert c["in_range"] is True, c
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# OI-1663: com.vnx.gate-obligation-runner's declared PATH
+# (/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin) never includes
+# ~/.local/bin, where pipx-style CLI installs actually live — measured live:
+# `which codex` -> /Users/vincentvandeth/.local/bin/codex, but
+# gate_result_parser._classify_unavailable's shutil.which(binary_name) runs
+# in the RUNNER's own process PATH, which is always this bare launchd
+# default. The gate is therefore always booked provider_not_installed
+# regardless of whether codex is actually installed.
+#
+# A literal ``~`` is never expanded inside a launchd EnvironmentVariables
+# string value (no shell runs over it), so this test executes the plist's
+# own ProgramArguments command through the SAME /bin/bash -c launchd itself
+# invokes it with — the one place in the template that already does real,
+# runtime shell expansion (of ${VNX_HOME} pre-substitution, then of any
+# shell variable at execution time) — with a fake HOME carrying a
+# ``.local/bin/codex`` stub and the declared static PATH, and asserts the
+# spawned process can resolve it. This is GEDRAG, not string matching: it
+# proves what a real launchd-launched process would see.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _extract_program_arguments_last_string(plist_path: Path) -> str:
+    """Return the final ``<string>`` in a launchd plist's ProgramArguments
+    array — the bash -c payload for every template in this directory."""
+    tree = ET.parse(plist_path)
+    top_dict = tree.getroot().find("dict")
+    assert top_dict is not None, f"{plist_path} has no top-level <dict>"
+    children = list(top_dict)
+    for i, el in enumerate(children):
+        if el.tag == "key" and el.text == "ProgramArguments":
+            array = children[i + 1]
+            assert array.tag == "array", f"ProgramArguments in {plist_path} is not an array"
+            strings = [child.text for child in array if child.tag == "string"]
+            assert strings, f"ProgramArguments in {plist_path} has no <string> entries"
+            return strings[-1]
+    raise AssertionError(f"no ProgramArguments key found in {plist_path}")
+
+
+def test_gate_obligation_runner_plist_resolves_local_bin_codex_on_path(tmp_path: Path) -> None:
+    script = _extract_program_arguments_last_string(GATE_OBLIGATION_RUNNER_PLIST)
+
+    fake_home = tmp_path / "home"
+    local_bin = fake_home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    codex_stub = local_bin / "codex"
+    codex_stub.write_text("#!/bin/bash\necho fake-codex\n")
+    codex_stub.chmod(0o755)
+
+    fake_vnx_home = tmp_path / "repo"
+    scripts_dir = fake_vnx_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "gate_obligation_runner.py").write_text(
+        "import shutil, sys\nsys.stdout.write(shutil.which('codex') or '')\n"
+    )
+
+    resolved_script = script.replace("${VNX_HOME}", str(fake_vnx_home))
+    static_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    env = {"HOME": str(fake_home), "PATH": static_path}
+
+    proc = subprocess.run(
+        ["/bin/bash", "-c", resolved_script],
+        capture_output=True, text=True, env=env, timeout=10, check=False,
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert proc.stdout.strip() == str(codex_stub), (
+        "the runner process, launched exactly as launchd would launch it "
+        "(bash -c over the plist's own ProgramArguments string, with only "
+        "HOME and the declared static PATH set), could not resolve codex "
+        f"on PATH -- stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )

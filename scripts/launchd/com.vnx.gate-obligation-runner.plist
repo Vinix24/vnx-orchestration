@@ -56,12 +56,41 @@
     the producer-freshness monitor's launchd harvest; obligations pending
     longer than a day are flagged per gate key by the same monitor's
     review_gate_obligations producer.
+
+    OI-1663 (golf Bx, D1, 2026-09-08): the declared static PATH below
+    (/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin) never included
+    ~/.local/bin, where pipx-style CLI installs (codex, measured live)
+    actually live — every gate whose provider binary lands there was
+    unconditionally booked provider_not_installed by this job, regardless of
+    whether the binary was actually installed. ~/.local/bin cannot be baked
+    into the EnvironmentVariables.PATH string above as a literal "~" —
+    launchd sets environment variable VALUES verbatim, with no shell running
+    over them to expand a tilde — and there is no existing ${...}
+    install-time substitution for a per-user home directory (only
+    ${VNX_HOME}/${VNX_PROJECT_ID}, both project-scoped, are substituted by
+    vnx_cli/commands/init_cmd.py::_install_launchd_agent). The
+    ProgramArguments command IS run through /bin/bash -c, which performs
+    real shell expansion at RUN time — "$PATH:$HOME/.local/bin" above
+    appends the user's actual local bin directory to the declared PATH
+    using $HOME, which launchd sets for every user LaunchAgent regardless of
+    what EnvironmentVariables declares (only PATH is overridden here).
+
+    Append, never prepend (golf Bx, D1 codex finding, 2026-09-08): this job
+    runs as the same user who owns ~/.local/bin, so there is no privilege
+    boundary being crossed either way — but PREPENDING would let any
+    executable name that also exists in ~/.local/bin shadow the system
+    version of the same name for every OTHER tool this job invokes (e.g. a
+    ~/.local/bin/python3 silently taking over from the system python3 that
+    "exec python3 scripts/gate_obligation_runner.py" below actually depends
+    on). codex itself does not exist anywhere in the static PATH above, so
+    appending finds it exactly as reliably as prepending would, with zero
+    shadowing risk for every other binary on the declared static PATH.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/gate_obligation_runner.py</string>
+    <string>cd ${VNX_HOME} &amp;&amp; PATH="$PATH:$HOME/.local/bin" exec python3 scripts/gate_obligation_runner.py</string>
   </array>
   <key>StartInterval</key>
   <integer>900</integer>

@@ -866,6 +866,156 @@ def test_runner_removes_provider_not_installed_result_record(tmp_path, monkeypat
     )
 
 
+def test_runner_sweeps_provider_not_installed_result_written_by_another_process(tmp_path, monkeypatch):
+    """OI-1663: OI-1469's cleanup above only fires INSIDE fulfill_obligation,
+    right after ITS OWN request_and_execute call just caused the engine to
+    write the record — it never sees a provider_not_installed record written
+    by a SEPARATE process. Measured live on vnx-dev (2026-09-08): 97 such
+    records survived on disk weeks after OI-1469 closed, including
+    pr-1809-codex_gate.json and pr-1802-codex_gate.json (2026-09-07) and
+    pr-1792-gemini_review.json (2026-09-06, no dispatch_id field at all).
+    All three carry the signature of scripts/review_gate_manager.py's
+    ``request-and-execute`` subcommand invoked directly -- documented at
+    templates/terminals/T0.md as T0's own PR-review-gate workflow ("PR review
+    gate ... scripts/review_gate_manager.py request-and-execute (or
+    scripts/t0_gate_enforcement.sh wrapper)") -- a SEPARATE OS process from
+    this runner, so the in-process OI-1469 cleanup step never runs for it.
+
+    This test writes such a record directly to disk with NO obligation
+    registered for it at all (simulating that separate writer, and proving
+    the sweep is not coupled to this run's own obligation-fulfilment loop),
+    then asserts a plain runner.run() call removes it anyway."""
+    state_dir = _make_state_dir(tmp_path)
+    results_dir = state_dir / "review_gates" / "results"
+    stale_record = {
+        "gate": "codex_gate",
+        "pr_id": "1809",
+        "pr_number": 1809,
+        "status": STATUS_NOT_EXECUTABLE,
+        "reason": "provider_not_installed",
+        "reason_detail": "codex binary not found in PATH",
+        "failure_reason": "codex binary not found in PATH",
+        "summary": "codex_gate not executable: codex binary not found in PATH",
+        "contract_hash": "",
+        "branch": "dispatch/20260907-golfb-b4-runbook",
+        "report_path": "",
+        "recorded_at": "2026-09-07T16:44:26Z",
+        "dispatch_id": "20260907-golfb-b4-runbook",
+    }
+    result_file = results_dir / "pr-1809-codex_gate.json"
+    result_file.write_text(json.dumps(stale_record), encoding="utf-8")
+
+    summary = runner.run(state_dir)
+
+    assert not result_file.exists(), (
+        "a provider_not_installed result written by ANY process must not "
+        "survive a runner.run() call, not just one this runner's own "
+        "fulfilment attempt just wrote itself (OI-1663)"
+    )
+    assert summary["obligations_seen"] == 0
+
+
+def test_runner_sweep_leaves_decided_results_untouched(tmp_path, monkeypatch):
+    """The sweep must be narrowly targeted: status=not_executable AND
+    reason=provider_not_installed, nothing broader. A decided pass/fail (real
+    PR evidence) and an unrelated not_executable reason (e.g. a genuine
+    config-disabled parking) must both survive the sweep untouched."""
+    state_dir = _make_state_dir(tmp_path)
+    results_dir = state_dir / "review_gates" / "results"
+    pass_record = {
+        "gate": "codex_gate", "pr_number": 1700, "status": "pass",
+        "contract_hash": "abc123", "report_path": "/tmp/report.md",
+    }
+    pass_file = results_dir / "pr-1700-codex_gate.json"
+    pass_file.write_text(json.dumps(pass_record), encoding="utf-8")
+
+    disabled_record = {
+        "gate": "ci_gate", "pr_number": 1701, "status": STATUS_NOT_EXECUTABLE,
+        "reason": "provider_disabled", "reason_detail": "VNX_CI_GATE_REQUIRED is set to 0",
+        "contract_hash": "", "report_path": "",
+    }
+    disabled_file = results_dir / "pr-1701-ci_gate.json"
+    disabled_file.write_text(json.dumps(disabled_record), encoding="utf-8")
+
+    runner.run(state_dir)
+
+    assert pass_file.exists()
+    assert json.loads(pass_file.read_text(encoding="utf-8")) == pass_record
+    assert disabled_file.exists()
+    assert json.loads(disabled_file.read_text(encoding="utf-8")) == disabled_record
+
+
+def test_runner_sweep_writes_governance_audit_entry_for_removed_record(tmp_path, monkeypatch):
+    """golf Bx, D1 (PR #1817 codex finding 1): ``entry.unlink()`` alone erases
+    a governance record with nothing left to show it ever existed. The sweep
+    must append an audit-trail entry -- path, gate, PR number (when the
+    record carries one), the reason it was removed for, and why -- to the
+    repo's EXISTING general-purpose governance audit trail
+    (governance_audit.ndjson), not a new file."""
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    state_dir = _make_state_dir(tmp_path)
+    results_dir = state_dir / "review_gates" / "results"
+    stale_record = {
+        "gate": "codex_gate",
+        "pr_number": 1809,
+        "status": STATUS_NOT_EXECUTABLE,
+        "reason": "provider_not_installed",
+        "reason_detail": "codex binary not found in PATH",
+        "dispatch_id": "20260907-golfb-b4-runbook",
+    }
+    result_file = results_dir / "pr-1809-codex_gate.json"
+    result_file.write_text(json.dumps(stale_record), encoding="utf-8")
+
+    runner.run(state_dir)
+
+    assert not result_file.exists()
+    audit_path = state_dir / "governance_audit.ndjson"
+    assert audit_path.exists(), "the sweep must leave an audit trail behind a removed record"
+    entries = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    matches = [e for e in entries if e.get("check_name") == "provider_not_installed_sweep"]
+    assert len(matches) == 1, f"expected exactly one sweep audit entry, got: {entries}"
+    entry = matches[0]
+    assert entry["pr_number"] == 1809
+    assert entry["dispatch_id"] == "20260907-golfb-b4-runbook"
+    message = entry["message"]
+    assert str(result_file) in message, message
+    assert "codex_gate" in message, message
+    assert "provider_not_installed" in message, message
+    assert "OI-1469" in message and "OI-1663" in message, message
+
+
+def test_runner_sweep_leaves_corrupt_record_and_logs_loudly(tmp_path, monkeypatch, caplog):
+    """golf Bx, D1 (PR #1817 codex finding 2): a corrupt/unreadable result
+    record must never silently disappear from the sweep's accounting. It
+    must stay ON DISK -- never deleted on evidence the sweep could not even
+    read -- be logged loudly with its path and the read error, and be
+    counted in run()'s summary next to swept_provider_not_installed."""
+    import logging
+
+    state_dir = _make_state_dir(tmp_path)
+    results_dir = state_dir / "review_gates" / "results"
+    corrupt_file = results_dir / "pr-1810-codex_gate.json"
+    corrupt_file.write_text("{not valid json", encoding="utf-8")
+
+    caplog.set_level(logging.WARNING, logger="gate_obligation_runner")
+
+    summary = runner.run(state_dir)
+
+    assert corrupt_file.exists(), "a record the sweep could not read must never be deleted"
+    assert corrupt_file.read_text(encoding="utf-8") == "{not valid json"
+    assert summary["provider_not_installed_sweep_unreadable_count"] == 1
+    assert str(corrupt_file) in summary["provider_not_installed_sweep_unreadable"]
+    assert summary["swept_provider_not_installed"] == []
+    assert any(
+        str(corrupt_file) in record.message or corrupt_file.name in record.message
+        for record in caplog.records
+    ), f"expected a loud log line naming the corrupt path, got: {[r.message for r in caplog.records]}"
+
+
 def test_runner_leaves_pre_existing_pass_untouched_on_provider_not_installed(tmp_path, monkeypatch):
     """OI-1469/OI-1470 composition: if the slot already carries a real,
     evidenced pass, gate_recorder's overwrite guard (OI-1470/OI-1471)
