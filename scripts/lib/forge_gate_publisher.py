@@ -546,9 +546,10 @@ def review_verdict(
             # disagreeing is exactly the state an operator has to see, because
             # the merge would go through while the check stays red.
             logger.warning(
-                "forge_gate_publisher: %s telt %s als ondertekenaar voor %s op %s, maar het "
-                "record is hier geen bewezen pass (%s) — de samenvattende check blijft rood",
-                "de merge-deur", evidence_gate, gate, resolved_head[:12], why,
+                "forge_gate_publisher: de merge-deur telt %s als ondertekenaar voor %s op "
+                "%s, maar het record is hier geen bewezen pass (%s) — de samenvattende "
+                "check blijft rood",
+                evidence_gate, gate, resolved_head[:12], why,
             )
             continue
         via = (
@@ -565,7 +566,7 @@ def review_verdict(
     # found unreviewed? Everything the closure verifier can interpret counts
     # towards "something was decided here", INCLUDING the gates that may not
     # sign — that is precisely what separates the two red conclusions.
-    spoken: List[str] = []
+    spoken: List[Tuple[str, str]] = []
     for gate in sorted(_KNOWN_GATES):
         record = _find_gate_result(
             gate, pr_id, directory, branch=branch, project_id=project_id,
@@ -575,30 +576,33 @@ def review_verdict(
             continue
         status = canonical_status(record)
         if status in (PASS_STATES | FAIL_STATES):
-            spoken.append(f"{gate}={status}")
+            spoken.append((gate, status))
 
     if not spoken:
         return ForgeVerdict(
             CONCLUSION_ACTION_REQUIRED,
             "geen review-akkoord op deze kop: geen enkele poort heeft hier een beslissende "
-            f"uitspraak achtergelaten (afwezig, uitgevallen, nog bezig, of een oordeel over "
+            "uitspraak achtergelaten (afwezig, uitgevallen, nog bezig, of een oordeel over "
             f"een andere commit). Draai een review-poort op {resolved_head[:12]}. "
             f"Ondertekenaars die tellen: {', '.join(peers)}.",
         )
 
-    signers_spoke = [entry for entry in spoken if entry.split("=")[0] in _REVIEW_PEER_GATES]
+    everyone = ", ".join(f"{gate}={status}" for gate, status in spoken)
+    signers_spoke = [
+        f"{gate}={status}" for gate, status in spoken if gate in _REVIEW_PEER_GATES
+    ]
     if signers_spoke:
         return ForgeVerdict(
             CONCLUSION_FAILURE,
             "geen geldig review-akkoord op deze kop: de review-poorten die hier spraken "
             f"({', '.join(signers_spoke)}) leverden geen bewezen pass. Volledige uitspraak "
-            f"op deze kop: {', '.join(spoken)}.",
+            f"op deze kop: {everyone}.",
         )
     return ForgeVerdict(
         CONCLUSION_FAILURE,
-        f"geen review-akkoord op deze kop: alleen niet-review-bewijs ({', '.join(spoken)}). "
+        f"geen review-akkoord op deze kop: alleen niet-review-bewijs ({everyone}). "
         "CI is een tweede, zelfstandige merge-eis en nooit een ondertekenaar (OI-1645), "
-        f"dus deze kop is beoordeeld maar niet gereviewd. Ondertekenaars die tellen: "
+        "dus deze kop is beoordeeld maar niet gereviewd. Ondertekenaars die tellen: "
         f"{', '.join(peers)}.",
     )
 
