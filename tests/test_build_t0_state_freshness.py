@@ -384,24 +384,30 @@ def test_autoclose_degraded_when_counts_malformed(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _t0_sessionstart_command() -> str:
+    """Locate the state-builder registration by SUBSTRING on its command.
+
+    OI-1552: this used to look the group up by ``matcher == "terminals/T0"``.
+    That matcher was itself the bug — a SessionStart matcher matches the session
+    SOURCE (startup/resume/clear/compact) or is empty, never a path, so the group
+    never fired. Keying the lookup on the matcher meant these assertions moved
+    with the defect instead of catching it. Substring on the command is how
+    ``scripts/lib/t0_state_health.py`` detects the same hook.
+    """
     settings = json.loads((_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
     for entry in settings["hooks"]["SessionStart"]:
-        if entry.get("matcher") == "terminals/T0":
-            return entry["hooks"][0]["command"]
-    raise AssertionError("T0 SessionStart hook not found")
+        for hook in entry.get("hooks", []):
+            if "build_t0_state_hook" in hook.get("command", ""):
+                return hook["command"]
+    raise AssertionError("no SessionStart hook registers build_t0_state_hook")
 
 
 def _t0_sessionstart_wrapper() -> str:
-    settings = json.loads((_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    for entry in settings["hooks"]["SessionStart"]:
-        if entry.get("matcher") == "terminals/T0":
-            command = entry["hooks"][0]["command"]
-            body = shlex.split(command)[2]
-            match = re.search(r"scripts/hooks/([\w._-]+\.sh)", body)
-            if not match:
-                raise AssertionError(f"T0 SessionStart hook does not delegate to a wrapper: {command}")
-            return (_ROOT / "scripts" / "hooks" / match.group(1)).read_text(encoding="utf-8")
-    raise AssertionError("T0 SessionStart hook not found")
+    command = _t0_sessionstart_command()
+    body = shlex.split(command)[2]
+    match = re.search(r"scripts/hooks/([\w._-]+\.sh)", body)
+    if not match:
+        raise AssertionError(f"T0 SessionStart hook does not delegate to a wrapper: {command}")
+    return (_ROOT / "scripts" / "hooks" / match.group(1)).read_text(encoding="utf-8")
 
 
 def test_sessionstart_hook_is_valid_bash_and_visible_failure():

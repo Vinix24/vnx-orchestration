@@ -6044,10 +6044,25 @@ class TestWorkerScopeHookSettingsWiring(_LaneTestCase):
         self.assertIn("${VNX_HOME:-", command, "VNX_HOME must be the primary anchor")
         self.assertIn("scripts/hooks/build_t0_state_hook.sh", command)
         self.assertIn("MISSING", command, "fail-loud guard must be present")
-        self.assertNotIn(
-            "git rev-parse --show-toplevel",
+        # OI-1552 amends this assertion. It used to forbid `git rev-parse
+        # --show-toplevel` outright, to stop the builder resolving against a
+        # CONSUMER git top-level that has no scripts/ next to it. That banned
+        # the mechanism instead of the outcome, and the only remaining anchor
+        # was VNX_HOME — a RUNTIME variable a SessionStart hook does not
+        # inherit (measured 2026-09-08: it comes back UNSET). The gate was
+        # therefore false in every session and t0_state.json froze.
+        #
+        # What OI-1089 actually wanted is preserved and still asserted above:
+        # VNX_HOME is the PRIMARY anchor when set, and a tree without the
+        # artifact fails LOUD. The git top-level is only the FALLBACK, and it
+        # is safe precisely because the `[ -f ... ]` guard below still stands
+        # between it and execution: in a consumer tree the file is absent, so
+        # the command prints MISSING instead of silently doing nothing.
+        self.assertIn(
+            '[ -f "${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh" ]',
             command,
-            "must not resolve against a consumer git top-level",
+            "the artifact guard must gate execution, so a consumer git "
+            "top-level fallback can only ever fail loud, never silently no-op",
         )
 
     def test_write_hook_settings_merges_existing_and_is_idempotent(self):
