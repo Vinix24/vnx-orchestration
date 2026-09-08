@@ -465,3 +465,183 @@ class TestShortCircuitUnchanged:
 
         assert rc == pr_merge.EXIT_OK
         assert counts == {"adr": 1, "contract_invalid": 1, "branch_protection": 1}
+
+
+# ---------------------------------------------------------------------------
+# 4. ADR-038 outcome identity: a second refusal must not be swallowed
+# ---------------------------------------------------------------------------
+
+class TestRefusalOutcomeIdentity:
+    """ADR-038 gives an outcome a durable identity over
+    ``(dispatch_id, event_type, status, commit_sha, gate, pr_number)``
+    (``outcome_identity.OUTCOME_ID_FIELDS``) and dedups against a whole-ledger
+    index, not a time window. The refusal receipt as first shipped carried
+    ``head_sha`` and ``refused_by`` — neither is in that tuple — with a
+    constant ``status="blocked"``, so every refusal of one PR by one dispatch
+    hashed to ONE identity and every refusal after the first was dropped by
+    ``idempotency._write_receipt_under_lock``.
+    """
+
+    def _refuse_once(self, monkeypatch, *, ci=None, review=None, head, dispatch_id):
+        pr_data = dict(PR_DATA, headRefOid=head)
+        _stub_gh_gates(monkeypatch, ci=ci, review=review, pr_data=pr_data)
+        _track_do_merge(monkeypatch)
+        return pr_merge.main(["--pr", "7", "--dispatch-id", dispatch_id])
+
+    def test_two_refusals_by_different_gates_leave_two_records(
+        self, vnx_env, monkeypatch,
+    ):
+        """The failing case: CI refuses on one head, the operator pushes a fix,
+        the review gate refuses on the next head. Two distinct governance
+        outcomes, two ledger lines."""
+        head_one = "a" * 40
+        head_two = "b" * 40
+
+        rc1 = self._refuse_once(
+            monkeypatch, ci=_no_go("CI rood"),
+            head=head_one, dispatch_id="20260908-d3-dedup",
+        )
+        rc2 = self._refuse_once(
+            monkeypatch, review=_no_go("geen gate-verdict"),
+            head=head_two, dispatch_id="20260908-d3-dedup",
+        )
+
+        assert rc1 == pr_merge.EXIT_ERROR
+        assert rc2 == pr_merge.EXIT_ERROR
+
+        refusals = _receipts_of(vnx_env["receipts_path"], "pr_merge_refused")
+        assert len(refusals) == 2, (
+            "the second refusal was swallowed by the ADR-038 outcome index — "
+            f"got {[r.get('refused_by') for r in refusals]}"
+        )
+        assert [r["refused_by"] for r in refusals] == ["ci", "review"]
+        assert [r["commit_sha"] for r in refusals] == [head_one, head_two]
+
+    def test_two_refusals_by_different_gates_on_the_same_head(
+        self, vnx_env, monkeypatch,
+    ):
+        """``commit_sha`` alone does not carry it: an operator who fixes gate
+        state WITHOUT pushing (a review verdict landing, a protection drift
+        repaired) retries on the very same head and is refused by a later
+        gate. ``gate`` is what discriminates there."""
+        rc1 = self._refuse_once(
+            monkeypatch, ci=_no_go("CI rood"),
+            head=SHA, dispatch_id="20260908-d3-samehead",
+        )
+        rc2 = self._refuse_once(
+            monkeypatch, review=_no_go("geen gate-verdict"),
+            head=SHA, dispatch_id="20260908-d3-samehead",
+        )
+
+        assert (rc1, rc2) == (pr_merge.EXIT_ERROR, pr_merge.EXIT_ERROR)
+        refusals = _receipts_of(vnx_env["receipts_path"], "pr_merge_refused")
+        assert [r["refused_by"] for r in refusals] == ["ci", "review"]
+
+    def test_the_identity_tuple_actually_discriminates(self, vnx_env, monkeypatch):
+        """Asserted on ADR-038's own hash rather than on the line count, so this
+        test names the mechanism it defends and not just its symptom."""
+        from append_receipt_internals.outcome_identity import compute_outcome_id
+
+        self._refuse_once(
+            monkeypatch, ci=_no_go("CI rood"),
+            head="a" * 40, dispatch_id="20260908-d3-hash",
+        )
+        self._refuse_once(
+            monkeypatch, review=_no_go("geen gate-verdict"),
+            head="b" * 40, dispatch_id="20260908-d3-hash",
+        )
+
+        ids = {
+            compute_outcome_id(r)
+            for r in _receipts_of(vnx_env["receipts_path"], "pr_merge_refused")
+        }
+        assert len(ids) == 2
+
+    def test_an_identical_repeat_refusal_is_a_duplicate_and_stays_quiet(
+        self, vnx_env, monkeypatch, capsys,
+    ):
+        """The other side of the decision: after the fix, ``duplicate`` on this
+        event type can ONLY mean the same dispatch was refused by the same gate
+        on the same head with the same status — a genuine re-run of the door
+        whose evidence line is already on record. ADR-038 suppressing the
+        second copy is correct, so ``duplicate`` stays in
+        ``_RECEIPT_OK_STATUSES`` and the "record did NOT land" WARN must NOT
+        fire."""
+        for _ in range(2):
+            rc = self._refuse_once(
+                monkeypatch, ci=_no_go("CI rood"),
+                head=SHA, dispatch_id="20260908-d3-repeat",
+            )
+            assert rc == pr_merge.EXIT_ERROR
+
+        refusals = _receipts_of(vnx_env["receipts_path"], "pr_merge_refused")
+        assert len(refusals) == 1
+        assert "did NOT land" not in capsys.readouterr().err
+
+    def test_refusal_without_a_resolvable_dispatch_id_stays_in_the_ledger(
+        self, vnx_env, monkeypatch,
+    ):
+        """Guard on the fix itself. ``ghost_receipt_filter.is_gate_event``
+        treats ANY non-empty ``gate`` field as a headless gate event, and
+        ``should_route_to_gate_stream`` then diverts it to
+        ``gate_events.ndjson`` whenever the dispatch_id is a ghost value
+        (``""`` is one). Stamping ``gate`` unconditionally would therefore push
+        exactly the refusals that are hardest to trace OUT of the ledger this
+        PR exists to land them in."""
+        monkeypatch.setattr(pr_merge, "_lookup_dispatch_id_by_pr_number", lambda n: "")
+        self._refuse_once(
+            monkeypatch, ci=_no_go("CI rood"), head=SHA, dispatch_id="",
+        )
+
+        assert len(_receipts_of(vnx_env["receipts_path"], "pr_merge_refused")) == 1
+        assert not (vnx_env["state_dir"] / "gate_events.ndjson").exists()
+
+
+# ---------------------------------------------------------------------------
+# 5. A pr_merged without preflight_gates has three meanings
+# ---------------------------------------------------------------------------
+
+class TestMergedReceiptAlwaysCarriesTheKey:
+    """The ``not_evaluated`` principle applied to the LIST, not only inside it.
+
+    Omitting ``preflight_gates`` made "this caller never ran the door's gates"
+    indistinguishable from the ~23k ``pr_merged`` lines written before this
+    field existed. The first reader would have to fail open on both.
+    """
+
+    def test_a_merge_without_gates_still_writes_the_key(self, vnx_env, monkeypatch):
+        monkeypatch.setattr(pr_merge, "_query_pr", lambda n: dict(PR_DATA))
+        _track_do_merge(monkeypatch)
+        monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **k: True)
+
+        pr_merge.merge_pr(7, dispatch_id="20260908-d3-nogates")
+
+        merged = _receipts_of(vnx_env["receipts_path"], "pr_merged")
+        assert len(merged) == 1
+        assert "preflight_gates" in merged[0], (
+            "absence is indistinguishable from a pre-D3 merge receipt"
+        )
+
+    def test_the_key_names_all_five_gates_as_not_evaluated(self, vnx_env, monkeypatch):
+        monkeypatch.setattr(pr_merge, "_query_pr", lambda n: dict(PR_DATA))
+        _track_do_merge(monkeypatch)
+        monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **k: True)
+
+        pr_merge.merge_pr(7, dispatch_id="20260908-d3-nogates-shape")
+
+        gates = _receipts_of(vnx_env["receipts_path"], "pr_merged")[0]["preflight_gates"]
+        assert [g["gate"] for g in gates] == list(pr_merge.PREFLIGHT_ORDER)
+        for g in gates:
+            assert g["verdict"] == pr_merge.VERDICT_NOT_EVALUATED, g
+            assert g["message"] == pr_merge.GATES_NOT_RUN_MESSAGE, g
+
+    def test_a_gateless_merge_reads_differently_from_a_refusal_padding(self):
+        """Both use ``not_evaluated``; the message is what tells a reader which
+        of the two it is looking at."""
+        gateless = pr_merge._preflight_ledger(
+            [], unevaluated_message=pr_merge.GATES_NOT_RUN_MESSAGE,
+        )
+        short_circuited = pr_merge._preflight_ledger([], refused_by="ci")
+
+        assert gateless[0]["message"] != short_circuited[0]["message"]
+        assert "ci" in short_circuited[0]["message"]

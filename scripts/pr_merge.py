@@ -212,6 +212,15 @@ PREFLIGHT_ORDER: tuple[str, ...] = (
 #: is indistinguishable from one that approved (OI-1665).
 VERDICT_NOT_EVALUATED = "not_evaluated"
 
+#: The ``not_evaluated`` message for a merge whose CALLER never ran the door's
+#: preflights at all (``merge_pr`` invoked directly, not via ``main()``). The
+#: same principle one level up: a ``pr_merged`` receipt that simply OMITS
+#: ``preflight_gates`` is indistinguishable from the ~23k receipts written
+#: before the field existed, so the first reader has to fail open on both. The
+#: key is therefore always written, and this message is what separates "no gate
+#: ran, ever" from the short-circuit padding a refusal produces.
+GATES_NOT_RUN_MESSAGE = "niet uitgevoerd: deze aanroep draaide de preflights van de deur niet"
+
 
 def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Dict[str, Any]:
     """One preflight's outcome, in the shape the ledger stores it.
@@ -235,6 +244,7 @@ def _preflight_ledger(
     evaluated: list[Dict[str, Any]],
     *,
     refused_by: str = "",
+    unevaluated_message: str = "",
 ) -> list[Dict[str, Any]]:
     """The five preflights in ``PREFLIGHT_ORDER``: those that ran, plus those
     that never got a turn marked ``not_evaluated``.
@@ -244,9 +254,19 @@ def _preflight_ledger(
     reconstruct WHY a gate has no verdict. On the merge branch all five have
     run and this pads nothing.
 
+    ``unevaluated_message`` overrides that text for a caller whose gates did
+    not run for a different reason than a short-circuit — see
+    ``GATES_NOT_RUN_MESSAGE``. Both shapes use the same ``not_evaluated``
+    verdict, so the message is what tells the two apart.
+
     A gate that did not run judged no commit, so its ``head_sha`` is empty —
     deliberately not the PR head, which would suggest it looked at it.
     """
+    default_message = (
+        f"niet uitgevoerd: de deur stopte op de {refused_by}-preflight"
+        if refused_by
+        else "niet uitgevoerd"
+    )
     by_name = {record["gate"]: record for record in evaluated}
     ledger: list[Dict[str, Any]] = []
     for name in PREFLIGHT_ORDER:
@@ -257,11 +277,7 @@ def _preflight_ledger(
         ledger.append({
             "gate": name,
             "verdict": VERDICT_NOT_EVALUATED,
-            "message": (
-                f"niet uitgevoerd: de deur stopte op de {refused_by}-preflight"
-                if refused_by
-                else "niet uitgevoerd"
-            ),
+            "message": unevaluated_message or default_message,
             "head_sha": "",
             "overridden": False,
         })
@@ -995,8 +1011,17 @@ def _emit_receipt(
 
     ``preflight_gates`` (Golf Bx, D3): the five preflight verdicts that
     approved this merge, on THIS receipt rather than in a second gate
-    registration beside it — one merge, one evidence record. ``None`` omits
-    the field, for callers that merge without running the door's gates.
+    registration beside it — one merge, one evidence record.
+
+    The key is written ALWAYS, never omitted. Omitting it on a caller that ran
+    no gates gave the absence three readings at once — a merge from before this
+    field existed, a caller that skipped the door, and an empty list — over a
+    ledger holding ~23k older ``pr_merged`` lines that carry none of it. That
+    is the same argument ``VERDICT_NOT_EVALUATED`` exists for, applied to the
+    list itself instead of only to entries inside it. A gateless caller gets
+    the full five-record ledger with every verdict ``not_evaluated`` and
+    ``GATES_NOT_RUN_MESSAGE`` as the reason, so a reader sees one uniform shape
+    and field-presence alone separates a post-D3 receipt from a pre-D3 one.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -1013,8 +1038,9 @@ def _emit_receipt(
         kwargs["dispatch_id"] = dispatch_id
     if contract_invalid_override:
         kwargs["contract_invalid_override"] = contract_invalid_override
-    if preflight_gates:
-        kwargs["preflight_gates"] = preflight_gates
+    kwargs["preflight_gates"] = preflight_gates or _preflight_ledger(
+        [], unevaluated_message=GATES_NOT_RUN_MESSAGE,
+    )
     return emit_governance_receipt(
         "pr_merged",
         receipt_kind="state_mutation",
@@ -1048,6 +1074,38 @@ def _emit_refusal_receipt(
     fleet-wide vocabulary change, not a merge-door change.
     ``receipt_kind="state_mutation"`` matches the ``pr_merged`` sibling — the
     merge door's attempt to mutate main, here with its outcome being "no".
+
+    ``commit_sha`` and ``gate`` carry ADR-038 outcome identity. That ADR
+    identifies an outcome by
+    ``(dispatch_id, event_type, status, commit_sha, gate, pr_number)``
+    (``outcome_identity.OUTCOME_ID_FIELDS``) and dedups against a durable index
+    spanning the WHOLE ledger, not a time window. This receipt first shipped
+    carrying only ``head_sha`` and ``refused_by`` — neither is in that tuple —
+    with a constant ``status="blocked"``, so every refusal of one PR under one
+    dispatch collapsed onto a single identity and ``_write_receipt_under_lock``
+    dropped all but the first. Measured on an isolated ledger: a CI refusal on
+    head aaa111 appended, a branch-protection refusal on head bbb222 returned
+    ``duplicate``, one line total.
+
+    ``commit_sha`` repeats ``head_sha`` deliberately rather than replacing it.
+    ``head_sha`` is this record's own field, asserted by the D3 tests and
+    echoed in the CLI's JSON; ``commit_sha`` is the fleet-canonical name that
+    ``closure_verifier``, ``gate_recorder``, ``receipt_provenance`` and
+    ``forge_gate_publisher`` already read, and the name ADR-038 hashes.
+
+    ``gate`` is stamped ONLY alongside a real dispatch_id, and that condition
+    is load-bearing in both directions. ``ghost_receipt_filter.is_gate_event``
+    treats ANY non-empty ``gate`` as a headless gate event, and
+    ``should_route_to_gate_stream`` then diverts the receipt to
+    ``gate_events.ndjson`` whenever the dispatch_id is a ghost value — and
+    ``""`` is one, which is exactly what ``_lookup_dispatch_id_by_pr_number``
+    returns on a miss. Stamping it unconditionally would push the least
+    traceable refusals straight out of the ledger this record exists to land
+    in (measured: reroute False today, True with an unconditional ``gate``).
+    Nothing is lost by the condition: ADR-038's durable check only runs when
+    ``has_outcome_identity`` sees a real dispatch_id, so ``gate`` adds
+    discrimination in precisely the case where discrimination is consulted.
+    ``refused_by`` carries the same gate name unconditionally for readers.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -1055,9 +1113,11 @@ def _emit_refusal_receipt(
         "refused_by": refused_by,
         "preflight_gates": preflight_gates,
         "head_sha": head_sha or "",
+        "commit_sha": head_sha or "",
     }
     if dispatch_id:
         kwargs["dispatch_id"] = dispatch_id
+        kwargs["gate"] = refused_by
     return emit_governance_receipt(
         "pr_merge_refused",
         receipt_kind="state_mutation",
@@ -1092,6 +1152,19 @@ def _refuse_merge(
     failing emit is reported loudly on stderr and the refusal still exits
     EXIT_ERROR. The receipt's status travels back in the JSON payload so an
     unwritten record is visible to a machine reader too, not just in the log.
+
+    ``duplicate`` stays inside ``_RECEIPT_OK_STATUSES`` here, and that is a
+    decision rather than an oversight. Before ADR-038 identity was stamped on
+    this receipt (see ``_emit_refusal_receipt``), ``duplicate`` was reachable
+    for any second refusal of the same PR and meant "an unrelated earlier
+    refusal swallowed this one" — a silent evidence loss that the OK-list was
+    hiding. With ``commit_sha`` and ``gate`` on the tuple it is reachable only
+    when dispatch_id, PR, gate, head AND status are all identical, i.e. the
+    operator re-ran the door and got the very same refusal back. The ledger
+    already holds a byte-equivalent evidence line for that outcome, so ADR-038
+    suppressing the copy is the correct one-outcome-one-line behaviour and not
+    a fault to warn about. It remains visible to a machine reader either way:
+    ``refusal_receipt_status`` reports it verbatim in the JSON payload.
     """
     ledger = _preflight_ledger(evaluated, refused_by=gate_name)
 
