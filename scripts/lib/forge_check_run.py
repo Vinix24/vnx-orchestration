@@ -22,6 +22,15 @@ Three secrets, three sources:
   private key (PEM)               macOS keychain, item ``vnx-gate-app-key``.
   installation id                 macOS keychain, item ``vnx-gate-installation-id``.
 
+The private key does not come back as a PEM. ``security find-generic-password
+-w`` refuses to print a secret containing newlines and prints its raw bytes as
+a hex dump instead — silently, with nothing in the output saying so. Measured
+2026-09-08 on the registered App: 3356 hex characters where the 1678-byte,
+27-line PEM was stored. So every keychain read here recognizes that shape and
+decodes it (:func:`_looks_hex_encoded`, :func:`_decode_hex_secret`); without it
+``build_app_jwt`` fails on a key that is perfectly intact in the keychain, and
+the check-run can never be published (OI-1673).
+
 Every keychain read fails LOUD. ``send_digest_email._read_smtp_pass_from_keychain``
 returns ``""`` when the item is missing or the keychain is locked; that soft
 failure is correct for an optional digest mail and WRONG here — an empty key
@@ -47,6 +56,7 @@ BILLING SAFETY: No Anthropic SDK. No direct API calls to api.anthropic.com.
 
 from __future__ import annotations
 
+import binascii
 import json
 import os
 import subprocess
@@ -207,11 +217,69 @@ def load_app_config(path: Optional[Path] = None) -> AppConfig:
 # ---------------------------------------------------------------------------
 
 
+#: The alphabet a macOS hex dump is drawn from. ``security`` emits lowercase;
+#: uppercase is accepted because the shape, not the casing, is what identifies
+#: it. A PEM can never match: ``-----BEGIN`` is outside this set, so a keychain
+#: that hands the key back verbatim takes the untouched path.
+_HEX_ALPHABET = frozenset("0123456789abcdefABCDEF")
+
+#: Below this many characters a hex-shaped value is left alone. Every decimal id
+#: is also a valid hex string, so ``vnx-gate-installation-id`` (8-10 digits)
+#: would otherwise be "decoded" into four or five bytes of nonsense whenever it
+#: happened to have an even length. A hex dump of a multi-line secret is orders
+#: of magnitude longer — the App's PEM measured 3356 characters — so a floor of
+#: 32 separates the two without the reader needing to know which item it holds.
+_HEX_DECODE_MIN_CHARS = 32
+
+#: Whitespace a decoded secret may legitimately contain (a PEM is newlines).
+#: Any OTHER non-printable character means the hex decoded to bytes, not text.
+_ALLOWED_CONTROL_CHARS = frozenset("\t\n\r")
+
+
 def _recovery_hint(service: str, what: str) -> str:
     return (
         f"Herstel: security add-generic-password -s {service} -a \"$USER\" -w '<{what}>' "
         f"(runbook: {RUNBOOK_PATH})"
     )
+
+
+def _looks_hex_encoded(value: str) -> bool:
+    """True when ``value`` has the shape of macOS's hex dump of a secret."""
+    return (
+        len(value) >= _HEX_DECODE_MIN_CHARS
+        and len(value) % 2 == 0
+        and all(char in _HEX_ALPHABET for char in value)
+    )
+
+
+def _decode_hex_secret(value: str, service: str, what: str) -> str:
+    """Decode a hex-dumped keychain secret, or raise.
+
+    Never falls back to returning ``value`` unchanged. Handing the hex string
+    on would push the failure into ``build_app_jwt``, which can only report
+    "could not deserialize key data" — it does not know a keychain item is
+    involved, so the operator is sent to repair a key that is already correct.
+    """
+    # unhexlify cannot fail here: _looks_hex_encoded already established an
+    # even-length string drawn entirely from the hex alphabet.
+    raw = binascii.unhexlify(value)
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ForgeKeychainError(
+            f"keychain-item {service} heeft de hex-vorm die macOS teruggeeft voor een "
+            f"meerregelig geheim, maar decodeert niet naar tekst ({exc.reason}). "
+            f"{_recovery_hint(service, what)}"
+        ) from exc
+
+    # Valid UTF-8 is not the same as usable text: a run of control bytes decodes
+    # cleanly and is still bytes. Returning it would be a silent wrong value.
+    if any(char not in _ALLOWED_CONTROL_CHARS and not char.isprintable() for char in decoded):
+        raise ForgeKeychainError(
+            f"keychain-item {service} decodeert vanuit de hex-vorm naar bytes in plaats "
+            f"van tekst (niet-afdrukbare tekens). {_recovery_hint(service, what)}"
+        )
+    return decoded.strip()
 
 
 def _read_keychain_secret(service: str, what: str) -> str:
@@ -260,16 +328,27 @@ def _read_keychain_secret(service: str, what: str) -> str:
             f"keychain-item {service} is leeg. Een lege waarde is hier nooit bruikbaar: "
             f"de check-run zou stil wegvallen in plaats van te falen. {hint}"
         )
+    if _looks_hex_encoded(secret):
+        return _decode_hex_secret(secret, service, what)
     return secret
 
 
 def read_private_key() -> str:
-    """The App's RSA private key (PEM) from keychain item ``vnx-gate-app-key``."""
+    """The App's RSA private key (PEM) from keychain item ``vnx-gate-app-key``.
+
+    This is the read that hits the hex dump in practice: the key is multi-line,
+    so macOS never returns it verbatim on the machine where it was measured.
+    """
     return _read_keychain_secret(KEYCHAIN_PRIVATE_KEY_SERVICE, "pad naar de .pem, via $(cat ...)")
 
 
 def read_installation_id() -> str:
-    """The installation id from keychain item ``vnx-gate-installation-id``."""
+    """The installation id from keychain item ``vnx-gate-installation-id``.
+
+    A single-line number, so ``security`` prints it as-is and the hex decode
+    never engages — see ``_HEX_DECODE_MIN_CHARS`` for why an id that happens to
+    have an even length is still safe.
+    """
     value = _read_keychain_secret(KEYCHAIN_INSTALLATION_ID_SERVICE, "installation-id")
     if not value.isdigit():
         raise ForgeKeychainError(
