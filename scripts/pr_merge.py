@@ -71,6 +71,13 @@ the flag is reported as unnecessary and nothing is stamped, so
 refused chain a non-empty reason overrides visibly and is stamped onto the
 ``pr_merged`` receipt; an empty reason is refused (no silent bypass).
 
+The hatch covers ONE refusal, the contract_invalid one (golf Bx, D4 /
+OI-1666). The gate's other two refusals — an unreadable ledger and an empty
+dispatch_id — are not judgments about the deliverable and stand regardless of
+the flag; an unreadable ledger is repaired, not merged past. The door decides
+on ``contract_invalid_ledger``'s machine-readable acceptance CODE, never on
+the Dutch reason text.
+
 Receipt written to t0_receipts.ndjson:
     event_type  : "pr_merged"
     pr_number   : <int>
@@ -165,7 +172,10 @@ from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 from merge_preflight_adr_check import check_adr_numbers_for_pr
-from contract_invalid_ledger import is_deliverable_acceptable
+from contract_invalid_ledger import (
+    CODE_CONTRACT_INVALID,
+    evaluate_deliverable_acceptance,
+)
 from forge_protection_drift import (
     PROTECTION_YAML_RELATIVE_PATH,
     ProtectionConfigError,
@@ -601,6 +611,25 @@ def _run_contract_invalid_gate(
     NO-GO. On a clean chain the flag is reported as unnecessary and nothing
     is stamped; on a dirty chain a non-empty reason overrides visibly and an
     empty one is refused (no silent bypass).
+
+    And it only covers its OWN refusal (golf Bx, D4 / OI-1666). The gate
+    refuses in three distinguishable cases — the real contract_invalid, an
+    unreadable ledger, and an empty dispatch_id — and this branch used to set
+    GO on all three, because ``is_deliverable_acceptable`` returned a bool
+    plus Dutch prose and nothing that could be decided on. An operator who
+    means "I know about that contract_invalid" was thereby silently also
+    waving through "I cannot read the ledger", where the right move is to
+    repair it. The decision is now on
+    ``evaluate_deliverable_acceptance``'s ``code``: only
+    ``CODE_CONTRACT_INVALID`` may be overridden, any other refusal stands
+    with ``override_not_applicable: True`` and ``overridden: False`` (no
+    bypass happened, so nothing may be stamped as one). Deliberately not a
+    match on the message text — that prose is a message for a human and
+    breaks on the first rewording, in the permissive direction.
+
+    Applicability is judged BEFORE the reason's emptiness: a flag that does
+    not cover this refusal is no override at all, so there is nothing to
+    demand a reason for. Both orders refuse; this one names the real cause.
     """
     did = (dispatch_id or "").strip()
     resolved_from_pr = False
@@ -622,7 +651,8 @@ def _run_contract_invalid_gate(
 
     paths = ensure_env()
     receipts_path = Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
-    acceptable, reason = is_deliverable_acceptable(did, receipts_path)
+    acceptance = evaluate_deliverable_acceptance(did, receipts_path)
+    acceptable, reason = acceptance.acceptable, acceptance.reason
 
     origin = f" (dispatch-id afgeleid uit PR #{pr_number})" if resolved_from_pr else ""
     result: Dict[str, Any] = {
@@ -632,6 +662,8 @@ def _run_contract_invalid_gate(
         "overridden": False,
         "override_reason": None,
         "override_unnecessary": False,
+        "override_not_applicable": False,
+        "reason_code": acceptance.code,
         "resolved_from_pr": resolved_from_pr,
     }
 
@@ -645,6 +677,17 @@ def _run_contract_invalid_gate(
             f"(de keten is schoon); geen override op de receipt"
         )
         result["override_unnecessary"] = True
+        return result
+
+    # The refusal must be the one this flag is FOR. Judged on the acceptance
+    # code, never on the message: those strings are Dutch prose for a human.
+    if acceptance.code != CODE_CONTRACT_INVALID:
+        result["message"] = (
+            f"{result['message']} — --override-contract-invalid geldt alleen voor "
+            f"een contract_invalid-uitkomst, niet voor '{acceptance.code}'; "
+            f"deze weigering blijft staan"
+        )
+        result["override_not_applicable"] = True
         return result
 
     reason_text = override_reason.strip()
@@ -1406,7 +1449,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--override-contract-invalid", default=None,
         help="Escape hatch (golf B, B7): accept a dispatch whose latest receipt is "
              "contract_invalid, with this required reason (empty is refused). Separate "
-             "from --override-reason.",
+             "from --override-reason. Covers ONLY that refusal: an unreadable ledger "
+             "or an unresolvable dispatch_id stands regardless of this flag.",
     )
     parser.add_argument(
         "--allow-weaken", default=None,

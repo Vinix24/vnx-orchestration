@@ -607,6 +607,112 @@ def test_advisory_readers_keep_soft_behaviour_on_unreadable_ledger(tmp_path: Pat
 
 
 # ---------------------------------------------------------------------------
+# evaluate_deliverable_acceptance: the MACHINE-READABLE reason (golf Bx, D4)
+#
+# is_deliverable_acceptable returns (False, <Dutch prose>) for three
+# distinguishable cases — the real contract_invalid, an unreadable ledger, and
+# an empty dispatch_id — and the merge door's --override-contract-invalid
+# covered all three because prose is all it had to go on (OI-1666). The code
+# is what the door decides on; the prose stays a message for a human.
+# ---------------------------------------------------------------------------
+
+def test_code_for_a_real_contract_invalid_chain(tmp_path: Path) -> None:
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [_ci_receipt("d-open", "kimi", "2026-09-06T10:00:00Z")])
+
+    acceptance = cil.evaluate_deliverable_acceptance("d-open", receipts)
+
+    assert acceptance.acceptable is False
+    assert acceptance.code == cil.CODE_CONTRACT_INVALID
+    assert "contract_invalid" in acceptance.reason
+
+
+def test_code_for_an_unreadable_ledger_is_not_contract_invalid(tmp_path: Path) -> None:
+    """The fail-closed I/O refusal is its OWN code — the whole point of D4:
+    an operator who says "I know about that contract_invalid" must not thereby
+    also wave through "I cannot read the ledger"."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    acceptance = cil.evaluate_deliverable_acceptance("d-any", receipts)
+
+    assert acceptance.acceptable is False
+    assert acceptance.code == cil.CODE_LEDGER_UNREADABLE
+    assert acceptance.code != cil.CODE_CONTRACT_INVALID
+    assert "grootboek onleesbaar" in acceptance.reason
+
+
+def test_code_for_an_empty_dispatch_id(tmp_path: Path) -> None:
+    receipts = tmp_path / "t0_receipts.ndjson"
+
+    acceptance = cil.evaluate_deliverable_acceptance("", receipts)
+
+    assert acceptance.acceptable is False
+    assert acceptance.code == cil.CODE_EMPTY_DISPATCH_ID
+    assert acceptance.code != cil.CODE_CONTRACT_INVALID
+
+
+def test_codes_for_the_three_acceptable_outcomes(tmp_path: Path) -> None:
+    """The accepting side is coded too: a caller that logs or branches on the
+    code never has to re-derive "which kind of yes" from the prose."""
+    healed = tmp_path / "healed.ndjson"
+    _write_receipts(healed, [
+        _ci_receipt("d-healed", "kimi", "2026-09-06T10:00:00Z"),
+        _success_receipt("d-healed", "kimi", "2026-09-06T11:00:00Z"),
+    ])
+    absent = tmp_path / "absent.ndjson"
+    _write_receipts(absent, [_ci_receipt("d-other", "kimi", "2026-09-06T10:00:00Z")])
+    undecided = tmp_path / "undecided.ndjson"
+    _write_receipts(undecided, [
+        _ci_receipt("d-u", "kimi", "2026-09-06T10:00:00Z", status="unknown", report_path=None),
+    ])
+
+    assert cil.evaluate_deliverable_acceptance("d-healed", healed).code == (
+        cil.CODE_NOT_CONTRACT_INVALID
+    )
+    assert cil.evaluate_deliverable_acceptance("never-ran", absent).code == (
+        cil.CODE_NO_OUTCOME_RECEIPT
+    )
+    assert cil.evaluate_deliverable_acceptance("d-u", undecided).code == (
+        cil.CODE_NO_DECIDED_OUTCOME
+    )
+
+
+def test_every_code_is_registered(tmp_path: Path) -> None:
+    """ACCEPTANCE_CODES is the closed set a reader may switch on; a code
+    returned but not registered would break that promise silently."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [_ci_receipt("d-open", "kimi", "2026-09-06T10:00:00Z")])
+
+    for did, path in (("d-open", receipts), ("", receipts), ("nobody", receipts)):
+        assert cil.evaluate_deliverable_acceptance(did, path).code in cil.ACCEPTANCE_CODES
+
+
+def test_is_deliverable_acceptable_keeps_its_two_tuple_contract(tmp_path: Path) -> None:
+    """The widening is additive: the existing (bool, str) callers are
+    untouched and still get the same prose."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    _write_receipts(receipts, [_ci_receipt("d-open", "kimi", "2026-09-06T10:00:00Z")])
+
+    ok, reason = cil.is_deliverable_acceptable("d-open", receipts)
+    acceptance = cil.evaluate_deliverable_acceptance("d-open", receipts)
+
+    assert (ok, reason) == (acceptance.acceptable, acceptance.reason)
+
+
+def test_strict_false_is_carried_through_to_the_coded_form(tmp_path: Path) -> None:
+    """strict=False still degrades an unreadable ledger to the soft read —
+    the new entry point must not quietly harden the advisory contract."""
+    receipts = tmp_path / "t0_receipts.ndjson"
+    receipts.mkdir(parents=True)
+
+    acceptance = cil.evaluate_deliverable_acceptance("d-any", receipts, strict=False)
+
+    assert acceptance.acceptable is True
+    assert acceptance.code == cil.CODE_NO_OUTCOME_RECEIPT
+
+
+# ---------------------------------------------------------------------------
 # build_t0_state.py wiring: full-state key + t0_index compact form
 # ---------------------------------------------------------------------------
 

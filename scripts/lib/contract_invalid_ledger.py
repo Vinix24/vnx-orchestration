@@ -20,10 +20,14 @@ at session start. This module is the missing read side:
   - ``collect_contract_invalid_open`` / ``write_contract_invalid_open_ledger``:
     the single-file open-items ledger — one row per still-open dispatch, not
     one open item per receipt (gevolg 2, "een lijst, geen vloed").
-  - ``is_deliverable_acceptable``: the gate a closer must call before
-    treating a dispatch's deliverable as done (gevolg 3, "niet stil
-    sluitbaar"). Its call site is the merge door (``pr_merge.py``'s
-    ``_run_contract_invalid_gate``).
+  - ``is_deliverable_acceptable`` / ``evaluate_deliverable_acceptance``: the
+    gate a closer must call before treating a dispatch's deliverable as done
+    (gevolg 3, "niet stil sluitbaar"). Its call site is the merge door
+    (``pr_merge.py``'s ``_run_contract_invalid_gate``). The first returns
+    ``(bool, prose)``; the second returns that same judgment plus the
+    machine-readable ``code`` a caller may DECIDE on (golf Bx, D4 / OI-1666 —
+    the door's override covers one of the three refusals, and prose is not a
+    contract).
 
 Which receipts that gate may judge is itself the thing that decides whether
 it fires at all, and it takes TWO filters to get there:
@@ -59,7 +63,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -151,6 +155,90 @@ DECIDED_OUTCOME_STATUSES = frozenset({
 })
 
 _MIN_AWARE_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
+
+# ── Acceptance reason codes (golf Bx, D4 / OI-1666) ───────────────────────
+#
+# ``is_deliverable_acceptable`` answered with a bool plus a Dutch prose
+# reason, and that prose was the ONLY thing distinguishing its three refusals
+# from one another. The merge door's ``--override-contract-invalid`` therefore
+# covered all three: an operator who meant "I know about that
+# contract_invalid" silently also waved through "I cannot read the ledger",
+# where repairing is the right move and proceeding is not.
+#
+# These codes are what a caller DECIDES on; the reason string stays a message
+# for a human and may be reworded freely without moving a gate. Matching on
+# that prose instead is the exact failure class golf Bx exists to remove — it
+# breaks on the first rewrite, silently and in the permissive direction.
+#
+# Deliberately plain string constants rather than an ``enum.Enum``: this
+# module already carries its vocabularies this way
+# (``CONTRACT_INVALID_STATUS``, ``DECIDED_OUTCOME_STATUSES``), the values are
+# written straight into JSON gate results, and a ``(str, Enum)`` member
+# formats as ``AcceptanceCode.X`` in an f-string on Python 3.11+ but as its
+# value on 3.10 — a version-dependent difference that has no place in an
+# audit message.
+
+#: Refusal: the latest decided deliverable-outcome receipt IS contract_invalid.
+#: The ONE case ``--override-contract-invalid`` may bypass. Its VALUE equals
+#: ``CONTRACT_INVALID_STATUS`` because it names the same fact from the other
+#: side (a receipt status vs. why this gate refused); they are separate
+#: constants and a caller compares a code against codes, never against a
+#: receipt's ``status`` field.
+CODE_CONTRACT_INVALID = "contract_invalid"
+
+#: Refusal: the ledger exists but could not be read (``strict=True``). A gate
+#: outage to be repaired, never a judgment about the deliverable.
+CODE_LEDGER_UNREADABLE = "ledger_unreadable"
+
+#: Refusal: no dispatch_id was given, so there is no chain to judge at all.
+CODE_EMPTY_DISPATCH_ID = "empty_dispatch_id"
+
+#: Accepted: a decided outcome receipt exists and is not contract_invalid.
+CODE_NOT_CONTRACT_INVALID = "not_contract_invalid"
+
+#: Accepted (fail-open absence): no deliverable-outcome receipt on record.
+CODE_NO_OUTCOME_RECEIPT = "no_outcome_receipt"
+
+#: Accepted (fail-open absence): outcome receipts exist but none of them
+#: decides the deliverable.
+CODE_NO_DECIDED_OUTCOME = "no_decided_outcome"
+
+#: The closed set of codes this module returns. A reader may switch on a code
+#: from this set; anything outside it is a bug in this module, not a case to
+#: handle permissively — a consumer meeting an unknown code must fail closed.
+ACCEPTANCE_CODES = frozenset({
+    CODE_CONTRACT_INVALID,
+    CODE_LEDGER_UNREADABLE,
+    CODE_EMPTY_DISPATCH_ID,
+    CODE_NOT_CONTRACT_INVALID,
+    CODE_NO_OUTCOME_RECEIPT,
+    CODE_NO_DECIDED_OUTCOME,
+})
+
+#: The refusing subset, for a caller that wants to assert it handled them all.
+REFUSING_ACCEPTANCE_CODES = frozenset({
+    CODE_CONTRACT_INVALID,
+    CODE_LEDGER_UNREADABLE,
+    CODE_EMPTY_DISPATCH_ID,
+})
+
+
+class DeliverableAcceptance(NamedTuple):
+    """The verdict of ``evaluate_deliverable_acceptance``: the boolean, the
+    machine-readable ``code`` a caller decides on, and the human ``reason``.
+
+    A NamedTuple rather than a widened return tuple on
+    ``is_deliverable_acceptable``: that function is a gate function with
+    call sites outside this module (``pr_merge.py``) and ~20 in the suite,
+    all unpacking two values. Widening it to three would have broken every
+    one of them at once, so the widening is ADDITIVE — the two-tuple contract
+    stays exactly as it was and is still tested, and the coded form is a
+    second entry point that returns the same judgment with its cause attached.
+    """
+
+    acceptable: bool
+    code: str
+    reason: str
 
 
 class ReceiptsUnreadableError(OSError):
@@ -403,6 +491,75 @@ def write_contract_invalid_open_ledger(
     return payload
 
 
+def evaluate_deliverable_acceptance(
+    dispatch_id: str,
+    receipts_path: Path,
+    *,
+    project_id: Optional[str] = None,
+    strict: bool = True,
+) -> DeliverableAcceptance:
+    """The full judgment behind ``is_deliverable_acceptable``: the same
+    boolean and the same prose, plus the machine-readable ``code`` that says
+    WHICH of the six outcomes produced it (see the ``CODE_*`` constants).
+
+    Callers that only display the answer keep using
+    ``is_deliverable_acceptable``. A caller that DECIDES on the answer —
+    today the merge door, whose ``--override-contract-invalid`` may bypass
+    ``CODE_CONTRACT_INVALID`` and nothing else (OI-1666) — must use this one:
+    the three refusals are indistinguishable in the boolean and separable in
+    the prose only by matching Dutch text, which is not a contract.
+    """
+    did = (dispatch_id or "").strip()
+    if not did:
+        return DeliverableAcceptance(False, CODE_EMPTY_DISPATCH_ID, "empty dispatch_id")
+
+    try:
+        records = _read_receipts_strict(receipts_path) if strict else _read_receipts(receipts_path)
+    except ReceiptsUnreadableError as exc:
+        return DeliverableAcceptance(
+            False, CODE_LEDGER_UNREADABLE, f"grootboek onleesbaar: {exc}",
+        )
+
+    records = _filter_project(records, project_id)
+    outcomes = [
+        r for r in records
+        if str(r.get("dispatch_id") or "").strip() == did and _is_outcome_receipt(r)
+    ]
+    if not outcomes:
+        return DeliverableAcceptance(
+            True,
+            CODE_NO_OUTCOME_RECEIPT,
+            f"geen uitkomst-receipt op record voor {did} "
+            f"(afwezigheid is geen weigering)",
+        )
+
+    decided = [r for r in outcomes if _is_decided_outcome(r)]
+    if not decided:
+        seen = sorted({
+            str(r.get("status") or "").strip().lower() or "<leeg>" for r in outcomes
+        })
+        return DeliverableAcceptance(
+            True,
+            CODE_NO_DECIDED_OUTCOME,
+            f"geen besliste uitkomst voor {did}: {len(outcomes)} uitkomst-receipt(s), "
+            f"alle onbeslist (status: {', '.join(seen)}) "
+            f"(afwezigheid is geen weigering)",
+        )
+
+    latest = sorted(decided, key=_sort_key)[-1]
+    if _is_contract_invalid(latest):
+        event_type = str(latest.get("event_type") or latest.get("event") or "")
+        return DeliverableAcceptance(
+            False,
+            CODE_CONTRACT_INVALID,
+            f"latest decided outcome receipt for {did} is contract_invalid "
+            f"(event_type={event_type!r}, report_path={latest.get('report_path')!r})",
+        )
+    return DeliverableAcceptance(
+        True, CODE_NOT_CONTRACT_INVALID, "latest decided outcome receipt is not contract_invalid",
+    )
+
+
 def is_deliverable_acceptable(
     dispatch_id: str,
     receipts_path: Path,
@@ -447,57 +604,40 @@ def is_deliverable_acceptable(
     than degrading to an empty read that would look like that same
     fail-open absence. ``strict=False`` restores the advisory soft read for a
     caller that only wants a hint.
+
+    The three refusals above are three DIFFERENT things and this signature
+    cannot tell them apart — a caller that acts on the difference (the merge
+    door's ``--override-contract-invalid``, which may bypass the
+    contract_invalid one and neither of the other two) must call
+    ``evaluate_deliverable_acceptance`` and read its ``code``. This function
+    is the unchanged display form: same boolean, same prose, one judgment,
+    computed in exactly one place.
     """
-    did = (dispatch_id or "").strip()
-    if not did:
-        return False, "empty dispatch_id"
-
-    try:
-        records = _read_receipts_strict(receipts_path) if strict else _read_receipts(receipts_path)
-    except ReceiptsUnreadableError as exc:
-        return False, f"grootboek onleesbaar: {exc}"
-
-    records = _filter_project(records, project_id)
-    outcomes = [
-        r for r in records
-        if str(r.get("dispatch_id") or "").strip() == did and _is_outcome_receipt(r)
-    ]
-    if not outcomes:
-        return True, (
-            f"geen uitkomst-receipt op record voor {did} "
-            f"(afwezigheid is geen weigering)"
-        )
-
-    decided = [r for r in outcomes if _is_decided_outcome(r)]
-    if not decided:
-        seen = sorted({
-            str(r.get("status") or "").strip().lower() or "<leeg>" for r in outcomes
-        })
-        return True, (
-            f"geen besliste uitkomst voor {did}: {len(outcomes)} uitkomst-receipt(s), "
-            f"alle onbeslist (status: {', '.join(seen)}) "
-            f"(afwezigheid is geen weigering)"
-        )
-
-    latest = sorted(decided, key=_sort_key)[-1]
-    if _is_contract_invalid(latest):
-        event_type = str(latest.get("event_type") or latest.get("event") or "")
-        return False, (
-            f"latest decided outcome receipt for {did} is contract_invalid "
-            f"(event_type={event_type!r}, report_path={latest.get('report_path')!r})"
-        )
-    return True, "latest decided outcome receipt is not contract_invalid"
+    result = evaluate_deliverable_acceptance(
+        dispatch_id, receipts_path, project_id=project_id, strict=strict,
+    )
+    return result.acceptable, result.reason
 
 
 __all__ = [
+    "ACCEPTANCE_CODES",
+    "CODE_CONTRACT_INVALID",
+    "CODE_EMPTY_DISPATCH_ID",
+    "CODE_LEDGER_UNREADABLE",
+    "CODE_NOT_CONTRACT_INVALID",
+    "CODE_NO_DECIDED_OUTCOME",
+    "CODE_NO_OUTCOME_RECEIPT",
     "CONTRACT_INVALID_STATUS",
     "CONTRACT_INVALID_EVENT_TYPE",
     "DECIDED_OUTCOME_STATUSES",
     "DELIVERABLE_OUTCOME_EVENT_TYPES",
     "OPEN_LEDGER_FILENAME",
+    "REFUSING_ACCEPTANCE_CODES",
+    "DeliverableAcceptance",
     "ReceiptsUnreadableError",
     "build_contract_invalid_summary",
     "collect_contract_invalid_open",
+    "evaluate_deliverable_acceptance",
     "write_contract_invalid_open_ledger",
     "is_deliverable_acceptable",
 ]
