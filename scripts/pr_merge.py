@@ -71,6 +71,13 @@ the flag is reported as unnecessary and nothing is stamped, so
 refused chain a non-empty reason overrides visibly and is stamped onto the
 ``pr_merged`` receipt; an empty reason is refused (no silent bypass).
 
+The hatch covers ONE refusal, the contract_invalid one (golf Bx, D4 /
+OI-1666). The gate's other two refusals — an unreadable ledger and an empty
+dispatch_id — are not judgments about the deliverable and stand regardless of
+the flag; an unreadable ledger is repaired, not merged past. The door decides
+on ``contract_invalid_ledger``'s machine-readable acceptance CODE, never on
+the Dutch reason text.
+
 Receipt written to t0_receipts.ndjson:
     event_type  : "pr_merged"
     pr_number   : <int>
@@ -92,7 +99,19 @@ printed a verdict to the terminal and none of them reached the ledger, so
 REFUSED merge left no record at all — the five ``return EXIT_ERROR`` branches
 in ``main()`` wrote nothing. Both branches now carry the same field,
 ``preflight_gates``: one record per gate in ``PREFLIGHT_ORDER``, each
-``{"gate", "verdict", "message", "head_sha", "overridden"}``.
+``{"gate", "verdict", "message", "head_sha", "overridden",
+"override_unnecessary", "override_not_applicable", "reason_code"}``.
+
+``reason_code`` is the machine-readable cause the gate decided on, next to the
+Dutch ``message`` (golf Bx, D4 / OI-1666). D3 landed this ledger an hour before
+D4 landed those codes and the two never met: the door decided on a code and
+recorded only prose, so telling three distinguishable refusals apart afterwards
+was back to matching Dutch text — the exact failure class D4 removed inside the
+door, reintroduced in the record it writes. Today only the contract_invalid
+preflight publishes a code vocabulary
+(``contract_invalid_ledger.ACCEPTANCE_CODES`` plus ``REASON_CODE_GATE_SKIPPED``
+for its own skip); the other four carry ``""``, and the key is written on every
+record either way.
 
 The door SHORT-CIRCUITS on the first NO-GO (each preflight returns
 EXIT_ERROR on its own, before the next one runs) and that stays exactly as
@@ -165,7 +184,10 @@ from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 from merge_preflight_adr_check import check_adr_numbers_for_pr
-from contract_invalid_ledger import is_deliverable_acceptable
+from contract_invalid_ledger import (
+    CODE_CONTRACT_INVALID,
+    evaluate_deliverable_acceptance,
+)
 from forge_protection_drift import (
     PROTECTION_YAML_RELATIVE_PATH,
     ProtectionConfigError,
@@ -221,6 +243,19 @@ VERDICT_NOT_EVALUATED = "not_evaluated"
 #: ran, ever" from the short-circuit padding a refusal produces.
 GATES_NOT_RUN_MESSAGE = "niet uitgevoerd: deze aanroep draaide de preflights van de deur niet"
 
+#: ``reason_code`` for the contract_invalid preflight's own skip: no dispatch_id
+#: was given and none could be derived from the PR, so the ledger was never
+#: read and no acceptance code exists.
+#:
+#: Deliberately a DOOR literal and deliberately NOT a member of
+#: ``contract_invalid_ledger.ACCEPTANCE_CODES``: that set is the closed
+#: vocabulary of judgments the ledger produced, and a reader validating a code
+#: against it must not be handed a value the ledger never returned. What it may
+#: not be is the empty string — that is what a gate with no code vocabulary at
+#: all carries, and reusing it here would make "this gate published no code"
+#: and "this gate skipped without reading anything" the same record.
+REASON_CODE_GATE_SKIPPED = "gate_skipped_no_dispatch_id"
+
 
 def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Dict[str, Any]:
     """One preflight's outcome, in the shape the ledger stores it.
@@ -230,6 +265,31 @@ def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Di
     the commit that gate judged; it is the same head for all five (established
     once by ``_run_ci_gate``) and is carried per record so a single record is
     self-contained evidence rather than a pointer to a sibling field.
+
+    ``reason_code`` is the machine-readable cause the gate DECIDED on (golf Bx,
+    D4 / OI-1666). Without it this record held the verdict and the Dutch
+    message and nothing else, so establishing afterwards WHICH refusal fired —
+    a real contract_invalid, an unreadable ledger, an empty dispatch_id — meant
+    matching that prose. Deciding on prose is the failure class D4 removed
+    inside the door; a record that keeps only the prose puts it back one level
+    up, where the reader is a digest or a human weeks later. The door and its
+    record now name the same fact the same way.
+
+    The two override fields travel for the same reason. ``overridden`` alone
+    covers only one of the three things that can happen to an override flag:
+    it was applied, it was passed but does not cover this refusal
+    (``override_not_applicable``), or it was passed while the chain was clean
+    and nothing needed bypassing (``override_unnecessary``). An operator who
+    TRIED to override and was held is an audit fact of its own, and with only
+    the first field that attempt and "no flag was passed at all" produce an
+    identical record.
+
+    Every key is written on every record, including for the four gates that
+    publish no code at all — they decide on their own logic and their record
+    carries ``reason_code: ""``. That is the same rule ``VERDICT_NOT_EVALUATED``
+    exists for: a key that is present on some records and absent on others
+    forces its first reader to guess, and the natural repair for the resulting
+    KeyError is a permissive default.
     """
     return {
         "gate": name,
@@ -237,6 +297,9 @@ def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Di
         "message": str(gate.get("message") or ""),
         "head_sha": head_sha or "",
         "overridden": bool(gate.get("overridden")),
+        "override_unnecessary": bool(gate.get("override_unnecessary")),
+        "override_not_applicable": bool(gate.get("override_not_applicable")),
+        "reason_code": str(gate.get("reason_code") or ""),
     }
 
 
@@ -260,7 +323,12 @@ def _preflight_ledger(
     verdict, so the message is what tells the two apart.
 
     A gate that did not run judged no commit, so its ``head_sha`` is empty —
-    deliberately not the PR head, which would suggest it looked at it.
+    deliberately not the PR head, which would suggest it looked at it. Its
+    ``reason_code`` is empty for the same reason: a gate that never ran reached
+    no cause. The padding is built from ``_preflight_record`` itself rather than
+    from a second literal, so the two shapes cannot drift apart — when D4's
+    ``reason_code`` landed on the one and not the other, a reader met the key on
+    three of five records and a KeyError on the rest.
     """
     default_message = (
         f"niet uitgevoerd: de deur stopte op de {refused_by}-preflight"
@@ -274,13 +342,10 @@ def _preflight_ledger(
         if record is not None:
             ledger.append(record)
             continue
-        ledger.append({
-            "gate": name,
+        ledger.append(_preflight_record(name, {
             "verdict": VERDICT_NOT_EVALUATED,
             "message": unevaluated_message or default_message,
-            "head_sha": "",
-            "overridden": False,
-        })
+        }))
     return ledger
 
 
@@ -601,6 +666,37 @@ def _run_contract_invalid_gate(
     NO-GO. On a clean chain the flag is reported as unnecessary and nothing
     is stamped; on a dirty chain a non-empty reason overrides visibly and an
     empty one is refused (no silent bypass).
+
+    And it only covers its OWN refusal (golf Bx, D4 / OI-1666). The gate
+    refuses in three distinguishable cases — the real contract_invalid, an
+    unreadable ledger, and an empty dispatch_id — and this branch used to set
+    GO on all three, because ``is_deliverable_acceptable`` returned a bool
+    plus Dutch prose and nothing that could be decided on. An operator who
+    means "I know about that contract_invalid" was thereby silently also
+    waving through "I cannot read the ledger", where the right move is to
+    repair it. The decision is now on
+    ``evaluate_deliverable_acceptance``'s ``code``: only
+    ``CODE_CONTRACT_INVALID`` may be overridden, any other refusal stands
+    with ``override_not_applicable: True`` and ``overridden: False`` (no
+    bypass happened, so nothing may be stamped as one). Deliberately not a
+    match on the message text — that prose is a message for a human and
+    breaks on the first rewording, in the permissive direction.
+
+    Applicability is judged BEFORE the reason's emptiness: a flag that does
+    not cover this refusal is no override at all, so there is nothing to
+    demand a reason for. Both orders refuse; this one names the real cause.
+
+    ``overridden`` is True on exactly one branch: the one that returns GO
+    because a real reason bypassed a real contract_invalid. Every other use of
+    the flag — inapplicable, unnecessary, or refused for lacking a reason —
+    leaves it False, because no bypass happened on any of them and the field is
+    copied verbatim into the ``pr_merged``/``pr_merge_refused`` record.
+
+    ``reason_code`` travels out of this function on every branch, so the record
+    it lands in can name the cause the door decided on instead of only the
+    Dutch message. Its values are ``contract_invalid_ledger.ACCEPTANCE_CODES``
+    plus this module's ``REASON_CODE_GATE_SKIPPED`` for the skip above, which
+    never reaches the ledger.
     """
     did = (dispatch_id or "").strip()
     resolved_from_pr = False
@@ -617,12 +713,15 @@ def _run_contract_invalid_gate(
             "overridden": False,
             "override_reason": None,
             "override_unnecessary": False,
+            "override_not_applicable": False,
+            "reason_code": REASON_CODE_GATE_SKIPPED,
             "resolved_from_pr": False,
         }
 
     paths = ensure_env()
     receipts_path = Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
-    acceptable, reason = is_deliverable_acceptable(did, receipts_path)
+    acceptance = evaluate_deliverable_acceptance(did, receipts_path)
+    acceptable, reason = acceptance.acceptable, acceptance.reason
 
     origin = f" (dispatch-id afgeleid uit PR #{pr_number})" if resolved_from_pr else ""
     result: Dict[str, Any] = {
@@ -632,6 +731,8 @@ def _run_contract_invalid_gate(
         "overridden": False,
         "override_reason": None,
         "override_unnecessary": False,
+        "override_not_applicable": False,
+        "reason_code": acceptance.code,
         "resolved_from_pr": resolved_from_pr,
     }
 
@@ -647,6 +748,17 @@ def _run_contract_invalid_gate(
         result["override_unnecessary"] = True
         return result
 
+    # The refusal must be the one this flag is FOR. Judged on the acceptance
+    # code, never on the message: those strings are Dutch prose for a human.
+    if acceptance.code != CODE_CONTRACT_INVALID:
+        result["message"] = (
+            f"{result['message']} — --override-contract-invalid geldt alleen voor "
+            f"een contract_invalid-uitkomst, niet voor '{acceptance.code}'; "
+            f"deze weigering blijft staan"
+        )
+        result["override_not_applicable"] = True
+        return result
+
     reason_text = override_reason.strip()
     if not reason_text:
         result["verdict"] = "NO-GO"
@@ -654,7 +766,19 @@ def _run_contract_invalid_gate(
             "override zonder reden geweigerd: --override-contract-invalid "
             "vereist een niet-lege reden (geen stille bypass)"
         )
-        result["overridden"] = True
+        # NOT ``overridden: True``. The verdict stays NO-GO, so nothing was
+        # bypassed — the same rule the branch two above already applies to an
+        # inapplicable flag, and the same one this function's docstring states
+        # for a clean chain. It is not a cosmetic field either: ``main`` builds
+        # the ``contract_invalid_override`` audit stamp from it, and
+        # ``_preflight_record`` copies it straight into the preflight ledger, so
+        # a True here put "this merge door was overridden" into the very record
+        # written to prove it refused.
+        #
+        # ``override_reason`` keeps the empty string rather than ``None``: the
+        # flag WAS passed here, and the distinction from the branches that leave
+        # it None is the only in-band trace of an attempt that carried no reason.
+        result["overridden"] = False
         result["override_reason"] = reason_text
         return result
 
@@ -1406,7 +1530,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--override-contract-invalid", default=None,
         help="Escape hatch (golf B, B7): accept a dispatch whose latest receipt is "
              "contract_invalid, with this required reason (empty is refused). Separate "
-             "from --override-reason.",
+             "from --override-reason. Covers ONLY that refusal: an unreadable ledger "
+             "or an unresolvable dispatch_id stands regardless of this flag.",
     )
     parser.add_argument(
         "--allow-weaken", default=None,

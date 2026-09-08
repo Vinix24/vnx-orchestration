@@ -31,6 +31,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import pr_merge
+import contract_invalid_ledger as cil
 
 
 SHA = "b" * 40
@@ -139,6 +140,21 @@ def _track_do_merge(monkeypatch):
     return calls
 
 
+def _refusal_record(path: Path, gate_name: str) -> Dict[str, Any]:
+    """The named gate's entry inside the one ``pr_merge_refused`` receipt.
+
+    Golf Bx, D3 writes that receipt with all five preflights in
+    ``preflight_gates``; this is the record a human or a reader meets when
+    asking why the door refused.
+    """
+    refusals = [
+        r for r in _load_receipts(path) if r.get("event_type") == "pr_merge_refused"
+    ]
+    assert len(refusals) == 1, f"expected exactly one refusal record, got {len(refusals)}"
+    gates = {g["gate"]: g for g in refusals[0]["preflight_gates"]}
+    return gates[gate_name]
+
+
 # ---------------------------------------------------------------------------
 # Unit tests: _run_contract_invalid_gate
 # ---------------------------------------------------------------------------
@@ -189,7 +205,9 @@ class TestRunContractInvalidGate:
         ])
         gate = pr_merge._run_contract_invalid_gate(did, override_reason="   ")
         assert gate["verdict"] == "NO-GO"
-        assert gate["overridden"] is True
+        assert gate["overridden"] is False, (
+            "the gate stayed NO-GO, so no override was applied"
+        )
         assert "niet-lege reden" in gate["message"]
 
     def test_override_nonempty_reason_grants_go(self, vnx_env):
@@ -653,3 +671,383 @@ class TestOverrideOnlyStampsARealBypass:
             "flag": "--override-contract-invalid",
             "reason": "handmatig geverifieerd",
         }
+
+
+class TestOverrideAppliesOnlyToItsOwnReasonCode:
+    """Golf Bx, D4 / OI-1666: the flag used to force GO on EVERY non-acceptable
+    verdict, because the gate only ever saw ``(False, <Dutch prose>)`` and
+    never why. ``is_deliverable_acceptable`` refuses in three distinguishable
+    cases — the real contract_invalid, an unreadable ledger (the fail-closed
+    I/O refusal), and an empty dispatch_id — and an operator who means "I know
+    about that contract_invalid" was silently also waving through "I cannot
+    read the ledger", where repairing is the right move, not proceeding.
+
+    The door now decides on the machine-readable code
+    (``contract_invalid_ledger.CODE_*``), never on the message text: those
+    strings are Dutch prose for a human and break on the first rewording.
+    """
+
+    def test_unreadable_ledger_with_the_flag_is_still_no_go(self, vnx_env):
+        """The core case. On the pre-D4 door this said GO."""
+        vnx_env["receipts_path"].mkdir(parents=True)
+
+        gate = pr_merge._run_contract_invalid_gate(
+            "d-any", override_reason="ik weet van die contract_invalid",
+        )
+
+        assert gate["verdict"] == "NO-GO"
+        assert gate["overridden"] is False, (
+            "no bypass happened, so nothing may be stamped as one"
+        )
+        assert gate["override_not_applicable"] is True
+        assert gate["reason_code"] == cil.CODE_LEDGER_UNREADABLE
+        assert "grootboek onleesbaar" in gate["message"]
+        assert "geldt alleen" in gate["message"]
+
+    def test_main_refuses_unreadable_ledger_even_with_the_flag(
+        self, vnx_env, monkeypatch, capsys,
+    ):
+        vnx_env["receipts_path"].mkdir(parents=True)
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main([
+            "--pr", "1", "--dispatch-id", "d-any",
+            "--override-contract-invalid", "ik weet van die contract_invalid",
+        ])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls, (
+            "an unreadable ledger must be repaired, not overridden past"
+        )
+        assert "grootboek onleesbaar" in capsys.readouterr().err
+
+    def test_unreadable_ledger_with_an_empty_reason_is_also_no_go(self, vnx_env):
+        """Applicability is judged before the reason is: a flag that does not
+        cover this refusal is no override at all, so there is nothing to
+        demand a reason for. Both orders refuse; this one says why."""
+        vnx_env["receipts_path"].mkdir(parents=True)
+
+        gate = pr_merge._run_contract_invalid_gate("d-any", override_reason="   ")
+
+        assert gate["verdict"] == "NO-GO"
+        assert gate["overridden"] is False
+        assert gate["override_not_applicable"] is True
+        assert gate["reason_code"] == cil.CODE_LEDGER_UNREADABLE
+
+    def test_real_contract_invalid_with_a_reason_still_grants_go(self, vnx_env):
+        """The repair must not take away the escape hatch it was built for."""
+        did = "20260908-d4-real-contract-invalid"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T11:36:00Z"),
+            _gate_request(did, "2026-09-06T11:50:54Z"),
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(
+            did, override_reason="rapport handmatig nagelezen",
+        )
+
+        assert gate["verdict"] == "GO"
+        assert gate["overridden"] is True
+        assert gate["override_not_applicable"] is False
+        assert gate["override_reason"] == "rapport handmatig nagelezen"
+        assert gate["reason_code"] == cil.CODE_CONTRACT_INVALID
+
+    def test_empty_reason_on_a_real_contract_invalid_stays_refused(self, vnx_env):
+        """Unchanged behaviour: on the reason the flag DOES cover, an empty
+        one is still a refused silent bypass."""
+        did = "20260908-d4-empty-reason"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_ci(did, "2026-09-06T11:36:00Z"),
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(did, override_reason="   ")
+
+        assert gate["verdict"] == "NO-GO"
+        assert gate["overridden"] is False, (
+            "an override that was refused is not an override that was applied"
+        )
+        assert gate["override_not_applicable"] is False
+        assert "niet-lege reden" in gate["message"]
+
+    def test_clean_chain_with_the_flag_is_unchanged(self, vnx_env):
+        """Unchanged behaviour: nothing to override, nothing stamped — and the
+        'unnecessary' branch is not the 'not applicable' one."""
+        did = "20260908-d4-clean-chain"
+        _write_receipts(vnx_env["receipts_path"], [
+            _outcome_success(did, "2026-09-06T11:36:00Z"),
+        ])
+
+        gate = pr_merge._run_contract_invalid_gate(did, override_reason="voor de zekerheid")
+
+        assert gate["verdict"] == "GO"
+        assert gate["overridden"] is False
+        assert gate["override_unnecessary"] is True
+        assert gate["override_not_applicable"] is False
+        assert gate["reason_code"] == cil.CODE_NOT_CONTRACT_INVALID
+
+    @pytest.mark.parametrize("code", [
+        cil.CODE_LEDGER_UNREADABLE,
+        cil.CODE_EMPTY_DISPATCH_ID,
+        "een_code_die_later_wordt_toegevoegd",
+    ])
+    def test_no_other_refusal_code_can_be_overridden(self, vnx_env, monkeypatch, code):
+        """The rule is on the code, not on the cases this door can reach
+        today: ``empty_dispatch_id`` is unreachable here (the door skips a
+        missing id loudly before the ledger read) and a code added later is
+        unknown to this test — both must refuse by construction, not by
+        having been enumerated. Only the evaluator is stubbed; the door's own
+        decision runs for real."""
+        monkeypatch.setattr(
+            pr_merge, "evaluate_deliverable_acceptance",
+            lambda did, path, **kw: cil.DeliverableAcceptance(False, code, f"reden: {code}"),
+        )
+
+        gate = pr_merge._run_contract_invalid_gate("d-any", override_reason="toch maar wel")
+
+        assert gate["verdict"] == "NO-GO"
+        assert gate["overridden"] is False
+        assert gate["reason_code"] == code
+
+
+class TestRefusedOverrideIsNotAnAppliedOne:
+    """Golf Bx, D4 fix-forward: the empty-reason branch stamped
+    ``overridden: True`` on a gate that stayed NO-GO.
+
+    Two lines above it, the same function refuses to mark an inapplicable
+    override as applied, for the stated reason that nothing was bypassed. An
+    override that was REFUSED for lacking a reason bypassed exactly as little.
+    The field travels: ``_preflight_record`` copies ``overridden`` straight
+    into the preflight ledger, so the refusal record claimed a merge door had
+    been overridden while it was in the act of refusing.
+    """
+
+    def test_the_empty_reason_branch_records_no_override(self, vnx_env):
+        did = "20260908-d4ff-empty-reason-field"
+        _write_receipts(vnx_env["receipts_path"], [_outcome_ci(did, "2026-09-06T11:36:00Z")])
+
+        gate = pr_merge._run_contract_invalid_gate(did, override_reason="   ")
+
+        assert gate["verdict"] == "NO-GO"
+        assert gate["overridden"] is False
+
+    def test_the_refusal_record_does_not_claim_an_override(
+        self, vnx_env, monkeypatch,
+    ):
+        """The field as a reader meets it: inside ``preflight_gates`` on the
+        ``pr_merge_refused`` receipt, not just on the gate dict in memory."""
+        did = "20260908-d4ff-empty-reason-record"
+        _write_receipts(vnx_env["receipts_path"], [_outcome_ci(did, "2026-09-06T11:36:00Z")])
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main([
+            "--pr", "1", "--dispatch-id", did, "--override-contract-invalid", "  ",
+        ])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls
+
+        record = _refusal_record(vnx_env["receipts_path"], "contract_invalid")
+        assert record["verdict"] == "NO-GO"
+        assert record["overridden"] is False, (
+            "a refused merge may not carry an override in its own record"
+        )
+
+    def test_an_applied_override_is_still_recorded_as_one(self, vnx_env, monkeypatch):
+        """The other direction, so the fix cannot be "always False": a real
+        override with a real reason still reads as overridden on the merged
+        receipt."""
+        did = "20260908-d4ff-real-override-record"
+        _write_receipts(vnx_env["receipts_path"], [_outcome_ci(did, "2026-09-06T11:36:00Z")])
+        _bypass_upstream_gates(monkeypatch)
+        _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main([
+            "--pr", "1", "--dispatch-id", did,
+            "--override-contract-invalid", "rapport handmatig nagelezen",
+        ])
+
+        assert rc == pr_merge.EXIT_OK
+        merged = [
+            r for r in _load_receipts(vnx_env["receipts_path"])
+            if r.get("event_type") == "pr_merged"
+        ]
+        assert len(merged) == 1
+        gates = {g["gate"]: g for g in merged[0]["preflight_gates"]}
+        assert gates["contract_invalid"]["overridden"] is True
+
+
+class TestRefusalRecordCarriesTheCodeNotOnlyTheProse:
+    """Golf Bx, D4 fix-forward: the redencode never reached the record.
+
+    D3 (OI-1665) landed ``_preflight_record`` an hour before D4 (OI-1666)
+    landed the codes, and the two never met. ``_preflight_record`` copies five
+    fields off the gate result — gate, verdict, message, head_sha, overridden —
+    and ``reason_code`` was not one of them.
+
+    So the door DECIDED on the machine-readable code and then recorded only
+    the Dutch prose. Establishing afterwards which of the three refusals fired
+    was back to matching that prose, which is the exact failure class D4 exists
+    to remove, put back one level up: it breaks on the first rewording, and it
+    breaks permissively.
+    """
+
+    def test_a_real_contract_invalid_refusal_names_its_code(
+        self, vnx_env, monkeypatch,
+    ):
+        """Nothing stubbed but the upstream gates and the merge itself: the
+        ledger, the gate decision and the emit path are the real ones."""
+        did = "20260908-d4ff-code-in-record"
+        _write_receipts(vnx_env["receipts_path"], [_outcome_ci(did, "2026-09-06T11:36:00Z")])
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", "1", "--dispatch-id", did])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls
+
+        record = _refusal_record(vnx_env["receipts_path"], "contract_invalid")
+        assert record["verdict"] == "NO-GO"
+        assert record["reason_code"] == cil.CODE_CONTRACT_INVALID
+        assert record["reason_code"] in cil.ACCEPTANCE_CODES
+
+    @pytest.mark.parametrize("code", [
+        cil.CODE_LEDGER_UNREADABLE,
+        cil.CODE_EMPTY_DISPATCH_ID,
+    ])
+    def test_the_other_two_refusals_name_their_own_code(
+        self, vnx_env, monkeypatch, code,
+    ):
+        """The two refusals that cannot be produced through the door with a
+        WRITABLE ledger, so only the evaluator is stubbed and everything after
+        it is real.
+
+        Neither is reachable otherwise. ``empty_dispatch_id`` is caught by the
+        door's own loud skip before the ledger is ever read, and a genuinely
+        unreadable ledger is also an unwritable one — the refusal record would
+        have nowhere to land, which is a separate, pre-existing property
+        ``_refuse_merge`` already warns about. Stubbing the evaluator is what
+        lets the record itself be tested for all three codes.
+        """
+        did = "20260908-d4ff-code-" + code
+        monkeypatch.setattr(
+            pr_merge, "evaluate_deliverable_acceptance",
+            lambda d, path, **kw: cil.DeliverableAcceptance(False, code, f"reden: {code}"),
+        )
+        _bypass_upstream_gates(monkeypatch)
+        do_merge_calls = _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", "1", "--dispatch-id", did])
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert not do_merge_calls
+
+        record = _refusal_record(vnx_env["receipts_path"], "contract_invalid")
+        assert record["reason_code"] == code
+        assert record["reason_code"] != cil.CODE_CONTRACT_INVALID
+
+    def test_the_three_refusals_are_separable_without_reading_the_prose(
+        self, vnx_env, monkeypatch,
+    ):
+        """The blocker itself, stated as one assertion: three refusals, three
+        distinct codes in the record, no Dutch text consulted."""
+        seen = set()
+        for code in (
+            cil.CODE_CONTRACT_INVALID,
+            cil.CODE_LEDGER_UNREADABLE,
+            cil.CODE_EMPTY_DISPATCH_ID,
+        ):
+            monkeypatch.setattr(
+                pr_merge, "evaluate_deliverable_acceptance",
+                lambda d, path, _c=code, **kw: cil.DeliverableAcceptance(
+                    False, _c, "een en dezelfde nederlandse tekst voor alle drie",
+                ),
+            )
+            _bypass_upstream_gates(monkeypatch)
+            _track_do_merge(monkeypatch)
+
+            pr_merge.main(["--pr", "1", "--dispatch-id", f"20260908-d4ff-sep-{code}"])
+
+            records = [
+                {g["gate"]: g for g in r["preflight_gates"]}["contract_invalid"]
+                for r in _load_receipts(vnx_env["receipts_path"])
+                if r.get("event_type") == "pr_merge_refused"
+            ]
+            seen.add(records[-1]["reason_code"])
+
+        assert seen == {
+            cil.CODE_CONTRACT_INVALID,
+            cil.CODE_LEDGER_UNREADABLE,
+            cil.CODE_EMPTY_DISPATCH_ID,
+        }
+
+    def test_an_inapplicable_override_attempt_is_visible_in_the_record(
+        self, vnx_env, monkeypatch,
+    ):
+        """An operator who TRIED to override a refusal this flag does not cover
+        is an audit fact of its own. Without the field, that attempt and "no
+        flag was passed at all" are the same record, separable only in the
+        message."""
+        monkeypatch.setattr(
+            pr_merge, "evaluate_deliverable_acceptance",
+            lambda d, path, **kw: cil.DeliverableAcceptance(
+                False, cil.CODE_LEDGER_UNREADABLE, "grootboek onleesbaar: stub",
+            ),
+        )
+        _bypass_upstream_gates(monkeypatch)
+        _track_do_merge(monkeypatch)
+
+        pr_merge.main([
+            "--pr", "1", "--dispatch-id", "20260908-d4ff-attempt",
+            "--override-contract-invalid", "ik weet van die contract_invalid",
+        ])
+
+        record = _refusal_record(vnx_env["receipts_path"], "contract_invalid")
+        assert record["override_not_applicable"] is True
+        assert record["overridden"] is False
+
+    def test_the_merged_receipt_carries_the_accepting_code_too(
+        self, vnx_env, monkeypatch,
+    ):
+        """Not only refusals: a merge records WHICH kind of yes the gate gave,
+        so "the chain was clean" and "there was nothing on record" are
+        separable on a merged receipt as well."""
+        did = "20260908-d4ff-merged-code"
+        _write_receipts(vnx_env["receipts_path"], [_outcome_success(did, "2026-09-06T11:36:00Z")])
+        _bypass_upstream_gates(monkeypatch)
+        _track_do_merge(monkeypatch)
+
+        rc = pr_merge.main(["--pr", "1", "--dispatch-id", did])
+
+        assert rc == pr_merge.EXIT_OK
+        merged = [
+            r for r in _load_receipts(vnx_env["receipts_path"])
+            if r.get("event_type") == "pr_merged"
+        ]
+        gates = {g["gate"]: g for g in merged[0]["preflight_gates"]}
+        assert gates["contract_invalid"]["reason_code"] == cil.CODE_NOT_CONTRACT_INVALID
+
+    def test_a_skipped_gate_says_so_instead_of_leaving_the_field_empty(
+        self, vnx_env, monkeypatch, capsys,
+    ):
+        """The gate's own skip (no dispatch_id, none derivable from the PR)
+        never reaches the ledger, so it has no acceptance code — and an empty
+        string there would be indistinguishable from a record written before
+        this field existed. It gets a door-level literal instead, deliberately
+        outside the ledger's closed set."""
+        _bypass_upstream_gates(monkeypatch)
+        _track_do_merge(monkeypatch)
+        monkeypatch.setattr(pr_merge, "_lookup_dispatch_id_by_pr_number", lambda n: "")
+
+        rc = pr_merge.main(["--pr", "1"])
+
+        assert rc == pr_merge.EXIT_OK
+        merged = [
+            r for r in _load_receipts(vnx_env["receipts_path"])
+            if r.get("event_type") == "pr_merged"
+        ]
+        gates = {g["gate"]: g for g in merged[0]["preflight_gates"]}
+        assert gates["contract_invalid"]["reason_code"] == pr_merge.REASON_CODE_GATE_SKIPPED
+        assert pr_merge.REASON_CODE_GATE_SKIPPED not in cil.ACCEPTANCE_CODES
