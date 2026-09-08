@@ -993,7 +993,106 @@ class GateResultIndex(NamedTuple):
     by_pr: Dict[Tuple[int, str], List[Tuple[Path, Dict[str, Any]]]]
 
 
-def _sweep_stale_provider_not_installed_results(state_dir: Path) -> List[str]:
+class ProviderNotInstalledSweepResult(NamedTuple):
+    """Outcome of one :func:`_sweep_stale_provider_not_installed_results` call
+    (golf Bx, D1 — codex findings on PR #1817, the PR that introduced the
+    sweep itself).
+
+    ``removed`` — filenames of records actually unlinked (unchanged OI-1663
+    behaviour). ``unreadable`` — absolute paths of records the sweep could
+    not even parse (``OSError``/``json.JSONDecodeError``). These are left ON
+    DISK, never removed: a record that cannot be read cannot be verified
+    against the narrow ``status=not_executable`` + ``reason=
+    provider_not_installed`` predicate this sweep targets, and deleting on
+    evidence the sweep never actually read could destroy a genuine gate
+    verdict that merely failed to parse (a corrupt write, a write caught
+    mid-flush) — the exact silent-outcome failure mode golf Bx exists to
+    close, so each one is also logged loudly rather than folded into a bare
+    ``continue``.
+    """
+
+    removed: List[str]
+    unreadable: List[str]
+
+
+def _audit_log_provider_not_installed_removal(
+    state_dir: Path, entry: Path, record: Dict[str, Any],
+) -> None:
+    """Append a removal entry to the governance audit trail (ADR-005).
+
+    ``entry.unlink()`` alone erases a governance record with nothing left
+    behind to show it ever existed. This reuses the repo's EXISTING
+    general-purpose governance audit trail
+    (``scripts/lib/governance_audit.py`` → ``governance_audit.ndjson``)
+    rather than introducing a new file: ``cleanup_orphan_gates.py`` already
+    calls the identical ``log_enforcement`` for the same shape of action (a
+    stale gate record cleaned up, logged under its own ``check_name``).
+    ``gate_recorder.write_skip_rationale`` (``gate_execution_audit.ndjson``,
+    GATE-9) was considered and rejected: its schema is a fixed
+    ``provider_check`` block answering "why was this gate never requested",
+    not "an existing record was deleted" — forcing this event through it
+    would mean inventing fields that schema was never designed to carry.
+
+    ``log_enforcement`` only stores a few fields as top-level plaintext
+    (``pr_number``, ``dispatch_id``, ``message``) — everything else passed
+    via ``context`` is HASHED, not kept in the clear (see
+    ``governance_audit._context_hash``). The dispatch's minimum bar — path,
+    gate, PR number, the reason the record carried, and why it was removed —
+    is therefore put directly into ``message`` (always recoverable in
+    plaintext from the audit line itself), with ``pr_number``/``dispatch_id``
+    additionally carried as their own dedicated top-level fields.
+
+    ``governance_audit._data_dir()`` resolves ``VNX_DATA_DIR`` from the
+    AMBIENT environment, never from an argument. Pinning it here to this
+    sweep's own ``state_dir`` mirrors ``_build_manager``'s identical pin
+    a few hundred lines below — the same fix for the same class of bug: a
+    store-scoped write must never depend on whatever ``VNX_DATA_DIR``
+    happens to be set to elsewhere in the process (Codex Defense Checklist:
+    state dir override must come from the explicit argument, never ambient
+    env).
+
+    Best-effort: an audit-write failure must never re-open the (already
+    correct, already-completed) removal decision — logged loudly via
+    ``_LOG.warning``, never raised, mirroring ``cleanup_orphan_gates.py``'s
+    identical tolerance for this exact class of write.
+    """
+    try:
+        os.environ["VNX_DATA_DIR"] = str(Path(state_dir).parent)
+        from governance_audit import log_enforcement  # noqa: PLC0415
+
+        dispatch_id = record.get("dispatch_id") or None
+        pr_number = record.get("pr_number")
+        context: Dict[str, Any] = {
+            "path": str(entry),
+            "gate": record.get("gate"),
+            "reason": record.get("reason"),
+        }
+        if isinstance(pr_number, int):
+            context["pr_number"] = pr_number
+        log_enforcement(
+            check_name="provider_not_installed_sweep",
+            level=1,
+            result=True,
+            context=context,
+            message=(
+                f"removed stale provider_not_installed result {entry.name} "
+                f"(path={entry}, gate={record.get('gate')!r}, "
+                f"reason={record.get('reason')!r}): provider availability is "
+                "an environment fact about whichever process wrote it, "
+                "never PR evidence (OI-1469/OI-1663)"
+            ),
+            dispatch_id=dispatch_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — audit-write failure must not unwind the sweep
+        _LOG.warning(
+            "gate_obligation_runner: could not write governance_audit entry "
+            "for removed %s: %s", entry, exc,
+        )
+
+
+def _sweep_stale_provider_not_installed_results(
+    state_dir: Path,
+) -> ProviderNotInstalledSweepResult:
     """Remove every ``provider_not_installed`` result record on disk,
     regardless of which process wrote it (OI-1663).
 
@@ -1026,18 +1125,32 @@ def _sweep_stale_provider_not_installed_results(state_dir: Path) -> List[str]:
     Called once per :func:`run`, over the WHOLE ``review_gates/results``
     directory — not scoped to this run's own obligations — so a stale record
     is swept on the very next launchd tick (900s) regardless of whether any
-    obligation still references the PR it names. Returns the list of removed
-    filenames (empty when nothing was stale), logged loudly per removal so
-    the sweep itself stays visible in the runner's own log.
+    obligation still references the PR it names. Returns a
+    :class:`ProviderNotInstalledSweepResult` — ``removed`` filenames (empty
+    when nothing was stale), each also logged loudly and given a matching
+    ``governance_audit.ndjson`` entry (:func:`_audit_log_provider_not_installed_removal`,
+    ADR-005) so a deleted governance record leaves a trace behind; and
+    ``unreadable`` paths for anything the sweep could not even parse — never
+    deleted, always logged loudly, never folded silently into the same
+    ``continue`` a genuinely-uninteresting record takes (golf Bx, D1).
     """
     results_dir = Path(state_dir) / "review_gates" / "results"
     removed: List[str] = []
+    unreadable: List[str] = []
     if not results_dir.is_dir():
-        return removed
+        return ProviderNotInstalledSweepResult(removed=removed, unreadable=unreadable)
     for entry in sorted(results_dir.glob("*.json")):
         try:
             record = json.loads(entry.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            unreadable.append(str(entry))
+            _LOG.warning(
+                "gate_obligation_runner: could not read %s during the "
+                "provider_not_installed sweep (%s) — leaving it in place; "
+                "a record this sweep could not verify is never removed "
+                "(golf Bx, D1)",
+                entry, exc,
+            )
             continue
         if not isinstance(record, dict):
             continue
@@ -1060,7 +1173,8 @@ def _sweep_stale_provider_not_installed_results(state_dir: Path) -> List[str]:
             "fact, never PR evidence (OI-1469/OI-1663)",
             entry.name,
         )
-    return removed
+        _audit_log_provider_not_installed_removal(state_dir, entry, record)
+    return ProviderNotInstalledSweepResult(removed=removed, unreadable=unreadable)
 
 
 def _index_gate_results(state_dir: Path) -> GateResultIndex:
@@ -2692,7 +2806,12 @@ def run(
     # building the evidence index, so a swept record can never be read back
     # as a candidate. write=False (dry run) must never mutate anything, so
     # the sweep — like the fulfilment loop itself — only runs when write=True.
-    swept_provider_not_installed = _sweep_stale_provider_not_installed_results(state_dir) if write else []
+    sweep_result = (
+        _sweep_stale_provider_not_installed_results(state_dir)
+        if write
+        else ProviderNotInstalledSweepResult(removed=[], unreadable=[])
+    )
+    swept_provider_not_installed = sweep_result.removed
     # OI-1388 defect 2: built once per run, not per obligation, and shared by
     # both the write path and the dry-run path — the same index feeds the
     # same decision tree (_pre_execution_decision) either way, so the two
@@ -2745,6 +2864,8 @@ def run(
         "terminal_evidence_contradictions": contradictions,
         "terminal_evidence_contradiction_count": len(contradictions),
         "swept_provider_not_installed": swept_provider_not_installed,
+        "provider_not_installed_sweep_unreadable": sweep_result.unreadable,
+        "provider_not_installed_sweep_unreadable_count": len(sweep_result.unreadable),
     }
 
 

@@ -945,6 +945,77 @@ def test_runner_sweep_leaves_decided_results_untouched(tmp_path, monkeypatch):
     assert json.loads(disabled_file.read_text(encoding="utf-8")) == disabled_record
 
 
+def test_runner_sweep_writes_governance_audit_entry_for_removed_record(tmp_path, monkeypatch):
+    """golf Bx, D1 (PR #1817 codex finding 1): ``entry.unlink()`` alone erases
+    a governance record with nothing left to show it ever existed. The sweep
+    must append an audit-trail entry -- path, gate, PR number (when the
+    record carries one), the reason it was removed for, and why -- to the
+    repo's EXISTING general-purpose governance audit trail
+    (governance_audit.ndjson), not a new file."""
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    state_dir = _make_state_dir(tmp_path)
+    results_dir = state_dir / "review_gates" / "results"
+    stale_record = {
+        "gate": "codex_gate",
+        "pr_number": 1809,
+        "status": STATUS_NOT_EXECUTABLE,
+        "reason": "provider_not_installed",
+        "reason_detail": "codex binary not found in PATH",
+        "dispatch_id": "20260907-golfb-b4-runbook",
+    }
+    result_file = results_dir / "pr-1809-codex_gate.json"
+    result_file.write_text(json.dumps(stale_record), encoding="utf-8")
+
+    runner.run(state_dir)
+
+    assert not result_file.exists()
+    audit_path = state_dir / "governance_audit.ndjson"
+    assert audit_path.exists(), "the sweep must leave an audit trail behind a removed record"
+    entries = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    matches = [e for e in entries if e.get("check_name") == "provider_not_installed_sweep"]
+    assert len(matches) == 1, f"expected exactly one sweep audit entry, got: {entries}"
+    entry = matches[0]
+    assert entry["pr_number"] == 1809
+    assert entry["dispatch_id"] == "20260907-golfb-b4-runbook"
+    message = entry["message"]
+    assert str(result_file) in message, message
+    assert "codex_gate" in message, message
+    assert "provider_not_installed" in message, message
+    assert "OI-1469" in message and "OI-1663" in message, message
+
+
+def test_runner_sweep_leaves_corrupt_record_and_logs_loudly(tmp_path, monkeypatch, caplog):
+    """golf Bx, D1 (PR #1817 codex finding 2): a corrupt/unreadable result
+    record must never silently disappear from the sweep's accounting. It
+    must stay ON DISK -- never deleted on evidence the sweep could not even
+    read -- be logged loudly with its path and the read error, and be
+    counted in run()'s summary next to swept_provider_not_installed."""
+    import logging
+
+    state_dir = _make_state_dir(tmp_path)
+    results_dir = state_dir / "review_gates" / "results"
+    corrupt_file = results_dir / "pr-1810-codex_gate.json"
+    corrupt_file.write_text("{not valid json", encoding="utf-8")
+
+    caplog.set_level(logging.WARNING, logger="gate_obligation_runner")
+
+    summary = runner.run(state_dir)
+
+    assert corrupt_file.exists(), "a record the sweep could not read must never be deleted"
+    assert corrupt_file.read_text(encoding="utf-8") == "{not valid json"
+    assert summary["provider_not_installed_sweep_unreadable_count"] == 1
+    assert str(corrupt_file) in summary["provider_not_installed_sweep_unreadable"]
+    assert summary["swept_provider_not_installed"] == []
+    assert any(
+        str(corrupt_file) in record.message or corrupt_file.name in record.message
+        for record in caplog.records
+    ), f"expected a loud log line naming the corrupt path, got: {[r.message for r in caplog.records]}"
+
+
 def test_runner_leaves_pre_existing_pass_untouched_on_provider_not_installed(tmp_path, monkeypatch):
     """OI-1469/OI-1470 composition: if the slot already carries a real,
     evidenced pass, gate_recorder's overwrite guard (OI-1470/OI-1471)
