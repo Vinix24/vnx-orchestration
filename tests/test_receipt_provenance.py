@@ -964,6 +964,72 @@ class TestReconcileCommitProvenanceTrackLinkage:
         assert reg["pr_number"] == 412
         conn.close()
 
+    def test_multiple_trailers_plus_prose_hash_all_get_same_correct_pr(self, tmp_path):
+        """OI-1681: a squashed fix-forward commit carries multiple
+        Dispatch-ID trailers AND a prose reference to an unrelated open
+        item/PR before its own squash suffix -- every trailer's dispatch
+        must be linked to the REAL suffix PR number (1817), never the
+        prose one (1663). Fails on current first-match code (both
+        dispatches would get 1663)."""
+        dispatch_a = "20260908-bx-d1-runner-path"
+        dispatch_b = "20260908-bx-d1-ff-audit-append"
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, dispatch_a, "test-proj", "T-001")
+        _seed_dispatch(conn, dispatch_b, "test-proj", "T-001")
+        _commit(
+            repo,
+            "fix(gate-runner): addresses #1663 in provider cleanup (#1817)\n\n"
+            "Fix-forward on PR #1663, three findings addressed.\n\n"
+            f"Dispatch-ID: {dispatch_a}\n\n"
+            "* fix(gate-runner): audit trail for swept records\n\n"
+            f"Dispatch-ID: {dispatch_b}\n",
+            env,
+        )
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["linked"] == 2
+        for dispatch_id in (dispatch_a, dispatch_b):
+            reg = conn.execute(
+                "SELECT pr_number FROM provenance_registry WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchone()
+            assert reg["pr_number"] == 1817, f"{dispatch_id} got {reg['pr_number']!r}"
+        assert self._track_ref(conn, "T-001", "test-proj") == "#1817"
+        conn.close()
+
+    def test_no_suffix_with_prose_hash_records_commit_without_pr_number(self, tmp_path):
+        """OI-1681 fallback: a direct (non-squash) commit that cites an
+        unrelated past PR in prose but carries no squash suffix must not
+        silently adopt that unrelated number. The chosen behavior is None:
+        the commit/dispatch link is still recorded, but pr_number stays
+        NULL and no pr_ref is written."""
+        repo, _state_dir, conn, env = _make_project(tmp_path)
+        _seed_track(conn, "T-001", "test-proj")
+        _seed_dispatch(conn, self.DISPATCH_ID, "test-proj", "T-001")
+        _commit(
+            repo,
+            "fix(update): make GC-protect fail-closed on undeterminable set\n\n"
+            "addresses codex blocking findings on PR #1218.\n\n"
+            f"Dispatch-ID: {self.DISPATCH_ID}\n",
+            env,
+        )
+
+        result = reconcile_commit_provenance(repo, conn, max_commits=10)
+        conn.commit()
+
+        assert result["linked"] == 1
+        assert result["pr_ref_linked"] == 0
+        assert self._track_ref(conn, "T-001", "test-proj") is None
+        reg = conn.execute(
+            "SELECT pr_number FROM provenance_registry WHERE dispatch_id = ?",
+            (self.DISPATCH_ID,),
+        ).fetchone()
+        assert reg["pr_number"] is None
+        conn.close()
+
 
 class TestReconcileCommitProvenanceCentralStateDir:
     """Seam 2 (provenance seams PR-B, 2026-07-29): reconcile_commit_provenance's
@@ -1534,3 +1600,61 @@ class TestChainStatusRename:
         source = inspect.getsource(_calculate_chain_status)
         assert "has_pr" not in source
         assert "has_fp" not in source
+
+
+class TestExtractPrNumberFromSquashSuffix:
+    """OI-1681: ``_extract_pr_number`` must read the GitHub squash-merge
+    suffix ``(#NNN)`` at the END of the commit subject line, not the first
+    ``#NNN`` anywhere in the body. Measured live on main (08-09): a
+    fix-forward body routinely cites an unrelated PR or open item in prose
+    ("addresses codex blocking findings on PR #1218", "(OI-1663)") before
+    its own squash suffix -- a first-match scan silently mislinks that
+    dispatch's track to someone else's PR. Measured on ~2000 mainline
+    commits: 42 have a first ``#NNN`` that differs from the actual squash
+    suffix; 43 more carry a ``#NNN`` prose reference with NO squash suffix
+    at all (a direct/non-squash commit citing a past PR's finding).
+    """
+
+    def test_prose_hash_before_suffix_does_not_win(self):
+        """Dispatch spec case: '#1663' in the first line, '(#1817)' as the
+        squash suffix -> 1817, not 1663. Fails on current first-match code."""
+        body = (
+            "fix(gate-runner): addresses #1663 in provider cleanup (#1817)\n\n"
+            "Fix-forward on PR #1663, three findings addressed.\n\n"
+            "Dispatch-ID: 20260908-bx-d1-runner-path\n"
+        )
+        assert receipt_provenance._extract_pr_number(body) == 1817
+
+    def test_multiple_prose_hashes_still_yield_suffix(self):
+        """Real main history (fbf60e31): several bare #NNN issue refs in the
+        subject line, real PR number is the trailing suffix."""
+        body = "docs(changelog): fold #1577/#1579/#1581/#1582 into the 1.5.0 section (#1583)\n"
+        assert receipt_provenance._extract_pr_number(body) == 1583
+
+    def test_no_suffix_with_prose_hash_returns_none(self):
+        """Real main history (c3d5bb9b): a direct (non-squash) commit citing
+        a past PR's finding has no own-PR suffix at all. The chosen fallback
+        is None -- returning the prose number would silently attribute this
+        commit to someone else's PR, which is worse than a visible gap."""
+        body = (
+            "fix(update): make GC-protect fail-closed on undeterminable protected set\n\n"
+            "addresses codex blocking findings on PR #1218.\n"
+        )
+        assert receipt_provenance._extract_pr_number(body) is None
+
+    def test_no_hash_anywhere_returns_none(self):
+        body = "chore: bump version\n\nNo PR reference here.\n"
+        assert receipt_provenance._extract_pr_number(body) is None
+
+    def test_regression_simple_squash_suffix_still_works(self):
+        """Existing reconcile_commit_provenance tests all use this shape --
+        must keep working unchanged."""
+        body = f"feat(x): do thing (#412)\n\nDispatch-ID: 20260706-tl-d2-provenance-prref"
+        assert receipt_provenance._extract_pr_number(body) == 412
+
+    def test_suffix_on_first_line_ignores_hash_on_later_line(self):
+        """A #NNN on a body line after the subject must never override the
+        subject's own suffix, even when it numerically comes first in the
+        raw text order used by a naive re.search."""
+        body = "feat(x): ship thing (#500)\n\nSee also #100 for background.\n"
+        assert receipt_provenance._extract_pr_number(body) == 500
