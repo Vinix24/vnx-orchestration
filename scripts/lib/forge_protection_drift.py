@@ -265,6 +265,7 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
     )
     if "app" in doc:
         _validate_app_block(doc["app"])
+    signing_app_id = doc["app"]["app_id"] if isinstance(doc.get("app"), dict) else None
 
     if not isinstance(doc["branch"], str) or not doc["branch"]:
         raise ProtectionConfigError("branch moet een niet-lege string zijn")
@@ -291,11 +292,35 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
         app_id = entry["app_id"]
         if app_id is not None and not isinstance(app_id, int):
             raise ProtectionConfigError(f"{where}.app_id moet een integer of null zijn")
-        if context.startswith(VNX_GATE_PREFIX) and (app_id is None or app_id == ANY_APP_ID):
-            raise ProtectionConfigError(
-                f"{where} ('{context}') is een vnx-gate/*-check zonder gebonden app_id "
-                "(null of de 'elke app'-sentinel -1): dat zou elke app deze status laten zetten"
-            )
+        if context.startswith(VNX_GATE_PREFIX):
+            if app_id is None or app_id == ANY_APP_ID:
+                raise ProtectionConfigError(
+                    f"{where} ('{context}') is een vnx-gate/*-check zonder gebonden app_id "
+                    "(null of de 'elke app'-sentinel -1): dat zou elke app deze status laten zetten"
+                )
+            # Bound to SOMETHING is not bound to the right thing. checks[] is
+            # the PUT body and needs its own app_id per entry; `app:` is the
+            # identity forge_check_run.py actually signs with. Two copies of one
+            # number, and until this guard only a YAML comment asked an editor
+            # to keep them equal. A transposed digit parses, is not a weakening
+            # (is_weakening reads presence/absence in the checks branch, never a
+            # changed app_id), applies cleanly — and leaves main requiring a
+            # check no App can satisfy. That is a permanently shut merge door
+            # installed by a typo, so it is refused at read time.
+            if signing_app_id is None:
+                raise ProtectionConfigError(
+                    f"{where} ('{context}') is een vnx-gate/*-check, maar dit bestand "
+                    "declareert geen tekenende App (app.app_id ontbreekt of is null): "
+                    "er is geen identiteit om hem aan te binden, dus zou de check "
+                    "onvervulbaar zijn"
+                )
+            if app_id != signing_app_id:
+                raise ProtectionConfigError(
+                    f"{where} ('{context}') is gebonden aan app_id {app_id}, maar de App "
+                    f"die tekent is app.app_id {signing_app_id}: alleen die App kan deze "
+                    "check vervullen, dus zou hij permanent rood blijven. Houd het getal "
+                    "in de entry gelijk aan app.app_id"
+                )
         checks.append(RequiredCheck(context, None if app_id == ANY_APP_ID else app_id))
 
     pending_raw = doc["pending_checks"]

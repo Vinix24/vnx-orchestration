@@ -776,7 +776,14 @@ def annotate_refused_write(
 def publish_forge_check_run(
     payload: Dict[str, Any], *, gate: str, result_path: Path
 ) -> None:
-    """Publish the just-written result as a GitHub check-run (Golf B, B2b).
+    """Publish the just-written result as GitHub check-runs (Golf B, B2b).
+
+    TWO of them, in this order: ``vnx-gate/<gate>`` from this record, then
+    ``vnx-gate/review`` for the same head (:func:`publish_forge_review_summary`,
+    which carries the reasoning for the second one). The per-gate check goes
+    first and settles on its own merits; the summary is a separate call with a
+    separate failure handler, so it can never hold back or undo the
+    publication above it.
 
     Called AFTER the atomic write has landed and after the slot lock is
     released, and NEVER able to change the outcome of that write. A gate run
@@ -831,6 +838,7 @@ def publish_forge_check_run(
         )
         return
 
+    app_not_registered = False
     try:
         from forge_gate_publisher import (  # noqa: PLC0415
             RECOVERY_COMMAND_TEMPLATE, ForgeAppConfigError, publish_for_record,
@@ -867,12 +875,95 @@ def publish_forge_check_run(
                 "runbook; daarna: %s",
                 gate, pr_number, exc, recovery,
             )
-            return
+        else:
+            logger.warning(
+                "gate_recorder: check-run PUBLICATIE MISLUKT voor gate=%s pr=%s head=%s — "
+                "%s: %s. Het resultaat op schijf is ongewijzigd en blijft geldig; "
+                "herstel met: %s",
+                gate, pr_number, head_sha[:12], type(exc).__name__, exc, recovery,
+            )
+
+    if app_not_registered:
+        # No App means no publication of ANY kind, so attempting the summary
+        # would only reprint the line above under a second name — on every
+        # gate write, for as long as the operator step stays open.
+        return
+    publish_forge_review_summary(
+        payload, pr_number=pr_number, head_sha=head_sha, result_path=result_path
+    )
+
+
+def publish_forge_review_summary(
+    payload: Dict[str, Any], *, pr_number: int, head_sha: str, result_path: Path
+) -> None:
+    """Publish ``vnx-gate/review`` for the head this record was written against.
+
+    The second half of the recorder's publication, and the half branch
+    protection actually requires. OP-B3 moved ``vnx-gate/review`` out of
+    ``pending_checks`` into ``required_status_checks.checks``, and until this
+    hook existed its only producer in the tree was the ``review`` CLI
+    subcommand — one hand-run command, per PR head, forever. What publishes
+    automatically (``vnx-gate/<gate>``, :func:`publish_forge_check_run`) is
+    required by nothing; what is required had no automatic producer at all.
+
+    **Second, and separate.** The per-gate publication runs first and settles
+    on its own merits; this is a distinct call with a distinct failure handler,
+    so a 500 here can neither undo a check-run that already went out nor fail
+    the gate run that produced the evidence. The record on disk is the truth in
+    both directions — a missing summary is repaired by
+    :data:`forge_gate_publisher.REVIEW_RECOVERY_COMMAND_TEMPLATE`, never by
+    failing the write.
+
+    **The head is the recorded one, never "the PR's current head".** Same
+    binding as the per-gate check and for the same reason: branch protection
+    matches a check-run to ONE commit. A push after the gate ran gets no check
+    and blocks — which is the OP-B3 rule working (FORGE_GATE.md §6), not a gap
+    to paper over by re-resolving the head.
+
+    **What is handed through, and what deliberately is not.** ``results_dir``
+    is the directory of the record just written, so the summary reads the same
+    store the merge door will read — every gate run in this project writes to
+    ``VNX_DATA_DIR=~/.vnx-data/vnx-dev``, and the publisher's own default store
+    is a different place (the OI-1307-adjacent reason
+    :func:`publish_forge_check_run` passes ``record_path``). ``branch`` comes
+    from the record's own stamped field (:func:`stamp_request_identity`), which
+    scopes the door lookup exactly as the merge door scopes it; absent, it is
+    omitted rather than guessed, and the verdict then falls back to the
+    publisher's own wider scope. ``project_id`` and ``project_root`` are NOT
+    passed: the recorder holds neither. Deriving a project_root from
+    ``__file__`` here would name whichever checkout this module was imported
+    from — in a dispatch worktree, not the repo the PR lives in — so the
+    publisher's own ``origin``-based resolution is the better-informed one.
+    """
+    try:
+        from forge_gate_publisher import (  # noqa: PLC0415
+            REVIEW_RECOVERY_COMMAND_TEMPLATE, publish_review_summary,
+        )
+
+        publish_review_summary(
+            pr_number,
+            head_sha,
+            results_dir=result_path.parent,
+            branch=(payload.get("branch") or "").strip() or None,
+        )
+    # vnx-broad-except: same rule as the per-gate publication one call above —
+    # this hook may not be able to fail a gate run, and the publisher's failure
+    # surface is open-ended by nature (keychain, JWT, DNS, GitHub, YAML, a lazy
+    # import). Narrowing it to the Forge exception tree would let anything
+    # outside that tree take down a write that has already succeeded. Nothing
+    # is silent: the branch below logs with the repair command.
+    except Exception as exc:  # noqa: BLE001
+        try:
+            recovery = REVIEW_RECOVERY_COMMAND_TEMPLATE.format(pr=pr_number)
+        except NameError:
+            # The import itself is what failed.
+            recovery = f"python3 scripts/lib/forge_gate_publisher.py review --pr {pr_number}"
         logger.warning(
-            "gate_recorder: check-run PUBLICATIE MISLUKT voor gate=%s pr=%s head=%s — "
-            "%s: %s. Het resultaat op schijf is ongewijzigd en blijft geldig; "
-            "herstel met: %s",
-            gate, pr_number, head_sha[:12], type(exc).__name__, exc, recovery,
+            "gate_recorder: SAMENVATTENDE CHECK vnx-gate/review NIET GEPUBLICEERD voor "
+            "pr=%s head=%s — %s: %s. Het resultaat op schijf is ongewijzigd en blijft "
+            "geldig, en de per-poort-check is hier niet door geraakt; deze PR blijft "
+            "onmergebaar tot de check er staat. Herstel met: %s",
+            pr_number, head_sha[:12], type(exc).__name__, exc, recovery,
         )
 
 

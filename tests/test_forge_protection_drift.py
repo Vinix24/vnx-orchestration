@@ -81,12 +81,28 @@ class TestParseProtectionConfig:
         assert config.checks[0].app_id == 15368
         assert config.enforce_admins is True
 
-    def test_the_real_shipped_yaml_parses_and_has_fourteen_checks(self):
-        """The actual scripts/forge/branch_protection.yaml this dispatch ships."""
+    def test_the_real_shipped_yaml_parses_and_has_fifteen_checks(self):
+        """The actual scripts/forge/branch_protection.yaml this dispatch ships.
+
+        Fourteen until OP-B3, fifteen after it: that step moved
+        ``vnx-gate/review`` out of ``pending_checks`` and into ``checks[]``. The
+        blanket ``all(app_id == 15368)`` went with it — the fifteenth check is
+        not a GitHub Actions context but the ``vnx-gate`` App's, bound to the
+        App ID the same file declares under ``app:``. Read, not repeated here:
+        a second literal copy of that number in the test could drift from the
+        one that signs, which is the very thing the YAML comment warns about.
+        """
         path = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
         config = fpd.load_protection_config(path)
-        assert len(config.checks) == 14
-        assert all(c.app_id == 15368 for c in config.checks)
+        app_id = yaml.safe_load(path.read_text(encoding="utf-8"))["app"]["app_id"]
+
+        by_context = {c.context: c.app_id for c in config.checks}
+        assert len(config.checks) == 15
+        assert by_context["vnx-gate/review"] == app_id
+        assert all(
+            c.app_id == 15368 for c in config.checks if not c.context.startswith("vnx-gate/")
+        )
+        assert config.pending_checks == ()
         assert config.branch == "main"
         assert config.enforce_admins is True
         assert config.allow_auto_merge is False
@@ -164,8 +180,16 @@ class TestParseProtectionConfig:
             with pytest.raises(fpd.ProtectionConfigError, match="vnx-gate/review"):
                 fpd.parse_protection_config(yaml.safe_dump(doc))
 
-        def test_vnx_gate_check_with_a_bound_app_id_is_accepted(self):
-            doc = _base_config_dict()
+        def test_vnx_gate_check_bound_to_the_signing_app_is_accepted(self):
+            """The positive control: the number that signs, accepted.
+
+            This used to accept ``99999`` against a document with no ``app:``
+            block at all -- an arbitrary integer bound to nothing. That made
+            the assertion measure "any integer passes", which is precisely the
+            hole the class below closes; the entry is now bound to the App the
+            same document declares.
+            """
+            doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": 99999})
             doc["required_status_checks"]["checks"].append({"context": "vnx-gate/review", "app_id": 99999})
             config = fpd.parse_protection_config(yaml.safe_dump(doc))
             names = {c.context: c.app_id for c in config.checks}
@@ -179,6 +203,79 @@ class TestParseProtectionConfig:
             config = fpd.parse_protection_config(yaml.safe_dump(doc))
             names = {c.context: c.app_id for c in config.checks}
             assert names["Some Other Check"] is None
+
+    class TestVnxGateAppIdMatchesTheSigningApp:
+        """(OP-B3 fix-forward) a ``vnx-gate/*`` entry must carry the app_id of
+        the App that actually signs -- ``app.app_id`` in the same document.
+
+        Two copies of one number now ship in ``branch_protection.yaml``
+        (``required_status_checks.checks[]`` needs its own binding because that
+        list IS the PUT body; ``app:`` is what ``forge_check_run.py`` signs
+        with). Before this guard only a YAML comment asked an editor to keep
+        them equal. A transposed digit passed the schema reader, passed the
+        merge door -- ``is_weakening`` reads only presence/absence in the
+        checks branch, so a CHANGED app_id is not a weakening -- and applied
+        cleanly, leaving ``main`` requiring a check that no App on earth can
+        satisfy. That is a permanently closed merge door installed by a typo.
+        """
+
+        def test_a_transposed_digit_is_refused(self):
+            doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": 4869217})
+            doc["required_status_checks"]["checks"].append(
+                {"context": "vnx-gate/review", "app_id": 4869271}
+            )
+            with pytest.raises(fpd.ProtectionConfigError) as excinfo:
+                fpd.parse_protection_config(yaml.safe_dump(doc))
+            message = str(excinfo.value)
+            assert "4869271" in message and "4869217" in message, (
+                "de melding hoort beide getallen te noemen, anders moet de lezer "
+                "zelf gaan zoeken welke van de twee fout is"
+            )
+            assert "vnx-gate/review" in message
+
+        def test_a_vnx_gate_check_without_any_app_block_is_refused(self):
+            """No ``app:`` block means no identity to bind to. Accepting the
+            entry would put a required check in the PUT body whose app_id is
+            answerable to nothing in this file."""
+            doc = _base_config_dict()
+            assert "app" not in doc
+            doc["required_status_checks"]["checks"].append(
+                {"context": "vnx-gate/review", "app_id": 4869217}
+            )
+            with pytest.raises(fpd.ProtectionConfigError, match="app"):
+                fpd.parse_protection_config(yaml.safe_dump(doc))
+
+        def test_a_vnx_gate_check_with_a_null_app_block_id_is_refused(self):
+            """``app.app_id: null`` is the pre-registration state (runbook
+            §1/§3). Nothing signs yet, so nothing may be required yet."""
+            doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": None})
+            doc["required_status_checks"]["checks"].append(
+                {"context": "vnx-gate/review", "app_id": 4869217}
+            )
+            with pytest.raises(fpd.ProtectionConfigError, match="app"):
+                fpd.parse_protection_config(yaml.safe_dump(doc))
+
+        def test_a_non_vnx_gate_check_may_carry_any_app_id(self):
+            """The guard binds the ``vnx-gate/*`` namespace only. A GitHub
+            Actions context is satisfied by GitHub's own app (15368) and has no
+            business matching the review App -- refusing that would make the
+            shipped YAML, with its fourteen Actions checks, unparseable."""
+            doc = _base_config_dict(app={"slug": "vnx-gate", "app_id": 4869217})
+            doc["required_status_checks"]["checks"].append(
+                {"context": "Some Actions Check", "app_id": 15368}
+            )
+            config = fpd.parse_protection_config(yaml.safe_dump(doc))
+            names = {c.context: c.app_id for c in config.checks}
+            assert names["Some Actions Check"] == 15368
+
+        def test_the_shipped_yaml_satisfies_the_guard(self):
+            """The file this PR ships, through the guard it adds."""
+            path = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
+            config = fpd.load_protection_config(path)
+            app_id = yaml.safe_load(path.read_text(encoding="utf-8"))["app"]["app_id"]
+
+            bound = {c.app_id for c in config.checks if c.context.startswith("vnx-gate/")}
+            assert bound == {app_id}
 
 
 class TestAppBlock:

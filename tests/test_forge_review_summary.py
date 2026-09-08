@@ -408,7 +408,7 @@ class TestReviewPublication:
 
 
 # ---------------------------------------------------------------------------
-# The YAML: pending, not required
+# The YAML: required, and bound to the App that signs
 # ---------------------------------------------------------------------------
 
 
@@ -416,45 +416,113 @@ def _real_yaml_doc() -> Dict[str, Any]:
     return yaml.safe_load(YAML_PATH.read_text(encoding="utf-8"))
 
 
+#: A context that exists NOWHERE — not in ``checks[]``, not in
+#: ``pending_checks``, not on the branch. The parking-slot invariant needs a
+#: pending entry to observe, and after OP-B3 the YAML no longer ships one; a
+#: synthetic name keeps the invariant testable without re-parking the real
+#: check to test it.
+SYNTHETIC_PENDING_CHECK = "vnx-gate/nooit-vereist-alleen-voor-deze-test"
+
+
 class TestBranchProtectionYaml:
-    def test_review_check_is_parked_in_pending_checks(self):
+    """OP-B3 flipped this class. Before it, ``vnx-gate/review`` sat in
+    ``pending_checks`` and the assertions here pinned that it reached neither
+    the apply nor the drift check. That was true of the YAML on ``main`` and is
+    the exact state OP-B3 ends: the entry now lives in
+    ``required_status_checks.checks`` bound to ``app.app_id``, so every
+    assertion about WHERE it sits is inverted on purpose.
+
+    What did NOT change is the parking-slot invariant itself — an entry in
+    ``pending_checks`` still reaches neither apply nor drift. It lost its last
+    real user, not its meaning, so it is pinned below on a synthetic entry
+    (:data:`SYNTHETIC_PENDING_CHECK`) instead of being deleted along with the
+    promotion.
+    """
+
+    def test_review_check_is_no_longer_parked(self):
         config = drift.load_protection_config(YAML_PATH)
 
-        assert REVIEW_CHECK in config.pending_checks
+        assert REVIEW_CHECK not in config.pending_checks
+        assert config.pending_checks == ()
 
-    def test_review_check_is_not_required_yet(self):
+    def test_review_check_is_required_and_bound_to_the_app(self):
+        """Required AND bound. The binding is half the requirement: an unbound
+        ``vnx-gate/*`` context could be satisfied by any app that knows the
+        name, which is why the schema reader refuses one (see
+        :meth:`test_promoting_it_unbound_is_refused`)."""
         config = drift.load_protection_config(YAML_PATH)
 
-        assert REVIEW_CHECK not in {c.context for c in config.checks}
+        assert (REVIEW_CHECK, REAL_APP_ID) in {(c.context, c.app_id) for c in config.checks}
 
-    def test_apply_and_drift_never_see_the_pending_entry(self):
+    def test_apply_and_drift_now_see_it(self):
+        """The inversion that has teeth: it is in the PUT body the apply sends
+        and in the object the drift check compares against live state."""
         config = drift.load_protection_config(YAML_PATH)
 
         normalized = drift.to_normalized_dict(config)
         put_body = apply_bp.build_put_payload(config)
 
-        assert "pending_checks" not in normalized
-        assert REVIEW_CHECK not in json.dumps(normalized)
-        assert REVIEW_CHECK not in json.dumps(put_body)
-
-    def test_promoting_it_with_the_real_app_id_is_accepted(self):
-        doc = _real_yaml_doc()
-        doc["pending_checks"] = []
-        doc["required_status_checks"]["checks"].append(
-            {"context": REVIEW_CHECK, "app_id": REAL_APP_ID}
+        assert {"context": REVIEW_CHECK, "app_id": REAL_APP_ID} in (
+            normalized["required_status_checks"]["checks"]
         )
+        assert {"context": REVIEW_CHECK, "app_id": REAL_APP_ID} in (
+            put_body["required_status_checks"]["checks"]
+        )
+
+    def test_apply_and_drift_never_see_a_pending_entry(self):
+        """The B1 parking-slot invariant, on a synthetic entry.
+
+        ``pending_checks`` remains a slot that requires nothing of ``main``:
+        ``apply_branch_protection.py`` leaves it out of the PUT and
+        ``forge_protection_drift.py`` never compares it. OP-B3 emptied the list
+        but did not remove the mechanism, and the next check to be parked there
+        must inherit the same guarantee.
+        """
+        doc = _real_yaml_doc()
+        doc["pending_checks"] = [SYNTHETIC_PENDING_CHECK]
 
         config = drift.parse_protection_config(yaml.safe_dump(doc))
 
-        assert (REVIEW_CHECK, REAL_APP_ID) in {(c.context, c.app_id) for c in config.checks}
+        normalized = drift.to_normalized_dict(config)
+        put_body = apply_bp.build_put_payload(config)
+
+        assert SYNTHETIC_PENDING_CHECK in config.pending_checks
+        assert "pending_checks" not in normalized
+        assert SYNTHETIC_PENDING_CHECK not in json.dumps(normalized)
+        assert SYNTHETIC_PENDING_CHECK not in json.dumps(put_body)
+
+    def test_the_real_yaml_with_the_bound_entry_is_accepted(self):
+        """What the old ``test_promoting_it_with_the_real_app_id_is_accepted``
+        meant, now that the promotion is on disk.
+
+        It used to build the promoted document by appending the entry to a copy.
+        Appending it now produces a DUPLICATE context, which the schema reader
+        refuses for its own reason — the test would still be red-free but it
+        would be measuring the duplicate guard instead of acceptance. So it
+        reads the shipped file as-is: the real YAML, through the real parser,
+        with the entry it really carries.
+        """
+        config = drift.parse_protection_config(YAML_PATH.read_text(encoding="utf-8"))
+
+        contexts = [c.context for c in config.checks]
+        assert contexts.count(REVIEW_CHECK) == 1
+        assert dict((c.context, c.app_id) for c in config.checks)[REVIEW_CHECK] == REAL_APP_ID
 
     @pytest.mark.parametrize("app_id", [None, drift.ANY_APP_ID])
     def test_promoting_it_unbound_is_refused(self, app_id):
+        """Unbinding the entry that now ships must still be refused.
+
+        Same guarantee as before, reached from the other side: the entry no
+        longer has to be added, it has to be BROKEN. Rewriting the app_id of the
+        real entry to ``null`` / the "any app" sentinel is exactly the edit a
+        future hand could make to the shipped file.
+        """
         doc = _real_yaml_doc()
-        doc["pending_checks"] = []
-        doc["required_status_checks"]["checks"].append(
-            {"context": REVIEW_CHECK, "app_id": app_id}
-        )
+        entries = [
+            c for c in doc["required_status_checks"]["checks"] if c["context"] == REVIEW_CHECK
+        ]
+        assert len(entries) == 1, "de promotie hoort precies een entry op te leveren"
+        entries[0]["app_id"] = app_id
 
         with pytest.raises(drift.ProtectionConfigError):
             drift.parse_protection_config(yaml.safe_dump(doc))
@@ -473,12 +541,58 @@ class TestPendingPreview:
         assert {"context": REVIEW_CHECK, "app_id": REAL_APP_ID} in checks
 
     def test_every_currently_required_check_survives_the_promotion(self):
+        """The shipped file, where ``pending_checks`` is empty since OP-B3.
+
+        Kept as the no-op control, and it is honest about being one: with
+        nothing parked, the promotion loop runs zero iterations and this
+        asserts ``X <= X``, which cannot fail. It pins that an EMPTY
+        ``pending_checks`` neither drops nor invents a requirement — nothing
+        more. The test that actually exercises the loop is
+        :meth:`test_a_parked_entry_is_promoted_bound_to_the_signing_app`.
+        """
         config = drift.load_protection_config(YAML_PATH)
 
         payload = fgp.pending_promotion_put_payload(YAML_PATH)
 
         promoted = {c["context"] for c in payload["required_status_checks"]["checks"]}
+        assert config.pending_checks == (), (
+            "dit is de nul-iteratie-controle; met een geparkeerde entry meet hij "
+            "iets anders dan hij zegt"
+        )
         assert {c.context for c in config.checks} <= promoted
+
+    def test_a_parked_entry_is_promoted_bound_to_the_signing_app(self, tmp_path):
+        """The promotion loop itself, on a synthetic parked entry.
+
+        Without this the loop is dead code behind a green suite: OP-B3 emptied
+        ``pending_checks``, so every other test here drives
+        :func:`pending_promotion_put_payload` through zero iterations. The two
+        refusal branches stayed covered; the branch that actually promotes did
+        not. Same technique as
+        :meth:`TestBranchProtectionYaml.test_apply_and_drift_never_see_a_pending_entry`
+        — a synthetic entry on a copy of the real document, so the shipped file
+        is never re-parked to test the mechanism that unparks it.
+        """
+        doc = _real_yaml_doc()
+        doc["pending_checks"] = [SYNTHETIC_PENDING_CHECK]
+        path = tmp_path / "branch_protection.yaml"
+        path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+        before = drift.load_protection_config(path)
+        assert SYNTHETIC_PENDING_CHECK not in {c.context for c in before.checks}
+
+        payload = fgp.pending_promotion_put_payload(path)
+
+        promoted = payload["required_status_checks"]["checks"]
+        by_context = {c["context"]: c["app_id"] for c in promoted}
+        assert {c.context for c in before.checks} <= set(by_context), (
+            "een promotie mag geen bestaande eis laten vallen"
+        )
+        assert by_context[SYNTHETIC_PENDING_CHECK] == REAL_APP_ID, (
+            "de geparkeerde entry komt gebonden aan de tekenende App uit de lus, "
+            "niet als kale context"
+        )
+        assert len(promoted) == len(before.checks) + 1
+        assert "pending_checks" not in payload
 
     def test_the_rehearsal_never_talks_to_github(self, monkeypatch, capsys):
         """No PUT, no POST, no ``gh`` — a rehearsal that writes is not one."""
@@ -534,13 +648,24 @@ class TestPendingPreview:
         assert "Traceback" not in captured.err
 
     def test_a_pending_entry_already_required_is_refused(self, tmp_path):
+        """A context that is parked AND required refuses in the rehearsal.
+
+        Before OP-B3 this test appended the entry to ``checks[]`` itself. After
+        it, ``checks[]`` already carries ``vnx-gate/review``, so appending would
+        make the document hold the context TWICE — and the schema reader refuses
+        that for its own, earlier reason ("bevat 'vnx-gate/review' dubbel",
+        measured). The test would stay green while
+        :func:`pending_promotion_put_payload`'s own ``context in required``
+        refusal went unexercised. Re-parking the already-required entry is what
+        reaches that branch now.
+        """
         doc = _real_yaml_doc()
         doc["pending_checks"] = [REVIEW_CHECK]
-        doc["required_status_checks"]["checks"].append(
-            {"context": REVIEW_CHECK, "app_id": REAL_APP_ID}
-        )
+        assert REVIEW_CHECK in {
+            c["context"] for c in doc["required_status_checks"]["checks"]
+        }, "checks[] hoort de entry na OP-B3 al te dragen; anders test dit iets anders"
         path = tmp_path / "branch_protection.yaml"
         path.write_text(yaml.safe_dump(doc), encoding="utf-8")
 
-        with pytest.raises(fgp.ForgePublishRefused):
+        with pytest.raises(fgp.ForgePublishRefused, match="zowel in pending_checks als in"):
             fgp.pending_promotion_put_payload(path)
