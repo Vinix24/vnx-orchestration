@@ -399,6 +399,67 @@ class TestRepeatedGateFailureCause:
         result = check_repeated_gate_failure_cause(results_dir, n=3)
         assert result.status == CheckStatus.TRIGGERED
 
+    def test_unbuilt_gate_runner_missing_does_not_trigger(self, tmp_path):
+        # OI-1693: gate_runner_missing means the gate was never built, not
+        # that it failed and might recover — a 3x streak of it must NOT
+        # trigger E6. This is the case that was ROOD before the fix (main
+        # b634b58b: deepseek_gate's #1729/#1782/#1803 forced
+        # --override-stop-conditions on every dispatch since 07-09).
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        for i, pr in enumerate([1729, 1782, 1803]):
+            d = _gate_result(pr, "deepseek_gate", status="not_executable", reason="gate_runner_missing", recorded_at=f"2026-09-0{i+1}T00:00:00Z")
+            (results_dir / f"pr-{pr}-deepseek_gate.json").write_text(json.dumps(d))
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status != CheckStatus.TRIGGERED
+
+    def test_provider_not_installed_still_triggers_alongside_unbuilt_gate(self, tmp_path):
+        # Proves the fix is narrow: a REAL recurring cause (provider not
+        # installed, which can recover on retry) on one gate must still
+        # trigger E6, even while an unbuilt gate's records sit in the same
+        # results dir and are excluded from every streak.
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        for i, pr in enumerate([901, 902, 903]):
+            d = _gate_result(pr, "codex_gate", status="unavailable", reason="provider_not_installed", recorded_at=f"2026-09-0{i+1}T00:00:00Z")
+            (results_dir / f"pr-{pr}-codex_gate.json").write_text(json.dumps(d))
+        for i, pr in enumerate([1729, 1782, 1803]):
+            d = _gate_result(pr, "deepseek_gate", status="not_executable", reason="gate_runner_missing", recorded_at=f"2026-09-0{i+1}T00:00:00Z")
+            (results_dir / f"pr-{pr}-deepseek_gate.json").write_text(json.dumps(d))
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status == CheckStatus.TRIGGERED
+
+    def test_unbuilt_gate_notice_names_gate_and_newest_pr(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        for i, pr in enumerate([1729, 1782, 1803]):
+            d = _gate_result(pr, "deepseek_gate", status="not_executable", reason="gate_runner_missing", recorded_at=f"2026-09-0{i+1}T00:00:00Z")
+            (results_dir / f"pr-{pr}-deepseek_gate.json").write_text(json.dumps(d))
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        notice = result.evidence["per_gate"]["repeated_gate_failure_cause:unbuilt:deepseek_gate"]
+        assert notice["status"] == CheckStatus.UNMEASURABLE.value
+        assert "deepseek_gate" in notice["message"]
+        assert "1803" in notice["message"]
+        assert notice["evidence"]["gate"] == "deepseek_gate"
+        assert notice["evidence"]["count"] == 3
+        assert notice["evidence"]["newest_pr"] == 1803
+
+    def test_mixed_reasons_on_same_gate_only_excludes_unbuilt_records(self, tmp_path):
+        # A gate can flip from gate_runner_missing to a real cause mid-window
+        # (the runner shipped, then broke). Only the unbuilt-reason records
+        # are pulled out of the streak; the real ones still count normally.
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        d1 = _gate_result(1001, "deepseek_gate", status="not_executable", reason="gate_runner_missing", recorded_at="2026-09-01T00:00:00Z")
+        d2 = _gate_result(1002, "deepseek_gate", status="unavailable", reason="provider_not_installed", recorded_at="2026-09-02T00:00:00Z")
+        d3 = _gate_result(1003, "deepseek_gate", status="unavailable", reason="provider_not_installed", recorded_at="2026-09-03T00:00:00Z")
+        for pr, d in [(1001, d1), (1002, d2), (1003, d3)]:
+            (results_dir / f"pr-{pr}-deepseek_gate.json").write_text(json.dumps(d))
+        # Only 2 non-unbuilt dated records remain for this gate -> below n=3,
+        # so this must read as insufficient data, never triggered.
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status != CheckStatus.TRIGGERED
+
     def test_different_gates_scored_independently(self, tmp_path):
         # codex_gate stays clean; kimi_gate has the 3x repeat — overall must
         # still trigger (any-sub-triggered wins), and the untriggered gate
