@@ -177,10 +177,11 @@ class TestCentralMode:
         assert exit_code == 1
 
     def test_central_mode_pin_and_active_agree_with_pin_file(self, tmp_path, monkeypatch):
-        """OI-914: doctor's pin line and `cat .vnx-version` must agree. A
-        project pinning v1.4.0 while v1.4.1 is active is reported as BOTH —
-        the drift is visible, not silently reported as a single value that
-        matches neither."""
+        """OI-914 split ``pin`` and ``active`` into two separately-reported
+        values so a drift is visible instead of collapsed into one label —
+        but stopped short of comparing them, so this scenario (pin v1.4.0,
+        active v1.4.1) still PASSed. OI-1678 closes that gap: the two values
+        being visible only matters if a mismatch actually WARNs."""
         project = _make_project(tmp_path)
         (project / ".vnx-version").write_text("v1.4.0\n")
         active_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.4.1"
@@ -193,9 +194,112 @@ class TestCentralMode:
 
         result = _check_install_mode(project)
 
-        assert result.status == PASS
+        assert result.status == WARN
         assert "pin: v1.4.0" in result.detail
         assert "active: v1.4.1" in result.detail
+        assert "not honored" in result.detail
+
+    def test_central_mode_pin_diverges_from_active_warns(self, tmp_path, monkeypatch):
+        """OI-1678 live case (SEOcrawler_v2): pin v1.5.0, active v1.6.0. The
+        pin is readable and there is no marker problem, so pre-fix code fell
+        straight through to PASS — pin and active were reported side by side
+        but never compared. WARN, naming both versions and the pin file
+        path (OI-1679)."""
+        project = _make_project(tmp_path)
+        (project / ".vnx-version").write_text("v1.5.0\n")
+        active_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.6.0"
+        (active_dir / "scripts").mkdir(parents=True)
+        (active_dir / ".vnx-install-mode").write_text("central\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(active_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(project)
+
+        assert result.status == WARN
+        assert "mode: central" in result.detail
+        assert "pin: v1.5.0" in result.detail
+        assert "active: v1.6.0" in result.detail
+        assert "not honored" in result.detail
+        assert str(project / ".vnx-version") in result.detail
+
+    def test_central_mode_pin_unset_stays_pass_with_versioned_active(self, tmp_path, monkeypatch):
+        """An unpinned project must not get a false WARN just because active
+        resolves to a real version dir name (v1.6.0) instead of the literal
+        'current' fallback used by the no-VERSION-dir test above."""
+        project = _make_project(tmp_path)
+        active_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.6.0"
+        (active_dir / "scripts").mkdir(parents=True)
+        (active_dir / ".vnx-install-mode").write_text("central\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(active_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(project)
+
+        assert result.status == PASS
+        assert "pin: unset" in result.detail
+        assert "active: v1.6.0" in result.detail
+
+    def test_central_mode_pin_found_via_ancestor_walkup(self, tmp_path, monkeypatch):
+        """OI-1679: doctor run from a SUBDIRECTORY of a pinned project must
+        still see the pin — the same walk `_reexec._find_pin_dir` performs at
+        startup — and must name the ancestor path the pin came from, not
+        silently report 'unset' just because the immediate project_dir has no
+        pin file of its own."""
+        project = _make_project(tmp_path)
+        (project / ".vnx-version").write_text("v1.5.0\n")
+        submap = project / "sub" / "deeper"
+        submap.mkdir(parents=True)
+        active_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.6.0"
+        (active_dir / "scripts").mkdir(parents=True)
+        (active_dir / ".vnx-install-mode").write_text("central\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(active_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(submap)
+
+        assert result.status == WARN
+        assert "pin: v1.5.0" in result.detail
+        assert "active: v1.6.0" in result.detail
+        assert str(project / ".vnx-version") in result.detail
+
+    def test_central_mode_sibling_directory_does_not_inherit_pin(self, tmp_path, monkeypatch):
+        """OI-1679 documented blind spot: the pin walk only climbs ANCESTORS.
+        A build worktree checked out as a SIBLING of the pinned project root
+        (e.g. `<root>-wt-g1-<id>`) does not inherit the pin, so running this
+        check from inside the sibling reports 'unset'/PASS even though the
+        sibling may in fact be running a different engine version than the
+        pinned root expects. This locks in the accepted, documented scope of
+        the check (see the `_check_install_mode` docstring) — not a claim
+        that the split is undetected everywhere."""
+        root = tmp_path / "proj-root"
+        root.mkdir()
+        (root / ".vnx").mkdir()
+        (root / ".vnx-data" / "state").mkdir(parents=True)
+        (root / ".vnx-version").write_text("v1.5.0\n")
+
+        sibling = tmp_path / "proj-root-wt-g1-abc123"
+        sibling.mkdir()
+        (sibling / ".vnx").mkdir()
+        (sibling / ".vnx-data" / "state").mkdir(parents=True)
+
+        active_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.6.0"
+        (active_dir / "scripts").mkdir(parents=True)
+        (active_dir / ".vnx-install-mode").write_text("central\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(active_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(sibling)
+
+        assert result.status == PASS
+        assert "pin: unset" in result.detail
 
     def test_central_mode_missing_marker_warns(self, tmp_path, monkeypatch):
         """The active `current` resolves to a version dir with no

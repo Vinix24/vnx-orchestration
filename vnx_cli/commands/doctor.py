@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from vnx_cli import _engine
-from vnx_cli._reexec import PIN_FILE_NAME
+from vnx_cli._reexec import PIN_FILE_NAME, _find_pin_dir
 
 logger = logging.getLogger(__name__)
 
@@ -133,25 +133,40 @@ def _check_agents(project_dir: Path) -> Check:
     )
 
 
-def _read_project_pin(project_dir: Path) -> str:
-    """Read the project's ``.vnx-version`` pin file (the operator's pin intent).
+def _read_project_pin(project_dir: Path) -> "tuple[str, Path | None]":
+    """Locate and read the ``.vnx-version`` pin the startup re-exec would honor.
 
-    This is the SAME file ``vnx_cli._reexec`` honors at startup, so doctor's
-    ``pin`` field and ``cat .vnx-version`` agree (OI-914). Returns the raw
-    first line when present and non-empty, ``"unset"`` when there is no usable
-    pin, or ``"error"`` when a pin file exists but cannot be read.
+    Walks UP from ``project_dir`` the same way ``_reexec._find_pin_dir`` does
+    — nearest ancestor wins, bounded at the resolved home directory
+    (exclusive) — so doctor's ``pin`` field matches what ``vnx`` actually
+    honors when run from a SUBDIRECTORY of a pinned project, not just a pin
+    file sitting directly in ``project_dir`` (OI-1679). Delegates the walk to
+    ``_find_pin_dir`` instead of reimplementing it, so the two never drift.
+    When the pin sits directly in ``project_dir`` this still agrees with
+    ``cat .vnx-version`` (OI-914).
+
+    Returns ``(pin, pin_dir)``: the raw first line and the ancestor directory
+    it came from, ``("unset", None)`` when no ancestor within the boundary
+    carries a usable pin file (absent everywhere walked, or present but
+    empty), or ``("error", pin_dir)`` when a pin file is found but cannot be
+    read.
     """
-    pin_file = project_dir / PIN_FILE_NAME
-    if not pin_file.is_file():
-        return "unset"
     try:
-        first = pin_file.read_text(encoding="utf-8").strip().splitlines()[0]
+        start = project_dir.expanduser().resolve()
+    except OSError:
+        return "unset", None
+    pin_dir = _find_pin_dir(start)
+    if pin_dir is None:
+        return "unset", None
+    pin_file = pin_dir / PIN_FILE_NAME
+    try:
+        text = pin_file.read_text(encoding="utf-8").strip()
     except OSError as exc:
         logger.warning("doctor: cannot read pin file %s: %s", pin_file, exc)
-        return "error"
-    if not first:
-        return "unset"
-    return first
+        return "error", pin_dir
+    if not text:
+        return "unset", None
+    return text.splitlines()[0], pin_dir
 
 
 def _resolve_active_version(central_path: Path) -> str:
@@ -201,11 +216,24 @@ def _check_install_mode(project_dir: Path) -> Check:
 
     In central mode the check reports two values that OI-914 found conflated
     under one "pin" label:
-      * ``pin`` — the project's ``.vnx-version`` file (the pin the startup
-        re-exec honors; matches ``cat .vnx-version``);
+      * ``pin`` — the ``.vnx-version`` pin the startup re-exec would honor,
+        found the same way ``_reexec._find_pin_dir`` finds it: walking UP
+        from ``project_dir`` toward (not including) $HOME. Matches
+        ``cat .vnx-version`` when the pin sits directly in ``project_dir``,
+        and also catches a pin inherited from a parent when doctor runs from
+        a subdirectory of the project;
       * ``active`` — the version dir the ``current`` symlink resolves to
         (what actually runs absent a re-exec).
-    Reporting both makes a pin that is not honored visible.
+    A ``pin`` that is not ``"unset"`` and does not equal ``active`` is a split
+    install (OI-1678): the engine code a pinned project expects differs from
+    the engine code that is actually active. WARN, naming both versions and
+    the path the pin was read from (OI-1679).
+
+    Blind spot (OI-1679): the walk only climbs ANCESTORS of ``project_dir``.
+    A SIBLING directory — e.g. a build worktree checked out next to the
+    project root instead of nested under it — does not inherit the pin and
+    is invisible to this check; run doctor from inside that worktree to see
+    its own pin/active split.
     """
     embedded_path = project_dir / ".claude" / "vnx-system"
     central_path = Path.home() / ".vnx-system" / "current"
@@ -214,7 +242,7 @@ def _check_install_mode(project_dir: Path) -> Check:
     embedded_active = (embedded_path / "scripts").is_dir()
 
     if central_active:
-        pin = _read_project_pin(project_dir)
+        pin, pin_dir = _read_project_pin(project_dir)
         active = _resolve_active_version(central_path)
         marker_issue = _check_central_install_marker(central_path)
         if pin == "error":
@@ -226,11 +254,22 @@ def _check_install_mode(project_dir: Path) -> Check:
                     f"{project_dir / PIN_FILE_NAME} — check permissions), active: {active}"
                 ),
             )
+        warnings: "list[str]" = []
         if marker_issue is not None:
+            warnings.append(marker_issue)
+        if pin != "unset" and pin != active:
+            pin_path = pin_dir / PIN_FILE_NAME if pin_dir is not None else project_dir / PIN_FILE_NAME
+            warnings.append(
+                f"pin not honored: {pin_path} pins {pin} but active is {active} "
+                "(checked only from this directory up to $HOME — a sibling "
+                "directory such as a build worktree is not covered by this check "
+                "and must be doctored separately)"
+            )
+        if warnings:
             return Check(
                 name="install:mode",
                 status=WARN,
-                detail=f"mode: central, pin: {pin}, active: {active}, {marker_issue}",
+                detail=f"mode: central, pin: {pin}, active: {active}, {'; '.join(warnings)}",
             )
         return Check(
             name="install:mode",
