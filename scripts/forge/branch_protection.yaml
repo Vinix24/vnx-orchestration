@@ -33,13 +33,30 @@ required_status_checks:
     - {context: "secret scan (gitleaks)", app_id: 15368}
     - {context: "vnx doctor smoke", app_id: 15368}
 
-# B3 will add "vnx-gate/review" here once the review-gate GitHub App exists.
+# De samenvattende check van B3, geparkeerd en nog niet vereist.
+#
 # Ignored by both apply_branch_protection.py and forge_protection_drift.py —
 # an entry here is a future obligation, not a current requirement. The schema
 # still refuses a vnx-gate/* entry placed directly in checks[] above without a
 # bound app_id (null or the GitHub "any app" sentinel -1): an unbound
 # vnx-gate/* check would let any app satisfy it.
-pending_checks: []
+#
+# vnx-gate/review zegt, per head, of er een geldig review-akkoord ligt volgens
+# dezelfde regel als de merge-deur (closure_verifier._REVIEW_PEER_GATES +
+# check_review_gate_for_merge). Publiceren:
+#
+#   python3 scripts/lib/forge_gate_publisher.py review --pr <n>
+#
+# Er staat hier bewust GEEN app_id per entry. Het app_id waaraan een
+# vnx-gate/*-check gebonden wordt is `app.app_id` onderaan dit bestand — de
+# identiteit die forge_check_run.py daadwerkelijk ondertekent, en dus per
+# definitie de enige App die zo'n check kan vervullen. Een tweede kopie van dat
+# getal hier zou kunnen gaan afwijken van het getal dat tekent. Het exacte
+# PUT-object dat de promotie oplevert lees je vooraf met:
+#
+#   python3 scripts/lib/forge_gate_publisher.py pending-preview
+pending_checks:
+  - "vnx-gate/review"
 
 required_pull_request_reviews:
   required_approving_review_count: 0
