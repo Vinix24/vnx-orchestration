@@ -79,10 +79,48 @@ Receipt written to t0_receipts.ndjson:
     merge_method: "squash" | "merge" | "rebase"
     pr_title    : <from gh api>
     branch      : <from gh api>
+    preflight_gates: <list of 5 dicts — every preflight's own verdict; see
+                                 "Preflight ledger" below>
     contract_invalid_override: <dict, optional — {"flag", "reason"}, only
                                  present when --override-contract-invalid
                                  was used to bypass a contract_invalid latest
                                  receipt>
+
+Preflight ledger (Golf Bx, D3 / OI-1665): the five preflights above each
+printed a verdict to the terminal and none of them reached the ledger, so
+"which gate approved this merge" survived only as long as the pane did, and a
+REFUSED merge left no record at all — the five ``return EXIT_ERROR`` branches
+in ``main()`` wrote nothing. Both branches now carry the same field,
+``preflight_gates``: one record per gate in ``PREFLIGHT_ORDER``, each
+``{"gate", "verdict", "message", "head_sha", "overridden"}``.
+
+The door SHORT-CIRCUITS on the first NO-GO (each preflight returns
+EXIT_ERROR on its own, before the next one runs) and that stays exactly as
+it was — it is the fail-closed property golf A and B built. So a refusal can
+never carry five real verdicts: the gates after the deciding one never ran.
+They are recorded as ``verdict: "not_evaluated"`` naming the gate that
+stopped the door, which is the point of the field — without it a gate that
+never ran is simply absent from the record, and absence reads as silent
+approval.
+
+Refusal receipt written to t0_receipts.ndjson (a refused merge):
+    event_type  : "pr_merge_refused"
+    status      : "blocked"
+    pr_number   : <int>
+    dispatch_id : <str, optional — --dispatch-id, else resolved from the PR>
+    conclusion  : "refused"
+    refused_by  : <str — the gate whose NO-GO stopped the merge>
+    head_sha    : <str — the head the gates judged, "" when unresolvable>
+    preflight_gates: <list of 5 dicts, as above>
+
+Its own event_type, NOT a ``pr_merged`` carrying ``conclusion: "refused"``:
+every merged-PR reader in the tree filters on the literal string
+``pr_merged`` and none of them reads ``conclusion`` (track_reconciler.py:320,
+build_feature_plan.py:212, build_t0_state.py:999, pr_queue_state.py:128,
+traceability_audit.py:610, digest/collectors/progress.py:63), so reusing the
+event type would make every one of them count a refused merge as a merge.
+``--dry-run`` writes no refusal receipt: that flag is documented as "no
+merge, no write", and a governance record is a write.
 
 Register event written to dispatch_register.ndjson:
     event       : "pr_merged"
@@ -156,6 +194,78 @@ _PR_LABEL_RE = re.compile(r"\bPR-([A-Z0-9]+(?:-[A-Z0-9]+)*)\b", re.IGNORECASE)
 # here together: _emit_receipt raising, and _emit_receipt returning a status
 # that is not recognized. Both must make the CLI exit non-zero.
 _RECEIPT_OK_STATUSES = frozenset({"appended", "duplicate"})
+
+#: The five preflights, in the exact order ``main()`` runs them. This order is
+#: what makes a refusal record readable: the door short-circuits on the first
+#: NO-GO, so everything at a later position never ran.
+PREFLIGHT_ORDER: tuple[str, ...] = (
+    "ci",
+    "review",
+    "adr",
+    "contract_invalid",
+    "branch_protection",
+)
+
+#: Third verdict value beside "GO" and "NO-GO" on a preflight record: this gate
+#: never got a turn because an earlier one refused. It is written EXPLICITLY
+#: rather than left out, because a gate that is simply missing from the record
+#: is indistinguishable from one that approved (OI-1665).
+VERDICT_NOT_EVALUATED = "not_evaluated"
+
+
+def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Dict[str, Any]:
+    """One preflight's outcome, in the shape the ledger stores it.
+
+    Read straight off the gate result the door already holds — no gate is ever
+    re-run to fill this in (see ``TestShortCircuitUnchanged``). ``head_sha`` is
+    the commit that gate judged; it is the same head for all five (established
+    once by ``_run_ci_gate``) and is carried per record so a single record is
+    self-contained evidence rather than a pointer to a sibling field.
+    """
+    return {
+        "gate": name,
+        "verdict": str(gate.get("verdict") or "unknown"),
+        "message": str(gate.get("message") or ""),
+        "head_sha": head_sha or "",
+        "overridden": bool(gate.get("overridden")),
+    }
+
+
+def _preflight_ledger(
+    evaluated: list[Dict[str, Any]],
+    *,
+    refused_by: str = "",
+) -> list[Dict[str, Any]]:
+    """The five preflights in ``PREFLIGHT_ORDER``: those that ran, plus those
+    that never got a turn marked ``not_evaluated``.
+
+    ``refused_by`` names the gate whose NO-GO stopped the door; it goes into
+    the message of every unevaluated record so a reader never has to
+    reconstruct WHY a gate has no verdict. On the merge branch all five have
+    run and this pads nothing.
+
+    A gate that did not run judged no commit, so its ``head_sha`` is empty —
+    deliberately not the PR head, which would suggest it looked at it.
+    """
+    by_name = {record["gate"]: record for record in evaluated}
+    ledger: list[Dict[str, Any]] = []
+    for name in PREFLIGHT_ORDER:
+        record = by_name.get(name)
+        if record is not None:
+            ledger.append(record)
+            continue
+        ledger.append({
+            "gate": name,
+            "verdict": VERDICT_NOT_EVALUATED,
+            "message": (
+                f"niet uitgevoerd: de deur stopte op de {refused_by}-preflight"
+                if refused_by
+                else "niet uitgevoerd"
+            ),
+            "head_sha": "",
+            "overridden": False,
+        })
+    return ledger
 
 
 def _extract_pr_id(subject: str) -> Optional[str]:
@@ -871,6 +981,7 @@ def _emit_receipt(
     pr_id_resolution: str = "",
     receipts_file: Optional[str] = None,
     contract_invalid_override: Optional[Dict[str, Any]] = None,
+    preflight_gates: Optional[list[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -881,6 +992,11 @@ def _emit_receipt(
     this receipt when ``--override-contract-invalid`` was used to bypass a
     contract_invalid latest receipt — ``{"flag": "--override-contract-invalid",
     "reason": <str>}``. ``None`` (the normal case) omits the field entirely.
+
+    ``preflight_gates`` (Golf Bx, D3): the five preflight verdicts that
+    approved this merge, on THIS receipt rather than in a second gate
+    registration beside it — one merge, one evidence record. ``None`` omits
+    the field, for callers that merge without running the door's gates.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -897,6 +1013,8 @@ def _emit_receipt(
         kwargs["dispatch_id"] = dispatch_id
     if contract_invalid_override:
         kwargs["contract_invalid_override"] = contract_invalid_override
+    if preflight_gates:
+        kwargs["preflight_gates"] = preflight_gates
     return emit_governance_receipt(
         "pr_merged",
         receipt_kind="state_mutation",
@@ -906,6 +1024,114 @@ def _emit_receipt(
         receipts_file=receipts_file,
         **kwargs,
     )
+
+
+def _emit_refusal_receipt(
+    *,
+    pr_number: int,
+    dispatch_id: str,
+    preflight_gates: list[Dict[str, Any]],
+    refused_by: str,
+    head_sha: str = "",
+    receipts_file: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Write the ``pr_merge_refused`` receipt for a merge the door refused.
+
+    Its OWN event_type, not a ``pr_merged`` with ``conclusion: "refused"`` —
+    see the module docstring for the six readers that filter on the literal
+    ``pr_merged`` and would each count a refusal as a merge.
+
+    ``status="blocked"`` is taken from the canonical vocabulary in
+    ``event_outcome_semantics`` (a governed failure literal) rather than a new
+    literal like "refused": a status this ledger has never seen is refused by
+    ``resolve_status_category`` on the write side, and adding one is a
+    fleet-wide vocabulary change, not a merge-door change.
+    ``receipt_kind="state_mutation"`` matches the ``pr_merged`` sibling — the
+    merge door's attempt to mutate main, here with its outcome being "no".
+    """
+    kwargs: Dict[str, Any] = {
+        "pr_number": pr_number,
+        "conclusion": "refused",
+        "refused_by": refused_by,
+        "preflight_gates": preflight_gates,
+        "head_sha": head_sha or "",
+    }
+    if dispatch_id:
+        kwargs["dispatch_id"] = dispatch_id
+    return emit_governance_receipt(
+        "pr_merge_refused",
+        receipt_kind="state_mutation",
+        status="blocked",
+        terminal="T0",
+        source="pr_merge",
+        receipts_file=receipts_file,
+        **kwargs,
+    )
+
+
+def _refuse_merge(
+    *,
+    pr_number: int,
+    dispatch_id: str,
+    gate_name: str,
+    gate: Dict[str, Any],
+    evaluated: list[Dict[str, Any]],
+    head_sha: str,
+    json_output: bool,
+    json_key: str,
+    dry_run: bool,
+    receipts_file: Optional[str] = None,
+) -> int:
+    """Record a refused merge and return the CLI's exit code.
+
+    Called from every one of the five NO-GO branches in ``main()``; each of
+    them still does its own ``return`` on the value this produces, so the
+    short-circuit is untouched — this function never runs a gate.
+
+    Writing the record must not be able to turn a refusal into a crash: a
+    failing emit is reported loudly on stderr and the refusal still exits
+    EXIT_ERROR. The receipt's status travels back in the JSON payload so an
+    unwritten record is visible to a machine reader too, not just in the log.
+    """
+    ledger = _preflight_ledger(evaluated, refused_by=gate_name)
+
+    receipt_status = "skipped: dry-run"
+    if not dry_run:
+        resolved_dispatch_id = dispatch_id or _lookup_dispatch_id_by_pr_number(pr_number)
+        try:
+            receipt = _emit_refusal_receipt(
+                pr_number=pr_number,
+                dispatch_id=resolved_dispatch_id,
+                preflight_gates=ledger,
+                refused_by=gate_name,
+                head_sha=head_sha,
+                receipts_file=receipts_file,
+            )
+            receipt_status = (receipt or {}).get("append_status", "unknown")
+        # Broad by intent: a failed record must never mask the refusal itself.
+        except Exception as exc:
+            receipt_status = f"error: {exc}"
+        if receipt_status not in _RECEIPT_OK_STATUSES:
+            print(
+                f"WARN: PR #{pr_number} was refused by the {gate_name} preflight, but the "
+                f"pr_merge_refused record did NOT land (append_status={receipt_status!r}). "
+                f"The refusal itself stands; only its audit-trail evidence is missing.",
+                file=sys.stderr,
+            )
+
+    if json_output:
+        print(json.dumps({
+            "success": False,
+            "pr_number": pr_number,
+            "error": gate["message"],
+            json_key: gate,
+            "refused_by": gate_name,
+            "preflight_gates": ledger,
+            "refusal_receipt_status": receipt_status,
+        }, indent=2))
+    else:
+        print(f"NO-GO: {gate['message']}", file=sys.stderr)
+    return EXIT_ERROR
 
 
 def _emit_register_event(
@@ -938,6 +1164,7 @@ def merge_pr(
     head_sha: str = "",
     pr_data: Optional[Dict[str, Any]] = None,
     contract_invalid_override: Optional[Dict[str, Any]] = None,
+    preflight_gates: Optional[list[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
 
@@ -946,6 +1173,10 @@ def merge_pr(
     see ``_emit_receipt`` and ``_run_contract_invalid_gate``. ``None``
     (default) omits the field, matching a merge whose contract_invalid gate
     was never overridden.
+
+    ``preflight_gates`` (Golf Bx, D3): the five preflight verdicts ``main()``
+    collected on the way here, forwarded onto the ``pr_merged`` receipt.
+    ``None`` (default) omits the field for callers that never ran the gates.
 
     ``head_sha`` is the exact commit the gates approved; it is threaded into
     ``gh pr merge --match-head-commit`` so the merge refuses any other commit.
@@ -1045,6 +1276,7 @@ def merge_pr(
             pr_id_resolution="" if pr_id else "unmatched",
             receipts_file=receipts_file,
             contract_invalid_override=contract_invalid_override,
+            preflight_gates=preflight_gates,
         )
         append_status = (receipt or {}).get("append_status", "unknown")
         result["receipt_status"] = append_status
@@ -1114,19 +1346,34 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     method = args.merge_method or "squash"
 
+    # Golf Bx, D3: every preflight's own verdict, appended as it is decided.
+    # The door still returns on the FIRST NO-GO — this list is what the gates
+    # after that one are recorded as `not_evaluated` from, never a reason to
+    # keep running them.
+    evaluated: list[Dict[str, Any]] = []
+
     # ── Merge gate: VNX CI conclusion=success for the exact PR head ──────
     gate, pr_data = _run_ci_gate(args.pr, override_reason=args.override_reason)
+    # The head SHA the gates approve is established once, here: the merge is
+    # pinned to it (--match-head-commit) and every preflight record names it.
+    head_sha = (pr_data or {}).get("headRefOid") or ""
+    evaluated.append(_preflight_record("ci", gate, head_sha))
+
+    def refuse(gate_name: str, gate_result: Dict[str, Any], json_key: str) -> int:
+        return _refuse_merge(
+            pr_number=args.pr,
+            dispatch_id=args.dispatch_id or "",
+            gate_name=gate_name,
+            gate=gate_result,
+            evaluated=evaluated,
+            head_sha=head_sha,
+            json_output=args.json,
+            json_key=json_key,
+            dry_run=args.dry_run,
+        )
+
     if gate["verdict"] != "GO":
-        if args.json:
-            print(json.dumps({
-                "success": False,
-                "pr_number": args.pr,
-                "error": gate["message"],
-                "ci_gate": gate,
-            }, indent=2))
-        else:
-            print(f"NO-GO: {gate['message']}", file=sys.stderr)
-        return EXIT_ERROR
+        return refuse("ci", gate, "ci_gate")
     if gate.get("overridden"):
         print(f"OVERRIDE: {gate['message']}")
     else:
@@ -1134,17 +1381,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ── Review gate: a passing, evidenced review-gate result must exist ────
     review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason)
+    evaluated.append(_preflight_record("review", review_gate, head_sha))
     if review_gate["verdict"] != "GO":
-        if args.json:
-            print(json.dumps({
-                "success": False,
-                "pr_number": args.pr,
-                "error": review_gate["message"],
-                "review_gate": review_gate,
-            }, indent=2))
-        else:
-            print(f"NO-GO: {review_gate['message']}", file=sys.stderr)
-        return EXIT_ERROR
+        return refuse("review", review_gate, "review_gate")
     if review_gate.get("overridden"):
         print(f"OVERRIDE: {review_gate['message']}")
     else:
@@ -1153,13 +1392,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ── ADR-number preflight: an added ADR file must not collide with a ────
     # number already on main (Golf B, B6). No override — always a refusal.
     adr_gate = _run_adr_gate(args.pr, pr_data=pr_data)
+    evaluated.append(_preflight_record("adr", adr_gate, head_sha))
     if adr_gate["verdict"] != "GO":
-        if args.json:
-            print(json.dumps({"success": False, "pr_number": args.pr,
-                               "error": adr_gate["message"], "adr_gate": adr_gate}, indent=2))
-        else:
-            print(f"NO-GO: {adr_gate['message']}", file=sys.stderr)
-        return EXIT_ERROR
+        return refuse("adr", adr_gate, "adr_gate")
     print(f"ADR gate: {adr_gate['message']}")
 
     # ── contract_invalid gate: the latest OUTCOME receipt for the dispatch ──
@@ -1170,16 +1405,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         pr_number=args.pr,
         override_reason=args.override_contract_invalid,
     )
+    evaluated.append(_preflight_record("contract_invalid", contract_gate, head_sha))
     if contract_gate["verdict"] != "GO":
-        if args.json:
-            print(json.dumps({
-                "success": False, "pr_number": args.pr,
-                "error": contract_gate["message"],
-                "contract_invalid_gate": contract_gate,
-            }, indent=2))
-        else:
-            print(f"NO-GO: {contract_gate['message']}", file=sys.stderr)
-        return EXIT_ERROR
+        return refuse("contract_invalid", contract_gate, "contract_invalid_gate")
     if contract_gate.get("overridden"):
         print(f"OVERRIDE: {contract_gate['message']}")
     else:
@@ -1192,24 +1420,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     protection_gate = _run_branch_protection_gate(
         args.pr, pr_data=pr_data, allow_weaken_reason=args.allow_weaken,
     )
+    evaluated.append(_preflight_record("branch_protection", protection_gate, head_sha))
     if protection_gate["verdict"] != "GO":
-        if args.json:
-            print(json.dumps({
-                "success": False, "pr_number": args.pr,
-                "error": protection_gate["message"],
-                "branch_protection_gate": protection_gate,
-            }, indent=2))
-        else:
-            print(f"NO-GO: {protection_gate['message']}", file=sys.stderr)
-        return EXIT_ERROR
+        return refuse("branch_protection", protection_gate, "branch_protection_gate")
     if protection_gate.get("overridden"):
         print(f"OVERRIDE: {protection_gate['message']}")
     else:
         print(f"Branch-protection gate: {protection_gate['message']}")
 
-    # The head SHA the gates approved is established once in _run_ci_gate; the
-    # merge is pinned to it (--match-head-commit) so a post-gate push is refused.
-    head_sha = (pr_data or {}).get("headRefOid") or ""
+    # All five ran and approved: the ledger pads nothing here.
+    preflight_gates = _preflight_ledger(evaluated)
 
     contract_invalid_override = (
         {"flag": "--override-contract-invalid", "reason": contract_gate["override_reason"]}
@@ -1224,6 +1444,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         head_sha=head_sha,
         pr_data=pr_data,
         contract_invalid_override=contract_invalid_override,
+        preflight_gates=preflight_gates,
     )
 
     if args.json:
