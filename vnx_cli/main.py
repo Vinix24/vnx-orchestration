@@ -755,6 +755,23 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
              "OI-829 auto-close requires >=1 linked PR marked 'complete')",
     )
 
+    p_unlink_pr = subs.add_parser(
+        "unlink-pr",
+        help="manually unlink PR ref(s) from a track (operator-gated inverse of "
+             "link-pr; audited)",
+    )
+    _common_horizon_args(p_unlink_pr)
+    p_unlink_pr.add_argument("track_id", metavar="TRACK_ID")
+    p_unlink_pr.add_argument(
+        "pr", nargs="+", metavar="PR",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unlink_pr.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this PR reference is being removed "
+             "(audited; no silent bypass — an empty reason is refused)",
+    )
+
     p_lane_hint = subs.add_parser(
         "set-lane-hint",
         help="set the descriptive dispatch lane_hint (governed|direct|unset) on a track",
