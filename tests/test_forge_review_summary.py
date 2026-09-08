@@ -541,12 +541,58 @@ class TestPendingPreview:
         assert {"context": REVIEW_CHECK, "app_id": REAL_APP_ID} in checks
 
     def test_every_currently_required_check_survives_the_promotion(self):
+        """The shipped file, where ``pending_checks`` is empty since OP-B3.
+
+        Kept as the no-op control, and it is honest about being one: with
+        nothing parked, the promotion loop runs zero iterations and this
+        asserts ``X <= X``, which cannot fail. It pins that an EMPTY
+        ``pending_checks`` neither drops nor invents a requirement — nothing
+        more. The test that actually exercises the loop is
+        :meth:`test_a_parked_entry_is_promoted_bound_to_the_signing_app`.
+        """
         config = drift.load_protection_config(YAML_PATH)
 
         payload = fgp.pending_promotion_put_payload(YAML_PATH)
 
         promoted = {c["context"] for c in payload["required_status_checks"]["checks"]}
+        assert config.pending_checks == (), (
+            "dit is de nul-iteratie-controle; met een geparkeerde entry meet hij "
+            "iets anders dan hij zegt"
+        )
         assert {c.context for c in config.checks} <= promoted
+
+    def test_a_parked_entry_is_promoted_bound_to_the_signing_app(self, tmp_path):
+        """The promotion loop itself, on a synthetic parked entry.
+
+        Without this the loop is dead code behind a green suite: OP-B3 emptied
+        ``pending_checks``, so every other test here drives
+        :func:`pending_promotion_put_payload` through zero iterations. The two
+        refusal branches stayed covered; the branch that actually promotes did
+        not. Same technique as
+        :meth:`TestBranchProtectionYaml.test_apply_and_drift_never_see_a_pending_entry`
+        — a synthetic entry on a copy of the real document, so the shipped file
+        is never re-parked to test the mechanism that unparks it.
+        """
+        doc = _real_yaml_doc()
+        doc["pending_checks"] = [SYNTHETIC_PENDING_CHECK]
+        path = tmp_path / "branch_protection.yaml"
+        path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+        before = drift.load_protection_config(path)
+        assert SYNTHETIC_PENDING_CHECK not in {c.context for c in before.checks}
+
+        payload = fgp.pending_promotion_put_payload(path)
+
+        promoted = payload["required_status_checks"]["checks"]
+        by_context = {c["context"]: c["app_id"] for c in promoted}
+        assert {c.context for c in before.checks} <= set(by_context), (
+            "een promotie mag geen bestaande eis laten vallen"
+        )
+        assert by_context[SYNTHETIC_PENDING_CHECK] == REAL_APP_ID, (
+            "de geparkeerde entry komt gebonden aan de tekenende App uit de lus, "
+            "niet als kale context"
+        )
+        assert len(promoted) == len(before.checks) + 1
+        assert "pending_checks" not in payload
 
     def test_the_rehearsal_never_talks_to_github(self, monkeypatch, capsys):
         """No PUT, no POST, no ``gh`` — a rehearsal that writes is not one."""

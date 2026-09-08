@@ -435,6 +435,12 @@ class TestRunBranchProtectionGate:
 
             assert result["verdict"] == "NO-GO"
             assert "vnx-gate/review" in result["message"]
+            # The context name alone does not identify which check said no:
+            # step (c) (live vs main's YAML) reports the same field in its own
+            # NO-GO. ``allow-weaken`` appears only in the PR-side weakening
+            # message, so it is what pins this on step (d) — the same pair the
+            # enforce_admins sister test above asserts on.
+            assert "allow-weaken" in result["message"]
 
     def test_door_hash_check_no_go_propagates(self, monkeypatch):
         self._stub_main_matches_live(monkeypatch)

@@ -379,6 +379,53 @@ def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_forge_check_run_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Golf B, OP-B3 fix-forward: no check-run POST leaves a unit-test run.
+
+    ``gate_recorder.publish_forge_check_run`` fires after EVERY gate-result
+    write, and since the OP-B3 fix-forward it publishes twice (the per-gate
+    check and the required ``vnx-gate/review`` summary). Both end in
+    ``forge_gate_publisher.publish_check_run`` → keychain → an installation
+    token from ``api.github.com`` → ``POST /repos/{owner}/{repo}/check-runs``.
+
+    Measured on this branch, over the 21 test files that drive a recorder
+    write: **51** outbound TCP connections to ``140.82.121.5:443`` before the
+    summary wiring and **102** after it — a live GitHub call per publication,
+    from a machine whose keychain happens to hold the App key. It swallows its
+    own failures (a fabricated sha earns a 422), so the suite stayed green and
+    said nothing about it. Green is not the same as offline.
+
+    Stubbed at ``forge_gate_publisher.publish_check_run``, the one choke point
+    both publications share, and NOT at ``forge_check_run.publish_check_run``:
+    that module's own transport tests (tests/test_forge_check_run_client.py)
+    exercise the real function against a stubbed ``_api_request`` and must keep
+    doing so. Returns GitHub's response shape rather than raising — a raise
+    would exercise the recorder's failure handler on every gate write instead
+    of its success path.
+
+    Tests that assert on WHAT was published set their own stub in the test body
+    (``tests/test_forge_gate_publisher.py::_capture_publish`` and the summary
+    fixture beside it): same function-scoped ``monkeypatch`` instance, later
+    call wins — the convention the three stubs above already document.
+    """
+    try:
+        import forge_gate_publisher
+    except ImportError:
+        # Only importable once a test module has put scripts/lib on sys.path.
+        # A run that never collects one never reaches the publisher either.
+        return
+
+    def offline_publish_check_run(
+        head_sha: str, name: str, conclusion: str, summary: str, **_kwargs: object
+    ) -> dict:
+        return {"id": 0, "name": name, "head_sha": head_sha, "conclusion": conclusion}
+
+    monkeypatch.setattr(
+        forge_gate_publisher, "publish_check_run", offline_publish_check_run
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB / registry fixtures  (shared with test_burnin_certification)
 # ---------------------------------------------------------------------------

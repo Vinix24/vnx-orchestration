@@ -78,7 +78,9 @@ Dit blok is bewust **geen** onderdeel van `checks[]` of `pending_checks:`. Het b
 
 Het invullen gaat via een kleine PR door de normale deur (glm-gate tekent). Zolang `app_id` `null` is weigert de client expliciet en luid in plaats van te gokken (`load_app_config`'s eigen foutmelding verwijst naar dit runbook).
 
-Dit blok zegt alleen wie *publiceert*. Wat `main` vereist, staat in `required_status_checks.checks` — daar staat `vnx-gate/review` sinds OP-B3 in, met dit getal eraan gebonden. Houd de twee gelijk: de binding in `checks[]` moet de identiteit zijn die daadwerkelijk tekent, anders is de check onvervulbaar. Zie §5.
+Dit blok zegt alleen wie *publiceert*. Wat `main` vereist, staat in `required_status_checks.checks` — daar staat `vnx-gate/review` sinds OP-B3 in, met dit getal eraan gebonden. Zie §5.
+
+De twee getallen gelijk houden is geen leesinstructie meer maar een schemaregel: `parse_protection_config` weigert een `vnx-gate/*`-entry waarvan het `app_id` niet gelijk is aan `app.app_id`, en weigert er ook een wanneer er helemaal geen `app`-blok is (dan is er geen identiteit om aan te binden). De melding noemt beide getallen. Zonder die wachter zou een verwisselde cijfervolgorde gewoon parsen, geen verzwakking zijn voor de merge-deur — `is_weakening` kijkt in de checks-tak alleen naar aanwezigheid, niet naar een gewijzigd `app_id` — en netjes applyen, waarna `main` een check vereist die geen enkele App kan vervullen. Een permanent dichte merge-deur, geïnstalleerd door een typefout.
 
 ## 4. Eerste apply **[operator]** — historisch, niet meer als no-op uit te voeren
 
@@ -156,7 +158,9 @@ branch-protection wijkt af van scripts/forge/branch_protection.yaml op main: req
 
 Hij noemt het afwijkende veld en niet het herstel. Dat herstel is de apply uit stap 4 hierboven.
 
-Gevolg voor de planning: tussen de merge van de promotie en de apply mag niets zitten. Geen andere PR, geen pauze, geen "morgen verder". Ook de PR die deze situatie zou repareren komt er niet doorheen. De apply is de enige uitweg, en de terugweg in §7 (de entry er weer uit) vereist zelf óók een merge — die dus ook geblokkeerd is.
+Gevolg voor de planning: tussen de merge van de promotie en de apply mag niets zitten. Geen andere PR, geen pauze, geen "morgen verder". Ook de PR die deze situatie zou repareren komt er niet doorheen. De apply is de enige uitweg, en de terugweg in §7.1 (de entry er weer uit) vereist zelf óók een merge — die dus ook geblokkeerd is.
+
+Dezelfde redenering geldt ná de apply, en dat is niet dezelfde situatie. Hierboven is de blokkade tijdelijk en heft de apply hem op. Daarna vereist elke merge een gepubliceerde `vnx-gate/review`, dus zodra publiceren zélf onmogelijk wordt (§8: keychain blijvend dicht, App verwijderd) is de terugweg uit §7.1 een lus in precies die faalmodus: de terugdraai-PR heeft de check nodig die niemand nog kan zetten. Daarvoor bestaat **§7.2**, met één ongegovernde stap en een verplichte vastlegging ervan.
 
 ### Na de apply leest een ongepubliceerde head als `unverified`, niet als "geen oordeel"
 
@@ -186,27 +190,100 @@ Herken dus `vnx-gate/review` in een `SKIPPED_UNVERIFIED`-regel als "publiceer he
 
 Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait — ook een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → `glm_gate.py` (of de opvolger in de overnameketen) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
 
+### Wie publiceert wat, en wanneer
+
+"Publicatie" in die volgorde is geen handmatige stap. De **gate-recorder** publiceert na elk schijf-record twee check-runs, in deze volgorde, op de kop die in dat record staat (`scripts/lib/gate_recorder.py::publish_forge_check_run` en `::publish_forge_review_summary`):
+
+1. `vnx-gate/<poort>` — wat déze poort zei. Vereist door niets.
+2. `vnx-gate/review` — of er op deze kop een geldig review-akkoord ligt, volgens dezelfde regel als de merge-deur. **Dit is de check die `main` vereist.**
+
+De twee zijn onafhankelijk. De per-poort-publicatie gaat eerst en slaagt of faalt op eigen merites; de samenvatting is een aparte aanroep met een aparte foutafhandeling, dus een fout daar kan de eerste niet ongedaan maken en kan een geslaagde poortrun niet rood maken. Beide falen luid in de log, met het herstelcommando erin, en geen van beide raakt het record op schijf.
+
+Twee poortruns op dezelfde kop publiceren de samenvatting twee keer; dat is een update van dezelfde check-run, geen conflict.
+
+Het CLI-commando blijft bestaan als **handmatige terugvaloptie**, niet als de normale weg:
+
+```bash
+python3 scripts/lib/forge_gate_publisher.py review --pr <n>
+```
+
+Gebruik het voor een kop die nooit een poortrun heeft gehad (de migratie in §5 stap 5), en na een uitval waarbij de recorder de publicatie moest inslikken — een gesloten keychain, een GitHub-500, een launchd-runner zonder `gh` op zijn PATH (§8). De log-regel van die uitval draagt dit commando al.
+
+Wat de recorder **niet** doorgeeft, omdat hij het niet weet: `project_id` en `project_root`. De samenvatting valt daarvoor terug op de eigen resolutie van de publisher (`origin` van de checkout waarin hij draait). `results_dir` en `branch` komen wél mee, uit het record dat zojuist geschreven is, zodat de check dezelfde records leest als de deur straks toetst.
+
 ## 7. Terugweg **[operator]**
 
 De terugweg is een branch-brede actie op de bestaande, geverifieerde `apply_branch_protection.py` — geen nieuwe code nodig, ook niet zodra OP-B3 gedraaid heeft. B5 voert hem één keer uit en quoteert de API-feiten ervan en ervoor.
 
+Er zijn **twee gevallen**, en ze verschillen op precies één vraag: kun je nog publiceren? De deur zelf kent het verschil niet en krijgt er ook geen ontsnappingsluik voor. §7.1 is de terugweg; §7.2 is wat er overblijft als publiceren onmogelijk is.
+
+### 7.1 Het gewone geval — publiceren werkt, en dit is dus geen lus
+
+Van toepassing wanneer de App bestaat, de keychain open is en `forge_gate_publisher.py review --pr <n>` gewoon slaagt. Dan is de terugdraai-PR een PR als elke andere: hij krijgt zijn eigen review-poortrun, de recorder publiceert `vnx-gate/review` op zijn kop (§6), en de deur laat hem door. De terugweg vereist een merge, die merge vereist een gepubliceerde check, en die check is te leveren. Geen cirkel.
+
 1. Kleine PR: haal de `vnx-gate/review`-entry uit `checks[]` van `scripts/forge/branch_protection.yaml` (terug naar `pending_checks:`, of helemaal weg).
 2. `python3 scripts/forge/apply_branch_protection.py --dry-run` — dit is nu een verzwakking (een check minder), dus de dry-run toont ook de waarschuwing `zou een verzwakking zijn zonder --allow-weaken`.
-3. Apply met de reden verplicht ingevuld:
+3. Draai de review-poort op de kop van die PR en merge hem via de deur, mét `--allow-weaken` en een reden: de PR verzwakt `main`'s YAML, en dat is precies wat stap (d) van de deur tegenhoudt zonder die vlag.
+4. **Pas na de merge** de apply, met de reden verplicht ingevuld:
 
    ```bash
    python3 scripts/forge/apply_branch_protection.py --allow-weaken "vnx-gate/review teruggedraaid: <reden>"
    ```
 
-   Een lege reden wordt geweigerd (`run_apply` toetst expliciet op een niet-lege string) — er is geen stille bypass.
-4. Receipt controleren zoals in §4; het veld `weak_fields` in die receipt draagt de naam van de teruggedraaide check.
-5. Zodra het probleem verholpen is: dezelfde entry via een nieuwe PR terug in `checks[]`, opnieuw apply (nu weer een aanscherping, geen `--allow-weaken` nodig) — zie §5.
+   Een lege reden wordt geweigerd (`run_apply` toetst expliciet op een niet-lege string) — er is geen stille bypass. Tussen stap 3 en stap 4 zegt `main` veertien en zegt live er vijftien: dat is drift en de deur staat dicht, om dezelfde reden als in §5. Laat er dus niets tussen zitten.
+5. Receipt controleren zoals in §4; het veld `weak_fields` in die receipt draagt de naam van de teruggedraaide check.
+6. Zodra het probleem verholpen is: dezelfde entry via een nieuwe PR terug in `checks[]`, opnieuw apply (nu weer een aanscherping, geen `--allow-weaken` nodig) — zie §5.
+
+### 7.2 Het noodgeval — publiceren is onmogelijk
+
+**Alleen voor de twee faalmodi uit §8 waarin geen enkele publicatie meer kan slagen:** een blijvend ontoegankelijke keychain, en een verwijderde of gedeïnstalleerde App. In beide gevallen is §7.1 een lus in zijn eigen faalmodus. De terugdraai-PR heeft `vnx-gate/review` nodig om te mergen, en dat is nou juist de check die niemand meer kan zetten. De omweg via een lokale `apply --allow-weaken` vóór de merge helpt niet: die maakt live veertien terwijl `main`'s YAML vijftien zegt, en op dat verschil weigert `scripts/pr_merge.py::_run_branch_protection_gate` stap (c) zonder enige override.
+
+Deze volgorde werkt wél, en hij bevat **precies één ongegovernde stap**: stap 3, een kale `gh pr merge` buiten de deur om. Dat is het enige punt in dit hele runbook waar dat mag, en het mag alleen hier.
+
+1. **Kleine PR met alleen de terugdraai.** Haal de `vnx-gate/review`-entry uit `checks[]`. Niets anders in die PR — hoe kleiner de ongegovernde merge, hoe kleiner wat er ongereviewd binnenkomt.
+
+   Draai er wél de review-poort op. Die schrijft zijn record op schijf en dat record is het bewijsstuk; alleen de publicatie ervan naar GitHub lukt niet. De poort is dus niet overgeslagen, alleen zijn check-run ontbreekt.
+2. **Verwijder de vereiste live**, want anders komt stap 3 er ook niet doorheen:
+
+   ```bash
+   python3 scripts/forge/apply_branch_protection.py --allow-weaken "noodherstel: <keychain dicht|App weg>, vnx-gate/review tijdelijk uit de bescherming"
+   ```
+
+   Dit is de laatste gegovernde stap. Hij schrijft zijn eigen receipt (`branch_protection_applied`, met `weak_fields`), dus dit deel van de afwijking staat vanzelf in de audit trail.
+
+   Let op de volgorde ten opzichte van §7.1: daar apply je ná de merge, hier ervóór. Dat is het hele verschil. Hier is `main`'s YAML nog vijftien en live veertien, dus stap (c) van de deur zou een normale merge alsnog weigeren — daarom is stap 3 een kale merge en geen deur-merge.
+3. **Kale merge, buiten de deur om.** De ongegovernde stap:
+
+   ```bash
+   gh pr merge <n> --squash
+   ```
+
+   Waarom de gegovernde weg hier niet kan: `pr_merge.py` toetst live tegen `main`'s YAML (stap c). Die twee zijn na stap 2 met opzet verschillend, en dat verschil is geen verzwakking die de PR introduceert, dus `--allow-weaken` dekt hem niet. Er is geen vlag die dit opent, en die komt er ook niet — een ontsnappingsluik in de deur zou op elke andere dag ook openstaan.
+
+   Na deze merge zeggen `main`'s YAML en de live bescherming allebei veertien en is de deur weer normaal bruikbaar.
+4. **Leg de ongegovernde stap vast.** Verplicht, en niet te improviseren op de dag dat `main` dichtstaat. Twee dingen, in deze volgorde:
+
+   ```bash
+   python3 scripts/open_items_manager.py add \
+     --dispatch "<dispatch-id van de terugdraai>" \
+     --pr <n> \
+     --severity blocker \
+     --title "Ongegovernde merge van PR #<n>: vnx-gate/review noodterugweg (FORGE_GATE.md §7.2)" \
+     --details "Reden: <keychain dicht|App weg>. Poortrecord op schijf: <pad naar het review_gates/results-record>. Live bescherming teruggebracht naar 14 checks via apply --allow-weaken (receipt: branch_protection_applied). Merge uitgevoerd met een kale gh pr merge, buiten pr_merge.py om. Sluiten zodra de App hersteld is en de entry via §5 terugstaat."
+   ```
+
+   ```bash
+   grep branch_protection_applied "$VNX_DATA_DIR/state/t0_receipts.ndjson" | tail -1
+   ```
+
+   De receipt van stap 2 is het bewijs van de verzwakking; het open item is het bewijs van de merge zelf, want dáár schrijft niets een receipt — dat is precies wat "buiten de deur om" betekent. Zonder dit open item eindigt de stap als een gat in de audit trail.
+5. **Herstel.** Keychain weer open of App opnieuw aangemaakt (§1 en §2, inclusief een nieuw App ID in de YAML via §3 als de App echt nieuw is). Daarna de entry terug in `checks[]` via §5, apply, en het open item uit stap 4 sluiten met een verwijzing naar de PR die de entry terugzette.
 
 ## 8. Faalmodi
 
-- **Gesloten keychain in een niet-interactieve sessie.** Na OP-B3 vraagt elke merge een lokaal gedraaide publisher met keychain-toegang. Zonder die toegang: geen publicatie, dus geen merge — ook niet voor de PR die het repareert. Geverifieerd (PR #1808, §2): elke keychain-fout is luid en draagt het exacte herstelcommando (`security add-generic-password -s <item> -a "$USER" -w '<...>'`); geen stille lege string. Als dat herstel zelf niet lukt (keychain blijvend ontoegankelijk, bijvoorbeeld een niet-interactieve launchd-sessie zonder sessiesleutel — `security`'s exit 51, "wil geen niet-interactieve toegang"), is de terugweg uit §7 de enige echte uitweg: haal `vnx-gate/review` uit `checks[]`, merge, zet daarna terug.
-- **Verwijderde of gedeinstalleerde App.** `vnx-gate/review` is dan permanent onvervulbaar — geen enkele publicatie kan nog slagen. De terugweg uit §7 is het enige herstel; daarna de App opnieuw aanmaken (§1) en de hele keten opnieuw doorlopen.
-- **Fork-PR.** De repo is publiek en er is nog geen externe PR geweest (gemeten: `POST /check-runs` op de head-sha van een fork-PR in de base-repo is dus niet getoetst). Aanvaarde procedure: de operator publiceert vanaf het schijf-record zoals bij elke andere PR. Faalt dat met **422**: er is geen per-PR-override in `apply_branch_protection.py` (het werkt branch-breed, niet per PR) — het herstel is de branch-brede terugweg uit §7, die ene PR mergen, en de bescherming direct daarna weer aanzetten. De eerste externe PR is zo een meting, geen storing.
+- **Gesloten keychain in een niet-interactieve sessie.** Na OP-B3 vraagt elke merge een lokaal gedraaide publisher met keychain-toegang. Zonder die toegang: geen publicatie, dus geen merge — ook niet voor de PR die het repareert. Geverifieerd (PR #1808, §2): elke keychain-fout is luid en draagt het exacte herstelcommando (`security add-generic-password -s <item> -a "$USER" -w '<...>'`); geen stille lege string. Lukt dat herstel wél, dan is §7.1 de terugweg. Lukt het niet (keychain blijvend ontoegankelijk, bijvoorbeeld een niet-interactieve launchd-sessie zonder sessiesleutel — `security`'s exit 51, "wil geen niet-interactieve toegang"), dan kan er niets meer gepubliceerd worden en is **§7.2** de weg: §7.1 zou hier een lus zijn, want de terugdraai-PR heeft zelf de check nodig die niemand meer kan zetten.
+- **Verwijderde of gedeinstalleerde App.** `vnx-gate/review` is dan permanent onvervulbaar — geen enkele publicatie kan nog slagen. Dat is de tweede faalmodus waarvoor **§7.2** bestaat, om dezelfde reden: §7.1 vraagt een publicatie die per definitie niet meer kan. Daarna de App opnieuw aanmaken (§1), het nieuwe App ID in de YAML zetten (§3, en de schemalezer weigert een `vnx-gate/*`-entry die niet aan dat getal gebonden is) en de keten opnieuw doorlopen via §5.
+- **Fork-PR.** De repo is publiek en er is nog geen externe PR geweest (gemeten: `POST /check-runs` op de head-sha van een fork-PR in de base-repo is dus niet getoetst). Aanvaarde procedure: de operator publiceert vanaf het schijf-record zoals bij elke andere PR. Faalt dat met **422**: er is geen per-PR-override in `apply_branch_protection.py` (het werkt branch-breed, niet per PR) — het herstel is de branch-brede terugweg uit §7.1, die ene PR mergen, en de bescherming direct daarna weer aanzetten. Publiceren werkt in dit geval nog gewoon voor elke andere PR, dus §7.2 is hier niet aan de orde. De eerste externe PR is zo een meting, geen storing.
 - **launchd-runner met kaal PATH (OI-1663).** Een runner zonder de interactieve-shell-PATH boekt bijvoorbeeld codex als niet-geïnstalleerd. Voor deze poort betekent dat: als de publicatie via launchd draait, controleer eerst of `gh` en `security` op het PATH van die launchd-sessie staan vóór je een publicatiefout aan de keychain of de App toeschrijft.
 - **Drift in een week zonder merges.** Niemand hoeft te mergen om drift te veroorzaken — een handmatige wijziging in de GitHub-UI verandert de live protection zonder dat de YAML meebeweegt. `vnx doctor`'s `branch_protection_drift`-check (§4) vangt dit ook buiten de merge-deur om; draai hem periodiek, niet alleen rond een merge.
 

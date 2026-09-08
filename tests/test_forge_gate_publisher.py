@@ -135,6 +135,35 @@ def _capture_publish(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _summary_publication_captured(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
+    """Capture the recorder's SUMMARY publication instead of performing it.
+
+    Since the OP-B3 fix-forward the recorder publishes TWO check-runs per
+    result write: ``vnx-gate/<gate>`` and ``vnx-gate/review``. Most tests in
+    this file replace only the first (``publish_for_record``), so without this
+    the second would run for real — ``load_app_config`` against the shipped
+    YAML (which carries a live ``app_id``), then the keychain, then a POST to
+    api.github.com from a unit test.
+
+    Autouse and function-scoped, so it shares this test's ``monkeypatch``
+    instance: a test that wants the real summary path, or a different stub,
+    sets its own and the later call wins — the same convention
+    ``conftest.py``'s offline stubs document.
+
+    Returns the list the stub appends to, so a test can request the fixture by
+    name and assert on WHAT was published.
+    """
+    calls: List[Dict[str, Any]] = []
+
+    def fake_summary(pr_number: int, head_sha: str, **kwargs: Any) -> Dict[str, Any]:
+        calls.append({"pr_number": pr_number, "head_sha": head_sha, **kwargs})
+        return {"conclusion": "action_required", "name": fcr.REVIEW_SUMMARY_CHECK_NAME}
+
+    monkeypatch.setattr(fcr, "publish_review_summary", fake_summary)
+    return calls
+
+
 # ---------------------------------------------------------------------------
 # The mapping — statuses
 # ---------------------------------------------------------------------------
@@ -806,6 +835,241 @@ def test_a_refused_write_publishes_nothing(
 
     assert written is False
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# The recorder hook — the SUMMARY check, the one branch protection requires
+# ---------------------------------------------------------------------------
+
+
+def test_the_recorder_also_publishes_the_summary_check_for_the_same_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """OP-B3 made ``vnx-gate/review`` a REQUIRED check. Without this wiring the
+    only producer of it is a hand-run CLI, so every merge to ``main`` would
+    forever wait on an operator typing a command — while the check that IS
+    published automatically (``vnx-gate/<gate>``) is required by nothing.
+    """
+    results_dir = tmp_path / "vnx-dev" / "review_gates" / "results"
+    results_dir.mkdir(parents=True)
+    result_path = results_dir / "pr-1811-glm_gate.json"
+    monkeypatch.setattr(fcr, "publish_for_record", lambda *_a, **_k: {})
+
+    _payload, written = gate_recorder.write_result_guarded(
+        result_path, _recorder_payload(), gate="glm_gate", pr_ref="1811"
+    )
+
+    assert written is True
+    assert len(_summary_publication_captured) == 1
+    call = _summary_publication_captured[0]
+    assert call["pr_number"] == 1811
+    assert call["head_sha"] == HEAD, (
+        "de samenvatting hoort bij de kop die de recorder registreerde, nooit bij "
+        "de huidige kop van de PR — een nieuwe push krijgt terecht geen check"
+    )
+    assert call["results_dir"] == results_dir, (
+        "dezelfde opslag als het record dat zojuist geschreven is, zodat de "
+        "samenvatting de records leest die de merge-deur straks toetst"
+    )
+    assert call["branch"] == "dispatch/x"
+
+
+def test_the_terminal_writer_publishes_the_summary_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """The other writer (``record_terminal_result``), which free-form gates use.
+    An asymmetric pair of writers would leave whichever lane used the other one
+    unmergeable."""
+    import gate_depth
+
+    result_path = tmp_path / "pr-1811-glm_gate.json"
+    monkeypatch.setattr(fcr, "publish_for_record", lambda *_a, **_k: {})
+
+    gate_recorder.record_terminal_result(
+        gate="glm_gate",
+        pr_id="1811",
+        result_path=result_path,
+        payload=_recorder_payload(),
+        execution_depth=gate_depth.single_shot_depth(4096, False),
+    )
+
+    assert [c["head_sha"] for c in _summary_publication_captured] == [HEAD]
+
+
+def test_the_per_gate_publication_goes_first_and_the_summary_after(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """Order is the guarantee: the per-gate publication succeeds or fails on its
+    own merits BEFORE the summary is attempted, so the summary can never be the
+    thing that took it down."""
+    order: List[str] = []
+    monkeypatch.setattr(
+        fcr, "publish_for_record", lambda *_a, **_k: order.append("per-gate") or {}
+    )
+    monkeypatch.setattr(
+        fcr,
+        "publish_review_summary",
+        lambda *_a, **_k: order.append("summary") or {},
+    )
+
+    gate_recorder.write_result_guarded(
+        tmp_path / "pr-1811-glm_gate.json",
+        _recorder_payload(),
+        gate="glm_gate",
+        pr_ref="1811",
+    )
+
+    assert order == ["per-gate", "summary"]
+
+
+def test_a_throwing_summary_leaves_the_per_gate_publication_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The second publication is a SECOND, separate failure handler.
+
+    A 500 on the summary may not undo the per-gate check-run that already went
+    out, may not touch the record on disk, and may not fail the gate run — and
+    it must say so loudly, with the command that repairs it.
+    """
+    result_path = tmp_path / "pr-1811-glm_gate.json"
+    per_gate: List[Any] = []
+    monkeypatch.setattr(
+        fcr, "publish_for_record", lambda *a, **_k: per_gate.append(a) or {}
+    )
+
+    def exploding_summary(*_a: Any, **_k: Any) -> Dict[str, Any]:
+        raise fcr.ForgeAPIError("GitHub gaf 500", status=500, body="boom")
+
+    monkeypatch.setattr(fcr, "publish_review_summary", exploding_summary)
+
+    with caplog.at_level(logging.WARNING, logger="gate_recorder"):
+        payload, written = gate_recorder.write_result_guarded(
+            result_path, _recorder_payload(), gate="glm_gate", pr_ref="1811"
+        )
+
+    assert written is True
+    assert payload["status"] == "pass"
+    assert json.loads(result_path.read_text())["status"] == "pass"
+    assert len(per_gate) == 1, "de per-poort-publicatie is geslaagd en blijft geslaagd"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "forge_gate_publisher.py review --pr 1811" in logged
+    assert "SAMENVATTENDE CHECK" in logged
+    assert "ForgeAPIError" in logged
+
+
+def test_a_throwing_per_gate_publication_still_lets_the_summary_go_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """The reverse direction, and the one that matters for mergeability: the
+    per-gate check is required by nothing, the summary is required by branch
+    protection. A gate-specific failure may not take the required check with
+    it."""
+    def exploding_per_gate(*_a: Any, **_k: Any) -> Dict[str, Any]:
+        raise fcr.ForgeAPIError("GitHub gaf 500", status=500, body="boom")
+
+    monkeypatch.setattr(fcr, "publish_for_record", exploding_per_gate)
+
+    gate_recorder.write_result_guarded(
+        tmp_path / "pr-1811-glm_gate.json",
+        _recorder_payload(),
+        gate="glm_gate",
+        pr_ref="1811",
+    )
+
+    assert [c["head_sha"] for c in _summary_publication_captured] == [HEAD]
+
+
+def test_two_gate_runs_on_the_same_head_publish_the_summary_twice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """Idempotence. Two review peers signing the same head is the normal case,
+    and a check-run POST for a name+sha that already carries one is an update,
+    not a conflict."""
+    monkeypatch.setattr(fcr, "publish_for_record", lambda *_a, **_k: {})
+
+    for gate in ("glm_gate", "kimi_gate"):
+        payload = _recorder_payload()
+        payload["gate"] = gate
+        gate_recorder.write_result_guarded(
+            tmp_path / f"pr-1811-{gate}.json", payload, gate=gate, pr_ref="1811"
+        )
+
+    assert [c["head_sha"] for c in _summary_publication_captured] == [HEAD, HEAD]
+
+
+def test_a_record_without_a_head_publishes_no_summary_either(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """One identity check for both publications: no head, nothing to attach."""
+    monkeypatch.setattr(fcr, "publish_for_record", lambda *_a, **_k: {})
+    payload = _recorder_payload()
+    payload["commit_sha"] = ""
+
+    gate_recorder.write_result_guarded(
+        tmp_path / "pr-1811-glm_gate.json", payload, gate="glm_gate", pr_ref="1811"
+    )
+
+    assert _summary_publication_captured == []
+
+
+def test_a_refused_write_publishes_no_summary_either(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """A refused write left another writer's record standing (OI-1469/OI-1470);
+    a summary computed over it would describe a write that never happened."""
+    result_path = tmp_path / "pr-1811-glm_gate.json"
+    result_path.write_text("{ this is not json", encoding="utf-8")
+    monkeypatch.setattr(fcr, "publish_for_record", lambda *_a, **_k: {})
+
+    _payload, written = gate_recorder.write_result_guarded(
+        result_path, _recorder_payload(), gate="glm_gate", pr_ref="1811"
+    )
+
+    assert written is False
+    assert _summary_publication_captured == []
+
+
+def test_an_unregistered_app_costs_one_info_line_and_no_second_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _summary_publication_captured: List[Dict[str, Any]],
+) -> None:
+    """No App registered is a pending operator step, not a malfunction — and
+    the summary cannot publish without one either. Attempting it anyway would
+    put a second copy of the same line in the log on every single gate write,
+    which is how a reader learns to skip the line that has to be believed on
+    the day the keychain really is locked."""
+    def no_app(*_a: Any, **_k: Any) -> Dict[str, Any]:
+        raise fcr.ForgeAppConfigError("app_id ontbreekt")
+
+    monkeypatch.setattr(fcr, "publish_for_record", no_app)
+
+    with caplog.at_level(logging.INFO, logger="gate_recorder"):
+        gate_recorder.write_result_guarded(
+            tmp_path / "pr-1811-glm_gate.json",
+            _recorder_payload(),
+            gate="glm_gate",
+            pr_ref="1811",
+        )
+
+    assert _summary_publication_captured == []
+    logged = [r.getMessage() for r in caplog.records if "nog niet geregistreerd" in r.getMessage()]
+    assert len(logged) == 1
 
 
 def test_publication_never_shells_out_from_the_recorder_on_import() -> None:

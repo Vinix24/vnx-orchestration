@@ -284,18 +284,38 @@ def test_shipped_yaml_parses_and_applies_clean(tmp_path: Path) -> None:
     assert config.checks
 
 
-def _shipped_doc_without_app() -> str:
-    """The shipped YAML with the ``app:`` block removed, as YAML text."""
+def _shipped_doc_without_the_app_bound_checks() -> Dict[str, Any]:
+    """The shipped YAML with every ``vnx-gate/*`` entry taken out of ``checks[]``.
+
+    The one part of the document whose validity DEPENDS on the ``app:`` block:
+    since the OP-B3 fix-forward the schema reader refuses a ``vnx-gate/*``
+    entry that is not bound to ``app.app_id``, so a document with the entry and
+    without the block no longer parses at all. Removing it from both sides is
+    what leaves ``app:`` as the only difference between them.
+    """
     doc = yaml.safe_load(SHIPPED_YAML_PATH.read_text(encoding="utf-8"))
     assert "app" in doc, "the shipped YAML must carry the app: block for this test to mean anything"
-    doc.pop("app")
-    return yaml.safe_dump(doc, sort_keys=False)
+    doc["required_status_checks"]["checks"] = [
+        c for c in doc["required_status_checks"]["checks"]
+        if not str(c.get("context", "")).startswith("vnx-gate/")
+    ]
+    assert doc["required_status_checks"]["checks"], "stripping must not empty the list"
+    return doc
 
 
 def test_shipped_app_block_is_invisible_to_the_comparator() -> None:
-    """Dropping the real ``app:`` block changes nothing the drift check sees."""
-    with_app = fpd.load_protection_config(SHIPPED_YAML_PATH)
-    without_app = fpd.parse_protection_config(_shipped_doc_without_app())
+    """Dropping the real ``app:`` block changes nothing the drift check sees.
+
+    Compared on two documents that differ in the ``app:`` block and in nothing
+    else — see :func:`_shipped_doc_without_the_app_bound_checks` for why the
+    ``vnx-gate/*`` entry comes out of both sides rather than one.
+    """
+    base = _shipped_doc_without_the_app_bound_checks()
+    stripped = {k: v for k, v in base.items() if k != "app"}
+
+    with_app = fpd.parse_protection_config(yaml.safe_dump(base, sort_keys=False))
+    without_app = fpd.parse_protection_config(yaml.safe_dump(stripped, sort_keys=False))
+
     diffs = fpd.compare(fpd.to_normalized_dict(without_app), fpd.to_normalized_dict(with_app))
     assert diffs == [], f"the registered app_id leaked into the comparator: {diffs}"
 
