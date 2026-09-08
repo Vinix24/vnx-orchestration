@@ -963,6 +963,23 @@ def check_review_gate_for_merge(
     records. A decided verdict at the declared gate (pass or fail) always
     stands on its own and is never overridden by a successor.
 
+    Golf Bx/D7: a successor that claims the takeover but rendered NO verdict
+    of its own (canonical status outside ``_DECIDED_VERDICT_STATES``) is
+    SKIPPED by that loop rather than judged by
+    :func:`_merge_door_record_verdict`. Such a record only ever says something
+    about the runner (measured live on PR #1818: ``kimi_gate``
+    ``not_executable`` / ``gate_not_subprocess_routable``), so running it
+    through machinery that asks "is this a valid pass" produced a guaranteed
+    NO-GO, and that NO-GO latched into ``first_failure`` — outranking the
+    OI-1624/OI-1642 independent-signer branch below, which is never consulted
+    once ``first_failure`` is set. The result was a merge blocked by a
+    non-judgement while ``glm_gate`` carried a fully evidenced pass on the
+    exact same head. A successor that DID render a verdict is judged by the
+    unchanged invariant chain and still blocks — a real rejection is never
+    weakened — and the loop's position in FRONT of the independent-signer
+    branch is deliberately unchanged, because a successor that explicitly
+    claims the declared gate is stronger evidence than a lane that does not.
+
     OI-1624: a gate-UITVAL is an ABSENCE, never a rejection (see
     :func:`_is_absent_without_verdict`) — ``not_executable``/``unavailable``
     mean "this attempt concluded without a verdict", not "this attempt
@@ -1019,6 +1036,29 @@ def check_review_gate_for_merge(
     first_failure: Optional[Dict[str, Any]] = None
     for successor in successors:
         successor_gate = (successor.get("gate") or "").strip() or gate
+        if gate_canonical_status(successor) not in _DECIDED_VERDICT_STATES:
+            # Golf Bx/D7: this successor claims the takeover but rendered no
+            # verdict of its own — the SAME "did anyone speak at all" test the
+            # declared-gate branch above already applies, and the same one
+            # _find_peer_gate_results uses to decide who may sign. Judging it
+            # with _merge_door_record_verdict here would be asking "is this a
+            # valid pass" of a record that never attempted one, and its
+            # inevitable NO-GO would be latched into first_failure — silently
+            # outranking the OI-1624/OI-1642 independent-signer branch below,
+            # which never even gets consulted once first_failure is set.
+            #
+            # Measured live on main 58330dd4 while merging PR #1818 (head
+            # 3074b642): kimi_gate recorded not_executable with
+            # reason='gate_not_subprocess_routable' and a takeover_path naming
+            # codex_gate, while glm_gate carried a fully evidenced pass on that
+            # exact head. The door refused with "overname-route voor
+            # codex_gate: kimi_gate resultaat mist contract_hash en/of
+            # report_path" — a statement about the RUNNER's routing blocking a
+            # proven review. Skipping it here restores the fall-through to the
+            # independent signer; the loop ORDER is deliberately unchanged,
+            # because a successor that does render a verdict is stronger
+            # evidence than a lane that never claimed the gate at all.
+            continue
         verdict = _merge_door_record_verdict(successor, successor_gate, pr_id)
         if verdict["verdict"] == "GO":
             return {
