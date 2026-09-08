@@ -508,6 +508,31 @@ class TestPendingPreview:
         with pytest.raises(fgp.ForgePublishRefused):
             fgp.pending_promotion_put_payload(path)
 
+    @pytest.mark.parametrize("content", [None, "branch: main\n"])
+    def test_an_unreadable_yaml_refuses_instead_of_tracebacking(self, tmp_path, content):
+        """A missing file and a malformed one both come back as a refusal.
+
+        ``load_protection_config`` raises ``OSError`` / ``ProtectionConfigError``
+        (a ``ValueError``); neither is a ``ForgeCheckRunError``, so without the
+        translation at this boundary the CLI's handler misses both and prints a
+        traceback — for the one command whose entire purpose is a readable
+        rehearsal.
+        """
+        path = tmp_path / "branch_protection.yaml"
+        if content is not None:
+            path.write_text(content, encoding="utf-8")
+
+        with pytest.raises(fgp.ForgePublishRefused):
+            fgp.pending_promotion_put_payload(path)
+
+    def test_an_unreadable_yaml_exits_non_zero_without_a_traceback(self, tmp_path, capsys):
+        rc = fgp.main(["pending-preview", "--yaml", str(tmp_path / "afwezig.yaml")])
+
+        captured = capsys.readouterr()
+        assert rc == fgp.EXIT_ERROR
+        assert "pending-preview:" in captured.err
+        assert "Traceback" not in captured.err
+
     def test_a_pending_entry_already_required_is_refused(self, tmp_path):
         doc = _real_yaml_doc()
         doc["pending_checks"] = [REVIEW_CHECK]

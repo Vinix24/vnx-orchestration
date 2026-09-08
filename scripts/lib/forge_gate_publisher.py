@@ -1212,10 +1212,23 @@ def pending_promotion_put_payload(yaml_path: Optional[Path] = None) -> Dict[str,
     """
     from ci_contexts import RequiredCheck  # noqa: PLC0415
     from forge_check_run import DEFAULT_YAML_PATH  # noqa: PLC0415
-    from forge_protection_drift import load_protection_config  # noqa: PLC0415
+    from forge_protection_drift import (  # noqa: PLC0415
+        ProtectionConfigError,
+        load_protection_config,
+    )
 
     path = Path(yaml_path) if yaml_path is not None else DEFAULT_YAML_PATH
-    config = load_protection_config(path)
+    # Translated at this boundary, not left to escape. ``load_protection_config``
+    # lets an OSError through untouched and raises ProtectionConfigError (a
+    # ValueError) for a malformed file — neither is a ForgeCheckRunError, so
+    # the CLI's own handler would miss both and hand the operator a traceback
+    # where the whole point of this command is a readable rehearsal.
+    try:
+        config = load_protection_config(path)
+    except OSError as exc:
+        raise ForgePublishRefused(f"kan {path} niet lezen: {exc}") from exc
+    except ProtectionConfigError as exc:
+        raise ForgePublishRefused(f"{path} voldoet niet aan het schema: {exc}") from exc
     app = load_app_config(path)
 
     required = {check.context for check in config.checks}
@@ -1450,7 +1463,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             return _run_pending_preview(args)
         except ForgeCheckRunError as exc:
-            print(f"{REVIEW_SUMMARY_CHECK_NAME}: {exc}", file=sys.stderr)
+            # Named after the COMMAND, not after vnx-gate/review: a refusal
+            # here is usually about some other pending entry, and prefixing it
+            # with the review check's name would point the operator at the one
+            # entry that is fine.
+            print(f"pending-preview: {exc}", file=sys.stderr)
             return EXIT_ERROR
 
     results_dir = Path(args.results_dir) if args.results_dir else _default_results_dir()
