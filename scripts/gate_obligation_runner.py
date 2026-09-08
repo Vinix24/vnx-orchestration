@@ -993,6 +993,76 @@ class GateResultIndex(NamedTuple):
     by_pr: Dict[Tuple[int, str], List[Tuple[Path, Dict[str, Any]]]]
 
 
+def _sweep_stale_provider_not_installed_results(state_dir: Path) -> List[str]:
+    """Remove every ``provider_not_installed`` result record on disk,
+    regardless of which process wrote it (OI-1663).
+
+    The OI-1469 cleanup inside :func:`fulfill_obligation` only removes a
+    record THIS runner's own ``request_and_execute`` call just caused the
+    engine to write, in the same process, in the same call — it has no way
+    to see a record written by a SEPARATE process. Measured live on vnx-dev
+    (2026-09-08): 97 ``provider_not_installed`` records survived on disk
+    weeks after OI-1469 closed, including ``pr-1809-codex_gate.json`` and
+    ``pr-1802-codex_gate.json`` (2026-09-07, golf-B PRs) and
+    ``pr-1792-gemini_review.json`` (2026-09-06, no ``dispatch_id`` field at
+    all). All three carry the signature of ``scripts/review_gate_manager.py``
+    ``request-and-execute`` invoked directly — documented at
+    ``templates/terminals/T0.md`` as T0's own PR-review-gate workflow ("PR
+    review gate ... scripts/review_gate_manager.py request-and-execute (or
+    scripts/t0_gate_enforcement.sh wrapper)") — a process this runner never
+    shares state with.
+
+    Deliberately narrow: only ``status == not_executable`` AND
+    ``reason == "provider_not_installed"`` is removed, the exact same
+    predicate OI-1469 already established as "never PR evidence, always an
+    environment fact about whichever process wrote it" (see the
+    ``test_runner_removes_provider_not_installed_result_record`` docstring).
+    A decided pass/fail, or a ``not_executable`` for any OTHER reason (e.g.
+    ``provider_disabled`` — a config decision, not an environment gap), is
+    left untouched; the guard the request-time writer already goes through
+    (``gate_recorder.write_result_guarded``) means a record that clears this
+    predicate was never protecting real evidence in the first place.
+
+    Called once per :func:`run`, over the WHOLE ``review_gates/results``
+    directory — not scoped to this run's own obligations — so a stale record
+    is swept on the very next launchd tick (900s) regardless of whether any
+    obligation still references the PR it names. Returns the list of removed
+    filenames (empty when nothing was stale), logged loudly per removal so
+    the sweep itself stays visible in the runner's own log.
+    """
+    results_dir = Path(state_dir) / "review_gates" / "results"
+    removed: List[str] = []
+    if not results_dir.is_dir():
+        return removed
+    for entry in sorted(results_dir.glob("*.json")):
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") != STATUS_NOT_EXECUTABLE:
+            continue
+        if record.get("reason") != "provider_not_installed":
+            continue
+        try:
+            entry.unlink()
+        except OSError as exc:
+            _LOG.debug(
+                "gate_obligation_runner: could not sweep stale provider_not_installed "
+                "result %s: %s", entry, exc,
+            )
+            continue
+        removed.append(entry.name)
+        _LOG.warning(
+            "gate_obligation_runner: swept stale provider_not_installed result %s "
+            "written by another process — provider availability is an environment "
+            "fact, never PR evidence (OI-1469/OI-1663)",
+            entry.name,
+        )
+    return removed
+
+
 def _index_gate_results(state_dir: Path) -> GateResultIndex:
     """Index ``review_gates/results`` records by ``(dispatch_id, gate)`` AND
     by ``(pr_number, gate)`` — see :class:`GateResultIndex`.
@@ -2617,6 +2687,12 @@ def run(
         for path, record in obligations
         if _in_scope(path, record, since=since, dispatch_prefix=dispatch_prefix)
     ]
+    # OI-1663: sweep every stale provider_not_installed result left by ANY
+    # process (not just this runner's own fulfilment calls below) before
+    # building the evidence index, so a swept record can never be read back
+    # as a candidate. write=False (dry run) must never mutate anything, so
+    # the sweep — like the fulfilment loop itself — only runs when write=True.
+    swept_provider_not_installed = _sweep_stale_provider_not_installed_results(state_dir) if write else []
     # OI-1388 defect 2: built once per run, not per obligation, and shared by
     # both the write path and the dry-run path — the same index feeds the
     # same decision tree (_pre_execution_decision) either way, so the two
@@ -2668,6 +2744,7 @@ def run(
         "action_counts": action_counts,
         "terminal_evidence_contradictions": contradictions,
         "terminal_evidence_contradiction_count": len(contradictions),
+        "swept_provider_not_installed": swept_provider_not_installed,
     }
 
 

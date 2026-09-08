@@ -56,12 +56,30 @@
     the producer-freshness monitor's launchd harvest; obligations pending
     longer than a day are flagged per gate key by the same monitor's
     review_gate_obligations producer.
+
+    OI-1663 (golf Bx, D1, 2026-09-08): the declared static PATH below
+    (/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin) never included
+    ~/.local/bin, where pipx-style CLI installs (codex, measured live)
+    actually live — every gate whose provider binary lands there was
+    unconditionally booked provider_not_installed by this job, regardless of
+    whether the binary was actually installed. ~/.local/bin cannot be baked
+    into the EnvironmentVariables.PATH string above as a literal "~" —
+    launchd sets environment variable VALUES verbatim, with no shell running
+    over them to expand a tilde — and there is no existing ${...}
+    install-time substitution for a per-user home directory (only
+    ${VNX_HOME}/${VNX_PROJECT_ID}, both project-scoped, are substituted by
+    vnx_cli/commands/init_cmd.py::_install_launchd_agent). The
+    ProgramArguments command IS run through /bin/bash -c, which performs
+    real shell expansion at RUN time — "$HOME/.local/bin:$PATH" above
+    prepends the user's actual local bin directory to the declared PATH
+    using $HOME, which launchd sets for every user LaunchAgent regardless of
+    what EnvironmentVariables declares (only PATH is overridden here).
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/gate_obligation_runner.py</string>
+    <string>cd ${VNX_HOME} &amp;&amp; PATH="$HOME/.local/bin:$PATH" exec python3 scripts/gate_obligation_runner.py</string>
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
