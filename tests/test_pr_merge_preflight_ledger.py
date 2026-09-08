@@ -645,3 +645,57 @@ class TestMergedReceiptAlwaysCarriesTheKey:
 
         assert gateless[0]["message"] != short_circuited[0]["message"]
         assert "ci" in short_circuited[0]["message"]
+
+
+# ---------------------------------------------------------------------------
+# 6. One record shape, whether the gate ran or not (golf Bx, D4 fix-forward)
+# ---------------------------------------------------------------------------
+
+class TestOneRecordShape:
+    """Every preflight record carries the same keys, on both paths.
+
+    ``_preflight_record`` builds the records of gates that RAN and
+    ``_preflight_ledger`` pads the ones that did not, and the two shapes are
+    written by two different literals. When D4's ``reason_code`` reached the
+    first and not the second, a reader would have met the key on three of five
+    records and a KeyError on the other two — and the natural repair for that
+    (``.get(...)``, defaulting to something falsy) is how a missing code turns
+    back into a code that says nothing.
+    """
+
+    def test_a_padded_record_has_the_same_keys_as_a_real_one(self):
+        real = pr_merge._preflight_record(
+            "contract_invalid",
+            {"verdict": "NO-GO", "message": "m", "reason_code": "contract_invalid"},
+            "a" * 40,
+        )
+        padded = pr_merge._preflight_ledger([], refused_by="ci")[0]
+
+        assert set(real) == set(padded)
+
+    def test_every_record_of_a_refusal_carries_the_full_shape(
+        self, vnx_env, monkeypatch,
+    ):
+        _stub_gh_gates(monkeypatch, ci=_no_go("CI-run niet groen op deze head"))
+        _track_do_merge(monkeypatch)
+
+        pr_merge.main(["--pr", "7", "--dispatch-id", "20260908-d4ff-shape"])
+
+        gates = _refusal(vnx_env["receipts_path"])["preflight_gates"]
+        assert len(gates) == len(pr_merge.PREFLIGHT_ORDER)
+        for g in gates:
+            assert set(g) == {
+                "gate", "verdict", "message", "head_sha",
+                "overridden", "override_unnecessary", "override_not_applicable",
+                "reason_code",
+            }, g
+
+    def test_a_gate_without_a_code_vocabulary_says_so_explicitly(self):
+        """Four of the five preflights decide on their own logic and publish no
+        code. Their record carries the key with an empty value — the key is
+        never simply left out, for the reason ``VERDICT_NOT_EVALUATED`` exists.
+        """
+        record = pr_merge._preflight_record("ci", {"verdict": "GO", "message": "groen"}, "b" * 40)
+
+        assert record["reason_code"] == ""
+        assert record["override_not_applicable"] is False

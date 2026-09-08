@@ -190,6 +190,27 @@ CODE_CONTRACT_INVALID = "contract_invalid"
 #: outage to be repaired, never a judgment about the deliverable.
 CODE_LEDGER_UNREADABLE = "ledger_unreadable"
 
+#: Not a refusal: the same read failure met in ADVISORY mode (``strict=False``),
+#: where this function does not gate anything and may not block a caller.
+#:
+#: It exists because the advisory branch previously reported that failure as
+#: ``CODE_NO_OUTCOME_RECEIPT`` — the soft read swallowed the error, handed back
+#: an empty list, and the absence branch below took it from there. Two
+#: different states then shared one code, which is the conflation D4 removed
+#: one level up. They are not the same state and the difference is directional:
+#: an absence is genuinely fail-open (a dispatch that wrote no outcome receipt
+#: makes no claim about its deliverable), while a read failure may be hiding a
+#: contract_invalid record this reader could not see. A caller that treats them
+#: alike is choosing the permissive reading of an unknown.
+#:
+#: The boolean stays ``True`` here on purpose. ``strict=False`` is the contract
+#: an advisory reader asks for — a SessionStart counter must not crash and must
+#: not block over a permission bit — and hardening it would turn every such
+#: reader into a second gate. What changes is only that the answer now says
+#: which kind of not-judging it was, so a caller that DOES care can see it.
+#: The gate itself keeps ``strict=True`` and its own refusing code.
+CODE_LEDGER_UNREADABLE_ADVISORY = "ledger_unreadable_advisory"
+
 #: Refusal: no dispatch_id was given, so there is no chain to judge at all.
 CODE_EMPTY_DISPATCH_ID = "empty_dispatch_id"
 
@@ -209,6 +230,7 @@ CODE_NO_DECIDED_OUTCOME = "no_decided_outcome"
 ACCEPTANCE_CODES = frozenset({
     CODE_CONTRACT_INVALID,
     CODE_LEDGER_UNREADABLE,
+    CODE_LEDGER_UNREADABLE_ADVISORY,
     CODE_EMPTY_DISPATCH_ID,
     CODE_NOT_CONTRACT_INVALID,
     CODE_NO_OUTCOME_RECEIPT,
@@ -216,6 +238,13 @@ ACCEPTANCE_CODES = frozenset({
 })
 
 #: The refusing subset, for a caller that wants to assert it handled them all.
+#:
+#: Membership tracks the BOOLEAN exactly: a code is in this set if and only if
+#: the judgment carrying it has ``acceptable=False``. That is why the advisory
+#: read failure gets its own code instead of reusing ``CODE_LEDGER_UNREADABLE``
+#: with a ``True`` boolean — a reader switching on the code alone would then
+#: reach a different verdict than a reader reading the boolean, and having one
+#: answer mean two things is the defect this vocabulary exists to prevent.
 REFUSING_ACCEPTANCE_CODES = frozenset({
     CODE_CONTRACT_INVALID,
     CODE_LEDGER_UNREADABLE,
@@ -500,7 +529,7 @@ def evaluate_deliverable_acceptance(
 ) -> DeliverableAcceptance:
     """The full judgment behind ``is_deliverable_acceptable``: the same
     boolean and the same prose, plus the machine-readable ``code`` that says
-    WHICH of the six outcomes produced it (see the ``CODE_*`` constants).
+    WHICH of the seven outcomes produced it (see the ``CODE_*`` constants).
 
     Callers that only display the answer keep using
     ``is_deliverable_acceptable``. A caller that DECIDES on the answer —
@@ -513,11 +542,25 @@ def evaluate_deliverable_acceptance(
     if not did:
         return DeliverableAcceptance(False, CODE_EMPTY_DISPATCH_ID, "empty dispatch_id")
 
+    # The read failure is caught HERE in both modes, rather than delegating the
+    # advisory mode to ``_read_receipts``. That helper turns the error into an
+    # empty list, and an empty list walks straight into the absence branch
+    # below — so an I/O failure came back as "geen uitkomst-receipt", which is
+    # a statement about the dispatch and not about the reader. The two modes
+    # differ in what they DO with the failure (refuse vs. decline to judge),
+    # never in whether they can still tell it apart from an absence.
     try:
-        records = _read_receipts_strict(receipts_path) if strict else _read_receipts(receipts_path)
+        records = _read_receipts_strict(receipts_path)
     except ReceiptsUnreadableError as exc:
+        if strict:
+            return DeliverableAcceptance(
+                False, CODE_LEDGER_UNREADABLE, f"grootboek onleesbaar: {exc}",
+            )
         return DeliverableAcceptance(
-            False, CODE_LEDGER_UNREADABLE, f"grootboek onleesbaar: {exc}",
+            True,
+            CODE_LEDGER_UNREADABLE_ADVISORY,
+            f"grootboek onleesbaar: {exc} — advisory-modus (strict=False) "
+            f"velt hierover geen oordeel; dit is geen afwezigheid",
         )
 
     records = _filter_project(records, project_id)
@@ -603,7 +646,10 @@ def is_deliverable_acceptable(
     unreadable ledger returns ``(False, "grootboek onleesbaar: ...")`` rather
     than degrading to an empty read that would look like that same
     fail-open absence. ``strict=False`` restores the advisory soft read for a
-    caller that only wants a hint.
+    caller that only wants a hint — it does not refuse, but it still does not
+    call that read failure an absence: it answers with
+    ``CODE_LEDGER_UNREADABLE_ADVISORY`` and prose that names the failure. See
+    that constant for why the two must stay apart even where neither blocks.
 
     The three refusals above are three DIFFERENT things and this signature
     cannot tell them apart — a caller that acts on the difference (the merge
@@ -624,6 +670,7 @@ __all__ = [
     "CODE_CONTRACT_INVALID",
     "CODE_EMPTY_DISPATCH_ID",
     "CODE_LEDGER_UNREADABLE",
+    "CODE_LEDGER_UNREADABLE_ADVISORY",
     "CODE_NOT_CONTRACT_INVALID",
     "CODE_NO_DECIDED_OUTCOME",
     "CODE_NO_OUTCOME_RECEIPT",
