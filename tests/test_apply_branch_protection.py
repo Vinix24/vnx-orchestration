@@ -200,17 +200,21 @@ class TestWeakenRefusal:
 class TestPendingChecksIgnored:
     """(h) pending_checks with an entry: apply ignores it entirely."""
 
-    def test_pending_checks_entry_never_reaches_the_put_payload_or_the_diff(self, monkeypatch, tmp_path):
+    def test_pending_checks_entry_never_reaches_the_put_payload_or_the_diff(self, monkeypatch):
+        """Measured against the SHIPPED config, not a synthetic one.
+
+        This test used to string-patch an entry into ``pending_checks: []``,
+        because the real file carried none. B3 parked ``vnx-gate/review``
+        there, so the entry it needed now ships — and asserting on the real
+        file is strictly stronger than asserting on a copy of it.
+        """
         doc_text = YAML_PATH.read_text(encoding="utf-8")
-        assert "pending_checks: []" in doc_text
-        patched = doc_text.replace("pending_checks: []", "pending_checks: [\"vnx-gate/review\"]")
-        custom_yaml = tmp_path / "branch_protection.yaml"
-        custom_yaml.write_text(patched, encoding="utf-8")
+        assert "vnx-gate/review" in doc_text
 
         live = _real_norm()
         monkeypatch.setattr(abp, "fetch_live_protection", lambda *a, **k: live)
 
-        result = abp.run_apply(yaml_path=custom_yaml, project_root=VNX_ROOT)
+        result = abp.run_apply(yaml_path=YAML_PATH, project_root=VNX_ROOT)
 
         assert result["verdict"] == "OK"
         assert result["diffs"] == []

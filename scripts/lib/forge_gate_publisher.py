@@ -35,7 +35,7 @@ import logging
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,6 +45,13 @@ if str(_LIB_DIR) not in sys.path:
 _SCRIPTS_DIR = _LIB_DIR.parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+# scripts/forge holds apply_branch_protection.py, whose build_put_payload the
+# pending-promotion rehearsal reuses. Importing it beats rebuilding the PUT
+# body here: a second copy would show the operator an object the real apply
+# does not send.
+_FORGE_DIR = _SCRIPTS_DIR / "forge"
+if str(_FORGE_DIR) not in sys.path:
+    sys.path.insert(0, str(_FORGE_DIR))
 
 from forge_check_run import (  # noqa: E402
     RUNBOOK_PATH,
@@ -77,6 +84,9 @@ __all__ = [
     "FORGE_CONCLUSIONS",
     "FORGE_EVENT_LANE",
     "RECOVERY_COMMAND_TEMPLATE",
+    "REVIEW_RECOVERY_COMMAND_TEMPLATE",
+    "REVIEW_SUMMARY_CHECK_NAME",
+    "REVIEW_SUMMARY_SLUG",
     "ForgeAPIError",
     "ForgeAppConfigError",
     "ForgeCheckRunError",
@@ -90,11 +100,14 @@ __all__ = [
     "conclusion_for",
     "gates_with_a_record",
     "main",
+    "pending_promotion_put_payload",
     "publish_for_record",
+    "publish_review_summary",
     "read_result_record",
     "read_result_record_at",
     "refuse_if_auto_merge_is_armed",
     "result_record_path",
+    "review_verdict",
 ]
 
 logger = logging.getLogger(__name__)
@@ -114,11 +127,27 @@ FORGE_CONCLUSIONS = (CONCLUSION_SUCCESS, CONCLUSION_FAILURE, CONCLUSION_ACTION_R
 #: module publishes them all and requires none.
 CHECK_RUN_NAME_PREFIX = "vnx-gate"
 
+#: The slug of the SUMMARY check (B3), and the one name in this namespace that
+#: is NOT a gate. ``vnx-gate/<gate>`` answers "what did THIS gate say"; the
+#: summary answers the only question branch protection needs answered — is
+#: there a valid review accord on this head at all. Branch protection matches
+#: on the name, so a gate that ever came to be called ``review`` would publish
+#: over the summary check and satisfy it with a single gate's opinion.
+#: :func:`check_run_name` refuses the slug for exactly that reason.
+REVIEW_SUMMARY_SLUG = "review"
+REVIEW_SUMMARY_CHECK_NAME = f"{CHECK_RUN_NAME_PREFIX}/{REVIEW_SUMMARY_SLUG}"
+
 #: The command that republishes a check-run from the record already on disk.
 #: Carried in every failure log, so a publication the recorder swallowed is
 #: always one copy-paste away from repair.
 RECOVERY_COMMAND_TEMPLATE = (
     "python3 scripts/lib/forge_gate_publisher.py publish --pr {pr} --gate {gate}"
+)
+
+#: The same, for the summary check — it names no gate, because it is about
+#: every review peer at once.
+REVIEW_RECOVERY_COMMAND_TEMPLATE = (
+    "python3 scripts/lib/forge_gate_publisher.py review --pr {pr}"
 )
 
 _GH_TIMEOUT_SECONDS = 15
@@ -153,10 +182,25 @@ class ForgePublishRefused(ForgeCheckRunError):
 
 
 def check_run_name(gate: str) -> str:
-    """``vnx-gate/<gate>`` — the name branch protection matches on."""
+    """``vnx-gate/<gate>`` — the name branch protection matches on.
+
+    Refuses :data:`REVIEW_SUMMARY_SLUG`. That name belongs to the summary
+    check, which asks a strictly stronger question than any single gate; a
+    gate publishing under it would satisfy a required ``vnx-gate/review`` with
+    one gate's verdict. No gate is called ``review`` today
+    (``test_no_gate_in_the_enum_is_named_review`` keeps it that way), so this
+    is a guard against a future enum member, not against a current one.
+    """
     if not gate or not gate.strip():
         raise ForgeCheckRunError("gate is leeg: een check-run zonder poortnaam matcht niets")
-    return f"{CHECK_RUN_NAME_PREFIX}/{gate.strip()}"
+    resolved = gate.strip()
+    if resolved == REVIEW_SUMMARY_SLUG:
+        raise ForgeCheckRunError(
+            f"{REVIEW_SUMMARY_CHECK_NAME} is de naam van de samenvattende check en niet "
+            f"van een poort: een poort die onder deze naam publiceert zou de "
+            "samenvattende eis met één poortoordeel vervullen"
+        )
+    return f"{CHECK_RUN_NAME_PREFIX}/{resolved}"
 
 
 @dataclass(frozen=True)
@@ -402,6 +446,164 @@ def conclusion_for(record: Optional[Dict[str, Any]], head_sha: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The summary check — one conclusion per head, over every review peer (B3)
+# ---------------------------------------------------------------------------
+
+
+def review_verdict(
+    pr_number: int,
+    head_sha: str,
+    *,
+    results_dir: Optional[Path] = None,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> ForgeVerdict:
+    """Is there a valid review accord on THIS head? One verdict for all gates.
+
+    Where :func:`classify_record` answers "what did gate X say", this answers
+    the question branch protection actually needs answered, and it is the only
+    one of the two that can be made required: a per-gate check would force
+    whichever gate happened to be named, on every PR, while the fleet's real
+    rule has always been "at least one review peer signed".
+
+    **The rule is read, never restated.** ``closure_verifier``'s
+    ``_REVIEW_PEER_GATES`` (who may sign — OI-1645 keeps ``ci_gate`` out: it
+    verifies tests, lint and build, never the change) and
+    ``check_review_gate_for_merge`` (whether a signature holds, including the
+    OI-1576 takeover chain and the OI-1624 peer route) do the deciding. A
+    second copy here would be a check that says GO where the merge door says
+    NO-GO, and the whole point of publishing this to GitHub is that the two
+    agree. ``TestTheRuleComesFromTheMergeDoor`` pins the reading: widen the
+    door's peer set and this conclusion moves with it.
+
+    On top of the door, :func:`_proven_pass_on_head` — the SAME predicate the
+    per-gate publisher consults before a green check leaves the machine. The
+    door does not read ``evidence_source``, so without this the summary would
+    be MORE permissive than the per-gate check it summarizes, and a
+    ``reanchored`` verdict could sign a head no gate ever ran against.
+
+    The three conclusions, and why the split falls where it does:
+
+    ``success``       a review peer signed this exact head, and that signature
+                      survives the merge door's chain and the head/test-run/
+                      provenance conditions.
+    ``failure``       nobody signed, and the head is not waiting on anything:
+                      some gate DID render a verdict here. Either a review
+                      peer said no (or said yes and its own report contradicts
+                      it), or the only evidence is non-review evidence — a
+                      ``ci_gate`` pass and nothing else is the OI-1645 state,
+                      fully judged and entirely unreviewed.
+    ``action_required``  nothing decided has been said about this head at all:
+                      no records, provider outage, a gate still running, or a
+                      verdict that belongs to another commit. Absence of
+                      evidence, which on a required check must block — never
+                      ``neutral`` or ``skipped``, both of which GitHub reads
+                      as SATISFIED.
+
+    ``branch``/``project_id`` are passed straight through to the door. Handing
+    it less scope than the merge door gets would make this check the more
+    lenient of the two, which is the one direction that costs something.
+    """
+    resolved_head = _require_head(head_sha)
+    directory = results_dir if results_dir is not None else _default_results_dir()
+    pr_id = str(pr_number)
+
+    # Imported at call time for the same reason _proven_pass_on_head does it:
+    # closure_verifier's import tail has no business loading on every gate run
+    # that merely records a result.
+    from closure_verifier import (  # noqa: PLC0415
+        _KNOWN_GATES,
+        _REVIEW_PEER_GATES,
+        _find_gate_result,
+        check_review_gate_for_merge,
+    )
+
+    peers = sorted(_REVIEW_PEER_GATES)
+    if not directory.exists():
+        return ForgeVerdict(
+            CONCLUSION_ACTION_REQUIRED,
+            f"geen review-akkoord op deze kop: de resultatenmap {directory} bestaat niet, "
+            "dus geen enkele review-poort heeft hier een record achtergelaten",
+        )
+
+    for gate in peers:
+        door = check_review_gate_for_merge(
+            pr_id, gate, directory, branch=branch, project_id=project_id,
+            head_sha=resolved_head,
+        )
+        if door.get("verdict") != "GO":
+            continue
+        # WHICH record carried the GO: the declared gate's own, or the peer /
+        # takeover successor the door accepted in its place.
+        evidence_gate = str(door.get("evidence_gate") or gate)
+        record = _find_gate_result(
+            evidence_gate, pr_id, directory, branch=branch, project_id=project_id,
+            head_sha=resolved_head,
+        )
+        proven, why = _proven_pass_on_head(record, resolved_head)
+        if not proven:
+            # The door accepts it, this layer does not. Never silent: the two
+            # disagreeing is exactly the state an operator has to see, because
+            # the merge would go through while the check stays red.
+            logger.warning(
+                "forge_gate_publisher: %s telt %s als ondertekenaar voor %s op %s, maar het "
+                "record is hier geen bewezen pass (%s) — de samenvattende check blijft rood",
+                "de merge-deur", evidence_gate, gate, resolved_head[:12], why,
+            )
+            continue
+        via = (
+            f"{evidence_gate} (via overname/ondertekening voor {gate})"
+            if evidence_gate != gate
+            else evidence_gate
+        )
+        return ForgeVerdict(
+            CONCLUSION_SUCCESS,
+            f"geldig review-akkoord op deze kop: {via} — {why}",
+        )
+
+    # Nobody signed. Is this head still waiting, or has it been judged and
+    # found unreviewed? Everything the closure verifier can interpret counts
+    # towards "something was decided here", INCLUDING the gates that may not
+    # sign — that is precisely what separates the two red conclusions.
+    spoken: List[str] = []
+    for gate in sorted(_KNOWN_GATES):
+        record = _find_gate_result(
+            gate, pr_id, directory, branch=branch, project_id=project_id,
+            head_sha=resolved_head,
+        )
+        if record is None:
+            continue
+        status = canonical_status(record)
+        if status in (PASS_STATES | FAIL_STATES):
+            spoken.append(f"{gate}={status}")
+
+    if not spoken:
+        return ForgeVerdict(
+            CONCLUSION_ACTION_REQUIRED,
+            "geen review-akkoord op deze kop: geen enkele poort heeft hier een beslissende "
+            f"uitspraak achtergelaten (afwezig, uitgevallen, nog bezig, of een oordeel over "
+            f"een andere commit). Draai een review-poort op {resolved_head[:12]}. "
+            f"Ondertekenaars die tellen: {', '.join(peers)}.",
+        )
+
+    signers_spoke = [entry for entry in spoken if entry.split("=")[0] in _REVIEW_PEER_GATES]
+    if signers_spoke:
+        return ForgeVerdict(
+            CONCLUSION_FAILURE,
+            "geen geldig review-akkoord op deze kop: de review-poorten die hier spraken "
+            f"({', '.join(signers_spoke)}) leverden geen bewezen pass. Volledige uitspraak "
+            f"op deze kop: {', '.join(spoken)}.",
+        )
+    return ForgeVerdict(
+        CONCLUSION_FAILURE,
+        f"geen review-akkoord op deze kop: alleen niet-review-bewijs ({', '.join(spoken)}). "
+        "CI is een tweede, zelfstandige merge-eis en nooit een ondertekenaar (OI-1645), "
+        f"dus deze kop is beoordeeld maar niet gereviewd. Ondertekenaars die tellen: "
+        f"{', '.join(peers)}.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Reading the record off disk
 # ---------------------------------------------------------------------------
 
@@ -605,7 +807,7 @@ def refuse_if_auto_merge_is_armed(pr_number: int) -> None:
         )
 
 
-def _note_red_over_armed_auto_merge(pr_number: int, gate: str, conclusion: str) -> None:
+def _note_red_over_armed_auto_merge(pr_number: int, check_name: str, conclusion: str) -> None:
     """Say out loud that a red conclusion is going out onto a self-merging PR.
 
     Advisory only, and deliberately unable to stop anything: the auto-merge
@@ -627,7 +829,7 @@ def _note_red_over_armed_auto_merge(pr_number: int, gate: str, conclusion: str) 
             "forge_gate_publisher: auto-merge-status van PR #%s niet vast te stellen (%s); "
             "%s voor %s wordt tóch gepubliceerd — een rode uitkomst houdt een eventuele "
             "auto-merge juist tegen, dus deze onbekende blokkeert niets",
-            pr_number, exc, conclusion, check_run_name(gate),
+            pr_number, exc, conclusion, check_name,
         )
         return
     if armed:
@@ -635,7 +837,7 @@ def _note_red_over_armed_auto_merge(pr_number: int, gate: str, conclusion: str) 
             "forge_gate_publisher: PR #%s heeft een actieve auto-merge en krijgt tóch %s "
             "voor %s — een rode check houdt die auto-merge tegen; alleen een success "
             "wordt hier geweigerd",
-            pr_number, conclusion, check_run_name(gate),
+            pr_number, conclusion, check_name,
         )
 
 
@@ -674,6 +876,7 @@ def _emit_publication_event(
     detail: str,
     conclusion: str = "",
     record: Optional[Dict[str, Any]] = None,
+    check_name: Optional[str] = None,
 ) -> None:
     """One NDJSON line per publication attempt (ADR-005), best-effort.
 
@@ -682,6 +885,11 @@ def _emit_publication_event(
     line. Never raises: this is a trace OF the publication, and a trace that
     can break the thing it traces is worse than a missing line (the same rule
     ``gate_recorder.publish_forge_check_run`` applies one level up).
+
+    ``check_name`` is passed by the summary-check path, whose name is not
+    derivable from a gate (:func:`check_run_name` refuses ``review`` on
+    purpose). Absent, the name is derived — which is what every per-gate
+    caller wants.
 
     ``dispatch_id`` is deliberately left empty on the envelope and carried in
     ``data`` instead. The envelope field is what drives ``EventStore``'s
@@ -700,7 +908,7 @@ def _emit_publication_event(
                 "data": {
                     "pr_number": pr_number,
                     "gate": gate,
-                    "check_run_name": check_run_name(gate),
+                    "check_run_name": check_name or check_run_name(gate),
                     "head_sha": head_sha,
                     "outcome": outcome,
                     "conclusion": conclusion,
@@ -806,7 +1014,7 @@ def publish_for_record(
         elif not dry_run:
             # Red goes out whatever the auto-merge state is; the operator still
             # gets told. A rehearsal posts nothing, so it has nothing to note.
-            _note_red_over_armed_auto_merge(pr_number, gate, verdict.conclusion)
+            _note_red_over_armed_auto_merge(pr_number, check_run_name(gate), verdict.conclusion)
 
         name = check_run_name(gate)
         payload: Dict[str, Any] = {
@@ -854,6 +1062,182 @@ def publish_for_record(
     return payload
 
 
+def _review_summary_body(verdict: ForgeVerdict, head_sha: str, pr_number: int) -> str:
+    lines = [
+        f"**{REVIEW_SUMMARY_CHECK_NAME}** — {verdict.conclusion}",
+        "",
+        verdict.reason,
+        "",
+        f"Kop: `{head_sha}`",
+    ]
+    if verdict.conclusion != CONCLUSION_SUCCESS:
+        lines += [
+            "",
+            "Opnieuw beoordelen vanaf de schijf-records:",
+            "",
+            "```",
+            REVIEW_RECOVERY_COMMAND_TEMPLATE.format(pr=pr_number),
+            "```",
+        ]
+    lines += ["", f"Runbook: `{RUNBOOK_PATH}`"]
+    return "\n".join(lines)
+
+
+def publish_review_summary(
+    pr_number: int,
+    head_sha: str,
+    *,
+    results_dir: Optional[Path] = None,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+    dry_run: bool = False,
+    project_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Publish ``vnx-gate/review`` for one head. Returns the payload sent.
+
+    The summary sibling of :func:`publish_for_record`, and deliberately the
+    same shape: the App config is asked for first so a pending operator step
+    costs no network round-trip, ``success`` is refused while auto-merge is
+    armed (a green check on an armed PR performs the merge), and red goes out
+    regardless because the red check IS the brake.
+
+    One difference, and it is not an omission: there is no second re-ask of the
+    proving predicate before the green light. :func:`publish_for_record` re-asks
+    :func:`_proven_pass_on_head` because :func:`classify_record` reaches its
+    conclusion by a different route than the predicate does. Here
+    :func:`review_verdict` IS that predicate — it returns ``success`` only by
+    calling :func:`_proven_pass_on_head` and getting True — so asking again
+    would run the identical call twice and prove nothing the first one did not.
+    """
+    resolved_head = _require_head(head_sha)
+
+    # Before any network call: is the App registered at all? Same reason as in
+    # publish_for_record — and a --dry-run skips it, because rehearsing the
+    # conclusion is exactly what an operator wants BEFORE registering one.
+    if not dry_run:
+        load_app_config()
+
+    try:
+        verdict = review_verdict(
+            pr_number, resolved_head, results_dir=results_dir, branch=branch,
+            project_id=project_id,
+        )
+        if verdict.conclusion == CONCLUSION_SUCCESS:
+            refuse_if_auto_merge_is_armed(pr_number)
+        elif not dry_run:
+            _note_red_over_armed_auto_merge(
+                pr_number, REVIEW_SUMMARY_CHECK_NAME, verdict.conclusion
+            )
+
+        payload: Dict[str, Any] = {
+            "pr_number": pr_number,
+            "gate": REVIEW_SUMMARY_SLUG,
+            "name": REVIEW_SUMMARY_CHECK_NAME,
+            "head_sha": resolved_head,
+            "conclusion": verdict.conclusion,
+            "reason": verdict.reason,
+            "summary": _review_summary_body(verdict, resolved_head, pr_number),
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return payload
+
+        response = publish_check_run(
+            resolved_head,
+            REVIEW_SUMMARY_CHECK_NAME,
+            verdict.conclusion,
+            payload["summary"],
+            project_root=project_root,
+        )
+    # vnx-broad-except: every way this ends without a check-run is one line in
+    # the trail, and the exception is re-raised unchanged.
+    except Exception as exc:  # noqa: BLE001
+        _emit_publication_event(
+            pr_number=pr_number,
+            gate=REVIEW_SUMMARY_SLUG,
+            head_sha=resolved_head,
+            outcome="failed",
+            detail=f"{type(exc).__name__}: {exc}",
+            check_name=REVIEW_SUMMARY_CHECK_NAME,
+        )
+        raise
+
+    payload["check_run_id"] = response.get("id")
+    _emit_publication_event(
+        pr_number=pr_number,
+        gate=REVIEW_SUMMARY_SLUG,
+        head_sha=resolved_head,
+        outcome="published",
+        detail=str(payload["reason"]),
+        conclusion=str(payload["conclusion"]),
+        check_name=REVIEW_SUMMARY_CHECK_NAME,
+    )
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# The rehearsal: what the apply WOULD send once the entry is promoted
+# ---------------------------------------------------------------------------
+
+
+def pending_promotion_put_payload(yaml_path: Optional[Path] = None) -> Dict[str, Any]:
+    """The exact PUT body ``apply_branch_protection.py`` would send if every
+    ``pending_checks`` entry were moved into ``checks[]``. Writes nothing.
+
+    ``pending_checks`` is a parking slot: ``apply_branch_protection.py`` leaves
+    it out of the PUT and ``forge_protection_drift.py`` never compares it, so
+    an entry there requires nothing of ``main`` (B1, pinned by
+    ``test_apply_branch_protection.py``). This is the rehearsal of the step
+    that ends that: it shows the operator the object that closes the trap
+    BEFORE it is closed, and it never touches ``gh``.
+
+    **Where the app_id comes from.** ``app.app_id`` in the same YAML — the
+    identity ``forge_check_run`` signs with, and therefore by construction the
+    only App that can satisfy a ``vnx-gate/*`` check. Repeating the number
+    inside each pending entry would be a second copy of one fact, free to
+    drift from the one that actually signs.
+
+    Two refusals, both fail-closed:
+
+    - a pending entry that is not ``vnx-gate/*`` has no App to bind to, and
+      emitting it unbound would put a check into ``checks[]`` that ANY app can
+      satisfy — a weakening dressed up as a preview. Declare it in ``checks[]``
+      with its own ``app_id`` instead.
+    - a pending entry already present in ``checks[]`` would produce the
+      duplicate context the schema reader itself refuses.
+    """
+    from ci_contexts import RequiredCheck  # noqa: PLC0415
+    from forge_check_run import DEFAULT_YAML_PATH  # noqa: PLC0415
+    from forge_protection_drift import load_protection_config  # noqa: PLC0415
+
+    path = Path(yaml_path) if yaml_path is not None else DEFAULT_YAML_PATH
+    config = load_protection_config(path)
+    app = load_app_config(path)
+
+    required = {check.context for check in config.checks}
+    promoted = list(config.checks)
+    for context in config.pending_checks:
+        if not context.startswith(f"{CHECK_RUN_NAME_PREFIX}/"):
+            raise ForgePublishRefused(
+                f"pending_checks bevat '{context}', geen {CHECK_RUN_NAME_PREFIX}/*-check: "
+                f"deze proefdraai kan alleen aan de App '{app.slug}' binden, en een entry "
+                "zonder gebonden app_id zou elke app deze status laten zetten. Zet hem "
+                "met zijn eigen app_id rechtstreeks in required_status_checks.checks."
+            )
+        if context in required:
+            raise ForgePublishRefused(
+                f"'{context}' staat zowel in pending_checks als in "
+                "required_status_checks.checks — de promotie zou een dubbele context "
+                "opleveren, precies wat de schemalezer weigert"
+            )
+        promoted.append(RequiredCheck(context, app.app_id))
+        required.add(context)
+
+    from apply_branch_protection import build_put_payload  # noqa: PLC0415
+
+    return build_put_payload(replace(config, checks=tuple(promoted), pending_checks=()))
+
+
 # ---------------------------------------------------------------------------
 # CLI — republish from the record on disk
 # ---------------------------------------------------------------------------
@@ -878,6 +1262,26 @@ def _resolve_head_sha(pr_number: int) -> str:
     from gate_recorder import get_pr_head_sha  # noqa: PLC0415
 
     return get_pr_head_sha(pr_number)
+
+
+def _resolve_head_branch(pr_number: int) -> str:
+    """The PR's head branch, or refuse.
+
+    Uses this module's strict :func:`_gh_pr_json`, not
+    ``gate_recorder._gh_pr_view_field`` (which returns "" on every failure).
+    The leniency is right when stamping identity onto a record; here an empty
+    branch would silently widen the scope handed to the merge door, and this
+    check would then accept evidence the door itself rejects as stale — the
+    one direction a summary check may never fall.
+    """
+    branch = str(_gh_pr_json(pr_number, "headRefName").get("headRefName") or "").strip()
+    if not branch:
+        raise ForgePublishRefused(
+            f"`gh pr view {pr_number} --json headRefName` gaf geen branch terug — zonder "
+            "branch is de scope ruimer dan die van de merge-deur, en dan zou deze check "
+            "bewijs kunnen goedkeuren dat de deur als verouderd afwijst"
+        )
+    return branch
 
 
 def _publish_one(
@@ -925,12 +1329,66 @@ def _publish_one(
     return EXIT_OK
 
 
+def _run_review(args: argparse.Namespace, results_dir: Path, head_sha: str) -> int:
+    """``review`` — publish the one summary check for this head."""
+    branch = args.branch or _resolve_head_branch(args.pr)
+    payload = publish_review_summary(
+        args.pr,
+        head_sha,
+        results_dir=results_dir,
+        branch=branch,
+        dry_run=args.dry_run,
+    )
+
+    prefix = "[dry-run] " if args.dry_run else ""
+    print(f"{prefix}{payload['name']} -> {payload['conclusion']}")
+    print(f"  kop:    {head_sha}")
+    print(f"  branch: {branch}")
+    print(f"  reden:  {payload['reason']}")
+    if args.dry_run:
+        print("  payload:")
+        print(
+            json.dumps(
+                {
+                    "name": payload["name"],
+                    "head_sha": payload["head_sha"],
+                    "status": "completed",
+                    "conclusion": payload["conclusion"],
+                    "output": {"title": payload["name"], "summary": payload["summary"]},
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    return EXIT_OK
+
+
+def _run_pending_preview(args: argparse.Namespace) -> int:
+    """``pending-preview`` — the PUT object promotion would send. Writes nothing.
+
+    Printed, never applied: this is the rehearsal an operator reads before
+    closing the trap, and the command that closes it
+    (``apply_branch_protection.py``) stays a separate, deliberate step.
+    """
+    yaml_path = Path(args.yaml) if args.yaml else None
+    payload = pending_promotion_put_payload(yaml_path)
+    print(
+        "Proefdraai: het PUT-object dat "
+        "`python3 scripts/forge/apply_branch_protection.py` zou versturen ZODRA elke "
+        "pending_checks-entry naar required_status_checks.checks verhuist. Er is niets "
+        "geschreven en niets opgevraagd."
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return EXIT_OK
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="forge_gate_publisher.py",
         description=(
             "Publiceer het poortoordeel van een PR als GitHub check-run "
-            "(vnx-gate/<poort>), vanaf het schijf-record."
+            "(vnx-gate/<poort> per poort, vnx-gate/review samenvattend), vanaf de "
+            "schijf-records."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -951,7 +1409,45 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="resultatenmap (standaard ${VNX_STATE_DIR}/review_gates/results)",
     )
 
+    review = sub.add_parser(
+        "review",
+        help=f"publiceer de samenvattende check {REVIEW_SUMMARY_CHECK_NAME} voor een PR",
+    )
+    review.add_argument("--pr", type=int, required=True, help="PR-nummer")
+    review.add_argument(
+        "--dry-run", action="store_true", help="toon conclusie en payload, POST niets"
+    )
+    review.add_argument(
+        "--results-dir",
+        default=None,
+        help="resultatenmap (standaard ${VNX_STATE_DIR}/review_gates/results)",
+    )
+    review.add_argument(
+        "--branch",
+        default=None,
+        help="head-branch (standaard opgevraagd via gh; dezelfde scope als de merge-deur)",
+    )
+
+    preview = sub.add_parser(
+        "pending-preview",
+        help="toon het PUT-object dat de apply zou versturen na promotie van pending_checks",
+    )
+    preview.add_argument(
+        "--yaml",
+        default=None,
+        help="pad naar branch_protection.yaml (standaard die van deze checkout)",
+    )
+
     args = parser.parse_args(argv)
+
+    # Reads a file, talks to nobody, and must therefore never be gated on a
+    # PR lookup or a results dir.
+    if args.command == "pending-preview":
+        try:
+            return _run_pending_preview(args)
+        except ForgeCheckRunError as exc:
+            print(f"{REVIEW_SUMMARY_CHECK_NAME}: {exc}", file=sys.stderr)
+            return EXIT_ERROR
 
     results_dir = Path(args.results_dir) if args.results_dir else _default_results_dir()
 
@@ -963,6 +1459,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    if args.command == "review":
+        try:
+            return _run_review(args, results_dir, head_sha)
+        except ForgeCheckRunError as exc:
+            print(f"{REVIEW_SUMMARY_CHECK_NAME}: {exc}", file=sys.stderr)
+            return EXIT_ERROR
 
     gates = [args.gate] if args.gate else gates_with_a_record(results_dir, args.pr)
     if not gates:

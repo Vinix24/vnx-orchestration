@@ -495,7 +495,8 @@ VALIDATE
   └→ APPROVE of REJECT (max 2 retries)
 
 MERGE (alleen als alle PRs in wave APPROVED)
-  ├→ Per PR sequentieel: gh pr merge --squash --delete-branch
+  ├→ Per PR sequentieel: python3 scripts/pr_merge.py --pr <n> --squash --dispatch-id <id>
+  │   (kale `gh pr merge` slaat de poorten over en laat geen pr_merged-receipt achter)
   ├→ Bij merge conflict: stop, escaleer
   └→ Update PR queue state
 
@@ -594,8 +595,10 @@ EOF
 ### 6.2 T0-Side (na validatie)
 
 ```bash
-# 1. Merge
-gh pr merge "feat/PR-${PR_ID}-${SLUG}" --squash --delete-branch
+# 1. Merge — via de gegoverneerde deur, nooit kaal `gh pr merge`: die slaat de
+#    CI-, review- en branch-protection-poorten over en laat geen pr_merged-receipt
+#    achter, dus de merge komt nergens in het grootboek te staan.
+python3 scripts/pr_merge.py --pr "${PR_NUMBER}" --squash --dispatch-id "${DISPATCH_ID}"
 
 # 2. Sync
 bash .claude/vnx-system/scripts/vnx_worktree_setup.sh sync
