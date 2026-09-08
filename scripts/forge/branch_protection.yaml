@@ -71,4 +71,20 @@ repo:
 # GET /repos/{owner}/{repo}/rulesets returned [] when this was measured.
 rulesets: []
 
-# Operator-stap uit docs/operations/FORGE_GATE.md: het `app:`-blok (slug + app_id) komt hier terug zodra de App bestaat; de schemalezer accepteert het al sinds deze PR (Golf B, B2a fix-forward 3).
+# WIE publiceert, niet wat main vereist.
+#
+# De publieke helft van de identiteit van de review-poort-App, gelezen door
+# `scripts/lib/forge_check_run.py::load_app_config` om het App-JWT te
+# ondertekenen. Het legt main geen enkele eis op: apply_branch_protection.py
+# laat dit blok uit het PUT-object en forge_protection_drift.py vergelijkt het
+# niet, dus een wijziging hier kan nooit als drift of als verzwakking lezen.
+# De vereiste-check zelf komt in B3 in required_status_checks hierboven, met
+# dit app_id eraan gebonden.
+#
+# App geregistreerd op 2026-09-08 (checks: write + metadata: read, alleen op
+# Vinix24/vnx-orchestration). De sleutel en het installation-id staan in de
+# keychain onder vnx-gate-app-key en vnx-gate-installation-id — zie
+# docs/operations/FORGE_GATE.md.
+app:
+  slug: vnx-gate
+  app_id: 4869217

@@ -14,6 +14,7 @@ public key.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import subprocess
 import sys
@@ -30,9 +31,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(VNX_ROOT / "scripts" / "forge"))
 
+import apply_branch_protection as abp  # noqa: E402
 import forge_check_run as fcr  # noqa: E402
 import forge_protection_drift as fpd  # noqa: E402
+
+SHIPPED_YAML_PATH = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -205,19 +210,26 @@ def test_load_app_config_unreadable_path_raises(tmp_path: Path) -> None:
 
 
 def test_app_block_shape_is_slug_and_app_id() -> None:
-    """The app: block B2b will read carries slug + app_id.
-
-    Golf B, B2a fix-forward 3 pulled the block back OUT of the shipped
-    ``scripts/forge/branch_protection.yaml``: the schema reader that accepts
-    it landed in the same PR that would have introduced the field, so the
-    field itself is deferred to the operator's App step
-    (docs/operations/FORGE_GATE.md). This test builds its own fixture rather
-    than leaning on the shipped file, which no longer carries the block.
-    """
+    """The app: block B2b reads carries slug + app_id."""
     doc = _base_protection_doc(app={"slug": "vnx-gate", "app_id": None})
     parsed = yaml.safe_load(yaml.safe_dump(doc, sort_keys=False))
     assert parsed["app"]["slug"] == "vnx-gate"
     assert "app_id" in parsed["app"]
+
+
+def test_shipped_yaml_carries_the_registered_app_id() -> None:
+    """The real ``app:`` block, read the way the client reads it.
+
+    Golf B, B2a fix-forward 3 pulled the block OUT of the shipped YAML because
+    the App did not exist yet and the schema reader accepting it landed in the
+    same PR. The App was registered on 2026-09-08, so the block is back and
+    ``load_app_config()`` on its default path must find it — no fixture, the
+    shipped file itself.
+    """
+    config = fcr.load_app_config()
+    assert config.slug == "vnx-gate"
+    assert config.app_id == 4869217
+    assert fcr.DEFAULT_YAML_PATH == SHIPPED_YAML_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +278,53 @@ def test_b1_still_refuses_a_genuinely_unknown_key() -> None:
 
 
 def test_shipped_yaml_parses_and_applies_clean(tmp_path: Path) -> None:
-    """The real file still round-trips through B1 -- app: is optional, so its
-    absence from the shipped YAML (Golf B, B2a fix-forward 3) changes nothing
-    here."""
-    path = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
-    config = fpd.load_protection_config(path)
+    """The real file, carrying a real app_id, still round-trips through B1."""
+    config = fpd.load_protection_config(SHIPPED_YAML_PATH)
     assert config.branch == "main"
     assert config.checks
+
+
+def _shipped_doc_without_app() -> str:
+    """The shipped YAML with the ``app:`` block removed, as YAML text."""
+    doc = yaml.safe_load(SHIPPED_YAML_PATH.read_text(encoding="utf-8"))
+    assert "app" in doc, "the shipped YAML must carry the app: block for this test to mean anything"
+    doc.pop("app")
+    return yaml.safe_dump(doc, sort_keys=False)
+
+
+def test_shipped_app_block_is_invisible_to_the_comparator() -> None:
+    """Dropping the real ``app:`` block changes nothing the drift check sees."""
+    with_app = fpd.load_protection_config(SHIPPED_YAML_PATH)
+    without_app = fpd.parse_protection_config(_shipped_doc_without_app())
+    diffs = fpd.compare(fpd.to_normalized_dict(without_app), fpd.to_normalized_dict(with_app))
+    assert diffs == [], f"the registered app_id leaked into the comparator: {diffs}"
+
+    weakening, fields = fpd.is_weakening(
+        fpd.to_normalized_dict(without_app), fpd.to_normalized_dict(with_app)
+    )
+    assert weakening is False
+    assert fields == []
+
+
+def test_shipped_app_block_never_reaches_the_branch_protection_put(monkeypatch) -> None:
+    """``app:`` describes WHO publishes; the PUT describes what main requires.
+
+    A stray ``app`` key in the PUT body would be sent to
+    ``PUT /repos/{owner}/{repo}/branches/main/protection``, which does not know
+    the field — so this is checked on the object ``--dry-run`` actually prints,
+    not on the YAML.
+    """
+    live = fpd.to_normalized_dict(fpd.load_protection_config(SHIPPED_YAML_PATH))
+    monkeypatch.setattr(abp, "fetch_live_protection", lambda *a, **k: live)
+
+    result = abp.run_apply(yaml_path=SHIPPED_YAML_PATH, project_root=VNX_ROOT, dry_run=True)
+
+    assert result["verdict"] == "DRY-RUN"
+    assert result["diffs"] == []
+    assert "app" not in result["payload"]
+    # The checks[] entries legitimately carry app_id, so "no app anywhere" is
+    # the wrong assertion — it is the top-level key that must be absent.
+    assert "slug" not in json.dumps(result["payload"])
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +440,141 @@ def test_read_installation_id_rejects_non_numeric(monkeypatch: pytest.MonkeyPatc
     )
     with pytest.raises(fcr.ForgeKeychainError):
         fcr.read_installation_id()
+
+
+# ---------------------------------------------------------------------------
+# macOS hands a multi-line secret back hex-encoded (OI-1673)
+# ---------------------------------------------------------------------------
+
+
+def _as_macos_hex(text: str) -> str:
+    """What ``security find-generic-password -w`` prints for a multi-line secret.
+
+    Measured 2026-09-08 on the real ``vnx-gate-app-key`` item: a 1678-byte PEM
+    over 27 lines came back as 3356 hex characters, with nothing in the output
+    saying so.
+    """
+    return binascii.hexlify(text.encode("utf-8")).decode("ascii")
+
+
+def test_read_private_key_decodes_the_hex_form_macos_returns(
+    monkeypatch: pytest.MonkeyPatch, rsa_keypair: Tuple[str, str]
+) -> None:
+    """The regression: today this returns 3356 hex characters, not a PEM."""
+    private_pem, _ = rsa_keypair
+    hex_form = _as_macos_hex(private_pem)
+    assert "PRIVATE KEY" not in hex_form, "the fixture must be the hex form, not a PEM"
+    _security_returning(
+        monkeypatch,
+        {fcr.KEYCHAIN_PRIVATE_KEY_SERVICE: _FakeCompleted(0, stdout=hex_form + "\n")},
+    )
+
+    assert fcr.read_private_key() == private_pem.strip()
+
+
+def test_the_hex_decoded_key_actually_signs_an_app_jwt(
+    monkeypatch: pytest.MonkeyPatch, rsa_keypair: Tuple[str, str]
+) -> None:
+    """The whole point of the decode: a key read this way must be usable.
+
+    ``build_app_jwt`` on the undecoded hex string is exactly where OI-1673
+    surfaced, so the proof runs the real signing path end to end and verifies
+    the result against the matching public key.
+    """
+    private_pem, public_pem = rsa_keypair
+    _security_returning(
+        monkeypatch,
+        {
+            fcr.KEYCHAIN_PRIVATE_KEY_SERVICE: _FakeCompleted(
+                0, stdout=_as_macos_hex(private_pem) + "\n"
+            )
+        },
+    )
+
+    token = fcr.build_app_jwt(4869217, fcr.read_private_key())
+    assert jwt.decode(token, public_pem, algorithms=["RS256"], issuer="4869217")["iss"] == "4869217"
+
+
+def test_read_private_key_leaves_an_already_decoded_pem_untouched(
+    monkeypatch: pytest.MonkeyPatch, rsa_keypair: Tuple[str, str]
+) -> None:
+    """A keychain that hands back the PEM verbatim must not be second-guessed."""
+    private_pem, _ = rsa_keypair
+    _security_returning(
+        monkeypatch, {fcr.KEYCHAIN_PRIVATE_KEY_SERVICE: _FakeCompleted(0, stdout=private_pem)}
+    )
+    assert fcr.read_private_key() == private_pem.strip()
+
+
+@pytest.mark.parametrize("value", ["159965649", "12345678", "4869217"])
+def test_a_short_all_hex_value_like_an_installation_id_passes_through(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Every decimal id is also a valid hex string.
+
+    ``12345678`` is even-length and entirely within the hex alphabet, so a
+    decode rule that looked only at the alphabet would turn an installation id
+    into four bytes of nonsense. The real id (``159965649``, 9 digits) came back
+    plain when measured; this must hold for the even-length case too.
+    """
+    _security_returning(
+        monkeypatch,
+        {fcr.KEYCHAIN_INSTALLATION_ID_SERVICE: _FakeCompleted(0, stdout=value + "\n")},
+    )
+    assert fcr.read_installation_id() == value
+
+
+def test_a_hex_shaped_secret_that_is_not_text_is_loud_never_passed_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hex-shaped but not decodable as UTF-8: name the item, do not hand it on.
+
+    Passing the raw string through would push the failure into
+    ``build_app_jwt``, which can only say "could not deserialize key data" —
+    it has no idea a keychain item is involved.
+    """
+    not_utf8 = binascii.hexlify(b"\xff\xfe\x80" * 16).decode("ascii")
+    _security_returning(
+        monkeypatch, {fcr.KEYCHAIN_PRIVATE_KEY_SERVICE: _FakeCompleted(0, stdout=not_utf8)}
+    )
+
+    with pytest.raises(fcr.ForgeKeychainError) as excinfo:
+        fcr.read_private_key()
+    message = str(excinfo.value)
+    assert fcr.KEYCHAIN_PRIVATE_KEY_SERVICE in message
+    assert "security add-generic-password" in message
+    assert fcr.RUNBOOK_PATH in message
+
+
+def test_a_hex_shaped_secret_that_decodes_to_control_bytes_is_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid UTF-8 is not the same as usable text.
+
+    ``\\x00\\x01\\x02...`` decodes cleanly as UTF-8 and is still bytes, not a
+    secret. Returning it would be a silent wrong value, which is the one
+    outcome this module refuses everywhere else.
+    """
+    control_bytes = binascii.hexlify(bytes(range(0, 24))).decode("ascii")
+    _security_returning(
+        monkeypatch, {fcr.KEYCHAIN_PRIVATE_KEY_SERVICE: _FakeCompleted(0, stdout=control_bytes)}
+    )
+
+    with pytest.raises(fcr.ForgeKeychainError) as excinfo:
+        fcr.read_private_key()
+    assert fcr.KEYCHAIN_PRIVATE_KEY_SERVICE in str(excinfo.value)
+    assert "security add-generic-password" in str(excinfo.value)
+
+
+def test_a_long_non_hex_secret_passes_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long enough to reach the length floor, but not hex: untouched."""
+    value = "ghp_" + "z" * 60
+    _security_returning(
+        monkeypatch, {fcr.KEYCHAIN_PRIVATE_KEY_SERVICE: _FakeCompleted(0, stdout=value + "\n")}
+    )
+    assert fcr.read_private_key() == value
 
 
 # ---------------------------------------------------------------------------
