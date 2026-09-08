@@ -28,8 +28,10 @@ for p in (_LIB, _SCRIPTS):
         sys.path.insert(0, str(p))
 
 from t0_state_health import (  # noqa: E402
+    SESSION_START_SOURCES,
     STALE_AFTER_DAYS,
     assess_t0_state_health,
+    sessionstart_matcher_can_fire,
 )
 
 NOW = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -65,12 +67,23 @@ def _write_dispatch(state_dir: Path, created_at: datetime) -> None:
     conn.close()
 
 
-def _write_settings(project_root: Path, with_hook: bool) -> None:
+def _write_settings(project_root: Path, with_hook: bool, matcher: str = "") -> None:
+    """Stage a project's ``.claude/settings.json``.
+
+    OI-1680: ``matcher`` defaults to ``""`` — the form the harness actually
+    dispatches. It used to be hardcoded to ``"terminals/T0"``, so every
+    ``with_hook=True`` case here staged a group that can NEVER fire while
+    asserting the project was healthy. That is the same shape of fixture defect
+    #1816 corrected in ``test_build_t0_state_freshness``: the fixture moved with
+    the bug, so no assertion in this file could see it. The dead matcher is now
+    an explicit argument, exercised by its own test below instead of silently
+    underpinning every "healthy" case.
+    """
     (project_root / ".claude").mkdir(parents=True, exist_ok=True)
     session_start = []
     if with_hook:
         session_start = [{
-            "matcher": "terminals/T0",
+            "matcher": matcher,
             "hooks": [{
                 "type": "command",
                 "command": "bash -c 'exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"'",
@@ -175,6 +188,165 @@ def test_missing_hook_and_stale_both_findings(tmp_path):
 def test_stale_threshold_is_deliberate():
     """N must be a consciously-chosen constant, not a magic inline number."""
     assert STALE_AFTER_DAYS == 7
+
+
+# ---------------------------------------------------------------------------
+# OI-1680: "hook registered" must stop being green when the group cannot fire.
+#
+# Before this, ``_has_t0_refresh_hook`` detected the hook on a substring of the
+# command and never looked at the matcher. So a project carrying
+# ``"matcher": "terminals/T0"`` — the form all three install templates shipped,
+# and the form every ``vnx init`` repo therefore had — reported a fresh,
+# healthy, wired projection while the group was never dispatched at all.
+# ---------------------------------------------------------------------------
+
+def test_dead_matcher_is_not_green(tmp_path):
+    """The regression: hook present, matcher a path -> NOT green."""
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    _write_settings(project_root, with_hook=True, matcher="terminals/T0")
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["refresh_hook_can_fire"] is False
+    kinds = [f["kind"] for f in assessment["findings"]]
+    assert kinds == ["dead_hook_matcher"], assessment["findings"]
+    finding = assessment["findings"][0]
+    assert "terminals/T0" in finding["message"]
+    assert "never" in finding["message"]
+    assert finding["remediation"]
+
+
+def test_dead_matcher_still_counts_as_registered(tmp_path):
+    """The two facts are distinct: the hook IS registered, it just cannot fire.
+    Collapsing them into ``has_refresh_hook=False`` would report "no hook
+    registers build_t0_state_hook.sh", which is false and sends the reader
+    looking for a missing line that is right there."""
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    _write_settings(project_root, with_hook=True, matcher="terminals/T0")
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["has_refresh_hook"] is True
+    kinds = [f["kind"] for f in assessment["findings"]]
+    assert "missing_hook" not in kinds
+
+
+def test_empty_matcher_with_hook_is_green(tmp_path):
+    """The repair must not cry wolf: the working form stays green."""
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    _write_settings(project_root, with_hook=True, matcher="")
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["has_refresh_hook"] is True
+    assert assessment["refresh_hook_can_fire"] is True
+    assert assessment["findings"] == []
+
+
+@pytest.mark.parametrize("matcher", sorted(SESSION_START_SOURCES) + ["*", "startup|resume"])
+def test_valid_session_source_matchers_are_green(tmp_path, matcher):
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    _write_settings(project_root, with_hook=True, matcher=matcher)
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["refresh_hook_can_fire"] is True, matcher
+    assert assessment["findings"] == []
+
+
+@pytest.mark.parametrize("matcher", ["terminals/T0", "T0", "SessionStart", ".claude/terminals/T0", "|"])
+def test_matchers_that_never_fire_are_flagged(tmp_path, matcher):
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    _write_settings(project_root, with_hook=True, matcher=matcher)
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["refresh_hook_can_fire"] is False, matcher
+    assert [f["kind"] for f in assessment["findings"]] == ["dead_hook_matcher"]
+
+
+def test_absent_matcher_key_means_always(tmp_path):
+    """A group with no ``matcher`` key at all is "always", not dead."""
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    (project_root / ".claude").mkdir(parents=True)
+    (project_root / ".claude" / "settings.json").write_text(json.dumps({
+        "hooks": {"SessionStart": [{
+            "hooks": [{
+                "type": "command",
+                "command": "bash /engine/scripts/hooks/build_t0_state_hook.sh",
+            }],
+        }]},
+    }))
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["refresh_hook_can_fire"] is True
+    assert assessment["findings"] == []
+
+
+def test_dead_matcher_and_stale_are_independent_findings(tmp_path):
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(days=52)))
+    _write_settings(project_root, with_hook=True, matcher="terminals/T0")
+    _write_dispatch(state_dir, NOW - timedelta(days=3))
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    kinds = sorted(f["kind"] for f in assessment["findings"])
+    assert kinds == ["dead_hook_matcher", "stale_while_active"]
+
+
+def test_no_state_file_suppresses_dead_matcher_finding(tmp_path):
+    """Same contract as ``missing_hook``: with no projection on disk there is
+    nothing to warn about — the project never set one up here."""
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True)
+    _write_settings(project_root, with_hook=True, matcher="terminals/T0")
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["exists"] is False
+    assert assessment["findings"] == []
+
+
+def test_missing_hook_reports_no_matcher_verdict(tmp_path):
+    """With nothing registered there is no matcher to judge — the fact must be
+    False, and only the missing_hook finding fires (not both)."""
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    _write_settings(project_root, with_hook=False)
+
+    assessment = assess_t0_state_health(state_dir, project_root, now=NOW)
+    assert assessment["has_refresh_hook"] is False
+    assert assessment["refresh_hook_can_fire"] is False
+    assert [f["kind"] for f in assessment["findings"]] == ["missing_hook"]
+
+
+# ---------------------------------------------------------------------------
+# sessionstart_matcher_can_fire — the shared vocabulary, directly
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("matcher", ["", "  ", "*", None, "startup", "resume", "clear", "compact",
+                                     "startup|resume", " startup | clear "])
+def test_matcher_predicate_accepts_live_forms(matcher):
+    assert sessionstart_matcher_can_fire(matcher) is True, matcher
+
+
+@pytest.mark.parametrize("matcher", ["terminals/T0", "T0", "startup|terminals/T0", "|", "Bash",
+                                     ["startup"], 3, True, {}])
+def test_matcher_predicate_rejects_dead_forms(matcher):
+    assert sessionstart_matcher_can_fire(matcher) is False, matcher
+
+
+def test_session_start_sources_is_the_documented_vocabulary():
+    assert SESSION_START_SOURCES == {"startup", "resume", "clear", "compact"}
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +484,27 @@ def test_doctor_render_pass_when_fresh_and_hooked(tmp_path):
     results = check_t0_state_freshness(paths)
     assert len(results) == 1
     assert results[0].status == PASS
+
+
+def test_doctor_render_warns_on_dead_matcher(tmp_path):
+    """OI-1680 through the operator-facing surface: a fresh projection whose
+    refresh group can never fire must WARN, not pass."""
+    from vnx_doctor import WARN, check_t0_state_freshness
+
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "state"
+    _write_t0_state(state_dir, _iso(NOW - timedelta(hours=1)))
+    _write_settings(project_root, with_hook=True, matcher="terminals/T0")
+
+    paths = {
+        "PROJECT_ROOT": str(project_root),
+        "VNX_STATE_DIR": str(state_dir),
+    }
+    results = check_t0_state_freshness(paths)
+    assert len(results) == 1
+    assert results[0].status == WARN
+    assert "terminals/T0" in results[0].message
+    assert results[0].remediation
 
 
 if __name__ == "__main__":  # pragma: no cover
