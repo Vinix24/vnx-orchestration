@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
+import yaml
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
@@ -402,12 +403,24 @@ class TestRunBranchProtectionGate:
             assert "niet-lege reden" in result["message"]
 
         def test_removing_a_vnx_gate_check_is_refused_without_allow_weaken(self, monkeypatch):
-            main_text = _real_yaml_text().replace(
-                "    - {context: \"vnx doctor smoke\", app_id: 15368}\n",
-                "    - {context: \"vnx doctor smoke\", app_id: 15368}\n"
-                "    - {context: \"vnx-gate/review\", app_id: 424242}\n",
-            )
-            pr_text = _real_yaml_text()  # PR-side lacks the vnx-gate/* entry main now has
+            """The FORGE_GATE.md §7 terugweg, as the merge door sees it.
+
+            This used to synthesize main's side by inserting a ``vnx-gate/*``
+            entry the shipped YAML did not have. Since OP-B3 it has one, and
+            inserting a second would only produce the duplicate context the
+            schema reader refuses — the test would go red on the wrong error.
+            So main is now the real file and the PR side is the file with the
+            entry taken OUT, which is exactly what the rollback PR in §7 looks
+            like: a weakening, blocked without ``--allow-weaken``.
+            """
+            main_text = _real_yaml_text()
+            pr_doc = yaml.safe_load(main_text)
+            pr_doc["required_status_checks"]["checks"] = [
+                c for c in pr_doc["required_status_checks"]["checks"]
+                if not c["context"].startswith("vnx-gate/")
+            ]
+            pr_text = yaml.safe_dump(pr_doc)
+            assert "vnx-gate/review" in main_text and "vnx-gate/review" not in pr_text
 
             def fake_fetch(project_root, ref, *a, **k):
                 if ref == "main":

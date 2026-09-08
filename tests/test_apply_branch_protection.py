@@ -93,7 +93,11 @@ class TestDryRun:
         assert not put_calls
         out = json.loads(capsys.readouterr().out)
         assert out["required_status_checks"]["strict"] is False
-        assert len(out["required_status_checks"]["checks"]) == 14
+        # Fifteen since OP-B3: vnx-gate/review left pending_checks for checks[],
+        # so the apply now sends it. Counted against the shipped YAML rather
+        # than a literal, which is what makes this assertion notice the next
+        # promotion too.
+        assert len(out["required_status_checks"]["checks"]) == len(_real_config().checks) == 15
         assert out["restrictions"] is None
 
     def test_dry_run_prints_payload_even_when_state_matches_exactly(self, monkeypatch, capsys):

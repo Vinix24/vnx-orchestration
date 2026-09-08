@@ -81,12 +81,28 @@ class TestParseProtectionConfig:
         assert config.checks[0].app_id == 15368
         assert config.enforce_admins is True
 
-    def test_the_real_shipped_yaml_parses_and_has_fourteen_checks(self):
-        """The actual scripts/forge/branch_protection.yaml this dispatch ships."""
+    def test_the_real_shipped_yaml_parses_and_has_fifteen_checks(self):
+        """The actual scripts/forge/branch_protection.yaml this dispatch ships.
+
+        Fourteen until OP-B3, fifteen after it: that step moved
+        ``vnx-gate/review`` out of ``pending_checks`` and into ``checks[]``. The
+        blanket ``all(app_id == 15368)`` went with it — the fifteenth check is
+        not a GitHub Actions context but the ``vnx-gate`` App's, bound to the
+        App ID the same file declares under ``app:``. Read, not repeated here:
+        a second literal copy of that number in the test could drift from the
+        one that signs, which is the very thing the YAML comment warns about.
+        """
         path = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
         config = fpd.load_protection_config(path)
-        assert len(config.checks) == 14
-        assert all(c.app_id == 15368 for c in config.checks)
+        app_id = yaml.safe_load(path.read_text(encoding="utf-8"))["app"]["app_id"]
+
+        by_context = {c.context: c.app_id for c in config.checks}
+        assert len(config.checks) == 15
+        assert by_context["vnx-gate/review"] == app_id
+        assert all(
+            c.app_id == 15368 for c in config.checks if not c.context.startswith("vnx-gate/")
+        )
+        assert config.pending_checks == ()
         assert config.branch == "main"
         assert config.enforce_admins is True
         assert config.allow_auto_merge is False
