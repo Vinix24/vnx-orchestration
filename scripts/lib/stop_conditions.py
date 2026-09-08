@@ -545,6 +545,16 @@ def check_provider_exhausted(
 # ── Check 4: E6 — repeated gate-failure cause ───────────────────────────────
 
 _INFRA_FAIL_STATUSES = frozenset({"failed", "fail", "unavailable", "not_executable"})
+
+# Reasons that mean "the gate was never built" — no runner file exists on
+# disk for it — as opposed to "the gate ran (or tried to) and failed"
+# (provider_not_installed, gate_execution_degenerate). Those two are real
+# operational failures the same runner can recover from on a later attempt;
+# a missing runner file cannot self-heal by retrying, so a streak of it is
+# not evidence of a recurring failure — it is a standing configuration gap
+# (OI-1693: a gate requested in the routing paths but never shipped).
+_UNBUILT_GATE_REASONS = frozenset({"gate_runner_missing"})
+
 DEFAULT_REPEAT_THRESHOLD = 3
 
 
@@ -583,6 +593,14 @@ def check_repeated_gate_failure_cause(
     unparseable timestamp is excluded — order-unknown, never guessed, mirrors
     OI-1613's rule) and checks whether the last ``n`` results for that gate
     all carry the same non-null cause.
+
+    A record whose cause is ``reason:<r>`` with ``r`` in
+    ``_UNBUILT_GATE_REASONS`` (i.e. ``gate_runner_missing``) never enters
+    that streak — see the constant's docstring for why. Such records are
+    tracked separately and surfaced as a non-triggering, ``_unmeasurable``-
+    shaped notice per gate instead (OI-1693): the absence of a runner is
+    reported loudly, exactly once per gate, but can never flip this check to
+    TRIGGERED.
     """
     check_id = "repeated_gate_failure_cause"
     if results_dir is not None:
@@ -602,6 +620,7 @@ def check_repeated_gate_failure_cause(
         return _unmeasurable(check_id, f"resultaten-map niet leesbaar: {exc}")
 
     by_gate: Dict[str, List[Tuple[datetime, Any, Optional[str]]]] = {}
+    unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     for fp in files:
         try:
             d = json.loads(fp.read_text(encoding="utf-8"))
@@ -615,10 +634,19 @@ def check_repeated_gate_failure_cause(
         ts = _parse_iso(d.get("recorded_at"))
         if ts is None:
             continue
+        # _gate_result_cause reports what the record honestly says, for any
+        # infra-fail reason alike. The POLICY choice of which causes count
+        # toward a repeating-failure streak belongs here, not in that
+        # helper: a gate_runner_missing record means the gate was never
+        # built, not that it failed and might recover on retry. It is
+        # excluded from the streak and tracked separately below instead.
         cause = _gate_result_cause(d)
+        if cause is not None and cause.startswith("reason:") and cause[len("reason:") :] in _UNBUILT_GATE_REASONS:
+            unbuilt_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
+            continue
         by_gate.setdefault(gate, []).append((ts, d.get("pr_number"), cause))
 
-    if not by_gate:
+    if not by_gate and not unbuilt_gate_records:
         return _unmeasurable(check_id, "geen bruikbare gate-resultaten met geldige recorded_at gevonden")
 
     sub_results: List[StopConditionResult] = []
@@ -641,6 +669,24 @@ def check_repeated_gate_failure_cause(
             )
         else:
             sub_results.append(_clear(sub_id, f"laatste {n} PR's op gate '{gate}' niet allemaal dezelfde blokkade-oorzaak", gate=gate, causes=causes, prs=prs))
+
+    # Absence must be loud: a gate requested with no runner on disk is a
+    # standing configuration gap, not a recurring failure. Report it every
+    # time it is seen, per gate, as an _unmeasurable-shaped notice — that
+    # status can never tip _combine's verdict to TRIGGERED below, so this
+    # can only ever be a loud non-event, never a silent one (OI-1693).
+    for gate, records in unbuilt_gate_records.items():
+        records.sort(key=lambda r: r[0])
+        newest_pr = records[-1][1]
+        sub_id = f"{check_id}:unbuilt:{gate}"
+        sub_results.append(
+            _unmeasurable(
+                sub_id,
+                f"gate '{gate}' wordt aangevraagd maar heeft geen runner "
+                f"(reason:gate_runner_missing, {len(records)}x gezien, meest recente PR #{newest_pr})",
+                gate=gate, reason="gate_runner_missing", count=len(records), newest_pr=newest_pr,
+            )
+        )
 
     return _combine(check_id, sub_results, sub_key="per_gate")
 
