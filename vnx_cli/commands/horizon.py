@@ -189,6 +189,12 @@ def _cmd_link_pr(args: Any) -> int:
     return pc.cmd_objective_link_pr(args)
 
 
+def _cmd_unlink_pr(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_unlink_pr(args)
+
+
 def _cmd_set_lane_hint(args: Any) -> int:
     pc = _require_planning_cli()
     _prep(args)
@@ -213,6 +219,7 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "close": _cmd_close,
     "reopen": _cmd_reopen,
     "link-pr": _cmd_link_pr,
+    "unlink-pr": _cmd_unlink_pr,
     "set-lane-hint": _cmd_set_lane_hint,
     "set-goal": _cmd_set_goal,
 }

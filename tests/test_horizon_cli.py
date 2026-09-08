@@ -517,6 +517,19 @@ def test_link_pr_and_set_lane_hint_resolve_through_verb_dispatch():
     assert hasattr(planning_cli, "cmd_objective_set_lane_hint")
 
 
+def test_unlink_pr_resolves_through_verb_dispatch():
+    """`unlink-pr` (golf Bx, D5b, OI-1664) is registered in _VERB_DISPATCH and
+    delegates to the real planning_cli.cmd_objective_unlink_pr (not
+    reimplemented) -- same wiring shape as link-pr above. NOTE: unlike
+    link-pr, this verb is not yet reachable through `vnx_cli.main`'s argparse
+    (out of this dispatch's file boundary -- vnx_cli/main.py); this test only
+    verifies the horizon.py-layer dispatch wiring, matching the OI-1063
+    precedent where the engine verb landed before the pip-CLI parser surface
+    caught up."""
+    assert _horizon._VERB_DISPATCH["unlink-pr"] is _horizon._cmd_unlink_pr
+    assert hasattr(planning_cli, "cmd_objective_unlink_pr")
+
+
 def _capture_delegate(monkeypatch, name):
     """Stub a planning_cli cmd_* function and capture the args it receives."""
     captured = {}
