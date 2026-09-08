@@ -224,6 +224,33 @@ class TestCentralMode:
         assert "not honored" in result.detail
         assert str(project / ".vnx-version") in result.detail
 
+    def test_central_mode_pin_without_v_prefix_matches_v_prefixed_active(self, tmp_path, monkeypatch):
+        """glm-gate finding on the OI-1678 PR: `_reexec` normalizes away a
+        decorative leading `v` (`_normalize_version`) before deciding whether
+        a pin is honored, but this check compared the raw pin string against
+        `active` directly. A pin written WITHOUT the `v` (e.g. `1.5.0`) that
+        names the SAME version as the `v`-prefixed active dir (`v1.5.0`) is
+        honored by re-exec, but pre-fix this check reported it as a mismatch
+        — the inverse of the bug OI-1678 closes: the check first stayed
+        silent where it should have warned, then warned where it should have
+        stayed silent."""
+        project = _make_project(tmp_path)
+        (project / ".vnx-version").write_text("1.5.0\n")
+        active_dir = tmp_path / "home" / ".vnx-system" / "versions" / "v1.5.0"
+        (active_dir / "scripts").mkdir(parents=True)
+        (active_dir / ".vnx-install-mode").write_text("central\n")
+        current = tmp_path / "home" / ".vnx-system" / "current"
+        current.symlink_to(active_dir)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        result = _check_install_mode(project)
+
+        assert result.status == PASS
+        assert "pin: 1.5.0" in result.detail
+        assert "active: v1.5.0" in result.detail
+        assert "not honored" not in result.detail
+
     def test_central_mode_pin_unset_stays_pass_with_versioned_active(self, tmp_path, monkeypatch):
         """An unpinned project must not get a false WARN just because active
         resolves to a real version dir name (v1.6.0) instead of the literal

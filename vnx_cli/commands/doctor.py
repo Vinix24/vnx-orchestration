@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from vnx_cli import _engine
-from vnx_cli._reexec import PIN_FILE_NAME, _find_pin_dir
+from vnx_cli._reexec import PIN_FILE_NAME, _find_pin_dir, _normalize_version
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +229,26 @@ def _check_install_mode(project_dir: Path) -> Check:
     the engine code that is actually active. WARN, naming both versions and
     the path the pin was read from (OI-1679).
 
+    Comparison note (fix-forward on OI-1678, glm-gate finding): ``pin`` and
+    ``active`` are compared through ``_reexec._normalize_version`` — the
+    exact same normalization the startup re-exec applies (in
+    ``_resolve_pinned_dir`` / ``_warn_diverged_dev_checkout``) before it
+    decides whether a pin is honored, reused here rather than reimplemented
+    so the two can never drift apart. Without it a pin written without the
+    decorative ``v`` (e.g. ``1.5.0``) that names the SAME install as a
+    ``v``-prefixed ``active`` (e.g. ``v1.5.0``) — an install re-exec WOULD
+    honor — was reported here as a mismatch: the inverse of the OI-1678 bug,
+    a false WARN instead of a missed one. This is still only a normalized
+    VERSION-STRING comparison, not the full identity check
+    ``_maybe_reexec_pinned`` performs when it actually decides to re-exec:
+    that resolves the pin to a directory under ``versions/`` (trying several
+    candidate spellings) and compares the RESOLVED PATH against the running
+    engine root, which also catches a symlink escape, a custom store root, or
+    two differently-spelled dirs that happen to resolve to the same install
+    — none of which a string compare can see. ``pin`` and ``active``
+    normalizing equal is strong evidence of the same install, not proof of
+    it.
+
     Blind spot (OI-1679): the walk only climbs ANCESTORS of ``project_dir``.
     A SIBLING directory — e.g. a build worktree checked out next to the
     project root instead of nested under it — does not inherit the pin and
@@ -257,7 +277,7 @@ def _check_install_mode(project_dir: Path) -> Check:
         warnings: "list[str]" = []
         if marker_issue is not None:
             warnings.append(marker_issue)
-        if pin != "unset" and pin != active:
+        if pin != "unset" and _normalize_version(pin) != _normalize_version(active):
             pin_path = pin_dir / PIN_FILE_NAME if pin_dir is not None else project_dir / PIN_FILE_NAME
             warnings.append(
                 f"pin not honored: {pin_path} pins {pin} but active is {active} "
