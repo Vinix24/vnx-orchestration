@@ -648,6 +648,17 @@ def _run_branch_protection_gate(
         as the ultimate weakening. Blocks without ``--allow-weaken
         "<reason>"`` (empty reason refused, no silent bypass).
 
+        Reader-for-field contract: the parser used here (``parse_protection_config``)
+        is the LOCAL checkout's code, which step (a) has just proven
+        byte-identical to main — never the PR's own copy. A PR that adds a
+        new schema field to ``branch_protection.yaml`` AND teaches the
+        reader that field in the same PR can therefore never pass this
+        step: main's reader, the only one running, does not know the field
+        yet. Extending the schema is always two PRs, reader first, field
+        second. See docs/operations/FORGE_GATE.md § "Contract:
+        branch_protection.yaml uitbreiden gaat in twee PR's (OI-1672)" for
+        the measured cases and the exact refusal text.
+
     No override besides ``--allow-weaken`` — a drift found in (c) or an
     unreadable/unparseable state anywhere has no escape hatch.
     """

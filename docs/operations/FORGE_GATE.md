@@ -291,9 +291,34 @@ Deze volgorde werkt wél, en hij bevat **precies één ongegovernde stap**: stap
 
 Letterlijk uit het plan (`claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md`, sectie "Geaccepteerd restrisico"): de bescherming is bewerkbaar door precies de operator die hem bindt, en op een persoonlijk account is er geen audit-log-API — een protection-wijziging gevolgd door een kale merge laat niets opvraagbaars achter. Wie de private key in de keychain heeft, kan bovendien met een paar regels `curl` een `success` op elke sha zetten, langs `forge_check_run.py` heen; dezelfde operator, hetzelfde risico. Compenserende maatregelen: de drift in de deur (`pr_merge.py`) en in `vnx doctor` (§4, §8), en de receipt die apply en terugweg zelf schrijven (§4, §7). Wat overblijft is een operator die bewust drie stappen zet; dat risico is aanvaard en staat hier opgeschreven, niet weggewerkt.
 
+## 10. Contract: `branch_protection.yaml` uitbreiden gaat in twee PR's (OI-1672)
+
+**Gemeten, twee keer live.** `scripts/pr_merge.py::_run_branch_protection_gate` stap (d) leest de YAML van de PR-head via de contents-API, maar parseert die met `parse_protection_config` uit `scripts/lib/forge_protection_drift.py` **zoals dat bestand in de lokale checkout staat** — en stap (a), vlak daarvoor in dezelfde poort, heeft net bewezen dat die lokale checkout byte-identiek is aan `main`. De lezer die over de YAML van de PR-head oordeelt is dus altijd `main`'s lezer, nooit die van de PR zelf.
+
+Gevolg: een PR die tegelijk een nieuw veld in `branch_protection.yaml` toevoegt ÉN de lezer uitbreidt zodat die het veld kent, kan nooit door stap (d). `main`'s lezer — de enige die op dat moment draait — kent het nieuwe veld per definitie nog niet. Een PR mag zijn eigen bewaker niet leveren.
+
+**De eis.** Een uitbreiding van het schema van `scripts/forge/branch_protection.yaml` (nieuw top-level veld, nieuw sub-veld, nieuwe toegestane waarde) gaat altijd in twee PR's, in deze volgorde:
+
+1. **Eerst de lezer.** `forge_protection_drift.py` (en elke andere plek die het schema parseert) leert het nieuwe veld kennen. De YAML op `main` verandert in deze PR NIET.
+2. **Dan pas het veld.** Een tweede PR voegt het veld daadwerkelijk toe aan `scripts/forge/branch_protection.yaml`. Stap (d) draait nu tegen een `main`-lezer die het veld al kent, en laat de PR door.
+
+**De exacte weigerboodschap**, zodat een lezer die erop stuit hem herkent:
+
+```
+branch-protection-YAML op de PR-head ongeldig: branch_protection.yaml heeft onbekende velden: [<veld>]
+```
+
+**Twee gemeten gevallen:**
+
+- **2026-09-07 23:52, PR #1808**: voegde in één PR een `app:`-blok toe aan `scripts/forge/branch_protection.yaml` én breidde `forge_protection_drift.py` uit zodat de lezer dat blok kende (172 tests groen op de PR-head). De deur weigerde alsnog met exact de bovenstaande boodschap (`[app]`). Alle andere poorten stonden groen; alleen stap (d) blokkeerde.
+- **2026-09-08, OP-B3 (#1815)**: opnieuw bevestigd door T0. De promotie van `vnx-gate/review` van `pending_checks` naar `required_status_checks.checks` (§5) is daarom bewust gedaan **zonder** een nieuw schemaveld — die PR wijzigde alleen bestaande, al-bekende structuur.
+
+Zie ook de docstring van `_run_branch_protection_gate` (stap d) in `scripts/pr_merge.py` voor de codekant van dit contract.
+
 ## Cross-references
 
 - Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md`
 - Merge-deur en zijn gates: `docs/core/DISPATCH_RULES.md` §2
 - Code op `main`: `scripts/forge/branch_protection.yaml`, `scripts/forge/apply_branch_protection.py`, `scripts/lib/forge_protection_drift.py`, `scripts/pr_merge.py::_run_branch_protection_gate`, `scripts/vnx_doctor.py::check_branch_protection_drift`
 - Publicatielaag op `main`: `scripts/lib/forge_check_run.py` (client), `scripts/lib/forge_gate_publisher.py` (afbeelding, samenvattende check, CLI), `tests/test_forge_check_run_client.py`, `tests/test_forge_review_summary.py`
+- Lezer-voor-veld-contract (OI-1672): §10 hierboven, bewaakt door `tests/test_branch_protection_gate_reader_for_field_doc.py`
