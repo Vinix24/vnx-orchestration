@@ -61,11 +61,11 @@
         ]
       },
       {
-        "matcher": "terminals/T0",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'if [ -n \"${VNX_HOME:-}\" ] && [ -f \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\" ]; then exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"; else printf \"[vnx] build_t0_state_hook artifact MISSING (VNX_HOME unset or hook absent); t0_state.json will not refresh\\n\" >&2; exit 0; fi'"
+            "command": "bash -c 'VNX_HOME=\"${VNX_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}\"; if [ -f \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\" ]; then exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"; else printf \"[vnx] build_t0_state_hook artifact MISSING (no scripts/hooks/build_t0_state_hook.sh under %s); t0_state.json will not refresh\\n\" \"${VNX_HOME}\" >&2; exit 0; fi'"
           }
         ]
       },
