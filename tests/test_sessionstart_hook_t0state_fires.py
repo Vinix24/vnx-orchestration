@@ -47,6 +47,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -54,10 +55,19 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 _SETTINGS = _ROOT / ".claude" / "settings.json"
 
+_LIB = _ROOT / "scripts" / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
 # A SessionStart matcher the harness can actually dispatch: empty/"*" mean
 # "always", otherwise it is built from the documented session-source tokens.
 # Anything else (notably a path like "terminals/T0") silently never fires.
-_VALID_SOURCES = {"startup", "resume", "clear", "compact"}
+#
+# OI-1680: this list used to be a local literal here. It now comes from the
+# production module that ``vnx doctor`` runs, so the test vocabulary and the
+# runtime check cannot drift apart — the templates carried the dead matcher for
+# months precisely because the only place that knew the rule was a test.
+from t0_state_health import SESSION_START_SOURCES as _VALID_SOURCES  # noqa: E402
 
 
 def _load_settings() -> dict:

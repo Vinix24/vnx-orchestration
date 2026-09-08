@@ -54,11 +54,11 @@
     ],
     "SessionStart": [
       {
-        "matcher": "terminals/T0",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'exec bash \"{{ engine_root }}/scripts/hooks/build_t0_state_hook.sh\"'"
+            "command": "bash -c 'VNX_HOME=\"${VNX_HOME:-{{ engine_root }}}\"; if [ -f \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\" ]; then exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"; else printf \"[vnx] build_t0_state_hook artifact MISSING under %s (expected in its scripts/hooks directory); t0_state.json will not refresh\\n\" \"${VNX_HOME}\" >&2; exit 0; fi'"
           }
         ]
       }
