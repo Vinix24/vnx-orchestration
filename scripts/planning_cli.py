@@ -835,6 +835,48 @@ def _merge_pr_refs(existing: Optional[str], incoming: list[str]) -> tuple[Option
     return new_ref, added, already
 
 
+def _remove_pr_refs(existing: Optional[str], to_remove: list[str]) -> tuple[Optional[str], list[str], list[str]]:
+    """Remove PR refs from an existing comma-separated pr_ref (inverse of `_merge_pr_refs`).
+
+    Returns (new_pr_ref, removed_refs, not_present_refs). Preserves the order of
+    `existing`; `removed_refs` lists refs in that same order, `not_present_refs`
+    lists requested-but-absent refs in request order. Deduplicates by PR number
+    on both sides. `new_pr_ref` is None when nothing remains (mirrors
+    `_merge_pr_refs`'s empty-is-None convention).
+    """
+    current: list[str] = []
+    seen: set[int] = set()
+    for tok in str(existing or "").split(","):
+        norm = _normalize_pr_ref(tok.strip())
+        if norm is None:
+            continue
+        n = int(norm.lstrip("#"))
+        if n in seen:
+            continue
+        seen.add(n)
+        current.append(norm)
+
+    remove_set: set[int] = set()
+    requested_order: list[int] = []
+    for raw in to_remove:
+        for tok in str(raw).split(","):
+            norm = _normalize_pr_ref(tok.strip())
+            if norm is None:
+                continue
+            n = int(norm.lstrip("#"))
+            if n not in remove_set:
+                remove_set.add(n)
+                requested_order.append(n)
+
+    present_nums = {int(ref.lstrip("#")) for ref in current}
+    removed = [ref for ref in current if int(ref.lstrip("#")) in remove_set]
+    remaining = [ref for ref in current if int(ref.lstrip("#")) not in remove_set]
+    not_present = [f"#{n}" for n in requested_order if n not in present_nums]
+
+    new_ref = ",".join(remaining) if remaining else None
+    return new_ref, removed, not_present
+
+
 # OI-1167: link-pr's pr_ref write and its delivery-marking write are two
 # separate facts. Linking the PR reference genuinely succeeds even when
 # track_pr_delivery is absent (pre-0032 store) -- that is legitimate
@@ -1017,6 +1059,104 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
             print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
         else:
             print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
+        print()
+    return 0
+
+
+def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
+    """Manually unlink PR ref(s) from a track (inverse of `link-pr`; operator-gated; audited).
+
+    Removes PR reference(s) from `tracks.pr_ref`, scoped to (track_id, project_id)
+    per ADR-007 -- same scoping shape as `link-pr`'s write. Unlink is more
+    destructive than link (it removes evidence), so a non-empty --reason is
+    REQUIRED: an empty reason is a refusal, not a silent bypass, mirroring
+    `pr_merge.py`'s `--override-contract-invalid` shape. Unlinking a PR that
+    is not currently present is a no-op that says so -- not an error.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+    reason = (args.reason or "").strip()
+
+    if not reason:
+        print(
+            "objective unlink-pr: --reason is required and must not be empty "
+            "(no silent bypass). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"objective unlink-pr: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 1
+
+    existing = track.get("pr_ref")
+    new_ref, removed, not_present = _remove_pr_refs(existing, list(args.pr))
+
+    if not removed:
+        payload = {
+            "track_id": track_id,
+            "project_id": project_id,
+            "pr_ref": existing or "",
+            "removed": removed,
+            "not_present": not_present,
+            "reason": reason,
+            "action": "noop_not_present",
+            "applied": False,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective unlink-pr — {track_id} (project '{project_id}')")
+            print(f"  pr_ref: {existing or ''}")
+            print(f"  none of the provided PR refs are present; no change made.\n")
+        return 0
+
+    # ADR-007: write is scoped to (track_id, project_id) -- same shape as link-pr.
+    conn = _db_conn(state_dir)
+    try:
+        conn.execute(
+            "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
+            (new_ref, track_id, project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # ADR-005 audit event: specific operator action, reason recorded.
+    tracks_lib._emit_track_event(
+        state_dir,
+        "track_pr_unlinked",
+        track_id,
+        project_id,
+        "operator",
+        {"removed": removed, "not_present": not_present, "pr_ref": new_ref, "reason": reason},
+    )
+
+    payload = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "pr_ref": new_ref,
+        "removed": removed,
+        "not_present": not_present,
+        "reason": reason,
+        "action": "unlinked",
+        "applied": True,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective unlink-pr — {track_id} (project '{project_id}')")
+        print(f"  pr_ref: {new_ref or '(none)'}")
+        print(f"  - removed: {', '.join(removed)}")
+        if not_present:
+            print(f"  = not present: {', '.join(not_present)}")
+        print(f"  reason: {reason}")
         print()
     return 0
 
@@ -4814,6 +4954,23 @@ def _build_parser() -> argparse.ArgumentParser:
              "so; apply 0032 and re-run to record it)",
     )
     p_link_pr.set_defaults(func=cmd_objective_link_pr)
+
+    p_unlink_pr = obj_sub.add_parser(
+        "unlink-pr",
+        help="manually unlink PR ref(s) from a track (inverse of link-pr; operator-gated; audited)",
+    )
+    _common(p_unlink_pr)
+    p_unlink_pr.add_argument("track_id")
+    p_unlink_pr.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unlink_pr.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this PR reference is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
 
     p_reopen = obj_sub.add_parser(
         "reopen",

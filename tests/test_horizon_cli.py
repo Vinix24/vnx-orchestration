@@ -345,7 +345,7 @@ def test_horizon_help_lists_full_surface(monkeypatch, capsys):
     for verb in (
         "add", "list", "show", "sync", "drift", "reconcile",
         "reconcile-review", "reconcile-streak", "close", "reopen",
-        "link-pr", "set-lane-hint", "set-goal",
+        "link-pr", "unlink-pr", "set-lane-hint", "set-goal",
         "deliverable", "plan-gate",
     ):
         assert verb in out, f"missing verb in `vnx horizon --help`: {verb}"
@@ -357,7 +357,7 @@ def test_objective_and_deliverable_alias_help(monkeypatch, capsys):
     for verb in (
         "add", "list", "show", "sync", "drift", "reconcile",
         "reconcile-review", "reconcile-streak", "close", "reopen",
-        "link-pr", "set-lane-hint", "set-goal",
+        "link-pr", "unlink-pr", "set-lane-hint", "set-goal",
     ):
         assert verb in out
     # objective is the OBJECTIVE-domain alias only — deliverable/plan-gate stay
@@ -517,6 +517,17 @@ def test_link_pr_and_set_lane_hint_resolve_through_verb_dispatch():
     assert hasattr(planning_cli, "cmd_objective_set_lane_hint")
 
 
+def test_unlink_pr_resolves_through_verb_dispatch():
+    """`unlink-pr` (golf Bx, D5b, OI-1664) is registered in _VERB_DISPATCH and
+    delegates to the real planning_cli.cmd_objective_unlink_pr (not
+    reimplemented) -- same wiring shape as link-pr above. Reachable through
+    `vnx_cli.main`'s argparse as of golf Bx D5b fix-forward (20260908-bx-d5b-
+    ff-cli-oppervlak) -- see the round-trip/help tests below for the parser
+    surface itself."""
+    assert _horizon._VERB_DISPATCH["unlink-pr"] is _horizon._cmd_unlink_pr
+    assert hasattr(planning_cli, "cmd_objective_unlink_pr")
+
+
 def _capture_delegate(monkeypatch, name):
     """Stub a planning_cli cmd_* function and capture the args it receives."""
     captured = {}
@@ -573,6 +584,85 @@ def test_horizon_link_pr_rejects_unknown_delivery(project, monkeypatch, capsys):
         "--project-id", "horizon-test", "--project-dir", str(project_dir),
     ])
     assert rc == 2
+
+
+def test_horizon_unlink_pr_round_trips_track_prs_and_reason(project, monkeypatch, capsys):
+    """`vnx horizon unlink-pr <track> <pr> <pr> --reason ...` parses multiple
+    PR refs and forwards --reason (golf Bx, D5b, OI-1664 fix-forward: the
+    argparse surface for the parser-side of unlink-pr, mirroring link-pr's
+    round-trip test above)."""
+    project_dir, _ = project
+    captured = _capture_delegate(monkeypatch, "cmd_objective_unlink_pr")
+
+    rc, _, err = _run(monkeypatch, capsys, [
+        "horizon", "unlink-pr", "feat-unlink", "#1234", "#1235",
+        "--reason", "superseded by #1240",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 0, err
+
+    args = captured["args"]
+    assert args.track_id == "feat-unlink"
+    assert args.pr == ["#1234", "#1235"]
+    assert args.reason == "superseded by #1240"
+    assert args.project_id == "horizon-test"
+    assert args.state_dir == str(_engine.resolve_data_root(Path(project_dir)) / "state")
+
+
+def test_objective_unlink_pr_round_trips_track_prs_and_reason(project, monkeypatch, capsys):
+    """Same round trip via the `vnx objective` alias entrance -- proves both
+    surfaces (`vnx horizon` and `vnx objective`) reach the new subparser, not
+    just one."""
+    project_dir, _ = project
+    captured = _capture_delegate(monkeypatch, "cmd_objective_unlink_pr")
+
+    rc, _, err = _run(monkeypatch, capsys, [
+        "objective", "unlink-pr", "feat-unlink", "#4321",
+        "--reason", "linked in error",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 0, err
+
+    args = captured["args"]
+    assert args.track_id == "feat-unlink"
+    assert args.pr == ["#4321"]
+    assert args.reason == "linked in error"
+
+
+def test_horizon_unlink_pr_empty_reason_is_refused_by_the_real_handler(project, monkeypatch, capsys):
+    """A real (non-stubbed) dry-run call with no --reason falls through to
+    planning_cli.cmd_objective_unlink_pr's own empty-reason refusal (exit 2,
+    no silent bypass) -- proves the validation shipped in the prior commit
+    still fires when reached through this new argparse entrance, not just
+    when planning_cli.py's own standalone parser is used directly. The
+    refusal happens before any track lookup, so no track needs to exist."""
+    project_dir, _ = project
+    rc, _, err = _run(monkeypatch, capsys, [
+        "objective", "unlink-pr", "feat-does-not-exist", "#1",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 2
+    assert "reason" in err
+
+
+def test_horizon_unlink_pr_help_matches_engine_arg_surface(monkeypatch, capsys):
+    """`vnx horizon unlink-pr --help` accepts the same arguments as the
+    planning_cli engine's own standalone parser (TRACK_ID, PR with
+    nargs='+', --reason)."""
+    rc, out, _ = _run(monkeypatch, capsys, ["horizon", "unlink-pr", "--help"])
+    assert rc == 0
+    assert "TRACK_ID" in out
+    assert "PR" in out
+    assert "--reason" in out
+
+
+def test_objective_unlink_pr_help_matches_engine_arg_surface(monkeypatch, capsys):
+    """Same help surface via the `vnx objective` alias entrance."""
+    rc, out, _ = _run(monkeypatch, capsys, ["objective", "unlink-pr", "--help"])
+    assert rc == 0
+    assert "TRACK_ID" in out
+    assert "PR" in out
+    assert "--reason" in out
 
 
 def test_horizon_set_lane_hint_round_trips_choices(project, monkeypatch, capsys):

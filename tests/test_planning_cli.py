@@ -381,6 +381,129 @@ def test_link_pr_wrong_project_id_does_not_write(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# unlink-pr (golf Bx, D5b, OI-1664) — inverse of link-pr, operator-gated
+# ---------------------------------------------------------------------------
+
+def _unlink_pr_args(
+    state_dir: Path,
+    track_id: str,
+    *prs: str,
+    project_id: str = PROJECT_ID,
+    json: bool = False,
+    reason: str = "",
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        state_dir=str(state_dir),
+        project_id=project_id,
+        track_id=track_id,
+        pr=list(prs),
+        json=json,
+        reason=reason,
+    )
+
+
+def test_unlink_pr_removes_present_pr_and_writes_audit_event(tmp_path):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#100,#1790,#200"
+    )
+    rc = planning_cli.cmd_objective_unlink_pr(
+        _unlink_pr_args(sd, "T", "#1790", reason="herkomst onbekend, OI-1664")
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#100,#200"
+
+    events = _track_events(sd, "T", "track_pr_unlinked")
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["removed"] == ["#1790"]
+    assert details["not_present"] == []
+    assert details["pr_ref"] == "#100,#200"
+    assert details["reason"] == "herkomst onbekend, OI-1664"
+
+
+def test_unlink_pr_removing_all_refs_leaves_pr_ref_empty(tmp_path):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#1790")
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#1790", reason="only ref"))
+    assert rc == 0
+    assert _pr_ref(sd, "T") == ""
+
+
+def test_unlink_pr_not_present_is_clean_noop_not_an_error(tmp_path):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#100")
+    rc = planning_cli.cmd_objective_unlink_pr(
+        _unlink_pr_args(sd, "T", "#999", reason="not linked here")
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#100"  # unchanged
+    # a no-op writes no audit event -- nothing to attest to.
+    assert _track_events(sd, "T", "track_pr_unlinked") == []
+
+
+def test_unlink_pr_on_missing_track_is_clean_error(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "missing", "#1", reason="x"))
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "not found" in (captured.out + captured.err)
+
+
+def test_unlink_pr_empty_reason_is_refused(tmp_path):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#100")
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#100", reason=""))
+    assert rc == 2
+    assert _pr_ref(sd, "T") == "#100"  # unchanged -- no silent bypass
+    assert _track_events(sd, "T", "track_pr_unlinked") == []
+
+
+def test_unlink_pr_whitespace_only_reason_is_refused(tmp_path):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#100")
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#100", reason="   "))
+    assert rc == 2
+    assert _pr_ref(sd, "T") == "#100"
+
+
+def test_unlink_pr_wrong_project_id_does_not_write(tmp_path):
+    """Builds on the SAME wrong-project guard as link-pr
+    (`test_link_pr_wrong_project_id_does_not_write`): `get_track` is scoped to
+    (track_id, project_id), so a track that exists only under PROJECT_ID is
+    invisible under a different project_id -- the command errors out via the
+    "track not found" path before any write is attempted, never via a
+    second/duplicate scoping check."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#1")
+    rc = planning_cli.cmd_objective_unlink_pr(
+        _unlink_pr_args(sd, "T", "#1", project_id="other-proj", reason="x")
+    )
+    assert rc == 1
+    assert _pr_ref(sd, "T", PROJECT_ID) == "#1"  # untouched
+
+
+def test_unlink_pr_isolation_same_track_id_two_projects(tmp_path):
+    """Tenancy requirement (golf Bx D5b, ADR-007): the SAME track_id under two
+    different project_ids are two different rows -- unlinking in project A
+    must never touch project B's row."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", "proj-a", title="x", goal_state="y", phase="queued", pr_ref="#1790")
+    tracks_lib.create_track(sd, "T", "proj-b", title="x", goal_state="y", phase="queued", pr_ref="#1790")
+
+    rc = planning_cli.cmd_objective_unlink_pr(
+        _unlink_pr_args(sd, "T", "#1790", project_id="proj-a", reason="isolation test")
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "T", project_id="proj-a") == ""
+    assert _pr_ref(sd, "T", project_id="proj-b") == "#1790"  # untouched
+
+    events_a = _track_events(sd, "T", "track_pr_unlinked")
+    assert len(events_a) == 1
+    assert events_a[0]["project_id"] == "proj-a"
+
+
+# ---------------------------------------------------------------------------
 # link-pr --delivery — OI-829 fail-closed auto-close gate
 # ---------------------------------------------------------------------------
 
