@@ -23,6 +23,7 @@ resume.sh call the SAME guard function.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -55,12 +56,32 @@ sleep 5
 """
 
 
-def _run(script: str, timeout: int = 20) -> subprocess.CompletedProcess:
+def _run(script: str, timeout: int = 20, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run `script` as a fresh bash subprocess with an explicit environment.
+
+    Starts from a copy of the real environment (so PATH etc. still resolve)
+    but always drops the ambient `VNX_PROJECT_ID` — this repo's own CI job
+    runs as project "vnx-dev", and that env var takes precedence over the
+    `.vnx-project-id` marker these tests write (see
+    `_vnx_launchd_guard_project_id`), so the guard silently resolves label
+    "com.vnx.receipt-processor.vnx-dev" instead of "...testproj" and reports
+    NOT_LOADED regardless of the fake launchctl state (measured: CI run
+    34394050973, reproduced locally by exporting VNX_PROJECT_ID=vnx-dev with
+    no other change). `VNX_LAUNCHD_GUARD_PLATFORM` / `VNX_LAUNCHCTL_LIST_CMD`
+    are also always threaded through this real subprocess environment
+    (never a same-shell `VAR=value` line before the call) so every caller
+    gets the same, auditable injection point instead of two different ones.
+    """
+    run_env = dict(os.environ)
+    run_env.pop("VNX_PROJECT_ID", None)
+    if env:
+        run_env.update(env)
     return subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=run_env,
     )
 
 
@@ -84,14 +105,12 @@ class TestGuardLibDirectly:
 set -uo pipefail
 source "{GUARD_SH}"
 {_FAKE_LAUNCHCTL_LOADED}
-VNX_LAUNCHD_GUARD_PLATFORM=Darwin
-VNX_LAUNCHCTL_LIST_CMD=fake_launchctl_loaded
 if _vnx_receipt_processor_launchd_loaded "{marker}"; then
   echo "LOADED:$VNX_LAUNCHD_GUARD_LABEL"
 else
   echo "NOT_LOADED"
 fi
-""")
+""", env={"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": "fake_launchctl_loaded"})
         assert result.returncode == 0, result.stderr
         assert "LOADED:com.vnx.receipt-processor.testproj" in result.stdout
 
@@ -104,14 +123,12 @@ fi
 set -uo pipefail
 source "{GUARD_SH}"
 {_FAKE_LAUNCHCTL_EMPTY}
-VNX_LAUNCHD_GUARD_PLATFORM=Darwin
-VNX_LAUNCHCTL_LIST_CMD=fake_launchctl_empty
 if _vnx_receipt_processor_launchd_loaded "{marker}"; then
   echo "LOADED"
 else
   echo "NOT_LOADED"
 fi
-""")
+""", env={"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": "fake_launchctl_empty"})
         assert result.returncode == 0, result.stderr
         assert "NOT_LOADED" in result.stdout
 
@@ -124,14 +141,12 @@ fi
 set -uo pipefail
 source "{GUARD_SH}"
 {_FAKE_LAUNCHCTL_LOADED}
-VNX_LAUNCHD_GUARD_PLATFORM=Linux
-VNX_LAUNCHCTL_LIST_CMD=fake_launchctl_loaded
 if _vnx_receipt_processor_launchd_loaded "{marker}"; then
   echo "LOADED"
 else
   echo "NOT_LOADED"
 fi
-""")
+""", env={"VNX_LAUNCHD_GUARD_PLATFORM": "Linux", "VNX_LAUNCHCTL_LIST_CMD": "fake_launchctl_loaded"})
         assert result.returncode == 0, result.stderr
         assert "NOT_LOADED" in result.stdout
 
@@ -142,14 +157,12 @@ fi
 set -uo pipefail
 source "{GUARD_SH}"
 {_FAKE_LAUNCHCTL_LOADED}
-VNX_LAUNCHD_GUARD_PLATFORM=Darwin
-VNX_LAUNCHCTL_LIST_CMD=fake_launchctl_loaded
 if _vnx_receipt_processor_launchd_loaded "{empty_dir}"; then
   echo "LOADED"
 else
   echo "NOT_LOADED"
 fi
-""")
+""", env={"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": "fake_launchctl_loaded"})
         assert result.returncode == 0, result.stderr
         assert "NOT_LOADED" in result.stdout
 
@@ -163,14 +176,12 @@ fi
 set -uo pipefail
 source "{GUARD_SH}"
 fake_launchctl_other() {{ printf 'PID\\tStatus\\tLabel\\n-\\t0\\tcom.vnx.receipt-processor.mission-control\\n'; }}
-VNX_LAUNCHD_GUARD_PLATFORM=Darwin
-VNX_LAUNCHCTL_LIST_CMD=fake_launchctl_other
 if _vnx_receipt_processor_launchd_loaded "{marker}"; then
   echo "LOADED"
 else
   echo "NOT_LOADED"
 fi
-""")
+""", env={"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": "fake_launchctl_other"})
         assert result.returncode == 0, result.stderr
         assert "NOT_LOADED" in result.stdout
 
@@ -182,7 +193,7 @@ fi
 
 
 class TestStartShSkipsWhenLaunchdManaged:
-    def _harness(self, tmp_path, *, loaded: bool) -> str:
+    def _harness(self, tmp_path, *, loaded: bool) -> tuple[str, Path, dict[str, str]]:
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
         log_dir = tmp_path / "logs"
@@ -195,7 +206,7 @@ class TestStartShSkipsWhenLaunchdManaged:
         fake_fn = "fake_launchctl_loaded" if loaded else "fake_launchctl_empty"
         fake_body = _FAKE_LAUNCHCTL_LOADED if loaded else _FAKE_LAUNCHCTL_EMPTY
 
-        return f"""
+        script = f"""
 set -uo pipefail
 export VNX_HOME="{VNX_ROOT}"
 export PROJECT_ROOT="{proj_dir}"
@@ -203,15 +214,15 @@ log() {{ echo "[log] $*"; }}
 err() {{ echo "[err] $*" >&2; }}
 source "{START_SH}"
 {fake_body}
-VNX_LAUNCHD_GUARD_PLATFORM=Darwin
-VNX_LAUNCHCTL_LIST_CMD={fake_fn}
 _vnx_maybe_start_receipt_processor "{scripts_dir}" "{log_dir}" "started"
 sleep 0.3
-""", scripts_dir
+"""
+        env = {"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": fake_fn}
+        return script, scripts_dir, env
 
     def test_skips_direct_start_when_launchd_manages_it(self, tmp_path):
-        script, scripts_dir = self._harness(tmp_path, loaded=True)
-        result = _run(script)
+        script, scripts_dir, env = self._harness(tmp_path, loaded=True)
+        result = _run(script, env=env)
         assert result.returncode == 0, result.stderr
         assert "skipping direct started" in result.stdout
         assert not (scripts_dir / "receipt_processor.ran").exists(), (
@@ -220,8 +231,8 @@ sleep 0.3
         )
 
     def test_starts_directly_when_launchd_does_not_manage_it(self, tmp_path):
-        script, scripts_dir = self._harness(tmp_path, loaded=False)
-        result = _run(script)
+        script, scripts_dir, env = self._harness(tmp_path, loaded=False)
+        result = _run(script, env=env)
         assert result.returncode == 0, result.stderr
         assert "Receipt processor V4 started" in result.stdout
         assert (scripts_dir / "receipt_processor.ran").exists(), (
@@ -257,7 +268,9 @@ sleep 0.3
 
 
 class TestResumeShSkipsWhenLaunchdManaged:
-    def _harness(self, tmp_path, *, loaded: bool, with_supervisor: bool = True) -> tuple[str, Path]:
+    def _harness(
+        self, tmp_path, *, loaded: bool, with_supervisor: bool = True
+    ) -> tuple[str, Path, dict[str, str]]:
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
         logs_dir = tmp_path / "logs"
@@ -286,19 +299,18 @@ log() {{ echo "[log] $*"; }}
 err() {{ echo "[err] $*" >&2; }}
 source "{RESUME_SH}"
 {fake_body}
-VNX_LAUNCHD_GUARD_PLATFORM=Darwin
-VNX_LAUNCHCTL_LIST_CMD={fake_fn}
 _vnx_resume_start_daemons "{scripts_dir}" "{logs_dir}"
 sleep 0.3
 echo "RECEIPT_PID=[$_resume_receipt_pid]"
 _vnx_resume_verify_readiness
 echo "READINESS_RC=$?"
 """
-        return script, scripts_dir
+        env = {"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": fake_fn}
+        return script, scripts_dir, env
 
     def test_skips_manual_start_when_launchd_manages_it(self, tmp_path):
-        script, scripts_dir = self._harness(tmp_path, loaded=True)
-        result = _run(script)
+        script, scripts_dir, env = self._harness(tmp_path, loaded=True)
+        result = _run(script, env=env)
         assert result.returncode == 0, result.stderr
         assert "skipping manual (re)start" in result.stdout
         assert not (scripts_dir / "receipt_processor_supervisor.ran").exists(), (
@@ -313,8 +325,8 @@ echo "READINESS_RC=$?"
         )
 
     def test_starts_supervisor_directly_when_launchd_does_not_manage_it(self, tmp_path):
-        script, scripts_dir = self._harness(tmp_path, loaded=False)
-        result = _run(script)
+        script, scripts_dir, env = self._harness(tmp_path, loaded=False)
+        result = _run(script, env=env)
         assert result.returncode == 0, result.stderr
         assert (scripts_dir / "receipt_processor_supervisor.ran").exists(), (
             "receipt_processor_supervisor.sh must still start directly when "
@@ -325,8 +337,8 @@ echo "READINESS_RC=$?"
     def test_falls_back_to_direct_receipt_processor_when_supervisor_absent(self, tmp_path):
         """Same guard, same shape, on the OTHER receipt-processor branch
         (direct receipt_processor.sh, not the supervisor)."""
-        script, scripts_dir = self._harness(tmp_path, loaded=True, with_supervisor=False)
-        result = _run(script)
+        script, scripts_dir, env = self._harness(tmp_path, loaded=True, with_supervisor=False)
+        result = _run(script, env=env)
         assert result.returncode == 0, result.stderr
         assert "skipping manual (re)start" in result.stdout
         assert not (scripts_dir / "receipt_processor.ran").exists()

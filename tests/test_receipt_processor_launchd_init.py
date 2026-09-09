@@ -130,7 +130,15 @@ class TestReceiptProcessorInstalled:
         and assert the receipt-processor installer was actually invoked from
         the scaffold, with this project's id. A test asserting only that
         `_install_receipt_processor_runner` exists as a symbol would go
-        green even if `_vnx_init_scaffold` never called it."""
+        green even if `_vnx_init_scaffold` never called it.
+
+        Isolates from any ambient `VNX_PROJECT_ID` (e.g. this very repo's own
+        CI job runs as project "vnx-dev"): without this, the DB-bootstrap
+        step's ADR-007 fail-closed check sees the tmp_path-derived marker
+        disagree with the inherited env var and aborts init before the
+        receipt-processor installer is ever reached — a real CI-only failure
+        (run 34394050973), unrelated to the installer wiring under test."""
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         spy = MagicMock(return_value=True)
         monkeypatch.setattr(init_cmd, "_install_receipt_processor_runner", spy)
 
