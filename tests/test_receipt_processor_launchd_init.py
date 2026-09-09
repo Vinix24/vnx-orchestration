@@ -133,12 +133,47 @@ class TestReceiptProcessorInstalled:
         green even if `_vnx_init_scaffold` never called it.
 
         Isolates from any ambient `VNX_PROJECT_ID` (e.g. this very repo's own
-        CI job runs as project "vnx-dev"): without this, the DB-bootstrap
-        step's ADR-007 fail-closed check sees the tmp_path-derived marker
-        disagree with the inherited env var and aborts init before the
-        receipt-processor installer is ever reached — a real CI-only failure
-        (run 34394050973), unrelated to the installer wiring under test."""
+        CI job runs as project "vnx-dev") — belt-and-suspenders, kept from the
+        prior round even though it no longer drives the failure below.
+
+        Stubs out `_bootstrap_runtime_dbs` (DB-bootstrap side effect, unused
+        return value, nothing later in the scaffold reads back from it) rather
+        than letting it run for real. Ticket: the round-1 fix (delenv above)
+        closed a DIFFERENT CI-only failure (run 34394050973, an ADR-007
+        marker/env mismatch), but a SEPARATE failure surfaced right after,
+        ONLY in full-suite collection (run 34398777391), never in this file
+        alone: `assert rc == 0` failing on "dispatches missing
+        UNIQUE(dispatch_id, project_id) — was added in migration 0017, must
+        be preserved".
+
+        Root cause, measured by reproducing the exact `_bootstrap_runtime_dbs`
+        sequence standalone: on a from-scratch DB, `schemas/
+        runtime_coordination_v10.sql` unconditionally stamps
+        `runtime_schema_version=12`, even though ITS OWN `CREATE TABLE IF NOT
+        EXISTS dispatches (... UNIQUE(dispatch_id, project_id) ...)` is a
+        no-op — `dispatches` already exists in its v1 (no-project_id,
+        single-column-UNIQUE) shape by then. `scripts/lib/migrations/
+        apply_0017.py` trusts that stamp (`MAX(runtime_schema_version) >= 12`
+        => skip) and never runs the real composite-UNIQUE rebuild. This is
+        silent in a standalone `vnx init` process: the ONLY thing that
+        notices is `scripts/migrate_future_system.py`'s preflight
+        (`schema_migration.register_preflight(22, _assert_dispatches_schema_
+        intact)`), and that registration is a process-global side effect of
+        IMPORTING that module — `_bootstrap_runtime_dbs` never imports it.
+        In an isolated run of this file, nothing imports it either, so the
+        gap stays silent and the test passes; in the full suite, some OTHER
+        test module imports `migrate_future_system` first, the preflight
+        stays registered for the rest of the pytest process, and this test's
+        real `vnx init` call is the next one to reach migration 0022's
+        preflight and trip it — a collection-order-dependent false negative
+        for what this test actually checks. Confirmed the underlying gap is
+        not test-only: this repo's own live store
+        (~/.vnx-data/vnx-dev/state/runtime_coordination.db, PRAGMA
+        user_version=33) has the same single-column-only
+        `sqlite_autoindex_dispatches_1` and no composite index. Left as a
+        real, separate defect for `## Open Items` — out of scope here."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.setattr(init_cmd, "_bootstrap_runtime_dbs", MagicMock(return_value=None))
         spy = MagicMock(return_value=True)
         monkeypatch.setattr(init_cmd, "_install_receipt_processor_runner", spy)
 
