@@ -67,6 +67,16 @@ if str(_LIB_DIR) not in sys.path:
 
 import project_root  # noqa: E402
 
+# golf C / C2a operator decision (2026-09-09): the intelligence layer stays
+# PARKED until the governance ledger is falsifiable (per the PRD, not a
+# regression) -- learning_loop (last write 2026-06-26) and intelligence_daemon
+# (last write 2026-06-27) are therefore expected to sit silent, on purpose.
+# A parked component still HAS a reader (both already pass through the same
+# generic all_beacons(expected=...) readers every other component does) --
+# this list only tells health_beacon.all_beacons() to stop classifying their
+# age as "stale", not to stop expecting/reading them.
+PARKED_COMPONENTS: frozenset = frozenset({"learning_loop", "intelligence_daemon"})
+
 
 @dataclass(frozen=True)
 class BeaconSpec:
@@ -171,4 +181,51 @@ def expected_component_names(register: Optional[Sequence[BeaconSpec]] = None) ->
     return tuple(spec.name for spec in register)
 
 
-__all__ = ["BeaconSpec", "read_beacon_register", "expected_component_names"]
+def parked_component_names() -> Tuple[str, ...]:
+    """Convenience: :data:`PARKED_COMPONENTS` as a sorted tuple, for passing
+    straight to ``all_beacons(parked=...)``."""
+    return tuple(sorted(PARKED_COMPONENTS))
+
+
+# Historical duplicate-write locations for the same beacon component (C2a).
+# report_to_receipt_converter's own writer passed VNX_STATE_DIR straight
+# through to HealthBeacon instead of its parent (data dir) until #1736
+# (2026-08-30) fixed it -- every OTHER writer in the fleet already resolved
+# `state_dir.parent` correctly. The leftover file this produced
+# (`<data_dir>/state/health/report_to_receipt_converter.json`) is stale, not
+# actively rewritten (confirmed via `git log -S` against the fixed call
+# site), but it was never cleaned up and a monitor that glob-scanned BOTH
+# roots would silently read the wrong, frozen half.
+_PRIMARY_HEALTH_SUBDIR = "health"
+_SECONDARY_HEALTH_SUBDIR = "state/health"
+
+
+def find_duplicate_beacon_writers(data_dir: Path) -> Dict[str, Tuple[Path, Path]]:
+    """Return ``{component: (primary_path, secondary_path)}`` for every
+    component with a beacon file under BOTH ``<data_dir>/health/`` (the one
+    every reader resolves to) and ``<data_dir>/state/health/`` (the historical
+    wrong path). An empty dict when either root is absent or no name
+    collides -- this is advisory, not a crash on a fresh/partial store.
+    """
+    data_dir = Path(data_dir)
+    primary = data_dir / _PRIMARY_HEALTH_SUBDIR
+    secondary = data_dir / _SECONDARY_HEALTH_SUBDIR
+    if not primary.is_dir() or not secondary.is_dir():
+        return {}
+    primary_names = {p.stem for p in primary.glob("*.json")}
+    secondary_names = {p.stem for p in secondary.glob("*.json")}
+    dupes = sorted(primary_names & secondary_names)
+    return {
+        name: (primary / f"{name}.json", secondary / f"{name}.json")
+        for name in dupes
+    }
+
+
+__all__ = [
+    "BeaconSpec",
+    "read_beacon_register",
+    "expected_component_names",
+    "PARKED_COMPONENTS",
+    "parked_component_names",
+    "find_duplicate_beacon_writers",
+]

@@ -216,6 +216,62 @@ class TestBeaconHealthDigest:
         assert result.returncode == 0, result.stderr
 
 
+class TestBeaconHealthDigestExpectedAndParked:
+    """C2a: hooks/sessionstart.sh now resolves beacon_register.py's
+    expected_component_names()/parked_component_names() (in the SAME
+    python subprocess that already resolves VNX_STATE_DIR/VNX_DATA_DIR
+    above) and forwards them to health_check.py as --expected/--parked.
+
+    That resolution is CWD-anchored (beacon_register.py's own
+    project_root.resolve_project_root() is CWD-first, no __file__ anchor —
+    see its docstring), so it only succeeds when the hook runs from inside
+    a real git checkout. The other tests in this file run the hook from a
+    synthetic tmp_path project with no .git at all (by design — they only
+    need DATA isolation, not a real scripts/lib) which makes the try/except
+    around that resolution swallow a RuntimeError and fall back to empty
+    --expected/--parked, i.e. old behavior. These tests instead run the
+    hook from THIS repo's own .claude/terminals/T0 (real git checkout, so
+    project-root/beacon_register resolution succeeds) while still fully
+    isolating DATA via VNX_DATA_HOME -- never touching this repo's own
+    .vnx-data or the developer's live ~/.vnx-data/<project>/ store.
+    """
+
+    def test_parked_component_is_excluded_from_the_not_ok_list(self, tmp_path, monkeypatch):
+        """The exact learning_loop/intelligence_daemon shape (golf C
+        operator decision): stale-by-age but parked, so it must not surface
+        as [stale] anymore."""
+        _clean_env(monkeypatch)
+        real_t0_dir = REPO / ".claude" / "terminals" / "T0"
+        monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "vnx-data-home"))
+        env = dict(os.environ)
+
+        data_dir = Path(vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+        _write_beacon(
+            data_dir, "learning_loop", status="ok",
+            age_seconds=64.6 * 86400, expected_interval_seconds=86400,
+        )
+
+        out = _run_hook(real_t0_dir, env)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "[stale] learning_loop" not in ctx, ctx
+        assert "[parked] learning_loop" not in ctx, (
+            "parked is excluded from the bad-list entirely, not relisted under a new label: " + ctx
+        )
+
+    def test_expected_component_that_never_wrote_surfaces_as_absent(self, tmp_path, monkeypatch):
+        """fleet_role_drift's real shape: an ast-registered writer that has
+        never once produced a beacon file -- invisible before this PR's
+        --expected wiring, now surfaces by name."""
+        _clean_env(monkeypatch)
+        real_t0_dir = REPO / ".claude" / "terminals" / "T0"
+        monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "vnx-data-home"))
+        env = dict(os.environ)
+
+        out = _run_hook(real_t0_dir, env)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "[absent] fleet_role_drift" in ctx, ctx
+
+
 _CALL_SITE_TARGETS = frozenset({"all_beacons", "beacon_summary"})
 _CALL_SITE_EXCLUDE_DIRS = frozenset({"tests"})
 

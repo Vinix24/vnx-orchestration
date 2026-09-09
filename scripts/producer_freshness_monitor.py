@@ -90,6 +90,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--state-dir", default=None, help="VNX state dir (default: resolved via vnx_paths)")
     parser.add_argument("--no-write", action="store_true", help="read-only sweep; report to stdout only")
     parser.add_argument("--skip-job-exits", action="store_true", help="do not harvest launchd exit codes")
+    parser.add_argument(
+        "--skip-beacon-checks",
+        action="store_true",
+        help=(
+            "do not run the beacon reader-coverage / duplicate-writer checks "
+            "(C2a: scripts/lib/beacon_reader_register.py, "
+            "beacon_register.find_duplicate_beacon_writers)"
+        ),
+    )
     parser.add_argument("--human", action="store_true", help="human-readable output")
     parser.add_argument(
         "--latest-findings",
@@ -134,6 +143,47 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_IO
 
     report = pf.run_sweep(state_dir, registry)
+
+    # C2a (absence-is-loud, the reader half): a producer/beacon with zero
+    # readers is exactly as invisible as one with zero writers. Kept OUTSIDE
+    # pf.run_sweep() itself (never touches its signature/behavior) so every
+    # existing run_sweep()-level test asserting exact findings_count against
+    # a hand-built YAML registry stays unaffected — this only runs at the
+    # CLI layer, folded into the SAME NDJSON report + heartbeat as the rest.
+    beacon_checks: Dict[str, object] = {"skipped": True}
+    if not args.skip_beacon_checks:
+        try:
+            import beacon_reader_register  # noqa: PLC0415
+            import beacon_register  # noqa: PLC0415
+
+            coverage = beacon_reader_register.check_coverage()
+            data_dir = state_dir.parent if state_dir.name == "state" else state_dir
+            duplicates = beacon_register.find_duplicate_beacon_writers(data_dir)
+            duplicate_findings = [
+                {
+                    "producer": "beacon_reader_coverage",
+                    "key": name,
+                    "kind": "duplicate_writer",
+                    "cadence_seconds": None,
+                    "paths": [str(p) for p in paths],
+                }
+                for name, paths in duplicates.items()
+            ]
+            new_findings = list(coverage["findings"]) + duplicate_findings
+            beacon_checks = {
+                "skipped": False,
+                "no_reader_count": len(coverage["findings"]),
+                "duplicate_writer_count": len(duplicate_findings),
+            }
+            if new_findings:
+                report["findings"].extend(new_findings)
+                report["findings_count"] = len(report["findings"])
+                report["status"] = "stale"
+        except (ImportError, OSError) as exc:
+            # A bonus structural signal in the same run; its failure must not
+            # suppress the per-key freshness findings the sweep already has.
+            beacon_checks = {"skipped": False, "error": str(exc)}
+    report["beacon_reader_coverage"] = beacon_checks
 
     job_exits: Dict[str, object] = {"skipped": True}
     if not args.skip_job_exits and not args.no_write:

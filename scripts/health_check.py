@@ -122,13 +122,16 @@ def _print_table(beacons: dict, requested: list[str]) -> None:
         )
 
 
+_NON_BAD_HEALTH = frozenset({"ok", "parked"})
+
+
 def _exit_code(beacons: dict, requested: list[str]) -> int:
     requested_set = {c for c in requested if c}
     if requested_set:
         for name in requested_set:
             if name not in beacons:
                 return 1
-            if beacons[name].get("health") != "ok":
+            if beacons[name].get("health") not in _NON_BAD_HEALTH:
                 return 1
         return 0
 
@@ -136,7 +139,7 @@ def _exit_code(beacons: dict, requested: list[str]) -> int:
         # No requested filter and no beacons present -> degraded.
         return 1
     for b in beacons.values():
-        if b.get("health") != "ok":
+        if b.get("health") not in _NON_BAD_HEALTH:
             return 1
     return 0
 
@@ -160,11 +163,32 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Comma-separated component names to filter on.",
     )
+    parser.add_argument(
+        "--expected",
+        default=None,
+        help=(
+            "Comma-separated component names that MUST have a beacon (C2a) — "
+            "any name here with no beacon on disk reports health=absent "
+            "instead of being silently omitted. Opt-in: omitting this leaves "
+            "output byte-for-byte unchanged (backward compatible)."
+        ),
+    )
+    parser.add_argument(
+        "--parked",
+        default=None,
+        help=(
+            "Comma-separated component names (C2a) whose silence/absence is "
+            "a deliberate decision, not a defect — reported health=parked "
+            "instead of stale/unknown/absent."
+        ),
+    )
     args = parser.parse_args(argv)
 
     requested = [
         c.strip() for c in (args.components or "").split(",") if c.strip()
     ]
+    expected = [c.strip() for c in (args.expected or "").split(",") if c.strip()]
+    parked = [c.strip() for c in (args.parked or "").split(",") if c.strip()]
 
     try:
         state_dir = _resolve_state_dir(args.state_dir)
@@ -180,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        beacons = all_beacons(state_dir)
+        beacons = all_beacons(state_dir, expected=expected or None, parked=parked or None)
     except Exception as exc:
         msg = {"error": "beacon_read_failed", "message": str(exc)}
         if args.json:

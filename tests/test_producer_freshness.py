@@ -971,3 +971,168 @@ def test_latest_findings_ignores_a_torn_final_line(tmp_path: Path) -> None:
     assert result["swept"] is True
     assert result["run_id"] == "torntest0001"
     assert len(result["findings"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# golf C / C2a — beacon reader-coverage + duplicate-writer checks, wired into
+# producer_freshness_monitor.py's CLI (never into pf.run_sweep() itself, so
+# every findings_count-exact test above stays unaffected — see the module
+# comment at the call site). Forced via monkeypatch on the imported modules,
+# per the dispatch's own "don't assert this against the real tree" rule.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_beacon_reader_coverage_finding_lands_in_the_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+    import beacon_reader_register as brr  # noqa: PLC0415
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    config_path = tmp_path / "registry.yaml"
+    config_path.write_text(
+        "producers:\n"
+        "  - name: trivial\n"
+        "    type: directory\n"
+        f"    path: '{tmp_path / 'empty'}'\n"
+        "    cadence_seconds: 86400\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        brr,
+        "check_coverage",
+        lambda: {
+            "producer": "beacon_reader_coverage",
+            "type": "beacon_reader_register",
+            "kind": "structural",
+            "keys": [{"key": "orphan_beacon"}],
+            "findings": [
+                {"producer": "beacon_reader_coverage", "key": "orphan_beacon", "kind": "no_reader", "cadence_seconds": None}
+            ],
+            "status": "stale",
+        },
+    )
+
+    rc = cli.main(["--config", str(config_path), "--state-dir", str(state_dir), "--no-write"])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "stale"
+    assert out["beacon_reader_coverage"]["no_reader_count"] == 1
+    assert any(
+        f["producer"] == "beacon_reader_coverage" and f["key"] == "orphan_beacon" and f["kind"] == "no_reader"
+        for f in out["findings"]
+    )
+
+
+def test_cli_beacon_checks_clean_when_coverage_and_duplicates_are_both_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+    import beacon_reader_register as brr  # noqa: PLC0415
+    import beacon_register as br  # noqa: PLC0415
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    config_path = tmp_path / "registry.yaml"
+    config_path.write_text(
+        "producers:\n"
+        "  - name: trivial\n"
+        "    type: directory\n"
+        f"    path: '{tmp_path / 'empty'}'\n"
+        "    cadence_seconds: 86400\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(brr, "check_coverage", lambda: {
+        "producer": "beacon_reader_coverage", "type": "beacon_reader_register", "kind": "structural",
+        "keys": [], "findings": [], "status": "ok",
+    })
+    monkeypatch.setattr(br, "find_duplicate_beacon_writers", lambda data_dir: {})
+
+    rc = cli.main(["--config", str(config_path), "--state-dir", str(state_dir), "--no-write"])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "ok"
+    assert out["beacon_reader_coverage"] == {"skipped": False, "no_reader_count": 0, "duplicate_writer_count": 0}
+
+
+def test_cli_flags_a_duplicate_beacon_writer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """Forces the exact report_to_receipt_converter shape: the same
+    component's beacon present under both <data_dir>/health/ and
+    <data_dir>/state/health/."""
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+    import beacon_reader_register as brr  # noqa: PLC0415
+    import beacon_register as br  # noqa: PLC0415
+
+    data_dir = tmp_path
+    state_dir = data_dir / "state"
+    state_dir.mkdir()
+    primary = data_dir / "health"
+    secondary = data_dir / "state" / "health"
+    primary.mkdir()
+    secondary.mkdir()
+    (primary / "dup_component.json").write_text("{}", encoding="utf-8")
+    (secondary / "dup_component.json").write_text("{}", encoding="utf-8")
+
+    config_path = tmp_path / "registry.yaml"
+    config_path.write_text(
+        "producers:\n"
+        "  - name: trivial\n"
+        "    type: directory\n"
+        f"    path: '{tmp_path / 'empty'}'\n"
+        "    cadence_seconds: 86400\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(brr, "check_coverage", lambda: {
+        "producer": "beacon_reader_coverage", "type": "beacon_reader_register", "kind": "structural",
+        "keys": [], "findings": [], "status": "ok",
+    })
+
+    rc = cli.main(["--config", str(config_path), "--state-dir", str(state_dir), "--no-write"])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["beacon_reader_coverage"]["duplicate_writer_count"] == 1
+    dup = [f for f in out["findings"] if f["kind"] == "duplicate_writer"]
+    assert len(dup) == 1
+    assert dup[0]["key"] == "dup_component"
+
+
+def test_cli_skip_beacon_checks_flag_disables_the_section(tmp_path: Path, capsys) -> None:
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    config_path = tmp_path / "registry.yaml"
+    config_path.write_text(
+        "producers:\n"
+        "  - name: trivial\n"
+        "    type: directory\n"
+        f"    path: '{tmp_path / 'empty'}'\n"
+        "    cadence_seconds: 86400\n",
+        encoding="utf-8",
+    )
+
+    rc = cli.main([
+        "--config", str(config_path), "--state-dir", str(state_dir),
+        "--no-write", "--skip-beacon-checks",
+    ])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["beacon_reader_coverage"] == {"skipped": True}
+
+
+def test_real_cli_run_against_the_real_registry_carries_zero_no_reader_findings(fake_state: Path, capsys) -> None:
+    """Sanity check against the LIVE register (not a mock): measured
+    2026-09-09, dashboard/api_health.py + scripts/build_t0_state.py already
+    give every beacon_register.py-derived component a generic reader, so a
+    real (unmocked) run must report zero no_reader findings even though the
+    registry itself finds other, unrelated stale keys."""
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+
+    rc = cli.main([
+        "--config", str(REPO_ROOT / "configs" / "producer_freshness.yaml"),
+        "--state-dir", str(fake_state), "--no-write",
+    ])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["beacon_reader_coverage"]["no_reader_count"] == 0

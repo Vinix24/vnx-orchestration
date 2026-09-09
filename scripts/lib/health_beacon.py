@@ -157,6 +157,7 @@ class HealthBeacon:
 def all_beacons(
     state_dir: Path,
     expected: Optional[Sequence[str]] = None,
+    parked: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Read all beacons under ``state_dir/health`` and classify each.
 
@@ -183,9 +184,16 @@ def all_beacons(
     is a real, deliberate "expected nothing" and also adds nothing; a
     populated sequence adds one ``"absent"`` entry per name not found.
 
-    Returns a mapping ``component_name -> beacon_dict`` (the raw payload
-    plus the derived ``health`` and ``age_seconds`` keys; synthetic
-    ``"absent"`` entries carry only ``component`` and ``health``).
+    ``parked`` (golf C / C2a, optional): component names that are a
+    deliberate operator decision to stop expecting fresh writes from — see
+    ``beacon_register.PARKED_COMPONENTS``. A parked component still gets a
+    reader like any other (this only changes its HEALTH classification):
+    a beacon that would otherwise read ``"stale"``/``"unknown"`` (silence-
+    driven) or ``"absent"`` (never wrote) is reported ``"parked"`` instead.
+    A parked component that reports a genuine ``"fail"``/``"corrupt"`` while
+    fresh is NOT overridden — parking suppresses silence, not a real defect.
+    ``None`` (the default) changes nothing, same backward-compatibility
+    contract ``expected=None`` already has.
     """
     state_dir = Path(state_dir)
     health_dir = state_dir / "health"
@@ -253,12 +261,18 @@ def all_beacons(
                 else:
                     data["health"] = _status_to_health(status)
 
+            if parked and component in parked and data["health"] in ("stale", "unknown"):
+                data["health"] = "parked"
+
             out[component] = data
 
     if expected:
         for name in expected:
             if name not in out:
-                out[name] = {"component": name, "health": "absent"}
+                if parked and name in parked:
+                    out[name] = {"component": name, "health": "parked"}
+                else:
+                    out[name] = {"component": name, "health": "absent"}
 
     return out
 
@@ -266,11 +280,12 @@ def all_beacons(
 def beacon_summary(
     state_dir: Path,
     expected: Optional[Sequence[str]] = None,
+    parked: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Return a compact summary suitable for dashboard / CI consumption.
 
-    ``expected`` is forwarded to ``all_beacons`` verbatim — see its
-    docstring for the None/empty/populated distinction.
+    ``expected``/``parked`` are forwarded to ``all_beacons`` verbatim — see
+    its docstring for the None/empty/populated distinction.
 
     Both new D3a health values feed ``overall`` (the exact trap this
     dispatch closes elsewhere: adding a health value to ``counts`` without
@@ -279,11 +294,13 @@ def beacon_summary(
     as bad as a confirmed ``fail``, so it joins the ``fail`` tier. ``unknown``
     — an event-driven beacon whose freshness can no longer be verified — is
     "can't verify", not "confirmed bad", so it joins the milder ``stale``
-    tier instead.
+    tier instead. ``parked`` (golf C / C2a) deliberately joins NEITHER tier —
+    it is an operator decision to stop expecting freshness, not evidence of
+    a problem, so it never floors ``overall`` away from ``"ok"``.
     """
-    beacons = all_beacons(state_dir, expected=expected)
+    beacons = all_beacons(state_dir, expected=expected, parked=parked)
     counts: Dict[str, int] = {
-        "ok": 0, "stale": 0, "fail": 0, "corrupt": 0, "absent": 0, "unknown": 0,
+        "ok": 0, "stale": 0, "fail": 0, "corrupt": 0, "absent": 0, "unknown": 0, "parked": 0,
     }
     for b in beacons.values():
         h = b.get("health", "corrupt")
