@@ -59,7 +59,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -689,6 +689,93 @@ def check_repeated_gate_failure_cause(
         )
 
     return _combine(check_id, sub_results, sub_key="per_gate")
+
+
+# ── Ledger label <-> spec-provider/gate scoping (OI-1694) ───────────────────
+#
+# check_provider_exhausted/check_repeated_gate_failure_cause measure BROADLY
+# — run_all_checks below never threads providers=/gates= through them, on
+# purpose: filtering AT MEASUREMENT TIME would throw away the wide reading a
+# WARN needs (a dead kimi lane must stay visible in a claude-dispatch's
+# output, not vanish). Whether a TRIGGERED sub-result actually matters to
+# ONE dispatch is a decision the CALLER (the dispatch door) makes AFTER
+# measuring, using the maps below. They live here — not in dispatch_cli.py —
+# because the vocabulary they encode (which raw ledger labels a
+# spec-provider/gate corresponds to) is a fact about how THIS module reads
+# the ledger, not about the door.
+#
+# Measured on the last 5000 t0_receipts.ndjson lines of this project
+# (2026-09-08): claude_code 1269 | claude 1237 | deepseek-harness 449 |
+# glm-harness 417 | kimi 283 | codex 244 | unknown 60 | codex_cli 43 |
+# deepseek 41 | gemini_cli 7 | anthropic 3 — plus free text ("Moonshot AI
+# (Kimi Code CLI)", a line containing only "`."). Anything not accounted for
+# below is exactly that free-text/unknown tail; see
+# ledger_label_is_relevant's fail-closed handling of it.
+
+PROVIDER_LEDGER_ALIASES: Dict[str, FrozenSet[str]] = {
+    "auto": frozenset(),  # not yet resolved to a real provider — never a positive match on its own
+    "claude": frozenset({"claude", "claude_code", "anthropic"}),
+    "codex": frozenset({"codex", "codex_cli"}),
+    "kimi": frozenset({"kimi"}),
+    "gemini": frozenset({"gemini", "gemini_cli"}),
+    "litellm:deepseek": frozenset({"deepseek"}),
+    "litellm:zai": frozenset({"glm-harness"}),  # benchmark-baseline only; prod GLM ledger label is glm-harness too
+    "litellm:moonshot": frozenset({"kimi"}),  # benchmark-baseline only; prod kimi ledger label is kimi too
+    "deepseek-harness": frozenset({"deepseek-harness"}),
+    "glm-harness": frozenset({"glm-harness"}),
+    "local-gemma": frozenset({"local-gemma"}),
+}
+
+_ALL_KNOWN_LEDGER_PROVIDER_LABELS: FrozenSet[str] = frozenset().union(*PROVIDER_LEDGER_ALIASES.values())
+
+GATE_LEDGER_PROVIDERS: Dict[str, FrozenSet[str]] = {
+    "gemini_review": frozenset({"gemini", "gemini_cli"}),
+    "codex_gate": frozenset({"codex", "codex_cli"}),
+    "claude_github_optional": frozenset(),  # runs on gh, no model provider — explicit, not absent
+    "ci_gate": frozenset(),  # runs on gh, no model provider — explicit, not absent
+    "wiring_gate": frozenset(),  # runs on gh, no model provider — explicit, not absent
+    "kimi_gate": frozenset({"kimi"}),
+    "glm_gate": frozenset({"glm-harness"}),
+}
+
+
+def ledger_label_is_relevant(label: str, spec_providers: Set[str]) -> bool:
+    """Is a raw ledger provider ``label`` (e.g. "kimi", "claude_code")
+    relevant to a dispatch whose scope is ``spec_providers``?
+
+    True when ``label`` falls, via PROVIDER_LEDGER_ALIASES, inside the union
+    of what ``spec_providers`` covers. ALSO true when ``label`` does not
+    appear in ANY alias set at all: unrecognized ledger vocabulary (free
+    text, a future provider, a typo) can never be positively proven
+    unrelated to this dispatch, so it stays relevant. Fail-closed — a missed
+    match here means the brake does not fire when it should, the opposite
+    and worse failure than firing one time too many.
+    """
+    relevant_labels: Set[str] = set()
+    for provider in spec_providers:
+        relevant_labels |= PROVIDER_LEDGER_ALIASES.get(provider, frozenset())
+    if label in relevant_labels:
+        return True
+    return label not in _ALL_KNOWN_LEDGER_PROVIDER_LABELS
+
+
+def triggered_entity_labels(result: StopConditionResult, *, sub_key: str, entity_field: str) -> Set[str]:
+    """Entity labels (provider or gate names) of the TRIGGERED sub-results
+    folded into a combined check's ``evidence[sub_key]`` (see ``_combine``).
+
+    Lets a caller scope a blocking-eligible TRIGGERED verdict down to the
+    entities that actually fired, instead of the bare fact that some
+    sub-result did.
+    """
+    sub = result.evidence.get(sub_key) or {}
+    labels: Set[str] = set()
+    for sub_result in sub.values():
+        if sub_result.get("status") != CheckStatus.TRIGGERED.value:
+            continue
+        entity = sub_result.get("evidence", {}).get(entity_field)
+        if entity:
+            labels.add(entity)
+    return labels
 
 
 # ── Orchestration + halt.json ───────────────────────────────────────────────
