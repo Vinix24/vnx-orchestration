@@ -664,3 +664,97 @@ class TestCompletionOutcomeVocabulary:
         _write_receipt_lines(receipts, records)
         result = check_provider_exhausted(receipts, threshold=3)
         assert result.status == CheckStatus.CLEAR
+
+
+# ── ledger label <-> spec-provider/gate scoping (OI-1694) ──────────────────
+#
+# stop_conditions.run_all_checks() itself stays UNSCOPED (measures every
+# provider/gate on the ledger, always) — see run_all_checks's own call site,
+# which never threads providers=/gates= through. The scoping objects below
+# only decide whether a TRIGGERED sub-result is *relevant* to one particular
+# dispatch; that decision is made by the door (dispatch_cli.py), not here.
+# These tests pin the vocabulary/relevance contract in isolation from the door.
+
+
+class TestLedgerScoping:
+    def test_known_relevant_label_matches_its_own_provider(self):
+        assert sc.ledger_label_is_relevant("kimi", {"kimi"}) is True
+
+    def test_known_irrelevant_label_does_not_match_an_unrelated_provider(self):
+        # "kimi" is a KNOWN ledger label (it has its own alias entry) — a
+        # dispatch scoped to "claude" only must NOT treat it as relevant.
+        assert sc.ledger_label_is_relevant("kimi", {"claude"}) is False
+
+    def test_claude_family_aliases_are_recognized(self):
+        for label in ("claude", "claude_code", "anthropic"):
+            assert sc.ledger_label_is_relevant(label, {"claude"}) is True
+
+    def test_codex_family_aliases_are_recognized(self):
+        for label in ("codex", "codex_cli"):
+            assert sc.ledger_label_is_relevant(label, {"codex"}) is True
+
+    def test_litellm_zai_and_glm_harness_share_the_same_ledger_label(self):
+        assert sc.ledger_label_is_relevant("glm-harness", {"litellm:zai"}) is True
+        assert sc.ledger_label_is_relevant("glm-harness", {"glm-harness"}) is True
+
+    def test_unknown_ledger_vocabulary_is_relevant_fail_closed(self):
+        # Free text / a future provider / a typo — never in ANY alias set —
+        # can never be positively proven unrelated, so it stays relevant
+        # regardless of scope.
+        assert sc.ledger_label_is_relevant("Moonshot AI (Kimi Code CLI)", {"claude"}) is True
+        assert sc.ledger_label_is_relevant("`.", {"claude"}) is True
+
+    def test_empty_spec_providers_still_recognizes_unknown_as_relevant(self):
+        assert sc.ledger_label_is_relevant("some-new-provider", set()) is True
+
+    def test_empty_spec_providers_excludes_known_labels(self):
+        assert sc.ledger_label_is_relevant("kimi", set()) is False
+
+    def test_triggered_entity_labels_extracts_only_triggered_providers(self):
+        # Build a combined result directly via _combine to avoid depending on
+        # ledger I/O for this pure extraction test.
+        triggered = StopConditionResult(
+            "provider_exhausted:kimi", CheckStatus.TRIGGERED, "kimi exhausted", evidence={"provider": "kimi"},
+        )
+        clear = StopConditionResult(
+            "provider_exhausted:claude", CheckStatus.CLEAR, "claude fine", evidence={"provider": "claude"},
+        )
+        combined = sc._combine("provider_exhausted", [triggered, clear], sub_key="per_provider")
+        labels = sc.triggered_entity_labels(combined, sub_key="per_provider", entity_field="provider")
+        assert labels == {"kimi"}
+
+    def test_triggered_entity_labels_extracts_gate_names(self):
+        triggered = StopConditionResult(
+            "repeated_gate_failure_cause:glm_gate", CheckStatus.TRIGGERED, "glm_gate repeat", evidence={"gate": "glm_gate"},
+        )
+        combined = sc._combine("repeated_gate_failure_cause", [triggered], sub_key="per_gate")
+        labels = sc.triggered_entity_labels(combined, sub_key="per_gate", entity_field="gate")
+        assert labels == {"glm_gate"}
+
+
+class TestLedgerScopingEnumDrift:
+    """Every Provider/Gate enum member must have an explicit entry in the
+    corresponding alias map — a missing entry is not an empty scope, it is a
+    silent hole in the scoping contract. Mirrors
+    test_closure_verifier_gate_enum_drift.py's style."""
+
+    def test_every_provider_enum_member_has_a_ledger_alias_entry(self):
+        from dispatch_spec import Provider
+
+        missing = [p.value for p in Provider if p.value not in sc.PROVIDER_LEDGER_ALIASES]
+        assert not missing, f"Provider enum member(s) missing from PROVIDER_LEDGER_ALIASES: {missing}"
+
+    def test_every_gate_enum_member_has_a_ledger_provider_entry(self):
+        from dispatch_spec import Gate
+
+        missing = [g.value for g in Gate if g.value not in sc.GATE_LEDGER_PROVIDERS]
+        assert not missing, f"Gate enum member(s) missing from GATE_LEDGER_PROVIDERS: {missing}"
+
+    def test_non_model_gates_carry_an_explicit_empty_set_not_a_missing_key(self):
+        # ci_gate/wiring_gate/claude_github_optional run on gh, not a model
+        # provider — they must still be a real (empty) dict entry, never
+        # simply absent, so a lookup miss can never be confused with "runs
+        # on no provider by design".
+        for gate_name in ("ci_gate", "wiring_gate", "claude_github_optional"):
+            assert gate_name in sc.GATE_LEDGER_PROVIDERS
+            assert sc.GATE_LEDGER_PROVIDERS[gate_name] == frozenset()

@@ -50,7 +50,9 @@ from stop_conditions import CheckStatus, StopConditionResult  # noqa: E402
 # Shared helpers (mirrors tests/test_dispatch_refire_guard.py's _make_bundle)
 # ---------------------------------------------------------------------------
 
-def _make_bundle(tmp_path: Path, *, staging_id: str, dispatch_id: str) -> "tuple[Path, Path]":
+def _make_bundle(
+    tmp_path: Path, *, staging_id: str, dispatch_id: str, provider: str = "claude", gate: str = "codex_gate",
+) -> "tuple[Path, Path]":
     data_dir = tmp_path / "vnx-data"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -64,14 +66,19 @@ def _make_bundle(tmp_path: Path, *, staging_id: str, dispatch_id: str) -> "tuple
         "instruction_file": str(instruction),
         "role": "backend-developer",
         "target_slot": "T0",
-        "gate": "codex_gate",
+        "gate": gate,
         "dispatch_paths": [],
-        "provider": "claude",
+        "provider": provider,
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        "force_tmux": True,
-        "force_tmux_reason": "stop-conditions gate test asserts door decisions, not lane behavior",
     }
+    # force_tmux is only a legal opt-out for provider=claude/auto (dispatch_spec
+    # validate() Rule 12b) — omit it entirely for any other provider so
+    # OI-1694's non-claude scoping scenarios (e.g. provider=kimi) don't trip an
+    # unrelated force-tmux-claude-only rejection.
+    if provider in ("claude", "auto"):
+        spec["force_tmux"] = True
+        spec["force_tmux_reason"] = "stop-conditions gate test asserts door decisions, not lane behavior"
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
     return data_dir, spec_file
@@ -303,17 +310,17 @@ def test_measurement_crash_degrades_to_unmeasurable_not_a_door_crash(tmp_path, m
 # neutralized via shutil.which so the test has no real network/gh-auth
 # dependency; provider_exhausted and repeated_gate_failure_cause run for real,
 # resolved against the state_dir this call passes in.
+#
+# OI-1694: the door now SCOPES a blocking-eligible TRIGGERED sub-result down
+# to whether it is actually relevant to THIS dispatch's provider/gate, instead
+# of refusing on the bare fact that SOMETHING, somewhere, is exhausted. Every
+# test below uses a REAL receipts ledger / review_gates results dir in
+# tmp_path — never a patched stop_conditions.run_all_checks — so the
+# relevance logic itself is exercised, not a mock standing in for it.
 # ---------------------------------------------------------------------------
 
-def test_real_provider_exhaustion_blocks_any_provider_end_to_end(tmp_path, monkeypatch, capsys):
-    data_dir, spec_file = _make_bundle(
-        tmp_path, staging_id="20260904-staging-stopcond-e2e", dispatch_id="20260904-stopcond-e2e",
-    )
-    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-    state_dir = data_dir / "state"
+def _write_kimi_exhausted_ledger(state_dir: Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
-
     with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as fh:
         for i in range(3):
             rec = {
@@ -326,26 +333,239 @@ def test_real_provider_exhaustion_blocks_any_provider_end_to_end(tmp_path, monke
             }
             fh.write(json.dumps(rec) + "\n")
 
+
+def _write_exhausted_ledger(state_dir: Path, provider: str) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as fh:
+        for i in range(3):
+            rec = {
+                "event_type": "task_complete",
+                "provider": provider,
+                "status": "failed",
+                "failure_class": "auth_rejected",
+                "dispatch_id": f"20260903-{provider}-fail-{i}",
+                "timestamp": f"2026-09-03T0{i}:00:00Z",
+            }
+            fh.write(json.dumps(rec) + "\n")
+
+
+def _neutralize_gh(monkeypatch) -> None:
     import stop_conditions
     monkeypatch.setattr(stop_conditions.shutil, "which", lambda _bin: None)
+
+
+def _write_repeated_gate_results(results_dir: Path, gate: str, reason: str = "provider_not_installed") -> None:
+    results_dir.mkdir(parents=True, exist_ok=True)
+    for i, pr in enumerate([9001, 9002, 9003]):
+        d = {
+            "pr_number": pr,
+            "gate": gate,
+            "status": "unavailable",
+            "reason": reason,
+            "recorded_at": f"2026-09-0{i+1}T00:00:00Z",
+        }
+        (results_dir / f"pr-{pr}-{gate}.json").write_text(json.dumps(d), encoding="utf-8")
+
+
+def test_1_unrelated_provider_exhaustion_does_not_block(tmp_path, monkeypatch, capsys):
+    """Scenario 1 (rood, het defect zelf): only kimi is exhausted; a dispatch
+    with provider=claude, gate=glm_gate touches neither kimi nor glm-harness
+    — the door must NOT block."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260908-staging-oi1694-1", dispatch_id="20260908-oi1694-1",
+        provider="claude", gate="glm_gate",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_kimi_exhausted_ledger(state_dir)
+    _neutralize_gh(monkeypatch)
 
     with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 1, (
-        "3 consecutive kimi auth_rejected receipts must trip "
-        "check_provider_exhausted for real (resolved against THIS call's own "
-        "state_dir, never the real central store) and refuse the fire — even "
-        "though THIS dispatch targets claude/T0, not kimi: it is a "
-        "chain-level halt"
+    assert rc == 0, "kimi-exhaustion must not block a claude/glm_gate dispatch that never touches kimi"
+    mock_execute.assert_called_once()
+
+    # Scenario 6: the measurement is NOT gone — it is a WARN, not a deletion.
+    err = capsys.readouterr().err
+    assert "kimi" in err, "the exhausted-but-out-of-scope provider must still be named in the door's output"
+
+    import stop_conditions
+    raw_results = stop_conditions.run_all_checks(state_dir=state_dir, write_halt=False)
+    by_id = {r.check_id: r for r in raw_results}
+    assert by_id["provider_exhausted"].status == CheckStatus.TRIGGERED
+    assert "kimi" in json.dumps(by_id["provider_exhausted"].evidence)
+
+
+def test_2_provider_match_still_blocks(tmp_path, monkeypatch, capsys):
+    """Scenario 2: same kimi-only ledger, but the dispatch itself IS kimi —
+    the brake must still bite via the provider match."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260908-staging-oi1694-2", dispatch_id="20260908-oi1694-2",
+        provider="kimi", gate="glm_gate",
     )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_kimi_exhausted_ledger(state_dir)
+    _neutralize_gh(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "a kimi dispatch must still be refused by kimi's own exhaustion"
     mock_execute.assert_not_called()
     err = capsys.readouterr().err
     assert "stop-conditions-triggered" in err
-    assert "provider_exhausted" in err
-    assert (state_dir / "halt.json").exists(), (
-        "a real fire hitting a blocking-eligible trigger must persist "
-        "halt.json via the explicit write_halt_file() call"
+
+
+def test_3_gate_match_pulls_provider_into_scope_and_still_blocks(tmp_path, monkeypatch, capsys):
+    """Scenario 3: glm-harness is exhausted; dispatch is provider=claude,
+    gate=glm_gate — glm_gate's own provider (glm-harness) pulls this
+    dispatch's scope in, so the brake must still bite."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260908-staging-oi1694-3", dispatch_id="20260908-oi1694-3",
+        provider="claude", gate="glm_gate",
     )
-    halt = json.loads((state_dir / "halt.json").read_text(encoding="utf-8"))
-    assert any(t["check_id"] == "provider_exhausted" for t in halt["triggered"])
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_exhausted_ledger(state_dir, "glm-harness")
+    _neutralize_gh(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "glm_gate must pull glm-harness exhaustion into scope even for a claude-provider dispatch"
+    mock_execute.assert_not_called()
+
+
+def test_4_unknown_ledger_vocabulary_blocks_regardless_of_provider(tmp_path, monkeypatch, capsys):
+    """Scenario 4: an exhausted label absent from every alias set can never
+    be positively proven unrelated — it must block no matter the spec
+    provider/gate."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260908-staging-oi1694-4", dispatch_id="20260908-oi1694-4",
+        provider="claude", gate="glm_gate",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_exhausted_ledger(state_dir, "future-provider-xyz")
+    _neutralize_gh(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "unrecognized ledger vocabulary must fail closed and block"
+    mock_execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Scenario 5: undeterminable scope falls back to (None, None) — i.e. broad
+# blocking. Unit-tested directly against _resolve_stop_conditions_scope
+# rather than through run_dispatch: by the time build_runtime_snapshot runs,
+# spec.provider == Provider.AUTO can no longer occur on the real path (OI-962's
+# smart router resolves AUTO to a concrete provider, falling back to CLAUDE,
+# BEFORE validate()/build_runtime_snapshot — see run_dispatch's own comment
+# at the router-pre-validate call), and an empty spec.gate is filled in by
+# _resolve_gate_via_router before build_runtime_snapshot too. Both router
+# steps are fail-open (a broken router leaves AUTO/empty-gate untouched), so
+# _resolve_stop_conditions_scope's own fallback is still live defense-in-depth
+# for that fail-open path — exercised here directly, at the level it actually
+# guards.
+# ---------------------------------------------------------------------------
+
+from dispatch_cli import _resolve_stop_conditions_scope  # noqa: E402
+from dispatch_spec import DispatchSpec, Isolation, Provider  # noqa: E402
+
+
+def _spec(*, provider: Provider, gate: str) -> DispatchSpec:
+    return DispatchSpec(
+        schema_version=1,
+        project_id="vnx-dev",
+        dispatch_id="20260908-oi1694-scope-unit",
+        staging_id="20260908-oi1694-scope-unit",
+        instruction_file=Path("/tmp/instruction.md"),
+        role="backend-developer",
+        target_slot="T0",
+        gate=gate,
+        dispatch_paths=(),
+        provider=provider,
+        isolation=Isolation.WORKTREE,
+    )
+
+
+def test_5a_auto_provider_cannot_be_scoped():
+    """Scenario 5 (auto half): provider=auto has not resolved to a real
+    provider yet — the scope is undeterminable, so the door must fall back
+    to broad blocking (None, None) exactly like before OI-1694."""
+    scope = _resolve_stop_conditions_scope(_spec(provider=Provider.AUTO, gate="glm_gate"))
+    assert scope == (None, None)
+
+
+def test_5b_empty_gate_cannot_be_scoped():
+    """Scenario 5 (empty-gate half): a non-auto provider with no gate
+    assigned also cannot be scoped via GATE_LEDGER_PROVIDERS — same broad
+    fallback."""
+    scope = _resolve_stop_conditions_scope(_spec(provider=Provider.CLAUDE, gate=""))
+    assert scope == (None, None)
+
+
+def test_5c_gate_outside_gate_ledger_providers_cannot_be_scoped():
+    """A legacy phase sentinel ("planning"/"implementation") is a legal
+    spec.gate value (dispatch_spec's LEGACY_GATE_SENTINELS) but is not a key
+    in GATE_LEDGER_PROVIDERS — undeterminable, same broad fallback."""
+    scope = _resolve_stop_conditions_scope(_spec(provider=Provider.CLAUDE, gate="planning"))
+    assert scope == (None, None)
+
+
+def test_determinable_scope_unions_provider_and_gate_ledger_labels():
+    """Sanity check on the happy path this whole dispatch is about: a
+    concrete provider + a known gate resolves to a real, unioned scope."""
+    providers, gates = _resolve_stop_conditions_scope(_spec(provider=Provider.CLAUDE, gate="glm_gate"))
+    assert providers == {"claude", "glm-harness"}
+    assert gates == {"glm_gate"}
+
+
+def test_8a_repeated_gate_failure_on_a_different_gate_does_not_block(tmp_path, monkeypatch, capsys):
+    """Scenario 8 (different-gate half): codex_gate has a real 3x repeat, but
+    THIS dispatch is scoped to glm_gate — must not block."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260908-staging-oi1694-8a", dispatch_id="20260908-oi1694-8a",
+        provider="claude", gate="glm_gate",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_repeated_gate_results(state_dir / "review_gates" / "results", "codex_gate")
+    _neutralize_gh(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, "a repeated failure on codex_gate must not block a glm_gate dispatch"
+    mock_execute.assert_called_once()
+    err = capsys.readouterr().err
+    assert "codex_gate" in err, "the out-of-scope repeat must still be named, not silently dropped"
+
+
+def test_8b_repeated_gate_failure_on_the_dispatchs_own_gate_still_blocks(tmp_path, monkeypatch, capsys):
+    """Scenario 8 (own-gate half): the same 3x repeat, but the dispatch
+    itself targets codex_gate — must block."""
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260908-staging-oi1694-8b", dispatch_id="20260908-oi1694-8b",
+        provider="claude", gate="codex_gate",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_repeated_gate_results(state_dir / "review_gates" / "results", "codex_gate")
+    _neutralize_gh(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1, "a repeated failure on the dispatch's own gate must still block"
+    mock_execute.assert_not_called()

@@ -20,7 +20,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Optional, Set
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -1900,18 +1900,75 @@ def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
 # See point 3 above for the full reasoning and the CI evidence this is based on.
 _STOP_CONDITIONS_BLOCKING_CHECK_IDS = frozenset({"provider_exhausted", "repeated_gate_failure_cause"})
 
+# 6. OI-1694: a blocking-eligible TRIGGERED check still measures BROADLY (see
+#    point 1 — run_all_checks never filters), but no longer refuses on the
+#    bare fact that SOMETHING somewhere is exhausted/repeating: it refuses
+#    only when the entity that fired (a provider, a gate) is RELEVANT to
+#    THIS dispatch's own provider/gate. Relevance is computed by
+#    _resolve_stop_conditions_scope + stop_conditions.ledger_label_is_relevant
+#    and is deliberately inverted to fail closed: a TRIGGERED sub-result
+#    blocks UNLESS it can be POSITIVELY proven unrelated (a known label
+#    outside this dispatch's alias set, or a gate name that is not this
+#    dispatch's own gate). An undeterminable scope (spec.provider == AUTO,
+#    or a gate absent from stop_conditions.GATE_LEDGER_PROVIDERS) is NOT a
+#    proven-unrelated scope — _resolve_stop_conditions_scope returns
+#    (None, None) for those and the door falls back to the pre-OI-1694 wide
+#    blocking behavior. A scoped-out TRIGGERED sub-result is never silently
+#    dropped: it is folded into the same WARN-only reporting path as
+#    main_ci_red/gh_auth_dead below, annotated with why it did not block.
+
+
+def _resolve_stop_conditions_scope(spec: DispatchSpec) -> "tuple[Optional[Set[str]], Optional[Set[str]]]":
+    """Compute this dispatch's (relevant_spec_providers, relevant_gates)
+    stop-conditions scope, or (None, None) when the scope cannot be
+    determined at all — which must fall back to unscoped/broad blocking
+    (see point 6 above): ``spec.provider == Provider.AUTO`` (not yet
+    resolved to a real provider), an empty ``spec.gate``, or a gate outside
+    stop_conditions.GATE_LEDGER_PROVIDERS (e.g. a legacy phase sentinel).
+    """
+    from stop_conditions import GATE_LEDGER_PROVIDERS  # noqa: PLC0415
+
+    if spec.provider == Provider.AUTO:
+        return None, None
+    gate_name = (spec.gate or "").strip()
+    if not gate_name or gate_name not in GATE_LEDGER_PROVIDERS:
+        return None, None
+    relevant_spec_providers = {spec.provider.value} | set(GATE_LEDGER_PROVIDERS[gate_name])
+    relevant_gates = {gate_name}
+    return relevant_spec_providers, relevant_gates
+
 
 def _check_stop_conditions_verdict(
-    *, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
+    *,
+    state_dir: Path,
+    override_reason: Optional[str] = None,
+    dry_run: bool = False,
+    relevant_spec_providers: Optional[Set[str]] = None,
+    relevant_gates: Optional[Set[str]] = None,
 ) -> Optional[ConstraintVerdict]:
     """Measure stop_conditions.run_all_checks() live and return a BLOCKING
     ConstraintVerdict iff a check in _STOP_CONDITIONS_BLOCKING_CHECK_IDS is
-    TRIGGERED, unless override_reason is a non-empty explicit operator reason
-    (audited, warn-severity verdict instead). Returns None when nothing
-    blocking-eligible is TRIGGERED — see the module-level comment above for
-    the full tri-state / blocking-vs-warn-only / halt.json-write contract.
+    TRIGGERED AND relevant to this dispatch's scope, unless override_reason
+    is a non-empty explicit operator reason (audited, warn-severity verdict
+    instead). Returns None when nothing blocking-eligible-and-relevant is
+    TRIGGERED — see the module-level comment above for the full tri-state /
+    blocking-vs-warn-only / scoping / halt.json-write contract.
+
+    ``relevant_spec_providers``/``relevant_gates`` of None means "scope not
+    determinable" — stay unscoped, block on the bare TRIGGERED fact exactly
+    like before OI-1694. Passing concrete sets (see
+    _resolve_stop_conditions_scope) narrows a blocking-eligible TRIGGERED
+    check to the sub-entities that are actually relevant to THIS dispatch;
+    everything scoped out is folded into the WARN-only report, never
+    dropped.
     """
-    from stop_conditions import CheckStatus, run_all_checks, write_halt_file  # noqa: PLC0415
+    from stop_conditions import (  # noqa: PLC0415
+        CheckStatus,
+        ledger_label_is_relevant,
+        run_all_checks,
+        triggered_entity_labels,
+        write_halt_file,
+    )
 
     try:
         # write_halt=False: a measurement pass never writes on its own — see
@@ -1935,8 +1992,42 @@ def _check_stop_conditions_verdict(
             file=sys.stderr,
         )
 
-    blocking_triggered = [r for r in triggered if r.check_id in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
+    blocking_eligible = [r for r in triggered if r.check_id in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
     warn_only_triggered = [r for r in triggered if r.check_id not in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
+
+    # Scope each blocking-eligible TRIGGERED check down to whether it is
+    # relevant to THIS dispatch. Scoping is only active when the caller
+    # supplied a determinable scope for the relevant axis (see
+    # _resolve_stop_conditions_scope) — otherwise a check stays unscoped and
+    # blocks on the bare TRIGGERED fact, unchanged from before OI-1694. Same
+    # fail-closed inversion when NO entity labels can be extracted at all
+    # (evidence missing the per_provider/per_gate sub-structure _combine()
+    # normally produces): that is an undeterminable scope, not a
+    # positively-proven-unrelated one, so it stays relevant too.
+    blocking_triggered = []
+    scoped_out = []
+    for r in blocking_eligible:
+        if r.check_id == "provider_exhausted" and relevant_spec_providers is not None:
+            fired = triggered_entity_labels(r, sub_key="per_provider", entity_field="provider")
+            relevant = not fired or any(ledger_label_is_relevant(label, relevant_spec_providers) for label in fired)
+        elif r.check_id == "repeated_gate_failure_cause" and relevant_gates is not None:
+            fired = triggered_entity_labels(r, sub_key="per_gate", entity_field="gate")
+            relevant = not fired or any(gate in relevant_gates for gate in fired)
+        else:
+            relevant = True
+        (blocking_triggered if relevant else scoped_out).append(r)
+
+    if scoped_out:
+        print(
+            f"[dispatch_cli] [WARN] stop-condition(s) TRIGGERED but scoped "
+            f"OUT of this dispatch's path (measured — provably unrelated to "
+            f"provider(s)={sorted(relevant_spec_providers or ())} "
+            f"gate(s)={sorted(relevant_gates or ())} — never blocks, never "
+            f"persisted to halt.json on its own for THIS dispatch): "
+            + "; ".join(f"{r.check_id}: {r.message}" for r in scoped_out),
+            file=sys.stderr,
+        )
+
     if warn_only_triggered:
         print(
             f"[dispatch_cli] [WARN] stop-condition(s) TRIGGERED but WARN-only "
@@ -2223,10 +2314,15 @@ def build_runtime_snapshot(
         constraint_verdicts = constraint_verdicts + (track_verdict,)
 
     # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
+    # OI-1694: scoped to THIS dispatch's own provider/gate — see
+    # _resolve_stop_conditions_scope for the fallback-to-broad rules.
+    _relevant_spec_providers, _relevant_gates = _resolve_stop_conditions_scope(spec)
     stop_verdict = _check_stop_conditions_verdict(
         state_dir=data_dir / "state",
         override_reason=stop_conditions_override_reason,
         dry_run=dry_run,
+        relevant_spec_providers=_relevant_spec_providers,
+        relevant_gates=_relevant_gates,
     )
     if stop_verdict is not None:
         constraint_verdicts = constraint_verdicts + (stop_verdict,)
