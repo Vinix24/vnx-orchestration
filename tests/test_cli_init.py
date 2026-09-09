@@ -618,8 +618,18 @@ class TestGateObligationRunnerInstall:
         engine_root = tmp_path / "engine"
         launchd_dir = engine_root / "scripts" / "launchd"
         launchd_dir.mkdir(parents=True)
+        # Real, parseable plist (not a bare-string placeholder): OI-1510
+        # onwards, _install_launchd_agent must plistlib.loads() the resolved
+        # content to derive the destination filename from its own Label
+        # before it ever reaches the launchctl-load path this test targets.
         (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
-            "mock plist with ${VNX_HOME}",
+            '<?xml version="1.0"?><plist><dict>'
+            f"<key>Label</key><string>{self.PLIST_NAME}</string>"
+            "<key>ProgramArguments</key><array>"
+            "<string>/bin/bash</string><string>-c</string>"
+            "<string>cd ${VNX_HOME} &amp;&amp; exec true</string>"
+            "</array>"
+            "</dict></plist>",
             encoding="utf-8",
         )
         monkeypatch.setattr(
@@ -651,8 +661,16 @@ class TestGateObligationRunnerInstall:
         engine_root = tmp_path / "engine"
         launchd_dir = engine_root / "scripts" / "launchd"
         launchd_dir.mkdir(parents=True)
+        # Real, parseable plist — see the sibling load-failure test above for
+        # why a bare placeholder string no longer works post-OI-1510.
         (launchd_dir / f"{self.PLIST_NAME}.plist").write_text(
-            "mock plist with ${VNX_HOME}",
+            '<?xml version="1.0"?><plist><dict>'
+            f"<key>Label</key><string>{self.PLIST_NAME}</string>"
+            "<key>ProgramArguments</key><array>"
+            "<string>/bin/bash</string><string>-c</string>"
+            "<string>cd ${VNX_HOME} &amp;&amp; exec true</string>"
+            "</array>"
+            "</dict></plist>",
             encoding="utf-8",
         )
         monkeypatch.setattr(
@@ -732,14 +750,18 @@ class TestGateObligationRunnerInstall:
         rc = vnx_init(_args(tmp_path / "project"))
         assert rc == 0
 
-        # Plist written to fake LaunchAgents dir.
+        # Plist written to fake LaunchAgents dir, filename derived from the
+        # RESOLVED (project-scoped) Label — OI-1510: two projects installing
+        # this same template must never land on the same destination file.
+        project_id = init_cmd._engine.derive_project_id(tmp_path / "project")
         dest = (
             fake_home / "Library" / "LaunchAgents"
-            / f"{self.PLIST_NAME}.plist"
+            / f"{self.PLIST_NAME}.{project_id}.plist"
         )
         assert dest.is_file(), (
-            f"vnx init must install {self.PLIST_NAME}.plist — "
-            "OI-917: the runner was never installed"
+            f"vnx init must install {self.PLIST_NAME}.{project_id}.plist — "
+            "OI-917/OI-1510: the runner was never installed under its "
+            "project-scoped Label"
         )
 
         content = dest.read_text(encoding="utf-8")
@@ -836,6 +858,28 @@ class TestInitDoctorDataDirConsistency:
         project_dir = tmp_path_factory.mktemp("project")
         rc = vnx_init(_args(project_dir))
         assert rc == 0, "vnx init must succeed"
+
+        # Isolate the launchd-agents check (golf C, C3) from this test's own
+        # concern (data-dir mismatch warnings): report both required jobs as
+        # loaded for whatever project_id vnx_init resolved. Without this, a
+        # worktree test run — where the OI-1117 guard always skips the real
+        # launchd install — would FAIL doctor for a reason unrelated to what
+        # this test actually verifies.
+        from vnx_cli import _engine as _launchd_engine
+        launchd_engine_root = _launchd_engine.ensure_engine_on_path()
+        launchd_dir = Path(launchd_engine_root) / "scripts" / "launchd"
+        sys.path.insert(0, str(launchd_dir))
+        import launchd_project_scope as _lps
+        resolved_project_id = _launchd_engine.read_marker_project_id(project_dir)
+        monkeypatch.setattr(
+            _lps,
+            "_run_real_launchctl_list",
+            lambda: (
+                "PID\tStatus\tLabel\n"
+                f"-\t0\tcom.vnx.gate-obligation-runner.{resolved_project_id}\n"
+                f"-\t0\tcom.vnx.receipt-processor.{resolved_project_id}\n"
+            ),
+        )
 
         # vnx doctor — must complete without VNXDataDirMismatchWarning.
         with warnings.catch_warnings(record=True) as caught:

@@ -896,6 +896,82 @@ def _check_ledger_health(data_root: Path) -> Check:
     return _result(PASS, "receipt coverage, pull-cursor age, and chain status all healthy")
 
 
+def _check_launchd_agents(project_dir: Path) -> list[Check]:
+    """FAIL per ``REQUIRED_PER_PROJECT_FAMILIES`` family missing this
+    project's launchd instance — golf C, C3 (absence-is-loud, OI-1509/OI-1510).
+
+    Before this check, ``scripts/launchd/launchd_project_scope.py`` (the
+    per-project label guard #1769 shipped) had zero readers outside its own
+    test file: the receipt processor and gate-obligation-runner could both
+    be entirely absent from launchd and nothing in ``vnx doctor`` said so.
+    Delegates entirely to that module's ``check_project_scope`` — never a
+    second launchctl reader here — reusing its own injectable
+    ``_run_real_launchctl_list`` so a test can monkeypatch the SAME function
+    ``vnx doctor`` calls, not a doctor-local duplicate.
+    """
+    try:
+        engine_root = _engine.ensure_engine_on_path()
+        launchd_dir = Path(engine_root) / "scripts" / "launchd"
+        if str(launchd_dir) not in sys.path:
+            sys.path.insert(0, str(launchd_dir))
+        import launchd_project_scope as lps
+    except Exception as exc:
+        return [Check("launchd:agents", WARN, f"could not load launchd_project_scope: {exc}")]
+
+    if sys.platform != "darwin":
+        return [Check("launchd:agents", WARN, "launchd is macOS-only — skipped on this platform")]
+
+    project_id = _engine.read_marker_project_id(project_dir)
+    if not project_id:
+        return [Check(
+            "launchd:agents",
+            WARN,
+            f"no {_engine.PROJECT_FILE_NAME} marker under {project_dir} — run "
+            "`vnx init` before checking per-project launchd state",
+        )]
+
+    try:
+        launchctl_output = lps._run_real_launchctl_list()
+    except (OSError, lps.subprocess.SubprocessError, lps.LaunchctlListFailedError) as exc:
+        return [Check(
+            "launchd:agents", WARN,
+            f"launchctl unavailable — cannot verify installed state: {exc}",
+        )]
+
+    result = lps.check_project_scope(launchd_dir, project_id, launchctl_output)
+    installed_violations = result["installed_check"]["violations"]
+    template_violations = result["template_check"]["violations"]
+    missing_families = {
+        v["family"] for v in installed_violations if v["kind"] == "missing_instance"
+    }
+
+    checks: list[Check] = []
+    for family in lps.REQUIRED_PER_PROJECT_FAMILIES:
+        expected_label = f"{family}.{project_id}"
+        if family in missing_families:
+            checks.append(Check(
+                f"launchd:{family}",
+                FAIL,
+                f"{expected_label} is not loaded — run `vnx init` or "
+                f"`bash scripts/launchd/reload_plist.sh {family}` to install it",
+            ))
+        else:
+            checks.append(Check(f"launchd:{family}", PASS, f"{expected_label} is loaded"))
+
+    # A collision-risk label (bare/malformed suffix) for a required family, or
+    # a template that has drifted off the project-scoped contract, is real
+    # signal (OI-1509) even when THIS project's own instance is present — but
+    # it is not this project's own job being down, so WARN rather than FAIL.
+    for v in installed_violations:
+        if v["kind"] == "missing_instance":
+            continue
+        checks.append(Check(f"launchd:{v['family']}:{v['kind']}", WARN, v["detail"]))
+    for v in template_violations:
+        checks.append(Check(f"launchd:{v['family']}:{v['kind']}", WARN, v["detail"]))
+
+    return checks
+
+
 def _check_embedded_path_assumptions() -> Check:
     """WARN on __file__-anchored .vnx-data/ROADMAP.yaml AND repo-root derivations.
 
@@ -1015,6 +1091,7 @@ def vnx_doctor(args) -> int:
     checks.append(_check_active_drain(data_root))
     checks.append(_check_hook_paths(project_dir))
     checks.append(_check_ledger_health(data_root))
+    checks.extend(_check_launchd_agents(project_dir))
     checks.append(_check_embedded_path_assumptions())
     checks.extend(_check_t0_state_freshness(project_dir, data_root))
 
