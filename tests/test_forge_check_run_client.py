@@ -53,6 +53,18 @@ def _clear_token_cache():
     fcr.reset_token_cache()
 
 
+@pytest.fixture(autouse=True)
+def _allow_real_publish_check_run_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OI-1675: dit bestand oefent expres de ECHTE publish_check_run uit tegen
+    een gemockte _api_request (zie de module-docstring, "Mocking boundary").
+    Zonder deze opt-in weigert de test-mode-guard elke aanroep hier. Elke test
+    die deze fixture bereikt heeft fcr._api_request al vervangen via
+    _install_http vóórdat publish_check_run/installation_token draait — deze
+    fixture licht alleen de guard, nooit het netwerk, dat blijft gemockt.
+    """
+    monkeypatch.setenv(fcr.TEST_POST_OPT_IN_ENV, "1")
+
+
 @pytest.fixture(scope="module")
 def rsa_keypair() -> Tuple[str, str]:
     """A throwaway RSA keypair as (private PEM, public PEM)."""

@@ -144,6 +144,66 @@ class ForgeAPIError(ForgeCheckRunError):
         self.body = body
 
 
+class ForgeTestPostRefused(ForgeCheckRunError):
+    """``publish_check_run`` weigerde te posten tijdens een pytest-run zonder
+    expliciete opt-in (OI-1675).
+
+    B2b (#1812) maakte ``publish_check_run`` bereikbaar vanuit de
+    recorder-module en dus vanuit elke test die een recorder-write drijft.
+    Gemeten 2026-09-08 op de fix-forward van #1815: 51 uitgaande TCP-verbindingen
+    naar api.github.com over de 21 testbestanden die een recorder-write
+    drijven, vóór er iets aan gewijzigd was. De vnx-gate App draagt
+    ``checks: write`` op dit repo, en ``vnx-gate/review`` is sinds vanmiddag
+    een VERPLICHTE check op main — een verdwaalde ``success`` uit een testrun
+    kan de merge-poort dus echt openzetten.
+
+    ``tests/conftest.py::_stub_forge_check_run_post`` sluit dat gat voor de
+    recorder-route, maar patcht ``forge_gate_publisher.publish_check_run`` —
+    de GEÏMPORTEERDE naam, een laag boven deze functie. Een testbestand dat
+    deze module rechtstreeks aanroept zonder ``_api_request`` te mocken, is
+    daar niet door gedekt. Deze guard is de achtervang op de ene plek waar
+    elk pad doorheen moet: de client-primitive zelf.
+    """
+
+
+#: Zet dit op ``"1"`` alleen in een test die de ECHTE ``publish_check_run``-
+#: body wil uitoefenen tegen een GEMOCKTE ``_api_request`` (zie
+#: ``tests/test_forge_check_run_client.py``). Deze vlag licht de guard, nooit
+#: het netwerk zelf — een test die hem zet zonder ``_api_request`` te mocken
+#: post nog steeds echt.
+TEST_POST_OPT_IN_ENV = "VNX_FORGE_ALLOW_TEST_POST"
+
+
+def _refuse_test_post_without_opt_in(name: str, head_sha: str) -> None:
+    """Fail-closed achtervang: weiger door te gaan onder pytest tenzij
+    ``VNX_FORGE_ALLOW_TEST_POST=1`` staat (OI-1675).
+
+    Detectie spiegelt ``vnx_paths.refuse_real_central_store_write_under_pytest``
+    — het signaal dat dit repo al overal gebruikt om "draait dit onder
+    pytest" te herkennen: ``PYTEST_CURRENT_TEST`` (een test draait) OF
+    ``"pytest" in sys.modules`` (waar vanaf collection, vóór de eerste test).
+    Geen nieuw begrip.
+
+    Productie is onaangeraakt: pytest zit nooit in ``sys.modules`` buiten een
+    testrun, dus dit is een no-op op elke echte gate-publicatie.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in sys.modules:
+        return
+    if os.environ.get(TEST_POST_OPT_IN_ENV) == "1":
+        return
+    raise ForgeTestPostRefused(
+        f"[TEST MODE GUARD] publish_check_run geweigerd: een POST voor check "
+        f"'{name}' op sha {head_sha[:12]} zou dit vanuit een pytest-run naar de "
+        f"echte GitHub API sturen — de vnx-gate App heeft checks:write op "
+        f"Vinix24/vnx-orchestration en vnx-gate/review is een VERPLICHTE check "
+        f"op main. Dit weigert fail-closed in elke pytest-run (OI-1675). Wil je "
+        f"publish_check_run() echt uitoefenen tegen een gemockte _api_request "
+        f"(zoals tests/test_forge_check_run_client.py doet): zet "
+        f"{TEST_POST_OPT_IN_ENV}=1 in die test/module — nooit om een echte post "
+        f"te forceren. Runbook: {RUNBOOK_PATH}"
+    )
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """The public half of the App's identity, read from the versioned YAML."""
@@ -616,6 +676,7 @@ def publish_check_run(
         raise ForgeCheckRunError("head_sha is leeg: een check-run zonder commit hoort nergens")
     if not name or not name.strip():
         raise ForgeCheckRunError("name is leeg: branch protection matcht check-runs op naam")
+    _refuse_test_post_without_opt_in(name, head_sha)
 
     owner_repo = resolve_owner_repo(project_root)
     url = f"{GITHUB_API_BASE}/repos/{owner_repo}/check-runs"
