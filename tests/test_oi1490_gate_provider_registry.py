@@ -77,49 +77,104 @@ def _run(gate_dirs, gate: str, pr_number: int = 1) -> dict:
     return runner.run(gate=gate, request_payload=_payload(gate, pr_number), pr_number=pr_number)
 
 
+def _run_harness(gate_dirs, monkeypatch, gate: str, report_text: str, pr_number: int = 1):
+    """Drive a harness-lane gate through the REAL GateRunner.run with the
+    governed dispatcher faked at the plan_gate_panel seam (C6 step 1).
+
+    The fake records exactly what the runner handed to the dispatcher and
+    returns ``report_text``, which materialize_artifacts then treats like
+    subprocess stdout — the same seam the standalone glm_gate.py/kimi_gate.py
+    reach. Returns ``(result, dispatcher_calls, report_path)``.
+    """
+    calls = []
+
+    def fake_factory(data_dir, timeout_seconds, *, role="plan-reviewer"):
+        def _dispatch(provider, model, instruction, dispatch_id):
+            calls.append({
+                "data_dir": data_dir,
+                "timeout_seconds": timeout_seconds,
+                "role": role,
+                "provider": provider,
+                "model": model,
+                "instruction": instruction,
+                "dispatch_id": dispatch_id,
+            })
+            return report_text
+        return _dispatch
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", fake_factory)
+    report_path = str(gate_dirs["reports"] / f"{gate}-pr{pr_number}.md")
+    payload = _payload(gate, pr_number)
+    payload["report_path"] = report_path
+    runner = GateRunner(state_dir=gate_dirs["state"], reports_dir=gate_dirs["reports"])
+    result = runner.run(gate=gate, request_payload=payload, pr_number=pr_number)
+    return result, calls, report_path
+
+
 # ---------------------------------------------------------------------------
 # 1. The measured defect, per gate
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("gate,runner_file", [
-    ("kimi_gate", "scripts/kimi_gate.py"),
-    ("glm_gate", "scripts/glm_gate.py"),
+@pytest.mark.parametrize("gate,provider", [
+    ("kimi_gate", "kimi"),
+    ("glm_gate", "glm-harness"),
 ])
-def test_a_script_runner_gate_is_not_a_missing_binary(gate_dirs, gate, runner_file):
-    """RED on main: every one of these booked provider_not_installed."""
-    result = _run(gate_dirs, gate)
+def test_a_harness_lane_gate_delegates_to_the_governed_dispatcher(
+    gate_dirs, monkeypatch, gate, provider,
+):
+    """Migrated from the script-runner refusal test for C6 step 1.
 
-    assert result["reason"] != "provider_not_installed", (
-        f"{gate} has no PATH binary and never had one; reporting a missing "
-        f"binary sends the reader after an install that cannot help"
+    The old assertion (reason == gate_not_subprocess_routable, detail naming
+    the runner FILE) described the refusal this runner used to book because it
+    could not drive glm_gate/kimi_gate. Those gates now DELEGATE to the same
+    governed dispatcher their standalone scripts call, so the correct
+    behaviour is a call through that seam — a completed result with a receipt
+    and report — never a refusal and never a PATH lookup on the provider
+    string.
+    """
+    result, calls, report_path = _run_harness(
+        gate_dirs, monkeypatch, gate,
+        report_text="Review complete.\nNo blocking findings.\nApproved.\n",
     )
-    assert result["reason"] == "gate_not_subprocess_routable"
-    assert runner_file in result["reason_detail"], (
-        "the detail must name the runner that DOES exist, so the reader can act"
-    )
-    assert "--pr 1" in result["reason_detail"], (
-        "and the invocation that actually works, with the PR filled in"
+
+    assert result["status"] == "completed", result.get("reason_detail")
+    assert result["contract_hash"] != "", "a completed run must carry receipt evidence"
+    assert Path(report_path).exists(), "the harness-lane run must materialize a report"
+
+    assert len(calls) == 1, "the runner must delegate exactly once"
+    assert calls[0]["provider"] == provider
+    assert calls[0]["role"] == "review-gate"
+    assert calls[0]["model"] in ("glm-5.2", "kimi-k3")
+    assert calls[0]["timeout_seconds"] == 900, (
+        "the dispatcher's timeout must match the standalone gate's own "
+        "DEFAULT_TIMEOUT, not the runner's PATH-binary default"
     )
 
 
-def test_the_invented_binary_name_is_gone_from_the_audit_trail(gate_dirs):
-    """The exact shape measured in gate_execution_audit.ndjson."""
-    _run(gate_dirs, "kimi_gate")
+def test_a_harness_lane_run_never_consults_path(gate_dirs, monkeypatch):
+    """Migrated from the invented-binary audit-trail test for C6 step 1.
 
-    audit = (gate_dirs["state"] / "gate_execution_audit.ndjson").read_text()
-    record = json.loads(audit.strip().splitlines()[-1])
-    check = record["provider_check"]
+    The old assertion pinned what the refusal writer logged when this runner
+    could not drive kimi_gate. Now kimi_gate/glm_gate are harness-lane: their
+    provider string ("kimi"/"glm-harness") is a lane identifier the governed
+    dispatcher routes on, not a PATH binary. A PATH lookup on it is exactly
+    the OI-1490 mistake again (shutil.which("kimi_gate")), so the runner must
+    never call shutil.which for these gates.
+    """
+    monkeypatch.setattr(
+        gate_runner.shutil, "which",
+        lambda b: (_ for _ in ()).throw(
+            AssertionError(f"harness-lane gate must not PATH-lookup {b!r}")
+        ),
+    )
 
-    assert check["binary_name"] != "kimi_gate", (
-        "this is the invented name: shutil.which('kimi_gate') answers a "
-        "question nobody asked, and its False was read as a missing provider"
+    result, _calls, _report_path = _run_harness(
+        gate_dirs, monkeypatch, "kimi_gate",
+        report_text="Review complete.\nNo blocking findings.\nApproved.\n",
     )
-    assert check["provider_kind"] == "script_runner"
-    assert check["binary_name"] == "scripts/kimi_gate.py"
-    assert check["binary_found"] is True, (
-        "the runner is on disk — that is the whole point: nothing was missing"
-    )
+
+    assert result["status"] == "completed", result.get("reason_detail")
 
 
 def test_an_unregistered_gate_says_so_instead_of_inventing_a_binary(gate_dirs):
@@ -168,7 +223,14 @@ def test_a_present_path_binary_gate_is_not_refused_here(gate_dirs, monkeypatch):
 
 def test_the_new_reasons_are_permanent_not_a_bounded_wait():
     """A routing bug must not sit in the retry-until-the-environment-changes
-    bucket. `provider_not_installed` belongs there and stays there."""
+    bucket. `provider_not_installed` belongs there and stays there.
+
+    C6 step 1 note: glm_gate/kimi_gate no longer produce
+    `gate_not_subprocess_routable` at all (they delegate to the governed
+    dispatcher), but the reason survives for the script-runner gate
+    (deepseek_gate) and must stay out of the temporary set either way — no
+    amount of waiting turns a script runner into a PATH binary.
+    """
     import gate_obligation_runner as gor
 
     temporary = gor._TEMPORARY_NOT_EXECUTABLE_REASONS
@@ -194,8 +256,9 @@ def test_every_path_binary_gate_can_actually_be_driven_by_this_runner():
     """A gate registered as a PATH binary is one this runner builds an argv
     for. Registering kimi_gate as `kimi` would satisfy the PATH check and then
     run a bare `kimi` with a review prompt — passing the gate and producing no
-    contract_hash, no report_path, no verdict. Worse than the loud refusal it
-    replaced, which is why kimi_gate is a script runner here and not a binary.
+    contract_hash, no report_path, no verdict. That is why kimi_gate/glm_gate
+    are NOT path binaries: historically script runners, and since C6 step 1
+    harness-lane gates that delegate to the governed dispatcher.
     """
     for gate in _rec._GATE_BINARIES:
         kind, _name = _rec.GATE_PROVIDERS[gate]
@@ -224,13 +287,28 @@ def test_a_registered_but_unshipped_runner_says_missing_not_unroutable(gate_dirs
     assert result["reason"] != "provider_not_installed"
 
 
-def test_shipped_script_runners_are_on_disk():
-    """The two gates that DO have runners must keep having them — a rename
-    that leaves the registry pointing at nothing would otherwise turn every
-    one of their runs into a silent `gate_runner_missing`."""
+def test_harness_lane_gates_name_the_same_lane_their_standalone_scripts_use():
+    """Adapted for C6 step 1. This used to assert glm_gate/kimi_gate's registry
+    name pointed at a runner FILE on disk — a rename leaving nothing on disk
+    would have turned every run into a silent gate_runner_missing. Those gates
+    are now harness-lane: their name is the provider string the governed
+    dispatcher routes on, matching the literal each standalone script
+    dispatches (glm_gate.py -> "glm-harness", kimi_gate.py -> "kimi"). Asking
+    (VNX_ROOT / name).exists() here would be the OI-1490 invented-name mistake
+    read as a file instead of a binary. The routing-correctness guard for a
+    lane is this cross-module consistency pin, not a file existence check.
+    """
+    lane_identifiers = {"kimi_gate": "kimi", "glm_gate": "glm-harness"}
     for gate in ("kimi_gate", "glm_gate"):
-        _kind, name = _rec.GATE_PROVIDERS[gate]
-        assert (VNX_ROOT / name).exists(), f"{gate} names a runner that is not on disk: {name}"
+        kind, name = _rec.GATE_PROVIDERS[gate]
+        assert kind == _rec.GATE_PROVIDER_HARNESS_LANE
+        assert name == lane_identifiers[gate], (
+            f"{gate} must name the lane its standalone script dispatches on, "
+            f"not {name!r}"
+        )
+        assert "/" not in name and not name.endswith(".py"), (
+            f"{gate} names a provider lane ({name!r}), not a runner path"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +387,14 @@ def test_the_delegating_writer_produces_the_registry_shape(tmp_path, monkeypatch
     )
     check = record["provider_check"]
 
-    assert check["provider_kind"] == "script_runner", (
-        "the delegating writer must produce the SAME shape as the direct one, "
-        "or one file carries two shapes of one event_type"
+    assert check["provider_kind"] == "harness_lane", (
+        "C6 step 1: glm_gate is now a harness-lane gate, and the delegating "
+        "writer must produce the SAME shape as the direct one, or one file "
+        "carries two shapes of one event_type"
     )
-    assert check["binary_name"] == "scripts/glm_gate.py"
+    assert check["binary_name"] == "glm-harness", (
+        "the lane identifier the dispatcher routes on, not a runner file path"
+    )
     assert check["binary_found"] is True
 
 
@@ -353,12 +434,18 @@ def _classify(gate: str):
 def test_request_time_kimi_is_not_a_missing_binary():
     """The caller passed binary_name="kimi_gate.py" — not a binary, never was,
     so the lookup could only fail and the gate could only be booked
-    provider_not_installed."""
+    provider_not_installed.
+
+    C6 step 1 note: kimi_gate is now harness-lane, so the detail names the
+    lane ("harness-lane") instead of the runner file. The invariant that
+    matters is unchanged: this is still never a PATH lookup on an invented
+    binary name.
+    """
     reason, detail = _classify("kimi_gate")
 
     assert reason != "provider_not_installed"
     assert reason == "gate_runner_missing"
-    assert "scripts/kimi_gate.py" in detail
+    assert "harness-lane" in detail
     assert "not a PATH lookup" in detail
 
 

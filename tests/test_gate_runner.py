@@ -1179,3 +1179,130 @@ class TestGateWorktreeCheckout:
             project_root=custom_root,
         )
         mock_remove.assert_called_once_with(fake_worktree, project_root=custom_root)
+
+
+class TestHarnessLaneDelegation:
+    """C6 step 1: glm_gate/kimi_gate run through the governed dispatcher.
+
+    The third strategy starts NO process of its own — it calls the SAME
+    dispatcher the standalone glm_gate.py/kimi_gate.py scripts call
+    (``plan_gate_panel._make_default_dispatcher``) and materializes the
+    returned report into the runner's receipt + unified report, exactly like
+    codex/gemini stdout. The ``Popen`` patch below is the RED guard: an
+    implementation that directly started a subprocess (the old path_binary
+    behaviour) would blow up here, while the delegating strategy never touches
+    ``Popen``.
+    """
+
+    @staticmethod
+    def _fake_dispatcher(report_text):
+        calls = []
+
+        def factory(data_dir, timeout_seconds, *, role="plan-reviewer"):
+            def dispatch(provider, model, instruction, dispatch_id):
+                calls.append({
+                    "data_dir": data_dir,
+                    "timeout_seconds": timeout_seconds,
+                    "role": role,
+                    "provider": provider,
+                    "model": model,
+                    "instruction": instruction,
+                    "dispatch_id": dispatch_id,
+                })
+                return report_text
+            return dispatch
+
+        return factory, calls
+
+    def test_harness_lane_produces_a_receipt_and_unified_report(
+        self, gate_env, monkeypatch,
+    ):
+        report_text = "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n"
+        factory, calls = self._fake_dispatcher(report_text)
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+        monkeypatch.setattr(
+            gate_runner.subprocess, "Popen",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("harness-lane must delegate, not start a process")
+            ),
+        )
+
+        report_path = str(gate_env["reports_dir"] / "kimi-gate-pr1.md")
+        dispatch_id = "kimi-gate-pr1-1788815204"
+        payload = _make_request_payload(
+            gate="kimi_gate",
+            prompt="Review this diff for correctness and security",
+            report_path=report_path,
+            dispatch_id=dispatch_id,
+        )
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1)
+
+        # Receipt: a completed result record on disk with contract evidence.
+        assert result["status"] == "completed", result.get("reason_detail")
+        assert result["contract_hash"] != ""
+        assert result["dispatch_id"] == dispatch_id
+
+        result_file = gate_env["results_dir"] / "pr-1-kimi_gate.json"
+        assert result_file.exists()
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["status"] == "completed"
+        assert saved["dispatch_id"] == dispatch_id
+
+        # Unified report: the dispatcher's text materialized to report_path.
+        report = Path(report_path)
+        assert report.exists()
+        assert "No blocking findings." in report.read_text(encoding="utf-8")
+
+        # Delegation, once, through the governed seam with the lane's args.
+        assert len(calls) == 1
+        assert calls[0]["provider"] == "kimi"
+        assert calls[0]["role"] == "review-gate"
+        assert calls[0]["model"] == "kimi-k3"
+        assert calls[0]["dispatch_id"] == dispatch_id
+        assert calls[0]["instruction"] == "Review this diff for correctness and security"
+
+    def test_harness_lane_builds_the_diff_prompt_when_none_is_supplied(
+        self, gate_env, monkeypatch,
+    ):
+        """The production shape: review_gate_manager builds no prompt for these
+        gates, so the runner must assemble it from the PR diff exactly like the
+        standalone scripts do — diff wrapped as delimited untrusted data and the
+        verbatim pass|fail|blocked verdict contract attached."""
+        report_text = "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n"
+        factory, calls = self._fake_dispatcher(report_text)
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+        monkeypatch.setattr(
+            GateRunner, "_fetch_gh_pr_diff",
+            staticmethod(lambda pr: "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new"),
+        )
+
+        report_path = str(gate_env["reports_dir"] / "kimi-gate-pr2.md")
+        dispatch_id = "kimi-gate-pr2-1788815205"
+        payload = _make_request_payload(
+            gate="kimi_gate", report_path=report_path, dispatch_id=dispatch_id,
+        )
+        payload.pop("prompt")  # production request payloads carry no prompt key
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=2)
+
+        assert result["status"] == "completed", result.get("reason_detail")
+        assert result["contract_hash"] != ""
+
+        assert len(calls) == 1
+        instruction = calls[0]["instruction"]
+        assert "BEGIN PR DIFF: UNTRUSTED DATA" in instruction
+        assert "-old" in instruction and "+new" in instruction
+        assert '"verdict": "pass|fail|blocked"' in instruction

@@ -243,7 +243,7 @@ class GateResultParserMixin:
         ``gate_runner``'s, on the other of the two paths; fixing one and
         leaving the other is a promise the code does not keep.
 
-        Three answers, matching gate_runner's:
+        Four answers, matching gate_runner's:
 
         * unregistered gate -> ``unsupported_gate_type``; a routing bug, not an
           environment complaint.
@@ -251,11 +251,18 @@ class GateResultParserMixin:
           the caller's own availability check (``_kimi_gate_available`` and
           friends, which test for the runner FILE) already said no, so the
           runner is absent — never a PATH question.
+        * harness-lane gate -> ``gate_runner_missing`` for the same reason: the
+          request-time availability check still tests the runner FILE (the
+          availability-fix that makes it lane-aware is a later step), so the
+          honest answer is "the runner is absent", never a PATH lookup on the
+          provider string.
         * PATH-binary gate -> the env-flag / which-lookup logic below,
           unchanged, on the registry's name.
         """
         from gate_recorder import (  # noqa: PLC0415
-            GATE_PROVIDER_SCRIPT_RUNNER, resolve_gate_provider,
+            GATE_PROVIDER_HARNESS_LANE,
+            GATE_PROVIDER_SCRIPT_RUNNER,
+            resolve_gate_provider,
         )
 
         provider = resolve_gate_provider(gate)
@@ -263,7 +270,8 @@ class GateResultParserMixin:
             return (
                 "unsupported_gate_type",
                 f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a PATH "
-                f"binary or a script runner; no binary name is guessed from the gate name",
+                f"binary, a script runner, or a harness lane; no binary name is guessed "
+                f"from the gate name",
             )
         provider_kind, binary_name = provider
         if provider_kind == GATE_PROVIDER_SCRIPT_RUNNER:
@@ -271,6 +279,13 @@ class GateResultParserMixin:
                 "gate_runner_missing",
                 f"{binary_name} does not exist — {gate} is a script runner and its "
                 f"runner is not on disk; this is not a PATH lookup",
+            )
+        if provider_kind == GATE_PROVIDER_HARNESS_LANE:
+            return (
+                "gate_runner_missing",
+                f"{gate} is a harness-lane gate (provider {binary_name}); its "
+                f"request-time availability check said no and its runner file is "
+                f"not on disk — this is not a PATH lookup",
             )
 
         # NOTE: this per-gate (env_var, default) map is NOT the same data as

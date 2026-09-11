@@ -328,8 +328,8 @@ class TestC7InWindowKeyNotEvicted:
 # Note on the PR-1762 anecdote in the dispatch prompt (glm_gate UNAVAILABLE
 # then kimi_gate PASS): that specific pair does NOT collide under the
 # CURRENT key, because "gate" already differs (glm_gate vs kimi_gate) and
-# because glm_gate.py/kimi_gate.py are GATE_PROVIDER_SCRIPT_RUNNER gates
-# that record their own verdict via gate_recorder.record_terminal_result —
+# because glm_gate.py/kimi_gate.py record their own verdict via
+# gate_recorder.record_terminal_result —
 # a direct JSON-file write with its own overwrite guard, never through
 # append_receipt_payload/idempotency.py at all. The real, reachable
 # collision is the SAME gate re-verdicted on the SAME PR (the
