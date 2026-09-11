@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
-from governance_receipts import utc_now_iso
+from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
 
 logger = logging.getLogger(__name__)
@@ -1065,6 +1065,108 @@ def publish_forge_review_summary(
         )
 
 
+def _emit_terminal_result_receipt(
+    payload: Dict[str, Any],
+    *,
+    gate: str,
+    pr_ref: str,
+) -> None:
+    """Emit the RESULT receipt for a decided gate verdict (OI-1702/OI-1703).
+
+    The request-time writers (gate_request_handler) book a ``review_gate``
+    receipt when the gate is REQUESTED, so every gate receipt in the ledger
+    describes a request: 753 investigate, 22 reject, 0 accept. The result
+    writers never booked a second receipt for the OUTCOME, so 456 decided
+    results (237 completed + 219 pass) were invisible to the ledger, and the
+    provider/model the result files already carried never reached it either.
+    This emits that missing receipt at the moment the verdict lands on disk.
+
+    Called ONLY after the write has landed (both call sites gate on that) and
+    outside the slot lock. A receipt append is a consequence of the record,
+    never a condition for it: a failure here must not undo or fail a verdict
+    that is already on disk, so it is logged and swallowed — the same
+    discipline as :func:`publish_forge_check_run`.
+
+    The receipt ``status`` is mapped onto the receipt's own verdict
+    vocabulary: ``gate_status`` speaks PASS/FAIL literals while
+    ``compute_verdict`` accepts ``SUCCESS_STATUSES`` and rejects
+    ``HARD_FAILURE_STATUSES``. A bare ``pass``/``fail`` sits in NEITHER set
+    and would book ``investigate`` — exactly the 753-investigate residue this
+    fixes. Decidedness is :func:`gate_status.is_pass`, not the raw status
+    literal: a ``completed`` record WITH blocking findings is a fail, and
+    booking it as ``completed`` would mint an accept receipt for a rejected
+    PR.
+
+    ``provider``/``model`` come from the payload the writer already holds and
+    are omitted when absent — never derived from the gate name.
+    """
+    from gate_status import (  # noqa: PLC0415
+        FAIL_STATES, PASS_STATES, canonical_status, is_pass,
+    )
+
+    status = canonical_status(payload)
+    if status not in (PASS_STATES | FAIL_STATES):
+        # not_executable / unavailable / in-flight: not a decided verdict, so
+        # there is no outcome receipt to book.
+        return
+    passed, _reason = is_pass(payload)
+    receipt_status = "completed" if passed else "failed"
+    blocking = payload.get("blocking_findings") or []
+    blocking_count = len(blocking) if isinstance(blocking, list) else 0
+    if passed:
+        tests_passed, tests_failed = 1, 0
+    else:
+        tests_passed, tests_failed = 0, max(1, blocking_count)
+    verification = {
+        "method": "gate_review",
+        "tests_run": 1,
+        "tests_passed": tests_passed,
+        "tests_failed": tests_failed,
+        "command": None,
+        "pr_ref": pr_ref,
+        "push_verified": None,
+        "spec_deviation": None,
+    }
+
+    fields: Dict[str, Any] = {
+        "gate": gate,
+        "gate_status": status,
+        "contract_hash": (payload.get("contract_hash") or "").strip(),
+        "report_path": (payload.get("report_path") or "").strip(),
+        "blocking_count": blocking_count,
+        "verification": verification,
+    }
+    for key in ("dispatch_id", "provider", "model", "pr_id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            fields[key] = value
+    pr_number = payload.get("pr_number")
+    if isinstance(pr_number, int) and not isinstance(pr_number, bool):
+        fields["pr_number"] = pr_number
+
+    try:
+        emit_governance_receipt(
+            "review_gate_result",
+            receipt_kind="review_gate",
+            status=receipt_status,
+            terminal="T0",
+            **fields,
+        )
+    # vnx-broad-except: the verdict is already on disk and this hook may not
+    # be able to fail the gate run that produced it. The receipt-append
+    # failure surface is open-ended (store resolution, lock contention, a lazy
+    # import); narrowing it would let anything outside that surface take down
+    # a write that has already succeeded. Nothing is silent: the branch below
+    # logs with the gate and pr_ref so the missing outcome stays visible.
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "gate_recorder: review_gate_result receipt NOT emitted for "
+            "gate=%s pr_ref=%s — %s: %s. The result on disk is unchanged; "
+            "the ledger is missing this outcome until a repair path emits it.",
+            gate, pr_ref, type(exc).__name__, exc,
+        )
+
+
 def write_result_guarded(
     result_path: Path,
     payload: Dict[str, Any],
@@ -1121,6 +1223,7 @@ def write_result_guarded(
     # write that never happened (the same reason record_failure gates its
     # register emit on ``written``, OI-1469/OI-1470).
     publish_forge_check_run(payload, gate=gate, result_path=result_path)
+    _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_ref)
     return payload, True
 
 
@@ -1212,6 +1315,10 @@ def record_terminal_result(
     # raises above and never reaches this line, so the same "only publish a
     # write that landed" rule holds here as in write_result_guarded.
     publish_forge_check_run(payload, gate=gate, result_path=result_path)
+    # The receipt reads the POST-reclassification payload: a degenerate
+    # pass/fail was rewritten to ``unavailable`` above, so
+    # _emit_terminal_result_receipt sees no decided verdict and emits nothing.
+    _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_id)
     return result_path
 
 

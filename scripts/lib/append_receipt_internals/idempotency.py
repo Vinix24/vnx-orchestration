@@ -119,11 +119,33 @@ def _fsync_receipt_append(fh: Any, *, context: str) -> None:
     fsync_fileno(fh, context=context)
 
 
+def _resolve_state_dir_env_first() -> Path:
+    """Resolve ``VNX_STATE_DIR`` without spawning a git subprocess.
+
+    The receipt-append write path must not depend on git. ``facade.ensure_env()``
+    walks ``resolve_paths()`` -> ``_git_toplevel()`` and spawns
+    ``git rev-parse --show-toplevel`` on every call, so booking a result
+    receipt for a gate outcome used to fork a subprocess on every append
+    (OI-1702/OI-1703 regression, dispatch 20260911-fix1836-subprocess-uit-schrijfpad).
+
+    Resolution order is env-first: in a governed run the dispatcher has already
+    exported ``VNX_STATE_DIR`` into the environment before the gate runner (and
+    therefore the receipt writer) starts, so the env var is authoritative and
+    sufficient — ``resolve_paths()`` itself already prefers it over the derived
+    default (``vnx_paths.py``). Only a cold process that never ran the resolver
+    falls back to the full ``ensure_env()`` bootstrap, which is pre-existing
+    behaviour and not on the hot write path of a governed run.
+    """
+    env = (os.environ.get("VNX_STATE_DIR") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    return Path(facade.ensure_env()["VNX_STATE_DIR"])
+
+
 def _resolve_receipts_file(receipts_file: Optional[str] = None) -> Path:
     if receipts_file:
         return Path(receipts_file).expanduser()
-    paths = facade.ensure_env()
-    return Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
+    return _resolve_state_dir_env_first() / "t0_receipts.ndjson"
 
 
 def _lock_file_for(receipts_path: Path) -> Path:
