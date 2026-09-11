@@ -480,14 +480,24 @@ def read_worktree_base_sha(
 def _worktree_lock(root: Path):
     """Serialize `git worktree` add/remove via an exclusive fcntl lock.
 
-    Uses the SAME lock path as tmux_worktree._flock_context
-    (``<repo>/.git/worktrees/.vnx-lock``) so the provider lane and the tmux lane
-    never run concurrent ``git worktree add/remove`` against one repo. Concurrent
-    adds contend on git's internal index/HEAD locks and fail in ~0.8s, which under
-    VNX_BENCH_REQUIRE_ISOLATION=1 cascades into spurious isolation DNFs (observed
-    2026-06-18 at --parallel 8: every provider cell DNF'd at 0.8s).
+    Uses the SAME lock path as tmux_worktree._flock_context and
+    gate_worktree._worktree_lock
+    (``<git-common-dir>/worktrees/.vnx-lock``) so the provider lane, the tmux
+    lane and the gate lane never run concurrent ``git worktree add/remove``
+    against one repo. The common dir is resolved via
+    ``git rev-parse --git-common-dir`` (see ``git_common.git_common_dir``) so
+    this works from a linked worktree where ``.git`` is a file, not a directory
+    — the bug fixed in OI-1713: the previous ``(root / ".git").resolve() /
+    "worktrees"`` raised ``NotADirectoryError`` in every linked worktree, which
+    meant the serialisation guarantee below did not hold there either (the
+    provider lane and the tmux lane would have picked different lock paths).
+    Concurrent adds contend on git's internal index/HEAD locks and fail in
+    ~0.8s, which under VNX_BENCH_REQUIRE_ISOLATION=1 cascades into spurious
+    isolation DNFs (observed 2026-06-18 at --parallel 8: every provider cell
+    DNF'd at 0.8s).
     """
-    lock_dir = (root / ".git").resolve() / "worktrees"
+    from git_common import git_common_dir  # deferred import keeps module-load cost off consumers that never lock
+    lock_dir = git_common_dir(root) / "worktrees"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / ".vnx-lock"
     with open(lock_path, "a") as lf:

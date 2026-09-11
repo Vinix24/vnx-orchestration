@@ -78,21 +78,11 @@ def _current_branch(wt: "Path | str") -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _git_common_dir(repo_root: Path) -> Path:
-    """Return the git common dir (handles bare worktrees where .git is a file)."""
-    result = _run(["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"])
-    if result.returncode == 0:
-        raw = result.stdout.strip()
-        p = Path(raw)
-        return p if p.is_absolute() else (repo_root / p).resolve()
-    # Fallback: assume standard layout
-    return (repo_root / ".git").resolve()
-
-
 @contextmanager
 def _flock_context(repo_root: Path):
     """Serialize worktree add/remove via an exclusive fcntl lock on <git-common-dir>/worktrees/.vnx-lock."""
-    git_dir = _git_common_dir(repo_root)
+    from git_common import git_common_dir
+    git_dir = git_common_dir(repo_root)
     lock_dir = git_dir / "worktrees"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / ".vnx-lock"
