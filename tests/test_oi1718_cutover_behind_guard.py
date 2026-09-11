@@ -45,12 +45,8 @@ if str(REPO_ROOT / "scripts" / "lib") not in sys.path:
 import config_registry as cr
 import vnx_cli.commands.update as update_module
 from vnx_cli.commands.update import (
-    CutoverRefusedError,
-    DEFAULT_CUTOVER_MAX_BEHIND_COMMITS,
     _atomic_symlink_flip,
-    _cutover_max_behind_commits,
     _do_rollback,
-    _measure_behind_main,
     vnx_update,
 )
 from vnx_cli.commands.release import vnx_release_publish
@@ -131,21 +127,29 @@ def _flip(root, target_dir, audit_log, **kwargs):
 # ---------------------------------------------------------------------------
 
 def test_measure_behind_main_counts_commits(tmp_path):
+    from vnx_cli.commands.update import _measure_behind_main
+
     src = _source_repo(tmp_path / "src", ahead=5)
     assert _measure_behind_main(str(src), "v1.0.0") == 5
 
 
 def test_measure_behind_main_zero_for_tip_tag(tmp_path):
+    from vnx_cli.commands.update import _measure_behind_main
+
     src = _source_repo(tmp_path / "src", ahead=0)
     assert _measure_behind_main(str(src), "v1.0.0") == 0
 
 
 def test_measure_behind_main_unknown_for_missing_ref(tmp_path):
+    from vnx_cli.commands.update import _measure_behind_main
+
     src = _source_repo(tmp_path / "src", ahead=2)
     assert _measure_behind_main(str(src), "v9.9.9") is None
 
 
 def test_measure_behind_main_unknown_for_unreachable_source(tmp_path):
+    from vnx_cli.commands.update import _measure_behind_main
+
     missing = tmp_path / "no-such-repo"
     assert _measure_behind_main(str(missing), "v1.0.0") is None
 
@@ -153,6 +157,8 @@ def test_measure_behind_main_unknown_for_unreachable_source(tmp_path):
 def test_measure_behind_main_unknown_when_source_has_no_main(tmp_path):
     """A source without a ``main`` branch cannot define behindness — UNKNOWN,
     never 0."""
+    from vnx_cli.commands.update import _measure_behind_main
+
     src = tmp_path / "src"
     src.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "trunk"], cwd=src, check=True)
@@ -168,17 +174,29 @@ def test_measure_behind_main_unknown_when_source_has_no_main(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_threshold_default_when_nothing_set(monkeypatch):
+    from vnx_cli.commands.update import (
+        DEFAULT_CUTOVER_MAX_BEHIND_COMMITS,
+        _cutover_max_behind_commits,
+    )
+
     monkeypatch.delenv("VNX_CUTOVER_MAX_BEHIND_COMMITS", raising=False)
     monkeypatch.delenv("VNX_OVERRIDE_CUTOVER_MAX_BEHIND_COMMITS", raising=False)
     assert _cutover_max_behind_commits() == DEFAULT_CUTOVER_MAX_BEHIND_COMMITS
 
 
 def test_threshold_env_override(monkeypatch):
+    from vnx_cli.commands.update import _cutover_max_behind_commits
+
     monkeypatch.setenv("VNX_CUTOVER_MAX_BEHIND_COMMITS", "2")
     assert _cutover_max_behind_commits() == 2
 
 
 def test_threshold_invalid_value_falls_back_to_default_loudly(monkeypatch, capsys):
+    from vnx_cli.commands.update import (
+        DEFAULT_CUTOVER_MAX_BEHIND_COMMITS,
+        _cutover_max_behind_commits,
+    )
+
     monkeypatch.setenv("VNX_CUTOVER_MAX_BEHIND_COMMITS", "banana")
     assert _cutover_max_behind_commits() == DEFAULT_CUTOVER_MAX_BEHIND_COMMITS
     assert "VNX_CUTOVER_MAX_BEHIND_COMMITS" in capsys.readouterr().err
@@ -188,6 +206,8 @@ def test_registry_entry_registered_with_description():
     """The threshold lives in the config registry (requirement 4), with a
     written-out description — not a bare number in code. The registry default
     mirrors the code fallback, the registry's own contract."""
+    from vnx_cli.commands.update import DEFAULT_CUTOVER_MAX_BEHIND_COMMITS
+
     entry = cr.CONFIG_REGISTRY["VNX_CUTOVER_MAX_BEHIND_COMMITS"]
     assert entry.default == str(DEFAULT_CUTOVER_MAX_BEHIND_COMMITS)
     assert entry.type == "string"
@@ -227,6 +247,8 @@ def test_under_threshold_proceeds_and_names_count(
 def test_over_threshold_refused_names_count_ref_and_way_out(
     tmp_path, central_root, audit_log, monkeypatch
 ):
+    from vnx_cli.commands.update import CutoverRefusedError
+
     src = _source_repo(tmp_path / "src", ahead=5)
     monkeypatch.setenv("VNX_CUTOVER_MAX_BEHIND_COMMITS", "2")
     target_dir = _flip_target(central_root, "v1.0.0")
@@ -284,6 +306,8 @@ def test_over_threshold_empty_reason_is_a_refusal(
     tmp_path, central_root, audit_log, monkeypatch, empty_reason
 ):
     """The escape hatch demands an explicit reason — a blank one is refused."""
+    from vnx_cli.commands.update import CutoverRefusedError
+
     src = _source_repo(tmp_path / "src", ahead=5)
     monkeypatch.setenv("VNX_CUTOVER_MAX_BEHIND_COMMITS", "2")
     target_dir = _flip_target(central_root, "v1.0.0")
