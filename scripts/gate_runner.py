@@ -68,6 +68,36 @@ GATE_CLI_ARGS: Dict[str, List[str]] = {
 # actual failure reason, e.g. a quota-reset time, behind a bare exit code).
 _REASON_DETAIL_TAIL_CHARS = 4000
 
+# Harness-lane gates (glm_gate/kimi_gate) delegate to the governed dispatcher
+# (C6 step 1). These constants mirror what scripts/glm_gate.py and
+# scripts/kimi_gate.py already hold, so a run through gate_runner's third
+# strategy has the same model, timeout, diff cap and verdict contract as the
+# same gate run standalone — verbatim effect, different entry point.
+_HARNESS_LANE_MODEL: Dict[str, tuple] = {
+    "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
+    "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
+}
+# glm_gate.py/kimi_gate.py drive the governed lane with DEFAULT_TIMEOUT=900.
+# headless_adapter.gate_timeout() has no entry for these gates and would fall
+# back to 600, cutting a run short that the standalone gate would have let
+# finish. The dispatcher's timeout_seconds is the lane's own deadline, so it
+# must match the standalone gate, not the runner's PATH-binary default.
+_HARNESS_LANE_TIMEOUT_SECONDS = 900
+_HARNESS_LANE_MAX_DIFF_CHARS = 50000
+# Verbatim-identical to glm_gate._VERDICT_CONTRACT and kimi_gate._VERDICT_CONTRACT.
+_HARNESS_LANE_VERDICT_CONTRACT = (
+    "When done, end your report with a structured JSON verdict ONLY, in a fenced block:\n"
+    "```json\n"
+    "{\n"
+    '  "verdict": "pass|fail|blocked",\n'
+    '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
+    '  "residual_risk": "remaining risk or null"\n'
+    "}\n"
+    "```\n"
+    "verdict=fail/blocked ONLY for a real, blocking correctness/security/governance issue "
+    "introduced by THIS diff. Style nits are severity=info, never blocking.\n"
+)
+
 
 def _tail(text: str, limit: int) -> str:
     """Return the last `limit` characters of `text`, stripped."""
@@ -156,6 +186,11 @@ class GateRunner:
         """
         provider = _rec.resolve_gate_provider(gate)
         using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
+        # Harness-lane gates (C6 step 1) delegate to the governed dispatcher
+        # instead of a PATH binary or a spawned script. Resolved here so the
+        # dispatch below routes to _run_harness_lane_path, never to a PATH
+        # lookup on the provider string.
+        harness_provider = ""
 
         if not using_vertex:
             # OI-1490: three outcomes, not one. Before this, an unregistered
@@ -173,8 +208,8 @@ class GateRunner:
                     reason="unsupported_gate_type",
                     reason_detail=(
                         f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
-                        f"PATH binary or a script runner; this runner will not guess a "
-                        f"binary name from the gate name"
+                        f"PATH binary, a script runner, or a harness lane; this runner "
+                        f"will not guess a binary name from the gate name"
                     ),
                     request_payload=request_payload,
                     requests_dir=self._requests_dir,
@@ -182,7 +217,13 @@ class GateRunner:
                     state_dir=self._state_dir,
                 )
             kind, provider_name = provider
-            if kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
+            if kind == _rec.GATE_PROVIDER_HARNESS_LANE:
+                # C6 step 1: glm_gate/kimi_gate route through the governed
+                # dispatcher, not a PATH binary. The provider string is the
+                # lane's own identifier ("glm-harness"/"kimi") — never a
+                # shutil.which target.
+                harness_provider = provider_name
+            elif kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
                 pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
                 # Not-shipped and not-routable are different answers and the
                 # reader acts differently on each. deepseek_gate is registered
@@ -217,17 +258,18 @@ class GateRunner:
                     results_dir=self._results_dir,
                     state_dir=self._state_dir,
                 )
-            binary = provider_name
-            if shutil.which(binary) is None:
-                return _rec.record_not_executable(
-                    gate=gate, pr_number=pr_number, pr_id=pr_id,
-                    reason="provider_not_installed",
-                    reason_detail=f"{binary} binary not found in PATH",
-                    request_payload=request_payload,
-                    requests_dir=self._requests_dir,
-                    results_dir=self._results_dir,
-                    state_dir=self._state_dir,
-                )
+            else:
+                binary = provider_name
+                if shutil.which(binary) is None:
+                    return _rec.record_not_executable(
+                        gate=gate, pr_number=pr_number, pr_id=pr_id,
+                        reason="provider_not_installed",
+                        reason_detail=f"{binary} binary not found in PATH",
+                        request_payload=request_payload,
+                        requests_dir=self._requests_dir,
+                        results_dir=self._results_dir,
+                        state_dir=self._state_dir,
+                    )
         else:
             binary = GATE_BINARIES.get(gate, "")
 
@@ -241,6 +283,12 @@ class GateRunner:
             return self._run_vertex_path(
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
                 prompt=prompt, request_payload=request_payload, pid=os.getpid(),
+            )
+
+        if harness_provider:
+            return self._run_harness_lane_path(
+                gate=gate, provider=harness_provider, prompt=prompt,
+                pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
             )
 
         return self._run_subprocess_path(
@@ -266,6 +314,8 @@ class GateRunner:
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
+        elif not prompt and gate in ("glm_gate", "kimi_gate"):
+            prompt = self._build_harness_lane_prompt(gate, request_payload)
         if (
             using_vertex
             and gate == "gemini_review"
@@ -382,6 +432,70 @@ class GateRunner:
         return _art.materialize_artifacts(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
             stdout=raw_text, request_payload=request_payload,
+            duration_seconds=time.monotonic() - _start,
+            requests_dir=self._requests_dir, results_dir=self._results_dir,
+            reports_dir=self._reports_dir,
+        )
+
+    def _run_harness_lane_path(
+        self,
+        *,
+        gate: str,
+        provider: str,
+        prompt: str,
+        pr_number: Optional[int],
+        pr_id: str,
+        request_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute a harness-lane gate (glm_gate/kimi_gate) through the governed dispatcher (C6 step 1).
+
+        This strategy starts NO process of its own. It calls the SAME dispatcher
+        ``glm_gate.py``/``kimi_gate.py`` call
+        (``plan_gate_panel._make_default_dispatcher``), which runs the provider
+        through its governed lane, writes the unified report, and returns its
+        text. That text is then materialized into the runner's receipt + report
+        exactly like codex/gemini stdout. A provider-outage/dispatch failure is
+        an execution failure (``unavailable``), never ``failed`` — the same
+        OI-1142 separation the standalone gates enforce.
+        """
+        # Lazy import: plan_gate_panel pulls in the whole governed dispatch
+        # graph, and only the harness-lane path needs it.
+        from plan_gate_panel import _make_default_dispatcher
+
+        # reports_dir is <data_dir>/unified_reports, so its parent is the data
+        # dir the dispatcher resolves and the lane writes its report into.
+        data_dir = self._reports_dir.parent
+        dispatch_id = request_payload.get("dispatch_id") or (
+            f"{gate}-pr{pr_number if pr_number is not None else pr_id}-{int(time.time())}"
+        )
+        model_env, default_model = _HARNESS_LANE_MODEL.get(gate, ("", ""))
+        model = os.environ.get(model_env, default_model) if model_env else default_model
+
+        _start = time.monotonic()
+        try:
+            dispatcher = _make_default_dispatcher(
+                str(data_dir), _HARNESS_LANE_TIMEOUT_SECONDS, role="review-gate",
+            )
+            report_text = dispatcher(provider, model, prompt, dispatch_id)
+        except Exception as exc:  # noqa: BLE001 — governed dispatch/report-read failure
+            return _rec.record_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                result={
+                    "reason": "harness_lane_dispatch_error",
+                    "reason_detail": str(exc),
+                    "duration_seconds": time.monotonic() - _start,
+                    "partial_output_lines": 0,
+                    "runner_pid": os.getpid(),
+                },
+                request_payload=request_payload,
+                requests_dir=self._requests_dir,
+                results_dir=self._results_dir,
+            )
+
+        request_payload["dispatch_id"] = dispatch_id
+        return _art.materialize_artifacts(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            stdout=report_text, request_payload=request_payload,
             duration_seconds=time.monotonic() - _start,
             requests_dir=self._requests_dir, results_dir=self._results_dir,
             reports_dir=self._reports_dir,
@@ -504,6 +618,28 @@ class GateRunner:
         )
         formatted = format_for_provider(assembled, "gemini")
         return f"{formatted['system_instruction']}\n\n---\n\n{formatted['prompt']}"
+
+    @staticmethod
+    def _build_harness_lane_prompt(gate: str, request_payload: Dict[str, Any]) -> str:
+        """Build the diff-review prompt for a harness-lane gate (glm_gate/kimi_gate).
+
+        Mirrors ``glm_gate._build_prompt`` / ``kimi_gate._build_prompt``: the PR
+        diff is delimited untrusted data (OI-1442), the verdict contract is the
+        pass|fail|blocked shape both standalone gates share verbatim, and the
+        diff is capped at the same MAX_DIFF_CHARS those scripts apply. The
+        prompt is what the governed dispatcher hands to the lane, so a
+        harness-lane run must not silently diverge from the same gate run
+        directly through its own script.
+        """
+        pr_number = request_payload.get("pr_number")
+        diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        return build_review_prompt(
+            gate_name=gate,
+            pr=str(pr_number),
+            diff_text=diff_content,
+            verdict_contract=_HARNESS_LANE_VERDICT_CONTRACT,
+            max_chars=_HARNESS_LANE_MAX_DIFF_CHARS,
+        )
 
     # Subprocess execution — stays here so tests can patch gate_runner.subprocess.Popen,
     # gate_runner.os.read, gate_runner.select.select, gate_runner.os.getpgid

@@ -28,7 +28,7 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
     "wiring_gate": "VNX_WIRING_GATE_REQUIRED",
 }
 
-# How each gate's provider is actually reached. Two KINDS, kept apart because
+# How each gate's provider is actually reached. Three KINDS, kept apart because
 # their failure modes are different and collapsing them is OI-1490.
 #
 # PATH_BINARY   the gate drives a CLI that must be on PATH, with a prompt on
@@ -37,6 +37,13 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
 #               its own contract, dispatches, parses the verdict and writes
 #               its own result record. There is no PATH binary to look for,
 #               and there never will be.
+# HARNESS_LANE  the gate routes through the governed dispatcher
+#               (plan_gate_panel._make_default_dispatcher ->
+#               provider_dispatch), the SAME lane glm_gate.py/kimi_gate.py
+#               already drive. The name is the provider string that lane
+#               dispatches on, not a file and not a PATH binary: gate_runner
+#               calls the dispatcher and feeds the returned report into the
+#               artifact pipeline (C6, gate-runner-provider-agnostisch step 1).
 #
 # Before OI-1490 there was no second kind: a gate absent from the mapping fell
 # back to its own NAME as a binary, so `shutil.which("kimi_gate")` failed and
@@ -51,6 +58,7 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
 # cannot happen.
 GATE_PROVIDER_PATH_BINARY = "path_binary"
 GATE_PROVIDER_SCRIPT_RUNNER = "script_runner"
+GATE_PROVIDER_HARNESS_LANE = "harness_lane"
 
 GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
     "gemini_review": (GATE_PROVIDER_PATH_BINARY, "gemini"),
@@ -58,8 +66,8 @@ GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
     "claude_github_optional": (GATE_PROVIDER_PATH_BINARY, "gh"),
     "ci_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
     "wiring_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
-    "kimi_gate": (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/kimi_gate.py"),
-    "glm_gate": (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/glm_gate.py"),
+    "kimi_gate": (GATE_PROVIDER_HARNESS_LANE, "kimi"),
+    "glm_gate": (GATE_PROVIDER_HARNESS_LANE, "glm-harness"),
     "deepseek_gate": (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/deepseek_gate.py"),
 }
 
@@ -106,6 +114,11 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # would read as a rejected PR) and never `completed` (which would read as
     # a clean review).
     "gate_execution_degenerate",
+    # The harness-lane dispatcher (C6 step 1) raised before producing a report
+    # (provider_dispatch timeout, missing report, lane outage). An execution
+    # failure like any other: the PR was never reviewed, so it books
+    # `unavailable`, never `failed`.
+    "harness_lane_dispatch_error",
 })
 
 
@@ -166,9 +179,12 @@ def write_skip_rationale(
     (OI-1490). A script-runner gate gets an existence check on its runner
     file and never a PATH lookup: ``shutil.which("kimi_gate")`` answers a
     question nobody asked and its ``False`` was read for two days as "the
-    provider is missing" while scripts/kimi_gate.py sat on disk. An
-    unregistered gate says so in ``provider_kind`` rather than inventing a
-    binary name from the gate's own name.
+    provider is missing" while scripts/kimi_gate.py sat on disk. A
+    harness-lane gate has nothing to find either — its route is wired by
+    construction, so ``binary_found`` is True and ``binary_name`` carries the
+    provider string the dispatcher routes on. An unregistered gate says so in
+    ``provider_kind`` rather than inventing a binary name from the gate's own
+    name.
     """
     provider = resolve_gate_provider(gate)
     if provider is None:
@@ -176,6 +192,9 @@ def write_skip_rationale(
     elif provider[0] == GATE_PROVIDER_SCRIPT_RUNNER:
         kind, name = provider
         found = (_repo_root() / name).exists()
+    elif provider[0] == GATE_PROVIDER_HARNESS_LANE:
+        kind, name = provider
+        found = True
     else:
         kind, name = provider
         found = shutil.which(name) is not None
