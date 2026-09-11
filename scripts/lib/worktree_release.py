@@ -105,15 +105,6 @@ def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, **kwargs)
 
 
-def _git_common_dir(repo_root: Path) -> Path:
-    result = _run(["git", "-C", str(repo_root), "rev-parse", "--git-common-dir"])
-    if result.returncode == 0:
-        raw = result.stdout.strip()
-        p = Path(raw)
-        return p if p.is_absolute() else (repo_root / p).resolve()
-    return (repo_root / ".git").resolve()
-
-
 def _resolve_repo_root(*, dry_run: bool = True) -> Path:
     """Resolve the git repo root, applying PROJECT_ROOT-over-cwd precedence.
 

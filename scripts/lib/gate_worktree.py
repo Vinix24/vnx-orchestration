@@ -90,31 +90,15 @@ def _validate_branch(branch: str, *, gate: str, identifier: str) -> None:
 def _git_common_dir(root: Path) -> Path:
     """Resolve the shared git dir for a repo, handling linked worktrees.
 
-    In a linked git worktree ``.git`` is a ~89-byte ASCII file pointing at the
-    real gitdir, not a directory — deriving a lock path from ``root / ".git"``
-    would raise ``NotADirectoryError`` (OI-905). ``git rev-parse
-    --git-common-dir`` returns the shared git dir in both a main checkout and a
-    linked worktree (the output may be relative to cwd or absolute).
+    Thin wrapper around the shared ``git_common.git_common_dir`` (the single
+    implementation every lane imports — OI-1713). Kept as a local symbol so
+    callers and tests that import ``gate_worktree._git_common_dir`` keep
+    working. In a linked git worktree ``.git`` is an ASCII file pointing at
+    the real gitdir, not a directory — deriving a lock path from
+    ``root / ".git"`` would raise ``NotADirectoryError`` (OI-905).
     """
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=15, check=True,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        detail = getattr(exc, "stderr", "") or str(exc)
-        raise GateWorktreeError(
-            f"git rev-parse --git-common-dir failed in {root}: {detail}"
-        ) from exc
-    common = proc.stdout.strip()
-    if not common:
-        raise GateWorktreeError(
-            f"git rev-parse --git-common-dir returned empty in {root}"
-        )
-    path = Path(common)
-    if not path.is_absolute():
-        path = root / path
-    return path.resolve()
+    from git_common import git_common_dir
+    return git_common_dir(root)
 
 
 @contextmanager
@@ -125,8 +109,8 @@ def _worktree_lock(root: Path):
     (``<git-common-dir>/worktrees/.vnx-lock``) so gate execution never races
     other lanes' concurrent ``git worktree add/remove`` against this repo. The
     common dir is resolved via ``git rev-parse --git-common-dir`` (see
-    ``_git_common_dir``) so this works from a linked worktree where ``.git``
-    is a file, not a directory.
+    ``git_common.git_common_dir``) so this works from a linked worktree where
+    ``.git`` is a file, not a directory.
     """
     lock_dir = _git_common_dir(root) / "worktrees"
     lock_dir.mkdir(parents=True, exist_ok=True)
