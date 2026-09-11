@@ -25,6 +25,7 @@ from vnx_cli.commands.update import (
     _current_target,
     _emit_audit_event,
     _git_toplevel,
+    _origin_url,
     _resolve_root,
     _validate_version_name,
     _write_install_marker,
@@ -140,8 +141,46 @@ def _materialize_from_tag(root: Path, repo: str, tag: str) -> Path:
         raise RuntimeError(
             f"materialization reported success but {target_dir} does not exist"
         )
+    _set_origin_remote(target_dir)
     _write_install_marker(target_dir)
     return target_dir
+
+
+def _set_origin_remote(version_dir: Path) -> None:
+    """Point a freshly published version dir's ``origin`` at the canonical remote.
+
+    install-central.sh clones from the temp checkout publish made of the
+    source repo, so the materialized dir's origin is a temp path that
+    publish deletes right after — every later git fetch/pull in that dir
+    would fail against a vanished origin (OI-1711 defect 1). Re-point origin
+    at ``VNX_GIT_REMOTE`` (the remote ``vnx update`` clones from and fetches
+    against) before the dir is considered published. Goes through the same
+    ``writeable_version_dir`` unlock/relock route ``vnx update`` uses — the
+    dir is already read-only at this point for pinned versions. A
+    materialized dir that is not a git checkout at all (test stubs that do
+    not clone) is skipped with a warning instead of failing the publish.
+    """
+    if _git_toplevel(version_dir) != version_dir:
+        print(f"[warn] {version_dir} is not a git checkout — origin left untouched")
+        return
+    from vnx_cli import _engine
+    _engine.ensure_engine_on_path()
+    from vnx_version_ro import writeable_version_dir
+    with writeable_version_dir(version_dir):
+        existing = _origin_url(version_dir)
+        if existing is None:
+            subprocess.run(
+                ["git", "-C", str(version_dir), "remote", "add", "origin", VNX_GIT_REMOTE],
+                check=True,
+            )
+        elif existing != VNX_GIT_REMOTE:
+            subprocess.run(
+                ["git", "-C", str(version_dir), "remote", "set-url", "origin", VNX_GIT_REMOTE],
+                check=True,
+            )
+        else:
+            return
+    print(f"Origin set: {version_dir} -> {VNX_GIT_REMOTE}")
 
 
 def _release_notes_hint(tag: str) -> str:

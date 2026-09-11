@@ -150,6 +150,126 @@ def _current_target(root: Path):
     return None
 
 
+def _origin_url(version_dir: Path) -> "str | None":
+    """The fetch URL of ``origin`` in ``version_dir``, or None when absent/unreadable."""
+    result = subprocess.run(
+        ["git", "-C", str(version_dir), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _origin_usable(version_dir: Path) -> bool:
+    """True when origin exists and points somewhere a fetch can actually read.
+
+    A local-path origin whose directory vanished (exactly what a pre-OI-1711
+    publish left behind: the deleted temp checkout) counts as unusable. A
+    network URL is assumed usable — a real outage there surfaces from the
+    fetch/pull itself with its own error.
+    """
+    url = _origin_url(version_dir)
+    if not url:
+        return False
+    if "://" in url or url.startswith("git@"):
+        return True
+    local = Path(os.path.expanduser(url))
+    if not local.is_dir():
+        return False
+    probe = subprocess.run(
+        ["git", "-C", str(local), "rev-parse", "--git-dir"],
+        capture_output=True,
+    )
+    return probe.returncode == 0
+
+
+def _ensure_origin_remote(version_dir: Path) -> bool:
+    """Repair a missing or unusable ``origin`` back to ``VNX_GIT_REMOTE``.
+
+    ``vnx update`` clones from and fetches against ``VNX_GIT_REMOTE``; an
+    origin that is absent or points at a vanished path makes every fetch
+    fail with git's opaque "does not appear to be a git repository".
+    Re-pointing at the canonical remote is the repair. Returns True when a
+    repair was applied.
+    """
+    if _origin_usable(version_dir):
+        return False
+    old = _origin_url(version_dir)
+    if old is None:
+        subprocess.run(
+            ["git", "-C", str(version_dir), "remote", "add", "origin", VNX_GIT_REMOTE],
+            check=True,
+        )
+    else:
+        subprocess.run(
+            ["git", "-C", str(version_dir), "remote", "set-url", "origin", VNX_GIT_REMOTE],
+            check=True,
+        )
+    print(f"Repaired unusable origin ({old or 'none'}) -> {VNX_GIT_REMOTE}")
+    return True
+
+
+def _head_sha(version_dir: Path) -> "str | None":
+    """The commit HEAD points at, or None when it cannot be resolved."""
+    result = subprocess.run(
+        ["git", "-C", str(version_dir), "rev-parse", "--verify", "--quiet", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _head_branch(version_dir: Path) -> "str | None":
+    """The branch HEAD is attached to, or None for a detached HEAD."""
+    result = subprocess.run(
+        ["git", "-C", str(version_dir), "symbolic-ref", "-q", "--short", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _ref_sha(version_dir: Path, ref: str) -> "str | None":
+    """The commit of a local ref (e.g. ``refs/tags/v1.2.3``), or None."""
+    result = subprocess.run(
+        ["git", "-C", str(version_dir), "rev-parse", "--verify", "--quiet",
+         f"{ref}^{{commit}}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _fetch_and_checkout_ref(version_dir: Path, target: str) -> None:
+    """Fetch ``target`` from origin and point HEAD at it explicitly.
+
+    The correct update move for a tag-pinned version dir: such a clone has a
+    detached HEAD with no upstream, so ``git pull --ff-only`` fails no matter
+    how healthy origin is (OI-1711 defect 2). Fetch the ref, then check it
+    out — detached again for a tag, re-attached to ``main`` for ``edge``.
+    """
+    if target == "edge":
+        refspec = "+refs/heads/main:refs/heads/main"
+        checkout = ["checkout", "main"]
+    else:
+        refspec = f"+refs/tags/{target}:refs/tags/{target}"
+        checkout = ["checkout", "--detach", target]
+    print(f"Fetching {target} from origin and checking it out in {version_dir}...")
+    subprocess.run(
+        ["git", "-C", str(version_dir), "fetch", "--depth", "1", "origin", refspec],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(version_dir), *checkout], check=True)
+
+
 def _fetch_version(
     root: Path, target: str, dry_run: bool, audit_log: "Path | None" = None
 ) -> Path:
@@ -166,15 +286,41 @@ def _fetch_version(
     versions_dir.mkdir(parents=True, exist_ok=True)
 
     if target_dir.is_dir():
-        print(f"Pulling {target} in {target_dir}...")
         from vnx_cli import _engine as _eng2
         _eng2.ensure_engine_on_path()
         from vnx_version_ro import writeable_version_dir as _wvd
         with _wvd(target_dir):
-            subprocess.run(
-                ["git", "-C", str(target_dir), "pull", "--ff-only"],
-                check=True,
-            )
+            # Test before touching anything: an origin left pointing at a
+            # vanished path (a pre-OI-1711 publish's deleted temp checkout)
+            # is repaired to the canonical remote first, so a later git
+            # failure is never the opaque "does not appear to be a git
+            # repository" against a path that no longer exists.
+            _ensure_origin_remote(target_dir)
+            if target == "edge":
+                if _head_branch(target_dir) is None:
+                    # Detached edge checkout: pull has no upstream to work
+                    # with — re-attach to a freshly fetched main instead.
+                    _fetch_and_checkout_ref(target_dir, target)
+                else:
+                    print(f"Pulling {target} in {target_dir}...")
+                    subprocess.run(
+                        ["git", "-C", str(target_dir), "pull", "--ff-only"],
+                        check=True,
+                    )
+            else:
+                head = _head_sha(target_dir)
+                tag_sha = _ref_sha(target_dir, f"refs/tags/{target}")
+                if head and tag_sha and head == tag_sha:
+                    # A tag-pinned dir already at the target tag is DONE, not
+                    # broken: no-op with a clear message — no pull (a detached
+                    # HEAD has no upstream, so pull could never work here),
+                    # no error.
+                    print(
+                        f"{target_dir} is already at {target} ({head[:12]}) — "
+                        "nothing to pull."
+                    )
+                else:
+                    _fetch_and_checkout_ref(target_dir, target)
             # Strip and marker happen inside the context so the dir is
             # writable for both.  _write_install_marker has its own inner
             # context manager that is a no-op when already writable.
