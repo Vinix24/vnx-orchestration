@@ -37,6 +37,12 @@ from gate_status import (
     is_test_run_record as _is_test_run_record,
 )
 from dispatch_spec import Gate
+from gate_obligations import (
+    REASON_FULFILLED_BY_TAKEOVER,
+    STATUS_FULFILLED,
+    iter_obligations_in,
+    obligation_matches_pr,
+)
 
 
 @dataclass(frozen=True)
@@ -922,6 +928,187 @@ def _consult_peers_for_absence(
     }
 
 
+def _find_obligation_takeover_bookings(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+) -> List[Dict[str, Any]]:
+    """OI-1719: obligations for this exact PR+gate booked fulfilled-by-takeover.
+
+    The obligation store (``results_dir.parent / "obligations"`` — the same
+    derivation :func:`_find_gate_request_payload` uses for ``requests``) is the
+    bookkeeper's own record that the declared gate's obligation was VERVULD by
+    takeover evidence: the runner (D2e, ``gate_obligation_runner``) walked the
+    chain, found a successor with a complete-evidence verdict, and closed the
+    obligation ``fulfilled`` with ``reason=fulfilled_by_takeover_evidence`` and
+    ``result_path``/``evidence_result_path`` pointing at the successor's record.
+    The OI-1576 route reads the provenance FIELD the successor carries about
+    itself; this route reads the BOOKING the obligation carries — the manually
+    started glm gates of PRs #1830/#1832-#1838 were booked exactly this way and
+    carry no ``takeover_path`` of their own (measured live: 18 of 672 result
+    records have that field; theirs are not among them).
+
+    A booking is a candidate only when ALL of these hold — miss one and the
+    route does not open through this obligation at all:
+
+      1. the obligation joins this PR (:func:`obligation_matches_pr` — the
+         SAME join ``declared_gates_for_pr`` uses) and names this exact gate;
+      2. ``status`` is ``fulfilled`` AND ``reason`` is
+         ``fulfilled_by_takeover_evidence`` — any other fulfilment reason does
+         not open this route, and a non-fulfilled (pending, or terminal
+         ``failed`` under ``failed_by_takeover_evidence``) obligation never
+         does either.
+
+    Unreadable obligation files raise ValueError straight through (the same
+    loud semantics as ``declared_gates_for_pr``): a store nobody can read is a
+    finding, never a silent "no booking".
+    """
+    bookings: List[Dict[str, Any]] = []
+    obligations_root = results_dir.parent / "obligations"
+    for _path, record in iter_obligations_in(obligations_root):
+        if (record.get("gate") or "").strip() != gate:
+            continue
+        if not obligation_matches_pr(record, pr_id):
+            continue
+        if record.get("status") != STATUS_FULFILLED:
+            continue
+        if record.get("reason") != REASON_FULFILLED_BY_TAKEOVER:
+            continue
+        bookings.append(record)
+    return bookings
+
+
+def _consult_obligation_takeover_booking(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+    *,
+    branch: Optional[str],
+    project_id: Optional[str],
+    head_sha: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """OI-1719: the obligation store's takeover booking as a THIRD evidence
+    source, next to the successor's self-carried ``takeover_path`` (OI-1576)
+    and the independent peer signer for a confirmed absence (OI-1624/OI-1642).
+
+    Returns ``None`` when NO obligation joins this PR+gate as
+    fulfilled-by-takeover — the route is simply absent and the caller falls
+    through to the remaining branches unchanged. Once such a booking EXISTS,
+    every failure to honour it is an explicit NO-GO from this route (de
+    weigering staat gewoon), never a silent fall-through to a message that
+    would claim there is no evidence at all.
+
+    The pointed-at record must clear the ONGEWIJZIGDE invariant chain — this
+    function reuses the door's own machinery, never a second, weaker copy:
+
+      - scope/sha-binding via :func:`_record_matches_scope`, with
+        ``head_sha or ""``: an unknown head makes EVERY record fail
+        ``_matches_required_field``, so "onbekend of afwijkend" is a refusal
+        here — this route does not suspend judgement the way OI-1571 tak 3
+        does, it refuses;
+      - terminal, complete evidence, report on disk, pass, no
+        self-contradiction via :func:`_merge_door_record_verdict` — a
+        ``not_executable`` non-verdict and a REAL rejection both fail there;
+      - offline ``test_run`` records are rejected inside
+        ``_record_matches_scope`` before any matching;
+      - who may sign: a record under another gate's name must be a REVIEW
+        gate (``_REVIEW_PEER_GATES``, OI-1645) — a booking that points a
+        review obligation at e.g. a ci_gate record lets CI sign a review,
+        which both other routes already forbid.
+
+    Hard boundary, shared with both other routes: a REAL rejection on this
+    head is never weakened by a takeover booking. Before any booking is
+    honoured, the same peer scan :func:`_consult_peers_for_absence` uses
+    (:func:`_find_peer_gate_results`) runs, and any peer fail blocks.
+    """
+    bookings = _find_obligation_takeover_bookings(gate, pr_id, results_dir)
+    if not bookings:
+        return None
+
+    peers = _find_peer_gate_results(
+        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
+    )
+    peer_fails = [
+        (peer_gate, peer) for peer_gate, peer in peers
+        if gate_canonical_status(peer) in _GATE_FAIL_STATES
+    ]
+    if peer_fails:
+        culprit_gate, culprit = sorted(peer_fails, key=lambda item: item[0])[0]
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"takeover-boeking voor {gate} op {pr_id} verandert niets aan de afkeuring: "
+                f"{culprit_gate} keurde dezelfde head af "
+                f"({gate_canonical_status(culprit)!r}) — een echte afkeuring blokkeert de "
+                "merge en wordt door geen enkele boeking verzwakt"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
+
+    refusal_notes: List[str] = []
+    for booking in sorted(bookings, key=lambda b: str(b.get("dispatch_id") or "")):
+        booking_id = str(booking.get("dispatch_id") or "<onbekende verplichting>")
+        evidence_ref = booking.get("result_path") or booking.get("evidence_result_path")
+        evidence_ref = str(evidence_ref).strip() if evidence_ref else ""
+        if not evidence_ref:
+            refusal_notes.append(
+                f"verplichting {booking_id} wijst geen bewijs aan "
+                "(result_path/evidence_result_path ontbreken)"
+            )
+            continue
+        try:
+            pointed = json.loads(_read_text(Path(evidence_ref)))
+        except (OSError, json.JSONDecodeError):
+            pointed = None
+        if not isinstance(pointed, dict):
+            refusal_notes.append(
+                f"verplichting {booking_id} wijst naar onleesbaar bewijs: {evidence_ref}"
+            )
+            continue
+        if not _record_matches_scope(pointed, pr_id, branch, project_id, head_sha or ""):
+            refusal_notes.append(
+                f"het aangewezen record van verplichting {booking_id} staat niet op de "
+                f"huidige kop ({_describe_scope_mismatch(pointed, branch, project_id, head_sha or '')})"
+            )
+            continue
+        evidence_gate = (pointed.get("gate") or "").strip() or gate
+        if evidence_gate != gate and evidence_gate not in _REVIEW_PEER_GATES:
+            refusal_notes.append(
+                f"verplichting {booking_id} wijst naar {evidence_gate}, dat geen "
+                "review-ondertekenaar is (OI-1645)"
+            )
+            continue
+        verdict = _merge_door_record_verdict(pointed, evidence_gate, pr_id)
+        if verdict["verdict"] == "GO":
+            return {
+                "verdict": "GO",
+                "message": (
+                    f"{gate} bewezen via takeover-boeking: verplichting {booking_id} "
+                    f"staat fulfilled_by_takeover_evidence en wijst naar {evidence_gate}, "
+                    f"dat op de huidige kop een volledig bewezen pass draagt voor {pr_id}"
+                ),
+                "overridden": False,
+                "override_reason": None,
+                "gate": gate,
+                "evidence_gate": evidence_gate,
+                "evidence_via": "takeover_boeking",
+            }
+        refusal_notes.append(verdict["message"])
+
+    return {
+        "verdict": "NO-GO",
+        "message": (
+            f"takeover-boeking voor {gate} op {pr_id} geweigerd: "
+            + "; ".join(refusal_notes)
+        ),
+        "overridden": False,
+        "override_reason": None,
+        "gate": gate,
+    }
+
+
 def check_review_gate_for_merge(
     pr_id: str,
     gate: str,
@@ -1016,6 +1203,25 @@ def check_review_gate_for_merge(
     record that DOES carry a decided verdict (pass/fail on a different
     branch/sha) is stale evidence, not an absence, and falls through to the
     unchanged "no evidence found" message instead.
+
+    OI-1719: a THIRD evidence source sits between the successor route and the
+    absence routes — the obligation store's own takeover booking
+    (:func:`_consult_obligation_takeover_booking`). The runner (D2e) books an
+    obligation ``fulfilled`` with ``reason=fulfilled_by_takeover_evidence`` and
+    ``result_path`` pointing at the successor's record when the chain
+    substituted a reader; successors started by hand carry no ``takeover_path``
+    (measured live: PRs #1830/#1832-#1838, whose glm gates were started
+    manually while codex sat at its usage limit and kimi/deepseek were
+    ``not_executable``), so the OI-1576 route never fires for them and the
+    booking in the obligation itself is the only place the takeover is
+    recorded. The booking is honoured under the SAME invariants — the same
+    join (:func:`obligation_matches_pr`), the same scope/sha binding
+    (:func:`_record_matches_scope`, refusing on an unknown head rather than
+    suspending judgement), the same signer set (``_REVIEW_PEER_GATES``), and
+    the same verdict chain (:func:`_merge_door_record_verdict`) — and under
+    the same hard boundary: a real rejection on this head, whether by the
+    pointed-at record or by any review peer, is never weakened by a booking.
+    An obligation already terminal ``failed`` never opens this route.
     """
     result = _find_gate_result(
         gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
@@ -1098,6 +1304,20 @@ def check_review_gate_for_merge(
             "override_reason": None,
             "gate": gate,
         }
+
+    # OI-1719: the obligation store's OWN takeover booking as a third evidence
+    # source, next to the successor-carried takeover_path above and the peer
+    # signer below. Read after the successor loop on purpose: a successor that
+    # explicitly claims the gate (and rendered a verdict) already settled the
+    # question, and its real rejection latched in first_failure blocks before
+    # any booking is consulted. A booking that cannot be honoured is an
+    # explicit NO-GO from the route itself; no booking at all falls through.
+    booking_verdict = _consult_obligation_takeover_booking(
+        gate, pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha
+    )
+    if booking_verdict is not None:
+        return booking_verdict
+
     if result is not None and _is_absent_without_verdict(result):
         # OI-1624: the declared gate spoke (a record exists, in scope) and
         # what it said is that it will render no verdict for this attempt —

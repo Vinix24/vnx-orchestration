@@ -144,6 +144,12 @@ class GateEvidence:
     #: False when no obligation declared this gate but a result record for it
     #: exists anyway — a gate run by hand rather than through the door.
     declared: bool = True
+    #: Which gate's record actually carried the evidence, when it is not the
+    #: declared gate itself (OI-1576 successor / OI-1719 takeover booking), and
+    #: through which route — so a satisfied gate never reads as if the declared
+    #: gate looked at the code itself.
+    evidence_gate: Optional[str] = None
+    evidence_via: Optional[str] = None
 
     @property
     def satisfied(self) -> bool:
@@ -158,6 +164,8 @@ class GateEvidence:
             "report_path": self.report_path,
             "report_exists": self.report_exists,
             "declared": self.declared,
+            "evidence_gate": self.evidence_gate,
+            "evidence_via": self.evidence_via,
         }
 
 
@@ -412,6 +420,14 @@ def collect_gate_evidence(
         # commit the newest record DOES sit on, so the reader sees "stale" and
         # "absent" as the different problems they are.
         anywhere = _find_gate_result(gate, str(pr_number), results_dir)
+        evidence_gate = verdict.get("evidence_gate")
+        evidence_via = verdict.get("evidence_via")
+        if anywhere is None and evidence_gate and evidence_gate != gate:
+            # The evidence lives under another gate's name (an OI-1576
+            # successor or an OI-1719 takeover booking): show where THAT
+            # record sits, never a blank "absent" for a declared gate whose
+            # obligation was fulfilled through someone else's record.
+            anywhere = _find_gate_result(evidence_gate, str(pr_number), results_dir)
         if anywhere:
             record_sha = anywhere.get("commit_sha") or None
             report_path = anywhere.get("report_path") or None
@@ -426,6 +442,8 @@ def collect_gate_evidence(
                 report_path=report_path,
                 report_exists=report_exists,
                 declared=gate in declared_set,
+                evidence_gate=evidence_gate,
+                evidence_via=evidence_via,
             )
         )
     return evidence

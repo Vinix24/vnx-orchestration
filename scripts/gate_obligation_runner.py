@@ -175,6 +175,8 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
+    REASON_FAILED_BY_TAKEOVER,
+    REASON_FULFILLED_BY_TAKEOVER,
     REASON_NO_PR_BRANCH_GONE,
     REASON_NO_PR_BRANCH_GONE_LIVE,
     REASON_NO_PR_BRANCH_GONE_UNMEASURED,
@@ -2466,7 +2468,7 @@ def fulfill_obligation(
             passed, verdict_reason = _gate_is_pass(successor_record)
             terminal = STATUS_FULFILLED if passed else STATUS_FAILED
             hop_chain = " -> ".join(hops)
-            reason = "fulfilled_by_takeover_evidence" if passed else "failed_by_takeover_evidence"
+            reason = REASON_FULFILLED_BY_TAKEOVER if passed else REASON_FAILED_BY_TAKEOVER
             reason_detail = (
                 f"{gate} never produced a decided verdict of its own for PR "
                 f"#{pr_number} -- the review-gate takeover chain ({hop_chain}) "
