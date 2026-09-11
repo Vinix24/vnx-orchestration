@@ -251,11 +251,12 @@ class GateResultParserMixin:
           the caller's own availability check (``_kimi_gate_available`` and
           friends, which test for the runner FILE) already said no, so the
           runner is absent — never a PATH question.
-        * harness-lane gate -> ``gate_runner_missing`` for the same reason: the
-          request-time availability check still tests the runner FILE (the
-          availability-fix that makes it lane-aware is a later step), so the
-          honest answer is "the runner is absent", never a PATH lookup on the
-          provider string.
+        * harness-lane gate -> ``gate_runner_missing``, defensively: since
+          dispatch 20260911-c6 step 2 the request-time availability check is
+          lane-aware (``gate_is_available`` returns True for a registered
+          harness-lane gate), so this branch is only reachable through a
+          caller that skipped that check. The answer stays "the runner is
+          absent", never a PATH lookup on the provider string.
         * PATH-binary gate -> the env-flag / which-lookup logic below,
           unchanged, on the registry's name.
         """

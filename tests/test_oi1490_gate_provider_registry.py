@@ -225,11 +225,13 @@ def test_the_new_reasons_are_permanent_not_a_bounded_wait():
     """A routing bug must not sit in the retry-until-the-environment-changes
     bucket. `provider_not_installed` belongs there and stays there.
 
-    C6 step 1 note: glm_gate/kimi_gate no longer produce
+    C6 note: glm_gate/kimi_gate no longer produce
     `gate_not_subprocess_routable` at all (they delegate to the governed
-    dispatcher), but the reason survives for the script-runner gate
-    (deepseek_gate) and must stay out of the temporary set either way — no
-    amount of waiting turns a script runner into a PATH binary.
+    dispatcher), and deepseek_gate is no longer a script runner either
+    (OI-1714, step 2: it is a config-based harness lane), but the reason
+    survives for any future script-runner registration and must stay out of
+    the temporary set either way — no amount of waiting turns a script
+    runner into a PATH binary.
     """
     import gate_obligation_runner as gor
 
@@ -267,24 +269,23 @@ def test_every_path_binary_gate_can_actually_be_driven_by_this_runner():
     assert "glm_gate" not in _rec._GATE_BINARIES
 
 
-def test_a_registered_but_unshipped_runner_says_missing_not_unroutable(gate_dirs):
-    """Found by these tests, not assumed: scripts/deepseek_gate.py is not on
-    disk. "Registered but not shipped" and "shipped but not drivable here" are
-    different answers and the reader acts differently on each, so they get
-    different reason codes. gate_request_handler already books the first as
-    `gate_runner_missing`; this reuses that name instead of minting a second
-    one for the same fact.
+def test_a_config_based_gate_is_available_without_a_file():
+    """OI-1714 (dispatch 20260911-c6 step 2): deepseek_gate used to be
+    registered as a script runner pointing at scripts/deepseek_gate.py, which
+    has never existed, so every deepseek request booked `gate_runner_missing`
+    — a dead link for the ONE provider that was actually working. It is a
+    config-based harness lane, so its availability is decided by REGISTRATION,
+    not by a file on disk, and it must never grow a runner file.
     """
     assert not (VNX_ROOT / "scripts" / "deepseek_gate.py").exists(), (
-        "if deepseek_gate.py has since shipped, this test documents the "
-        "transition — move it to the routable case above"
+        "deepseek_gate must not grow a runner file — its availability is "
+        "configuration, not a script (dispatch 20260911-c6 step 2)"
     )
 
-    result = _run(gate_dirs, "deepseek_gate")
-
-    assert result["reason"] == "gate_runner_missing"
-    assert "has not shipped" in result["reason_detail"]
-    assert result["reason"] != "provider_not_installed"
+    kind, name = _rec.GATE_PROVIDERS["deepseek_gate"]
+    assert kind == _rec.GATE_PROVIDER_HARNESS_LANE
+    assert name == "deepseek-harness"
+    assert _rec.gate_is_available("deepseek_gate") is True
 
 
 def test_harness_lane_gates_name_the_same_lane_their_standalone_scripts_use():

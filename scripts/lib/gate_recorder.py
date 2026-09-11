@@ -40,10 +40,15 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
 # HARNESS_LANE  the gate routes through the governed dispatcher
 #               (plan_gate_panel._make_default_dispatcher ->
 #               provider_dispatch), the SAME lane glm_gate.py/kimi_gate.py
-#               already drive. The name is the provider string that lane
-#               dispatches on, not a file and not a PATH binary: gate_runner
-#               calls the dispatcher and feeds the returned report into the
-#               artifact pipeline (C6, gate-runner-provider-agnostisch step 1).
+#               already drive: a config-based lane, not a file. The name is
+#               the provider string that lane dispatches on, not a file and
+#               not a PATH binary: gate_runner calls the dispatcher and feeds
+#               the returned report into the artifact pipeline (C6,
+#               gate-runner-provider-agnostisch step 1). Its availability is
+#               decided by REGISTRATION alone — there is no file on disk for
+#               it, and none is expected (dispatch 20260911-c6 step 2:
+#               availability measures configuration, not file existence; the
+#               existence check made deepseek_gate a dead link, OI-1714).
 #
 # Before OI-1490 there was no second kind: a gate absent from the mapping fell
 # back to its own NAME as a binary, so `shutil.which("kimi_gate")` failed and
@@ -68,7 +73,12 @@ GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
     "wiring_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
     "kimi_gate": (GATE_PROVIDER_HARNESS_LANE, "kimi"),
     "glm_gate": (GATE_PROVIDER_HARNESS_LANE, "glm-harness"),
-    "deepseek_gate": (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/deepseek_gate.py"),
+    # OI-1714: deepseek_gate was registered as a script runner pointing at
+    # scripts/deepseek_gate.py, which has never existed. Every deepseek request
+    # therefore booked `gate_runner_missing` — a dead link for the ONE provider
+    # that was actually working. It is a config-based harness lane
+    # ("deepseek-harness"), not a repo script, so it needs no file at all.
+    "deepseek_gate": (GATE_PROVIDER_HARNESS_LANE, "deepseek-harness"),
 }
 
 # Backward-compatible view: only the gates that really do resolve to a PATH
@@ -148,6 +158,64 @@ def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optio
         "report as this gate's verdict (OI-1725)"
     )
 
+
+class UnknownGateProvider(ValueError):
+    """A gate key was asked for availability and is not registered (or its
+    provider kind is unknown).
+
+    Raised where a silent skip would do the most damage: an operator
+    configures a review stack with a gate name
+    (``VNX_OVERRIDE_DEFAULT_REVIEW_STACK=glm_gate,claude_github_optional``)
+    and a typo books the seat as ``not_executable`` while every other gate
+    runs — the request fails without ever naming the key that was wrong.
+    The name is carried in the message, so the error is loud and actionable.
+    """
+
+
+def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
+    """Availability by REGISTRATION plus lane executability, never path existence.
+
+    dispatch 20260911-c6 step 2. The previous rule — ``<runner_path>.exists()``
+    — made availability a statement about a file, which is wrong in two
+    directions:
+
+    - a config-based gate (``harness_lane``) is available with NO file at all;
+      measuring one made deepseek_gate a dead link (OI-1714), and would make
+      kimi_gate/glm_gate silently vanish the day their runner files are
+      retired in favour of the lane (step 4);
+    - an unknown key must FAIL LOUD, never silently book ``unavailable`` —
+      see :class:`UnknownGateProvider`.
+
+    The three kinds:
+
+    - ``path_binary``   the gate drives a CLI: available when the binary is on
+      PATH (``shutil.which``). Note this answers "route present", NOT "enabled
+      by its env flag" — the env-flag question is a separate concern owned by
+      the gate's own availability helper.
+    - ``script_runner`` the gate IS a repo script: available when the script
+      file is on disk. A gate that still needs a file keeps that check.
+    - ``harness_lane``  the gate is config-based: available by registration
+      alone. There is no file to look for, and none is expected.
+
+    An unregistered gate raises :class:`UnknownGateProvider` — never ``False``,
+    never a fallback to a binary name invented from the gate's own name.
+    """
+    provider = resolve_gate_provider(gate)
+    if provider is None:
+        raise UnknownGateProvider(
+            f"{gate} is not a registered gate in gate_recorder.GATE_PROVIDERS — "
+            f"register it before asking whether it is available"
+        )
+    kind, name = provider
+    if kind == GATE_PROVIDER_PATH_BINARY:
+        return shutil.which(name) is not None
+    if kind == GATE_PROVIDER_SCRIPT_RUNNER:
+        return ((repo_root or _repo_root()) / name).exists()
+    if kind == GATE_PROVIDER_HARNESS_LANE:
+        return True
+    raise UnknownGateProvider(
+        f"{gate} has an unknown provider kind {kind!r} — cannot determine availability"
+    )
 # Infrastructure/execution failures — NOT semantic gate verdicts.
 # gate_failed means "gate completed with blocking findings"; only emit it for reasons
 # that represent a completed gate run with actual blocking findings. Anything else
@@ -243,9 +311,10 @@ def write_skip_rationale(
     file and never a PATH lookup: ``shutil.which("kimi_gate")`` answers a
     question nobody asked and its ``False`` was read for two days as "the
     provider is missing" while scripts/kimi_gate.py sat on disk. A
-    harness-lane gate has nothing to find either — its route is wired by
-    construction, so ``binary_found`` is True and ``binary_name`` carries the
-    provider string the dispatcher routes on. An unregistered gate says so in
+    harness-lane gate has nothing to find either — it is config-based, its
+    route is wired by construction, so ``binary_found`` is True without
+    touching the filesystem and ``binary_name`` carries the provider string
+    the dispatcher routes on. An unregistered gate says so in
     ``provider_kind`` rather than inventing a binary name from the gate's own
     name.
     """

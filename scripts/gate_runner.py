@@ -240,18 +240,18 @@ class GateRunner:
             elif kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
                 pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
                 # Not-shipped and not-routable are different answers and the
-                # reader acts differently on each. deepseek_gate is registered
-                # but scripts/deepseek_gate.py does not exist yet, which
-                # gate_request_handler already books as `gate_runner_missing`
-                # — reuse that code here rather than mint a second name for
-                # the same fact.
-                if not (_rec._repo_root() / provider_name).exists():
+                # reader acts differently on each. Availability is kind-based
+                # (gate_recorder.gate_is_available): a script-runner gate is
+                # available only while its runner file is on disk. Reuse
+                # `gate_runner_missing` here rather than mint a second name
+                # for the fact gate_request_handler already books.
+                if not _rec.gate_is_available(gate):
                     return _rec.record_not_executable(
                         gate=gate, pr_number=pr_number, pr_id=pr_id,
                         reason="gate_runner_missing",
                         reason_detail=(
-                            f"{provider_name} does not exist yet — {gate} is registered "
-                            f"as a script runner but its runner has not shipped"
+                            f"{provider_name} is not on disk — {gate} is registered "
+                            f"as a script runner and its runner is unavailable"
                         ),
                         request_payload=request_payload,
                         requests_dir=self._requests_dir,
