@@ -1302,6 +1302,11 @@ def _emit_governance(
                 duration_seconds=duration,
                 data_dir=data_dir,
                 frontmatter=frontmatter,
+                # OI-1710: thread the spawn-layer diagnosis into the report so an
+                # empty response never falls back to "(no response captured)" when
+                # the spawn layer already knows why it produced nothing (proxy
+                # unreachable, harness refused to start). Shared across every lane.
+                spawn_error=getattr(result, "error", None),
                 # OI-903: on failure/timeout, preserve a killed worker's partial
                 # report under a .partial.md sidecar instead of leaving an invalid
                 # file blocking the canonical (structured) failure report.

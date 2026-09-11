@@ -511,3 +511,50 @@ def test_resolve_data_dir_no_project_context_fails_closed(tmp_path, monkeypatch)
 
     with pytest.raises(RuntimeError, match="Cannot resolve project_id"):
         provider_dispatch._resolve_data_dir()
+
+
+# ---------------------------------------------------------------------------
+# OI-1710: the spawn-layer diagnosis (result.error) must reach the report body,
+# not only the receipt's failure_reason. The fix lives in _emit_governance, so
+# every provider lane inherits it — glm proves the bug, codex proves the fix is
+# shared (not a glm-only special case).
+# ---------------------------------------------------------------------------
+
+def _read_report(tmp_path, dispatch_id):
+    data_dir = tmp_path / "data"
+    return (data_dir / "unified_reports" / f"{dispatch_id}.md").read_text()
+
+
+def test_glm_harness_proxy_unreachable_error_reaches_report_body(tmp_path, monkeypatch):
+    """The glm-harness spawn layer fail-closes on an unreachable litellm proxy;
+    the report body must carry that diagnosis instead of "(no response captured)"."""
+    url = "http://127.0.0.1:1"
+    monkeypatch.setenv("VNX_GLM_PROXY_URL", url)
+    args = _make_args("glm-harness", dispatch_id="glm-proxy-unreachable-001")
+    with patch("event_store.EventStore", MagicMock()):
+        rc = provider_dispatch._dispatch_glm_harness(args)
+    assert rc == 1
+    report = _read_report(tmp_path, "glm-proxy-unreachable-001")
+    assert url in report, (
+        f"report body must carry the spawn-layer diagnosis ({url}), "
+        f"not fall back to '(no response captured)': {report!r}"
+    )
+    assert "(no response captured)" not in report
+
+
+def test_codex_spawn_error_reaches_report_body(tmp_path):
+    """A second lane (codex) must surface its spawn error in the report body the
+    same way — the fix lives in the shared _emit_governance, not in the glm lane."""
+    args = _make_args("codex", dispatch_id="codex-spawn-error-001")
+    result = _SpawnResult(
+        returncode=1,
+        completion_text="",
+        error="codex proxy unreachable at http://localhost:9999 (start the codex proxy first)",
+    )
+    with patch("provider_spawns.codex_spawn.spawn_codex", return_value=result), \
+         patch("event_store.EventStore", MagicMock()):
+        rc = provider_dispatch._dispatch_codex(args)
+    assert rc == 1
+    report = _read_report(tmp_path, "codex-spawn-error-001")
+    assert "http://localhost:9999" in report
+    assert "(no response captured)" not in report

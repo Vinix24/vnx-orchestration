@@ -421,6 +421,27 @@ def _lift_lane_log_reason(dispatch_id: str, data_dir: "Path | None") -> "str | N
     return reason if state == "lane_exhausted" else None
 
 
+def _lift_report_failure_reason(report_text: str) -> "str | None":
+    """OI-1710: read the canonical ``failure_reason`` the lane's own governance
+    emit already stamped onto the report frontmatter (the spawn-layer error, for
+    a run that died before the model could reply).
+
+    The lane-log lift above only reads the raw lane log — a spawn-layer failure
+    (proxy unreachable, harness refused to start) writes no lane log at all, so
+    the report is the only place the real reason survives. Returns the bounded
+    reason only when the frontmatter carries a real, non-empty value; returns
+    None — never invents a reason — on a missing/empty field or unreadable
+    frontmatter."""
+    if not report_text:
+        return None
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return None
+    reason = frontmatter.get("failure_reason")
+    return (reason or "").strip() or None
+
+
 def _status_summary(status: str, blocking: list, reason: str = "") -> str:
     """Summary line for the result record — outage vs recovery vs verdict must be unmistakable."""
     if status == "unavailable":
@@ -651,7 +672,9 @@ def main(argv: "list[str] | None" = None) -> int:
     # OI-1452 fix-forward: tracked across both branches below so the record
     # build can stamp the canonical failure_reason field (see there) — only
     # ever set by the lane-log lift in the run_failed branch, never guessed.
-    lane_log_reason: "str | None" = None
+    # OI-1710: also lifted from the report frontmatter when the lane log does
+    # not exist at all (a spawn-layer failure writes no lane log).
+    lifted_reason: "str | None" = None
     if dispatch_error:
         verdict: dict = {}
         status, blocking = "unavailable", []
@@ -695,9 +718,16 @@ def main(argv: "list[str] | None" = None) -> int:
                     # generic exit_code/token_usage summary. The glm lane does
                     # not always write this log — a missing file degrades to the
                     # frontmatter-only detail above, never a crash or a guess.
-                    lane_log_reason = _lift_lane_log_reason(dispatch_id, base_data_dir)
-                    if lane_log_reason:
-                        provider_failed_detail += f" — lane log: {lane_log_reason}"
+                    lifted_reason = _lift_lane_log_reason(dispatch_id, base_data_dir)
+                    if lifted_reason is None:
+                        # OI-1710: a spawn-layer failure (proxy unreachable,
+                        # harness refused to start) writes no lane log at all —
+                        # the lane died before the tee started. The report's own
+                        # frontmatter carries the canonical failure_reason the
+                        # governance emit stamped from the spawn error.
+                        lifted_reason = _lift_report_failure_reason(report_text or "")
+                    if lifted_reason:
+                        provider_failed_detail += f" — failure reason: {lifted_reason}"
                     status, blocking, residual = _verdict_to_status(
                         {}, report_text or "", provider_failed_detail=provider_failed_detail
                     )
@@ -871,18 +901,20 @@ def main(argv: "list[str] | None" = None) -> int:
         # OI-1452 fix-forward (OI-1453 tracks the other four gates): also
         # stamp the canonical failure_reason field (established OI-1415,
         # scripts/lib/phantom_guard.py) with the SAME text placed above in
-        # residual_risk, but ONLY the lifted lane-log reason — never a
-        # placeholder or a summary of the frontmatter fields when the lift
-        # found nothing. Three ways to be wrong here, in ascending order of
-        # danger: an EMPTY field fails visibly (a reader can tell the cause
-        # is unknown); a PLACEHOLDER ("unknown", "n/a") passes every
-        # presence check and fails silently; a SUMMARY that merely looks
-        # like a cause is worst of all, because it cannot be told apart from
-        # a real one. Filling this field with anything but the real lifted
-        # reason would make every existing record look complete while
+        # residual_risk, but ONLY the lifted reason — never a placeholder or a
+        # summary of the frontmatter fields when the lift found nothing.
+        # OI-1710: the lifted reason now has a second real source — the report
+        # frontmatter's own failure_reason (the spawn-layer error, for a run
+        # that died before writing any lane log). Three ways to be wrong here,
+        # in ascending order of danger: an EMPTY field fails visibly (a reader
+        # can tell the cause is unknown); a PLACEHOLDER ("unknown", "n/a")
+        # passes every presence check and fails silently; a SUMMARY that
+        # merely looks like a cause is worst of all, because it cannot be told
+        # apart from a real one. Filling this field with anything but the real
+        # lifted reason would make every existing record look complete while
         # explaining nothing — a regression hidden BEHIND the fix meant to
         # surface it.
-        "failure_reason": lane_log_reason or "",
+        "failure_reason": lifted_reason or "",
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         # dispatch-20260823-beta2-j: audit marker distinguishing a record
         # produced by a live model call from one formalized by --reprocess

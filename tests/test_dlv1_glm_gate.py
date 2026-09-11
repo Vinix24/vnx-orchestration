@@ -603,3 +603,68 @@ def test_pass_verdict_on_truncated_but_nonempty_diff_stays_pass(glm_gate, tmp_pa
     assert record["status"] == "pass"
     assert record["execution_depth"]["mode"] == "single_shot"
     assert record["execution_depth"]["diff_truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# 12. OI-1710: a spawn-layer failure (proxy unreachable) writes no lane log at
+#     all, so the gate's canonical failure_reason must fall back to the
+#     report's own frontmatter — the real diagnosis the governance emit already
+#     stamped there — instead of staying empty while the report body explains
+#     the cause.
+# ---------------------------------------------------------------------------
+
+_SPAWN_ERROR_REPORT = (
+    "---\n"
+    "schema_version: 1\n"
+    "dispatch_id: glm-gate-pr4242-1\n"
+    "provider: glm-harness\n"
+    "sub_provider: zai\n"
+    "model: glm-5.2\n"
+    "terminal_id: plan-gate\n"
+    "pool_id: headless\n"
+    "role: review-gate\n"
+    "task_class: research_structured\n"
+    "pr_id: '4242'\n"
+    "duration_seconds: 0.5\n"
+    "exit_code: 1\n"
+    "token_usage:\n"
+    "  input: 0\n"
+    "  output: 0\n"
+    "  cache_read: 0\n"
+    "cost_usd: 0.0\n"
+    "route_decision:\n"
+    "  strategy: default\n"
+    "  selected_provider: glm-harness\n"
+    "  selected_model: glm-5.2\n"
+    "empty_response_state: spawn_error\n"
+    "failure_reason: glm-harness proxy unreachable at http://localhost:4141 (start the litellm proxy first)\n"
+    "---\n"
+    "\n"
+    "# Dispatch glm-gate-pr4242-1\n"
+    "\n"
+    "**Dispatch-ID**: glm-gate-pr4242-1\n"
+    "**Provider**: glm-harness\n"
+    "\n"
+    "## Response\n"
+    "\n"
+    "_No response text was captured from the model. The spawn layer failed "
+    "before the model could run — the text below is the spawn error, NOT a "
+    "model reply._\n"
+    "\n"
+    "```\nglm-harness proxy unreachable at http://localhost:4141 (start the litellm proxy first)\n```\n"
+)
+
+
+def test_proxy_unreachable_report_surfaces_spawn_error_in_gate_failure_reason(
+    glm_gate, tmp_path, monkeypatch,
+):
+    rc, record, _data_dir = _run_glm_gate_for_real_pr(
+        glm_gate, tmp_path, monkeypatch, _SPAWN_ERROR_REPORT, pr="4242",
+    )
+
+    assert rc == 1
+    assert record["status"] == "unavailable"
+    assert "http://localhost:4141" in record["failure_reason"], (
+        "the gate's canonical failure_reason must carry the spawn-layer diagnosis "
+        f"from the report frontmatter when no lane log exists: {record['failure_reason']!r}"
+    )
