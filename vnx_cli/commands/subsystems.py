@@ -94,6 +94,11 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "N-slot serial lock protecting the shared Claude subscription session cap "
         "for the claude-tmux dispatch lane."
     ),
+    "central-install-cutover": (
+        "Cutover behind-guard: every central-install flip measures and names how "
+        "far the target lags main; over the threshold the flip needs an explicit "
+        "operator reason (OI-1718)."
+    ),
 }
 
 # Ledger row order (framework-status-audit-and-cockpit PR-3). Grouped by
@@ -133,6 +138,7 @@ _ROW_ORDER: List[str] = [
     "central-db-routing",
     "smart-router-staging",
     "claude-tmux-serialization",
+    "central-install-cutover",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

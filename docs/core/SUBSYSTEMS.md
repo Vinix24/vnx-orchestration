@@ -30,6 +30,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | central-db-routing | Central-DB read mode for the runtime coordination store (per-project vs central vs shadow). | `VNX_USE_CENTRAL_DB` | ACTIVATE-and-measure | unknown — no probe yet |
 | smart-router-staging | Phased smart-router AUTO routing rollout (per-tier enable + deterministic canary fraction). | `VNX_SMART_ROUTER_CANARY_PCT` | ACTIVATE-and-measure | unknown — no probe yet |
 | claude-tmux-serialization | N-slot serial lock protecting the shared Claude subscription session cap for the claude-tmux dispatch lane. | `VNX_TMUX_MAX_CONCURRENT` | ACTIVATE-and-measure | unknown — no probe yet |
+| central-install-cutover | Cutover behind-guard: every central-install flip measures and names how far the target lags main; over the threshold the flip needs an explicit operator reason (OI-1718). | `VNX_CUTOVER_MAX_BEHIND_COMMITS` | ACTIVATE-and-measure | unknown — no probe yet |
 | plan-gate-panel | 5-model deliberation panel for plan-first enforcement. | `VNX_PLAN_GATE_ENFORCE` | SCOPE | works — panel runs, verdicts recorded |
 | plan-gate-task-class-scope | Restrict panel to complex features; run trivial tracks on a reduced 2-seat panel (scope read-site: plan_gate_enforcement.plan_gate_scope). | `VNX_PLAN_GATE_COMPLEX_ONLY` | SCOPE | works — scope read-site present (light plans run 2 seats) |
 | subsystem-cockpit | SUBSYSTEMS.md + config_registry + vnx subsystems + dashboard tile. | — | COCKPIT | degraded — SSOT exists, probes partial |

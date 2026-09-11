@@ -272,6 +272,23 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         # this subsystem's 5 flags. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
 
+    # OI-1718: the cutover behind-guard threshold. Every central-install
+    # cutover (release --set-current, update --to) measures and prints how far
+    # the target lags main BEFORE flipping `current`; above this count the
+    # flip is refused without an explicit non-empty --cutover-reason (recorded
+    # in the central-install audit log). Unmeasurable behindness is reported
+    # as UNKNOWN, never silently 0, and proceeds loudly (update/rollback are
+    # recovery tools); rollback is exempt from refusal by design.
+    "VNX_CUTOVER_MAX_BEHIND_COMMITS": _e(
+        "VNX_CUTOVER_MAX_BEHIND_COMMITS", "string", "20", "gate",
+        "Max commits a cutover target may lag main before the flip is refused "
+        "without an explicit --cutover-reason (OI-1718). Default 20 mirrors "
+        "update.py DEFAULT_CUTOVER_MAX_BEHIND_COMMITS (pinned by "
+        "test_registry_entry_registered_with_description); the incident was a "
+        "tag measured 36->42 commits behind main within one evening.",
+        approval=True,
+        subsystem="central-install-cutover", status="ACTIVATE"),
+
     # Operator directive 2026-08-21 (dispatch-20260821-t0-tmux-concurrency-10): the
     # claude-tmux N-slot lock's concurrency cap, raised from 5 to 10 and made
     # registry-backed so an operator can flip it from the dashboard, not just env.

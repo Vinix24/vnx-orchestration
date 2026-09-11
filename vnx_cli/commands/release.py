@@ -21,6 +21,7 @@ from pathlib import Path
 from vnx_cli.commands.update import (
     INSTALL_MODE_MARKER,
     VNX_GIT_REMOTE,
+    CutoverRefusedError,
     _atomic_symlink_flip,
     _current_target,
     _emit_audit_event,
@@ -219,6 +220,7 @@ def vnx_release_publish(args) -> int:
     tag: "str | None" = getattr(args, "tag", None)
     dry_run: bool = getattr(args, "dry_run", False)
     set_current: bool = getattr(args, "set_current", False)
+    cutover_reason: "str | None" = getattr(args, "cutover_reason", None)
 
     if not tag:
         print("Error: --tag <vX.Y.Z> is required.", file=sys.stderr)
@@ -300,6 +302,11 @@ def vnx_release_publish(args) -> int:
                 "(--set-current passed)"
             )
             print(
+                f"[dry-run] Would measure how far '{tag}' is behind main and "
+                "enforce the VNX_CUTOVER_MAX_BEHIND_COMMITS threshold before "
+                "flipping (OI-1718)"
+            )
+            print(
                 f"[dry-run] Would warn: consumers with a tracked .vnx-version "
                 f"pin must update their pin to {tag} (the pin does not follow "
                 f"`current`)"
@@ -327,7 +334,24 @@ def vnx_release_publish(args) -> int:
     print(f"Published: {target_dir}")
 
     if set_current:
-        _atomic_symlink_flip(root, target_dir, dry_run=False)
+        # OI-1718: the guard measures the tag's behindness against the repo
+        # being published from (the same source the tag came from) and refuses
+        # the cutover over the configured threshold without an explicit reason.
+        # A refusal leaves the publish itself intact — only the flip is denied.
+        try:
+            _atomic_symlink_flip(
+                root, target_dir, dry_run=False,
+                cutover_reason=cutover_reason, behind_source=repo,
+            )
+        except CutoverRefusedError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            print(
+                f"Note: '{tag}' was published to {target_dir}; only the cutover "
+                f"was refused. Cut over later with `vnx update --to {tag} "
+                "--cutover-reason \"...\"` once the reason exists.",
+                file=sys.stderr,
+            )
+            return 1
         print(_release_notes_hint(tag))
         print(_current_flip_warning(tag), file=sys.stderr)
     else:

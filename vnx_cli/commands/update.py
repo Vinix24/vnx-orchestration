@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,21 @@ VNX_GIT_REMOTE = "https://github.com/Vinix24/vnx-orchestration.git"
 DEFAULT_KEEP_LAST = 3
 DEFAULT_REGISTRY_PATH = Path.home() / ".vnx" / "projects.json"
 PROTECTED_VERSIONS_FILE = "protected-versions"
+
+# OI-1718: every cutover measures how far its target lags main and names that
+# number out loud before flipping `current`; over the threshold the flip is
+# refused unless the operator passes an explicit --cutover-reason. The
+# threshold is CONFIG, not a hardcoded gate: it is registered as
+# VNX_CUTOVER_MAX_BEHIND_COMMITS in scripts/lib/config_registry.py, whose
+# default mirrors this constant (the registry's own contract — "defaults
+# mirror the current code"). Default 20: the OI-1718 incident was a tag
+# measured 36 commits behind main at the start of an evening and 42 by its
+# end; a release cut the same week typically sits well under 20.
+CUTOVER_BEHIND_CONFIG_KEY = "VNX_CUTOVER_MAX_BEHIND_COMMITS"
+DEFAULT_CUTOVER_MAX_BEHIND_COMMITS = 20
+# Bounded so an unreachable remote cannot hang a cutover (or a rollback, which
+# measures best-effort and never blocks) for longer than this.
+_BEHIND_CLONE_TIMEOUT_SECONDS = 60
 
 # OI-1379: the fleet registry (source 1) only protects REGISTERED consumer
 # projects. A project that pins a version via ``.vnx-version`` but was never
@@ -61,6 +77,15 @@ _VERSION_RE = re.compile(r"^(edge|latest|v?\d+\.\d+\.\d+(?:-[\w.]+)?)$")
 # standalone dev checkout and collapses PROJECT_ROOT onto the shared code tree.
 INSTALL_MODE_MARKER = ".vnx-install-mode"
 INSTALL_MODE_VALUE = "central"
+
+
+class CutoverRefusedError(Exception):
+    """The cutover behind-guard refused the flip (OI-1718).
+
+    Raised before any filesystem mutation: the target was measured too far
+    behind main and no explicit operator reason was given. The message names
+    the count, the target ref, and the way out.
+    """
 
 
 class ProtectionSetUnavailable(Exception):
@@ -440,13 +465,261 @@ def _ensure_install_marker(
     print(f"Repaired missing install-mode marker: {marker}")
 
 
+def _cutover_max_behind_commits() -> int:
+    """The cutover behindness threshold, read from the config registry.
+
+    Read through ``config_registry.get()`` so the standard precedence chain
+    applies (``VNX_OVERRIDE_CUTOVER_MAX_BEHIND_COMMITS`` > DB >
+    ``VNX_CUTOVER_MAX_BEHIND_COMMITS`` env > registry default). Falls back to
+    ``DEFAULT_CUTOVER_MAX_BEHIND_COMMITS`` when the engine tree is not
+    importable (the pip CLI without scripts/lib on path) — the registry
+    default mirrors that constant exactly, and a test pins the two together.
+    An invalid configured value is loud and falls back to the default rather
+    than silently disabling or hardening the guard.
+    """
+    raw = None
+    try:
+        from vnx_cli import _engine
+        _engine.ensure_engine_on_path()
+        from config_registry import get as _config_get
+        raw = _config_get(CUTOVER_BEHIND_CONFIG_KEY)
+    except ImportError:
+        override_key = f"VNX_OVERRIDE_{CUTOVER_BEHIND_CONFIG_KEY[len('VNX_'):]}"
+        raw = os.environ.get(override_key) or os.environ.get(CUTOVER_BEHIND_CONFIG_KEY)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_CUTOVER_MAX_BEHIND_COMMITS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        value = -1
+    if value < 0:
+        print(
+            f"[warn] invalid {CUTOVER_BEHIND_CONFIG_KEY}={raw!r} "
+            f"(need a non-negative integer) — using default "
+            f"{DEFAULT_CUTOVER_MAX_BEHIND_COMMITS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_CUTOVER_MAX_BEHIND_COMMITS
+    return value
+
+
+def _measure_behind_main(source: str, target_ref: str) -> "int | None":
+    """Commits on ``main`` that ``target_ref`` does not contain, or None.
+
+    Measured in a throwaway bare clone of ``source`` so no live checkout is
+    touched: installed version dirs are shallow (``--depth 1``) and read-only,
+    so counting there would either fail or silently under-count. A local-path
+    source clones with full history (hardlinked, cheap); a remote URL clones
+    the commit graph only (``--filter=tree:0``) — ``rev-list --count`` walks
+    commits, never trees.
+
+    None is a THIRD outcome, never a silent 0 (absence-is-loud, OI-1718):
+    unreachable source, a ref the source does not know, a source with no
+    ``main`` branch, or any git failure all land here, each with a named
+    warning on stderr.
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="vnx-cutover-behind-"))
+    try:
+        clone_cmd = ["git", "clone", "--bare", "--quiet"]
+        if not Path(os.path.expanduser(source)).is_dir():
+            clone_cmd.append("--filter=tree:0")
+        clone_cmd += [source, str(tmp)]
+        try:
+            clone = subprocess.run(
+                clone_cmd, capture_output=True, text=True,
+                timeout=_BEHIND_CLONE_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(
+                f"[warn] cutover behind-check: cannot clone {source}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        if clone.returncode != 0:
+            lines = (clone.stderr or "").strip().splitlines()
+            detail = f": {lines[-1]}" if lines else ""
+            print(
+                f"[warn] cutover behind-check: clone of {source} failed{detail}",
+                file=sys.stderr,
+            )
+            return None
+        main_sha = _ref_sha(tmp, "refs/heads/main")
+        if main_sha is None:
+            print(
+                f"[warn] cutover behind-check: {source} has no main branch",
+                file=sys.stderr,
+            )
+            return None
+        target_sha = _ref_sha(tmp, target_ref)
+        if target_sha is None:
+            print(
+                f"[warn] cutover behind-check: ref {target_ref!r} not found in {source}",
+                file=sys.stderr,
+            )
+            return None
+        count = subprocess.run(
+            ["git", "-C", str(tmp), "rev-list", "--count", f"{target_sha}..{main_sha}"],
+            capture_output=True, text=True,
+        )
+        if count.returncode != 0:
+            print(
+                f"[warn] cutover behind-check: rev-list failed: "
+                f"{(count.stderr or '').strip()}",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            return int(count.stdout.strip())
+        except ValueError:
+            print(
+                f"[warn] cutover behind-check: unparseable rev-list output "
+                f"{count.stdout!r}",
+                file=sys.stderr,
+            )
+            return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _derive_behind_source(target_dir: Path) -> "str | None":
+    """The git source to measure a flip target's behindness against.
+
+    The version dir being activated is a clone of the canonical remote in
+    every real install (``_ensure_origin_remote`` has repaired its origin by
+    the time the flip runs), so its own origin is the authoritative source.
+    A target that is not a git checkout carries no source: the caller reports
+    UNKNOWN without touching the network.
+    """
+    if _git_toplevel(target_dir) != target_dir:
+        return None
+    return _origin_url(target_dir)
+
+
+def _cutover_behind_guard(
+    to_name: str,
+    *,
+    target_dir: Path,
+    cutover_reason: "str | None",
+    enforce: bool,
+    behind_source: "str | None",
+    audit_log: "Path | None" = None,
+) -> None:
+    """Measure and NAME how far the cutover target lags main — before the flip.
+
+    Three outcomes, all loud and all audited as
+    ``central_install_cutover_behind_check`` events:
+
+    - measured, at or under the threshold: the count is printed and the
+      cutover proceeds (outcome ``proceed``). A silent successful cutover is
+      exactly the OI-1718 bug, so the number is named here too.
+    - measured, over the threshold: refused (outcome ``refused``, raises
+      ``CutoverRefusedError``) unless the operator passed an explicit
+      non-empty reason (outcome ``override``, the reason is printed and
+      recorded). A blank reason is a refusal.
+    - unmeasurable (no source, unreachable remote, unknown ref): reported as
+      UNKNOWN, never silently as 0 (outcome ``proceed_unknown``). UNKNOWN
+      proceeds loudly rather than blocking: a cutover is non-destructive, and
+      refusing every flip whenever the remote is unreachable would disable
+      ``update``/``rollback`` exactly when they are needed as recovery tools.
+
+    ``enforce=False`` is the rollback path: rolling back goes backwards by
+    design, so the count is measured and named but never refuses.
+    """
+    threshold = _cutover_max_behind_commits()
+    reason = (cutover_reason or "").strip()
+
+    def _audit(outcome: str, behind: "int | None") -> None:
+        fields = {
+            "to_version": to_name,
+            "behind": behind,
+            "threshold": threshold,
+            "enforced": enforce,
+            "outcome": outcome,
+        }
+        if reason:
+            fields["reason"] = reason
+        _emit_audit_event(
+            "central_install_cutover_behind_check", fields, audit_log=audit_log
+        )
+
+    if to_name == "edge":
+        # edge tracks main: the fetch/pull immediately before this flip put it
+        # at main's tip, so the count is 0 by construction — no clone needed.
+        print(
+            f"Cutover behind-check: 'edge' is 0 commits behind main "
+            f"(edge tracks main; threshold: {threshold})."
+        )
+        _audit("proceed", 0)
+        return
+
+    source = behind_source or _derive_behind_source(target_dir)
+    if source is None:
+        print(
+            f"[warn] cutover behind-check: no git source for '{to_name}' "
+            "(target dir is not a git checkout with an origin)",
+            file=sys.stderr,
+        )
+        behind = None
+    else:
+        behind = _measure_behind_main(source, to_name)
+
+    if behind is None:
+        print(
+            f"Cutover behind-check: behindness of '{to_name}' vs main is UNKNOWN "
+            "— proceeding with the flip, but the staleness of this target is "
+            "unverified. Unknown is not zero."
+        )
+        _audit("proceed_unknown", None)
+        return
+
+    print(
+        f"Cutover behind-check: '{to_name}' is {behind} commits behind main "
+        f"(threshold: {threshold})."
+    )
+
+    if behind <= threshold:
+        _audit("proceed", behind)
+        return
+
+    if not enforce:
+        print(
+            f"Cutover behind-check: {behind} exceeds threshold {threshold} — "
+            "reported, not blocked: a rollback goes backwards by design.",
+            file=sys.stderr,
+        )
+        _audit("proceed", behind)
+        return
+
+    if reason:
+        print(
+            f"Cutover behind-check: {behind} exceeds threshold {threshold} — "
+            f"proceeding on explicit operator reason: {reason!r}"
+        )
+        _audit("override", behind)
+        return
+
+    _audit("refused", behind)
+    raise CutoverRefusedError(
+        f"cutover refused: '{to_name}' is {behind} commits behind main "
+        f"(threshold: {threshold}). Cut a fresher release from main and target "
+        f"that, or re-run with --cutover-reason \"<why this stale target is "
+        f"intended>\" — an empty reason is itself a refusal."
+    )
+
+
 def _atomic_symlink_flip(
-    root: Path, target_dir: Path, dry_run: bool, audit_log: "Path | None" = None
+    root: Path, target_dir: Path, dry_run: bool, audit_log: "Path | None" = None,
+    cutover_reason: "str | None" = None, enforce_behind_guard: bool = True,
+    behind_source: "str | None" = None,
 ) -> None:
     current = root / "current"
 
     if dry_run:
         print(f"[dry-run] Would flip symlink: {current} -> {target_dir}")
+        print(
+            f"[dry-run] Would measure how far '{target_dir.name}' is behind main "
+            f"and enforce the {CUTOVER_BEHIND_CONFIG_KEY} threshold before flipping"
+        )
         return
 
     # Self-heal: whatever becomes active must carry the marker, even when this
@@ -457,6 +730,17 @@ def _atomic_symlink_flip(
     from_version = _current_target(root)
     from_name = from_version.name if from_version else None
     to_name = target_dir.name
+
+    # OI-1718: measure + name the target's behindness BEFORE any flip
+    # mutation. A refusal raises here, so `current` is never half-moved.
+    _cutover_behind_guard(
+        to_name,
+        target_dir=target_dir,
+        cutover_reason=cutover_reason,
+        enforce=enforce_behind_guard,
+        behind_source=behind_source,
+        audit_log=audit_log,
+    )
 
     root.mkdir(parents=True, exist_ok=True)
     tmp_link = root / "current.tmp"
@@ -965,7 +1249,7 @@ def _do_rollback(root: Path, dry_run: bool) -> int:
         print(f"[dry-run] Would rollback current -> {prev_dir}")
         return 0
 
-    _atomic_symlink_flip(root, prev_dir, dry_run=False)
+    _atomic_symlink_flip(root, prev_dir, dry_run=False, enforce_behind_guard=False)
     print(f"Rolled back to: {prev_dir.name}")
     return 0
 
@@ -976,6 +1260,7 @@ def vnx_update(args) -> int:
     dry_run: bool = getattr(args, "dry_run", False)
     rollback: bool = getattr(args, "rollback", False)
     protect_pins = getattr(args, "protect_pins", None)
+    cutover_reason = getattr(args, "cutover_reason", None)
 
     root = _resolve_root()
 
@@ -1003,10 +1288,15 @@ def vnx_update(args) -> int:
 
     try:
         target_dir = _fetch_version(root, target, dry_run=dry_run)
-        _atomic_symlink_flip(root, target_dir, dry_run=dry_run)
+        _atomic_symlink_flip(
+            root, target_dir, dry_run=dry_run, cutover_reason=cutover_reason
+        )
         _prune_old_versions(
             root, keep_last=keep_last, dry_run=dry_run, protect_pins=protect_pins
         )
+    except CutoverRefusedError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     except FileNotFoundError:
         print("Error: git executable not found in PATH", file=sys.stderr)
         return 1

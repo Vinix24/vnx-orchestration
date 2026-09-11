@@ -336,6 +336,15 @@ def _register_update_subparser(subparsers: argparse.Action) -> None:
              "fleet .vnx-version pins (from ~/.vnx/projects.json) and the "
              "<root>/protected-versions file",
     )
+    update_parser.add_argument(
+        "--cutover-reason",
+        dest="cutover_reason",
+        default=None,
+        metavar="TEXT",
+        help="explicit reason required to cut over to a target measured more "
+             "than VNX_CUTOVER_MAX_BEHIND_COMMITS commits behind main "
+             "(OI-1718); an empty reason is refused",
+    )
 
 
 def _register_release_subparser(subparsers: argparse.Action) -> None:
@@ -373,6 +382,15 @@ def _register_release_subparser(subparsers: argparse.Action) -> None:
         dest="set_current",
         action="store_true",
         help="also flip current -> <tag> (default OFF: publish without cutover)",
+    )
+    publish_parser.add_argument(
+        "--cutover-reason",
+        dest="cutover_reason",
+        default=None,
+        metavar="TEXT",
+        help="explicit reason required for --set-current when the tag measures "
+             "more than VNX_CUTOVER_MAX_BEHIND_COMMITS commits behind main "
+             "(OI-1718); an empty reason is refused",
     )
 
 
