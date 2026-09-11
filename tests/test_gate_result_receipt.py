@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -194,3 +195,35 @@ def test_completed_with_blocking_findings_books_reject_not_accept(tmp_path, monk
     assert receipt["status"] == "failed"
     assert receipt["blocking_count"] == 1
     assert receipt["verdict"]["decision"] == "reject"
+
+
+# ---------------------------------------------------------------------------
+# 5. The result-receipt write path must not fork a subprocess.
+# ---------------------------------------------------------------------------
+
+
+def test_result_receipt_write_path_spawns_no_subprocess(tmp_path, monkeypatch):
+    """Booking the outcome receipt must not spawn a subprocess.
+
+    OI-1702/OI-1703 regression (dispatch
+    20260911-fix1836-subprocess-uit-schrijfpad): the receipt write used to
+    resolve its store via facade.ensure_env() -> resolve_paths() ->
+    _git_toplevel(), which forks ``git rev-parse --show-toplevel`` on every
+    append. That put a subprocess in the write path of every gate outcome and
+    broke tests that patch subprocess.Popen to mock the codex run
+    (tests/test_gate_runner.py). A decided gate result is already on disk by
+    the time its receipt is booked; the writer must not fork.
+    """
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+
+    with mock.patch("subprocess.Popen") as popen:
+        record_terminal_result(
+            gate="glm_gate", pr_id="99", result_path=tmp_path / "pr-99-glm_gate.json",
+            payload=_pass_payload(), execution_depth=_OK_DEPTH,
+        )
+
+    popen.assert_not_called()
+    assert len(_result_receipts(state_dir)) == 1, (
+        "the outcome receipt must still be written"
+    )

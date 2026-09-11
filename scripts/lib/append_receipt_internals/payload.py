@@ -25,6 +25,7 @@ from .idempotency import (
     _cache_file_for,
     _lock_file_for,
     _resolve_receipts_file,
+    _resolve_state_dir_env_first,
     _write_receipt_under_lock,
 )
 from .receipt_finalize import classify_receipt_v2_warnings, commit_receipt_v2_fields
@@ -44,8 +45,7 @@ def _maybe_reroute_to_gate_stream(receipt: Dict[str, Any], receipts_file: Option
     if receipts_file is not None or not facade.should_route_to_gate_stream(receipt):
         return receipts_file
     try:
-        paths = facade.ensure_env()
-        state_dir = Path(paths["VNX_STATE_DIR"])
+        state_dir = _resolve_state_dir_env_first()
         rerouted = str(facade.gate_events_file(state_dir))
         _emit("INFO", "ghost_receipt_rerouted",
               gate=str(receipt.get("gate") or ""),
