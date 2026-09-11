@@ -430,6 +430,54 @@ def is_routing_announcement(result: Dict[str, Any]) -> bool:
     return reason.strip() in NON_VERDICT_NOT_EXECUTABLE_REASONS
 
 
+# OI-1707: three reasons that all say the same thing — the RUNNER could not
+# take this path. Distinct from a provider refusal (``provider_not_installed``,
+# ``provider_disabled``, ``provider_not_configured``, a quota/auth refusal),
+# which is the reader being asked and unable to answer, i.e. a statement about
+# the head. The runner reasons are the executor describing itself: the gate is
+# not registered (``unsupported_gate_type``), the script runner has not shipped
+# (``gate_runner_missing``), or it ships but is not a CLI this runner can drive
+# with a prompt (``gate_not_subprocess_routable``).
+#
+# WIDER than :data:`NON_VERDICT_NOT_EXECUTABLE_REASONS` on purpose, because the
+# two sets serve different directions. That set (narrow,
+# ``gate_not_subprocess_routable`` only) governs whether an EXISTING record
+# holds the slot (OI-1669): the other two runner reasons were left out because
+# nothing can write a verdict over either of them anyway. This set governs
+# whether a NEW record may TAKE the slot (OI-1707): a runner-refusal note must
+# never displace a record of what the provider actually did, and all three
+# reasons are the runner describing itself — a missing runner or an
+# unregistered gate is no more a verdict about the PR than a refused routing
+# is. A reason enters this set on a measurement, not on a resemblance.
+RUNNER_REFUSAL_NOT_EXECUTABLE_REASONS: frozenset = frozenset({
+    "gate_not_subprocess_routable",
+    "gate_runner_missing",
+    "unsupported_gate_type",
+})
+
+
+def is_runner_refusal(result: Dict[str, Any]) -> bool:
+    """Is this record the RUNNER describing itself rather than the gate/PR?
+
+    True only for a ``not_executable`` record whose ``reason`` is in
+    :data:`RUNNER_REFUSAL_NOT_EXECUTABLE_REASONS`. Both halves are required,
+    mirroring :func:`is_routing_announcement`: the reason string on its own,
+    carried by a record with any other status, is not the shape that was
+    measured.
+
+    A missing, non-string or unrecognised ``reason`` reads as False — the
+    default is that a record is evidence about the gate/PR, never the runner.
+    """
+    from gate_status import canonical_status  # noqa: PLC0415
+
+    if canonical_status(result) != "not_executable":
+        return False
+    reason = result.get("reason")
+    if not isinstance(reason, str):
+        return False
+    return reason.strip() in RUNNER_REFUSAL_NOT_EXECUTABLE_REASONS
+
+
 class _CorruptResult:
     """Sentinel: the result file exists but could not be parsed as a dict.
 
@@ -526,6 +574,25 @@ def _check_overwrite_guard(
     start — could then not write its ``unavailable``. See
     :data:`NON_VERDICT_NOT_EXECUTABLE_REASONS` for why that is a narrow set
     and why a PROVIDER refusal is not in it.
+
+    OI-1707 closes the OPPOSITE direction of OI-1669, on the SAME axis. OI-1669
+    stops a runner-refusal note from HOLDING the slot against the gate's own
+    result. OI-1707 stops that same note from TAKING the slot from a real
+    provider outcome. Measured 2026-09-10 on PRs #1830/#1832: three poortruns
+    recorded real provider outages (``unavailable``: codex usage limit, glm's
+    litellm-proxy down, kimi auth refused), and the obligation runner then
+    booked its own ``not_executable``/``gate_not_subprocess_routable`` over
+    them — ``unavailable`` is deliberately non-terminal, so the old
+    ``not is_terminal(existing) -> return`` let the refusal straight through
+    and erased the only trace of what the provider actually did. A
+    runner-refusal note (:func:`is_runner_refusal`) may now only land on an
+    empty slot or over another runner-refusal note; every other existing
+    record — a decided verdict, a provider refusal, an ``unavailable`` outage
+    — refuses it, after the OI-1668 head scoping so a refusal about a
+    DIFFERENT head still lands. The refused note is not lost: the request
+    record and the GATE-9 skip-rationale are written around the guarded result
+    write regardless of the refusal, so the diagnosis lands without displacing
+    the evidence.
     """
     from gate_status import is_terminal, has_complete_evidence, canonical_status  # noqa: PLC0415
 
@@ -552,40 +619,21 @@ def _check_overwrite_guard(
             f"{gate} result for pr={pr_ref!r} at {result_path} exists but is "
             f"unreadable/corrupt -- refusing to overwrite an unverifiable record"
         )
-    if existing is None or not is_terminal(existing):
+    if existing is None:
         return
     existing_status = canonical_status(existing)
     new_status = canonical_status(new_payload)
-    if is_routing_announcement(existing):
-        # OI-1669. The record in the slot is the executor saying it cannot
-        # drive this gate — a fact about the router, not about the head. It
-        # was never evidence, so there is nothing here to downgrade and the
-        # write proceeds whatever its status. Checked BEFORE the head branch
-        # because it holds on every head, including this one; checked AFTER
-        # the corrupt-file refusal above, because a torn write may be hiding a
-        # decided verdict and "it might have been an announcement" is not
-        # something the guard may assume.
-        #
-        # One-directional: this excuses a record from HOLDING the slot, never
-        # licenses one to TAKE it. An announcement written over a decided,
-        # evidenced verdict still meets the evidence check below, exactly as
-        # it does today.
-        logger.info(
-            "gate_recorder: replacing routing announcement gate=%s pr=%s "
-            "existing_status=%r reason=%r with status=%r — a statement about "
-            "what this executor can drive is not a verdict about the PR, so "
-            "it does not hold the slot against the gate itself (OI-1669)",
-            gate, pr_ref, existing_status, existing.get("reason"), new_status,
-        )
-        return
+
+    # OI-1668: the existing record judges a different commit (or none at all),
+    # so it is not evidence about the head being written now. Two log lines,
+    # not one: an operator reading this needs to tell "the head moved on, as
+    # it does after every fix-forward" apart from "a verdict that never
+    # recorded what it judged just lost its slot", and the second is the one
+    # worth chasing. Moved ABOVE the OI-1707 runner-refusal check below so a
+    # runner-refusal note about a DIFFERENT head still lands — a refusal about
+    # head B is not a downgrade of an outage recorded against head A.
     new_sha = (new_payload.get("commit_sha") or "").strip()
     if new_sha and not result_is_for_head(existing, new_sha):
-        # OI-1668: the existing record judges a different commit (or none at
-        # all), so it is not evidence about the head being written now. Two
-        # log lines, not one: an operator reading this needs to tell "the head
-        # moved on, as it does after every fix-forward" apart from "a verdict
-        # that never recorded what it judged just lost its slot", and the
-        # second is the one worth chasing.
         existing_sha = (existing.get("commit_sha") or "").strip()
         if not existing_sha:
             logger.warning(
@@ -603,6 +651,56 @@ def _check_overwrite_guard(
                 "this one (OI-1668)",
                 gate, pr_ref, existing_status, existing_sha, new_status, new_sha,
             )
+        return
+
+    # OI-1707: a runner-refusal note is the executor describing itself — it is
+    # not evidence about the head, so it may only land on an empty slot or
+    # over another runner-refusal note. It must never displace a record of
+    # what the provider actually did: a decided verdict (protected below), a
+    # provider-refusal not_executable, or — the measured defect — an
+    # ``unavailable`` outage. That outage is deliberately non-terminal, which
+    # is exactly why the old ``not is_terminal(existing) -> return`` let this
+    # write straight through and erased the only trace of the real provider
+    # failure (PRs #1830/#1832, 2026-09-10).
+    if is_runner_refusal(new_payload) and not is_runner_refusal(existing):
+        logger.warning(
+            "gate_recorder: REFUSING to overwrite result gate=%s pr=%s "
+            "existing_status=%r with a runner-refusal not_executable "
+            "status=%r reason=%r — 'the runner could not take this path' is "
+            "not evidence about the PR, so it must never displace a record of "
+            "what the provider actually did (OI-1707)",
+            gate, pr_ref, existing_status, new_status, new_payload.get("reason"),
+        )
+        raise ResultOverwriteRefused(
+            f"{gate} result for pr={pr_ref!r} carries a real provider outcome "
+            f"(status={existing_status!r}) — refusing to overwrite it with a "
+            f"runner-refusal not_executable (reason={new_payload.get('reason')!r})"
+        )
+
+    if not is_terminal(existing):
+        return
+    if is_routing_announcement(existing):
+        # OI-1669. The record in the slot is the executor saying it cannot
+        # drive this gate — a fact about the router, not about the head. It
+        # was never evidence, so there is nothing here to downgrade and the
+        # write proceeds whatever its status. Checked AFTER the OI-1707
+        # runner-refusal check above because that check also covers a
+        # runner-refusal note landing over an outage; checked AFTER the
+        # corrupt-file refusal, because a torn write may be hiding a decided
+        # verdict and "it might have been an announcement" is not something the
+        # guard may assume.
+        #
+        # One-directional: this excuses a record from HOLDING the slot, never
+        # licenses one to TAKE it. An announcement written over a decided,
+        # evidenced verdict still meets the evidence check below, exactly as
+        # it does today.
+        logger.info(
+            "gate_recorder: replacing routing announcement gate=%s pr=%s "
+            "existing_status=%r reason=%r with status=%r — a statement about "
+            "what this executor can drive is not a verdict about the PR, so "
+            "it does not hold the slot against the gate itself (OI-1669)",
+            gate, pr_ref, existing_status, existing.get("reason"), new_status,
+        )
         return
     if not is_terminal(new_payload):
         logger.warning(
