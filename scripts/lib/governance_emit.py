@@ -631,6 +631,7 @@ def emit_unified_report(
     overwrite: bool = False,
     preserve_partial: bool = False,
     model: Optional[str] = None,
+    spawn_error: Optional[str] = None,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
@@ -677,6 +678,14 @@ def emit_unified_report(
     ``None``; a non-empty list renders each finding. No validation rule is
     added and no report is refused — the wrapper simply stops writing an
     unfilled field as the authoritative "there are none".
+
+    When *spawn_error* is provided and *response_text* is empty, the spawn
+    layer already knows why no response exists (proxy unreachable, harness
+    refused to start) — that error is the authoritative diagnosis and is
+    surfaced in the body under an ``empty_response_state`` of ``spawn_error``,
+    labeled as NOT a model reply, ahead of the lane-log lift (OI-1710). The
+    lane-log lift stays the fallback for empty responses whose cause only the
+    raw lane log can explain.
 
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
@@ -772,19 +781,34 @@ def emit_unified_report(
         # placeholder — see _lift_lane_log_for_report above.
         response_block = response_text
         if not (response_text or "").strip():
-            lift = _lift_lane_log_for_report(dispatch_id, data_dir)
-            if lift is not None:
-                empty_response_state, response_block, lane_reason = lift
+            # OI-1710: the spawn layer already knowing why there is no response
+            # (proxy unreachable, harness refused to start) is the authoritative
+            # diagnosis — surface it ahead of the lane-log lift, labeled so it
+            # can never be misread as a model reply.
+            spawn_error_text = (spawn_error or "").strip()
+            if spawn_error_text:
+                empty_response_state = "spawn_error"
+                lift_reason = spawn_error_text
+                response_block = (
+                    "_No response text was captured from the model. The spawn "
+                    "layer failed before the model could run — the text below "
+                    "is the spawn error, NOT a model reply._\n\n"
+                    f"```\n{spawn_error_text}\n```"
+                )
             else:
-                empty_response_state, response_block, lane_reason = "no_response", None, None
+                lift = _lift_lane_log_for_report(dispatch_id, data_dir)
+                if lift is not None:
+                    empty_response_state, response_block, lift_reason = lift
+                else:
+                    empty_response_state, response_block, lift_reason = "no_response", None, None
             if frontmatter is not None:
                 frontmatter.setdefault("empty_response_state", empty_response_state)
                 # Canonical field (OI-1415/#1666): stamp the SAME failure_reason
                 # key generic failure readers already look for — never a
                 # lane-log-only field name — and never clobber a reason the
                 # caller already computed upstream.
-                if lane_reason and not frontmatter.get("failure_reason"):
-                    frontmatter["failure_reason"] = lane_reason
+                if lift_reason and not frontmatter.get("failure_reason"):
+                    frontmatter["failure_reason"] = lift_reason
 
         body = (
             f"# Dispatch {dispatch_id}\n\n"
