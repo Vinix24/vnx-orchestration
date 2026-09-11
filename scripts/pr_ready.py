@@ -143,7 +143,17 @@ def _gate_line(report: Readiness) -> str:
     for gate in report.gates:
         suffix = "" if gate.declared else " [off the door: no obligation]"
         if gate.satisfied:
-            parts.append(f"{gate.gate} OK on head{suffix}")
+            # Name the evidence's origin whenever it is not the declared gate
+            # itself, so a reader never thinks the declared gate looked at the
+            # code when a successor or a takeover booking did (OI-1719).
+            if gate.evidence_via == "takeover_boeking" and gate.evidence_gate:
+                parts.append(
+                    f"{gate.gate} OK via takeover-boeking -> {gate.evidence_gate} on head{suffix}"
+                )
+            elif gate.evidence_gate and gate.evidence_gate != gate.gate:
+                parts.append(f"{gate.gate} OK via overname -> {gate.evidence_gate} on head{suffix}")
+            else:
+                parts.append(f"{gate.gate} OK on head{suffix}")
         elif gate.verdict == VERDICT_UNMEASURABLE:
             parts.append(f"{gate.gate} UNMEASURABLE ({gate.message})")
         elif gate.record_sha and gate.record_sha != report.head_sha:

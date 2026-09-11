@@ -110,6 +110,17 @@ REASON_NO_PR_BRANCH_EXISTS = "no_pr_branch_exists"
 REASON_NO_PR_BRANCH_GONE_LIVE = "no_pr_branch_gone_live"
 REASON_NO_PR_BRANCH_GONE_UNMEASURED = "no_pr_branch_gone_unmeasured"
 
+# D2e takeover bookings (writer: scripts/gate_obligation_runner.py, the
+# ``_find_takeover_successor_evidence`` branch): the declared gate never
+# rendered a verdict of its own, but the review-gate takeover chain already
+# substituted a successor whose record carries a complete-evidence verdict.
+# The obligation then closes fulfilled/failed with ``result_path`` (and
+# ``evidence_result_path``) pointing at the SUCCESSOR's result record.
+# OI-1719 makes the merge door read exactly this booking; the constants live
+# here so writer and readers can never drift on the literal string.
+REASON_FULFILLED_BY_TAKEOVER = "fulfilled_by_takeover_evidence"
+REASON_FAILED_BY_TAKEOVER = "failed_by_takeover_evidence"
+
 # Distinct sentinel gate key for explicit no-gate records (dispatch
 # 20260816-gate-never-skippable). Deliberately NOT a member of the Gate enum: a
 # no-gate dispatch is not declaring any gate, but the freshness scanner needs a
@@ -170,12 +181,29 @@ def normalise_pr_id(pr_id: str) -> str:
     return s
 
 
-def declared_gates_for_pr(state_dir: Path, pr_number: int) -> list:
-    """Every review gate declared for ``pr_number``, oldest obligation first.
+def obligation_matches_pr(record: Dict[str, Any], pr_ref: Any) -> bool:
+    """The PR join every obligation reader answers with — ONE implementation.
 
     Joins on the GitHub PR number the runner stamps on the obligation, falling
     back to the normalised spec ``pr_id`` for records the runner never touched.
-    The ``__no_gate__`` sentinel and blank gates are excluded: they declare an
+    Promoted out of :func:`declared_gates_for_pr` (OI-1719) so the merge door's
+    obligation-evidence route (``closure_verifier``) decides "does this
+    obligation belong to this PR" from the SAME code as the readiness report —
+    a second copy is exactly how the two would start disagreeing.
+    """
+    num = str(pr_ref)
+    num_forms = {normalise_pr_id(num), normalise_pr_id(f"PR-{num}")}
+    rec_num = record.get("pr_number")
+    if rec_num is not None and str(rec_num) == num:
+        return True
+    return normalise_pr_id(str(record.get("pr_id") or "")) in num_forms
+
+
+def declared_gates_for_pr(state_dir: Path, pr_number: int) -> list:
+    """Every review gate declared for ``pr_number``, oldest obligation first.
+
+    The join itself lives in :func:`obligation_matches_pr`. The
+    ``__no_gate__`` sentinel and blank gates are excluded: they declare an
     explicit absence, not an obligation.
 
     Raises ValueError (via :func:`iter_obligations`) when an obligation file is
@@ -183,15 +211,9 @@ def declared_gates_for_pr(state_dir: Path, pr_number: int) -> list:
     silent-evidence failure this whole mechanism exists to expose, so a caller
     reports it rather than reading it as "this PR owes nothing".
     """
-    num = str(pr_number)
-    num_forms = {normalise_pr_id(num), normalise_pr_id(f"PR-{num}")}
     gates = []
     for _path, record in iter_obligations(state_dir):
-        rec_num = record.get("pr_number")
-        matched = rec_num is not None and str(rec_num) == num
-        if not matched:
-            matched = normalise_pr_id(str(record.get("pr_id") or "")) in num_forms
-        if not matched:
+        if not obligation_matches_pr(record, pr_number):
             continue
         gate = (record.get("gate") or "").strip()
         if gate and gate != NO_GATE_KEY:
@@ -425,14 +447,26 @@ def register_no_gate_obligation(
 
 
 def iter_obligations(state_dir: Path) -> Iterator[Tuple[Path, Dict[str, Any]]]:
-    """Yield (path, record) for every readable obligation, sorted by name.
+    """Yield (path, record) for every obligation under ``state_dir``."""
+    yield from iter_obligations_in(obligations_dir(state_dir))
+
+
+def iter_obligations_in(root: Path) -> Iterator[Tuple[Path, Dict[str, Any]]]:
+    """Yield (path, record) for every readable obligation in ``root``, sorted by name.
+
+    The same read discipline as :func:`iter_obligations`, rooted at the
+    obligations directory itself, for callers that hold a neighbouring path
+    rather than the state dir (OI-1719: the merge door derives
+    ``results_dir.parent / "obligations"`` — the same derivation
+    ``closure_verifier._find_gate_request_payload`` already uses for
+    ``requests``).
 
     Unreadable files raise ValueError — an obligation that cannot be read is
     exactly the class of silent-evidence failure this mechanism exists to
     expose, so callers (the freshness scanner) surface it as a finding
     instead of skipping it.
     """
-    root = obligations_dir(state_dir)
+    root = Path(root)
     if not root.is_dir():
         return
     for entry in sorted(root.glob("*.json")):
@@ -480,14 +514,20 @@ __all__ = [
     "REASON_NO_PR_BRANCH_EXISTS",
     "REASON_NO_PR_BRANCH_GONE_LIVE",
     "REASON_NO_PR_BRANCH_GONE_UNMEASURED",
+    "REASON_FULFILLED_BY_TAKEOVER",
+    "REASON_FAILED_BY_TAKEOVER",
     "TERMINAL_STATUSES",
     "NO_GATE_KEY",
     "obligations_dir",
     "obligation_path",
     "pr_number_from_pr_id",
+    "normalise_pr_id",
+    "obligation_matches_pr",
+    "declared_gates_for_pr",
     "register_obligation",
     "register_no_gate_obligation",
     "check_gate_requirement_mismatch",
     "iter_obligations",
+    "iter_obligations_in",
     "update_obligation",
 ]

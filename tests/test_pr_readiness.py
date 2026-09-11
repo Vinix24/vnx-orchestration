@@ -265,6 +265,52 @@ def test_render_distinguishes_an_absent_gate_from_a_stale_one():
     assert "absent" in pr_ready._gate_line(report)
 
 
+def test_a_gate_satisfied_via_takeover_booking_shows_where_its_evidence_came_from():
+    """OI-1719: a fulfilled_by_takeover_evidence booking must never read as if
+    the declared gate itself looked at the code.
+    """
+    report = _ready_report(
+        declared_gates=["codex_gate"],
+        gates=[
+            pr.GateEvidence(
+                gate="codex_gate",
+                verdict="GO",
+                message="bewezen via takeover-boeking",
+                evidence_gate="glm_gate",
+                evidence_via="takeover_boeking",
+            )
+        ],
+    )
+    line = pr_ready._gate_line(report)
+    assert "codex_gate OK via takeover-boeking -> glm_gate on head" in line
+    assert "codex_gate OK on head" not in line
+
+
+def test_a_gate_satisfied_via_an_oi1576_successor_names_the_successor():
+    """The same honesty for the older route: a successor's pass is not the
+    declared gate's own looking.
+    """
+    report = _ready_report(
+        declared_gates=["codex_gate"],
+        gates=[
+            pr.GateEvidence(
+                gate="codex_gate",
+                verdict="GO",
+                message="bewezen via overname",
+                evidence_gate="glm_gate",
+            )
+        ],
+    )
+    assert "codex_gate OK via overname -> glm_gate on head" in pr_ready._gate_line(report)
+
+
+def test_a_gate_satisfied_on_its_own_record_names_no_other_source():
+    report = _ready_report()
+    line = pr_ready._gate_line(report)
+    assert "glm_gate OK on head" in line
+    assert "via" not in line
+
+
 def test_every_verdict_maps_to_a_distinct_exit_code():
     """0 ready, 1 not ready, 2 unmeasurable. Collapsing 2 into 1 would hide
     "the machine cannot reach GitHub" inside "this PR needs another run".
