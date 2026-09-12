@@ -155,6 +155,62 @@ def test_expected_component_names_is_just_the_names(fixture_scripts: Path) -> No
     assert br.expected_component_names(reg) == ("one",)
 
 
+# ---------------------------------------------------------------------------
+# PARKED_COMPONENTS / parked_component_names (golf C, C2a)
+# ---------------------------------------------------------------------------
+
+
+def test_parked_component_names_is_learning_loop_and_intelligence_daemon() -> None:
+    """Operator decision 2026-09-09: the intelligence layer stays parked
+    until the governance ledger is falsifiable (per the PRD) -- both
+    already-silent components get a deliberate status, not a removal."""
+    assert br.parked_component_names() == ("intelligence_daemon", "learning_loop")
+
+
+def test_parked_components_is_a_subset_of_the_real_register() -> None:
+    names = {s.name for s in br.read_beacon_register()}
+    assert set(br.parked_component_names()) <= names
+
+
+# ---------------------------------------------------------------------------
+# find_duplicate_beacon_writers (golf C, C2a) -- forced red/green via
+# tmp_path fixtures, per the dispatch's own "een test die twee schrijfpaden
+# voor dezelfde component rood maakt" instruction.
+# ---------------------------------------------------------------------------
+
+
+def test_find_duplicate_beacon_writers_flags_a_forced_collision(tmp_path: Path) -> None:
+    primary = tmp_path / "health"
+    secondary = tmp_path / "state" / "health"
+    primary.mkdir(parents=True)
+    secondary.mkdir(parents=True)
+    (primary / "report_to_receipt_converter.json").write_text("{}", encoding="utf-8")
+    (secondary / "report_to_receipt_converter.json").write_text("{}", encoding="utf-8")
+
+    dupes = br.find_duplicate_beacon_writers(tmp_path)
+    assert set(dupes.keys()) == {"report_to_receipt_converter"}
+    primary_path, secondary_path = dupes["report_to_receipt_converter"]
+    assert primary_path == primary / "report_to_receipt_converter.json"
+    assert secondary_path == secondary / "report_to_receipt_converter.json"
+
+
+def test_find_duplicate_beacon_writers_clean_when_only_one_root_has_the_file(tmp_path: Path) -> None:
+    primary = tmp_path / "health"
+    secondary = tmp_path / "state" / "health"
+    primary.mkdir(parents=True)
+    secondary.mkdir(parents=True)
+    (primary / "only_here.json").write_text("{}", encoding="utf-8")
+
+    assert br.find_duplicate_beacon_writers(tmp_path) == {}
+
+
+def test_find_duplicate_beacon_writers_missing_secondary_root_is_clean(tmp_path: Path) -> None:
+    (tmp_path / "health").mkdir(parents=True)
+    (tmp_path / "health" / "only_here.json").write_text("{}", encoding="utf-8")
+
+    assert br.find_duplicate_beacon_writers(tmp_path) == {}
+
+
 def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     """Sanity check against the actual repo (measured 2026-09-05, was 9 on
     2026-08-30): 10 statically-resolvable HealthBeacon(...) call sites.

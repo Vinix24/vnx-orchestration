@@ -544,5 +544,114 @@ def test_beacon_summary_counts_always_include_absent_and_unknown_keys(tmp_path: 
     HealthBeacon(tmp_path, "good").heartbeat()
     summary = beacon_summary(tmp_path)
     assert summary["counts"] == {
-        "ok": 1, "stale": 0, "fail": 0, "corrupt": 0, "absent": 0, "unknown": 0,
+        "ok": 1, "stale": 0, "fail": 0, "corrupt": 0, "absent": 0, "unknown": 0, "parked": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# golf C / C2a — `parked`: an operator decision to stop expecting freshness
+# from a component must never be classified the same as a real defect.
+# ---------------------------------------------------------------------------
+
+
+def test_parked_overrides_stale_classification(tmp_path: Path) -> None:
+    """learning_loop's exact real shape: wrote 'ok' 64+ days ago against an
+    86400s interval -- would classify 'stale' without the override."""
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "learning_loop", status="ok",
+        last_run_ts=int(time.time() - 64 * 86400), expected_interval_seconds=86400,
+    )
+    result = all_beacons(tmp_path, parked=["learning_loop"])
+    assert result["learning_loop"]["health"] == "parked"
+
+
+def test_parked_overrides_unknown_classification_on_event_driven_beacon(tmp_path: Path) -> None:
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "evented_parked", status="ok",
+        last_run_ts=int(time.time() - 1_000_000), expected_interval_seconds=None,
+    )
+    result = all_beacons(tmp_path, parked=["evented_parked"])
+    assert result["evented_parked"]["health"] == "parked"
+
+
+def test_parked_component_that_never_wrote_is_parked_not_absent(tmp_path: Path) -> None:
+    result = all_beacons(tmp_path, expected=["never_wrote"], parked=["never_wrote"])
+    assert result["never_wrote"] == {"component": "never_wrote", "health": "parked"}
+
+
+def test_parked_does_not_override_a_fresh_genuine_fail(tmp_path: Path) -> None:
+    """Parking suppresses SILENCE, not a real self-reported problem: a
+    parked component that is fresh and reports status=fail must still
+    surface as fail — parking is not a blanket amnesty."""
+    HealthBeacon(tmp_path, "parked_but_broken", expected_interval_seconds=3600).heartbeat(
+        status="fail", details={"err": "current problem"}
+    )
+    result = all_beacons(tmp_path, parked=["parked_but_broken"])
+    assert result["parked_but_broken"]["health"] == "fail"
+
+
+def test_parked_none_is_backward_compatible(tmp_path: Path) -> None:
+    """Omitting `parked` entirely must produce byte-for-byte the same
+    output as before it existed."""
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "learning_loop", status="ok",
+        last_run_ts=int(time.time() - 64 * 86400), expected_interval_seconds=86400,
+    )
+    result = all_beacons(tmp_path)
+    assert result["learning_loop"]["health"] == "stale"
+
+
+def test_cli_expected_flag_surfaces_absent_component(tmp_path: Path) -> None:
+    HealthBeacon(tmp_path, "present").heartbeat()
+    rc, stdout, _ = _run_cli(tmp_path, "--json", "--expected", "present,never_wrote")
+    assert rc == 1
+    payload = json.loads(stdout)
+    assert payload["beacons"]["never_wrote"]["health"] == "absent"
+
+
+def test_cli_omitting_expected_is_backward_compatible(tmp_path: Path) -> None:
+    """The pre-C2a call shape (no --expected at all) must not change: a
+    component that never wrote a beacon is simply absent from the output,
+    not synthesized as "absent"."""
+    HealthBeacon(tmp_path, "present").heartbeat()
+    rc, stdout, _ = _run_cli(tmp_path, "--json")
+    assert rc == 0
+    payload = json.loads(stdout)
+    assert set(payload["beacons"].keys()) == {"present"}
+
+
+def test_cli_parked_flag_excludes_from_bad_exit_code(tmp_path: Path) -> None:
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "parked_stale", status="ok",
+        last_run_ts=int(time.time() - 64 * 86400), expected_interval_seconds=86400,
+    )
+    rc, stdout, _ = _run_cli(tmp_path, "--json", "--parked", "parked_stale")
+    assert rc == 0, stdout
+    payload = json.loads(stdout)
+    assert payload["beacons"]["parked_stale"]["health"] == "parked"
+
+
+def test_cli_without_parked_flag_the_same_beacon_is_bad(tmp_path: Path) -> None:
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "parked_stale", status="ok",
+        last_run_ts=int(time.time() - 64 * 86400), expected_interval_seconds=86400,
+    )
+    rc, _stdout, _ = _run_cli(tmp_path, "--json")
+    assert rc == 1
+
+
+def test_beacon_summary_parked_never_floors_overall_away_from_ok(tmp_path: Path) -> None:
+    HealthBeacon(tmp_path, "good").heartbeat()
+    health_dir = tmp_path / "health"
+    _write_raw_beacon(
+        health_dir, "parked_one", status="ok",
+        last_run_ts=int(time.time() - 64 * 86400), expected_interval_seconds=86400,
+    )
+    summary = beacon_summary(tmp_path, parked=["parked_one"])
+    assert summary["counts"]["parked"] == 1
+    assert summary["overall"] == "ok"

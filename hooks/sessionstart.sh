@@ -90,9 +90,25 @@ from vnx_paths import resolve_paths
 p = resolve_paths()
 print(p['VNX_STATE_DIR'])
 print(p['VNX_DATA_DIR'])
+try:
+    from beacon_register import expected_component_names, parked_component_names
+    print(','.join(expected_component_names()))
+    print(','.join(parked_component_names()))
+except Exception:
+    print('')
+    print('')
 " 2>/dev/null || true)"
       _VNX_STATE_DIR="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 1p)"
       _VNX_DATA_DIR="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 2p)"
+      # C2a: expected/parked component names (beacon_register.py), resolved
+      # once in the same subprocess as the paths above rather than a second
+      # python call — --expected makes a component that never wrote a
+      # beacon at all (fleet_role_drift, receipt_conversion_rejections)
+      # surface as absent instead of being silently omitted from this
+      # digest; --parked keeps learning_loop/intelligence_daemon (parked by
+      # operator decision, PARKED_COMPONENTS) out of the "NOT ok" list below.
+      _VNX_EXPECTED_BEACONS="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 3p)"
+      _VNX_PARKED_BEACONS="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 4p)"
     fi
 
     if [ -n "$_VNX_STATE_DIR" ] && [ -d "$_VNX_STATE_DIR" ]; then
@@ -173,13 +189,19 @@ ${T0_CONTRACT_INVALID}"
     BEACON_SECTION=""
     _HEALTH_CHECK_PY="$_HOOK_DIR/../scripts/health_check.py"
     if [ -n "$_VNX_DATA_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_HEALTH_CHECK_PY" ]; then
-      _BEACON_JSON="$("$_VNX_PY" "$_HEALTH_CHECK_PY" --state-dir "$_VNX_DATA_DIR" --json 2>/dev/null || true)"
+      _HEALTH_CHECK_ARGS=(--state-dir "$_VNX_DATA_DIR" --json)
+      [ -n "${_VNX_EXPECTED_BEACONS:-}" ] && _HEALTH_CHECK_ARGS+=(--expected "$_VNX_EXPECTED_BEACONS")
+      [ -n "${_VNX_PARKED_BEACONS:-}" ] && _HEALTH_CHECK_ARGS+=(--parked "$_VNX_PARKED_BEACONS")
+      _BEACON_JSON="$("$_VNX_PY" "$_HEALTH_CHECK_PY" "${_HEALTH_CHECK_ARGS[@]}" 2>/dev/null || true)"
       if [ -n "$_BEACON_JSON" ] && command -v jq &>/dev/null; then
         _BEACON_PARSE_OK=$(echo "$_BEACON_JSON" | jq -e '.beacons | type == "object"' >/dev/null 2>&1 && echo yes || echo no)
         if [ "$_BEACON_PARSE_OK" = "yes" ]; then
           _BEACON_TOTAL=$(echo "$_BEACON_JSON" | jq '.beacons | length' 2>/dev/null || echo "0")
+          # "parked" (C2a) is an operator decision to stop expecting
+          # freshness, not a defect — excluded from the NOT-ok list the same
+          # way "ok" itself is.
           _BEACON_BAD=$(echo "$_BEACON_JSON" | jq -r '
-            [.beacons | to_entries[] | select(.value.health != "ok")]
+            [.beacons | to_entries[] | select(.value.health != "ok" and .value.health != "parked")]
             | sort_by(if .value.health == "fail" then 0 elif .value.health == "corrupt" then 1 else 2 end)
             | .[] | "  - [\(.value.health)] \(.key): last_run \(.value.last_run_iso // "unknown"), age \(.value.age_seconds // "unknown")s"
           ' 2>/dev/null || true)
