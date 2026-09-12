@@ -1121,6 +1121,96 @@ def test_cli_skip_beacon_checks_flag_disables_the_section(tmp_path: Path, capsys
     assert out["beacon_reader_coverage"] == {"skipped": True}
 
 
+def _sweep_finding_config(tmp_path: Path) -> Path:
+    """A minimal registry yielding exactly one sweep finding (a never-written
+    expected key), independent of the beacon / job-exits bonus sections. A
+    bonus-section crash can then be proven NOT to take that finding down."""
+    config_path = tmp_path / "registry.yaml"
+    config_path.write_text(
+        "producers:\n"
+        "  - name: never_seen\n"
+        "    type: directory\n"
+        f"    path: '{tmp_path / 'no_such_dir'}'\n"
+        "    expected_keys:\n"
+        "      - never_written\n"
+        "    cadence_seconds: 86400\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_cli_beacon_check_error_keeps_sweep_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """An unexpected ValueError from the AST-driven reader register must be
+    caught at the CLI layer: the report still exists, the sweep finding is
+    still in it, and the beacon section says it was skipped with the reason."""
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+    import beacon_reader_register as brr  # noqa: PLC0415
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    def _explode(*args, **kwargs) -> dict:
+        raise ValueError("reader register exploded")
+
+    monkeypatch.setattr(brr, "check_coverage", _explode)
+
+    rc = cli.main([
+        "--config", str(_sweep_finding_config(tmp_path)),
+        "--state-dir", str(state_dir),
+        "--no-write",
+    ])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["findings_count"] == 1
+    assert out["findings"][0]["producer"] == "never_seen"
+    assert out["findings"][0]["key"] == "never_written"
+    assert out["findings"][0]["kind"] == "missing"
+    assert out["beacon_reader_coverage"]["skipped"] is True
+    assert "reader register exploded" in out["beacon_reader_coverage"]["error"]
+
+
+def test_cli_job_exits_error_keeps_sweep_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The launchd harvest has the same shape as the beacon check: an
+    unexpected ValueError from it must not take the sweep findings down.
+    Runs WITHOUT --no-write (that flag gates the job_exits block off)."""
+    import producer_freshness_monitor as cli  # noqa: PLC0415
+    import beacon_reader_register as brr  # noqa: PLC0415
+    import beacon_register as br  # noqa: PLC0415
+    import job_exit_capture as jec  # noqa: PLC0415
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    # Keep the beacon section clean and fast (it runs before job_exits) so
+    # this test isolates the job_exits guard.
+    monkeypatch.setattr(brr, "check_coverage", lambda: {
+        "producer": "beacon_reader_coverage", "type": "beacon_reader_register",
+        "kind": "structural", "keys": [], "findings": [], "status": "ok",
+    })
+    monkeypatch.setattr(br, "find_duplicate_beacon_writers", lambda data_dir: {})
+
+    def _explode(state_dir, **kwargs) -> dict:
+        raise ValueError("launchd harvest exploded")
+
+    monkeypatch.setattr(jec, "harvest_launchd", _explode)
+
+    rc = cli.main([
+        "--config", str(_sweep_finding_config(tmp_path)),
+        "--state-dir", str(state_dir),
+    ])
+    assert rc == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["findings_count"] == 1
+    assert out["findings"][0]["producer"] == "never_seen"
+    assert out["findings"][0]["kind"] == "missing"
+    assert out["job_exits"]["skipped"] is True
+    assert "launchd harvest exploded" in out["job_exits"]["error"]
+
+
 def test_real_cli_run_against_the_real_registry_carries_zero_no_reader_findings(fake_state: Path, capsys) -> None:
     """Sanity check against the LIVE register (not a mock): measured
     2026-09-09, dashboard/api_health.py + scripts/build_t0_state.py already

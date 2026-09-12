@@ -179,10 +179,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 report["findings"].extend(new_findings)
                 report["findings_count"] = len(report["findings"])
                 report["status"] = "stale"
-        except (ImportError, OSError) as exc:
-            # A bonus structural signal in the same run; its failure must not
-            # suppress the per-key freshness findings the sweep already has.
-            beacon_checks = {"skipped": False, "error": str(exc)}
+        except Exception as exc:  # vnx-silent-except: a bonus structural signal; an unexpected failure (ValueError/AttributeError/SyntaxError from the AST-driven reader register, not just ImportError/OSError) must not take the already-built sweep findings down with it
+            beacon_checks = {"skipped": True, "error": str(exc)}
     report["beacon_reader_coverage"] = beacon_checks
 
     job_exits: Dict[str, object] = {"skipped": True}
@@ -191,10 +189,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             import job_exit_capture  # noqa: PLC0415
 
             job_exits = job_exit_capture.harvest_launchd(state_dir)
-        except (ImportError, OSError) as exc:
-            # The harvest is a bonus signal in the same run; its failure must
-            # not suppress the freshness findings.
-            job_exits = {"skipped": False, "error": str(exc)}
+        except Exception as exc:  # vnx-silent-except: the launchd harvest is a bonus signal; an unexpected failure (e.g. a ValueError from a corrupt harvest cache, not just ImportError/OSError) must not take the already-built sweep findings down with it
+            job_exits = {"skipped": True, "error": str(exc)}
     report["job_exits"] = job_exits
 
     if not args.no_write:
