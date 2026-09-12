@@ -555,12 +555,13 @@ def test_three_step_chain_carries_full_path_in_annotation(manager_env, monkeypat
 # ---------------------------------------------------------------------------
 # Point 3 -- deepseek_gate as the configured end-link: glm_gate exhausted
 # (using the REAL pr-1691 record + report, T0's request) rolls to
-# deepseek_gate, which is skipped with a named reason because E2 has not
-# shipped its runner. The resulting record must be distinguishable from a
-# seat that was never requested at all.
+# deepseek_gate, which is REQUESTED, not skipped — it is a config-based
+# harness-lane gate, available without a runner file (OI-1714, dispatch
+# 20260911-c6 step 2). The resulting record must still carry glm's real 402
+# detail, distinguishing it from a seat that was never requested at all.
 # ---------------------------------------------------------------------------
 
-def test_glm_exhausted_real_record_rolls_to_deepseek_named_skip(manager_env, monkeypatch):
+def test_glm_exhausted_real_record_rolls_to_deepseek_requested(manager_env, monkeypatch):
     monkeypatch.chdir(manager_env["project_root"])
     pr_number = 1691
 
@@ -580,14 +581,13 @@ def test_glm_exhausted_real_record_rolls_to_deepseek_named_skip(manager_env, mon
             risk_class="medium",
             changed_files=["scripts/glm_gate.py"],
             mode="per_pr",
-            dispatch_id="beta3-e1-deepseek-skip-test",
+            dispatch_id="beta3-e1-deepseek-requested-test",
         )
 
     seat = result["requested"][0]
     assert seat["gate"] == "deepseek_gate"
-    assert seat["status"] == "not_executable"
-    assert seat["reason"] == "gate_runner_missing"
-    assert "E2" in seat["reason_detail"] or "deepseek_gate.py" in seat["reason_detail"]
+    assert seat["status"] == "requested"
+    assert seat.get("reason") is None
     assert seat["takeover_from"] == "glm_gate"
     # The REAL 402 detail is PRESERVED in the annotation, not merely a
     # pointer back to glm_gate's own (mutable) result record.
@@ -1072,13 +1072,14 @@ def test_pr1696_real_glm_record_classifies_lane_exhausted_via_derived_dispatch_i
     )
 
 
-def test_pr1696_real_glm_record_rolls_to_deepseek_named_skip(manager_env, monkeypatch):
+def test_pr1696_real_glm_record_rolls_to_deepseek_requested(manager_env, monkeypatch):
     """The takeover chain itself must fire on the real record: glm_gate's
     chain successor is deepseek_gate (codex_gate -> kimi_gate -> glm_gate ->
-    deepseek_gate) -- same named-skip shape as
-    test_glm_exhausted_real_record_rolls_to_deepseek_named_skip's pr-1691
-    fixture above, proven here on the pr-1696 record whose report_path field
-    is empty (the derivation-fallback case), not pre-populated."""
+    deepseek_gate) -- now REQUESTED, not skipped, because deepseek_gate is a
+    config-based harness-lane gate available without a runner file (OI-1714,
+    dispatch 20260911-c6 step 2). Proven here on the pr-1696 record whose
+    report_path field is empty (the derivation-fallback case), not
+    pre-populated."""
     monkeypatch.chdir(manager_env["project_root"])
     pr_number = 1696
 
@@ -1105,8 +1106,8 @@ def test_pr1696_real_glm_record_rolls_to_deepseek_named_skip(manager_env, monkey
     seat = result["requested"][0]
     print(f"OI-1477 real pr-1696-glm_gate.json takeover: {seat['gate']!r} (from {seat.get('takeover_from')!r})")
     assert seat["gate"] == "deepseek_gate"
-    assert seat["status"] == "not_executable"
-    assert seat["reason"] == "gate_runner_missing"
+    assert seat["status"] == "requested"
+    assert seat.get("reason") is None
     assert seat["takeover_from"] == "glm_gate"
     assert "openrouter_credits" in seat["failure_reason"] or "more credits" in seat["failure_reason"], (
         f"expected the actual 402 detail embedded in failure_reason: {seat['failure_reason']!r}"

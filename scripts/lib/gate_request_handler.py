@@ -18,7 +18,7 @@ from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
-from gate_recorder import get_pr_head_sha, result_is_for_head, write_result_guarded
+from gate_recorder import gate_is_available, get_pr_head_sha, result_is_for_head, write_result_guarded
 from governance_emit import _classify_lane_log_text
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
@@ -401,23 +401,14 @@ class GateRequestHandlerMixin:
                 dispatch_id, exc,
             )
 
-    def _kimi_gate_runner_path(self) -> Path:
-        return Path(__file__).resolve().parent.parent / "kimi_gate.py"
-
     def _kimi_gate_available(self) -> bool:
-        return self._kimi_gate_runner_path().exists()
-
-    def _glm_gate_runner_path(self) -> Path:
-        return Path(__file__).resolve().parent.parent / "glm_gate.py"
+        return gate_is_available("kimi_gate")
 
     def _glm_gate_available(self) -> bool:
-        return self._glm_gate_runner_path().exists()
-
-    def _deepseek_gate_runner_path(self) -> Path:
-        return Path(__file__).resolve().parent.parent / "deepseek_gate.py"
+        return gate_is_available("glm_gate")
 
     def _deepseek_gate_available(self) -> bool:
-        return self._deepseek_gate_runner_path().exists()
+        return gate_is_available("deepseek_gate")
 
     def _dispatch_one_review(
         self,
@@ -1479,12 +1470,16 @@ class GateRequestHandlerMixin:
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
         dispatch_id: str = "",
     ) -> Dict[str, Any]:
-        """glm_gate is a recognised Gate.GLM_GATE member whose runner
-        (scripts/glm_gate.py) has not shipped yet — a separate deliverable adds
-        it. Until then this must refuse with a reason distinct from
-        ``unknown_review_gate`` (dispatch_spec Gate rejects that request before
-        it ever reaches here) so an operator can tell "not a real gate" apart
-        from "real gate, runner not implemented yet".
+        """glm_gate is a recognised Gate.GLM_GATE member, since C6 step 1 a
+        harness-lane gate: the governed dispatcher drives it and its runner
+        file (scripts/glm_gate.py) is only the standalone entry point. Its
+        availability is kind-based (gate_recorder.gate_is_available) —
+        decided by REGISTRATION, not by a file on disk. The refusal below is
+        defensive (a registered harness-lane gate is always available): it
+        refuses with a reason distinct from ``unknown_review_gate``
+        (dispatch_spec Gate rejects an unknown request before it ever
+        reaches here) so an operator can tell "not a real gate" apart from
+        "real gate, route missing".
         """
         from review_gate_manager import _utc_now
 
@@ -1511,7 +1506,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if not available:
             reason = "gate_runner_missing"
-            reason_detail = "scripts/glm_gate.py does not exist yet — ships in a separate deliverable"
+            reason_detail = "scripts/glm_gate.py is not on disk — glm_gate is registered as a script runner and its runner is unavailable"
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]
@@ -1541,14 +1536,14 @@ class GateRequestHandlerMixin:
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
         dispatch_id: str = "",
     ) -> Dict[str, Any]:
-        """deepseek_gate is a legal review-gate-takeover-CHAIN link (BETA3-E1,
-        26-08 operator decision) whose runner ships in a separate dispatch
-        (E2) — it is deliberately NOT a ``dispatch_spec.Gate`` enum member
-        yet (see ``_known_takeover_gate_names``). Until E2 lands this always
-        refuses, mirroring ``_request_glm``'s own pre-runner refusal branch:
-        a reason distinct from ``unknown_review_gate`` so an operator can
-        tell "not a real gate" apart from "real gate, runner not implemented
-        yet" — the chain's own named-skip requirement.
+        """deepseek_gate is a config-based harness-lane gate (OI-1714, dispatch
+        20260911-c6 step 2), reached through the "deepseek-harness" provider
+        lane rather than a repo script, so its availability is decided by
+        REGISTRATION alone (gate_recorder.gate_is_available) and it is
+        requestable with no runner file on disk. It is deliberately NOT a
+        ``dispatch_spec.Gate`` enum member yet (see
+        ``_known_takeover_gate_names``) but IS a legal
+        review-gate-takeover-CHAIN link (BETA3-E1, 26-08 operator decision).
         """
         from review_gate_manager import _utc_now
 
@@ -1575,7 +1570,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if not available:
             reason = "gate_runner_missing"
-            reason_detail = "scripts/deepseek_gate.py does not exist yet — ships in dispatch E2"
+            reason_detail = "deepseek_gate is not available — its registered provider route is not present"
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]
