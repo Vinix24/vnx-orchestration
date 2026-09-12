@@ -869,6 +869,7 @@ def remove_dispatch_worktree(
     *,
     project_root: Optional[Path] = None,
     terminal_id: str = "",
+    review_only: bool = False,
 ) -> None:
     """Remove the ephemeral dispatch worktree.  Idempotent.
 
@@ -879,6 +880,20 @@ def remove_dispatch_worktree(
     → entire worktree locked).  A failed remote check (ls-remote timeout,
     network error) is fail-closed: the classification falls back to
     ``committed`` and the branch survives.
+
+    **OI-1629b (review-gate teardown):** when *review_only* is True, the
+    worktree's index and working tree are reset to the recorded base BEFORE
+    classification.  A review-gate worker may materialize the PR diff into
+    the worktree (``git checkout origin/<branch> -- <file>``) to run tests
+    against the checked-out tree; that staged reproduction is disposable —
+    the gate's verdict is captured as an inline report, not as files, and the
+    worker is dispatched with ``--no-auto-commit``.  The reset only fires
+    when HEAD still equals the recorded base (no local commits were made),
+    so real work is never discarded: if the worker committed anything, or the
+    base is unresolvable, teardown degrades to normal classification and the
+    worktree is preserved exactly as a normal dirty/committed dispatch would
+    be.  The default ``review_only=False`` keeps the normal build-dispatch
+    salvage rule (dirty → lock forever) untouched.
 
     When *terminal_id* is provided, a ``provider_teardown_worktree`` event is
     emitted via ``EventStore`` with the same metadata fields
@@ -984,6 +999,55 @@ def remove_dispatch_worktree(
                 _claim_base_ref, dispatch_id,
             )
             _claim_base_sha = ""
+
+    # ── OI-1629b: review-gate teardown resets the disposable PR reproduction ─
+    # A review-gate worker may have materialized the PR diff into the worktree
+    # (``git checkout origin/<branch> -- <file>`` stages the PR's file content)
+    # so it can run tests against the checked-out tree.  That staged state is
+    # not real work — the gate's verdict is captured inline, and the worker is
+    # dispatched with --no-auto-commit — so teardown discards it before
+    # classification.  The reset only fires when HEAD still equals the recorded
+    # base: a local commit means the worker produced real work, and teardown
+    # degrades to normal classification (which preserves it).  Best-effort:
+    # any git failure also degrades to normal classification.
+    if review_only and _claim_base_sha:
+        try:
+            _head_result = subprocess.run(
+                ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            )
+            _wt_head = _head_result.stdout.strip()
+        except subprocess.CalledProcessError:
+            _wt_head = ""
+
+        if _wt_head and _wt_head == _claim_base_sha:
+            try:
+                subprocess.run(
+                    ["git", "-C", str(wt_path), "reset", "--hard", _claim_base_sha],
+                    check=True, capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(wt_path), "clean", "-fd"],
+                    check=True, capture_output=True, text=True,
+                )
+                log.info(
+                    "remove_dispatch_worktree: review_only reset %s to base %s "
+                    "(no local commits — disposable PR reproduction discarded)",
+                    dispatch_id, _claim_base_sha[:8],
+                )
+            except subprocess.CalledProcessError as _reset_exc:
+                log.warning(
+                    "remove_dispatch_worktree: review_only reset failed for %s: %s — "
+                    "degrading to normal classification (worktree may be preserved)",
+                    dispatch_id, _reset_exc,
+                )
+        else:
+            log.info(
+                "remove_dispatch_worktree: review_only skip reset for %s "
+                "(HEAD=%s base=%s) — local commits present, degrading to normal "
+                "classification so real work is never discarded",
+                dispatch_id, (_wt_head or "?")[:8], _claim_base_sha[:8],
+            )
 
     from tmux_worktree import WorktreeHandle, classify, reap  # noqa: PLC0415
 
