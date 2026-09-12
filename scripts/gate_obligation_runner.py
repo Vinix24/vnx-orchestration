@@ -177,6 +177,8 @@ from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
     REASON_FAILED_BY_TAKEOVER,
     REASON_FULFILLED_BY_TAKEOVER,
+    REASON_GATE_PARKED,
+    REASON_GATE_PARKED_TIMEOUT,
     REASON_NO_PR_BRANCH_GONE,
     REASON_NO_PR_BRANCH_GONE_LIVE,
     REASON_NO_PR_BRANCH_GONE_UNMEASURED,
@@ -2533,7 +2535,7 @@ def fulfill_obligation(
                 "not a failure; will be re-attempted on the next run"
             )
         elif result_status == STATUS_NOT_EXECUTABLE and result_reason in _TEMPORARY_NOT_EXECUTABLE_REASONS:
-            temp_reason = "gate_parked"
+            temp_reason = REASON_GATE_PARKED
             if result_reason == "provider_not_installed":
                 temp_cause = "the provider binary is not on PATH in this environment yet"
             else:
@@ -2602,6 +2604,15 @@ def fulfill_obligation(
                     f"{attempts} attempts (last status={result_status!r}, "
                     f"reason={result_reason!r}) — escalating to a loud terminal failure"
                 )
+                # OI-1721: the parked case must read the shared composed
+                # constant so the reopen script and this writer can never
+                # drift on the literal string; the other temporary refusals
+                # keep the generic "<temp_reason>_timeout" composition.
+                escalation_reason = (
+                    REASON_GATE_PARKED_TIMEOUT
+                    if temp_reason == REASON_GATE_PARKED
+                    else f"{temp_reason}_timeout"
+                )
                 update_obligation(
                     path,
                     status=STATUS_NOT_EXECUTABLE,
@@ -2612,7 +2623,7 @@ def fulfill_obligation(
                     resolved_at=utc_now_iso(),
                     request_path=str(manager._request_path(gate, pr_number)),
                     result_path=str(result_file),
-                    reason=f"{temp_reason}_timeout",
+                    reason=escalation_reason,
                     reason_detail=escalation_detail,
                 )
                 outcome["action"] = "not_executable"

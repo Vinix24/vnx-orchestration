@@ -52,6 +52,13 @@ comparison is needed (or possible). That is the strongest reopen case there
 is, and this script used to refuse exactly it (measured: ``REFUSED: evidence
 file does not exist on disk: .../pr-1840-kimi_gate.json``).
 
+OI-1721 (2026-09-12): the same "absence IS the proof" branch now also admits
+a terminally-parked obligation — ``status=not_executable``,
+``reason=gate_parked_timeout``, evidence file missing. The gate never ran (it
+was parked and escalated to terminal), so its terminal state is a temporary
+refusal that exhausted its retry bound, not a verdict; the missing evidence
+file proves exactly that. Every OTHER not_executable reason stays refused.
+
 Usage:
     python3 scripts/gate_obligation_reopen_stale_evidence.py \\
         --dispatch-id 20260830-133000-oi1453-noemer-is-pass        # dry run
@@ -75,8 +82,10 @@ for _p in (SCRIPT_DIR / "lib", SCRIPT_DIR):
         sys.path.insert(0, str(_p))
 
 from gate_obligations import (  # noqa: E402
+    REASON_GATE_PARKED_TIMEOUT,
     STATUS_FAILED,
     STATUS_FULFILLED,
+    STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
     obligation_path,
     update_obligation,
@@ -100,8 +109,13 @@ def verify_stale_evidence(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
     writes. Raises :class:`ReopenRefused` (never returns a half-verified
     result) when the misstand cannot be established.
 
-    Two provable misstands are recognized:
+    Three provable misstands are recognized:
 
+      - OI-1721: the obligation is terminally ``not_executable`` with
+        ``reason=REASON_GATE_PARKED_TIMEOUT`` (the gate was parked and
+        escalated to terminal without ever running) AND its evidence file
+        does NOT exist on disk. Same branch and same returned shape as
+        OI-1726 — the absence IS the proof that no verdict exists.
       - OI-1726: the evidence file does NOT exist on disk. The obligation
         claims fulfilment/failure off a file that provably does not exist, so
         the claim is false by construction. Returned with
@@ -117,7 +131,17 @@ def verify_stale_evidence(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
     record = json.loads(path.read_text(encoding="utf-8"))
 
     status = record.get("status")
-    if status not in (STATUS_FULFILLED, STATUS_FAILED):
+    # OI-1721: a terminally-parked obligation is the ONE not_executable shape
+    # that is reopenable — its gate never ran, so "not_executable" here is a
+    # temporary refusal that exhausted its retry bound, not a verdict about
+    # the code. Every other not_executable reason (required_failure,
+    # stay_pending_timeout, ...) stays refused: the terminal state IS the
+    # honest end of a real decision, and this script must not reopen it.
+    parked_timeout = (
+        status == STATUS_NOT_EXECUTABLE
+        and record.get("reason") == REASON_GATE_PARKED_TIMEOUT
+    )
+    if status not in (STATUS_FULFILLED, STATUS_FAILED) and not parked_timeout:
         raise ReopenRefused(
             f"obligation status is {status!r}, not fulfilled/failed — nothing to reopen"
         )
@@ -127,13 +151,14 @@ def verify_stale_evidence(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
         raise ReopenRefused("obligation carries no evidence_result_path/result_path to verify")
     evidence_path = Path(evidence_path_str)
     if not evidence_path.exists():
-        # OI-1726: a MISSING evidence file is the strongest possible reopen
-        # reason — the obligation claims fulfilment/failure off a file that
-        # provably does not exist, so the claim is false by construction. The
-        # absence IS the proof; there is no PR head to resolve and no sha to
-        # compare (the stale-evidence path below only fires when the file
-        # EXISTS). A present-but-unreadable file (corrupt) is deliberately
-        # NOT this case and still refuses below.
+        # OI-1726 + OI-1721: a MISSING evidence file is the strongest possible
+        # reopen reason — the obligation claims fulfilment/failure (or, for
+        # OI-1721, a terminal verdict) off a file that provably does not
+        # exist, so the claim is false by construction. The absence IS the
+        # proof; there is no PR head to resolve and no sha to compare (the
+        # stale-evidence path below only fires when the file EXISTS). A
+        # present-but-unreadable file (corrupt) is deliberately NOT this case
+        # and still refuses below.
         return {
             "path": path,
             "record": record,
@@ -142,8 +167,21 @@ def verify_stale_evidence(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
             "evidence_sha": "",
             "evidence_path": str(evidence_path),
             "evidence_missing": True,
+            "parked_timeout": parked_timeout,
             "resolved_by_gate": record.get("resolved_by_gate") or record.get("fulfilled_by") or record.get("gate"),
         }
+    if parked_timeout:
+        # OI-1721: the parked-timeout reopen ground is DEFINED by the absence
+        # of the evidence file — the gate never ran, so there is nothing to
+        # bind against. An existing file means the absence is not provable,
+        # and a parked gate's result is not a code verdict: refuse rather
+        # than fall through to the sha-binding check, which would compare
+        # shas of a verdict that never existed.
+        raise ReopenRefused(
+            "obligation is parked-timeout but its evidence file still exists "
+            f"on disk ({evidence_path}) — the absence is not provable, so "
+            "there is nothing to reopen"
+        )
     try:
         evidence_record = json.loads(evidence_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -189,7 +227,20 @@ def reopen_obligation(
     """
     proof = verify_stale_evidence(state_dir, dispatch_id)
     record = proof["record"]
-    if proof.get("evidence_missing"):
+    if proof.get("parked_timeout"):
+        reopen_reason = "reopened_parked_timeout"
+        reason_detail = (
+            f"reopened by gate_obligation_reopen_stale_evidence.py (OI-1721): "
+            f"the obligation was booked {record.get('status')!r} with "
+            f"reason={record.get('reason')!r} — the gate was parked (provider "
+            "missing / config flag disabled) and escalated to terminal without "
+            f"ever running, and its evidence at {proof['evidence_path']} does "
+            "not exist on disk — there is no verdict to bind against, so the "
+            "runner must re-resolve the obligation now that the gate may be "
+            f"unparked/installed. Operator reason: {operator_reason}"
+        )
+    elif proof.get("evidence_missing"):
+        reopen_reason = "reopened_stale_takeover_evidence"
         reason_detail = (
             f"reopened by gate_obligation_reopen_stale_evidence.py (OI-1726): "
             f"the obligation was booked {record.get('status')!r} via "
@@ -200,6 +251,7 @@ def reopen_obligation(
             f"Operator reason: {operator_reason}"
         )
     else:
+        reopen_reason = "reopened_stale_takeover_evidence"
         reason_detail = (
             f"reopened by gate_obligation_reopen_stale_evidence.py (OI-1571 tak 3): "
             f"the obligation was booked {record.get('status')!r} via "
@@ -256,7 +308,7 @@ def reopen_obligation(
         fulfilled_by=None,
         takeover_gate=None,
         evidence_result_path=None,
-        reason="reopened_stale_takeover_evidence",
+        reason=reopen_reason,
         reason_detail=reason_detail,
     )
     outcome["action"] = "reopened"
