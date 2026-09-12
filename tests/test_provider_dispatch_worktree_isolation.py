@@ -123,7 +123,7 @@ class TestCodexIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-codex-001", base_ref=None)
-        mock_remove.assert_called_once_with("iso-codex-001", terminal_id="T1")
+        mock_remove.assert_called_once_with("iso-codex-001", terminal_id="T1", review_only=False)
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
@@ -154,7 +154,7 @@ class TestCodexIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("default-iso-codex", base_ref=None)
-        mock_remove.assert_called_once_with("default-iso-codex", terminal_id="T1")
+        mock_remove.assert_called_once_with("default-iso-codex", terminal_id="T1", review_only=False)
         assert captured.get("cwd") == _FAKE_WT_PATH
 
     def test_worktree_removed_on_spawn_failure(self):
@@ -176,7 +176,7 @@ class TestCodexIsolation:
                 with pytest.raises(RuntimeError, match="simulated"):
                     provider_dispatch._dispatch_codex(args)
 
-        mock_remove.assert_called_once_with("fail-codex", terminal_id="T1")
+        mock_remove.assert_called_once_with("fail-codex", terminal_id="T1", review_only=False)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +209,7 @@ class TestGeminiIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-gemini-001", base_ref=None)
-        mock_remove.assert_called_once_with("iso-gemini-001", terminal_id="T1")
+        mock_remove.assert_called_once_with("iso-gemini-001", terminal_id="T1", review_only=False)
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
@@ -238,7 +238,7 @@ class TestGeminiIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("default-iso-gemini", base_ref=None)
-        mock_remove.assert_called_once_with("default-iso-gemini", terminal_id="T1")
+        mock_remove.assert_called_once_with("default-iso-gemini", terminal_id="T1", review_only=False)
         assert captured.get("cwd") == _FAKE_WT_PATH
 
 
@@ -273,7 +273,7 @@ class TestKimiIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-kimi-001", base_ref=None)
-        mock_remove.assert_called_once_with("iso-kimi-001", terminal_id="T1")
+        mock_remove.assert_called_once_with("iso-kimi-001", terminal_id="T1", review_only=False)
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
@@ -303,7 +303,7 @@ class TestKimiIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("default-iso-kimi", base_ref=None)
-        mock_remove.assert_called_once_with("default-iso-kimi", terminal_id="T1")
+        mock_remove.assert_called_once_with("default-iso-kimi", terminal_id="T1", review_only=False)
         assert captured.get("cwd") == _FAKE_WT_PATH
 
 
@@ -343,7 +343,7 @@ class TestLiteLLMIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("iso-litellm-001", base_ref=None)
-        mock_remove.assert_called_once_with("iso-litellm-001", terminal_id="T1")
+        mock_remove.assert_called_once_with("iso-litellm-001", terminal_id="T1", review_only=False)
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
@@ -378,7 +378,7 @@ class TestLiteLLMIsolation:
 
         assert exit_code == 0
         mock_create.assert_called_once_with("default-iso-litellm", base_ref=None)
-        mock_remove.assert_called_once_with("default-iso-litellm", terminal_id="T1")
+        mock_remove.assert_called_once_with("default-iso-litellm", terminal_id="T1", review_only=False)
         assert captured.get("cwd") == _FAKE_WT_PATH
 
 
@@ -412,7 +412,12 @@ class TestProviderWorktreeHelpers:
         with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=consumer_root), \
              patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove:
             provider_dispatch._remove_provider_worktree("remove-ok-test")
-        mock_remove.assert_called_once_with("remove-ok-test", project_root=consumer_root, terminal_id="")
+        mock_remove.assert_called_once_with(
+            "remove-ok-test",
+            project_root=consumer_root,
+            terminal_id="",
+            review_only=False,
+        )
 
     def test_remove_best_effort_when_resolver_raises(self):
         """A resolver failure must also be swallowed — remove is best-effort end-to-end."""
@@ -975,6 +980,147 @@ class TestProviderLaneReapClassification:
         ).strip()
         assert branch_name in branches, (
             "L3 FAIL: branch was deleted — missing base_sha must fail-closed"
+        )
+
+
+# ---------------------------------------------------------------------------
+# OI-1629b: a review-gate dispatch must not leave its dispatch worktree dirty.
+# The gate worker materializes the PR diff into the worktree (git checkout
+# origin/<branch> -- <file>) to run tests, leaving a staged change. Teardown
+# with review_only=True resets that disposable reproduction before
+# classification, so the worktree is removed instead of locked forever.
+# The default (review_only=False) salvage rule for normal build dispatches is
+# untouched — a dirty build dispatch is still preserved.
+# ---------------------------------------------------------------------------
+
+
+class TestReviewGateTeardownResetsReproduction:
+    """review_only teardown: forced gate-dispatch state ending with a staged
+    change must NOT classify dirty afterward."""
+
+    def _stage_diff(self, wt_path: Path) -> None:
+        """Reproduce the review-gate writer: a staged change to a tracked file
+        (the worker's ``git checkout origin/<branch> -- <file>`` leaves exactly
+        this state)."""
+        (wt_path / "README.md").write_text("pr diff content\n")
+        subprocess.run(
+            ["git", "-C", str(wt_path), "add", "README.md"],
+            check=True, capture_output=True,
+        )
+
+    def test_review_only_removes_worktree_with_staged_diff(
+        self, tmp_path, monkeypatch
+    ):
+        """A gate dispatch ending with a staged change is removed, not locked.
+
+        Fails on old code: remove_dispatch_worktree had no review_only keyword,
+        so this call raises TypeError instead of cleaning the worktree.
+        """
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "glm-gate-pr1847-1789228202"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+        self._stage_diff(wt_path)
+
+        remove_dispatch_worktree(
+            dispatch_id,
+            project_root=local,
+            terminal_id="T1",
+            review_only=True,
+        )
+
+        # The worktree must be gone — not classified dirty, not locked.
+        assert not wt_path.exists(), (
+            "OI-1629b FAIL: review-gate worktree with a staged diff was "
+            "preserved as dirty instead of removed"
+        )
+        # Clean removal also deletes the branch.
+        branch_name = f"dispatch/{dispatch_id}"
+        branches = subprocess.check_output(
+            ["git", "-C", str(local), "branch", "--list", branch_name],
+            text=True,
+        ).strip()
+        assert branches == ""
+
+    def test_default_preserves_dirty_build_dispatch(self, tmp_path, monkeypatch):
+        """The hard boundary: without review_only, a staged change is still
+        dirty → worktree locked (salvage rule untouched)."""
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "build-dispatch-dirty-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+        self._stage_diff(wt_path)
+
+        remove_dispatch_worktree(
+            dispatch_id,
+            project_root=local,
+            terminal_id="T1",
+        )
+
+        assert wt_path.is_dir(), (
+            "OI-1629b FAIL: normal build dispatch with a staged change was "
+            "removed — the dirty salvage rule must stay untouched"
+        )
+
+    def test_review_only_never_discards_local_commits(self, tmp_path, monkeypatch):
+        """review_only teardown only resets when HEAD still equals base. A
+        committed change degrades to normal classification (committed → branch
+        kept), so real work is never thrown away."""
+        from dispatch_worktree_isolation import (
+            create_dispatch_worktree,
+            remove_dispatch_worktree,
+        )
+
+        local = _init_git_repo_with_origin(tmp_path)
+        data_dir = tmp_path / "vnx-data"
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+        dispatch_id = "glm-gate-pr9999-1"
+        wt_path = create_dispatch_worktree(dispatch_id, project_root=local)
+
+        (wt_path / "work.txt").write_text("committed real work\n")
+        subprocess.run(
+            ["git", "-C", str(wt_path), "add", "work.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wt_path), "commit", "-m", "worker commit"],
+            check=True, capture_output=True,
+        )
+
+        remove_dispatch_worktree(
+            dispatch_id,
+            project_root=local,
+            terminal_id="T1",
+            review_only=True,
+        )
+
+        # Disk removed (committed), branch kept — the commit survived.
+        assert not wt_path.exists()
+        branch_name = f"dispatch/{dispatch_id}"
+        branches = subprocess.check_output(
+            ["git", "-C", str(local), "branch", "--list", branch_name],
+            text=True,
+        ).strip()
+        assert branch_name in branches, (
+            "OI-1629b FAIL: review_only teardown discarded a local commit"
         )
 
 

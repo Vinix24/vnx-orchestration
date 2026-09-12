@@ -1766,7 +1766,12 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         # dispatch (archive -> receipt -> clear) instead of straggling into
         # the live ring buffer after the clear.  None marks it reaped so the
         # finally path does not remove it twice.
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         isolation_worktree = None
 
         if result.error or result.timed_out:
@@ -1794,7 +1799,12 @@ def _dispatch_claude_benchmark(args: argparse.Namespace) -> int:
         # buffer ends empty even when an unexpected exception bypassed
         # _emit_governance.  Both calls are no-ops after a normal emit (the
         # worktree was already reaped above; the live file is truncated).
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         _event_store_safety_net(event_store, args)
 
 
@@ -1878,7 +1888,12 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
         return 0 if ok else 1
     finally:
         _set_active_worktree(None)
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
 
 
 def _create_provider_worktree(dispatch_id: str, base_ref: Optional[str] = None) -> Path:
@@ -1957,7 +1972,9 @@ def _prepare_provider_workdir(
     return isolation_worktree, worker_cwd
 
 
-def _remove_provider_worktree(dispatch_id: str, *, terminal_id: str = "") -> None:
+def _remove_provider_worktree(
+    dispatch_id: str, *, terminal_id: str = "", review_only: bool = False
+) -> None:
     """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent.
 
     Resolves the same consumer project_root as _create_provider_worktree —
@@ -1966,6 +1983,10 @@ def _remove_provider_worktree(dispatch_id: str, *, terminal_id: str = "") -> Non
 
     When *terminal_id* is provided, a ``provider_teardown_worktree`` event is
     emitted via EventStore (L3 provider-lane reap).
+
+    *review_only* forwards to ``remove_dispatch_worktree`` so a review-gate
+    dispatch (OI-1629b) resets its disposable PR reproduction instead of
+    locking the worktree as dirty.
     """
     try:
         from dispatch_worktree_isolation import (  # noqa: PLC0415
@@ -1976,6 +1997,7 @@ def _remove_provider_worktree(dispatch_id: str, *, terminal_id: str = "") -> Non
             dispatch_id,
             project_root=resolve_consumer_project_root(),
             terminal_id=terminal_id,
+            review_only=review_only,
         )
         logger.info("provider isolation: worktree removed (dispatch=%s)", dispatch_id)
     except Exception as exc:
@@ -1990,6 +2012,7 @@ def _finish_provider_worktree(
     isolation_worktree: Optional[Path],
     *,
     terminal_id: str = "",
+    review_only: bool = False,
 ) -> None:
     """Remove normal provider worktrees while preserving benchmark output."""
     if isolation_worktree is None:
@@ -2001,7 +2024,9 @@ def _finish_provider_worktree(
             dispatch_id,
         )
         return
-    _remove_provider_worktree(dispatch_id, terminal_id=terminal_id)
+    _remove_provider_worktree(
+        dispatch_id, terminal_id=terminal_id, review_only=review_only
+    )
 
 
 def _dispatch_codex(args: argparse.Namespace) -> int:
@@ -2061,7 +2086,12 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         # dispatch (archive -> receipt -> clear) instead of straggling into
         # the live ring buffer after the clear.  None marks it reaped so the
         # finally path does not remove it twice.
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         isolation_worktree = None
 
         if result.error:
@@ -2090,7 +2120,12 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         # buffer ends empty even when an unexpected exception bypassed
         # _emit_governance.  Both calls are no-ops after a normal emit (the
         # worktree was already reaped above; the live file is truncated).
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         _event_store_safety_net(event_store, args)
 
 
@@ -2535,7 +2570,12 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         # dispatch (archive -> receipt -> clear) instead of straggling into
         # the live ring buffer after the clear.  None marks it reaped so the
         # finally path does not remove it twice.
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         isolation_worktree = None
 
         if result.error:
@@ -2564,7 +2604,12 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         # buffer ends empty even when an unexpected exception bypassed
         # _emit_governance.  Both calls are no-ops after a normal emit (the
         # worktree was already reaped above; the live file is truncated).
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         _event_store_safety_net(event_store, args)
 
 
@@ -2650,7 +2695,12 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         # dispatch (archive -> receipt -> clear) instead of straggling into
         # the live ring buffer after the clear.  None marks it reaped so the
         # finally path does not remove it twice.
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         isolation_worktree = None
 
         if result.error:
@@ -2679,7 +2729,12 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         # buffer ends empty even when an unexpected exception bypassed
         # _emit_governance.  Both calls are no-ops after a normal emit (the
         # worktree was already reaped above; the live file is truncated).
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         _event_store_safety_net(event_store, args)
 
 
@@ -2779,7 +2834,12 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         # dispatch (archive -> receipt -> clear) instead of straggling into
         # the live ring buffer after the clear.  None marks it reaped so the
         # finally path does not remove it twice.
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         isolation_worktree = None
 
         if result.error:
@@ -2801,7 +2861,12 @@ def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
         # buffer ends empty even when an unexpected exception bypassed
         # _emit_governance.  Both calls are no-ops after a normal emit (the
         # worktree was already reaped above; the live file is truncated).
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         _event_store_safety_net(event_store, args)
 
 
@@ -2855,7 +2920,12 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         # dispatch (archive -> receipt -> clear) instead of straggling into
         # the live ring buffer after the clear.  None marks it reaped so the
         # finally path does not remove it twice.
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         isolation_worktree = None
 
         if result.error:
@@ -2877,7 +2947,12 @@ def _dispatch_glm_harness(args: argparse.Namespace) -> int:
         # buffer ends empty even when an unexpected exception bypassed
         # _emit_governance.  Both calls are no-ops after a normal emit (the
         # worktree was already reaped above; the live file is truncated).
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         _event_store_safety_net(event_store, args)
 
 
@@ -2936,7 +3011,12 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         # dispatch (archive -> receipt -> clear) instead of straggling into
         # the live ring buffer after the clear.  None marks it reaped so the
         # finally path does not remove it twice.
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         isolation_worktree = None
 
         if result.error:
@@ -2965,7 +3045,12 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         # buffer ends empty even when an unexpected exception bypassed
         # _emit_governance.  Both calls are no-ops after a normal emit (the
         # worktree was already reaped above; the live file is truncated).
-        _finish_provider_worktree(args.dispatch_id, isolation_worktree, terminal_id=args.terminal_id)
+        _finish_provider_worktree(
+            args.dispatch_id,
+            isolation_worktree,
+            terminal_id=args.terminal_id,
+            review_only=getattr(args, "role", None) == "review-gate",
+        )
         _event_store_safety_net(event_store, args)
 
 
