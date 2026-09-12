@@ -2,28 +2,28 @@
   "couplings": [
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 933,
+      "line": 952,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 936,
+      "line": 955,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 574,
+      "line": 564,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_door_row.py",
-      "line": 579,
+      "line": 569,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
@@ -724,6 +724,48 @@
     {
       "file": "tests/test_envelope_govern_report_adoption.py",
       "line": 117,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
+      "file": "tests/test_envelope_govern_spawn_error.py",
+      "line": 29,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_govern_spawn_error.py",
+      "line": 30,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_govern_spawn_error.py",
+      "line": 30,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_govern_spawn_error.py",
+      "line": 67,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_spawn_error.py",
+      "line": 69,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_spawn_error.py",
+      "line": 71,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_receipt_exists_for_dispatch"
