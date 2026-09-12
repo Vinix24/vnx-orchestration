@@ -33,6 +33,7 @@ import launchd_project_scope as lps  # noqa: E402
 
 RECEIPT_PROCESSOR = "com.vnx.receipt-processor"
 GATE_OBLIGATION = "com.vnx.gate-obligation-runner"
+CLEANUP_WORKTREES = "com.vnx.cleanup-reviewed-worktrees"
 
 
 def _write_marker(project_dir: Path, project_id: str) -> None:
@@ -83,13 +84,42 @@ class TestMissingJobIsLoud:
         assert f"{RECEIPT_PROCESSOR}.vnx-dev" in failed[f"launchd:{RECEIPT_PROCESSOR}"].detail
         assert f"{GATE_OBLIGATION}.vnx-dev" in failed[f"launchd:{GATE_OBLIGATION}"].detail
 
+    def test_missing_cleanup_reviewed_worktrees_fails_with_job_name(
+        self, tmp_path, monkeypatch
+    ):
+        """OI-1629 deel c red test: without the family registered, doctor
+        produces no ``launchd:com.vnx.cleanup-reviewed-worktrees`` check at all
+        (KeyError -> red); with the registration, a project with no cleanup
+        instance must FAIL and the failure must name the job."""
+        _write_marker(tmp_path, "vnx-dev")
+        # receipt-processor and gate-obligation-runner both loaded; the
+        # cleanup family has no instance at all.
+        _patch(
+            monkeypatch,
+            labels=[
+                f"{RECEIPT_PROCESSOR}.vnx-dev",
+                f"{GATE_OBLIGATION}.vnx-dev",
+            ],
+        )
+
+        checks = doctor._check_launchd_agents(tmp_path)
+        by_name = {c.name: c for c in checks}
+
+        cleanup_check = by_name[f"launchd:{CLEANUP_WORKTREES}"]
+        assert cleanup_check.status == doctor.FAIL, checks
+        assert f"{CLEANUP_WORKTREES}.vnx-dev" in cleanup_check.detail
+
 
 class TestCleanStateIsGreen:
-    def test_both_jobs_loaded_is_all_pass(self, tmp_path, monkeypatch):
+    def test_all_required_jobs_loaded_is_all_pass(self, tmp_path, monkeypatch):
         _write_marker(tmp_path, "vnx-dev")
         _patch(
             monkeypatch,
-            labels=[f"{RECEIPT_PROCESSOR}.vnx-dev", f"{GATE_OBLIGATION}.vnx-dev"],
+            labels=[
+                f"{RECEIPT_PROCESSOR}.vnx-dev",
+                f"{GATE_OBLIGATION}.vnx-dev",
+                f"{CLEANUP_WORKTREES}.vnx-dev",
+            ],
         )
 
         checks = doctor._check_launchd_agents(tmp_path)
@@ -97,6 +127,7 @@ class TestCleanStateIsGreen:
         by_name = {c.name: c for c in checks}
         assert by_name[f"launchd:{RECEIPT_PROCESSOR}"].status == doctor.PASS
         assert by_name[f"launchd:{GATE_OBLIGATION}"].status == doctor.PASS
+        assert by_name[f"launchd:{CLEANUP_WORKTREES}"].status == doctor.PASS
 
     def test_a_second_projects_own_scoped_job_never_counts_for_this_project(
         self, tmp_path, monkeypatch
@@ -109,6 +140,7 @@ class TestCleanStateIsGreen:
             labels=[
                 f"{RECEIPT_PROCESSOR}.mission-control",
                 f"{GATE_OBLIGATION}.mission-control",
+                f"{CLEANUP_WORKTREES}.mission-control",
             ],
         )
 
@@ -116,6 +148,7 @@ class TestCleanStateIsGreen:
         failed_names = {c.name for c in checks if c.status == doctor.FAIL}
         assert f"launchd:{RECEIPT_PROCESSOR}" in failed_names
         assert f"launchd:{GATE_OBLIGATION}" in failed_names
+        assert f"launchd:{CLEANUP_WORKTREES}" in failed_names
 
 
 class TestNonBehavioralGuards:
@@ -161,7 +194,7 @@ class TestWiredIntoVnxDoctor:
         import argparse
 
         _write_marker(tmp_path, "vnx-dev")
-        _patch(monkeypatch, labels=[])  # both families absent
+        _patch(monkeypatch, labels=[])  # all required families absent
 
         # Isolate from the real .vnx/.vnx-data resolution machinery — only
         # the launchd check's behavior is under test here.

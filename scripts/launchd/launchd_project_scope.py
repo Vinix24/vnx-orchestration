@@ -56,14 +56,19 @@ import vnx_paths  # noqa: E402
 # py/sh duplication.
 PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
-# The two daemon families OI-1509/OI-1510 name explicitly. Not derived
-# dynamically from whatever templates happen to exist under scripts/launchd/:
-# most templates in that directory (conversation-analyzer, dashboard-adjacent
-# jobs, etc.) are deliberately single-instance-per-machine, not per-project,
-# and must NOT be flagged just for lacking a ${VNX_PROJECT_ID} placeholder.
+# The daemon families that must be per-project. OI-1509/OI-1510 named the first
+# two; OI-1629 deel c adds the reviewed-worktree cleaner, which must run per
+# project (each project's .vnx-data/worktrees/ is its own) and was measured
+# hard-targeted at a single repo via its old mission-control launchd job. Not
+# derived dynamically from whatever templates happen to exist under
+# scripts/launchd/: most templates in that directory (conversation-analyzer,
+# dashboard-adjacent jobs, etc.) are deliberately single-instance-per-machine,
+# not per-project, and must NOT be flagged just for lacking a
+# ${VNX_PROJECT_ID} placeholder.
 REQUIRED_PER_PROJECT_FAMILIES: tuple = (
     "com.vnx.gate-obligation-runner",
     "com.vnx.receipt-processor",
+    "com.vnx.cleanup-reviewed-worktrees",
 )
 
 _PLACEHOLDER = "${VNX_PROJECT_ID}"
@@ -262,11 +267,11 @@ def _run_real_launchctl_list() -> str:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Fail-closed guard: exits non-zero when a per-project launchd "
-            "daemon (gate-obligation-runner, receipt-processor) is missing "
-            "this project's instance, or when a bare/malformed label is "
-            "loaded for it (OI-1509/OI-1510). Read-only: never installs, "
-            "loads, or unloads a launchd job."
+            "Fail-closed guard: exits non-zero when a required per-project "
+            "launchd daemon family is missing this project's instance, or when "
+            "a bare/malformed label is loaded for it (OI-1509/OI-1510, "
+            "OI-1629). Read-only: never installs, loads, or unloads a launchd "
+            "job."
         )
     )
     parser.add_argument(

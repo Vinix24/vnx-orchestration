@@ -114,6 +114,16 @@ if printf '%s' "$RESOLVED" | grep -q '\${VNX_PROJECT_ID}'; then
     echo "Resolved project id: $PROJECT_ID"
 fi
 
+# OI-1629 deel c: point per-project worktree sweepers at the PROJECT checkout,
+# not the shared engine root. VNX_PROJECT_ROOT is the central shim's export for
+# the checkout vnx init ran inside; a standalone checkout has no shim and
+# VNX_HOME IS the checkout, so fall back to it.
+if printf '%s' "$RESOLVED" | grep -q '\${VNX_PROJECT_ROOT}'; then
+    PROJECT_ROOT="${VNX_PROJECT_ROOT:-$VNX_HOME}"
+    RESOLVED="$(printf '%s' "$RESOLVED" | sed "s|\${VNX_PROJECT_ROOT}|$PROJECT_ROOT|g")"
+    echo "Resolved project root: $PROJECT_ROOT"
+fi
+
 # Fail loud on any remaining unresolved ${...} placeholder rather than
 # install a plist that will confuse the daemon it starts.
 if printf '%s' "$RESOLVED" | grep -qE '\$\{[A-Za-z_][A-Za-z0-9_]*\}'; then
