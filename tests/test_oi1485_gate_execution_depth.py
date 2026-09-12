@@ -91,6 +91,13 @@ def gate_dirs(tmp_path):
 
 
 def _request(reports_dir: Path, gate: str = "codex_gate") -> dict:
+    # A harness-lane gate must sign with its own identity (OI-1725); a
+    # path_binary gate carries the builder's dispatch-id BY DESIGN. The codex
+    # tests keep the builder form, the kimi/glm tests mint the gate-eigen one.
+    if gate in ("kimi_gate", "glm_gate"):
+        dispatch_id = f"{gate[:-5]}-gate-pr1707-1788800000"
+    else:
+        dispatch_id = "20260828-t0-alpha-oi1482-parser"
     return {
         "gate": gate,
         "pr_id": "1707",
@@ -98,7 +105,7 @@ def _request(reports_dir: Path, gate: str = "codex_gate") -> dict:
         "branch": "fix/oi1482-bin-vnx-command-parser",
         "report_path": str(reports_dir / f"{gate}-report.md"),
         "contract_hash": "088a30754169bb91",
-        "dispatch_id": "20260828-t0-alpha-oi1482-parser",
+        "dispatch_id": dispatch_id,
     }
 
 
