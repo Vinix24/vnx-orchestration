@@ -7,6 +7,11 @@
 # _update_last_used, _detect_worktree_context, cmd_intelligence_export, etc.)
 # are available when this runs.
 
+# shellcheck source=../lib/launchd_receipt_processor_guard.sh
+if [ -n "${VNX_HOME:-}" ] && [ -f "$VNX_HOME/scripts/lib/launchd_receipt_processor_guard.sh" ]; then
+  source "$VNX_HOME/scripts/lib/launchd_receipt_processor_guard.sh"
+fi
+
 # Detect whether a tmux pane has an active CLI (claude/codex/gemini/node) in
 # its process tree. Checked via `ps`, not tmux's `#{pane_current_command}`:
 # a running claude process can report its own version string (e.g. "2.1.201")
@@ -24,6 +29,27 @@ _vnx_pane_active_cli() {
     esac
   done
   return 1
+}
+
+# Start receipt_processor.sh directly, unless launchd already manages a
+# per-project instance for THIS project (golf C, C3; OI-1509/OI-1510) — see
+# scripts/lib/launchd_receipt_processor_guard.sh for why a manual (re)start
+# racing a launchd-managed instance is unsafe, not merely redundant.
+# $1: scripts_dir  $2: log_dir  $3: verb for the log line ("started" or
+# "re-started" — mirrors this call site's own wording).
+_vnx_maybe_start_receipt_processor() {
+  local scripts_dir="$1" log_dir="$2" verb="${3:-started}"
+  [ -f "$scripts_dir/receipt_processor.sh" ] || return 0
+
+  if command -v _vnx_receipt_processor_launchd_loaded >/dev/null 2>&1 && _vnx_receipt_processor_launchd_loaded; then
+    log "Receipt processor managed by launchd ($VNX_LAUNCHD_GUARD_LABEL) — skipping direct $verb"
+    return 0
+  fi
+
+  cd "$scripts_dir"
+  VNX_MODE=monitor nohup bash ./receipt_processor.sh > "$log_dir/receipt_processor.log" 2>&1 &
+  log "Receipt processor V4 $verb (PID: $!)"
+  cd "$PROJECT_ROOT"
 }
 
 cmd_start() {
@@ -298,12 +324,7 @@ TSJSON
           log "Dispatcher V8 re-started (PID: $!)"
           cd "$PROJECT_ROOT"
         fi
-        if [ -f "$scripts_dir/receipt_processor.sh" ]; then
-          cd "$scripts_dir"
-          VNX_MODE=monitor nohup bash ./receipt_processor.sh > "$log_dir/receipt_processor.log" 2>&1 &
-          log "Receipt processor V4 re-started (PID: $!)"
-          cd "$PROJECT_ROOT"
-        fi
+        _vnx_maybe_start_receipt_processor "$scripts_dir" "$log_dir" "re-started"
         if [ -f "$scripts_dir/generate_valid_dashboard.sh" ]; then
           cd "$scripts_dir"
           nohup bash ./generate_valid_dashboard.sh > "$log_dir/dashboard_gen.log" 2>&1 &
@@ -431,12 +452,7 @@ TSJSON
       log "Dispatcher V8 started (PID: $!)"
       cd "$PROJECT_ROOT"
     fi
-    if [ -f "$scripts_dir/receipt_processor.sh" ]; then
-      cd "$scripts_dir"
-      VNX_MODE=monitor nohup bash ./receipt_processor.sh > "$log_dir/receipt_processor.log" 2>&1 &
-      log "Receipt processor V4 started (PID: $!)"
-      cd "$PROJECT_ROOT"
-    fi
+    _vnx_maybe_start_receipt_processor "$scripts_dir" "$log_dir" "started"
     if [ -f "$scripts_dir/generate_valid_dashboard.sh" ]; then
       cd "$scripts_dir"
       nohup bash ./generate_valid_dashboard.sh > "$log_dir/dashboard_gen.log" 2>&1 &

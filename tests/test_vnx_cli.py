@@ -45,6 +45,32 @@ def _dispatch_agent_args(project_dir, agent, instruction, model="sonnet"):
     )
 
 
+def _mock_launchd_agents_loaded(project_dir, monkeypatch):
+    """Isolate doctor's launchd-agents check (golf C, C3) from tests whose
+    actual concern is unrelated: report both required jobs as loaded for
+    whatever project_id `vnx init` resolved. Without this, a worktree test
+    run — where the OI-1117 guard always skips the real launchd install —
+    would FAIL doctor for a reason the test isn't checking."""
+    from vnx_cli import _engine as _launchd_engine
+
+    launchd_engine_root = _launchd_engine.ensure_engine_on_path()
+    launchd_dir = Path(launchd_engine_root) / "scripts" / "launchd"
+    if str(launchd_dir) not in sys.path:
+        sys.path.insert(0, str(launchd_dir))
+    import launchd_project_scope as _lps
+
+    project_id = _launchd_engine.read_marker_project_id(project_dir)
+    monkeypatch.setattr(
+        _lps,
+        "_run_real_launchctl_list",
+        lambda: (
+            "PID\tStatus\tLabel\n"
+            f"-\t0\tcom.vnx.gate-obligation-runner.{project_id}\n"
+            f"-\t0\tcom.vnx.receipt-processor.{project_id}\n"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # main entry point
 # ---------------------------------------------------------------------------
@@ -131,12 +157,14 @@ def test_doctor_detects_missing_dirs(tmp_path, capsys):
     assert "FAIL" in captured.out
 
 
-def test_doctor_passes_valid_project(tmp_path, capsys):
+def test_doctor_passes_valid_project(tmp_path, capsys, monkeypatch):
     """vnx doctor passes with complete setup (after vnx init)."""
     vnx_init(_init_args(tmp_path))
 
     # Add a dummy agent dir so the agents check is PASS not WARN
     (tmp_path / "agents" / "T1").mkdir(parents=True)
+
+    _mock_launchd_agents_loaded(tmp_path, monkeypatch)
 
     rc = vnx_doctor(_doctor_args(tmp_path))
 

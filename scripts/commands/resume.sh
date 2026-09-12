@@ -10,6 +10,11 @@
 # Appends service_resumed event to ${VNX_DATA_DIR}/events/lifecycle.ndjson.
 # Removes PAUSED marker on success.
 
+# shellcheck source=../lib/launchd_receipt_processor_guard.sh
+if [ -n "${VNX_HOME:-}" ] && [ -f "$VNX_HOME/scripts/lib/launchd_receipt_processor_guard.sh" ]; then
+  source "$VNX_HOME/scripts/lib/launchd_receipt_processor_guard.sh"
+fi
+
 # Helper: verify PAUSED marker exists before attempting resume.
 _vnx_resume_validate_marker() {
   local paused_file="$1"
@@ -53,8 +58,17 @@ _vnx_resume_start_daemons() {
     return 1
   fi
 
-  # Restart receipt_processor via supervisor (preferred) or directly
-  if [ -f "$scripts_dir/receipt_processor_supervisor.sh" ]; then
+  # Restart receipt_processor via supervisor (preferred) or directly — unless
+  # launchd already manages a per-project instance for this project (golf C,
+  # C3; OI-1509/OI-1510). See scripts/lib/launchd_receipt_processor_guard.sh
+  # for why a manual (re)start racing a launchd-managed instance is unsafe,
+  # not merely redundant: it can grab the supervisor's own flock singleton
+  # before launchd's job does, and if this manual process later dies nothing
+  # is left to restart it.
+  _resume_receipt_pid=""
+  if command -v _vnx_receipt_processor_launchd_loaded >/dev/null 2>&1 && _vnx_receipt_processor_launchd_loaded; then
+    log "[resume] receipt_processor managed by launchd ($VNX_LAUNCHD_GUARD_LABEL) — skipping manual (re)start."
+  elif [ -f "$scripts_dir/receipt_processor_supervisor.sh" ]; then
     log "[resume] Starting receipt_processor_supervisor.sh..."
     nohup bash "$scripts_dir/receipt_processor_supervisor.sh" \
       > "$logs_dir/receipt_processor_supervisor.log" 2>&1 &
@@ -103,7 +117,10 @@ _vnx_resume_verify_readiness() {
     log "[resume] WARNING: dispatcher did not stay alive (PID: $_resume_dispatcher_pid)."
     resume_failed=1
   fi
-  if ! kill -0 "$_resume_receipt_pid" 2>/dev/null; then
+  # An empty _resume_receipt_pid means _vnx_resume_start_daemons deliberately
+  # skipped the manual (re)start because launchd already manages this
+  # project's receipt processor — nothing to verify here, not a failure.
+  if [ -n "$_resume_receipt_pid" ] && ! kill -0 "$_resume_receipt_pid" 2>/dev/null; then
     log "[resume] WARNING: receipt_processor did not stay alive (PID: $_resume_receipt_pid)."
     resume_failed=1
   fi

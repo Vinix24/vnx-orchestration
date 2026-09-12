@@ -14,6 +14,7 @@ pin, root CLAUDE.md and FEATURE_PLAN.md via Jinja2 templates (default/minimal).
 """
 
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -733,11 +734,22 @@ def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "")
     via a hardcoded store path), writes atomically to ``~/Library/LaunchAgents/``,
     and loads via launchctl.
 
+    OI-1510 (golf C, C3): the destination filename is derived from the
+    template's own RESOLVED Label, never from the ``plist_name`` argument.
+    Mirrors ``reload_plist.sh``'s identical fix for the manual-install path
+    (see that script's OI-1509/OI-1510 comment) — before this, every
+    project's ``vnx init`` landed at the same
+    ``~/Library/LaunchAgents/<plist_name>.plist`` regardless of what a
+    per-project template's Label actually resolved to, so a second project
+    installing the same template silently unloaded and overwrote the first
+    project's job file.
+
     Returns True if the plist was installed or reloaded.
     Returns False if the template does not exist (not a VNX orchestration repo
     or central install — silently skip).
 
-    Raises RuntimeError if launchctl load fails (never silent).
+    Raises RuntimeError if launchctl load fails, or if the resolved plist has
+    no readable Label (never silent).
     Raises OSError if the template exists but is unreadable.
     """
     # --- OI-1117: refuse launchd agent install on an unstable root -----------
@@ -773,11 +785,24 @@ def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "")
     dest_dir = Path.home() / "Library" / "LaunchAgents"
     refuse_real_launch_agents_write_under_pytest(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{plist_name}.plist"
 
     content = template.read_text(encoding="utf-8")
     content = content.replace("${VNX_HOME}", vnx_home)
     content = content.replace("${VNX_PROJECT_ID}", project_id)
+
+    # OI-1510: destination filename comes from the RESOLVED Label, not the
+    # plist_name argument — see the docstring above.
+    try:
+        resolved_label = plistlib.loads(content.encode("utf-8")).get("Label")
+    except (plistlib.InvalidFileException, ValueError):
+        resolved_label = None
+    if not isinstance(resolved_label, str) or not resolved_label:
+        raise RuntimeError(
+            f"could not read a Label out of {plist_name}.plist after "
+            "${VNX_HOME}/${VNX_PROJECT_ID} substitution — refusing to install "
+            "under an unresolvable destination filename (OI-1510)"
+        )
+    dest = dest_dir / f"{resolved_label}.plist"
 
     fd, tmp_name = tempfile.mkstemp(dir=str(dest_dir), suffix=".tmp")
     try:
@@ -805,15 +830,23 @@ def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "")
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
 
-    # Verify the agent is registered.
+    # Verify the agent is registered. Exact match on the label field (last
+    # whitespace-delimited token of each launchctl list line), never a
+    # substring: plist_name is a prefix of every per-project label, so a
+    # substring check would "verify" another project's job (OI-1721).
     verify = subprocess.run(
         ["launchctl", "list"], capture_output=True, text=True,
     )
-    if plist_name in (verify.stdout or ""):
-        print(f"  installed launchd agent: {plist_name}")
+    loaded_labels = set()
+    for line in (verify.stdout or "").splitlines():
+        fields = line.split()
+        if fields:
+            loaded_labels.add(fields[-1])
+    if resolved_label in loaded_labels:
+        print(f"  installed launchd agent: {resolved_label}")
     else:
         print(
-            f"  warning: {plist_name} not found in launchctl list after load "
+            f"  warning: {resolved_label} not found in launchctl list after load "
             f"— check {dest}"
         )
 
@@ -842,6 +875,21 @@ def _install_ledger_health_runner(vnx_home: str, project_id: str = "") -> bool:
     """
     return _install_launchd_agent(
         vnx_home, "com.vnx.ledger-health", project_id=project_id
+    )
+
+
+def _install_receipt_processor_runner(vnx_home: str, project_id: str = "") -> bool:
+    """Install the receipt-processor launchd plist (golf C, C3, OI-1509/OI-1510).
+
+    Thin wrapper over ``_install_launchd_agent``, mirroring
+    ``_install_gate_obligation_runner`` and ``_install_ledger_health_runner``
+    — the same wiring, not a fourth mechanism. Closes the gap the template
+    (``scripts/launchd/com.vnx.receipt-processor.plist``, shipped in #1769)
+    and the guard (``scripts/launchd/launchd_project_scope.py``) already
+    covered, but that ``vnx init`` never called.
+    """
+    return _install_launchd_agent(
+        vnx_home, "com.vnx.receipt-processor", project_id=project_id
     )
 
 
@@ -981,6 +1029,16 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
             print("  skipped ledger-health (plist template not found)")
     except (OSError, RuntimeError) as exc:
         print(f"  warning: ledger-health install failed: {exc}")
+
+    # --- C3 (golf C): install receipt-processor launchd agent -----------------
+    try:
+        installed = _install_receipt_processor_runner(
+            str(_engine.engine_root()), project_id=project_id
+        )
+        if not installed:
+            print("  skipped receipt-processor (plist template not found)")
+    except (OSError, RuntimeError) as exc:
+        print(f"  warning: receipt-processor install failed: {exc}")
 
     print()
     print(f"Runtime state: {data_root}")
