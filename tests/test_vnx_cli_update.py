@@ -337,7 +337,13 @@ def test_symlink_flip_emits_audit_events(tmp_path):
     _atomic_symlink_flip(root, target_dir, dry_run=False, audit_log=audit_log)
 
     assert audit_log.exists()
-    lines = audit_log.read_text().strip().splitlines()
+    # OI-1718: the flip also emits a central_install_cutover_behind_check
+    # event; this test pins the flip's own before/after pair.
+    lines = [
+        line
+        for line in audit_log.read_text().strip().splitlines()
+        if json.loads(line)["event_type"] == "central_install_update"
+    ]
     assert len(lines) == 2
 
     before = json.loads(lines[0])
