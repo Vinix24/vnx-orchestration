@@ -23,6 +23,7 @@ import gate_recorder
 import gate_runner
 import glm_gate
 import kimi_gate
+from providers import provider_registry
 
 
 def test_verdict_contract_is_one_object_across_all_three_readers():
@@ -124,4 +125,47 @@ def test_model_defaults_cover_only_harness_lane_gates():
     assert not orphan, (
         "a MODEL_DEFAULTS entry for a gate that is not a harness lane in "
         "GATE_PROVIDERS is dead config — gate_runner never reads it: {orphan}"
+    )
+
+
+def _registry_model_keys():
+    """Every model key wave7_models.yaml carries, DERIVED via the lane's loader.
+
+    ``provider_registry.load()`` is the ADR-036 loader the provider lane uses
+    to resolve a model name against wave7_models.yaml. Collecting the model
+    keys of every provider section means the expectation here is read from the
+    registry, never hardcoded: a model key added or renamed in the yaml changes
+    this set, so the linkage can never drift into a second copy of the truth.
+    """
+    keys = set()
+    for cfg in provider_registry.load().values():
+        keys.update((cfg.models or {}).keys())
+    return keys
+
+
+def test_model_defaults_exist_in_wave7_registry():
+    """Every MODEL_DEFAULTS model must be a key in wave7_models.yaml.
+
+    MODEL_DEFAULTS is the table gate_runner hands to the harness-lane
+    dispatcher as ``model=``; wave7_models.yaml is the registry that lane
+    resolves the name against. The two carry one fact in two places: rename a
+    model key in the registry and the gate silently dispatches a name the lane
+    no longer knows (OI-1727). Both sides are derived — the names to check from
+    MODEL_DEFAULTS itself, the expectation from the registry — so neither list
+    is hardcoded in this test.
+    """
+    registry_keys = _registry_model_keys()
+    assert registry_keys, (
+        "provider_registry.load() returned no model keys — the derivation is "
+        "empty, so this test would pass vacuously"
+    )
+    models = [model for _env_var, model in gate_lane_contract.MODEL_DEFAULTS.values()]
+    assert models, (
+        "MODEL_DEFAULTS is empty — there are no gate defaults to check, so "
+        "this test would pass vacuously"
+    )
+    missing = sorted(model for model in models if model not in registry_keys)
+    assert not missing, (
+        "every MODEL_DEFAULTS model must be a key in wave7_models.yaml, or the "
+        f"harness lane dispatches a name the registry does not know: {missing}"
     )
