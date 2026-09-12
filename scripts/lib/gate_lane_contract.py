@@ -18,11 +18,16 @@ from typing import Dict
 #
 # glm_gate runs glm-5.2 (deprecated-glm-models allowlist, operator directive
 # 2026-08-03) via the glm-harness lane; kimi_gate runs kimi-k3 via the kimi
-# CLI. The env var is the per-gate override an operator sets before the run;
-# the default is what the governed lane dispatches when it is unset.
+# CLI; deepseek_gate runs deepseek-v4-pro via the deepseek-harness lane
+# (DEFAULT_DEEPSEEK_HARNESS_MODEL, provider_spawns/deepseek_harness_spawn.py
+# — the SAME default the build lane dispatches, registry wave7_models.yaml
+# `deepseek_harness.deepseek-v4-pro` with dispatch_allowed: true). The env var
+# is the per-gate override an operator sets before the run; the default is
+# what the governed lane dispatches when it is unset.
 MODEL_DEFAULTS: Dict[str, tuple] = {
     "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
     "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
+    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro"),
 }
 
 # glm_gate.py/kimi_gate.py drive the governed lane with DEFAULT_TIMEOUT=900.
