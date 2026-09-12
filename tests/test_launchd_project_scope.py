@@ -92,9 +92,10 @@ def _launchctl_text(entries: Iterable[Tuple[str, str, int]]) -> str:
 def test_required_families_constant_is_not_empty() -> None:
     # Nul-is-eerst-een-meetfout: every "ok" result below is only meaningful
     # if the family list actually has entries to check.
-    assert len(lps.REQUIRED_PER_PROJECT_FAMILIES) == 2
+    assert len(lps.REQUIRED_PER_PROJECT_FAMILIES) == 3
     assert "com.vnx.gate-obligation-runner" in lps.REQUIRED_PER_PROJECT_FAMILIES
     assert "com.vnx.receipt-processor" in lps.REQUIRED_PER_PROJECT_FAMILIES
+    assert "com.vnx.cleanup-reviewed-worktrees" in lps.REQUIRED_PER_PROJECT_FAMILIES
 
 
 def test_real_repo_launchd_templates_are_per_project_scoped() -> None:
@@ -103,6 +104,7 @@ def test_real_repo_launchd_templates_are_per_project_scoped() -> None:
     labels = {c["family"]: c["label"] for c in result["checked"]}
     assert labels["com.vnx.gate-obligation-runner"] == "com.vnx.gate-obligation-runner.${VNX_PROJECT_ID}"
     assert labels["com.vnx.receipt-processor"] == "com.vnx.receipt-processor.${VNX_PROJECT_ID}"
+    assert labels["com.vnx.cleanup-reviewed-worktrees"] == "com.vnx.cleanup-reviewed-worktrees.${VNX_PROJECT_ID}"
 
 
 def test_check_template_contract_flags_a_bare_label(tmp_path: Path) -> None:
@@ -145,6 +147,11 @@ def test_check_template_contract_clean_state_is_ok(tmp_path: Path) -> None:
     )
     _write_template(
         tmp_path, "com.vnx.receipt-processor", "com.vnx.receipt-processor.${VNX_PROJECT_ID}"
+    )
+    _write_template(
+        tmp_path,
+        "com.vnx.cleanup-reviewed-worktrees",
+        "com.vnx.cleanup-reviewed-worktrees.${VNX_PROJECT_ID}",
     )
     result = lps.check_template_contract(tmp_path)
     assert result["ok"] is True, result["violations"]
@@ -208,6 +215,8 @@ def test_check_installed_state_clean_multi_project_is_ok() -> None:
             ("com.vnx.gate-obligation-runner.mission-control", "-", 20),
             ("com.vnx.receipt-processor.vnx-dev", "1234", 0),
             ("com.vnx.receipt-processor.mission-control", "5678", 0),
+            ("com.vnx.cleanup-reviewed-worktrees.vnx-dev", "9012", 0),
+            ("com.vnx.cleanup-reviewed-worktrees.mission-control", "3456", 0),
         ]
     )
     result_vnx_dev = lps.check_installed_state(text, "vnx-dev")
@@ -265,6 +274,7 @@ def test_check_project_scope_real_templates_clean_installed_state_is_ok() -> Non
         [
             ("com.vnx.gate-obligation-runner.vnx-dev", "-", 11),
             ("com.vnx.receipt-processor.vnx-dev", "4321", 0),
+            ("com.vnx.cleanup-reviewed-worktrees.vnx-dev", "8765", 0),
         ]
     )
     result = lps.check_project_scope(LAUNCHD_DIR, "vnx-dev", text)
@@ -315,6 +325,7 @@ def test_main_json_mode_emits_parseable_json(monkeypatch, capsys) -> None:
             [
                 ("com.vnx.gate-obligation-runner.vnx-dev", "-", 11),
                 ("com.vnx.receipt-processor.vnx-dev", "1", 0),
+                ("com.vnx.cleanup-reviewed-worktrees.vnx-dev", "2", 0),
             ]
         ),
     )

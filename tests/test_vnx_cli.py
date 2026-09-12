@@ -47,7 +47,7 @@ def _dispatch_agent_args(project_dir, agent, instruction, model="sonnet"):
 
 def _mock_launchd_agents_loaded(project_dir, monkeypatch):
     """Isolate doctor's launchd-agents check (golf C, C3) from tests whose
-    actual concern is unrelated: report both required jobs as loaded for
+    actual concern is unrelated: report all required jobs as loaded for
     whatever project_id `vnx init` resolved. Without this, a worktree test
     run — where the OI-1117 guard always skips the real launchd install —
     would FAIL doctor for a reason the test isn't checking."""
@@ -67,6 +67,7 @@ def _mock_launchd_agents_loaded(project_dir, monkeypatch):
             "PID\tStatus\tLabel\n"
             f"-\t0\tcom.vnx.gate-obligation-runner.{project_id}\n"
             f"-\t0\tcom.vnx.receipt-processor.{project_id}\n"
+            f"-\t0\tcom.vnx.cleanup-reviewed-worktrees.{project_id}\n"
         ),
     )
 

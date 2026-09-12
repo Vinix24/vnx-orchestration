@@ -860,7 +860,7 @@ class TestInitDoctorDataDirConsistency:
         assert rc == 0, "vnx init must succeed"
 
         # Isolate the launchd-agents check (golf C, C3) from this test's own
-        # concern (data-dir mismatch warnings): report both required jobs as
+        # concern (data-dir mismatch warnings): report all required jobs as
         # loaded for whatever project_id vnx_init resolved. Without this, a
         # worktree test run — where the OI-1117 guard always skips the real
         # launchd install — would FAIL doctor for a reason unrelated to what
@@ -878,6 +878,7 @@ class TestInitDoctorDataDirConsistency:
                 "PID\tStatus\tLabel\n"
                 f"-\t0\tcom.vnx.gate-obligation-runner.{resolved_project_id}\n"
                 f"-\t0\tcom.vnx.receipt-processor.{resolved_project_id}\n"
+                f"-\t0\tcom.vnx.cleanup-reviewed-worktrees.{resolved_project_id}\n"
             ),
         )
 

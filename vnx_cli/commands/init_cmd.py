@@ -724,15 +724,20 @@ def vnx_init(args) -> int:
         return 1
 
 
-def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "") -> bool:
+def _install_launchd_agent(
+    vnx_home: str, plist_name: str, project_id: str = "", project_root: str = ""
+) -> bool:
     """Install a VNX launchd plist by name (OI-917, generalized for OI-1409).
 
     Reads the plist template from the engine root's scripts/launchd/ directory,
-    substitutes ``${VNX_HOME}`` with the resolved VNX home path and
+    substitutes ``${VNX_HOME}`` with the resolved VNX home path,
     ``${VNX_PROJECT_ID}`` with the project's id (OI-1253 fix-forward: a job
     identifies its project via VNX_PROJECT_ID, one instance per project, never
-    via a hardcoded store path), writes atomically to ``~/Library/LaunchAgents/``,
-    and loads via launchctl.
+    via a hardcoded store path), and ``${VNX_PROJECT_ROOT}`` with the project's
+    checkout path (OI-1629 deel c: a job that sweeps per-project worktrees must
+    be pointed at the PROJECT's checkout, not at the shared engine root — see
+    _install_cleanup_reviewed_worktrees_runner), writes atomically to
+    ``~/Library/LaunchAgents/``, and loads via launchctl.
 
     OI-1510 (golf C, C3): the destination filename is derived from the
     template's own RESOLVED Label, never from the ``plist_name`` argument.
@@ -789,6 +794,7 @@ def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "")
     content = template.read_text(encoding="utf-8")
     content = content.replace("${VNX_HOME}", vnx_home)
     content = content.replace("${VNX_PROJECT_ID}", project_id)
+    content = content.replace("${VNX_PROJECT_ROOT}", project_root)
 
     # OI-1510: destination filename comes from the RESOLVED Label, not the
     # plist_name argument — see the docstring above.
@@ -799,8 +805,9 @@ def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "")
     if not isinstance(resolved_label, str) or not resolved_label:
         raise RuntimeError(
             f"could not read a Label out of {plist_name}.plist after "
-            "${VNX_HOME}/${VNX_PROJECT_ID} substitution — refusing to install "
-            "under an unresolvable destination filename (OI-1510)"
+            "${VNX_HOME}/${VNX_PROJECT_ID}/${VNX_PROJECT_ROOT} substitution — "
+            "refusing to install under an unresolvable destination filename "
+            "(OI-1510)"
         )
     dest = dest_dir / f"{resolved_label}.plist"
 
@@ -890,6 +897,32 @@ def _install_receipt_processor_runner(vnx_home: str, project_id: str = "") -> bo
     """
     return _install_launchd_agent(
         vnx_home, "com.vnx.receipt-processor", project_id=project_id
+    )
+
+
+def _install_cleanup_reviewed_worktrees_runner(vnx_home: str, project_id: str = "") -> bool:
+    """Install the cleanup-reviewed-worktrees launchd plist (OI-1629 deel c).
+
+    Thin wrapper over ``_install_launchd_agent``, mirroring
+    ``_install_receipt_processor_runner`` — the same wiring, not a new
+    mechanism. Closes the gap the measured 12-09 launchd job left: that job
+    was hard-targeted at one repo (``REPO="$HOME/Development/mission-control"``)
+    even though ``scripts/cleanup_reviewed_worktrees.py`` has a ``--repo-root``
+    flag, so every other repo's ``.vnx-data/worktrees/`` grew unchecked.
+
+    The one thing this wrapper adds over the other runners is which checkout
+    to sweep. The worktrees live under each project's own checkout, not under
+    the engine root, and a central install shares one engine across many
+    projects. ``VNX_PROJECT_ROOT`` is the central shim's export for "the
+    project checkout vnx init is running inside"; a standalone dev checkout
+    has no shim, and there VNX_HOME IS the checkout, so fall back to it.
+    """
+    project_root = os.environ.get("VNX_PROJECT_ROOT") or vnx_home
+    return _install_launchd_agent(
+        vnx_home,
+        "com.vnx.cleanup-reviewed-worktrees",
+        project_id=project_id,
+        project_root=project_root,
     )
 
 
@@ -1039,6 +1072,16 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
             print("  skipped receipt-processor (plist template not found)")
     except (OSError, RuntimeError) as exc:
         print(f"  warning: receipt-processor install failed: {exc}")
+
+    # --- OI-1629 deel c: install cleanup-reviewed-worktrees launchd agent ------
+    try:
+        installed = _install_cleanup_reviewed_worktrees_runner(
+            str(_engine.engine_root()), project_id=project_id
+        )
+        if not installed:
+            print("  skipped cleanup-reviewed-worktrees (plist template not found)")
+    except (OSError, RuntimeError) as exc:
+        print(f"  warning: cleanup-reviewed-worktrees install failed: {exc}")
 
     print()
     print(f"Runtime state: {data_root}")
