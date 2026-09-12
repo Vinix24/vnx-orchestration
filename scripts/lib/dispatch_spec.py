@@ -1,7 +1,8 @@
 """dispatch_spec.py — DispatchSpec: the typed input surface for the single-entry dispatch gate.
 
-Pure types + one validate() function. No side effects beyond reading the instruction file.
-Nothing imports this module in PR-1; it is wired in later PRs.
+Pure types + one validate() function. Side effects are limited to reading the instruction
+file and consulting config_registry for the VNX_ALLOW_TMUX_LANE emergency brake (the
+tmux-lane retirement, 2026-09-12) — never the filesystem or the network.
 
 ADR-006: provider constraint enum enforces legal routing strings.
 ADR-007: not triggered here — no new table, pure in-process types only.
@@ -15,6 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Optional
+
+import config_registry  # VNX_ALLOW_TMUX_LANE (tmux-lane retirement, 2026-09-12)
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -481,6 +484,20 @@ def validate(
     # tmux instead is the deviation that must leave an audit trail, not the other
     # way around.
     if spec.force_tmux:
+        # Operator directive 2026-09-12 (dispatch-20260912-tmux-lane-uit-claude-altijd-headless):
+        # the tmux-interactive lane is RETIRED — claude dispatches headless only. Refuse
+        # fail-loud rather than silently falling back to headless (that would hand the
+        # operator a headless worker when they asked for a live pane and never tell them).
+        # VNX_ALLOW_TMUX_LANE=1 (config_registry) is the single emergency brake that
+        # restores the old behaviour — including the reason check below — for a caller
+        # that deliberately wants the tmux lane back.
+        if not config_registry.get_bool("VNX_ALLOW_TMUX_LANE"):
+            return Reject(
+                "tmux-lane-retired",
+                "force_tmux=True is refused: the tmux-interactive lane is retired per "
+                "operator directive 2026-09-12 — claude dispatches headless only. Set "
+                "VNX_ALLOW_TMUX_LANE=1 to deliberately re-enable the tmux lane.",
+            )
         reason = (spec.force_tmux_reason or "").strip()
         if not reason:
             return Reject(

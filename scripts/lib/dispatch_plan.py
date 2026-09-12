@@ -46,7 +46,10 @@ def resolve_claude_lane(spec: DispatchSpec) -> tuple[str, str, "str | None"]:
     Exactly one of the three branches fires; every branch names an unambiguous
     lane. Validation (dispatch_spec.validate Rule 12a/12b/12c) already rejected
     the contradictory allow_headless=True + force_tmux=True combination and the
-    reason-missing cases before a spec can reach here.
+    reason-missing cases before a spec can reach here. Since 2026-09-12
+    (dispatch-20260912-tmux-lane-uit-claude-altijd-headless) Rule 12b additionally
+    refuses force_tmux unless VNX_ALLOW_TMUX_LANE=1 — the tmux lane is retired, so
+    this function's tmux branch only fires when that emergency brake is on.
     """
     if spec.allow_headless:
         return (

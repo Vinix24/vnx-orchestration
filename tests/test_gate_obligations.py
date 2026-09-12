@@ -101,15 +101,6 @@ def _make_bundle(
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        # A2 (2026-08-26): these are door tests (gate obligation registration) — they
-        # don't exercise lane behavior, and they run in a tmp_path that is NOT a real
-        # git repo. Since claude_headless became the default lane, an unpinned claude
-        # spec now hits dispatch_envelope.run_envelope_headless_plan's
-        # create_dispatch_worktree, which correctly hard-aborts on a non-git cwd (the
-        # PR #1416 isolation guarantee — never soften that). Pin to the tmux lane
-        # explicitly via the opt-out these tests actually need.
-        "force_tmux": True,
-        "force_tmux_reason": "door test asserts gate obligation state, not lane behavior; tmp_path is not a real git repo",
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
@@ -228,7 +219,7 @@ def test_door_registers_obligation_for_declared_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
     assert rc == 0
 
@@ -265,7 +256,7 @@ def test_door_stamps_gate_requirement_resolution_on_registration(tmp_path, monke
         lambda key: True if key == "VNX_CI_GATE_REQUIRED" else real_get_bool(key),
     )
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
     assert rc == 0
 
@@ -305,7 +296,7 @@ def test_door_stamps_capture_failure_as_a_distinct_state_not_none(tmp_path, monk
 
     monkeypatch.setattr(config_runtime, "get_bool", _boom)
 
-    with patch("dispatch_cli._execute_claude", return_value=0), \
+    with patch("dispatch_cli._execute_claude_headless", return_value=0), \
          caplog.at_level(logging.WARNING, logger="dispatch_cli"):
         rc = run_dispatch(spec_file)
     assert rc == 0
@@ -344,7 +335,7 @@ def test_door_without_declared_gate_derives_obligation(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
     assert rc == 0
     path = obligation_path(data_dir / "state", "20260731-oi876-no-gate")
@@ -376,7 +367,7 @@ def test_explicit_gate_wins_over_derived_obligation(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
     assert rc == 0
     path = obligation_path(data_dir / "state", "20260731-oi876-explicit-wins")
@@ -1419,7 +1410,7 @@ def test_writing_spec_without_gate_is_refused_when_router_fails(tmp_path, monkey
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _make_router_broken(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1
@@ -1447,7 +1438,7 @@ def test_read_only_spec_without_gate_records_no_gate_obligation(tmp_path, monkey
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _make_router_broken(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -1475,7 +1466,7 @@ def test_build_role_without_gate_is_refused_even_with_empty_paths(tmp_path, monk
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _make_router_broken(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1

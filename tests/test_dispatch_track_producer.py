@@ -94,10 +94,6 @@ def _stage_bundle(data_dir: Path, dispatch_id: str, *, extra: "dict | None" = No
         "deadline_seconds": 3600,
         "isolation": "worktree",
         "track_id": None,
-        # Door tests assert route/track state, not lane behavior; tmp_path is not a real
-        # git repo, so pin the tmux lane exactly like test_dispatch_cli.py's own e2e tests.
-        "force_tmux": True,
-        "force_tmux_reason": "test fixture pins the tmux lane",
     }
     spec_dict.update(extra or {})
     spec_file = bundle_dir / "dispatch-spec.json"
@@ -140,7 +136,7 @@ class TestDoorTrackFlag:
         _make_tracks_db(data_dir / "state", tracks={"some-other-track": "active"})
         spec_file = _stage_bundle(data_dir, "20260906-door-track-bad")
 
-        with patch("dispatch_cli._execute_claude") as mock_execute:
+        with patch("dispatch_cli._execute_claude_headless") as mock_execute:
             rc = dispatch_cli_main(
                 ["--spec-file", str(spec_file), "--track", "does-not-exist-oi1639"]
             )

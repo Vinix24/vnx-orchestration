@@ -537,7 +537,11 @@ def deliver_via_door(
     explicit opt-OUT back to the tmux lane, for a caller that wants the pre-flip
     behavior instead of the new default. Same reason-required + claude-only rules
     at the door (validate() Rule 12b). Defaults False / None reproduce the new
-    default (claude_headless) unchanged.
+    default (claude_headless) unchanged. Since 2026-09-12
+    (dispatch-20260912-tmux-lane-uit-claude-altijd-headless) the tmux lane is
+    RETIRED: validate() Rule 12b refuses force_tmux=True (reject-code
+    tmux-lane-retired) unless VNX_ALLOW_TMUX_LANE=1 — the emergency brake that
+    re-enables this opt-out.
 
     ``pr_id`` / ``work_ref`` / ``base_ref`` (OI-1390): threaded through to
     ``bridge_dispatch`` -> ``stage_spec_bundle`` unchanged, so a consumer-door

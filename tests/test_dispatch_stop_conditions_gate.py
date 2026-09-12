@@ -72,13 +72,6 @@ def _make_bundle(
         "deadline_seconds": 3600,
         "isolation": "worktree",
     }
-    # force_tmux is only a legal opt-out for provider=claude/auto (dispatch_spec
-    # validate() Rule 12b) — omit it entirely for any other provider so
-    # OI-1694's non-claude scoping scenarios (e.g. provider=kimi) don't trip an
-    # unrelated force-tmux-claude-only rejection.
-    if provider in ("claude", "auto"):
-        spec["force_tmux"] = True
-        spec["force_tmux_reason"] = "stop-conditions gate test asserts door decisions, not lane behavior"
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
     return data_dir, spec_file
@@ -109,7 +102,7 @@ def test_triggered_stop_condition_blocks_fire(tmp_path, monkeypatch, capsys):
 
     with patch("stop_conditions.run_all_checks", return_value=fake_results) as mock_run, \
          patch("stop_conditions.write_halt_file") as mock_write_halt, \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "an active blocking-eligible TRIGGERED stop-condition must refuse the fire"
@@ -136,7 +129,7 @@ def test_triggered_stop_condition_with_override_reason_proceeds(tmp_path, monkey
     fake_results = [_result("provider_exhausted", CheckStatus.TRIGGERED, "kimi: 3 consecutive auth_rejected")]
 
     with patch("stop_conditions.run_all_checks", return_value=fake_results), \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(
             spec_file,
             stop_conditions_override_reason="operator: known false positive, verified kimi lane recovered by hand",
@@ -164,7 +157,7 @@ def test_unmeasurable_stop_condition_does_not_block(tmp_path, monkeypatch, capsy
     ]
 
     with patch("stop_conditions.run_all_checks", return_value=fake_results), \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "all-UNMEASURABLE must not block — unmeasurable is not evidence of a real condition"
@@ -188,7 +181,7 @@ def test_all_clear_does_not_block(tmp_path, monkeypatch):
     ]
 
     with patch("stop_conditions.run_all_checks", return_value=fake_results), \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -221,7 +214,7 @@ def test_gh_auth_dead_triggered_warns_but_does_not_block(tmp_path, monkeypatch, 
 
     with patch("stop_conditions.run_all_checks", return_value=fake_results), \
          patch("stop_conditions.write_halt_file") as mock_write_halt, \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "gh_auth_dead is an unscoped ambient probe — WARN-only, must never block the door"
@@ -248,7 +241,7 @@ def test_main_ci_red_triggered_warns_but_does_not_block(tmp_path, monkeypatch, c
 
     with patch("stop_conditions.run_all_checks", return_value=fake_results), \
          patch("stop_conditions.write_halt_file") as mock_write_halt, \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -273,7 +266,7 @@ def test_stop_conditions_checked_on_dry_run_too(tmp_path, monkeypatch):
 
     with patch("stop_conditions.run_all_checks", return_value=fake_results), \
          patch("stop_conditions.write_halt_file") as mock_write_halt, \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file, dry_run=True)
 
     assert rc == 1, "dry-run must also refuse on a blocking-eligible TRIGGERED stop-condition"
@@ -294,7 +287,7 @@ def test_measurement_crash_degrades_to_unmeasurable_not_a_door_crash(tmp_path, m
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
     with patch("stop_conditions.run_all_checks", side_effect=RuntimeError("boom")), \
-         patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -381,7 +374,7 @@ def test_1_unrelated_provider_exhaustion_does_not_block(tmp_path, monkeypatch, c
     _write_kimi_exhausted_ledger(state_dir)
     _neutralize_gh(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "kimi-exhaustion must not block a claude/glm_gate dispatch that never touches kimi"
@@ -411,7 +404,7 @@ def test_2_provider_match_still_blocks(tmp_path, monkeypatch, capsys):
     _write_kimi_exhausted_ledger(state_dir)
     _neutralize_gh(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "a kimi dispatch must still be refused by kimi's own exhaustion"
@@ -434,7 +427,7 @@ def test_3_gate_match_pulls_provider_into_scope_and_still_blocks(tmp_path, monke
     _write_exhausted_ledger(state_dir, "glm-harness")
     _neutralize_gh(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "glm_gate must pull glm-harness exhaustion into scope even for a claude-provider dispatch"
@@ -455,7 +448,7 @@ def test_4_unknown_ledger_vocabulary_blocks_regardless_of_provider(tmp_path, mon
     _write_exhausted_ledger(state_dir, "future-provider-xyz")
     _neutralize_gh(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "unrecognized ledger vocabulary must fail closed and block"
@@ -542,7 +535,7 @@ def test_8a_repeated_gate_failure_on_a_different_gate_does_not_block(tmp_path, m
     _write_repeated_gate_results(state_dir / "review_gates" / "results", "codex_gate")
     _neutralize_gh(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "a repeated failure on codex_gate must not block a glm_gate dispatch"
@@ -564,7 +557,7 @@ def test_8b_repeated_gate_failure_on_the_dispatchs_own_gate_still_blocks(tmp_pat
     _write_repeated_gate_results(state_dir / "review_gates" / "results", "codex_gate")
     _neutralize_gh(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "a repeated failure on the dispatch's own gate must still block"

@@ -136,13 +136,9 @@ def test_bridge_staged_dispatch_with_track_lands_in_door_row(tmp_path, monkeypat
         gate="codex_gate",
         track_id="oi1632-track",
         data_dir=data_dir,
-        # Door tests assert row/track state, not lane behavior; tmp_path is not
-        # a real git repo, so pin the tmux lane exactly like test_dispatch_door_row.py.
-        force_tmux=True,
-        force_tmux_reason="OI-1632 door-row test asserts track linkage, not lane behavior",
     )
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -172,11 +168,9 @@ def test_bridge_staged_dispatch_without_track_leaves_row_track_null(tmp_path, mo
         provider="claude",
         gate="codex_gate",
         data_dir=data_dir,
-        force_tmux=True,
-        force_tmux_reason="OI-1632 door-row test asserts track linkage, not lane behavior",
     )
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "an absent track_id must remain advisory-only, never a hard block"

@@ -301,6 +301,20 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "config-store value as an explicit per-session override.",
         approval=True,
         subsystem="claude-tmux-serialization", status="ACTIVATE"),
+
+    # Operator directive 2026-09-12 (dispatch-20260912-tmux-lane-uit-claude-altijd-headless):
+    # the tmux-interactive claude lane is RETIRED — claude dispatches headless only.
+    # This is the single emergency brake that restores the old force_tmux opt-out; without
+    # it a spec carrying force_tmux=True is refused fail-loud at dispatch_spec.validate()
+    # Rule 12b (reject-code tmux-lane-retired). The read-site is validate() itself, via
+    # config_registry.get_bool — deliberately not a loose os.environ read.
+    "VNX_ALLOW_TMUX_LANE": _e(
+        "VNX_ALLOW_TMUX_LANE", "bool", "0", "dispatch",
+        "Emergency brake: re-enable the retired claude tmux-interactive lane "
+        "(force_tmux opt-out). Off by default — a force_tmux=True spec is refused "
+        "(tmux-lane-retired) unless this resolves truthy. Operator directive 2026-09-12.",
+        approval=True,
+        subsystem="claude-tmux-lane", status="PARK"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems

@@ -29,7 +29,7 @@ event to ``t0_receipts.ndjson`` (the actual receipt ledger every receipt reader 
 addition to the existing ``dispatch_register.ndjson`` write. RED on main: neither the direct
 stderr line nor the receipt-ledger event exist.
 
-Fixture pattern (bundle layout, ``force_tmux`` opt-out) mirrors
+Fixture pattern (bundle layout, headless lane) mirrors
 ``tests/test_gate_obligations.py`` — the existing, working door-obligation test suite —
 rather than inventing a new one.
 """
@@ -66,12 +66,11 @@ def _make_bundle(
 ) -> "tuple[Path, Path]":
     """A promoted-style staged bundle (spec + instruction inside the bundle dir).
 
-    ``force_tmux=True`` pins the claude lane to ``claude_tmux_subscription``
-    (``_execute_claude``) instead of the new-default ``claude_headless`` lane —
-    tmp_path is not a real git repo, and the headless lane's worktree creation
-    correctly hard-aborts on a non-git cwd. These tests assert on door-level
-    gate-obligation state, not on lane execution, so the tmux opt-out (same one
-    tests/test_gate_obligations.py uses) keeps the fixture out of that guard's way.
+    The spec keeps ``force_tmux`` unset, so it routes through the default
+    ``claude_headless`` lane (``_execute_claude_headless``). These tests assert
+    on door-level gate-obligation state, not on lane execution, so they mock
+    ``_execute_claude_headless`` — tmp_path is not a real git repo, and the
+    headless lane's worktree creation correctly hard-aborts on a non-git cwd.
     """
     data_dir = tmp_path / "vnx-data"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -91,8 +90,6 @@ def _make_bundle(
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        "force_tmux": True,
-        "force_tmux_reason": "door test asserts gate obligation state, not lane behavior; tmp_path is not a real git repo",
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
@@ -138,12 +135,10 @@ class TestGateBearingRegistrationFailureRefusesFire:
 
         monkeypatch.setattr(gate_obligations, "register_obligation", _raising_register_obligation)
 
-        with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
-            with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
-                rc = run_dispatch(spec_file)
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
+            rc = run_dispatch(spec_file)
 
         assert rc == 1, "a gate-bearing dispatch whose obligation cannot be registered must be refused"
-        mock_tmux.assert_not_called()
         mock_headless.assert_not_called()
 
         err = capsys.readouterr().err
@@ -218,11 +213,11 @@ class TestNoGateRouteStaysBestEffort:
             gate_obligations, "register_no_gate_obligation", _raising_register_no_gate_obligation,
         )
 
-        with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
             rc = run_dispatch(spec_file)
 
         assert rc == 0, "a read-only dispatch must still fire even when its no-gate record fails"
-        mock_tmux.assert_called_once()
+        mock_headless.assert_called_once()
 
         facts = [
             r for r in _read_ndjson(data_dir / "state" / "dispatch_register.ndjson")

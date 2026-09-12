@@ -53,8 +53,6 @@ def _make_bundle(tmp_path: Path, *, staging_id: str, dispatch_id: str) -> "tuple
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        "force_tmux": True,
-        "force_tmux_reason": "refire-guard test asserts door decisions, not lane behavior",
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
@@ -115,7 +113,7 @@ def test_terminal_receipt_blocks_refire_without_reason(tmp_path, monkeypatch, ca
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _write_terminal_receipt(data_dir / "state", "20260904-refire-receipt", status="success")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "a dispatch_id with an existing terminal receipt must be refused"
@@ -133,7 +131,7 @@ def test_terminal_receipt_refire_with_reason_proceeds(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _write_terminal_receipt(data_dir / "state", "20260904-refire-receipt-ok", status="failure")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file, refire_reason="operator: known-good re-run after fixing the lane")
 
     assert rc == 0, "an explicit --refire reason must let the dispatch proceed"
@@ -152,7 +150,7 @@ def test_route_decision_blocks_refire_without_reason(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _write_route_decision(data_dir / "state", "20260904-refire-route")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "a dispatch_id with an existing route decision must be refused"
@@ -173,7 +171,7 @@ def test_runtime_end_state_blocks_refire_without_reason(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _write_runtime_end_state(data_dir / "state", "20260904-refire-endstate", "failed_delivery")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "a dispatch_id already at a runtime end-state must be refused"
@@ -191,7 +189,7 @@ def test_non_end_state_row_does_not_block_refire(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _write_runtime_end_state(data_dir / "state", "20260904-refire-proposed", "proposed")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "a row parked at a non-end-state must not block a first real fire"
@@ -209,7 +207,7 @@ def test_no_prior_evidence_fires_clean(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -248,7 +246,7 @@ def test_refire_guard_never_scans_pending_directory(tmp_path, monkeypatch):
             real_scandir_names.append(str(self))
         return real_iterdir(self)
 
-    with patch("dispatch_cli._execute_claude", return_value=0), \
+    with patch("dispatch_cli._execute_claude_headless", return_value=0), \
          patch.object(Path, "iterdir", _guarded_iterdir):
         rc = run_dispatch(spec_file)
 
