@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """gate_obligation_reopen_stale_evidence.py — audited reopen of an obligation
-that was booked fulfilled/failed off evidence about a DIFFERENT commit
-(OI-1571 tak 3).
+that was booked fulfilled/failed off evidence that can no longer stand: either
+about a DIFFERENT commit (OI-1571 tak 3), or off a file that no longer exists
+at all (OI-1726).
 
 The gate obligation runner used to book an obligation fulfilled off any
 complete-evidence decided verdict for the same dispatch_id/PR+gate,
@@ -26,19 +27,30 @@ the time this script was written is 64df9933f6b3fed46070d597965f4415acca83e.
 ``vnx pr-ready 1719`` independently confirmed the same fact
 ("glm_gate NOT on head").
 
-Safety: this script VERIFIES the mismatch itself before writing anything —
+Safety: this script VERIFIES the misstand itself before writing anything —
 it never trusts an operator's claim on faith. It refuses (no write, exit 2)
 when:
   - the obligation is not in a terminal fulfilled/failed state (nothing to
     reopen),
-  - the obligation's own ``evidence_result_path``/``result_path`` cannot be
-    read,
+  - the obligation carries no ``evidence_result_path``/``result_path`` at
+    all,
+  - the evidence file EXISTS but cannot be parsed (corrupt JSON) — a
+    present-but-unreadable file cannot be PROVEN stale, so it is refused
+    rather than reopened on an unverified claim,
   - the PR's current head sha cannot be resolved (``gh`` unavailable) — the
     mismatch cannot be PROVEN, so nothing is reopened on an unverified claim
     (the same "third branch, never guess" discipline the runner's own sha
     check applies),
   - the evidence's own commit_sha turns out to MATCH the current head after
     all (there is genuinely nothing to correct).
+
+OI-1726 (2026-09-12): the ONE ground that flips from refusal to reason is an
+evidence file that does NOT exist on disk. An obligation that claims
+fulfilment/failure off a file that provably does not exist is false by
+construction — the absence IS the proof, so no PR-head resolution or sha
+comparison is needed (or possible). That is the strongest reopen case there
+is, and this script used to refuse exactly it (measured: ``REFUSED: evidence
+file does not exist on disk: .../pr-1840-kimi_gate.json``).
 
 Usage:
     python3 scripts/gate_obligation_reopen_stale_evidence.py \\
@@ -84,10 +96,20 @@ class ReopenRefused(RuntimeError):
 
 
 def verify_stale_evidence(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
-    """Read the obligation and PROVE its evidence is about a different
-    commit than the PR's current head. Never writes. Raises
-    :class:`ReopenRefused` (never returns a half-verified result) when the
-    mismatch cannot be established.
+    """Read the obligation and PROVE its evidence can no longer stand. Never
+    writes. Raises :class:`ReopenRefused` (never returns a half-verified
+    result) when the misstand cannot be established.
+
+    Two provable misstands are recognized:
+
+      - OI-1726: the evidence file does NOT exist on disk. The obligation
+        claims fulfilment/failure off a file that provably does not exist, so
+        the claim is false by construction. Returned with
+        ``evidence_missing=True`` and empty shas — there is no PR-head
+        resolution or sha comparison because the absence IS the proof.
+      - OI-1571 tak 3: the evidence file EXISTS and is readable, but its own
+        ``commit_sha`` binds to a DIFFERENT commit than the PR's current
+        head. Returned with ``evidence_missing=False`` and both shas.
     """
     path = obligation_path(state_dir, dispatch_id)
     if not path.exists():
@@ -105,7 +127,23 @@ def verify_stale_evidence(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
         raise ReopenRefused("obligation carries no evidence_result_path/result_path to verify")
     evidence_path = Path(evidence_path_str)
     if not evidence_path.exists():
-        raise ReopenRefused(f"evidence file does not exist on disk: {evidence_path}")
+        # OI-1726: a MISSING evidence file is the strongest possible reopen
+        # reason — the obligation claims fulfilment/failure off a file that
+        # provably does not exist, so the claim is false by construction. The
+        # absence IS the proof; there is no PR head to resolve and no sha to
+        # compare (the stale-evidence path below only fires when the file
+        # EXISTS). A present-but-unreadable file (corrupt) is deliberately
+        # NOT this case and still refuses below.
+        return {
+            "path": path,
+            "record": record,
+            "pr_number": record.get("pr_number"),
+            "head_sha": "",
+            "evidence_sha": "",
+            "evidence_path": str(evidence_path),
+            "evidence_missing": True,
+            "resolved_by_gate": record.get("resolved_by_gate") or record.get("fulfilled_by") or record.get("gate"),
+        }
     try:
         evidence_record = json.loads(evidence_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -137,6 +175,7 @@ def verify_stale_evidence(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
         "head_sha": head_sha,
         "evidence_sha": evidence_sha,
         "evidence_path": str(evidence_path),
+        "evidence_missing": False,
         "resolved_by_gate": record.get("resolved_by_gate") or record.get("fulfilled_by") or record.get("gate"),
     }
 
@@ -150,16 +189,27 @@ def reopen_obligation(
     """
     proof = verify_stale_evidence(state_dir, dispatch_id)
     record = proof["record"]
-    reason_detail = (
-        f"reopened by gate_obligation_reopen_stale_evidence.py (OI-1571 tak 3): "
-        f"the obligation was booked {record.get('status')!r} via "
-        f"{proof['resolved_by_gate']!r} off evidence at {proof['evidence_path']} "
-        f"(commit_sha={proof['evidence_sha'][:12]!r}), which is a DIFFERENT "
-        f"commit than PR #{proof['pr_number']}'s current head "
-        f"({proof['head_sha'][:12]!r}) — the gate obligation runner's own "
-        "sha-binding check (this same dispatch) would now refuse this "
-        f"evidence outright. Operator reason: {operator_reason}"
-    )
+    if proof.get("evidence_missing"):
+        reason_detail = (
+            f"reopened by gate_obligation_reopen_stale_evidence.py (OI-1726): "
+            f"the obligation was booked {record.get('status')!r} via "
+            f"{proof['resolved_by_gate']!r} off evidence at {proof['evidence_path']} "
+            "which no longer exists on disk — the claimed evidence is provably "
+            "gone, so the fulfilment/failure cannot stand and the runner must "
+            f"re-resolve the obligation against whatever real evidence exists. "
+            f"Operator reason: {operator_reason}"
+        )
+    else:
+        reason_detail = (
+            f"reopened by gate_obligation_reopen_stale_evidence.py (OI-1571 tak 3): "
+            f"the obligation was booked {record.get('status')!r} via "
+            f"{proof['resolved_by_gate']!r} off evidence at {proof['evidence_path']} "
+            f"(commit_sha={proof['evidence_sha'][:12]!r}), which is a DIFFERENT "
+            f"commit than PR #{proof['pr_number']}'s current head "
+            f"({proof['head_sha'][:12]!r}) — the gate obligation runner's own "
+            "sha-binding check (this same dispatch) would now refuse this "
+            f"evidence outright. Operator reason: {operator_reason}"
+        )
     outcome: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         "path": str(proof["path"]),
@@ -190,6 +240,7 @@ def reopen_obligation(
         previous_resolved_by_gate=proof["resolved_by_gate"],
         evidence_commit_sha=proof["evidence_sha"],
         pr_head_sha=proof["head_sha"],
+        evidence_missing=bool(proof.get("evidence_missing")),
         reason_detail=reason_detail,
     )
     update_obligation(
