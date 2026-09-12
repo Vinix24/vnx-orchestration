@@ -274,3 +274,45 @@ class TestDestinationPathDoesNotCollide:
             "must be derived from the resolved (project-scoped) Label"
         )
         assert scoped_dest.is_file()
+
+
+class TestPostLoadVerificationIsExactLabelMatch:
+    """The post-load verification must match the RESOLVED label exactly, not
+    the base family name as a substring (OI-1721: 'project' prefixes
+    'project-alpha', and 'com.vnx.receipt-processor' prefixes EVERY
+    per-project label)."""
+
+    def test_verification_warns_when_only_another_projects_instance_is_loaded(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        fake_engine_root = _fake_engine_root(tmp_path)
+        monkeypatch.setattr(init_cmd._engine, "engine_root", lambda: fake_engine_root)
+
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stderr = ""
+            m.stdout = ""
+            if cmd[:2] == ["launchctl", "list"]:
+                # Only a DIFFERENT project's instance is loaded. The base name
+                # 'com.vnx.receipt-processor' is a substring of this line, but
+                # THIS project's resolved label is not present at all.
+                m.stdout = "com.vnx.receipt-processor.other-project\n"
+            return m
+
+        monkeypatch.setattr(init_cmd.subprocess, "run", fake_run)
+
+        installed = init_cmd._install_receipt_processor_runner(
+            str(fake_engine_root), project_id="project"
+        )
+        assert installed is True
+        out = capsys.readouterr().out
+        assert "not found in launchctl list" in out, (
+            "verification reported the agent as installed when only another "
+            "project's instance was in launchctl list (substring match)"
+        )
+        assert "installed launchd agent" not in out

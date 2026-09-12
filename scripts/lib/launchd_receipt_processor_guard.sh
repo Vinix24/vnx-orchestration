@@ -72,8 +72,9 @@ _vnx_receipt_processor_launchd_loaded() {
 
   local label="com.vnx.receipt-processor.${pid}"
   local list_cmd="${VNX_LAUNCHCTL_LIST_CMD:-launchctl list}"
+  # Exact field match on the label (last token of each launchctl list line), not a grep substring: a shorter project id would phantom-match a longer one's line (OI-1721).
   # shellcheck disable=SC2086  # list_cmd may be a two-word real command ("launchctl list")
-  if $list_cmd 2>/dev/null | grep -qF "$label"; then
+  if $list_cmd 2>/dev/null | awk -v lbl="$label" '$NF == lbl { found=1 } END { exit !found }'; then
     # shellcheck disable=SC2034  # read by callers in start.sh/resume.sh for their log line
     VNX_LAUNCHD_GUARD_LABEL="$label"
     return 0

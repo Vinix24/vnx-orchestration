@@ -830,11 +830,19 @@ def _install_launchd_agent(vnx_home: str, plist_name: str, project_id: str = "")
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
 
-    # Verify the agent is registered.
+    # Verify the agent is registered. Exact match on the label field (last
+    # whitespace-delimited token of each launchctl list line), never a
+    # substring: plist_name is a prefix of every per-project label, so a
+    # substring check would "verify" another project's job (OI-1721).
     verify = subprocess.run(
         ["launchctl", "list"], capture_output=True, text=True,
     )
-    if plist_name in (verify.stdout or ""):
+    loaded_labels = set()
+    for line in (verify.stdout or "").splitlines():
+        fields = line.split()
+        if fields:
+            loaded_labels.add(fields[-1])
+    if resolved_label in loaded_labels:
         print(f"  installed launchd agent: {resolved_label}")
     else:
         print(

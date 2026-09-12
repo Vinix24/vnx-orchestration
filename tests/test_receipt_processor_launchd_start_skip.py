@@ -185,6 +185,48 @@ fi
         assert result.returncode == 0, result.stderr
         assert "NOT_LOADED" in result.stdout
 
+    def test_not_loaded_when_another_projects_id_is_a_prefix(self, tmp_path):
+        """'project' is a prefix of 'project-alpha': a substring match on the
+        label would report THIS project's instance as loaded when only the
+        LONGER project's instance exists (OI-1721). The guard must return 1."""
+        marker = tmp_path / "proj"
+        marker.mkdir()
+        (marker / ".vnx-project-id").write_text("project\n", encoding="utf-8")
+
+        result = _run(f"""
+set -uo pipefail
+source "{GUARD_SH}"
+fake_launchctl_prefix() {{ printf 'PID\\tStatus\\tLabel\\n-\\t0\\tcom.vnx.receipt-processor.project-alpha\\n'; }}
+if _vnx_receipt_processor_launchd_loaded "{marker}"; then
+  echo "LOADED"
+else
+  echo "NOT_LOADED"
+fi
+""", env={"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": "fake_launchctl_prefix"})
+        assert result.returncode == 0, result.stderr
+        assert "NOT_LOADED" in result.stdout
+
+    def test_loaded_when_the_longer_prefix_variant_is_loaded(self, tmp_path):
+        """The genuine positive must survive: the longer project's own label,
+        exactly present, is still reported loaded (no anchor so tight it
+        breaks the real match)."""
+        marker = tmp_path / "proj"
+        marker.mkdir()
+        (marker / ".vnx-project-id").write_text("project-alpha\n", encoding="utf-8")
+
+        result = _run(f"""
+set -uo pipefail
+source "{GUARD_SH}"
+fake_launchctl_prefix() {{ printf 'PID\\tStatus\\tLabel\\n-\\t0\\tcom.vnx.receipt-processor.project-alpha\\n'; }}
+if _vnx_receipt_processor_launchd_loaded "{marker}"; then
+  echo "LOADED:$VNX_LAUNCHD_GUARD_LABEL"
+else
+  echo "NOT_LOADED"
+fi
+""", env={"VNX_LAUNCHD_GUARD_PLATFORM": "Darwin", "VNX_LAUNCHCTL_LIST_CMD": "fake_launchctl_prefix"})
+        assert result.returncode == 0, result.stderr
+        assert "LOADED:com.vnx.receipt-processor.project-alpha" in result.stdout
+
 
 # ---------------------------------------------------------------------------
 # scripts/commands/start.sh — _vnx_maybe_start_receipt_processor at BOTH
