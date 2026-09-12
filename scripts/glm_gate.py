@@ -105,6 +105,12 @@ from gate_recorder import (
 )
 import gate_depth  # OI-1618: a verdict without investigation is no verdict, on every lane
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
+from gate_lane_contract import (  # C6 step 3: one source, three readers
+    MAX_DIFF_CHARS,
+    MODEL_DEFAULTS,
+    TIMEOUT_SECONDS,
+    VERDICT_CONTRACT,
+)
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
     build_review_prompt,
     merge_scan_findings,
@@ -147,28 +153,19 @@ def _extract_verdict(text: str) -> dict:
     return {}
 
 
-DEFAULT_MODEL = "glm-5.2"
-DEFAULT_TIMEOUT = 900
-MAX_DIFF_CHARS = 50000
+# One source (C6 step 3): model env var/default, timeout, diff cap and verdict
+# contract come from gate_lane_contract — the SAME objects gate_runner and
+# kimi_gate read. The aliases keep this gate's existing names for the readers
+# below; ALLOWED_MODELS stays here because it is glm-specific.
+_MODEL_ENV, DEFAULT_MODEL = MODEL_DEFAULTS["glm_gate"]
+DEFAULT_TIMEOUT = TIMEOUT_SECONDS
+_VERDICT_CONTRACT = VERDICT_CONTRACT
 
 # deprecated-glm-models (provider_constraints.yaml): glm-5.2 is the ONLY
 # admitted GLM version. This is an allowlist, not a blocklist — every other
 # name (including a not-yet-released version) is refused until an operator
 # decision admits it explicitly.
-ALLOWED_MODELS = frozenset({"glm-5.2"})
-
-_VERDICT_CONTRACT = (
-    "When done, end your report with a structured JSON verdict ONLY, in a fenced block:\n"
-    "```json\n"
-    "{\n"
-    '  "verdict": "pass|fail|blocked",\n'
-    '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
-    '  "residual_risk": "remaining risk or null"\n'
-    "}\n"
-    "```\n"
-    "verdict=fail/blocked ONLY for a real, blocking correctness/security/governance issue "
-    "introduced by THIS diff. Style nits are severity=info, never blocking.\n"
-)
+ALLOWED_MODELS = frozenset({DEFAULT_MODEL})
 
 
 def _validate_model(model: str) -> "str | None":
@@ -192,9 +189,10 @@ def _build_prompt(diff_text: str, pr: str) -> str:
     author's own text, unmarked, in the last and most weighted position of the
     prompt. ``gate_prompt.build_review_prompt`` puts it in an explicitly
     delimited block and restates the instruction after it, so the gate has the
-    last word. The verdict contract stays this gate's own (kimi_gate and
-    gate_runner ask for different verdict shapes — sharing a builder must not
-    silently collapse three contracts into one).
+    last word. The verdict contract is the shared gate_lane_contract source
+    (C6 step 3), identical by design for glm_gate, kimi_gate and gate_runner's
+    harness-lane path; gate_runner's ``_REVIEWER_VERDICT_TEMPLATE``
+    (codex/gemini) is a different, richer shape and is not this contract.
     """
     return build_review_prompt(
         gate_name="glm_gate",
@@ -459,7 +457,7 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--data-dir", default=os.environ.get("VNX_DATA_DIR", ""),
                     help="VNX data dir; report lands in <data-dir>/unified_reports/ and the "
                          "result in <data-dir>/state/review_gates/results/")
-    ap.add_argument("--model", default=os.environ.get("VNX_GLM_GATE_MODEL", DEFAULT_MODEL))
+    ap.add_argument("--model", default=os.environ.get(_MODEL_ENV, DEFAULT_MODEL))
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     ap.add_argument("--json", action="store_true", help="print the result record as JSON")
     ap.add_argument(

@@ -32,6 +32,12 @@ import vertex_ai_runner as _vtx
 from gate_worktree import create_gate_worktree, remove_gate_worktree, GateWorktreeError
 from gate_prompt import build_review_prompt  # OI-1442: the diff is data, not instruction
 from prompt_assembler import PromptAssembler, format_for_provider
+from gate_lane_contract import (  # C6 step 3: one source, three readers
+    MODEL_DEFAULTS as _HARNESS_LANE_MODEL,
+    TIMEOUT_SECONDS as _HARNESS_LANE_TIMEOUT_SECONDS,
+    MAX_DIFF_CHARS as _HARNESS_LANE_MAX_DIFF_CHARS,
+    VERDICT_CONTRACT as _HARNESS_LANE_VERDICT_CONTRACT,
+)
 
 _REVIEWER_VERDICT_TEMPLATE = (
     "Respond with a structured JSON verdict only:\n"
@@ -69,34 +75,11 @@ GATE_CLI_ARGS: Dict[str, List[str]] = {
 _REASON_DETAIL_TAIL_CHARS = 4000
 
 # Harness-lane gates (glm_gate/kimi_gate) delegate to the governed dispatcher
-# (C6 step 1). These constants mirror what scripts/glm_gate.py and
-# scripts/kimi_gate.py already hold, so a run through gate_runner's third
-# strategy has the same model, timeout, diff cap and verdict contract as the
-# same gate run standalone — verbatim effect, different entry point.
-_HARNESS_LANE_MODEL: Dict[str, tuple] = {
-    "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
-    "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
-}
-# glm_gate.py/kimi_gate.py drive the governed lane with DEFAULT_TIMEOUT=900.
-# headless_adapter.gate_timeout() has no entry for these gates and would fall
-# back to 600, cutting a run short that the standalone gate would have let
-# finish. The dispatcher's timeout_seconds is the lane's own deadline, so it
-# must match the standalone gate, not the runner's PATH-binary default.
-_HARNESS_LANE_TIMEOUT_SECONDS = 900
-_HARNESS_LANE_MAX_DIFF_CHARS = 50000
-# Verbatim-identical to glm_gate._VERDICT_CONTRACT and kimi_gate._VERDICT_CONTRACT.
-_HARNESS_LANE_VERDICT_CONTRACT = (
-    "When done, end your report with a structured JSON verdict ONLY, in a fenced block:\n"
-    "```json\n"
-    "{\n"
-    '  "verdict": "pass|fail|blocked",\n'
-    '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
-    '  "residual_risk": "remaining risk or null"\n'
-    "}\n"
-    "```\n"
-    "verdict=fail/blocked ONLY for a real, blocking correctness/security/governance issue "
-    "introduced by THIS diff. Style nits are severity=info, never blocking.\n"
-)
+# (C6 step 1). The _HARNESS_LANE_* aliases imported at the top are the SAME
+# objects scripts/glm_gate.py and scripts/kimi_gate.py read from
+# gate_lane_contract (C6 step 3), so a run through gate_runner's third
+# strategy has the model, timeout, diff cap and verdict contract of the same
+# gate run standalone — verbatim effect, different entry point.
 
 
 def _harness_lane_dispatch_id(gate: str, pr_number: Optional[int], pr_id: str) -> str:
