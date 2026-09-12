@@ -117,6 +117,12 @@ from gate_recorder import (
 )
 import gate_depth  # OI-1618: a verdict without investigation is no verdict, on every lane
 from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
+from gate_lane_contract import (  # C6 step 3: one source, three readers
+    MAX_DIFF_CHARS,
+    MODEL_DEFAULTS,
+    TIMEOUT_SECONDS,
+    VERDICT_CONTRACT,
+)
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
     build_review_prompt,
     merge_scan_findings,
@@ -153,22 +159,13 @@ def _extract_verdict(text: str) -> dict:
             return obj
     return {}
 
-DEFAULT_MODEL = "kimi-k3"
-DEFAULT_TIMEOUT = 900
-MAX_DIFF_CHARS = 50000
-
-_VERDICT_CONTRACT = (
-    "When done, end your report with a structured JSON verdict ONLY, in a fenced block:\n"
-    "```json\n"
-    "{\n"
-    '  "verdict": "pass|fail|blocked",\n'
-    '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
-    '  "residual_risk": "remaining risk or null"\n'
-    "}\n"
-    "```\n"
-    "verdict=fail/blocked ONLY for a real, blocking correctness/security/governance issue "
-    "introduced by THIS diff. Style nits are severity=info, never blocking.\n"
-)
+# One source (C6 step 3): model env var/default, timeout, diff cap and verdict
+# contract come from gate_lane_contract — the SAME objects gate_runner and
+# glm_gate read. The aliases keep this gate's existing names for the readers
+# below.
+_MODEL_ENV, DEFAULT_MODEL = MODEL_DEFAULTS["kimi_gate"]
+DEFAULT_TIMEOUT = TIMEOUT_SECONDS
+_VERDICT_CONTRACT = VERDICT_CONTRACT
 
 
 def _build_prompt(diff_text: str, pr: str) -> str:
@@ -177,7 +174,8 @@ def _build_prompt(diff_text: str, pr: str) -> str:
     OI-1442, identical defect and identical fix to ``glm_gate._build_prompt``:
     the raw diff used to be the last thing in the prompt, unmarked. It now
     sits in an explicitly delimited block with the instruction restated after
-    it. ``_VERDICT_CONTRACT`` stays this gate's own.
+    it. ``_VERDICT_CONTRACT`` is the shared gate_lane_contract source (C6
+    step 3).
     """
     return build_review_prompt(
         gate_name="kimi_gate",
@@ -426,7 +424,7 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--data-dir", default=os.environ.get("VNX_DATA_DIR", ""),
                     help="VNX data dir; report lands in <data-dir>/unified_reports/ and the "
                          "result in <data-dir>/state/review_gates/results/")
-    ap.add_argument("--model", default=os.environ.get("VNX_KIMI_GATE_MODEL", DEFAULT_MODEL))
+    ap.add_argument("--model", default=os.environ.get(_MODEL_ENV, DEFAULT_MODEL))
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     ap.add_argument("--json", action="store_true", help="print the result record as JSON")
     ap.add_argument(

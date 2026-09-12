@@ -1506,7 +1506,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if not available:
             reason = "gate_runner_missing"
-            reason_detail = "scripts/glm_gate.py is not on disk — glm_gate is registered as a script runner and its runner is unavailable"
+            reason_detail = "glm_gate is not available — its registered provider route is not present"
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]

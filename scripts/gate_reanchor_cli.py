@@ -110,18 +110,25 @@ def load_existing_result(results_dir: Path, gate: str, pr_number: int) -> Dict[s
 def current_contract_hash(gate: str, pr_number: int) -> str:
     """Recompute the hash the gate WOULD produce for the PR head, offline.
 
-    No model call: ``_build_prompt`` is deterministic and the diff comes from
-    ``gh``. Verified against PR #1691, whose recorded hash
-    ``dd5ac45f7e84535e`` this reproduces exactly.
+    No model call: the prompt is deterministic and the diff comes from ``gh``.
+    Builds the prompt the way the harness lane does — ``build_review_prompt``
+    with the shared gate_lane_contract verdict contract and diff cap (C6 step
+    3) — instead of importing the standalone gate module. Verified against PR
+    #1691, whose recorded hash ``dd5ac45f7e84535e`` this reproduces exactly.
     """
-    diff = _gh(["pr", "diff", str(pr_number)])
-    if gate == "glm_gate":
-        import glm_gate as gate_module
-    elif gate == "kimi_gate":
-        import kimi_gate as gate_module
-    else:  # pragma: no cover — guarded by DIFF_DERIVED_HASH_GATES at the call site
+    if gate not in DIFF_DERIVED_HASH_GATES:
         raise ValueError(f"{gate} has no diff-derived contract hash")
-    prompt = gate_module._build_prompt(diff, str(pr_number))
+    from gate_lane_contract import MAX_DIFF_CHARS, VERDICT_CONTRACT
+    from gate_prompt import build_review_prompt
+
+    diff = _gh(["pr", "diff", str(pr_number)])
+    prompt = build_review_prompt(
+        gate_name=gate,
+        pr=str(pr_number),
+        diff_text=diff,
+        verdict_contract=VERDICT_CONTRACT,
+        max_chars=MAX_DIFF_CHARS,
+    )
     return _compute_contract_hash({"prompt": prompt}, gate)
 
 

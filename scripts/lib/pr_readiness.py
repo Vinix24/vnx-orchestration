@@ -88,16 +88,18 @@ class GateCost:
 #: assumed.
 GATE_COST: Dict[str, GateCost] = {
     Gate.GLM_GATE.value: GateCost(
-        command="python3 scripts/glm_gate.py --pr {pr}",
+        command="python3 scripts/review_gate_manager.py execute --gate glm_gate --pr {pr}",
         lane="glm-harness → litellm :4141 → OpenRouter",
         usd="~1.3–2.8 USD",
-        note="source ~/.config/vnx/provider-usage.env in the same subshell; glm-5.2 only",
+        note="governed lane entry (C6 step 3); request --review-stack glm_gate first, then "
+             "source ~/.config/vnx/provider-usage.env in the same subshell; glm-5.2 only",
     ),
     Gate.KIMI_GATE.value: GateCost(
-        command="python3 scripts/kimi_gate.py --pr {pr}",
+        command="python3 scripts/review_gate_manager.py execute --gate kimi_gate --pr {pr}",
         lane="kimi CLI (OAuth)",
         usd="subscription",
-        note="kimi-via-cli-only: never the Moonshot API",
+        note="governed lane entry (C6 step 3); request --review-stack kimi_gate first; "
+             "kimi-via-cli-only: never the Moonshot API",
     ),
     Gate.CODEX_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py request-and-execute --gate codex_gate --pr {pr}",
