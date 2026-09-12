@@ -258,6 +258,12 @@ def _govern(
             findings=None,
             duration_seconds=duration,
             data_dir=spec.data_dir,
+            # OI-1716: thread the spawn-layer diagnosis into the report so an
+            # empty response never falls back to "(no response captured)" when
+            # the spawn layer already knows why it produced nothing (proxy
+            # unreachable, harness refused to start). Same form as the provider
+            # lane (#1834, provider_dispatch._emit_governance).
+            spawn_error=getattr(adapter_result, "error", None),
             preserve_partial=adapter_result.status != "success",
         )
     except Exception as exc:
