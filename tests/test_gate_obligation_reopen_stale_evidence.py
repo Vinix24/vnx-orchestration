@@ -27,6 +27,7 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
 import gate_obligation_reopen_stale_evidence as reopener  # noqa: E402
 from gate_obligations import (  # noqa: E402
     STATUS_FULFILLED,
+    STATUS_NOT_EXECUTABLE,
     STATUS_PENDING,
     obligation_path,
     register_obligation,
@@ -219,6 +220,141 @@ class TestMissingEvidence:
 
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["status"] == STATUS_FULFILLED, "a corrupt-evidence refusal must never mutate"
+
+
+class TestParkedTimeoutReopen:
+    """OI-1721 (2026-09-12): a terminally-parked obligation —
+    status=not_executable, reason=gate_parked_timeout, evidence file missing —
+    is reopenable because its gate never ran. The missing evidence file IS the
+    proof that no verdict exists (the same "absence is the proof" branch as
+    OI-1726). Every OTHER not_executable reason stays refused, and so does a
+    parked-timeout obligation whose evidence file still exists on disk."""
+
+    def _seed_parked_timeout_obligation(self, state_dir, dispatch_id, *, gate="codex_gate", pr_number=1832, evidence_exists=False):
+        path = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate=gate,
+            project_id="vnx-dev", pr_number=pr_number,
+        )
+        evidence = state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
+        if evidence_exists:
+            evidence.write_text(
+                json.dumps({
+                    "gate": gate, "pr_number": pr_number, "status": "not_executable",
+                    "commit_sha": _STALE_SHA, "recorded_at": "2026-09-10T10:00:00Z",
+                }),
+                encoding="utf-8",
+            )
+        update_obligation(
+            path,
+            status=STATUS_NOT_EXECUTABLE,
+            resolved_at="2026-09-10T10:00:00Z",
+            result_path=str(evidence),
+            evidence_result_path=str(evidence),
+            # The literal string the runner actually writes to disk (OI-1721:
+            # REASON_GATE_PARKED_TIMEOUT) — a literal here, not the constant,
+            # so this test proves the reader matches the writer's real output.
+            reason="gate_parked_timeout",
+            reason_detail="codex_gate stayed temporarily unavailable (gate_parked) — escalating",
+        )
+        return path, evidence
+
+    def _seed_not_executable_obligation(self, state_dir, dispatch_id, *, gate="codex_gate", pr_number=1830, reason=None):
+        path = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate=gate,
+            project_id="vnx-dev", pr_number=pr_number,
+        )
+        # The referenced result file is never written — exactly the shape of
+        # the old not_executable records (no reason, or required_failure)
+        # whose evidence is also missing. They must NOT become reopenable.
+        evidence = state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
+        fields = {
+            "status": STATUS_NOT_EXECUTABLE,
+            "resolved_at": "2026-09-10T10:00:00Z",
+            "result_path": str(evidence),
+            "evidence_result_path": str(evidence),
+        }
+        if reason is not None:
+            fields["reason"] = reason
+        update_obligation(path, **fields)
+        return path, evidence
+
+    def test_parked_timeout_with_missing_evidence_is_reopenable(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        _path, evidence = self._seed_parked_timeout_obligation(state_dir, "d-parked-missing")
+        # The absence is itself the proof — a PR-head resolution attempt here
+        # would be a bug (there is no evidence sha to bind against).
+        monkeypatch.setattr(
+            reopener, "_get_pr_head_sha_for_gate",
+            lambda pr_number: pytest.fail("parked-timeout reopen must not resolve a PR head"),
+        )
+
+        proof = reopener.verify_stale_evidence(state_dir, "d-parked-missing")
+
+        assert proof.get("evidence_missing") is True
+        assert proof.get("parked_timeout") is True
+        assert proof["evidence_path"] == str(evidence)
+        assert proof["head_sha"] == ""
+        assert proof["evidence_sha"] == ""
+
+    def test_parked_timeout_with_existing_evidence_is_refused(self, tmp_path):
+        """A parked-timeout obligation whose evidence file STILL EXISTS has no
+        provable absence — the reopen ground is defined by the missing file.
+        It must refuse rather than fall through to the sha-binding check,
+        which would compare shas of a verdict that never existed."""
+        state_dir = _make_state_dir(tmp_path)
+        path, _evidence = self._seed_parked_timeout_obligation(
+            state_dir, "d-parked-existing", evidence_exists=True,
+        )
+
+        with pytest.raises(reopener.ReopenRefused, match="still exists"):
+            reopener.verify_stale_evidence(state_dir, "d-parked-existing")
+
+        record = json.loads(path.read_text(encoding="utf-8"))
+        assert record["status"] == STATUS_NOT_EXECUTABLE, "a refusal must never mutate"
+
+    def test_parked_timeout_without_result_path_is_refused(self, tmp_path):
+        state_dir = _make_state_dir(tmp_path)
+        path = register_obligation(
+            state_dir, dispatch_id="d-parked-nopath", gate="codex_gate",
+            project_id="vnx-dev", pr_number=1830,
+        )
+        update_obligation(
+            path, status=STATUS_NOT_EXECUTABLE, reason="gate_parked_timeout",
+        )
+
+        with pytest.raises(reopener.ReopenRefused, match="no evidence_result_path/result_path"):
+            reopener.verify_stale_evidence(state_dir, "d-parked-nopath")
+
+    @pytest.mark.parametrize("reason", [None, "required_failure", "stay_pending_timeout"])
+    def test_other_not_executable_reasons_are_not_reopenable(self, tmp_path, reason):
+        """Scope guard (OI-1721): the ledger holds 49 not_executable records
+        without a reason and 3 with required_failure whose evidence is also
+        missing — none of them may become reopenable. Only the parked-timeout
+        reason is admitted."""
+        state_dir = _make_state_dir(tmp_path)
+        self._seed_not_executable_obligation(state_dir, "d-ne-other", reason=reason)
+
+        with pytest.raises(reopener.ReopenRefused, match="not fulfilled/failed"):
+            reopener.verify_stale_evidence(state_dir, "d-ne-other")
+
+    def test_write_reopens_a_parked_timeout_obligation(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        path, _vanished = self._seed_parked_timeout_obligation(state_dir, "d-parked-write")
+
+        with patch("review_gate_manager.emit_governance_receipt") as mock_emit:
+            outcome = reopener.reopen_obligation(
+                state_dir, "d-parked-write", operator_reason="OI-1721 parked gate", write=True,
+            )
+
+        assert outcome["action"] == "reopened"
+        assert mock_emit.called, "the ledger event must be emitted before the mutation (ADR-005)"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        assert record["status"] == STATUS_PENDING
+        assert record["reason"] == "reopened_parked_timeout"
+        assert record["result_path"] is None
+        assert record["evidence_result_path"] is None
+        assert "OI-1721 parked gate" in record["reason_detail"]
+        assert "without ever running" in record["reason_detail"]
 
 
 class TestRunnerRebooksReopenedObligation:

@@ -121,6 +121,21 @@ REASON_NO_PR_BRANCH_GONE_UNMEASURED = "no_pr_branch_gone_unmeasured"
 REASON_FULFILLED_BY_TAKEOVER = "fulfilled_by_takeover_evidence"
 REASON_FAILED_BY_TAKEOVER = "failed_by_takeover_evidence"
 
+# OI-1721 (2026-09-12): a gate that could not run because it was PARKED
+# (provider binary missing / config flag disabled — the runner's
+# ``_TEMPORARY_NOT_EXECUTABLE_REASONS`` set) stays pending under a bounded
+# retry term, then escalates to the loud terminal ``not_executable`` with
+# reason "<parked-reason>_timeout". The runner composes that string (writer:
+# scripts/gate_obligation_runner.py, the temporary-refusal escalation branch)
+# and scripts/gate_obligation_reopen_stale_evidence.py reads it back to decide
+# whether a terminal not_executable obligation was terminally parked. Both
+# constants live here so writer and readers can never drift on the literal
+# string — the same discipline as REASON_FULFILLED_BY_TAKEOVER above. The
+# timeout form is DERIVED from the base, so a rename of the base cannot
+# silently strand the reader.
+REASON_GATE_PARKED = "gate_parked"
+REASON_GATE_PARKED_TIMEOUT = f"{REASON_GATE_PARKED}_timeout"
+
 # Distinct sentinel gate key for explicit no-gate records (dispatch
 # 20260816-gate-never-skippable). Deliberately NOT a member of the Gate enum: a
 # no-gate dispatch is not declaring any gate, but the freshness scanner needs a
@@ -516,6 +531,8 @@ __all__ = [
     "REASON_NO_PR_BRANCH_GONE_UNMEASURED",
     "REASON_FULFILLED_BY_TAKEOVER",
     "REASON_FAILED_BY_TAKEOVER",
+    "REASON_GATE_PARKED",
+    "REASON_GATE_PARKED_TIMEOUT",
     "TERMINAL_STATUSES",
     "NO_GATE_KEY",
     "obligations_dir",
