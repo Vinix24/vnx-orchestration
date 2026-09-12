@@ -90,6 +90,64 @@ def resolve_gate_provider(gate: str) -> Optional[Tuple[str, str]]:
     """
     return GATE_PROVIDERS.get(gate)
 
+
+def harness_lane_dispatch_prefix(gate: str) -> str:
+    """Return the gate-eigen dispatch-id prefix for a harness-lane gate.
+
+    ``<shortname>-gate-pr`` — the exact shape ``glm_gate.py``/``kimi_gate.py``
+    already mint (``glm-gate-pr1839``, ``kimi-gate-pr1840``). Derived from the
+    gate name by stripping the ``_gate`` suffix, so the prefix can never drift
+    from the identity it belongs to.
+    """
+    shortname = gate[:-5] if gate.endswith("_gate") else gate
+    return f"{shortname}-gate-pr"
+
+
+def is_gate_eigen_dispatch_id(gate: str, dispatch_id: Optional[str]) -> bool:
+    """True when ``dispatch_id`` is the gate's OWN harness-lane identity.
+
+    A POSITIVE check, never a list of known builder ids: the id must start
+    with the gate's own prefix AND end in a ``-<digits>`` timestamp tail.
+    Any other shape — a builder dispatch-id, a foreign gate's id, a
+    runner-refusal slug, an empty id — is not gate-eigen and fails, so a NEW
+    form of the same collision fails the same way (OI-1725).
+
+    Scoped to harness-lane gates: a path_binary gate (codex_gate, gemini,
+    ci_gate) carries the builder's dispatch-id BY DESIGN and is never judged
+    here.
+    """
+    provider = resolve_gate_provider(gate)
+    if provider is None or provider[0] != GATE_PROVIDER_HARNESS_LANE:
+        return False
+    if not dispatch_id:
+        return False
+    prefix = harness_lane_dispatch_prefix(gate)
+    if not dispatch_id.startswith(prefix):
+        return False
+    tail = dispatch_id[len(prefix):]
+    if "-" not in tail:
+        return False
+    ts = tail.rsplit("-", 1)[-1]
+    return bool(ts) and ts.isdigit()
+
+
+def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optional[str]:
+    """Return a refusal message when a harness-lane gate's dispatch-id is not
+    gate-eigen, else ``None``. See :func:`is_gate_eigen_dispatch_id`.
+    """
+    provider = resolve_gate_provider(gate)
+    if provider is None or provider[0] != GATE_PROVIDER_HARNESS_LANE:
+        return None
+    if is_gate_eigen_dispatch_id(gate, dispatch_id):
+        return None
+    return (
+        f"{gate} result carries a dispatch-id that is not gate-eigen "
+        f"({dispatch_id!r}): a harness-lane gate must sign with its own "
+        f"'{harness_lane_dispatch_prefix(gate)}<pr>-<timestamp>' identity, "
+        "never the builder's dispatch-id — refusing to book the builder's "
+        "report as this gate's verdict (OI-1725)"
+    )
+
 # Infrastructure/execution failures — NOT semantic gate verdicts.
 # gate_failed means "gate completed with blocking findings"; only emit it for reasons
 # that represent a completed gate run with actual blocking findings. Anything else
@@ -119,6 +177,11 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # failure like any other: the PR was never reviewed, so it books
     # `unavailable`, never `failed`.
     "harness_lane_dispatch_error",
+    # A harness-lane gate was handed a non-gate-eigen dispatch-id (OI-1725):
+    # the builder's own report would be read back as the gate's verdict, so
+    # the run is refused and booked `unavailable`, never `failed` and never a
+    # completed verdict.
+    "gate_dispatch_identity_invalid",
 })
 
 
@@ -1326,6 +1389,14 @@ def record_terminal_result(
             f"({payload.get('status')!r}) but no producer identity "
             f"(dispatch_id) — refusing to write unauthenticated gate evidence"
         )
+    # OI-1725: a harness-lane gate that signs a decided verdict under a
+    # non-gate-eigen dispatch-id (the builder's) would be read back as the
+    # builder's own report. Scoped to PASS/FAIL only: a ``not_executable``
+    # record never ran, so "which identity did it sign under" does not apply.
+    if canonical_status(payload) in (PASS_STATES | FAIL_STATES):
+        identity_error = gate_dispatch_identity_error(gate, payload.get("dispatch_id"))
+        if identity_error:
+            raise ValueError(identity_error)
     with slot_lock(result_path):
         _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
         _write_result_atomic(result_path, payload)

@@ -712,7 +712,10 @@ def _recorder_payload() -> Dict[str, Any]:
         "contract_hash": "sha256:deadbeef",
         "report_path": "/dev/null",
         "blocking_findings": [],
-        "dispatch_id": "20260908-golfb-b2b-forge-integratie",
+        # Gate-eigen dispatch-id (OI-1725): a harness-lane gate result must
+        # never carry the builder's dispatch-id, or the identity guard refuses
+        # the terminal write.
+        "dispatch_id": "glm-gate-pr1811-1788800000",
         "recorded_at": "2026-09-08T00:00:00Z",
     }
 

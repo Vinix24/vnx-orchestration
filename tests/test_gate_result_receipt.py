@@ -121,6 +121,10 @@ def test_result_receipt_omits_provider_when_payload_has_none(tmp_path, monkeypat
 
     payload = _pass_payload()
     payload["gate"] = "kimi_gate"
+    # The gate's own dispatch-id must follow it across the lane switch: a
+    # kimi_gate record carrying a glm dispatch-id is the OI-1725 collision,
+    # and the identity guard refuses it.
+    payload["dispatch_id"] = "kimi-gate-pr99-1"
     payload.pop("provider")
     payload.pop("model")
     record_terminal_result(

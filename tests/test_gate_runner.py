@@ -1217,7 +1217,25 @@ class TestHarnessLaneDelegation:
     def test_harness_lane_produces_a_receipt_and_unified_report(
         self, gate_env, monkeypatch,
     ):
-        report_text = "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n"
+        """OI-1725 (RED on main): a harness-lane gate run books a gate-eigen
+        dispatch-id, stamps provider/model, and materializes its OWN verdict
+        report — never the builder's.
+
+        The measured defect: the runner reused the BUILDER's dispatch-id from
+        the request payload, so the record carried the builder's id with
+        provider/model unstamped, and _read_report read the builder's own
+        unified report back as the gate's verdict. This test hands the runner
+        a builder dispatch-id on purpose and proves it does not propagate.
+        """
+        builder_dispatch_id = "20260911-oi1711-publicatiepad-werkt-twee-keer"
+        builder_report_marker = "THE BUILDER'S OWN REPORT — MUST NOT BE READ BY THE GATE"
+
+        report_text = (
+            "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
+            "```json\n"
+            '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+            "```\n"
+        )
         factory, calls = self._fake_dispatcher(report_text)
 
         monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
@@ -1229,13 +1247,20 @@ class TestHarnessLaneDelegation:
             ),
         )
 
+        # (a) A builder report sits on disk for the SAME dispatch the bug
+        # would have routed the gate through. The gate must not pick it up.
+        builder_report = gate_env["reports_dir"] / f"{builder_dispatch_id}.md"
+        builder_report.write_text(
+            f"Dispatch-ID: {builder_dispatch_id}\n\n## Summary\n{builder_report_marker}\n",
+            encoding="utf-8",
+        )
+
         report_path = str(gate_env["reports_dir"] / "kimi-gate-pr1.md")
-        dispatch_id = "kimi-gate-pr1-1788815204"
         payload = _make_request_payload(
             gate="kimi_gate",
             prompt="Review this diff for correctness and security",
             report_path=report_path,
-            dispatch_id=dispatch_id,
+            dispatch_id=builder_dispatch_id,
         )
 
         runner = GateRunner(
@@ -1244,28 +1269,46 @@ class TestHarnessLaneDelegation:
         )
         result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1)
 
-        # Receipt: a completed result record on disk with contract evidence.
+        # Receipt: a completed result record with contract evidence.
         assert result["status"] == "completed", result.get("reason_detail")
         assert result["contract_hash"] != ""
-        assert result["dispatch_id"] == dispatch_id
+
+        # Gate-eigen identity: the runner minted its OWN dispatch-id, never the
+        # builder's. The tail is int(time.time()) digits, so assert on shape.
+        gate_dispatch_id = result["dispatch_id"]
+        assert gate_dispatch_id != builder_dispatch_id
+        assert gate_dispatch_id.startswith("kimi-gate-pr1-"), gate_dispatch_id
+        assert gate_dispatch_id.rsplit("-", 1)[-1].isdigit(), gate_dispatch_id
+
+        # Provider + model are stamped on the result record, exactly like the
+        # standalone glm_gate/kimi_gate write path.
+        assert result["provider"] == "kimi"
+        assert result["model"] == "kimi-k3"
 
         result_file = gate_env["results_dir"] / "pr-1-kimi_gate.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "completed"
-        assert saved["dispatch_id"] == dispatch_id
+        assert saved["dispatch_id"] == gate_dispatch_id
+        assert saved["provider"] == "kimi"
+        assert saved["model"] == "kimi-k3"
 
-        # Unified report: the dispatcher's text materialized to report_path.
+        # The gate materialized ITS OWN report, with the verdict block — and it
+        # provably did not read the builder's report that sits beside it.
         report = Path(report_path)
         assert report.exists()
-        assert "No blocking findings." in report.read_text(encoding="utf-8")
+        report_text_on_disk = report.read_text(encoding="utf-8")
+        assert "No blocking findings." in report_text_on_disk
+        assert '"verdict": "pass"' in report_text_on_disk
+        assert builder_report_marker not in report_text_on_disk
 
-        # Delegation, once, through the governed seam with the lane's args.
+        # Delegation, once, through the governed seam with the lane's args and
+        # the gate-eigen id (not the builder's).
         assert len(calls) == 1
         assert calls[0]["provider"] == "kimi"
         assert calls[0]["role"] == "review-gate"
         assert calls[0]["model"] == "kimi-k3"
-        assert calls[0]["dispatch_id"] == dispatch_id
+        assert calls[0]["dispatch_id"] == gate_dispatch_id
         assert calls[0]["instruction"] == "Review this diff for correctness and security"
 
     def test_harness_lane_builds_the_diff_prompt_when_none_is_supplied(

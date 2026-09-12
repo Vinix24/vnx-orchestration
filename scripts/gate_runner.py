@@ -99,6 +99,20 @@ _HARNESS_LANE_VERDICT_CONTRACT = (
 )
 
 
+def _harness_lane_dispatch_id(gate: str, pr_number: Optional[int], pr_id: str) -> str:
+    """Mint the gate's OWN dispatch-id for a harness-lane run (OI-1725).
+
+    ``<shortname>-gate-pr<N>-<ts>`` — the exact shape glm_gate.py/kimi_gate.py
+    already mint, so a run through gate_runner's third strategy carries the
+    same identity the same gate run standalone would. NEVER the builder's
+    dispatch-id from the request payload: that reuse is what made
+    plan_gate_panel._read_report read the builder's own unified report back
+    as the gate's verdict (#1837).
+    """
+    pr_ref = str(pr_number) if pr_number is not None else (pr_id or "")
+    return f"{_rec.harness_lane_dispatch_prefix(gate)}{pr_ref}-{int(time.time())}"
+
+
 def _tail(text: str, limit: int) -> str:
     """Return the last `limit` characters of `text`, stripped."""
     text = (text or "").strip()
@@ -465,11 +479,16 @@ class GateRunner:
         # reports_dir is <data_dir>/unified_reports, so its parent is the data
         # dir the dispatcher resolves and the lane writes its report into.
         data_dir = self._reports_dir.parent
-        dispatch_id = request_payload.get("dispatch_id") or (
-            f"{gate}-pr{pr_number if pr_number is not None else pr_id}-{int(time.time())}"
-        )
+        # OI-1725: mint the gate's OWN identity up front, BEFORE the dispatcher
+        # runs — so both the success and the failure path carry it, and the
+        # builder's dispatch-id from the request payload can never leak into
+        # the result record or into the unified report the dispatcher writes.
+        dispatch_id = _harness_lane_dispatch_id(gate, pr_number, pr_id)
         model_env, default_model = _HARNESS_LANE_MODEL.get(gate, ("", ""))
         model = os.environ.get(model_env, default_model) if model_env else default_model
+        request_payload["dispatch_id"] = dispatch_id
+        request_payload["provider"] = provider
+        request_payload["model"] = model
 
         _start = time.monotonic()
         try:
@@ -492,7 +511,6 @@ class GateRunner:
                 results_dir=self._results_dir,
             )
 
-        request_payload["dispatch_id"] = dispatch_id
         return _art.materialize_artifacts(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
             stdout=report_text, request_payload=request_payload,

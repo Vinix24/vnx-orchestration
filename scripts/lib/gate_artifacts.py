@@ -256,6 +256,27 @@ def materialize_artifacts(
         requests_dir=requests_dir, results_dir=results_dir,
     )
 
+    # OI-1725 guard, before ANY artifact is written: a harness-lane gate whose
+    # dispatch-id is not gate-eigen would book the builder's own report as its
+    # verdict. Refuse loudly — book `unavailable`, never a completed verdict.
+    identity_error = gate_recorder.gate_dispatch_identity_error(
+        gate, request_payload.get("dispatch_id"),
+    )
+    if identity_error:
+        return gate_recorder.record_failure(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            result={
+                "reason": "gate_dispatch_identity_invalid",
+                "reason_detail": identity_error,
+                "duration_seconds": duration_seconds,
+                "partial_output_lines": len(stdout.splitlines()),
+                "runner_pid": os.getpid(),
+            },
+            request_payload=request_payload,
+            requests_dir=requests_dir,
+            results_dir=results_dir,
+        )
+
     report_path = request_payload.get("report_path", "")
     if not report_path:
         return gate_recorder.record_failure_simple(
@@ -387,6 +408,16 @@ def materialize_artifacts(
     gate_recorder.stamp_request_identity(result_payload, request_payload)
     if real_dispatch_id:
         result_payload["dispatch_id"] = real_dispatch_id
+    # OI-1725: a harness-lane gate result must carry its provider/model, exactly
+    # like the standalone glm_gate.py/kimi_gate.py write path (the correct
+    # pr-1839-glm_gate.json). Before #1837 these fields were left unstamped on
+    # the gate_runner lane, so the record read provider=None/model=None and
+    # looked like a non-run. The provider comes from the registry; the model
+    # from the request payload the runner stamps before dispatching.
+    provider_info = gate_recorder.resolve_gate_provider(gate)
+    if provider_info is not None and provider_info[0] == gate_recorder.GATE_PROVIDER_HARNESS_LANE:
+        result_payload["provider"] = request_payload.get("provider") or provider_info[1]
+        result_payload["model"] = request_payload.get("model", "")
 
     if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file)):
         return gate_recorder.record_failure_simple(
