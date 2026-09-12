@@ -118,16 +118,6 @@ def _make_bundle(
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        # A2 (2026-08-26): these are door tests (dispatch row creation, target_slot,
-        # gate obligations) — they don't exercise lane behavior, and they run in a
-        # tmp_path that is NOT a real git repo. Since claude_headless became the
-        # default lane, an unpinned claude spec now hits
-        # dispatch_envelope.run_envelope_headless_plan's create_dispatch_worktree,
-        # which correctly hard-aborts on a non-git cwd (the PR #1416 isolation
-        # guarantee — never soften that). Pin to the tmux lane explicitly via the
-        # opt-out these tests actually need.
-        "force_tmux": True,
-        "force_tmux_reason": "door test asserts row/obligation state, not lane behavior; tmp_path is not a real git repo",
     }
     if track_id is not None:
         spec["track_id"] = track_id
@@ -179,7 +169,7 @@ def test_door_creates_dispatch_row(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -215,7 +205,7 @@ def test_persist_track_id_hits_row_after_door(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
     assert rc == 0
 
@@ -264,14 +254,14 @@ def test_retry_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         assert run_dispatch(spec_file) == 0
     first = _read_row(db_path, "20260731-oi847-retry")
     assert first is not None
 
     # Without --refire the second fire is now blocked by the hervuur-wachter
     # (point 1): a route decision for this dispatch_id already exists.
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         assert run_dispatch(spec_file) == 1, (
             "a second fire of the same dispatch_id must be refused by the "
             "refire guard without an explicit --refire reason"
@@ -282,7 +272,7 @@ def test_retry_is_idempotent(tmp_path, monkeypatch):
     # With an explicit --refire reason the door proceeds; the row is still
     # left untouched (register_dispatch's idempotent lookup + the claim
     # step's benign no-op once the row is already past 'queued').
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         assert run_dispatch(spec_file, refire_reason="test: explicit retry") == 0
 
     assert _row_count(db_path) == 1, "retry must not create a second dispatches row"
@@ -309,7 +299,7 @@ def test_rejected_dispatch_creates_no_row(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(bad_spec)
     assert rc == 1
     mock_execute.assert_not_called()
@@ -320,7 +310,7 @@ def test_rejected_dispatch_creates_no_row(tmp_path, monkeypatch):
         staging_id="20260731-staging-oi847-accept",
         dispatch_id="20260731-oi847-accepted",
     )
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(good_spec)
     assert rc == 0
 
@@ -429,7 +419,7 @@ def test_oi943_target_slot_survives_through_door(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -445,11 +435,11 @@ def test_oi943_target_slot_survives_through_door(tmp_path, monkeypatch):
 #    a non-git directory MUST fail with the isolation abort. This is PR
 #    #1416's isolation guarantee (create_dispatch_worktree hard-aborts rather
 #    than silently falling back to a shared, unisolated checkout) — not a bug
-#    to be softened. Every other test in this file pins force_tmux=True
-#    precisely because they assert door/row/obligation behavior, not lane
-#    behavior; this test is the one place that intentionally leaves the spec
-#    unpinned so the isolation contract itself stays pinned and cannot
-#    regress silently.
+#    to be softened. Every other test in this file mocks
+#    _execute_claude_headless precisely because they assert door/row/obligation
+#    behavior, not lane behavior; this test is the one place that intentionally
+#    leaves the spec unpinned so the isolation contract itself stays pinned
+#    and cannot regress silently.
 #
 #    A2-ff2 (fix-forward on top of A2-ff): the ORIGINAL version of this test
 #    assumed pytest's tmp_path would be resolved by create_dispatch_worktree
@@ -620,7 +610,7 @@ def test_success_populates_attempt_and_completes(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0):
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -648,7 +638,7 @@ def test_lane_failure_routes_to_failed_delivery(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=1):
+    with patch("dispatch_cli._execute_claude_headless", return_value=1):
         rc = run_dispatch(spec_file)
 
     assert rc == 1

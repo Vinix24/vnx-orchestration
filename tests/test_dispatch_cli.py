@@ -62,6 +62,25 @@ from dispatch_spec import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _allow_tmux_lane_for_lane_routing_tests(monkeypatch):
+    """Retired-lane noodklep (dispatch-20260912-tmux-lane-uit-claude-altijd-headless).
+
+    This file is the door's lane-routing suite. It carries genuine tmux-lane
+    assertions (worker-claude-override -> claude_tmux_subscription,
+    TestHeadlessIsolationGuard's tmux branch) that must keep exercising the real
+    opt-out path, plus door-level tests that pin ``force_tmux=True`` purely to
+    keep the mocked ``_execute_claude`` entry point reachable. With the lane
+    retired, validate() refuses ``force_tmux=True`` fail-loud unless
+    VNX_ALLOW_TMUX_LANE is truthy, so set the brake for the whole file and keep
+    those routing assertions live. The refusal itself is pinned separately in
+    tests/test_tmux_lane_retirement.py; headless-default tests here are
+    unaffected because they never set force_tmux.
+    """
+    monkeypatch.delenv("VNX_OVERRIDE_ALLOW_TMUX_LANE", raising=False)
+    monkeypatch.setenv("VNX_ALLOW_TMUX_LANE", "1")
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
