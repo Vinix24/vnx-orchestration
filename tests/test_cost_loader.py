@@ -196,9 +196,13 @@ class TestGlmConsistency:
             assert cost is not None, f"Variant {name!r} must resolve to a cost"
             costs.append(cost)
 
-        # All variants must return the same glm-5.2 cost
-        # OI-1083: re-measured 2026-09-14 — input: 5000 * 0.683/1M + output: 2000 * 2.147/1M = 0.003415 + 0.004294 = 0.007709
-        expected = 0.007709
+        # All variants must resolve to the same cost as the canonical name.
+        # Derived from the registry itself rather than a hardcoded number:
+        # a literal copy of the computed price is exactly the pattern that
+        # went stale six times on 2026-09-14 when glm-5.2 was re-measured
+        # (see PR #1855) — this asserts the consistency invariant, not a price.
+        expected = compute_cost_per_call("glm-5.2")
+        assert expected is not None and expected > 0
         for name, cost in zip(variants, costs):
             assert abs(cost - expected) < 1e-9, (
                 f"Variant {name!r}: expected {expected}, got {cost}"
