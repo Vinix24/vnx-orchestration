@@ -26,7 +26,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from governance_receipts import utc_now_iso
 from headless_adapter import gate_timeout, gate_stall_threshold
-from unified_report_schema import SchemaViolation, parse_frontmatter
+from unified_report_schema import SchemaViolation, extract_frontmatter, parse_frontmatter
 import gate_recorder as _rec
 import gate_artifacts as _art
 import vertex_ai_runner as _vtx
@@ -154,6 +154,42 @@ def _lifted_harness_lane_failure_reason(report_text: str) -> Optional[str]:
         return None
     reason = frontmatter.get("failure_reason")
     return (reason or "").strip() or None
+
+
+def _lifted_harness_lane_exit_code(report_text: str) -> Optional[int]:
+    """OI-1753: read a harness-lane report's own ``exit_code`` for the SECOND
+    failure shape ``_lifted_harness_lane_failure_reason`` cannot see — the
+    spawn layer started the model, but the PROVIDER answered with an error
+    that got written as the report body instead of a verdict. That function
+    covers the spawn dying BEFORE the model ever ran (its own docstring:
+    quota/auth refusal, proxy outage) and reads ``failure_reason``, a field
+    only ever stamped on that pre-model death. This one is the broader
+    vangnet below it, for a model that DID get invoked and still produced no
+    usable verdict.
+
+    Measured: ``pr-1855-deepseek_gate.json`` was booked `completed` an hour
+    after the OI-1748 fix (#1857) landed, because its report
+    (``20260914-142556-HEADLESS-deepseek_gate-pr-1855-2d66eb.md``) carries
+    ``exit_code: 1`` with NO ``failure_reason`` — body ``API Error: 402
+    Insufficient Balance``. ``_lifted_harness_lane_failure_reason`` found
+    nothing to lift and materialize_artifacts stamped `completed`
+    unconditionally, same root cause as OI-1748, different shape.
+
+    Returns ``None`` — never 0, and never a synthesized value — when the
+    field is absent, unparsable, or not an int: a report with no ``exit_code``
+    carries no readable outcome here (a real model reply's frontmatter never
+    has one) and must not be read as either a clean 0 or a failure. Mirrors
+    ``deliberation_panel._seat_exit_code``, which reads the identical field
+    off the identical report shape for the identical reason.
+    """
+    if not report_text:
+        return None
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return None
+    exit_code = frontmatter.get("exit_code")
+    return exit_code if isinstance(exit_code, int) else None
 
 
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
@@ -561,6 +597,54 @@ class GateRunner:
                     "reason_detail": (
                         f"{gate} report carries failure_reason in its frontmatter "
                         f"(spawn layer failed before the model ran): {no_response_reason}"
+                    ),
+                    "duration_seconds": time.monotonic() - _start,
+                    "partial_output_lines": len(report_text.splitlines()),
+                    "runner_pid": os.getpid(),
+                },
+                request_payload=request_payload,
+                requests_dir=self._requests_dir,
+                results_dir=self._results_dir,
+            )
+
+        # OI-1753: the vangnet below the failure_reason check above. Some
+        # harness-lane reports fail the OTHER way — the spawn layer starts
+        # the model fine, but the PROVIDER answers with an error (a 402
+        # insufficient-balance, some other API failure) that lands as the
+        # report BODY with no failure_reason stamped, because that field is
+        # only ever written for a pre-model death. Measured an hour after
+        # #1857 merged: pr-1855-deepseek_gate.json booked `completed` with a
+        # report whose frontmatter carries exit_code: 1 and body "API Error:
+        # 402 Insufficient Balance" — the failure_reason check above found
+        # nothing to lift, so it fell straight through.
+        #
+        # Checked SECOND, not first: a specific failure_reason (when present)
+        # names the actual cause (e.g. "quota_or_auth"), while exit_code is
+        # only ever a bare integer — the narrower, more informative signal
+        # wins when both could apply. Booked under its OWN reason, not
+        # reused as "harness_lane_no_model_response": that name promises "the
+        # spawn layer died before the model ran" (see its docstring), which
+        # is specifically false here — the model DID run. A shared reason
+        # would misreport which of the two shapes actually happened, losing
+        # exactly the distinction this fix exists to keep. Registered in
+        # gate_recorder.EXECUTION_FAILURE_REASONS so it books `unavailable`,
+        # same as its sibling — never `failed` (a rejected PR) and never
+        # `completed` (a clean review).
+        exit_code = _lifted_harness_lane_exit_code(report_text)
+        if exit_code is not None and exit_code != 0:
+            try:
+                _, report_body = extract_frontmatter(report_text)
+            except SchemaViolation:
+                report_body = report_text
+            return _rec.record_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                result={
+                    "reason": "harness_lane_exit_nonzero",
+                    "reason_detail": (
+                        f"{gate} report carries exit_code={exit_code} in its "
+                        "frontmatter with no failure_reason (the provider/model "
+                        f"layer reported the failure after the spawn started): "
+                        f"{_tail(report_body, _REASON_DETAIL_TAIL_CHARS)}"
                     ),
                     "duration_seconds": time.monotonic() - _start,
                     "partial_output_lines": len(report_text.splitlines()),

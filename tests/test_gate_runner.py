@@ -1446,3 +1446,83 @@ class TestHarnessLaneDelegation:
         assert result["status"] == "completed", result.get("reason_detail")
         assert "completed successfully" in result["summary"]
         assert len(calls) == 1
+
+    def test_harness_lane_exit_nonzero_report_is_not_booked_completed(
+        self, gate_env, monkeypatch,
+    ):
+        """OI-1753 (RED on main before this fix): a report whose frontmatter
+        carries a non-zero exit_code but NO failure_reason is the SECOND
+        harness-lane failure shape — the model was invoked (unlike the
+        spawn-death shape #1857 fixed) and the provider itself answered with
+        an API error that landed as the report body instead of a verdict.
+
+        Measured incident, one hour AFTER #1857 merged:
+        pr-1855-deepseek_gate.json still booked status="completed" /
+        summary="deepseek_gate execution completed successfully", because the
+        report it points at
+        (unified_reports/headless/20260914-142556-HEADLESS-deepseek_gate-pr-1855-2d66eb.md)
+        has exit_code: 1 in its frontmatter but no failure_reason field — the
+        #1857 check found nothing to lift and fell straight through. This
+        test reproduces the exact frontmatter + body shape from that report
+        (the ``## Response`` section's ``---``-fenced portion the dispatcher
+        actually returns, before materialize_artifacts wraps it). On main,
+        before the OI-1753 fix, this fails with the measured value:
+        result["status"] == "completed".
+        """
+        report_text = (
+            "---\n"
+            "schema_version: 1\n"
+            "dispatch_id: deepseek-gate-pr1855-1789396586\n"
+            "provider: deepseek-harness\n"
+            "sub_provider: deepseek\n"
+            "model: deepseek-v4-pro\n"
+            "terminal_id: plan-gate\n"
+            "pool_id: headless\n"
+            "role: review-gate\n"
+            "task_class: research_structured\n"
+            "pr_id: none\n"
+            "duration_seconds: 308.942\n"
+            "exit_code: 1\n"
+            "---\n"
+            "\n"
+            "# Dispatch deepseek-gate-pr1855-1789396586\n"
+            "\n"
+            "**Dispatch-ID**: deepseek-gate-pr1855-1789396586\n"
+            "**Model**: deepseek-v4-pro\n"
+            "**Provider**: deepseek-harness\n"
+            "**Terminal**: plan-gate\n"
+            "**Duration**: 308.9s\n"
+            "\n"
+            "## Response\n"
+            "\n"
+            "API Error: 402 Insufficient Balance\n"
+        )
+        factory, calls = self._fake_dispatcher(report_text)
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_DEEPSEEK_GATE_MODEL", raising=False)
+
+        report_path = str(gate_env["reports_dir"] / "deepseek-gate-pr1855.md")
+        payload = _make_request_payload(
+            gate="deepseek_gate",
+            prompt="Review this diff for correctness and security",
+            report_path=report_path,
+        )
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+        result = runner.run(gate="deepseek_gate", request_payload=payload, pr_number=1855)
+
+        assert result["status"] != "completed", result
+        assert "completed successfully" not in result.get("summary", "")
+        assert result["status"] == "unavailable"
+        assert "402" in result["reason_detail"] or "Insufficient Balance" in result["reason_detail"]
+
+        result_file = gate_env["results_dir"] / "pr-1855-deepseek_gate.json"
+        assert result_file.exists()
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["status"] == "unavailable"
+
+        assert len(calls) == 1
