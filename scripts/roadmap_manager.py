@@ -51,10 +51,33 @@ def _base_review_stack() -> List[str]:
     ``ci_gate`` when ``VNX_CI_GATE_REQUIRED`` is on, and this template must
     carry the bare base stack the registry entry documents, not a
     request-time composition that varies with that flag.
+
+    Fails closed on an explicitly empty ``VNX_DEFAULT_REVIEW_STACK`` (dispatch
+    20260914-poorten-punt3-s2/-fix2), rather than silently returning ``[]``.
+    ``review_gate_manager._build_default_review_stack()`` reads the same key
+    and used to mask that same misconfiguration by falling back to
+    ``["ci_gate"]`` whenever ``VNX_CI_GATE_REQUIRED`` is on -- and returning
+    ``[]`` outright when it is off, which is the same silent hole this
+    function used to have. This writer has no live-pipeline fallback to lean
+    on: it stamps ``**Review-Stack**:`` straight into a FEATURE_PLAN.md, and
+    ``RoadmapManager._gates_incomplete`` treats an empty ``review_stack`` as
+    "nothing required" (``if not required_gates: return False``) -- so a
+    silently empty base stack would write a fix-up template that
+    ``advance()`` will certify with ZERO review evidence. An operator who
+    explicitly zeroes the config wanted something to notice that, not a
+    feature plan that quietly requires no review at all.
     """
     import config_runtime
     raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""
-    return [item.strip() for item in raw.split(",") if item.strip()]
+    stack = [item.strip() for item in raw.split(",") if item.strip()]
+    if not stack:
+        raise ValueError(
+            "VNX_DEFAULT_REVIEW_STACK resolved to an empty review-gate stack; "
+            "refusing to write a FEATURE_PLAN.md that requires zero review "
+            "gates. Set VNX_DEFAULT_REVIEW_STACK (scripts/lib/config_registry.py) "
+            "to a non-empty comma-separated gate list."
+        )
+    return stack
 
 
 @dataclass

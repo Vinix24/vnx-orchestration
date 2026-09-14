@@ -376,6 +376,41 @@ def test_fixup_feature_review_stack_follows_config_override_without_ci_gate(road
     assert "ci_gate" not in plan_text
 
 
+def test_base_review_stack_raises_on_explicitly_empty_config(monkeypatch):
+    """Dispatch 20260914-poorten-punt3-s2/-fix2, point C: an explicitly empty
+    ``VNX_DEFAULT_REVIEW_STACK`` must fail closed in ``_base_review_stack()``,
+    not silently resolve to ``[]``.
+
+    Before this fix, ``roadmap_manager._base_review_stack()`` returned ``[]``
+    on an empty value while ``review_gate_manager._build_default_review_stack()``
+    read the same key and returned ``["ci_gate"]`` whenever
+    ``VNX_CI_GATE_REQUIRED`` was on -- two readers of one config key silently
+    disagreeing about whether "empty" means "no gates" or "just ci_gate".
+    Both are wrong to stay quiet about it: ``RoadmapManager._gates_incomplete``
+    treats an empty ``review_stack`` as "nothing required"
+    (``if not required_gates: return False``), so a silently-empty base stack
+    would let ``_insert_fixup_feature`` write, and ``advance()`` later
+    certify, a FEATURE_PLAN.md that requires zero review evidence. This test
+    pins the choice made for the template-writing side: raise, don't mask.
+    """
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "")
+    with pytest.raises(ValueError, match="empty review-gate stack"):
+        rm._base_review_stack()
+
+
+def test_fixup_insertion_fails_closed_on_empty_review_stack_config(roadmap_env, monkeypatch):
+    """End-to-end version of the unit test above: with an explicitly empty
+    ``VNX_DEFAULT_REVIEW_STACK``, driving ``advance()`` through the
+    blocking-drift fix-up path must raise rather than materialize a
+    FEATURE_PLAN.md with an empty ``**Review-Stack**:`` line -- proving the
+    fail-closed behavior is actually wired into the fix-up path, not just
+    true of the helper in isolation.
+    """
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "")
+    with pytest.raises(ValueError, match="empty review-gate stack"):
+        _insert_a_fixup(roadmap_env, monkeypatch)
+
+
 # ---------------------------------------------------------------------------
 # RA-2: git branch materialization
 # ---------------------------------------------------------------------------

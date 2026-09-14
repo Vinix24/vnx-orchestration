@@ -14,7 +14,7 @@ Proves the roadmap auto-next loop with controlled trial sequences:
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 import pytest
 
@@ -180,17 +180,63 @@ _FEATURE_BRANCHES = {
     "feature-c": "feature/charlie",
 }
 
-# Required gates for the trial features (review_stack minus the optional gate).
-_REQUIRED_GATES = ("gemini_review", "codex_gate")
+
+def _required_gates_for(manager, feature_id: str) -> List[str]:
+    """The gates a feature actually needs PASS evidence for, derived the same
+    way production derives them (roadmap_manager.RoadmapManager._gates_incomplete):
+    every entry of THIS feature's own ``review_stack`` except
+    ``claude_github_optional``.
+
+    This used to be a single module-level constant (a literal copy of the
+    pre-s2 default review-gate stack) that every ``_certify()`` call shared.
+    That was the fourth hardcoded copy of the old default fixed by dispatch
+    20260914-poorten-punt3-s2/-fix2: once ``VNX_DEFAULT_REVIEW_STACK`` became
+    ``codex_gate,glm_gate``, the constant no longer matched the review_stack
+    ``roadmap_manager._insert_fixup_feature`` stamps on a freshly inserted
+    fix-up (it reads ``roadmap_manager._base_review_stack()`` live), so
+    fix-up certification wrote gate evidence for a stack nothing required
+    ("gemini_review") while leaving the one gate that WAS required
+    ("glm_gate") unwritten -- ``_gates_incomplete`` then correctly refused to
+    advance.
+
+    A single constant cannot replace it either: trial_env's ROADMAP.yaml
+    (``_write_roadmap``) gives feature-a/b/c a literal review_stack, the way
+    an already-authored FEATURE_PLAN.md carries whatever stack was set at
+    plan time and does not retroactively track a later config change, while
+    fix-ups pick up the LIVE config default. The two legitimately differ, so
+    a plain module constant read once at test-module IMPORT time (before any
+    monkeypatch fixture runs) can only ever match one of them, and matching
+    neither is exactly the bug this replaces. Deriving from the active
+    feature's own state at CALL time tracks both sources correctly, whichever
+    one a given feature actually carries.
+
+    Verified red/green, not just by inspection: running
+    test_full_trial_a_fixup_b with ``VNX_DEFAULT_REVIEW_STACK=kimi_gate,glm_gate``
+    exported in the shell (a THIRD value, in neither the old hardcoded pair
+    nor the current registry default) still passes, because the fix-up's
+    certify step writes evidence for kimi_gate/glm_gate, not a frozen pair
+    from import time. ``kimi_gate``/``glm_gate`` were picked deliberately —
+    both are members of ``dispatch_spec.Gate`` (closure_verifier's
+    ``_KNOWN_GATES``); a name outside that closed set (e.g. ``deepseek_gate``)
+    additionally needs a ``dispatch_id`` producer-identity field
+    (``gate_status.has_producer_identity``, OI-1093) that this file's
+    synthetic contracts never write, so it fails for a second, unrelated
+    reason that would have muddied this check.
+    """
+    state = manager.load_state()
+    feature = next(f for f in state["features"] if f["feature_id"] == feature_id)
+    review_stack = feature.get("review_stack") or []
+    return [gate for gate in review_stack if gate != "claude_github_optional"]
 
 
 def _write_passing_gates(
     state_dir: Path,
     branch: str,
+    gates: Sequence[str],
     pr_id: str = "PR-0",
     project_id: str = "vnx-dev",
 ) -> None:
-    """Write fully-valid PASS gate-result contracts for every required gate.
+    """Write fully-valid PASS gate-result contracts for every gate in ``gates``.
 
     Mirrors the result-file shape asserted by tests/test_roadmap_manager.py
     after #871: each contract carries the fields _accept + the gate-completeness
@@ -200,7 +246,7 @@ def _write_passing_gates(
     results_dir = state_dir / "review_gates" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
     pr_slug = pr_id.lower().replace("-", "")
-    for gate in _REQUIRED_GATES:
+    for gate in gates:
         report_file = results_dir / f"{pr_slug}-{gate}-report.md"
         report_file.write_text(f"# {gate} report for {pr_id}\n", encoding="utf-8")
         data = {
@@ -220,7 +266,7 @@ def _write_passing_gates(
 def _certify(manager, feature_id: str, state_dir: Path, branch: str) -> None:
     """Provide the real gate evidence + human-approval token so advance() can
     legitimately progress past the active feature."""
-    _write_passing_gates(state_dir, branch)
+    _write_passing_gates(state_dir, branch, _required_gates_for(manager, feature_id))
     manager.approve(feature_id, actor="test-operator", justification="trial certification")
 
 

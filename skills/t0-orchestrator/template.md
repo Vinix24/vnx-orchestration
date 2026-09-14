@@ -21,7 +21,7 @@ Requires-Model: <opus|sonnet>
 ClearContext: <true|false>
 Risk-Class: <low|medium|high>
 Merge-Policy: <human|conditional_auto>
-Review-Stack: <gemini_review,codex_gate,claude_github_optional>
+Review-Stack: <comma-separated gate names; default is VNX_DEFAULT_REVIEW_STACK in scripts/lib/config_registry.py — do not copy a literal here, it drifts>
 Dispatch-ID: <YYYYMMDD-HHMMSS-descriptor-slug>
 Parent-Dispatch: <dispatch-id or "none">
 PR-ID: <PR-X or "none">
@@ -174,7 +174,7 @@ Requires-Model: sonnet
 ClearContext: true
 Risk-Class: medium
 Merge-Policy: human
-Review-Stack: gemini_review,codex_gate,claude_github_optional
+Review-Stack: <default from VNX_DEFAULT_REVIEW_STACK>  # look up the live value in scripts/lib/config_registry.py, don't hardcode a gate list here
 Dispatch-ID: 20260203-153000-storage-fix
 Parent-Dispatch: none
 PR-ID: PR-4
