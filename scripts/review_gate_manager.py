@@ -36,9 +36,10 @@ def _build_default_review_stack() -> List[str]:
     hardcoded name list (dispatch 20260823-beta2-e, OI-1435).
 
     ``VNX_DEFAULT_REVIEW_STACK`` (config_registry, default
-    "gemini_review,codex_gate,claude_github_optional") is the single source
-    an operator edits to route the stack at any registered gate — e.g.
-    kimi_gate,glm_gate — without touching this function. ci_gate stays a
+    "codex_gate,glm_gate" since 14-09, dispatch 20260914-poorten-punt3-kimi --
+    before that "gemini_review,codex_gate,claude_github_optional") is the
+    single source an operator edits to route the stack at any registered gate
+    — e.g. kimi_gate — without touching this function. ci_gate stays a
     separate append gated by VNX_CI_GATE_REQUIRED, matching prior behavior.
     """
     import config_runtime

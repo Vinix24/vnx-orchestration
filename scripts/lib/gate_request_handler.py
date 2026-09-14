@@ -59,11 +59,15 @@ class ReviewGateTakeoverConfigError(ValueError):
 # question 1); this mapping stays a choice under uncertainty until that
 # lands.
 #
-# deepseek_gate is a legal END-LINK even though its runner does not exist yet
-# (a separate dispatch, E2, ships it): walking onto it always resolves
-# not_executable/gate_runner_missing (see `_request_deepseek`) -- a named
-# skip, never a further hop, since it is deliberately absent from the chain
-# it would otherwise continue into.
+# deepseek_gate is a legal END-LINK and a LIVE one. The comment that used to
+# sit here -- "its runner does not exist yet; walking onto it always resolves
+# not_executable/gate_runner_missing" -- is superseded: since #1714 and #1838
+# deepseek_gate is registered as a harness-lane gate (gate_recorder.py's
+# GATE_PROVIDERS, "deepseek-harness"), gate_is_available("deepseek_gate") is
+# True by registration alone, and `_request_deepseek` issues a real request
+# through the governed dispatcher lane. Walking onto it therefore dispatches
+# deepseek for real; it is still never a FURTHER hop, since it is the last
+# name in the chain and has no successor.
 _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,glm_gate,deepseek_gate"
 
 

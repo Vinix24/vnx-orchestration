@@ -114,19 +114,33 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_DEFAULT_REVIEW_STACK": _e(
-        "VNX_DEFAULT_REVIEW_STACK", "string", "gemini_review,codex_gate,claude_github_optional", "gate",
-        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435). "
-        "Lets an operator route review gates to any registered gate name — e.g. "
-        "kimi_gate,glm_gate — without editing review_gate_manager.py. ci_gate is appended "
-        "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,
+        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,glm_gate", "gate",
+        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435; "
+        "composition changed 14-09, dispatch 20260914-poorten-punt3-kimi). Lets an "
+        "operator route review gates to any registered gate name — e.g. kimi_gate — "
+        "without editing review_gate_manager.py. ci_gate is appended separately when "
+        "VNX_CI_GATE_REQUIRED is on; do not include it here. Why this composition: "
+        "claude_github_optional is OUT because it was never configured — no "
+        ".github/workflows/claude*.yml exists and VNX_CLAUDE_GITHUB_REVIEW_ENABLED "
+        "resolves to None outside tests, so all 23 of its records are "
+        "claude_github_not_configured (it stays in gate_recorder.GATE_PROVIDERS: "
+        "removing it there would rebook every historical request as "
+        "unsupported_gate_type, a routing-fault label, where those records describe "
+        "a deliberate design). gemini_review is OUT because its binary is not on "
+        "PATH and it produced a single record in fourteen days — never a verdict. "
+        "glm_gate is IN as the only gate with a proven verdict streak (86 pass on "
+        "94 records). codex_gate STAYS: its quota outage expires 15-09.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
         "codex_gate,kimi_gate,glm_gate,deepseek_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision). On "
-        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate is a "
-        "legal end-link that is skipped with a named reason until its runner ships (E2). "
-        "ABSENT (no env/DB override) falls back to this literal default string. An EXPLICIT "
+        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate "
+        "is a legal end-link and a LIVE one since #1714/#1838 -- it is registered as "
+        "a harness-lane gate (gate_recorder.GATE_PROVIDERS), so walking onto it "
+        "dispatches a real request via gate_request_handler._request_deepseek, not a "
+        "not_executable/gate_runner_missing skip. ABSENT (no env/DB override) falls "
+        "back to this literal default string. An EXPLICIT "
         "empty value ('') means NO takeover chain at all -- distinct from absent. Any name "
         "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "
         "Must match gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN verbatim "

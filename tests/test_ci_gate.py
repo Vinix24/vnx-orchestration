@@ -723,22 +723,28 @@ def test_default_review_stack_includes_ci_gate_when_required(monkeypatch):
     assert "ci_gate" in stack
 
 
-def test_default_review_stack_control_case_gemini_codex_combo_unchanged(monkeypatch):
-    """Control case (dispatch 20260823-beta2-e): with no config override, the
-    existing gemini_review + codex_gate + claude_github_optional combination
-    must come back byte-for-byte unchanged.
+def test_default_review_stack_control_case_codex_glm_combo_unchanged(monkeypatch):
+    """Control case: with no config override, the default stack must come back
+    byte-for-byte as codex_gate + glm_gate.
+
+    Re-pinned 14-09 (dispatch 20260914-poorten-punt3-kimi): until then this
+    asserted gemini_review,codex_gate,claude_github_optional — the default
+    changed because gemini_review's binary is not on PATH (zero verdicts in
+    14 days) and claude_github_optional was never configured (no claude*.yml
+    workflow, VNX_CLAUDE_GITHUB_REVIEW_ENABLED resolves to None outside
+    tests), while glm_gate carried the only proven verdict streak (86 pass on
+    94 records) and codex_gate's quota outage expires 15-09.
 
     VNX_CI_GATE_REQUIRED is pinned to "0" (not delenv'd) since OI-1385 flipped its
     registry default to "1": this test measures the BASE stack composition, not
     ci_gate's own default, so it must isolate that axis explicitly or it starts
-    asserting a gemini/codex/claude_github_optional-only stack that no longer
-    matches the wired default.
+    asserting a codex/glm-only stack that no longer matches the wired default.
     """
     monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
     import review_gate_manager as rgm
     stack = rgm._build_default_review_stack()
-    assert stack == ["gemini_review", "codex_gate", "claude_github_optional"]
+    assert stack == ["codex_gate", "glm_gate"]
 
 
 def test_default_review_stack_is_config_driven_not_hardcoded(monkeypatch):
