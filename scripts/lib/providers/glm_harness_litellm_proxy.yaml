@@ -5,12 +5,11 @@
 # while inference still flows through OpenRouter — so `zai-via-openrouter-only` stays
 # intact (no direct z.ai/Zhipu account) and it's the CLI not the SDK (`no-anthropic-sdk`
 # intact). The key is read from OPENROUTER_API_KEY in the proxy's env; never hardcoded.
-# 2026-08-03: glm-5.2 is the ONLY allowed GLM version per operator directive. glm-5.1
-# and base glm-5 entries removed; attempting to route them now hits the
-# deprecated-glm-models constraint in provider_constraints.yaml.
-# 2026-09-14: operator directive admits glm-5.3 and glm-5.3-flash alongside
-# glm-5.2 for comparative measurement (deprecated-glm-models allowlist now
-# carries all three). glm-5.2 stays the default; nothing here changes that.
+# 2026-08-03: glm-5.1 and base glm-5 entries removed; attempting to route them now hits
+# the deprecated-glm-models constraint in provider_constraints.yaml.
+# 2026-09-14: operator directive widened that allowlist to the three model_name blocks
+# below — provider_constraints.yaml is the source of truth for which versions are
+# currently admitted, not this comment. glm-5.2 stays the default.
 model_list:
   - model_name: glm-5.2
     litellm_params:
