@@ -59,11 +59,14 @@ class ReviewGateTakeoverConfigError(ValueError):
 # question 1); this mapping stays a choice under uncertainty until that
 # lands.
 #
-# deepseek_gate is a legal END-LINK even though its runner does not exist yet
-# (a separate dispatch, E2, ships it): walking onto it always resolves
-# not_executable/gate_runner_missing (see `_request_deepseek`) -- a named
-# skip, never a further hop, since it is deliberately absent from the chain
-# it would otherwise continue into.
+# deepseek_gate is the chain's END-LINK: no gate is configured after it, so a
+# takeover walk stops there. Since OI-1714/OI-1838 it is a real harness-lane
+# gate (gate_recorder.GATE_PROVIDERS, "deepseek-harness"), available by
+# REGISTRATION -- `gate_is_available("deepseek_gate")` is True and
+# `_request_deepseek` (below) actually requests it, the same as any other
+# harness-lane gate. It no longer resolves not_executable/gate_runner_missing
+# by design; that was the pre-OI-1714 defect (a script-runner registration
+# pointing at a file that never existed), not the current end-link behaviour.
 _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,glm_gate,deepseek_gate"
 
 

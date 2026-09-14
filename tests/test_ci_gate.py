@@ -723,22 +723,62 @@ def test_default_review_stack_includes_ci_gate_when_required(monkeypatch):
     assert "ci_gate" in stack
 
 
-def test_default_review_stack_control_case_gemini_codex_combo_unchanged(monkeypatch):
-    """Control case (dispatch 20260823-beta2-e): with no config override, the
-    existing gemini_review + codex_gate + claude_github_optional combination
-    must come back byte-for-byte unchanged.
+def test_default_review_stack_control_case_codex_glm_combo_unchanged(monkeypatch):
+    """Control case (dispatch 20260914-poorten-punt3-s2): with no config
+    override, the registry default is codex_gate + glm_gate.
+
+    Superseded by this dispatch: the previous default (gemini_review +
+    codex_gate + claude_github_optional, dispatch 20260823-beta2-e) named two
+    gates that never deliver a verdict -- gemini_review's binary is not on
+    PATH (one record ever), claude_github_optional has never been configured
+    (no workflow, 23/23 records claude_github_not_configured). glm_gate has
+    the proven track record (86/94 pass) the old default lacked.
 
     VNX_CI_GATE_REQUIRED is pinned to "0" (not delenv'd) since OI-1385 flipped its
     registry default to "1": this test measures the BASE stack composition, not
     ci_gate's own default, so it must isolate that axis explicitly or it starts
-    asserting a gemini/codex/claude_github_optional-only stack that no longer
-    matches the wired default.
+    asserting a codex/glm-only stack that no longer matches the wired default.
     """
     monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
     import review_gate_manager as rgm
     stack = rgm._build_default_review_stack()
-    assert stack == ["gemini_review", "codex_gate", "claude_github_optional"]
+    assert stack == ["codex_gate", "glm_gate"]
+
+
+def test_default_review_stack_excludes_gates_that_are_never_configured(monkeypatch):
+    """Dispatch 20260914-poorten-punt3-s2: the standaard review-stack mag geen
+    poort bevatten die nooit geconfigureerd is (claude_github_optional: geen
+    workflow, geen enkele geconfigureerde run) noch een poort waarvan het
+    binary niet op PATH staat en die in 14 dagen nul oordelen leverde
+    (gemini_review). Elke naam die wel in de stack staat moet een geregistreerde
+    gate_recorder.GATE_PROVIDERS-entry zijn.
+
+    Niet aan PATH gehangen: of `codex`/`gemini` op deze machine geinstalleerd
+    zijn is een eigenschap van de machine, geen garantie die CI geeft -- deze
+    test toetst de config-samenstelling, niet de binary-aanwezigheid.
+    """
+    monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
+    import review_gate_manager as rgm
+    import gate_recorder
+
+    stack = rgm._build_default_review_stack()
+
+    assert stack, "the default review stack must not be empty"
+    assert "claude_github_optional" not in stack, (
+        f"claude_github_optional is never configured (no workflow) and must "
+        f"not be a default-stack member: {stack}"
+    )
+    assert "gemini_review" not in stack, (
+        f"gemini_review's binary is not on PATH and it has delivered zero "
+        f"verdicts in 14 days of records; it must not be a default-stack "
+        f"member: {stack}"
+    )
+    for gate_name in stack:
+        assert gate_name in gate_recorder.GATE_PROVIDERS, (
+            f"{gate_name!r} is in the default review stack but is not a "
+            f"registered gate_recorder.GATE_PROVIDERS entry"
+        )
 
 
 def test_default_review_stack_is_config_driven_not_hardcoded(monkeypatch):

@@ -114,8 +114,18 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_DEFAULT_REVIEW_STACK": _e(
-        "VNX_DEFAULT_REVIEW_STACK", "string", "gemini_review,codex_gate,claude_github_optional", "gate",
-        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435). "
+        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,glm_gate", "gate",
+        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435; "
+        "recomposed by dispatch 20260914-poorten-punt3-s2 after a 14-day measurement: "
+        "gemini_review never delivers a verdict -- its binary is not on PATH and it carries "
+        "one record ever -- and claude_github_optional has never been configured -- no "
+        "workflow, 23/23 records claude_github_not_configured. Both are dropped from the "
+        "default. glm_gate replaces them: the only gate in the old default set with a proven "
+        "pass/fail track record (86/94). codex_gate stays despite its quota outage (through "
+        "2026-09-15), since that outage is temporary and its 55 records include real verdicts. "
+        "claude_github_optional remains a legal gate_recorder.GATE_PROVIDERS entry -- removing "
+        "it there would relabel its historical records unsupported_gate_type, which reads as a "
+        "routing bug instead of the deliberate design it is. "
         "Lets an operator route review gates to any registered gate name — e.g. "
         "kimi_gate,glm_gate — without editing review_gate_manager.py. ci_gate is appended "
         "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,
@@ -124,8 +134,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
         "codex_gate,kimi_gate,glm_gate,deepseek_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision). On "
-        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate is a "
-        "legal end-link that is skipped with a named reason until its runner ships (E2). "
+        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate is the "
+        "chain's last configured link -- since OI-1714/OI-1838 it is a real harness-lane gate "
+        "(available by registration, requested via gate_request_handler._request_deepseek), not "
+        "a skip pending a runner. "
         "ABSENT (no env/DB override) falls back to this literal default string. An EXPLICIT "
         "empty value ('') means NO takeover chain at all -- distinct from absent. Any name "
         "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "
