@@ -731,8 +731,9 @@ def test_default_review_stack_control_case_codex_glm_combo_unchanged(monkeypatch
     codex_gate + claude_github_optional, dispatch 20260823-beta2-e) named two
     gates that never deliver a verdict -- gemini_review's binary is not on
     PATH (one record ever), claude_github_optional has never been configured
-    (no workflow, 23/23 records claude_github_not_configured). glm_gate has
-    the proven track record (86/94 pass) the old default lacked.
+    (no workflow, 23/23 records claude_github_not_configured). glm_gate
+    demonstrably delivers verdicts where the two retired gates do not, which
+    the old default lacked.
 
     VNX_CI_GATE_REQUIRED is pinned to "0" (not delenv'd) since OI-1385 flipped its
     registry default to "1": this test measures the BASE stack composition, not
