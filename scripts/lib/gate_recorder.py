@@ -257,6 +257,15 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # two entries up — this books `unavailable`, never `failed` and never a
     # completed verdict.
     "harness_lane_no_model_response",
+    # The harness-lane dispatcher returned TEXT whose frontmatter carries a
+    # non-zero exit_code but NO failure_reason: the model was invoked (unlike
+    # `harness_lane_no_model_response`, where the spawn died before that) and
+    # the provider itself answered with an error (a 402 insufficient-balance,
+    # some other API failure) that landed as the report body instead of a
+    # verdict (OI-1753). No verdict was produced here either, so this books
+    # `unavailable` exactly like its sibling — never `failed` and never a
+    # completed verdict.
+    "harness_lane_exit_nonzero",
 })
 
 
