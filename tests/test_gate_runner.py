@@ -1349,3 +1349,100 @@ class TestHarnessLaneDelegation:
         assert "BEGIN PR DIFF: UNTRUSTED DATA" in instruction
         assert "-old" in instruction and "+new" in instruction
         assert '"verdict": "pass|fail|blocked"' in instruction
+
+    def test_harness_lane_spawn_failure_report_is_not_booked_completed(
+        self, gate_env, monkeypatch,
+    ):
+        """OI-1748 (RED on main): a report whose frontmatter carries a
+        failure_reason is a spawn-layer failure, not a model reply, and must
+        never be booked `completed`.
+
+        Measured incident: pr-1852-kimi_gate.json carried
+        status="completed" / summary="kimi_gate execution completed
+        successfully" while the report the record itself pointed at was a
+        403 weekly-quota refusal — the dispatcher returned that report as
+        TEXT (no exception), and materialize_artifacts stamped `completed`
+        unconditionally because it had no way to tell the two apart. This
+        test reproduces that exact report shape. On main (before the
+        OI-1748 fix in gate_runner._run_harness_lane_path) this fails with
+        the measured value: result["status"] == "completed".
+        """
+        report_text = (
+            "---\n"
+            "dispatch_id: kimi-gate-pr1852-1789378665\n"
+            "failure_reason: '[quota_or_auth] provider=kimi reason=quota_or_auth "
+            "msg=Error code: 403 - You have reached your weekly (7-day) usage limit'\n"
+            "---\n"
+            "\n"
+            "_No response text was captured from the model. The spawn layer failed "
+            "before the model could run — the text below is the spawn error, NOT a "
+            "model reply._\n"
+            "\n"
+            "subprocess exited with code 1 before complete event\n"
+        )
+        factory, calls = self._fake_dispatcher(report_text)
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+
+        report_path = str(gate_env["reports_dir"] / "kimi-gate-pr1852.md")
+        payload = _make_request_payload(
+            gate="kimi_gate",
+            prompt="Review this diff for correctness and security",
+            report_path=report_path,
+        )
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1852)
+
+        assert result["status"] != "completed", result
+        assert "completed successfully" not in result.get("summary", "")
+        assert result["status"] == "unavailable"
+        assert result["reason"] == "harness_lane_no_model_response"
+        assert "quota_or_auth" in result["reason_detail"]
+
+        result_file = gate_env["results_dir"] / "pr-1852-kimi_gate.json"
+        assert result_file.exists()
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["status"] == "unavailable"
+
+        assert len(calls) == 1
+
+    def test_harness_lane_normal_verdict_report_still_books_completed(
+        self, gate_env, monkeypatch,
+    ):
+        """The counterpart to the spawn-failure test above: a report with no
+        failure_reason in its frontmatter (a real model reply carrying a
+        verdict) must still be booked `completed`. Without this test, the
+        OI-1748 fix could be made to pass by refusing every harness-lane
+        report outright."""
+        report_text = (
+            "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
+            "```json\n"
+            '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+            "```\n"
+        )
+        factory, calls = self._fake_dispatcher(report_text)
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+
+        report_path = str(gate_env["reports_dir"] / "kimi-gate-pr3.md")
+        payload = _make_request_payload(
+            gate="kimi_gate",
+            prompt="Review this diff for correctness and security",
+            report_path=report_path,
+        )
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=3)
+
+        assert result["status"] == "completed", result.get("reason_detail")
+        assert "completed successfully" in result["summary"]
+        assert len(calls) == 1
