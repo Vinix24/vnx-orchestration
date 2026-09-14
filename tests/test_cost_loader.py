@@ -197,8 +197,8 @@ class TestGlmConsistency:
             costs.append(cost)
 
         # All variants must return the same glm-5.2 cost
-        # OI-1083: re-measured 2026-08-10 — input: 5000 * 0.76/1M + output: 2000 * 2.42/1M = 0.0038 + 0.00484 = 0.00864
-        expected = 0.00864
+        # OI-1083: re-measured 2026-09-14 — input: 5000 * 0.683/1M + output: 2000 * 2.147/1M = 0.003415 + 0.004294 = 0.007709
+        expected = 0.007709
         for name, cost in zip(variants, costs):
             assert abs(cost - expected) < 1e-9, (
                 f"Variant {name!r}: expected {expected}, got {cost}"

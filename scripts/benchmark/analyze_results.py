@@ -213,7 +213,8 @@ def validate_routing_models(routing: Dict) -> None:
     The results dir keeps legacy benchmark records (e.g. glm-5-1 field-test
     JSONs); passing their model_ids straight through would regenerate a
     routing_recommendations.yaml that recommends models the dispatch door
-    refuses (deprecated-glm-models admits only glm-5.2 — OI-1255). The router
+    refuses (deprecated-glm-models admits glm-5.2/glm-5.3/glm-5.3-flash, see
+    provider_constraints.yaml — OI-1255). The router
     already rejects such a file at load (BlockedRecommendationError); this
     guard surfaces the same drift at GENERATION time, with the offending
     model ids named, instead of letting the file be written first.

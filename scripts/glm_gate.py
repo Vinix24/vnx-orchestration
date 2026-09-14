@@ -72,9 +72,10 @@ first for the identical reason); only ``contract_hash`` being empty was ever
 load-bearing for that separation, and it stays empty on every non-terminal
 status.
 
-Model: GLM-5.2 only (``deprecated-glm-models``, provider_constraints.yaml,
-operator directive 2026-08-03). GLM-4.5, GLM-4.6, base GLM-5, and GLM-5.1 are
-blocked. This gate validates the model at its own entry point — before ever
+Model: glm-5.2, glm-5.3, or glm-5.3-flash (``deprecated-glm-models``,
+provider_constraints.yaml, operator directive 2026-09-14; glm-5.2 remains
+default). GLM-4.5, GLM-4.6, base GLM-5, and GLM-5.1 are blocked. This gate
+validates the model at its own entry point — before ever
 reaching the dispatcher — so a blocked version is refused LOUDLY with an
 explicit reason, not silently passed through to fail deep inside the
 provider-dispatch constraint enforcer and surface indistinguishable from any
@@ -161,20 +162,24 @@ _MODEL_ENV, DEFAULT_MODEL = MODEL_DEFAULTS["glm_gate"]
 DEFAULT_TIMEOUT = TIMEOUT_SECONDS
 _VERDICT_CONTRACT = VERDICT_CONTRACT
 
-# deprecated-glm-models (provider_constraints.yaml): glm-5.2 is the ONLY
-# admitted GLM version. This is an allowlist, not a blocklist — every other
-# name (including a not-yet-released version) is refused until an operator
-# decision admits it explicitly.
+# This gate pins to exactly the configured default model (MODEL_DEFAULTS /
+# VNX_GLM_GATE_MODEL) — narrower by design than deprecated-glm-models, which
+# since operator directive 2026-09-14 admits glm-5.2, glm-5.3, and
+# glm-5.3-flash (provider_constraints.yaml) so all three can be measured
+# elsewhere. The gate itself stays pinned to one model (glm-5.2, unchanged)
+# for a deterministic reviewer; widening the gate's own model choice is a
+# separate operator decision, not implied by the wider dispatch allowlist.
 ALLOWED_MODELS = frozenset({DEFAULT_MODEL})
 
 
 def _validate_model(model: str) -> "str | None":
     """Return the canonical (lowercase) model string, or None to refuse.
 
-    Operator directive 2026-08-03: only glm-5.2 is admitted. Matching is
-    case-insensitive (accepts "GLM-5.2") but the canonical lowercase form is
-    what actually gets dispatched, so the record's ``model`` field always
-    matches the wave7_models.yaml registry key exactly.
+    Only the configured default (``glm-5.2``, MODEL_DEFAULTS["glm_gate"]) is
+    admitted here. Matching is case-insensitive (accepts "GLM-5.2") but the
+    canonical lowercase form is what actually gets dispatched, so the
+    record's ``model`` field always matches the wave7_models.yaml registry
+    key exactly.
     """
     normalized = (model or "").strip().lower()
     if normalized in ALLOWED_MODELS:

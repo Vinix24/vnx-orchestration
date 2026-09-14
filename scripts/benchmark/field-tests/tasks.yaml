@@ -15,7 +15,7 @@ tiers:
       - codex-gpt-5-4
       - codex-gpt-5-5
       - kimi-k2-7-code
-      - glm-5-2        # GLM-5.2 (2026-06-16), only allowed GLM version per operator directive 2026-08-03
+      - glm-5-2        # GLM-5.2 (2026-06-16), default GLM version — glm-5.3/glm-5.3-flash also admitted, see provider_constraints.yaml
       - deepseek-v4-pro-harness
       - deepseek-v4-flash-harness
       - glm-5-2-harness

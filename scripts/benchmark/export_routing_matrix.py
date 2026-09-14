@@ -71,9 +71,10 @@ LANE = {
     # LANE keys stay in the benchmark's dash spelling (they match lane_id in the
     # raw.csv files); the EMITTED model_id is the canonical wave7_models.yaml
     # registry key (dot form). Emitting the dash form would produce a file the
-    # constraint layer refuses: deprecated-glm-models admits only glm-5.2, and
-    # its alias match is exact (no dot/dash fold), so smart_router's load-time
-    # validation (OI-1255) rejects dash-form entries as blocked.
+    # constraint layer refuses: deprecated-glm-models admits glm-5.2/glm-5.3/
+    # glm-5.3-flash (see provider_constraints.yaml), and its alias match is
+    # exact (no dot/dash fold), so smart_router's load-time validation
+    # (OI-1255) rejects dash-form entries as blocked.
     "glm-5-2": ("glm-5.2", "flat-runner"),
     "glm-5-2-harness": ("glm-5.2", "claude-harness"),
     "deepseek-v4-flash-harness": ("deepseek-v4-flash", "claude-harness"),

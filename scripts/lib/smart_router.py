@@ -261,7 +261,8 @@ def _validate_candidates_not_blocked(
     constraint SSOT (provider_constraints.yaml) via
     providers.constraint_enforcer.blocking_model_violations — the same
     allowlist the dispatch door enforces (e.g. deprecated-glm-models admits
-    only glm-5.2 for zai). Runtime-route constraints (via/role/env-keyed) are
+    glm-5.2/glm-5.3/glm-5.3-flash for zai, see provider_constraints.yaml).
+    Runtime-route constraints (via/role/env-keyed) are
     deliberately NOT checked here: they are decide()'s per-dispatch filter,
     not a verdict on the model itself.
     """
