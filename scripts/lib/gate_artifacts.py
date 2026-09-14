@@ -371,6 +371,18 @@ def materialize_artifacts(
     contract_hash = _compute_contract_hash(request_payload, gate)
     now = utc_now_iso()
 
+    # OI-1748: this function books `completed` unconditionally once it gets
+    # this far — it has no way to tell "the model spoke" from "the caller
+    # handed me an error report as stdout" on its own. That check on purpose
+    # does NOT live here: a harness-lane spawn failure (quota/auth refusal,
+    # proxy outage) is caught upstream, in
+    # ``gate_runner._run_harness_lane_path``, by reading the failure_reason
+    # its dispatcher's report carries in real YAML frontmatter — a guarantee
+    # ONLY that caller has. The vertex and subprocess strategies that also
+    # call this function hand it raw model stdout, never a governed report,
+    # so parsing frontmatter out of it here would be a second, weaker check
+    # guessing at a shape those callers never promise. One slot, at the
+    # caller that actually has the signal, beats two half-checks.
     real_dispatch_id = request_payload.get("dispatch_id", "")
     result_payload: Dict[str, Any] = {
         "gate": gate,

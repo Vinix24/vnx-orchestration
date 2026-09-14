@@ -250,6 +250,13 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # the run is refused and booked `unavailable`, never `failed` and never a
     # completed verdict.
     "gate_dispatch_identity_invalid",
+    # The harness-lane dispatcher returned TEXT instead of raising, but that
+    # text's own frontmatter carries a failure_reason: the spawn layer died
+    # (quota/auth refusal, proxy outage) before the model ever ran (OI-1748).
+    # No verdict was produced, so — exactly like `harness_lane_dispatch_error`
+    # two entries up — this books `unavailable`, never `failed` and never a
+    # completed verdict.
+    "harness_lane_no_model_response",
 })
 
 

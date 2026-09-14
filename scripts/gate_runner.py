@@ -26,6 +26,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from governance_receipts import utc_now_iso
 from headless_adapter import gate_timeout, gate_stall_threshold
+from unified_report_schema import SchemaViolation, parse_frontmatter
 import gate_recorder as _rec
 import gate_artifacts as _art
 import vertex_ai_runner as _vtx
@@ -127,6 +128,32 @@ def _extract_structured_error_message(stdout: str) -> Optional[str]:
         if isinstance(message, str) and message.strip():
             return message.strip()
     return None
+
+
+def _lifted_harness_lane_failure_reason(report_text: str) -> Optional[str]:
+    """OI-1748: read the canonical ``failure_reason`` a harness-lane report's
+    own frontmatter carries when the spawn layer died BEFORE the model ran
+    (a 403 quota/auth refusal, a proxy outage — see
+    ``governance_emit.emit_unified_report`` / OI-1415 for where this field is
+    stamped). Mirrors ``glm_gate._lift_report_failure_reason``, which reads
+    the SAME field off the standalone gates' own reports for the identical
+    reason.
+
+    ``_run_harness_lane_path`` only ever hands this a governed unified
+    report — the dispatcher's return value — never raw model stdout, so the
+    frontmatter is trusted to be real YAML when present. Returns the bounded
+    reason only when the frontmatter parses and the field is non-empty;
+    returns None — never invents a reason — on a missing field, an unparsable
+    frontmatter, or no frontmatter at all (a real model reply carries none).
+    """
+    if not report_text:
+        return None
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return None
+    reason = frontmatter.get("failure_reason")
+    return (reason or "").strip() or None
 
 
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
@@ -487,6 +514,56 @@ class GateRunner:
                     "reason_detail": str(exc),
                     "duration_seconds": time.monotonic() - _start,
                     "partial_output_lines": 0,
+                    "runner_pid": os.getpid(),
+                },
+                request_payload=request_payload,
+                requests_dir=self._requests_dir,
+                results_dir=self._results_dir,
+            )
+
+        # OI-1748: the dispatcher can also fail WITHOUT raising. It returns
+        # the lane's own governed report as TEXT, and when the spawn layer
+        # died before the model ever ran (quota/auth refusal, proxy outage)
+        # that report's frontmatter carries a non-empty failure_reason
+        # instead of a verdict — see the pr-1852-kimi_gate incident, where a
+        # 403 weekly-quota report was booked `completed` because
+        # materialize_artifacts has no way to tell "the model spoke" from
+        # "the spawn layer wrote an error report" and stamps `completed`
+        # unconditionally. Read the STRUCTURED signal (frontmatter), never
+        # the prose body — a model asked to review code can legitimately
+        # quote failure-sounding words.
+        #
+        # record_failure, not record_not_executable: this mirrors the
+        # sibling `harness_lane_dispatch_error` branch immediately above —
+        # the SAME execution failure, just surfaced as a return value
+        # instead of a raised exception. record_not_executable is for a gate
+        # that was never even attempted (unregistered gate, missing binary);
+        # this dispatch WAS attempted and the attempt is what failed
+        # mid-flight. "harness_lane_no_model_response" is registered in
+        # gate_recorder.EXECUTION_FAILURE_REASONS, so it books `unavailable`
+        # exactly like `harness_lane_dispatch_error` — never `failed` (which
+        # would read as a rejected PR) and never `completed` (the OI-1142
+        # outage/verdict separation this file's own docstring promises).
+        #
+        # This is the ONE slot for this check. materialize_artifacts is
+        # shared by the vertex and subprocess strategies too, whose `stdout`
+        # is raw model output, never a governed report with real frontmatter
+        # — teaching it to parse YAML frontmatter out of arbitrary model text
+        # would be guessing at a shape only the harness lane actually
+        # promises. Scoping the check to the one caller that has the
+        # guarantee avoids a second, weaker half-check in the shared path.
+        no_response_reason = _lifted_harness_lane_failure_reason(report_text)
+        if no_response_reason:
+            return _rec.record_failure(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                result={
+                    "reason": "harness_lane_no_model_response",
+                    "reason_detail": (
+                        f"{gate} report carries failure_reason in its frontmatter "
+                        f"(spawn layer failed before the model ran): {no_response_reason}"
+                    ),
+                    "duration_seconds": time.monotonic() - _start,
+                    "partial_output_lines": len(report_text.splitlines()),
                     "runner_pid": os.getpid(),
                 },
                 request_payload=request_payload,
