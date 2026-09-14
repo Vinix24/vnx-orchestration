@@ -281,6 +281,101 @@ def test_advance_inserts_fixup_when_blocking_drift_detected(roadmap_env, monkeyp
     assert state["inserted_fixups"]
 
 
+def _insert_a_fixup(roadmap_env, monkeypatch):
+    """Shared setup: drive advance() through the blocking-drift fix-up path
+    and return the inserted feature dict + its FEATURE_PLAN.md text."""
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+    monkeypatch.setattr(
+        rm,
+        "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    (roadmap_env["state_dir"] / "post_feature_drift.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "oi-1",
+                        "title": "Fix runtime regression",
+                        "category": "path/runtime regression",
+                        "blocking": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager.advance()
+    state = manager.load_state()
+    fixup_feature = next(
+        item for item in state["features"] if item["feature_id"] == state["current_active_feature"]
+    )
+    plan_text = Path(fixup_feature["plan_path"]).read_text(encoding="utf-8")
+    return fixup_feature, plan_text
+
+
+def test_fixup_feature_review_stack_matches_config_base_stack(roadmap_env, monkeypatch):
+    """Dispatch 20260914-poorten-punt3-s2 (fix-forward on PR #1852): the
+    FEATURE_PLAN template ``_insert_fixup_feature`` writes for a
+    blocking-drift fix-up, and the ``review_stack`` field it stamps on the
+    inserted feature, must both equal the base ``VNX_DEFAULT_REVIEW_STACK``
+    registry default -- WITHOUT ``ci_gate`` -- not a hardcoded copy.
+
+    Confirmed red pre-fix: with the old hardcoded literal
+    ("gemini_review,codex_gate,claude_github_optional" at three call sites in
+    roadmap_manager.py), this assertion failed because the registry default
+    is "codex_gate,glm_gate" (recomposed by this same dispatch in
+    config_registry.py after a 14-day measurement showing gemini_review and
+    claude_github_optional never deliver a verdict) -- the fix-up template
+    would have re-requested exactly the two poorten that measurement dropped.
+
+    VNX_CI_GATE_REQUIRED is pinned OFF (not delenv'd) since its registry
+    default is "1" (OI-1385): this test measures the BASE stack, isolated
+    from that axis, matching the isolation test_ci_gate.py's control-case
+    test already applies to review_gate_manager._build_default_review_stack.
+    """
+    monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
+    monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
+
+    import config_registry
+    expected_stack = config_registry.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default.split(",")
+    assert expected_stack == ["codex_gate", "glm_gate"], (
+        "this test assumes the current registry default; if it changed, "
+        f"update the expectation here too: {expected_stack}"
+    )
+
+    fixup_feature, plan_text = _insert_a_fixup(roadmap_env, monkeypatch)
+
+    assert fixup_feature["review_stack"] == expected_stack
+    expected_line = f"**Review-Stack**: {','.join(expected_stack)}"
+    assert plan_text.count(expected_line) == 2
+    assert "gemini_review" not in plan_text
+    assert "claude_github_optional" not in plan_text
+
+
+def test_fixup_feature_review_stack_follows_config_override_without_ci_gate(roadmap_env, monkeypatch):
+    """The red-side check the plain equality test above cannot provide on its
+    own: a test that always compares against the SAME hardcoded literal on
+    both sides can pass by coincidence. Point ``VNX_DEFAULT_REVIEW_STACK`` at
+    a THIRD value the old hardcoded template never contained, with
+    ``VNX_CI_GATE_REQUIRED`` on, and confirm the fix-up template and
+    ``review_stack`` field track that exact value and never pick up
+    ``ci_gate`` -- proving both are read from config at call time, not from a
+    literal anywhere in roadmap_manager.py.
+    """
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate,deepseek_gate")
+    monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "1")
+
+    fixup_feature, plan_text = _insert_a_fixup(roadmap_env, monkeypatch)
+
+    assert fixup_feature["review_stack"] == ["kimi_gate", "deepseek_gate"]
+    assert plan_text.count("**Review-Stack**: kimi_gate,deepseek_gate") == 2
+    assert "ci_gate" not in fixup_feature["review_stack"]
+    assert "ci_gate" not in plan_text
+
+
 # ---------------------------------------------------------------------------
 # RA-2: git branch materialization
 # ---------------------------------------------------------------------------

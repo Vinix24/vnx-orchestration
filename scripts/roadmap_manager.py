@@ -38,6 +38,25 @@ def _root_file(project_root: Path, name: str) -> Path:
     return project_root / name
 
 
+def _base_review_stack() -> List[str]:
+    """The base review-gate stack from config, WITHOUT ``ci_gate``.
+
+    Reads the same ``VNX_DEFAULT_REVIEW_STACK`` config entry that
+    ``review_gate_manager._build_default_review_stack()`` reads, so the
+    fix-up FEATURE_PLAN template never drifts from the registry default
+    (dispatch 20260914-poorten-punt3-s2 — the template previously hardcoded
+    the pre-s2 default in three places, which kept requesting gates that
+    dispatch had just dropped). ``review_gate_manager`` itself is not
+    imported here: its `_build_default_review_stack()` also appends
+    ``ci_gate`` when ``VNX_CI_GATE_REQUIRED`` is on, and this template must
+    carry the bare base stack the registry entry documents, not a
+    request-time composition that varies with that flag.
+    """
+    import config_runtime
+    raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 @dataclass
 class RoadmapPaths:
     project_root: Path
@@ -283,6 +302,8 @@ class RoadmapManager:
         plan_dir.mkdir(parents=True, exist_ok=True)
         plan_path = plan_dir / "FEATURE_PLAN.md"
         bullet_list = "\n".join(f"- {item.get('title') or item.get('id') or item.get('category')}" for item in drift_items)
+        review_stack = _base_review_stack()
+        review_stack_str = ",".join(review_stack)
         plan_path.write_text(
             f"""# Feature: Runtime Fix-up — {fixup_id}
 
@@ -291,7 +312,7 @@ class RoadmapManager:
 **Branch**: `feature/{fixup_id}`
 **Risk-Class**: medium
 **Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Review-Stack**: {review_stack_str}
 
 Primary objective:
 Close the blocking post-feature drift discovered during roadmap reconciliation.
@@ -313,7 +334,7 @@ PR-0 (no dependencies)
 **Requires-Model**: opus
 **Risk-Class**: medium
 **Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Review-Stack**: {review_stack_str}
 **Estimated Time**: 2-6 hours
 **Dependencies**: []
 
@@ -344,7 +365,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
             "branch_name": f"feature/{fixup_id}",
             "risk_class": "medium",
             "merge_policy": "human",
-            "review_stack": ["gemini_review", "codex_gate", "claude_github_optional"],
+            "review_stack": review_stack,
             "depends_on": [],
             "status": "planned",
             "inserted": True,

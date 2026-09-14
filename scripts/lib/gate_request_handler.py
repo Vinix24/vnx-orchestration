@@ -72,13 +72,13 @@ _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,glm_gate,deepseek_ga
 
 def _known_takeover_gate_names() -> "frozenset[str]":
     """Gate names the takeover-chain CONFIG may legally name: the closed
-    ``Gate`` enum (dispatch_spec.py) PLUS ``deepseek_gate`` -- a real future
-    chain member (E2 ships its runner + its own Gate enum member) that is
-    deliberately NOT added to the Gate enum here. Adding it there without a
-    matching gate_request_handler dispatch branch AND
-    closure_verifier._GATE_HANDLERS entry would trip
-    test_closure_verifier_gate_enum_drift.py (OI-1094) -- this local addition
-    is the narrower, correct scope until E2 lands the real member.
+    ``Gate`` enum (dispatch_spec.py) PLUS ``deepseek_gate`` -- a real,
+    already-shipped harness-lane gate (OI-1714/OI-1838) that is deliberately
+    NOT added to the Gate enum here. Adding it there without a matching
+    gate_request_handler dispatch branch AND closure_verifier._GATE_HANDLERS
+    entry would trip test_closure_verifier_gate_enum_drift.py (OI-1094) --
+    this local addition is the narrower, correct scope, and stays that way
+    regardless of whether deepseek_gate ever joins the enum.
     """
     from dispatch_spec import Gate
     return frozenset(Gate._value2member_map_) | {"deepseek_gate"}
