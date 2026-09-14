@@ -288,6 +288,40 @@ def test_a_config_based_gate_is_available_without_a_file():
     assert _rec.gate_is_available("deepseek_gate") is True
 
 
+def test_deepseek_gate_availability_is_wired_to_the_harness_lane_kind(monkeypatch):
+    """Dispatch 20260914-poorten-punt3-s2: pins the exact wiring OI-1714
+    repaired -- ``gate_is_available``'s verdict must actually be DRIVEN by the
+    registration kind, not merely equal to the same literal by coincidence.
+
+    Confirmed red by reverting the registration to the pre-#1714 shape this
+    test guards against: ``GATE_PROVIDERS["deepseek_gate"] =
+    (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/deepseek_gate.py")`` -- a file that
+    has never existed -- flips ``gate_is_available("deepseek_gate")`` to
+    False, because the SCRIPT_RUNNER branch of ``gate_is_available`` checks
+    the file on disk. That is the exact OI-1714 regression: a real, working
+    provider (the deepseek-harness lane) booked ``gate_runner_missing`` for
+    every request because its registration pointed at a script that was never
+    built.
+    """
+    import gate_recorder as _rec
+
+    assert _rec.GATE_PROVIDERS["deepseek_gate"][0] == _rec.GATE_PROVIDER_HARNESS_LANE
+    assert _rec.gate_is_available("deepseek_gate") is True
+
+    monkeypatch.setitem(
+        _rec.GATE_PROVIDERS, "deepseek_gate",
+        (_rec.GATE_PROVIDER_SCRIPT_RUNNER, "scripts/deepseek_gate.py"),
+    )
+    assert not (VNX_ROOT / "scripts" / "deepseek_gate.py").exists(), (
+        "this regression check depends on the script genuinely not existing "
+        "-- if it now exists, this test no longer measures the OI-1714 defect"
+    )
+    assert _rec.gate_is_available("deepseek_gate") is False, (
+        "reverting deepseek_gate to the pre-#1714 script-runner registration "
+        "must be detectable as unavailable -- this is the OI-1714 regression"
+    )
+
+
 def test_harness_lane_gates_name_the_same_lane_their_standalone_scripts_use():
     """Adapted for C6 step 1. This used to assert glm_gate/kimi_gate's registry
     name pointed at a runner FILE on disk — a rename leaving nothing on disk

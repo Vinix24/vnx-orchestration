@@ -35,11 +35,12 @@ def _build_default_review_stack() -> List[str]:
     """The default review-gate stack, resolved from config instead of a
     hardcoded name list (dispatch 20260823-beta2-e, OI-1435).
 
-    ``VNX_DEFAULT_REVIEW_STACK`` (config_registry, default
-    "gemini_review,codex_gate,claude_github_optional") is the single source
-    an operator edits to route the stack at any registered gate — e.g.
-    kimi_gate,glm_gate — without touching this function. ci_gate stays a
-    separate append gated by VNX_CI_GATE_REQUIRED, matching prior behavior.
+    ``VNX_DEFAULT_REVIEW_STACK`` (config_registry — that entry's ``default``
+    field is the single source of truth for the literal value; it is not
+    repeated here so this docstring cannot drift from it) is the single
+    source an operator edits to route the stack at any registered gate —
+    e.g. kimi_gate,glm_gate — without touching this function. ci_gate stays
+    a separate append gated by VNX_CI_GATE_REQUIRED, matching prior behavior.
     """
     import config_runtime
     raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""

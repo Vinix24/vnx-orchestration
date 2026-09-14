@@ -114,8 +114,26 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_DEFAULT_REVIEW_STACK": _e(
-        "VNX_DEFAULT_REVIEW_STACK", "string", "gemini_review,codex_gate,claude_github_optional", "gate",
-        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435). "
+        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,glm_gate", "gate",
+        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435; "
+        "recomposed by dispatch 20260914-poorten-punt3-s2 after a 14-day measurement: "
+        "gemini_review never delivers a verdict -- its binary is not on PATH and it carries "
+        "one record ever -- and claude_github_optional has never been configured -- no "
+        "workflow, 23/23 records claude_github_not_configured. Both are dropped from the "
+        "old default (gemini_review,codex_gate,claude_github_optional). glm_gate is new to "
+        "the default, not a promotion from within it -- it was never a member of the old "
+        "set. It fills the gap because it demonstrably delivers verdicts where the two "
+        "retired gates do not: forge_gate_publisher.py's 2026-09-08 measurement across 1148 "
+        "result records in every project store counts 94 glm_gate records, activity neither "
+        "retired gate can show. That is a record-volume measurement, not a pass/fail rate; "
+        "an earlier version of this entry cited an unscoped '86/94' pass-rate figure sampled "
+        "over 14 days in a single project store and documented nowhere else in the repo -- "
+        "dropped here rather than repeated without that scope. codex_gate stays despite its "
+        "quota outage (through 2026-09-15), since that outage is temporary and its 55 records "
+        "include real verdicts. claude_github_optional remains a legal "
+        "gate_recorder.GATE_PROVIDERS entry -- removing it there would relabel its historical "
+        "records unsupported_gate_type, which reads as a routing bug instead of the "
+        "deliberate design it is. "
         "Lets an operator route review gates to any registered gate name — e.g. "
         "kimi_gate,glm_gate — without editing review_gate_manager.py. ci_gate is appended "
         "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,
@@ -124,8 +142,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
         "codex_gate,kimi_gate,glm_gate,deepseek_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision). On "
-        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate is a "
-        "legal end-link that is skipped with a named reason until its runner ships (E2). "
+        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate is the "
+        "chain's last configured link -- since OI-1714/OI-1838 it is a real harness-lane gate "
+        "(available by registration, requested via gate_request_handler._request_deepseek), not "
+        "a skip pending a runner. "
         "ABSENT (no env/DB override) falls back to this literal default string. An EXPLICIT "
         "empty value ('') means NO takeover chain at all -- distinct from absent. Any name "
         "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "

@@ -59,23 +59,26 @@ class ReviewGateTakeoverConfigError(ValueError):
 # question 1); this mapping stays a choice under uncertainty until that
 # lands.
 #
-# deepseek_gate is a legal END-LINK even though its runner does not exist yet
-# (a separate dispatch, E2, ships it): walking onto it always resolves
-# not_executable/gate_runner_missing (see `_request_deepseek`) -- a named
-# skip, never a further hop, since it is deliberately absent from the chain
-# it would otherwise continue into.
+# deepseek_gate is the chain's END-LINK: no gate is configured after it, so a
+# takeover walk stops there. Since OI-1714/OI-1838 it is a real harness-lane
+# gate (gate_recorder.GATE_PROVIDERS, "deepseek-harness"), available by
+# REGISTRATION -- `gate_is_available("deepseek_gate")` is True and
+# `_request_deepseek` (below) actually requests it, the same as any other
+# harness-lane gate. It no longer resolves not_executable/gate_runner_missing
+# by design; that was the pre-OI-1714 defect (a script-runner registration
+# pointing at a file that never existed), not the current end-link behaviour.
 _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,glm_gate,deepseek_gate"
 
 
 def _known_takeover_gate_names() -> "frozenset[str]":
     """Gate names the takeover-chain CONFIG may legally name: the closed
-    ``Gate`` enum (dispatch_spec.py) PLUS ``deepseek_gate`` -- a real future
-    chain member (E2 ships its runner + its own Gate enum member) that is
-    deliberately NOT added to the Gate enum here. Adding it there without a
-    matching gate_request_handler dispatch branch AND
-    closure_verifier._GATE_HANDLERS entry would trip
-    test_closure_verifier_gate_enum_drift.py (OI-1094) -- this local addition
-    is the narrower, correct scope until E2 lands the real member.
+    ``Gate`` enum (dispatch_spec.py) PLUS ``deepseek_gate`` -- a real,
+    already-shipped harness-lane gate (OI-1714/OI-1838) that is deliberately
+    NOT added to the Gate enum here. Adding it there without a matching
+    gate_request_handler dispatch branch AND closure_verifier._GATE_HANDLERS
+    entry would trip test_closure_verifier_gate_enum_drift.py (OI-1094) --
+    this local addition is the narrower, correct scope, and stays that way
+    regardless of whether deepseek_gate ever joins the enum.
     """
     from dispatch_spec import Gate
     return frozenset(Gate._value2member_map_) | {"deepseek_gate"}
