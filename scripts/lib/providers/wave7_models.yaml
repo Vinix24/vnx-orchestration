@@ -299,19 +299,42 @@ providers:
     models:
       glm-5.2:
         litellm_name: "openrouter/z-ai/glm-5.2"  # GLM-5.2 (released 2026-06-16)
-        cost_input_per_mtok: 0.76   # re-measured 2026-08-10 against live OpenRouter /api/v1/models
-        cost_output_per_mtok: 2.42
+        cost_input_per_mtok: 0.683   # re-measured 2026-09-14 against live OpenRouter /api/v1/models
+        cost_output_per_mtok: 2.147
         max_tokens: 8192
+        context_window: 1048576
         supports_streaming: true
         supports_tool_calls: true
-        price_source: "unverified: registry-authored"
-        price_checked_at: "2026-08-10"
+        price_source: "OpenRouter /api/v1/models endpoint, verified by operator"
+        price_checked_at: "2026-09-14"
         task_classes: ["coding", "review"]
         deprecated_models:
           - "glm-4.5"
           - "glm-4.6"
           - "glm-5"
           - "glm-5.1"
+      glm-5.3:
+        litellm_name: "openrouter/z-ai/glm-5.3"
+        cost_input_per_mtok: 1.40
+        cost_output_per_mtok: 4.40
+        max_tokens: 8192
+        context_window: 1310720
+        supports_streaming: true
+        supports_tool_calls: true
+        price_source: "OpenRouter /api/v1/models endpoint, verified by operator"
+        price_checked_at: "2026-09-14"
+        task_classes: ["coding", "review"]
+      glm-5.3-flash:
+        litellm_name: "openrouter/z-ai/glm-5.3-flash"
+        cost_input_per_mtok: 0.15
+        cost_output_per_mtok: 0.50
+        max_tokens: 8192
+        context_window: 1310720
+        supports_streaming: true
+        supports_tool_calls: true
+        price_source: "OpenRouter /api/v1/models endpoint, verified by operator"
+        price_checked_at: "2026-09-14"
+        task_classes: ["coding", "review"]
   local_gemma:
     enabled: true
     api_key_env: ""  # no API key; runs entirely on-device via MLX or Ollama

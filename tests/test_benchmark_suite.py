@@ -473,7 +473,8 @@ def test_glm_uses_zai_provider():
     models = run_benchmark.load_models()
     glm = next((m for m in models if m["id"] == "glm-5-2"), None)
     assert glm is not None, "glm-5-2 not found in models.yaml"
-    # glm-5-2 is the only allowed GLM version per operator directive 2026-08-03.
+    # glm-5-2 is the default GLM version (glm-5.3/glm-5.3-flash also admitted
+    # since operator directive 2026-09-14, see provider_constraints.yaml).
     # The zai sub-provider prefix satisfies zai-via-openrouter-only.
     assert glm["provider"].startswith("litellm:zai"), f"Expected litellm:zai*, got {glm['provider']}"
     assert glm["model_arg"] == "glm-5.2", f"Expected glm-5.2, got {glm['model_arg']}"

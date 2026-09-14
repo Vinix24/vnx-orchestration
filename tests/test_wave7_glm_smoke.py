@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,36 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
 from provider_spawns.litellm_spawn import LiteLLMSpawnResult
+
+
+def _assert_price_schema(model) -> None:
+    """Assert a ProviderModel's price fields are well-formed.
+
+    Deliberately does NOT compare cost_input_per_mtok/cost_output_per_mtok
+    against a literal number. A *_model_schema test that pins the current
+    price is a copy of the registry value, and every copy is a place that
+    goes stale the next time the price is re-measured (six such copies were
+    found and fixed on 2026-09-14, see PR #1855). This checks the shape a
+    price entry must have to be trustworthy instead.
+    """
+    assert isinstance(model.cost_input_per_mtok, (int, float)), (
+        f"cost_input_per_mtok must be numeric, got {model.cost_input_per_mtok!r}"
+    )
+    assert isinstance(model.cost_output_per_mtok, (int, float)), (
+        f"cost_output_per_mtok must be numeric, got {model.cost_output_per_mtok!r}"
+    )
+    assert model.cost_input_per_mtok > 0, "cost_input_per_mtok must be > 0"
+    assert model.cost_output_per_mtok > 0, "cost_output_per_mtok must be > 0"
+    assert model.cost_input_per_mtok < model.cost_output_per_mtok, (
+        f"input ({model.cost_input_per_mtok}) must be cheaper than output "
+        f"({model.cost_output_per_mtok})"
+    )
+    assert model.price_source, "price_source must not be empty"
+    assert model.price_source != "unverified: registry-authored", (
+        f"price_source is still the unverified placeholder: {model.price_source!r}"
+    )
+    assert model.price_checked_at, "price_checked_at must not be empty"
+    date.fromisoformat(model.price_checked_at)  # raises ValueError if unparseable
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +224,12 @@ class TestGlmModelAliasResolution:
         assert zai.api_key_env == "OPENROUTER_API_KEY", (
             f"unexpected api_key_env: {zai.api_key_env!r}"
         )
-        assert len(zai.models) == 1, (
-            # glm-5.2 only; glm-5.1-default and glm-5.1 removed 2026-08-03
-            f"expected 1 zai model (glm-5.2), got {len(zai.models)}"
+        assert len(zai.models) == 3, (
+            # glm-5.2, glm-5.3, glm-5.3-flash (operator directive 2026-09-14);
+            # glm-5.1-default and glm-5.1 removed 2026-08-03
+            f"expected 3 zai models (glm-5.2, glm-5.3, glm-5.3-flash), got {len(zai.models)}"
         )
+        assert set(zai.models) == {"glm-5.2", "glm-5.3", "glm-5.3-flash"}
 
     def test_glm52_model_schema(self):
         from providers import provider_registry
@@ -207,9 +240,42 @@ class TestGlmModelAliasResolution:
         assert model.litellm_name == "openrouter/z-ai/glm-5.2", (
             f"unexpected litellm_name: {model.litellm_name!r}"
         )
-        assert model.cost_input_per_mtok == pytest.approx(0.76)  # OI-1083: re-measured 2026-08-10
-        assert model.cost_output_per_mtok == pytest.approx(2.42)
+        _assert_price_schema(model)
         assert model.max_tokens == 8192
+        assert model.supports_streaming is True
+        assert model.supports_tool_calls is True
+        assert "coding" in model.task_classes
+        assert "review" in model.task_classes
+
+    def test_glm53_model_schema(self):
+        """glm-5.3 admitted 2026-09-14 for comparative measurement alongside
+        glm-5.2 — live OpenRouter pricing, not copied from glm-5.2."""
+        from providers import provider_registry
+
+        registry = provider_registry.load()
+        model = registry["zai"].models["glm-5.3"]
+
+        assert model.litellm_name == "openrouter/z-ai/glm-5.3", (
+            f"unexpected litellm_name: {model.litellm_name!r}"
+        )
+        _assert_price_schema(model)
+        assert model.supports_streaming is True
+        assert model.supports_tool_calls is True
+        assert "coding" in model.task_classes
+        assert "review" in model.task_classes
+
+    def test_glm53_flash_model_schema(self):
+        """glm-5.3-flash admitted 2026-09-14 alongside glm-5.2 and glm-5.3 —
+        live OpenRouter pricing, not copied from either sibling."""
+        from providers import provider_registry
+
+        registry = provider_registry.load()
+        model = registry["zai"].models["glm-5.3-flash"]
+
+        assert model.litellm_name == "openrouter/z-ai/glm-5.3-flash", (
+            f"unexpected litellm_name: {model.litellm_name!r}"
+        )
+        _assert_price_schema(model)
         assert model.supports_streaming is True
         assert model.supports_tool_calls is True
         assert "coding" in model.task_classes
@@ -222,4 +288,8 @@ class TestGlmModelAliasResolution:
         assert model is not None, "get_default_model('zai') returned None after PR-7.3"
         assert "openrouter" in model.litellm_name, (
             f"expected openrouter in litellm_name, got {model.litellm_name!r}"
+        )
+        assert model.litellm_name == "openrouter/z-ai/glm-5.2", (
+            "glm-5.2 must stay the default zai model after admitting glm-5.3/"
+            f"glm-5.3-flash, got {model.litellm_name!r}"
         )

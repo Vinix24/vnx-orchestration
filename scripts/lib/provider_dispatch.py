@@ -130,7 +130,9 @@ _SUB_PROVIDER_KEY_REQS: dict = {
 }
 
 # GLM model names that are LEGACY — rejected on zai dispatch (PR-7.3)
-# Extended 2026-08-03: glm-5 (base Feb 2026) and glm-5.1 blocked; only glm-5.2 allowed.
+# Extended 2026-08-03: glm-5 (base Feb 2026) and glm-5.1 blocked. Operator
+# directive 2026-09-14 admits glm-5.2, glm-5.3, and glm-5.3-flash (see
+# deprecated-glm-models, provider_constraints.yaml); glm-5.2 remains default.
 _DEPRECATED_ZAI_MODELS = frozenset({"glm-4.5", "glm-4.6", "glm-5", "glm-5.1"})
 
 # Default model alias per sub-provider — used to build lane key for contract lookup

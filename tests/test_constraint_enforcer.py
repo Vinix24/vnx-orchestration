@@ -181,7 +181,8 @@ class TestZaiViaOpenrouterOnly:
 
 
 # ---------------------------------------------------------------------------
-# deprecated-glm-models — require_route allowlist provider=zai model=glm-5.2
+# deprecated-glm-models — require_route allowlist provider=zai
+# model=[glm-5.2, glm-5.3, glm-5.3-flash]
 # ---------------------------------------------------------------------------
 
 class TestDeprecatedGlmModels:
@@ -209,20 +210,62 @@ class TestDeprecatedGlmModels:
     def test_glm52_allowed(self, real_enforcer: ConstraintEnforcer):
         real_enforcer.enforce(provider="zai", model="glm-5.2")
 
-    def test_glm53_blocked(self, real_enforcer: ConstraintEnforcer):
-        """A not-yet-released version is blocked: the allowlist admits only glm-5.2."""
+    def test_glm53_allowed(self, real_enforcer: ConstraintEnforcer):
+        """Operator directive 2026-09-14: glm-5.3 is admitted alongside glm-5.2
+        for comparative measurement."""
+        real_enforcer.enforce(provider="zai", model="glm-5.3")
+
+    def test_glm53_flash_allowed(self, real_enforcer: ConstraintEnforcer):
+        """Operator directive 2026-09-14: glm-5.3-flash is admitted alongside
+        glm-5.2 for comparative measurement."""
+        real_enforcer.enforce(provider="zai", model="glm-5.3-flash")
+
+    def test_glm51_still_blocked(self, real_enforcer: ConstraintEnforcer):
+        """Widening the allowlist to admit glm-5.3/glm-5.3-flash must not
+        loosen it for a version that was never admitted."""
         with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
-            real_enforcer.enforce(provider="zai", model="glm-5.3")
+            real_enforcer.enforce(provider="zai", model="glm-5.1")
 
     def test_glm99_blocked(self, real_enforcer: ConstraintEnforcer):
         """A nonexistent future version is blocked, not merely unlisted."""
         with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
             real_enforcer.enforce(provider="zai", model="glm-9.9")
 
-    def test_glm_block_message_names_allowed_version(self, real_enforcer: ConstraintEnforcer):
-        violations = real_enforcer.check_constraints(provider="zai", model="glm-5.3")
+    def test_glm_block_message_names_allowed_versions(self, real_enforcer: ConstraintEnforcer):
+        """The refusal message must name all three currently-approved versions,
+        using a real-but-unlisted model (glm-5.1) as the refusal case — a made-up
+        name would also be refused for "does not exist", which would not exercise
+        the allowlist itself."""
+        violations = real_enforcer.check_constraints(provider="zai", model="glm-5.1")
         glm_v = next(v for v in violations if v.code == "deprecated-glm-models")
         assert "glm-5.2" in glm_v.message
+        assert "glm-5.3" in glm_v.message
+        assert "glm-5.3-flash" in glm_v.message
+
+    def test_allowlist_is_exactly_three_versions(self, real_enforcer: ConstraintEnforcer):
+        """Value-level assertion on the allowlist itself, not just refusal
+        behaviour: the required_route.model list must be exactly glm-5.2,
+        glm-5.3, and glm-5.3-flash, and a real-but-unlisted version (glm-5.1,
+        chosen because it exists but was never admitted — an invented name would
+        fail for "does not exist" instead of "not on the allowlist") must still
+        be refused.
+
+        Verified red 2026-09-14: temporarily dropped "glm-5.3" from
+        provider_constraints.yaml's deprecated-glm-models.required_route.model
+        list and reran this test. It failed on the set-equality assertion with
+        `AssertionError: assert {'glm-5.2', 'glm-5.3-flash'} == {'glm-5.2',
+        'glm-5.3', 'glm-5.3-flash'}`, showing 'glm-5.3' as the missing element —
+        confirming the assertion checks the actual allowlist value, not merely
+        that the constraint id exists.
+        """
+        constraint = next(
+            c for c in real_enforcer._constraints if c.get("id") == "deprecated-glm-models"
+        )
+        allowed = constraint["required_route"]["model"]
+        assert set(allowed) == {"glm-5.2", "glm-5.3", "glm-5.3-flash"}
+
+        with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
+            real_enforcer.enforce(provider="zai", model="glm-5.1")
 
     def test_non_zai_provider_with_glm_model_unaffected(self, real_enforcer: ConstraintEnforcer):
         """The allowlist is scoped to provider zai; a glm-named model on another
@@ -252,20 +295,24 @@ class TestDeprecatedGlmModelsCoverAllZaiRoutes:
         self, real_enforcer: ConstraintEnforcer, provider, sub_provider
     ):
         """A non-allowed GLM version must be refused no matter which provider
-        string routes to zai (OI-1217)."""
-        for bad_model in ("glm-4.5", "glm-5", "glm-5.1", "glm-5.3"):
+        string routes to zai (OI-1217). glm-4.7 exists as a real model name but
+        was never admitted, so it exercises "not on the allowlist" rather than
+        "does not exist"."""
+        for bad_model in ("glm-4.5", "glm-5", "glm-5.1", "glm-4.7"):
             with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
                 real_enforcer.enforce(
                     provider=provider, sub_provider=sub_provider, model=bad_model
                 )
 
     @pytest.mark.parametrize("provider,sub_provider", ZAI_ROUTES)
+    @pytest.mark.parametrize("good_model", ["glm-5.2", "glm-5.3", "glm-5.3-flash"])
     def test_glm52_allowed_on_every_zai_route(
-        self, real_enforcer: ConstraintEnforcer, provider, sub_provider
+        self, real_enforcer: ConstraintEnforcer, provider, sub_provider, good_model
     ):
-        """glm-5.2 stays allowed on every route to zai."""
+        """glm-5.2, glm-5.3, and glm-5.3-flash all stay allowed on every route
+        to zai."""
         violations = real_enforcer.check_constraints(
-            provider=provider, sub_provider=sub_provider, model="glm-5.2"
+            provider=provider, sub_provider=sub_provider, model=good_model
         )
         blocking = [v for v in violations if v.severity == "blocking"]
         assert not [v for v in blocking if v.code == "deprecated-glm-models"], blocking
@@ -686,14 +733,15 @@ class TestRegistryKeyNormalization:
 
 class TestBlockingModelViolations:
 
-    @pytest.mark.parametrize("blocked", ["glm-5", "glm-5.1", "glm-4.5", "glm-4.6", "glm-5.3"])
+    @pytest.mark.parametrize("blocked", ["glm-5", "glm-5.1", "glm-4.5", "glm-4.6", "glm-4.7"])
     def test_deprecated_glm_variants_flagged(self, blocked):
         violations = blocking_model_violations(provider="litellm:zai", model=blocked, env={})
         assert [v.code for v in violations] == ["deprecated-glm-models"]
         assert all(v.severity == "blocking" for v in violations)
 
-    def test_glm_5_2_not_flagged(self):
-        assert blocking_model_violations(provider="litellm:zai", model="glm-5.2", env={}) == []
+    @pytest.mark.parametrize("allowed", ["glm-5.2", "glm-5.3", "glm-5.3-flash"])
+    def test_glm_5_2_not_flagged(self, allowed):
+        assert blocking_model_violations(provider="litellm:zai", model=allowed, env={}) == []
 
     def test_glm_harness_alias_routes_to_zai_identity(self):
         """The zai allowlist covers every provider string routing to zai (OI-1217)."""
