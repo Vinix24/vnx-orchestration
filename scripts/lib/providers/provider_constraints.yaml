@@ -134,18 +134,24 @@ constraints:
     rule: require_route
     required_route:
       provider: zai
-      model: glm-5.2
+      model: [glm-5.2, glm-5.3, glm-5.3-flash]
     reason: >-
-      Only glm-5.2 is allowed for provider zai. This is an allowlist, not a
-      blocklist: exactly one GLM version is approved for new dispatches, and
-      every other model (including any not-yet-released version such as
-      glm-5.3) is refused until an operator decision admits it. GLM-4.5 and
-      GLM-4.6 are retired; base GLM-5 (Feb 2026) and GLM-5.1 are superseded by
-      GLM-5.2 (released 2026-06-16). Operator directive 2026-08-03: geen oudere
-      5-varianten. A blocklist of four names lets every name that was never
-      listed through; model versions are structurally open-ended, so only an
-      allowlist enforces the one-approved-version decision. Admitting a newer
-      version is a deliberate one-line operator change to this model value.
+      Only glm-5.2, glm-5.3, and glm-5.3-flash are allowed for provider zai.
+      This is an allowlist, not a blocklist: exactly these three GLM versions
+      are approved for new dispatches, and every other model (including any
+      not-yet-released version) is refused until an operator decision admits
+      it. GLM-4.5 and GLM-4.6 are retired; base GLM-5 (Feb 2026) and GLM-5.1
+      are superseded by GLM-5.2 (released 2026-06-16). Operator directive
+      2026-09-14: glm-5.3 and glm-5.3-flash are admitted alongside glm-5.2 so
+      all three can be measured comparatively; glm-5.2 remains the default
+      (gate_lane_contract.py MODEL_DEFAULTS, unchanged). Live OpenRouter
+      pricing per Mtok, measured 2026-09-14: glm-5.2 0.68 in / 2.15 out
+      (1,048,576 ctx), glm-5.3 1.40 in / 4.40 out (1,310,720 ctx),
+      glm-5.3-flash 0.15 in / 0.50 out (1,310,720 ctx) — a snapshot, re-check
+      before quoting it stale. A blocklist of four names lets every name that
+      was never listed through; model versions are structurally open-ended,
+      so only an allowlist enforces the approved-version decision. Admitting
+      another version is a deliberate operator change to this model value.
       `provider: zai` is the wave7_models.yaml registry identity: the enforcer
       resolves every provider string that routes to it (zai, litellm:zai,
       glm-harness) to that key, so the allowlist cannot be sidestepped by

@@ -8,10 +8,21 @@
 # 2026-08-03: glm-5.2 is the ONLY allowed GLM version per operator directive. glm-5.1
 # and base glm-5 entries removed; attempting to route them now hits the
 # deprecated-glm-models constraint in provider_constraints.yaml.
+# 2026-09-14: operator directive admits glm-5.3 and glm-5.3-flash alongside
+# glm-5.2 for comparative measurement (deprecated-glm-models allowlist now
+# carries all three). glm-5.2 stays the default; nothing here changes that.
 model_list:
   - model_name: glm-5.2
     litellm_params:
       model: openrouter/z-ai/glm-5.2
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: glm-5.3
+    litellm_params:
+      model: openrouter/z-ai/glm-5.3
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: glm-5.3-flash
+    litellm_params:
+      model: openrouter/z-ai/glm-5.3-flash
       api_key: os.environ/OPENROUTER_API_KEY
 
 litellm_settings:

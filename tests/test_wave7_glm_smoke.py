@@ -193,10 +193,12 @@ class TestGlmModelAliasResolution:
         assert zai.api_key_env == "OPENROUTER_API_KEY", (
             f"unexpected api_key_env: {zai.api_key_env!r}"
         )
-        assert len(zai.models) == 1, (
-            # glm-5.2 only; glm-5.1-default and glm-5.1 removed 2026-08-03
-            f"expected 1 zai model (glm-5.2), got {len(zai.models)}"
+        assert len(zai.models) == 3, (
+            # glm-5.2, glm-5.3, glm-5.3-flash (operator directive 2026-09-14);
+            # glm-5.1-default and glm-5.1 removed 2026-08-03
+            f"expected 3 zai models (glm-5.2, glm-5.3, glm-5.3-flash), got {len(zai.models)}"
         )
+        assert set(zai.models) == {"glm-5.2", "glm-5.3", "glm-5.3-flash"}
 
     def test_glm52_model_schema(self):
         from providers import provider_registry
@@ -215,6 +217,42 @@ class TestGlmModelAliasResolution:
         assert "coding" in model.task_classes
         assert "review" in model.task_classes
 
+    def test_glm53_model_schema(self):
+        """glm-5.3 admitted 2026-09-14 for comparative measurement alongside
+        glm-5.2 — live OpenRouter pricing, not copied from glm-5.2."""
+        from providers import provider_registry
+
+        registry = provider_registry.load()
+        model = registry["zai"].models["glm-5.3"]
+
+        assert model.litellm_name == "openrouter/z-ai/glm-5.3", (
+            f"unexpected litellm_name: {model.litellm_name!r}"
+        )
+        assert model.cost_input_per_mtok == pytest.approx(1.40)
+        assert model.cost_output_per_mtok == pytest.approx(4.40)
+        assert model.supports_streaming is True
+        assert model.supports_tool_calls is True
+        assert "coding" in model.task_classes
+        assert "review" in model.task_classes
+
+    def test_glm53_flash_model_schema(self):
+        """glm-5.3-flash admitted 2026-09-14 alongside glm-5.2 and glm-5.3 —
+        live OpenRouter pricing, not copied from either sibling."""
+        from providers import provider_registry
+
+        registry = provider_registry.load()
+        model = registry["zai"].models["glm-5.3-flash"]
+
+        assert model.litellm_name == "openrouter/z-ai/glm-5.3-flash", (
+            f"unexpected litellm_name: {model.litellm_name!r}"
+        )
+        assert model.cost_input_per_mtok == pytest.approx(0.15)
+        assert model.cost_output_per_mtok == pytest.approx(0.50)
+        assert model.supports_streaming is True
+        assert model.supports_tool_calls is True
+        assert "coding" in model.task_classes
+        assert "review" in model.task_classes
+
     def test_get_default_model_returns_zai_model(self):
         from providers import provider_registry
 
@@ -222,4 +260,8 @@ class TestGlmModelAliasResolution:
         assert model is not None, "get_default_model('zai') returned None after PR-7.3"
         assert "openrouter" in model.litellm_name, (
             f"expected openrouter in litellm_name, got {model.litellm_name!r}"
+        )
+        assert model.litellm_name == "openrouter/z-ai/glm-5.2", (
+            "glm-5.2 must stay the default zai model after admitting glm-5.3/"
+            f"glm-5.3-flash, got {model.litellm_name!r}"
         )

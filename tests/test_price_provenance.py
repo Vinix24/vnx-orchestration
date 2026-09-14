@@ -254,6 +254,8 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
     ("moonshot", "kimi-k2-0905-default"): (0.6, 2.5),
     ("moonshot", "kimi-k2-6"): (0.95, 4.0),
     ("zai", "glm-5.2"): (0.76, 2.42),
+    ("zai", "glm-5.3"): (1.40, 4.40),
+    ("zai", "glm-5.3-flash"): (0.15, 0.50),
     ("local_gemma", "gemma-4b-local"): (0.0, 0.0),
     ("kimi_cli", "kimi-k3"): (3.0, 15.0),
     ("kimi_cli", "kimi-k2-7"): (0.6, 2.5),
@@ -292,6 +294,8 @@ _VERIFIED: set[tuple[str, str]] = {
     ("openai", "gpt-5.5"),
     ("openai", "gpt-6-astra"),
     ("kimi_cli", "kimi-k3"),
+    ("zai", "glm-5.3"),
+    ("zai", "glm-5.3-flash"),
 }
 
 
