@@ -22,6 +22,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from review_contract import _normalize_line  # canonical line-coercion, never a second copy
+
 # Explicit state values — these are the only valid states for a Claude GitHub
 # review gate event. Using string constants (not an Enum) for JSON transparency.
 STATE_NOT_CONFIGURED = "not_configured"
@@ -49,19 +51,6 @@ EVIDENCE_STATES = frozenset([
     STATE_REQUESTED,
     STATE_COMPLETED,
 ])
-
-
-def _normalize_line(raw_line: Any) -> int:
-    """Coerce a raw ``line`` value to a non-negative int, defaulting to 0.
-
-    The reviewer is an untrusted model, not a type-checked caller: a
-    non-numeric or negative ``line`` is normalized to 0 (no line) rather than
-    raised or passed through — a guessed/garbage line number is worse than an
-    empty one, and this must never crash the finding it is attached to.
-    """
-    if isinstance(raw_line, int) and not isinstance(raw_line, bool) and raw_line >= 0:
-        return raw_line
-    return 0
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,39 @@ from typing import Any, Dict, List, Optional
 
 SCHEMA_VERSION = "1.0.0"
 
+# ASCII-only, optional leading '-', one or more digits — never matches a float
+# or a non-ASCII digit that `str.isdigit()` would accept but `int()` could
+# reject (e.g. superscripts), so `_normalize_line` below can never raise.
+_LINE_STRING_RE = re.compile(r"^-?[0-9]+$")
+
+
+def _normalize_line(raw_line: Any) -> int:
+    """Coerce a raw ``line`` value to a non-negative int, defaulting to 0.
+
+    Canonical home: every review gate that classifies untrusted findings
+    (Gemini advisory, Claude GitHub optional) already builds those findings
+    from this contract's schema, and both previously carried an identical
+    copy of this function — this is the shared source, imported rather than
+    redefined.
+
+    The reviewer is an untrusted model, not a type-checked caller: a
+    non-numeric, negative, or otherwise malformed ``line`` is normalized to 0
+    (no line) rather than raised or passed through — a guessed/garbage line
+    number is worse than an empty one, and this must never crash the finding
+    it is attached to. A numeric string (whitespace-trimmed) is coerced to
+    its int value, since a reviewing LLM regularly emits ``"line": "137"`` in
+    JSON — before this coercion existed, that value silently normalized to 0,
+    discarding a valid anchor.
+    """
+    if isinstance(raw_line, bool):
+        return 0
+    if isinstance(raw_line, int):
+        return raw_line if raw_line >= 0 else 0
+    if isinstance(raw_line, str) and _LINE_STRING_RE.match(raw_line.strip()):
+        value = int(raw_line.strip())
+        return value if value >= 0 else 0
+    return 0
+
 
 @dataclass(frozen=True)
 class Deliverable:

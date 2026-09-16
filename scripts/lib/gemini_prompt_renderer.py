@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from review_contract import ReviewContract
+from review_contract import _normalize_line  # canonical line-coercion, never a second copy
 
 # Fields that MUST be present for the prompt renderer to produce a valid prompt.
 # Missing any of these raises MissingContractFieldError immediately.
@@ -35,19 +36,6 @@ class MissingContractFieldError(ValueError):
     def __init__(self, field_name: str) -> None:
         super().__init__(f"Required review contract field is missing or empty: '{field_name}'")
         self.field_name = field_name
-
-
-def _normalize_line(raw_line: Any) -> int:
-    """Coerce a raw ``line`` value to a non-negative int, defaulting to 0.
-
-    The reviewer is an untrusted model, not a type-checked caller: a
-    non-numeric or negative ``line`` is normalized to 0 (no line) rather than
-    raised or passed through — a guessed/garbage line number is worse than an
-    empty one, and this must never crash the finding it is attached to.
-    """
-    if isinstance(raw_line, int) and not isinstance(raw_line, bool) and raw_line >= 0:
-        return raw_line
-    return 0
 
 
 @dataclass(frozen=True)
