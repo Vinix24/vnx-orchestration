@@ -42,6 +42,34 @@ def test_verdict_contract_is_not_the_codex_reviewer_template():
     assert gate_runner._HARNESS_LANE_VERDICT_CONTRACT is not gate_runner._REVIEWER_VERDICT_TEMPLATE
 
 
+def test_both_verdict_templates_ask_for_file_path_and_line():
+    # OI finding-ankers: a finding's location used to live only in prose — 0 of
+    # 634 findings measured 2026-09-15 carried a structured file_path/line.
+    # Red on main before this dispatch: neither template mentioned the field
+    # names at all. Both readers (harness-lane gates via gate_lane_contract,
+    # codex/gemini via gate_runner) must ask for the same two field names.
+    for contract in (gate_lane_contract.VERDICT_CONTRACT, gate_runner._REVIEWER_VERDICT_TEMPLATE):
+        assert '"file_path"' in contract
+        assert '"line"' in contract
+
+
+def test_both_verdict_templates_explain_when_empty_is_correct_identically():
+    # The two contracts are deliberately NOT the same object (see
+    # test_verdict_contract_is_not_the_codex_reviewer_template above), so
+    # nothing else pins them together. Without this test, the "leave it empty
+    # rather than guess" guidance can drift out of sync between the two
+    # copies — precisely the failure mode this repo hit six times this week
+    # with a copied config value, just on prose instead of a constant.
+    guidance = (
+        'file_path and line point at the ONE new line a finding is about, repo-relative. '
+        'Leave file_path="" and line=0 for a finding about the PR as a whole, a missing '
+        "file, or anything that does not point at a single line — a guessed line number is "
+        "worse than an empty one.\n"
+    )
+    assert guidance in gate_lane_contract.VERDICT_CONTRACT
+    assert guidance in gate_runner._REVIEWER_VERDICT_TEMPLATE
+
+
 def test_model_timeout_and_diff_cap_are_one_source():
     assert gate_runner._HARNESS_LANE_MODEL is gate_lane_contract.MODEL_DEFAULTS
     assert glm_gate.DEFAULT_MODEL == gate_lane_contract.MODEL_DEFAULTS["glm_gate"][1]

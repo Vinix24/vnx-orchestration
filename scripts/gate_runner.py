@@ -45,12 +45,16 @@ _REVIEWER_VERDICT_TEMPLATE = (
     "```json\n"
     "{\n"
     '  "verdict": "pass|fail|blocked",\n'
-    '  "findings": [{"severity": "error|warning|info", "message": "...", "out_of_scope": false, "introduced_by_prior_fix": false}],\n'
+    '  "findings": [{"severity": "error|warning|info", "message": "...", "file_path": "...", "line": 0, "out_of_scope": false, "introduced_by_prior_fix": false}],\n'
     '  "residual_risk": "description of remaining risks or null",\n'
     '  "rerun_required": false,\n'
     '  "rerun_reason": null\n'
     "}\n"
     "```\n"
+    'file_path and line point at the ONE new line a finding is about, repo-relative. Leave '
+    'file_path="" and line=0 for a finding about the PR as a whole, a missing file, or '
+    "anything that does not point at a single line — a guessed line number is worse than an "
+    "empty one.\n"
 )
 
 # Gate type → CLI binary mapping.

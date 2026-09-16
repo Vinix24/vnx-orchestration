@@ -37,6 +37,19 @@ class MissingContractFieldError(ValueError):
         self.field_name = field_name
 
 
+def _normalize_line(raw_line: Any) -> int:
+    """Coerce a raw ``line`` value to a non-negative int, defaulting to 0.
+
+    The reviewer is an untrusted model, not a type-checked caller: a
+    non-numeric or negative ``line`` is normalized to 0 (no line) rather than
+    raised or passed through — a guessed/garbage line number is worse than an
+    empty one, and this must never crash the finding it is attached to.
+    """
+    if isinstance(raw_line, int) and not isinstance(raw_line, bool) and raw_line >= 0:
+        return raw_line
+    return 0
+
+
 @dataclass(frozen=True)
 class GeminiReviewFinding:
     """A single finding emitted from a Gemini review, classified by severity."""
@@ -131,7 +144,7 @@ class GeminiReviewReceipt:
                 category=str(raw.get("category", "general")),
                 message=str(raw.get("message", "")),
                 file_path=str(raw.get("file_path", "")),
-                line=int(raw.get("line", 0)),
+                line=_normalize_line(raw.get("line", 0)),
             )
             if finding.is_blocking():
                 blocking.append(finding)
