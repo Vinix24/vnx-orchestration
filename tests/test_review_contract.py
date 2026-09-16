@@ -21,11 +21,14 @@ from review_contract import (
     TestEvidence,
     materialize_review_contract,
     materialize_from_files,
+    _normalize_line,
     _parse_pr_section,
     _parse_feature_title,
     _parse_pr_queue_status,
 )
 import review_contract_materializer as rcm
+import claude_github_receipt
+import gemini_prompt_renderer
 
 
 SAMPLE_FEATURE_PLAN = """\
@@ -486,3 +489,39 @@ class TestCLI:
 
         exit_code = rcm.main(["validate", "--contract", str(out)])
         assert exit_code == 10  # EXIT_VALIDATION
+
+
+class TestNormalizeLine:
+    """_normalize_line is the shared coercion behind every gate that turns an
+    untrusted model's raw ``"line"`` value into a finding anchor.
+
+    Measured on the pre-fix code (duplicated in gemini_prompt_renderer.py and
+    claude_github_receipt.py): ``_normalize_line("137")`` returned ``0``, not
+    ``137`` — a reviewing LLM emitting a numeric string for "line" silently
+    lost its anchor.
+    """
+
+    @pytest.mark.parametrize(
+        "raw_line, expected",
+        [
+            (137, 137),
+            ("137", 137),
+            (" 137 ", 137),
+            (0, 0),
+            ("ergens", 0),
+            (-3, 0),
+            (True, 0),
+            (12.5, 0),
+            ("-3", 0),
+            ("12.5", 0),
+            (None, 0),
+        ],
+    )
+    def test_coerces_to_expected_value(self, raw_line, expected):
+        assert _normalize_line(raw_line) == expected
+
+    def test_gemini_prompt_renderer_imports_shared_function(self):
+        assert gemini_prompt_renderer._normalize_line is _normalize_line
+
+    def test_claude_github_receipt_imports_shared_function(self):
+        assert claude_github_receipt._normalize_line is _normalize_line

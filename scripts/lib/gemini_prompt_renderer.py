@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from review_contract import ReviewContract
+from review_contract import _normalize_line  # canonical line-coercion, never a second copy
 
 # Fields that MUST be present for the prompt renderer to produce a valid prompt.
 # Missing any of these raises MissingContractFieldError immediately.
@@ -131,7 +132,7 @@ class GeminiReviewReceipt:
                 category=str(raw.get("category", "general")),
                 message=str(raw.get("message", "")),
                 file_path=str(raw.get("file_path", "")),
-                line=int(raw.get("line", 0)),
+                line=_normalize_line(raw.get("line", 0)),
             )
             if finding.is_blocking():
                 blocking.append(finding)

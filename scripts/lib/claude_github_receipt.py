@@ -22,6 +22,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from review_contract import _normalize_line  # canonical line-coercion, never a second copy
+
 # Explicit state values — these are the only valid states for a Claude GitHub
 # review gate event. Using string constants (not an Enum) for JSON transparency.
 STATE_NOT_CONFIGURED = "not_configured"
@@ -177,7 +179,7 @@ class ClaudeGitHubReviewReceipt:
                 category=str(raw.get("category", "general")),
                 message=str(raw.get("message", "")),
                 file_path=str(raw.get("file_path", "")),
-                line=int(raw.get("line", 0)),
+                line=_normalize_line(raw.get("line", 0)),
             )
             if finding.is_blocking():
                 blocking.append(finding)
