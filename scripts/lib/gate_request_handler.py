@@ -1041,6 +1041,18 @@ class GateRequestHandlerMixin:
         dropping what the caller already knew on the way into the RESULT
         record (see ``_write_not_executable_result``'s docstring for why
         that mattered live on PR #1777).
+
+        ``audit_refusal=False`` (OI-1750 second finding): this method
+        already calls ``_write_skip_rationale`` below UNCONDITIONALLY, on
+        every call regardless of whether the guard refuses the result write
+        -- the exact shape ``gate_recorder.record_not_executable`` opted out
+        for (OI-1707). Without the opt-out, a guard refusal here would land
+        TWO lines in the ledger for the same event: this call's own
+        ``gate_result_write_refused`` plus the skip-rationale line below,
+        which already explains the same refusal under its own ``reason``.
+        The head that line would have carried moves to the skip-rationale
+        call instead (``commit_sha=`` below), so nothing about the refused
+        write is lost.
         """
         reason, detail = self._classify_unavailable(gate)
         payload["reason"] = reason
@@ -1061,12 +1073,14 @@ class GateRequestHandlerMixin:
             dispatch_id=dispatch_id,
             branch=payload.get("branch") or "",
             commit_sha=payload.get("commit_sha") or "",
+            audit_refusal=False,
         )
         if not written:
-            # gate_recorder.write_result_guarded already logged the refusal
-            # with the existing/new status; this line makes the request-time
-            # caller's own awareness explicit (OI-1469/OI-1470/OI-1471) --
-            # the PR keeps its prior decided verdict on disk, unpolluted.
+            # The skip-rationale call below already lands the durable line
+            # for this refusal (reason=%s, with commit_sha); this log makes
+            # the request-time caller's own awareness explicit
+            # (OI-1469/OI-1470/OI-1471) -- the PR keeps its prior decided
+            # verdict on disk, unpolluted.
             logger.warning(
                 "gate_request_handler: not_executable write REFUSED for "
                 "gate=%s pr=%s -- an existing terminal, evidenced result "
@@ -1077,6 +1091,7 @@ class GateRequestHandlerMixin:
         self._write_skip_rationale(
             gate=gate, pr_id=pr_id or str(pr_number),
             reason=reason, reason_detail=detail,
+            commit_sha=payload.get("commit_sha") or "",
         )
 
     def _request_gemini(
@@ -1513,12 +1528,19 @@ class GateRequestHandlerMixin:
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]
+            # audit_refusal=False (OI-1750 second finding): this branch
+            # already calls _write_skip_rationale below unconditionally, so
+            # the default audit-on-refusal would double-log the same
+            # refused write -- same reasoning as _mark_gate_unavailable and
+            # gate_recorder.record_not_executable (OI-1707). The head moves
+            # to the skip-rationale call's commit_sha= instead.
             _result_payload, written = self._write_not_executable_result(
                 gate="glm_gate", pr_number=pr_number, pr_id="",
                 reason=reason, reason_detail=reason_detail,
                 dispatch_id=dispatch_id,
                 branch=branch,
                 commit_sha=payload.get("commit_sha") or "",
+                audit_refusal=False,
             )
             if not written:
                 logger.warning(
@@ -1531,6 +1553,7 @@ class GateRequestHandlerMixin:
             self._write_skip_rationale(
                 gate="glm_gate", pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,
+                commit_sha=payload.get("commit_sha") or "",
             )
         atomic_write_json(self._request_path("glm_gate", pr_number), payload)
         return payload
@@ -1577,16 +1600,23 @@ class GateRequestHandlerMixin:
             payload["reason"] = reason
             payload["reason_detail"] = reason_detail
             payload["resolved_at"] = payload["requested_at"]
+            # audit_refusal=False (OI-1750 second finding): same shape as
+            # _mark_gate_unavailable/_request_glm above -- _write_skip_rationale
+            # below already writes an unconditional line, so the default
+            # audit-on-refusal would double-log the same refused write. The
+            # head moves to the skip-rationale call's commit_sha= instead.
             self._write_not_executable_result(
                 gate="deepseek_gate", pr_number=pr_number, pr_id="",
                 reason=reason, reason_detail=reason_detail,
                 dispatch_id=dispatch_id,
                 branch=branch,
                 commit_sha=payload.get("commit_sha") or "",
+                audit_refusal=False,
             )
             self._write_skip_rationale(
                 gate="deepseek_gate", pr_id=str(pr_number),
                 reason=reason, reason_detail=reason_detail,
+                commit_sha=payload.get("commit_sha") or "",
             )
         atomic_write_json(self._request_path("deepseek_gate", pr_number), payload)
         return payload

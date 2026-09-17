@@ -24,6 +24,7 @@ class GateReportGeneratorMixin:
         dispatch_id: str = "",
         branch: str = "",
         commit_sha: str = "",
+        audit_refusal: bool = True,
     ) -> Tuple[Dict[str, Any], bool]:
         """Write a not_executable result record (GATE-4).
 
@@ -59,6 +60,21 @@ class GateReportGeneratorMixin:
         untouched pre-existing terminal record when the guard refused it.
         ``written`` is ``False`` on refusal -- the caller must not assume
         the constructed payload reached disk without checking it.
+
+        ``audit_refusal`` (OI-1750 second finding, glm_gate review on
+        PR #1862): defaults to ``True`` so a bare call still gets the
+        refusal's own ``gate_result_write_refused`` audit line. Every
+        PRODUCTION caller of this method today (``_mark_gate_unavailable``,
+        ``_request_glm``, ``_request_deepseek`` in
+        ``gate_request_handler.py``) passes ``audit_refusal=False`` and then
+        unconditionally calls ``_write_skip_rationale`` right after --
+        exactly the shape ``gate_recorder.record_not_executable`` already
+        had (OI-1707), which is why that sibling function opted out from the
+        start. Leaving this default ``True`` while every caller opts out is
+        deliberate, not dead code: it is what a FUTURE caller that does not
+        already log its own skip-rationale line gets by default, so it is
+        never silently unaudited. A caller must earn the opt-out by also
+        carrying the skip-rationale write.
         """
         from gate_recorder import write_result_guarded
         from review_gate_manager import _utc_now
@@ -95,6 +111,7 @@ class GateReportGeneratorMixin:
             return payload, True
         return write_result_guarded(
             result_file, payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+            audit_refusal=audit_refusal,
         )
 
     def _write_skip_rationale(
@@ -104,8 +121,19 @@ class GateReportGeneratorMixin:
         pr_id: str,
         reason: str,
         reason_detail: str,
+        commit_sha: str = "",
     ) -> None:
         """Append a skip-rationale record to the NDJSON audit trail (GATE-9).
+
+        ``commit_sha`` (OI-1750 second finding): threaded straight through to
+        :func:`gate_recorder.write_skip_rationale`'s own ``commit_sha``
+        field. A caller that also opts out of ``_write_not_executable_result``'s
+        own audit line (``audit_refusal=False``) makes THIS line the only
+        durable record of the refusal, so it must carry the head the write
+        was refused against -- the same reasoning that put ``commit_sha`` on
+        the ``gate_result_write_refused`` line in the first place. Defaults
+        to "" for a caller with no head to report, same as the underlying
+        writer.
 
         Delegates to :func:`gate_recorder.write_skip_rationale` — the ONE
         writer of this record shape (OI-1490). This method used to build its
@@ -128,6 +156,7 @@ class GateReportGeneratorMixin:
 
         write_skip_rationale(
             self.state_dir, gate, pr_id=pr_id, reason=reason, reason_detail=reason_detail,
+            commit_sha=commit_sha,
         )
 
     def _write_failure_result(

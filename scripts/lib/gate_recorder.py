@@ -319,6 +319,7 @@ def write_skip_rationale(
     pr_id: str,
     reason: str,
     reason_detail: str,
+    commit_sha: str = "",
 ) -> None:
     """Append skip-rationale record to NDJSON audit trail (GATE-9).
 
@@ -333,6 +334,20 @@ def write_skip_rationale(
     the dispatcher routes on. An unregistered gate says so in
     ``provider_kind`` rather than inventing a binary name from the gate's own
     name.
+
+    ``commit_sha`` (OI-1750) is the head this event is about, when the caller
+    has one — a write-refusal audit line without it names the gate and the PR
+    but not which head the overwrite guard was protecting, which is the one
+    fact a reader needs to tell a live refusal apart from a stale one. Empty
+    string, not omitted, so the field stays present and uniform across every
+    record this writer produces, even for a caller with no head to report
+    (e.g. a GATE-4 skip that fires before any commit is resolved). Every
+    not_executable caller (``record_not_executable`` and the three
+    ``gate_request_handler.py`` sites that opt out of
+    :func:`write_result_guarded`'s own audit line, second OI-1750 finding)
+    DOES have a head at this point and passes it here — this is the only
+    place that refusal's ``commit_sha`` survives once the guard's own line
+    is suppressed.
     """
     provider = resolve_gate_provider(gate)
     if provider is None:
@@ -351,6 +366,7 @@ def write_skip_rationale(
         "event_type": "gate_skip_rationale",
         "gate": gate,
         "pr_id": pr_id,
+        "commit_sha": commit_sha,
         "reason": reason,
         "reason_detail": reason_detail,
         "provider_check": {
@@ -1038,6 +1054,70 @@ def annotate_refused_write(
     return annotated
 
 
+def _state_dir_from_result_path(result_path: Path) -> Optional[Path]:
+    """Best-effort state dir for the write-refusal audit trail (OI-1750).
+
+    Every production result path is ``<state_dir>/review_gates/results/...``
+    — every writer in the tree builds it that way (checked across
+    gate_runner.py, kimi_gate.py, glm_gate.py, gate_reanchor_cli.py,
+    gate_executor.py, review_gate_manager.py, 2026-09-17). Walking up for the
+    ``review_gates`` segment and returning its parent needs no new parameter
+    threaded through the dozen call sites that already build ``result_path``
+    this way, and it is a self-validating derivation rather than a fixed
+    parent-hop count: a path that never passes through ``review_gates`` (an
+    ad-hoc test fixture writing straight into ``tmp_path``, e.g.
+    ``tests/test_gate_recorder_overwrite_guard.py``'s
+    ``TestRecordTerminalResultOverwriteGuard``) has no state dir to log into
+    and gets None back, rather than a guess that would land the audit file in
+    some unrelated ancestor of that fixture's tmp_path.
+    """
+    for parent in result_path.parents:
+        if parent.name == "review_gates":
+            return parent.parent
+    return None
+
+
+def _audit_write_refusal(
+    result_path: Path,
+    gate: str,
+    pr_ref: str,
+    attempted: Dict[str, Any],
+) -> None:
+    """Land a durable trace of a write the overwrite guard refused (OI-1750).
+
+    The guard (:func:`_check_overwrite_guard`) is correct and untouched here
+    — it is not what was missing. What was missing is that its refusal left
+    no durable trace: a caller routed through :func:`write_result_guarded`
+    only got an in-memory ``write_refused`` flag
+    (:func:`annotate_refused_write`), and a caller of
+    :func:`record_terminal_result` only saw the raised
+    :class:`ResultOverwriteRefused` — both live only in that run's own
+    stdout/return value. Measured on PR #1852: a re-gate of kimi_gate whose
+    write was refused left ZERO lines in ``gate_execution_audit.ndjson``, and
+    a reader of that ledger saw only the earlier run's
+    ``kimi_gate execution completed successfully``, with nothing marking that
+    a later write had bounced off it.
+
+    Reuses :func:`write_skip_rationale` (GATE-9) — the ledger's one
+    skip-rationale writer — rather than adding a second writer or a second
+    file for the same event type.
+    """
+    state_dir = _state_dir_from_result_path(result_path)
+    if state_dir is None:
+        return
+    write_skip_rationale(
+        state_dir, gate,
+        pr_id=pr_ref,
+        reason="gate_result_write_refused",
+        reason_detail=(
+            f"overwrite guard refused a status={attempted.get('status', '')!r} "
+            "write: an existing decided, evidenced verdict for this head would "
+            "have been downgraded"
+        ),
+        commit_sha=attempted.get("commit_sha", "") or "",
+    )
+
+
 def publish_forge_check_run(
     payload: Dict[str, Any], *, gate: str, result_path: Path
 ) -> None:
@@ -1340,6 +1420,7 @@ def write_result_guarded(
     *,
     gate: str,
     pr_ref: str,
+    audit_refusal: bool = True,
 ) -> Tuple[Dict[str, Any], bool]:
     """Write a gate result unless it would downgrade an existing terminal one.
 
@@ -1376,11 +1457,37 @@ def write_result_guarded(
     hand back — the caller gets the attempted ``payload`` instead (never the
     internal :data:`_CORRUPT_RESULT` sentinel), which is NOT what is on disk;
     ``written is False`` is what tells the caller the write did not land.
+
+    A refusal also gets a durable line in ``gate_execution_audit.ndjson``
+    (:func:`_audit_write_refusal`, OI-1750) — the guard's refusal used to be
+    visible only as the in-memory ``write_refused`` flag
+    (:func:`annotate_refused_write`), never in the ledger a later reader
+    checks. ``audit_refusal=False`` opts out for a caller that already logs
+    its own skip-rationale line for every call regardless of this guard's
+    outcome — without the opt-out that caller would double-log the SAME
+    refused call, once under its own reason and once under this function's
+    ``gate_result_write_refused``.
+
+    That opt-out is not one caller's special case. Every PRODUCTION caller
+    that unconditionally writes its own skip-rationale line passes
+    ``audit_refusal=False``: :func:`record_not_executable` (OI-1707,
+    original) and, since the same shape was found in three more places on a
+    second review pass of this PR, ``gate_request_handler._mark_gate_unavailable``,
+    ``._request_glm`` and ``._request_deepseek`` (OI-1750 second finding).
+    ``tests/test_oi1750_tweede_plek_audit_line_count.py`` pins the exact
+    audit-line COUNT for all four, not just that a line exists, because
+    "a line exists" is what a one-opted-out/three-not state would also
+    satisfy. The default stays ``True``: a future caller earns the opt-out
+    by also carrying its own skip-rationale write (with ``commit_sha``,
+    since that is where the refusal's head now has to live), never by
+    assumption.
     """
     with slot_lock(result_path):
         try:
             _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_ref)
         except ResultOverwriteRefused:
+            if audit_refusal:
+                _audit_write_refusal(result_path, gate, pr_ref, payload)
             existing = _read_existing_result(result_path)
             on_disk = existing if isinstance(existing, dict) else {}
             return on_disk or payload, False
@@ -1483,7 +1590,11 @@ def record_terminal_result(
         if identity_error:
             raise ValueError(identity_error)
     with slot_lock(result_path):
-        _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
+        try:
+            _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
+        except ResultOverwriteRefused:
+            _audit_write_refusal(result_path, gate, pr_id, payload)
+            raise
         _write_result_atomic(result_path, payload)
     # After the write, outside the lock, non-fatal — see
     # :func:`publish_forge_check_run`. A refusal from the overwrite guard
@@ -1537,8 +1648,13 @@ def record_not_executable(
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
+        # audit_refusal=False: the unconditional write_skip_rationale call
+        # below already lands one line for this call whether or not the
+        # guard refuses it (OI-1707) — the default audit-on-refusal in
+        # write_result_guarded would double-log the same refused write.
         payload_on_disk, written = write_result_guarded(
             rf, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+            audit_refusal=False,
         )
         result_payload = (
             payload_on_disk if written
@@ -1550,6 +1666,7 @@ def record_not_executable(
         pr_id=pr_id or str(pr_number or ""),
         reason=reason,
         reason_detail=reason_detail,
+        commit_sha=request_payload.get("commit_sha", "") or "",
     )
     return result_payload
 
