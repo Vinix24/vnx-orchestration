@@ -156,6 +156,39 @@ class TestMinQualityTierBounds:
         ids = [c.model_id for c in recommend("02_code_review", recommendations_path=rec_path)]
         assert ids == ["premium"]
 
+    def test_min_quality_tier_string_is_coerced_like_per_candidate_quality_tier(self, tmp_path):
+        """glm_gate finding (severity info, this dispatch): the bounds check must
+        coerce a quoted YAML scalar (e.g. `min_quality_tier: "3"`) the same way
+        the per-candidate `quality_tier` check already does (`int(entry["quality_tier"])`)
+        — before the fix, the bounds check rejected a string while the
+        per-candidate check accepted one, an asymmetry within the same PR."""
+        rec_path = _write_yaml(tmp_path, {
+            "02_code_review": {
+                "candidates": [
+                    {"model_id": "premium", "composite_score": 9.0, "avg_duration_seconds": 90.0},
+                    {"model_id": "low", "composite_score": 1.0, "avg_duration_seconds": 10.0},
+                ],
+                "min_quality_tier": "3",
+            },
+        })
+        ids = [c.model_id for c in recommend("02_code_review", recommendations_path=rec_path)]
+        assert ids == ["premium"]
+
+    def test_min_quality_tier_non_numeric_string_still_rejected(self, tmp_path):
+        """A bound that cannot be coerced to int at all is still a hard error,
+        not silently ignored."""
+        rec_path = _write_yaml(tmp_path, {
+            "02_code_review": {
+                "candidates": [
+                    {"model_id": "claude-opus-4-8", "composite_score": 9.0,
+                     "avg_duration_seconds": 100.0},
+                ],
+                "min_quality_tier": "high",
+            },
+        })
+        with pytest.raises(ValueError, match="min_quality_tier"):
+            recommend("02_code_review", recommendations_path=rec_path)
+
 
 # ---------------------------------------------------------------------------
 # 3. compile_plan — the door's task_class closed-set check
@@ -264,10 +297,18 @@ class TestDiscoverValidTaskClasses:
         assert "01_code_generation" in classes
         assert "implementation" not in classes
 
-    def test_missing_registry_file_is_empty(self, tmp_path, monkeypatch):
+    def test_missing_registry_file_is_empty(self, tmp_path):
         """A missing/unreadable routing_recommendations.yaml → empty set
-        (compile_plan fails closed on any EXPLICIT task_class)."""
-        import smart_router
+        (compile_plan fails closed on any EXPLICIT task_class).
 
-        monkeypatch.setattr(smart_router, "_RECOMMENDATIONS_PATH", tmp_path / "absent.yaml")
-        assert _DISCOVER_VALID_TASK_CLASSES() == frozenset()
+        Fix-forward (dispatch-20260917-oi1756-fixforward): passes the absent
+        path directly rather than monkeypatching smart_router's module-global
+        `_RECOMMENDATIONS_PATH`. `smart_router` and `lib.smart_router` are two
+        distinct module objects with independent globals when both are on
+        sys.path (as happens under a full test sweep) — patching one identity's
+        global left `_discover_valid_task_classes()` free to resolve the OTHER
+        identity, which still pointed at the real YAML, so this test was green
+        solo and red under a sweep. A path parameter has no such ambiguity: mirrors
+        _discover_valid_roles(agents_dir), which is immune for the same reason.
+        """
+        assert _DISCOVER_VALID_TASK_CLASSES(tmp_path / "absent.yaml") == frozenset()

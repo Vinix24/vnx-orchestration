@@ -1600,7 +1600,9 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
         return frozenset()
 
 
-def _discover_valid_task_classes() -> frozenset[str]:
+def _discover_valid_task_classes(
+    recommendations_path: Optional[Path] = None,
+) -> frozenset[str]:
     """Return the closed task_class vocabulary from routing_recommendations.yaml.
 
     OI-1756: mirrors _discover_valid_roles's fail-closed convention exactly — an
@@ -1610,10 +1612,22 @@ def _discover_valid_task_classes() -> frozenset[str]:
     fires on a non-empty string). Never a second hardcoded Python list of class
     names here — smart_router.valid_task_classes() is the single reader of
     routing_by_task's keys.
+
+    Fix-forward (dispatch-20260917-oi1756-fixforward): unlike _discover_valid_roles
+    (which takes agents_dir as a parameter), this used to reach for
+    smart_router._RECOMMENDATIONS_PATH as a module-global. `smart_router` and
+    `lib.smart_router` are two distinct module objects (different sys.path entry
+    points) with independent globals — a test that monkeypatches one identity's
+    `_RECOMMENDATIONS_PATH` has no effect on the other, so behaviour depended on
+    which identity happened to be imported elsewhere in the same test run (green
+    solo, red under a full sweep). Taking the path as a parameter — exactly
+    _discover_valid_roles's own pattern — makes the caller's identity irrelevant.
+    Behaviour with no argument is unchanged: `valid_task_classes(None)` reads
+    smart_router's own default `_RECOMMENDATIONS_PATH`.
     """
     try:
         from smart_router import valid_task_classes as _valid_task_classes  # noqa: PLC0415
-        return _valid_task_classes()
+        return _valid_task_classes(recommendations_path)
     except Exception:  # vnx-silent-except: registry discovery must never crash the door; empty set fails closed
         return frozenset()
 

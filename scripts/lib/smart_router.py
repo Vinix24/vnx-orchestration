@@ -451,13 +451,35 @@ def _load_recommendations(
             # so it silently filters nothing while looking like a real gate —
             # reject it the same way an out-of-range quality_tier is already
             # rejected, rather than let a no-op floor pass as configured.
+            #
+            # Fix-forward (dispatch-20260917-oi1756-fixforward, glm_gate finding,
+            # severity info): coerce via int() the same way the per-candidate
+            # `quality_tier` check a few lines below does (`int(entry["quality_tier"])`)
+            # — a quoted YAML scalar like `min_quality_tier: "3"` was accepted on
+            # the per-candidate side but rejected here, an asymmetry within the
+            # same bounds check introduced by this PR. Coercing (rather than making
+            # the per-candidate side strict) keeps the existing accepted-inputs
+            # surface unchanged for both sides.
+            _coerced_bounds: Dict[str, Optional[int]] = {}
             for _bound_name, _bound_val in (
                 ("min_quality_tier", min_qt), ("max_quality_tier", max_qt),
             ):
-                if _bound_val is not None and _bound_val not in (1, 2, 3):
+                if _bound_val is None:
+                    _coerced_bounds[_bound_name] = None
+                    continue
+                try:
+                    _bound_int = int(_bound_val)
+                except (TypeError, ValueError):
                     raise ValueError(
-                        f"{_bound_name} must be 1-3, got {_bound_val} for task_class {task_class!r}"
+                        f"{_bound_name} must be 1-3, got {_bound_val!r} for task_class {task_class!r}"
                     )
+                if _bound_int not in (1, 2, 3):
+                    raise ValueError(
+                        f"{_bound_name} must be 1-3, got {_bound_val!r} for task_class {task_class!r}"
+                    )
+                _coerced_bounds[_bound_name] = _bound_int
+            min_qt = _coerced_bounds["min_quality_tier"]
+            max_qt = _coerced_bounds["max_quality_tier"]
         else:
             entries = task_node or []
             min_qt = None
