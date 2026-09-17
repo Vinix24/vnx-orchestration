@@ -39,6 +39,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 from gate_artifacts import materialize_artifacts
+from gate_lane_contract import VERDICT_CONTRACT
 import gate_recorder
 
 
@@ -151,6 +152,55 @@ class TestOI1767VerdictBlockGuard:
         )
         on_disk = json.loads(result_file.read_text(encoding="utf-8"))
         assert on_disk["status"] == "completed"
+
+    def test_echoed_template_then_death_mid_sentence_books_unavailable(self, env):
+        """OI-1767 fix-forward (third): a run that echoes VERDICT_CONTRACT back
+        (a model that repeats its own instructions) and then dies mid-sentence
+        must book `unavailable`, exactly like the no-verdict-block case above.
+
+        Before this fix: ``extract_verdict_block`` took the FIRST fenced json
+        block unconditionally, and the echoed VERDICT_CONTRACT IS a fenced json
+        block with a "verdict" key (value: the literal placeholder text
+        "pass|fail|blocked"). The guard read that as a real decision and
+        booked `completed` — reproduced directly against this exact scenario.
+        Built with the REAL VERDICT_CONTRACT constant, not a hand-copied one.
+        """
+        stdout = (
+            "Ik ga de diff reviewen. Mijn opdracht is:\n"
+            + VERDICT_CONTRACT
+            + "...De bevindingen zijn geen blokkerende problemen. Het oordeel "
+            "is geslaagd. Laat me het neerschrijven."
+        )
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640001")
+
+        assert result["status"] == "unavailable", (
+            f"OI-1767 echo-template regression: a report that echoes the "
+            f"contract template booked {result['status']!r} instead of "
+            f"unavailable — {result}"
+        )
+        assert result["reason"] == "validation_failed"
+        assert "no_verdict_block" in result["reason_detail"]
+
+    def test_template_echo_followed_by_real_verdict_still_books_completed(self, env):
+        """Control: a worker that echoes the template and THEN writes a real
+        verdict must still book `completed` on that real verdict — the fix
+        must pick the LAST valid block, not refuse every report that happens
+        to contain the template text anywhere.
+        """
+        stdout = (
+            "Ik ga de diff reviewen. Mijn opdracht is:\n"
+            + VERDICT_CONTRACT
+            + "...Na onderzoek is er geen blokkerend probleem gevonden.\n"
+            '```json\n{"verdict": "pass", "findings": [], "residual_risk": null}\n```\n'
+        )
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640002")
+
+        assert result["status"] == "completed", (
+            f"a real trailing verdict after an echoed template must still book "
+            f"completed — {result}"
+        )
 
     def test_guard_applies_to_kimi_gate_too_not_just_glm(self, env, tmp_path, monkeypatch):
         """The same no-verdict-block shape must refuse kimi_gate too, not only

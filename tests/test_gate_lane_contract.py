@@ -18,6 +18,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
+import codex_parser
 import gate_lane_contract
 import gate_recorder
 import gate_runner
@@ -33,6 +34,18 @@ def test_verdict_contract_is_one_object_across_all_three_readers():
     # The two gates must read the same object as each other, not merely two
     # equal aliases of the source.
     assert glm_gate._VERDICT_CONTRACT is kimi_gate._VERDICT_CONTRACT
+
+
+def test_valid_verdicts_is_one_object_across_all_readers():
+    """OI-1767 fix-forward (third): glm_gate/kimi_gate/codex_parser used to
+    each carry their own byte-identical ``{"pass", "fail", "blocked"}``
+    literal. A fourth literal copy in ``codex_parser.extract_verdict_block``
+    would repeat the exact drift ``gate_lane_contract`` exists to prevent
+    (see module docstring) — all readers now alias the SAME object.
+    """
+    assert glm_gate._VALID_VERDICTS is gate_lane_contract.VALID_VERDICTS
+    assert kimi_gate._VALID_VERDICTS is gate_lane_contract.VALID_VERDICTS
+    assert codex_parser.VALID_VERDICTS is gate_lane_contract.VALID_VERDICTS
 
 
 def test_verdict_contract_is_not_the_codex_reviewer_template():

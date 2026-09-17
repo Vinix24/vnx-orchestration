@@ -9,6 +9,8 @@ import json
 import re
 from typing import Any, Dict, List, Tuple
 
+from gate_lane_contract import VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
+
 
 def _extract_codex_text(stdout: str) -> str:
     """Extract agent_message text from codex NDJSON output."""
@@ -147,16 +149,31 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
     Reuses the NDJSON-unwrap in :func:`_extract_codex_text` so this also
     works on codex's ``exec --json`` stream, not only on the plain-text
     report bodies glm_gate/kimi_gate/gemini_review stdout actually is.
-    Returns ``{}`` when no such block is found — a candidate JSON object that
-    matched on a ``"findings"`` key alone (the looser match
-    :func:`_extract_codex_verdict` itself makes, kept for codex's own
-    findings-extraction fallback) does NOT count here: the contract's shared
-    characteristic is specifically the ``"verdict"`` key.
+
+    Does NOT delegate to :func:`_extract_codex_verdict`: that helper takes the
+    FIRST fenced block and accepts any dict with a ``"verdict"`` key, values
+    unchecked. VERDICT_CONTRACT is itself a fenced ```json block whose
+    ``"verdict"`` value is the literal placeholder text ``"pass|fail|blocked"``
+    — a worker that echoes its own instructions (then dies mid-report) hands
+    back exactly that block first, and the old first-match/any-value logic
+    read it as a genuine, blocking-free verdict (OI-1767 fix-forward,
+    live-reproduced against this scenario). Same rule glm_gate._extract_verdict
+    and kimi_gate._extract_verdict already apply: scan the fenced blocks from
+    the END, and only accept one whose ``verdict`` (trimmed, lowercased) is a
+    real value in :data:`gate_lane_contract.VALID_VERDICTS` — a report that
+    echoes the template and then writes a real verdict resolves to that real
+    verdict, not the template. Returns ``{}`` when no block clears that bar,
+    same as before.
     """
     text = _extract_codex_text(stdout)
-    candidate = _extract_codex_verdict(text)
-    if isinstance(candidate, dict) and "verdict" in candidate:
-        return candidate
+    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    for block in reversed(blocks):
+        try:
+            candidate = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and str(candidate.get("verdict", "")).strip().lower() in VALID_VERDICTS:
+            return candidate
     return {}
 
 

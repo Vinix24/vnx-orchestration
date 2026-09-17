@@ -110,6 +110,7 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     MAX_DIFF_CHARS,
     MODEL_DEFAULTS,
     TIMEOUT_SECONDS,
+    VALID_VERDICTS,
     VERDICT_CONTRACT,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
@@ -126,7 +127,7 @@ from gate_report_recovery import (
     recovered_verdict_conflicts,
 )
 
-_VALID_VERDICTS = {"pass", "fail", "blocked"}
+_VALID_VERDICTS = VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
 
 
 def _extract_verdict(text: str) -> dict:
