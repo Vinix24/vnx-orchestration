@@ -1668,6 +1668,124 @@ def _terminal_evidence_contradictions(
     return contradictions
 
 
+# ---------------------------------------------------------------------------
+# OI-1764: terminal evidence that went stale AFTER the obligation closed
+# ---------------------------------------------------------------------------
+#
+# The per-obligation loop in :func:`run` skips every already-terminal record
+# outright (``if status in TERMINAL_STATUSES: continue``) — correct: a closed
+# obligation must never be re-run. The pre-execution sha-binding check
+# (:func:`_has_decided_evidence`, OI-1571 tak 3) only runs while an
+# obligation is still PENDING, so it can only ever catch evidence that was
+# ALREADY stale at the moment a decision was being made — a record that was
+# sha-CURRENT the instant it closed and only drifted stale afterward (a
+# fix-forward push lands a new head on the same PR after the gate already
+# booked fulfilled/failed) is invisible to every check this runner already
+# has. Live measured 2026-09-17 on PR #1864: the fix-forward push landed head
+# ff5183e8 while the codex_gate record on disk still named the pre-push
+# commit e222601b; the obligation happened to still be PENDING at that
+# instant, so the next run's sha check caught it. Had it already been
+# fulfilled, nothing would have noticed — :func:`_stale_terminal_evidence` is
+# the read-only detector for exactly that gap.
+
+
+def _stale_terminal_evidence(
+    obligations: List[Tuple[Path, Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Report every TERMINAL obligation whose own evidence record no longer
+    binds to the PR's current head.
+
+    Read-only, over the FULL (unscoped) store — a third full-store
+    diagnostic sitting alongside :func:`_terminal_evidence_contradictions`
+    and OI-1751's ``prs_without_obligation``, run unconditionally on every
+    :func:`run` call. Reuses :func:`_classify_sha_binding` — the SAME
+    classifier :func:`_has_decided_evidence` already delegates to (OI-1571
+    tak 3) — never a second sha comparison.
+
+    Checks ``evidence_result_path`` first, falling back to ``result_path``
+    — an obligation carrying neither (e.g. ``retired``, which by
+    construction was never reviewed by anything) has no evidence that could
+    have gone stale and is silently skipped, exactly as today.
+
+    NEVER mutates anything. The corrective tool for a genuinely stale
+    obligation is the already-audited, hand-triggered
+    ``scripts/gate_obligation_reopen_stale_evidence.py`` — this function
+    only surfaces the candidates for a human (or that script) to act on.
+
+    Returns one entry per obligation whose binding is ``mismatch`` (evidence
+    provably about other code) or ``unknown`` (binding undeterminable — no
+    evidence file, unreadable, or either sha missing) — both loud, neither
+    silently treated as fine or as broken. A ``match``, or an obligation
+    with no evidence path recorded at all, produces no entry.
+    """
+    findings: List[Dict[str, Any]] = []
+    head_sha_cache: Dict[Any, str] = {}
+    for path, record in obligations:
+        status = record.get("status")
+        if status not in TERMINAL_STATUSES:
+            continue
+        evidence_path_str = record.get("evidence_result_path") or record.get("result_path")
+        if not evidence_path_str:
+            continue
+        dispatch_id = str(record.get("dispatch_id") or path.stem)
+        gate = str(record.get("gate") or "")
+        pr_number = record.get("pr_number")
+
+        evidence_record: Optional[Dict[str, Any]] = None
+        read_error: Optional[str] = None
+        try:
+            evidence_record = json.loads(Path(evidence_path_str).read_text(encoding="utf-8"))
+        except OSError as exc:
+            read_error = f"evidence file unreadable: {exc}"
+        except json.JSONDecodeError as exc:
+            read_error = f"evidence file is not valid JSON: {exc}"
+        if not isinstance(evidence_record, dict):
+            if read_error is None:
+                read_error = "evidence file does not contain a JSON object"
+            evidence_record = {}
+        result_sha = str(evidence_record.get("commit_sha") or "")
+
+        if pr_number not in head_sha_cache:
+            head_sha_cache[pr_number] = _get_pr_head_sha_for_gate(
+                pr_number if isinstance(pr_number, int) else None
+            )
+        head_sha = head_sha_cache[pr_number]
+
+        binding = _classify_sha_binding(head_sha, result_sha)
+        if binding == "match":
+            continue
+        finding: Dict[str, Any] = {
+            "dispatch_id": dispatch_id,
+            "gate": gate,
+            "pr_number": pr_number,
+            "obligation_status": status,
+            "obligation_path": str(path),
+            "evidence_result_path": evidence_path_str,
+            "head_sha": head_sha,
+            "evidence_commit_sha": result_sha,
+            "binding": binding,
+        }
+        if binding == "mismatch":
+            finding["detail"] = (
+                f"{gate} obligation for dispatch {dispatch_id} (PR #{pr_number}) "
+                f"closed {status!r} against commit {result_sha[:8] or '?'}, but "
+                f"the PR head is now {head_sha[:8] or '?'} — this evidence is "
+                "about code that is no longer the PR's head. NOT auto-fixed: "
+                "reopen by hand via scripts/gate_obligation_reopen_stale_evidence.py."
+            )
+        else:
+            finding["detail"] = (
+                f"{gate} obligation for dispatch {dispatch_id} (PR #{pr_number}) "
+                f"closed {status!r} but its sha binding to the PR head could "
+                "not be verified"
+                + (f" ({read_error})" if read_error else "")
+                + " — undetermined, not cleared: review manually or via "
+                "scripts/gate_obligation_reopen_stale_evidence.py."
+            )
+        findings.append(finding)
+    return findings
+
+
 def _evidence_decision(evidence: Tuple[Path, Dict[str, Any]]) -> Dict[str, Any]:
     """Turn OI-1388-rescue evidence into a decision, split by verdict (BETA3-C2).
 
@@ -2166,10 +2284,22 @@ def fulfill_obligation(
         # fulfill_by_failed_evidence below instead; _fulfilling_result never
         # hands either branch a not_executable or undecided-status record.
         evidence_path, evidence_record = decision["evidence"]
+        evidence_pr_number = evidence_record.get("pr_number") or record.get("pr_number")
+        # OI-1764 point 2: this early (pre-execution) route used to compute
+        # NO fast-fulfillment warning at all, while the late (post-execution)
+        # route below always does for the same terminal outcome — a booked
+        # fulfilment from a stale-by-mtime evidence file was silently
+        # indistinguishable from a genuinely fresh one on THIS route only.
+        # Same helper, same outcome-key convention as the late route: two
+        # routes to the same STATUS_FULFILLED outcome must carry the same
+        # tripwire.
+        fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
+            evidence_path, gate, evidence_pr_number, dispatch_id,
+        )
         updated = update_obligation(
             path,
             status=STATUS_FULFILLED,
-            pr_number=evidence_record.get("pr_number") or record.get("pr_number"),
+            pr_number=evidence_pr_number,
             branch=evidence_record.get("branch") or record.get("branch"),
             attempts=attempts,
             last_attempt_at=now,
@@ -2192,6 +2322,8 @@ def fulfill_obligation(
             "already reviewed and approved this dispatch"
         )
         outcome["result_path"] = updated.get("result_path")
+        if fast_fulfillment_warning:
+            outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
         return outcome
 
     if decision["kind"] == "fulfill_by_failed_evidence":
@@ -2941,6 +3073,18 @@ def run(
     ever registered for it. Logged LOUD via ``_LOG.warning`` and (when
     ``write=True``) appended to ``governance_audit.ndjson`` on every call,
     scoped or not, dry-run or not — see :func:`_find_prs_without_obligation`.
+
+    ``stale_terminal_evidence`` (OI-1764) is a further full-store, read-only
+    diagnostic: every already-TERMINAL obligation (skipped outright by the
+    per-obligation loop below) whose own evidence record's ``commit_sha`` no
+    longer binds to the PR's current head — a later commit landed on the
+    same PR after the obligation already closed. Split into
+    ``stale_terminal_evidence_mismatch_count`` (evidence provably about
+    other code) and ``stale_terminal_evidence_unknown_count`` (binding
+    undeterminable) — neither counts toward ``pending_after``, which means
+    "not yet reviewed"; these obligations WERE reviewed, just not of the
+    code now on the PR. Never mutated by this function — see
+    :func:`_stale_terminal_evidence`.
     """
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
@@ -3008,6 +3152,18 @@ def run(
     # --dispatch-prefix slice must not hide an already-burned record outside
     # it. Never rewrites anything (see _terminal_evidence_contradictions).
     contradictions = _terminal_evidence_contradictions(obligations, result_index)
+    # OI-1764: a third full-store, read-only diagnostic — terminal
+    # obligations the loop above skips outright (line ~2981) whose own
+    # evidence has since gone stale (a later commit landed on the same PR
+    # after the obligation already closed). Never mutates anything, same
+    # discipline as contradictions/prs_without_obligation.
+    stale_terminal_evidence = _stale_terminal_evidence(obligations)
+    stale_terminal_evidence_mismatch_count = sum(
+        1 for finding in stale_terminal_evidence if finding["binding"] == "mismatch"
+    )
+    stale_terminal_evidence_unknown_count = sum(
+        1 for finding in stale_terminal_evidence if finding["binding"] == "unknown"
+    )
     # OI-1751: a second full-store, read-only diagnostic sitting alongside
     # contradictions — the per-obligation loop above can only ever act on a
     # PR that already has an obligation; this is the one place that asks the
@@ -3042,6 +3198,9 @@ def run(
         "action_counts": action_counts,
         "terminal_evidence_contradictions": contradictions,
         "terminal_evidence_contradiction_count": len(contradictions),
+        "stale_terminal_evidence": stale_terminal_evidence,
+        "stale_terminal_evidence_mismatch_count": stale_terminal_evidence_mismatch_count,
+        "stale_terminal_evidence_unknown_count": stale_terminal_evidence_unknown_count,
         "swept_provider_not_installed": swept_provider_not_installed,
         "provider_not_installed_sweep_unreadable": sweep_result.unreadable,
         "provider_not_installed_sweep_unreadable_count": len(sweep_result.unreadable),
@@ -3156,6 +3315,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"  {c['dispatch_id']} gate={c['gate']} status={c['obligation_status']} "
                     f"reason={c['obligation_reason']!r} ({c['obligation_reason_bucket']}) "
                     f"evidence={c['evidence_result_path']}"
+                )
+        stale_terminal = summary.get("stale_terminal_evidence") or []
+        if stale_terminal:
+            print(
+                f"stale_terminal_evidence={len(stale_terminal)} "
+                f"(mismatch={summary.get('stale_terminal_evidence_mismatch_count', 0)} "
+                f"unknown={summary.get('stale_terminal_evidence_unknown_count', 0)}) "
+                "— already-terminal, evidence has drifted — NOT auto-fixed, "
+                "reopen via scripts/gate_obligation_reopen_stale_evidence.py"
+            )
+            for s in stale_terminal:
+                print(
+                    f"  {s['dispatch_id']} gate={s['gate']} status={s['obligation_status']} "
+                    f"binding={s['binding']} evidence={s['evidence_result_path']}"
                 )
         unlinked_prs = summary.get("prs_without_obligation") or []
         if unlinked_prs:

@@ -973,7 +973,16 @@ class TestFastFulfillmentTripwire:
             "rescued BEFORE the gate manager is ever invoked — never "
             "re-attempted just because its dispatch_id does not match"
         )
-        assert "fast_fulfillment_warning" not in outcome
+        # OI-1764 point 2: this rescue books STATUS_FULFILLED from a result
+        # file this attempt never touched (mtime set stale above) — exactly
+        # the shape _flag_fast_fulfillment_if_evidence_predates_attempt
+        # exists to flag. Before OI-1764 this early (pre-execution) route
+        # never computed the warning at all, unlike the late (post-execution)
+        # route, so it was silently absent here even though the underlying
+        # evidence is exactly as stale-by-mtime as the case that route DOES
+        # warn on.
+        assert "fast_fulfillment_warning" in outcome
+        assert "not provably a fresh run this cycle" in outcome["fast_fulfillment_warning"]
 
 
 # ---------------------------------------------------------------------------
@@ -1663,3 +1672,243 @@ class TestPRsWithoutObligationReportedByRun:
         summary = runner.run(state_dir, write=False)
 
         assert summary.get("prs_without_obligation") == []
+
+
+# ---------------------------------------------------------------------------
+# OI-1764: terminal evidence that went stale AFTER the obligation closed.
+# The per-obligation loop skips every already-terminal record outright
+# (``if status in TERMINAL_STATUSES: continue``) — nothing else in this
+# runner ever looks at one again, so a PR that landed a fix-forward push
+# AFTER its gate obligation already closed fulfilled/failed goes unnoticed
+# forever. :func:`_stale_terminal_evidence` is the read-only detector.
+# ---------------------------------------------------------------------------
+
+
+def _write_gate_result(
+    state_dir: Path, name: str, *, commit_sha: str, status: str = "pass",
+    pr_number: int = 1864, gate: str = "codex_gate",
+) -> Path:
+    path = state_dir / "review_gates" / "results" / name
+    path.write_text(
+        json.dumps({
+            "gate": gate, "pr_number": pr_number, "status": status,
+            "commit_sha": commit_sha,
+        }),
+        encoding="utf-8",
+    )
+    return path
+
+
+class TestStaleTerminalEvidenceDetection:
+    """Unit coverage for :func:`gate_obligation_runner._stale_terminal_evidence`."""
+
+    def test_mismatch_is_reported_in_its_own_bucket(self, tmp_path, monkeypatch):
+        """RED before OI-1764: a terminal obligation whose evidence names a
+        commit that is no longer the PR head was invisible — this function
+        did not exist and nothing else ever re-examines a terminal record.
+        A REAL, differing sha on each side, never an empty one — an empty
+        sha would test the ``unknown`` branch below, not ``mismatch``."""
+        state_dir = _make_state_dir(tmp_path)
+        old_sha = "e222601b" + "0" * 32
+        new_sha = "ff5183e8" + "1" * 32
+        result_path = _write_gate_result(state_dir, "pr-1864-codex_gate.json", commit_sha=old_sha)
+        record = {
+            "dispatch_id": "20260910-oi1764-mismatch", "gate": "codex_gate", "pr_number": 1864,
+            "status": STATUS_FULFILLED, "evidence_result_path": str(result_path),
+        }
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: new_sha)
+
+        findings = runner._stale_terminal_evidence([(state_dir / "obl.json", record)])
+
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding["binding"] == "mismatch"
+        assert finding["dispatch_id"] == "20260910-oi1764-mismatch"
+        assert finding["evidence_commit_sha"] == old_sha
+        assert finding["head_sha"] == new_sha
+        assert old_sha[:8] in finding["detail"]
+        assert new_sha[:8] in finding["detail"]
+
+    def test_unknown_is_reported_distinctly_from_mismatch(self, tmp_path, monkeypatch):
+        """An empty commit_sha must land in the THIRD bucket (unknown), never
+        silently folded into mismatch or silently cleared as a match."""
+        state_dir = _make_state_dir(tmp_path)
+        result_path = _write_gate_result(state_dir, "pr-1865-codex_gate.json", commit_sha="")
+        record = {
+            "dispatch_id": "20260910-oi1764-unknown", "gate": "codex_gate", "pr_number": 1865,
+            "status": STATUS_FAILED, "evidence_result_path": str(result_path),
+        }
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: "cccccccc" * 5)
+
+        findings = runner._stale_terminal_evidence([(state_dir / "obl.json", record)])
+
+        assert len(findings) == 1
+        assert findings[0]["binding"] == "unknown"
+        assert findings[0]["dispatch_id"] == "20260910-oi1764-unknown"
+
+    def test_match_is_the_silent_control_case(self, tmp_path, monkeypatch):
+        """Control, required: without this, every closed PR whose evidence
+        is genuinely current would also get flagged."""
+        state_dir = _make_state_dir(tmp_path)
+        current_sha = "dddddddd" * 5
+        result_path = _write_gate_result(state_dir, "pr-1866-codex_gate.json", commit_sha=current_sha)
+        record = {
+            "dispatch_id": "20260910-oi1764-match", "gate": "codex_gate", "pr_number": 1866,
+            "status": STATUS_FULFILLED, "evidence_result_path": str(result_path),
+        }
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: current_sha)
+
+        findings = runner._stale_terminal_evidence([(state_dir / "obl.json", record)])
+
+        assert findings == []
+
+    def test_non_terminal_obligation_is_skipped(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        result_path = _write_gate_result(state_dir, "pr-1867-codex_gate.json", commit_sha="eeeeeeee" * 5)
+        record = {
+            "dispatch_id": "20260910-oi1764-pending", "gate": "codex_gate", "pr_number": 1867,
+            "status": STATUS_PENDING, "evidence_result_path": str(result_path),
+        }
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: "ffffffff" * 5)
+
+        findings = runner._stale_terminal_evidence([(state_dir / "obl.json", record)])
+
+        assert findings == []
+
+    def test_retired_without_evidence_path_is_skipped_without_a_gh_call(self, tmp_path, monkeypatch):
+        """A retired obligation carries no result/evidence path by
+        construction (nothing ever reviewed it) — must be skipped before any
+        PR-head lookup is even attempted, never a wasted/erroring gh call."""
+        state_dir = _make_state_dir(tmp_path)
+
+        def _boom(pr_number):
+            raise AssertionError("must not resolve a PR head for evidence-less obligation")
+
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", _boom)
+        record = {
+            "dispatch_id": "20260910-oi1764-retired", "gate": "codex_gate", "pr_number": None,
+            "status": STATUS_RETIRED, "evidence_result_path": None, "result_path": None,
+        }
+
+        findings = runner._stale_terminal_evidence([(state_dir / "obl.json", record)])
+
+        assert findings == []
+
+    def test_missing_evidence_file_is_reported_as_unknown_not_a_crash(self, tmp_path, monkeypatch):
+        """The obligation POINTS at an evidence file that is no longer on
+        disk (pruned, moved). Must never raise, and must land in the
+        ``unknown`` bucket — this is exactly the undeterminable case, not a
+        silent match and not a silent mismatch."""
+        state_dir = _make_state_dir(tmp_path)
+        missing_path = state_dir / "review_gates" / "results" / "pr-1869-codex_gate.json"
+        record = {
+            "dispatch_id": "20260910-oi1764-missing-evidence", "gate": "codex_gate",
+            "pr_number": 1869, "status": STATUS_FULFILLED,
+            "evidence_result_path": str(missing_path),
+        }
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: "abababab" * 5)
+
+        findings = runner._stale_terminal_evidence([(state_dir / "obl.json", record)])
+
+        assert len(findings) == 1
+        assert findings[0]["binding"] == "unknown"
+        assert "unreadable" in findings[0]["detail"] or "could not be verified" in findings[0]["detail"]
+
+    def test_falls_back_to_result_path_when_no_evidence_result_path(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        old_sha = "11111111" * 5
+        new_sha = "22222222" * 5
+        result_path = _write_gate_result(state_dir, "pr-1868-codex_gate.json", commit_sha=old_sha)
+        record = {
+            "dispatch_id": "20260910-oi1764-fallback", "gate": "codex_gate", "pr_number": 1868,
+            "status": STATUS_FULFILLED, "result_path": str(result_path),
+        }
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: new_sha)
+
+        findings = runner._stale_terminal_evidence([(state_dir / "obl.json", record)])
+
+        assert len(findings) == 1
+        assert findings[0]["binding"] == "mismatch"
+
+
+class TestStaleTerminalEvidenceReportedByRun:
+    """Integration coverage through :func:`gate_obligation_runner.run` — the
+    diagnostic must surface in the summary AND must never mutate the
+    obligation it reports on."""
+
+    def test_run_reports_stale_terminal_evidence_and_mutates_nothing(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: None)
+        dispatch_id = "20260917-oi1764-fixforward"
+        obligation_file = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=1864,
+        )
+        old_sha = "e222601b" + "0" * 32
+        new_sha = "ff5183e8" + "1" * 32
+        result_path = _write_gate_result(
+            state_dir, "pr-1864-codex_gate.json", commit_sha=old_sha, pr_number=1864,
+        )
+        update_obligation(
+            obligation_file,
+            status=STATUS_FULFILLED,
+            pr_number=1864,
+            result_path=str(result_path),
+            evidence_result_path=str(result_path),
+            resolved_at="2026-09-10T00:00:00Z",
+            reason="fulfilled_by_existing_evidence",
+        )
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: new_sha)
+
+        before_obligation = obligation_file.read_bytes()
+        before_result = result_path.read_bytes()
+
+        summary = runner.run(state_dir)
+
+        # Third case, required: the detection pass must mutate NEITHER file,
+        # byte for byte.
+        assert obligation_file.read_bytes() == before_obligation
+        assert result_path.read_bytes() == before_result
+
+        findings = summary.get("stale_terminal_evidence") or []
+        assert len(findings) == 1
+        finding = findings[0]
+        assert finding["dispatch_id"] == dispatch_id
+        assert finding["binding"] == "mismatch"
+        assert summary.get("stale_terminal_evidence_mismatch_count") == 1
+        assert summary.get("stale_terminal_evidence_unknown_count") == 0
+        # Reviewed, just not of the code now on the PR — never counted
+        # toward "still needs review".
+        assert summary["pending_after"] == 0
+
+    def test_run_stays_silent_when_evidence_is_still_current(self, tmp_path, monkeypatch):
+        """Control through the real entry point: a terminal obligation whose
+        evidence sha still matches the PR head must produce no finding and
+        no count — otherwise every closed PR in the store would show up."""
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: None)
+        dispatch_id = "20260917-oi1764-current"
+        obligation_file = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=1862,
+        )
+        current_sha = "465e083c" + "2" * 32
+        result_path = _write_gate_result(
+            state_dir, "pr-1862-codex_gate.json", commit_sha=current_sha, pr_number=1862,
+        )
+        update_obligation(
+            obligation_file,
+            status=STATUS_FULFILLED,
+            pr_number=1862,
+            result_path=str(result_path),
+            evidence_result_path=str(result_path),
+            resolved_at="2026-09-10T00:00:00Z",
+            reason="fulfilled_by_existing_evidence",
+        )
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: current_sha)
+
+        summary = runner.run(state_dir)
+
+        assert summary.get("stale_terminal_evidence") == []
+        assert summary.get("stale_terminal_evidence_mismatch_count") == 0
+        assert summary.get("stale_terminal_evidence_unknown_count") == 0
