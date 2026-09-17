@@ -67,6 +67,14 @@ if str(_HERE) not in sys.path:
 
 from project_root import resolve_project_root  # noqa: E402
 from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES  # noqa: E402
+# Load-bearing, unlike the advisory FAILURE_CLASSES cross-check below: this is
+# the exact reason-string gate_recorder books a quota refusal under, and E6
+# excludes it from the streak. A local copy of the literal here would be a
+# second vocabulary that drifts silently the moment the writer's changes.
+# failure_classification is stdlib-only and a sibling in this same directory,
+# so importing it keeps this module's standalone-importable contract intact —
+# importing gate_recorder (which pulls the whole receipt stack) would not.
+from failure_classification import GATE_QUOTA_REFUSAL_REASON as QUOTA_REFUSAL_REASON  # noqa: E402
 
 try:
     from failure_classification import FAILURE_CLASSES as _KNOWN_FAILURE_CLASSES
@@ -555,6 +563,27 @@ _INFRA_FAIL_STATUSES = frozenset({"failed", "fail", "unavailable", "not_executab
 # (OI-1693: a gate requested in the routing paths but never shipped).
 _UNBUILT_GATE_REASONS = frozenset({"gate_runner_missing"})
 
+# Reasons that mean "an EXTERNAL, time-boxed condition refused the run" — the
+# provider's quota or credit is spent. Excluded from the streak for the same
+# reason _UNBUILT_GATE_REASONS is, and the reverse of it: a missing runner
+# cannot self-heal by retrying, and a quota refusal heals by ITSELF, at a date
+# the provider usually states out loud.
+#
+# Measured 2026-09-17 (D-gate-quota-105245): codex hit its ChatGPT weekly
+# limit, three consecutive PRs (#1126/#1127/#1128) recorded the refusal, and
+# E6 read three identical causes as systemic and halted every dispatch in
+# mission-control. The provider's own text named both the cause and its end
+# ("try again at Sep 19th, 2026 10:11 AM"). Three readings of one external
+# outage is not three failures of this fabric, and halting on it stays broken
+# for as long as the quota window lasts — while the takeover chain is already
+# the designed response to exactly this state.
+#
+# This does NOT weaken E6 on anything else: the threshold is unchanged, and a
+# gate failing three times for any reason the fabric itself owns still
+# triggers. Only the cause the fabric cannot fix by stopping is excluded, and
+# it is still reported loudly (a non-triggering notice, never a silent skip).
+_EXTERNAL_TRANSIENT_GATE_REASONS = frozenset({QUOTA_REFUSAL_REASON})
+
 DEFAULT_REPEAT_THRESHOLD = 3
 
 
@@ -621,6 +650,7 @@ def check_repeated_gate_failure_cause(
 
     by_gate: Dict[str, List[Tuple[datetime, Any, Optional[str]]]] = {}
     unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
+    exhausted_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     for fp in files:
         try:
             d = json.loads(fp.read_text(encoding="utf-8"))
@@ -637,16 +667,27 @@ def check_repeated_gate_failure_cause(
         # _gate_result_cause reports what the record honestly says, for any
         # infra-fail reason alike. The POLICY choice of which causes count
         # toward a repeating-failure streak belongs here, not in that
-        # helper: a gate_runner_missing record means the gate was never
-        # built, not that it failed and might recover on retry. It is
-        # excluded from the streak and tracked separately below instead.
+        # helper. Two causes are excluded, for opposite reasons, and each
+        # keeps its OWN bucket so the two stay distinguishable in the output:
+        #   - gate_runner_missing: the gate was never built, so it cannot
+        #     recover on retry — a standing configuration gap (OI-1693).
+        #   - a quota refusal: an external, time-boxed condition that recovers
+        #     BY ITSELF, usually at a date the provider states out loud
+        #     (D-gate-quota-105245). Halting on it stays broken for exactly as
+        #     long as the provider's window lasts.
+        # Both are reported below as loud, non-triggering notices — excluded
+        # from the streak, never silently dropped.
         cause = _gate_result_cause(d)
-        if cause is not None and cause.startswith("reason:") and cause[len("reason:") :] in _UNBUILT_GATE_REASONS:
+        cause_reason = cause[len("reason:") :] if cause is not None and cause.startswith("reason:") else None
+        if cause_reason in _UNBUILT_GATE_REASONS:
             unbuilt_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
+            continue
+        if cause_reason in _EXTERNAL_TRANSIENT_GATE_REASONS:
+            exhausted_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
             continue
         by_gate.setdefault(gate, []).append((ts, d.get("pr_number"), cause))
 
-    if not by_gate and not unbuilt_gate_records:
+    if not by_gate and not unbuilt_gate_records and not exhausted_gate_records:
         return _unmeasurable(check_id, "geen bruikbare gate-resultaten met geldige recorded_at gevonden")
 
     sub_results: List[StopConditionResult] = []
@@ -685,6 +726,26 @@ def check_repeated_gate_failure_cause(
                 f"gate '{gate}' wordt aangevraagd maar heeft geen runner "
                 f"(reason:gate_runner_missing, {len(records)}x gezien, meest recente PR #{newest_pr})",
                 gate=gate, reason="gate_runner_missing", count=len(records), newest_pr=newest_pr,
+            )
+        )
+
+    # Same shape, different cause: an external quota/credit refusal. Reported
+    # every time it is seen, per gate, as an _unmeasurable notice — which can
+    # never tip _combine's verdict to TRIGGERED below, so a spent provider
+    # quota is a loud non-event here instead of a fabric-wide halt. The
+    # designed response to this state is the review-gate takeover chain
+    # (VNX_REVIEW_GATE_TAKEOVER_CHAIN), not a stop condition.
+    for gate, records in exhausted_gate_records.items():
+        records.sort(key=lambda r: r[0])
+        newest_pr = records[-1][1]
+        sub_id = f"{check_id}:quota:{gate}"
+        sub_results.append(
+            _unmeasurable(
+                sub_id,
+                f"gate '{gate}' werd geweigerd door een externe quota-limiet "
+                f"(reason:{QUOTA_REFUSAL_REASON}, {len(records)}x gezien, meest recente PR #{newest_pr}) "
+                f"— externe, tijdelijke oorzaak, telt niet mee als systemische herhaling",
+                gate=gate, reason=QUOTA_REFUSAL_REASON, count=len(records), newest_pr=newest_pr,
             )
         )
 

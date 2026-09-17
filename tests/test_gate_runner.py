@@ -28,6 +28,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import gate_runner
+from gate_recorder import EXECUTION_FAILURE_REASONS, QUOTA_REFUSAL_REASON  # noqa: E402
 from gate_runner import GateRunner
 
 
@@ -453,7 +454,18 @@ class TestExitNonzeroReasonDetail:
         before_fix_detail = "Subprocess exited with code 1"
         after_fix_detail = result["reason_detail"]
 
-        assert result["reason"] == "exit_nonzero"
+        # This fixture is a QUOTA error, so since D-gate-quota-105245
+        # gate_recorder books it under QUOTA_REFUSAL_REASON rather than the
+        # bare lifecycle reason — the provider named its own cause in the very
+        # text this test is about. That reclassification is not this test's
+        # subject (reason_detail is), so what is asserted here is the
+        # invariant OI-1293 actually cares about: the reason is a registered
+        # execution failure, hence status=unavailable. The complement — an
+        # unstructured panic with no marker keeping `exit_nonzero` — is
+        # asserted in test_unstructured_output_falls_back_to_raw_tail below.
+        assert result["reason"] in EXECUTION_FAILURE_REASONS
+        assert result["reason"] == QUOTA_REFUSAL_REASON
+        assert result["reason_before_classification"] == "exit_nonzero"
         # Before the fix, this is exactly what reason_detail would have been.
         assert after_fix_detail != before_fix_detail
         assert after_fix_detail.startswith(before_fix_detail)
@@ -486,10 +498,19 @@ class TestExitNonzeroReasonDetail:
 
     def test_reason_stays_unavailable_not_failed(self, gate_env, monkeypatch):
         """Trap 1 (OI-1293 dispatch): enriching reason_detail must not smuggle
-        in a new `reason` value. `reason` stays `exit_nonzero` — already in
-        gate_recorder.EXECUTION_FAILURE_REASONS — so record_failure still
-        books status=unavailable, not `failed`. A `failed` status here would
-        misread a quota/infra failure as a rejected PR review."""
+        in a new `reason` value that lands OUTSIDE
+        gate_recorder.EXECUTION_FAILURE_REASONS — record_failure must still
+        book status=unavailable, not `failed`. A `failed` status here would
+        misread a quota/infra failure as a rejected PR review.
+
+        The invariant is the STATUS, and it is unchanged. The route to it
+        moved: since D-gate-quota-105245 this fixture's quota prose is
+        classified at write time and booked under QUOTA_REFUSAL_REASON, which
+        is itself registered in EXECUTION_FAILURE_REASONS — so unavailable
+        still follows, now for a reason that names the actual cause instead of
+        the exit code. Asserted below against the registry rather than against
+        one literal, so the trap keeps holding whatever reason a future
+        enrichment picks."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
 
         error_line = json.dumps({
@@ -507,7 +528,7 @@ class TestExitNonzeroReasonDetail:
             gate_env, payload, stdout_bytes=stdout_bytes, pid=97531,
         )
 
-        assert result["reason"] == "exit_nonzero"
+        assert result["reason"] in EXECUTION_FAILURE_REASONS
         assert result["status"] == "unavailable"
         assert result["required_reruns"] == ["codex_gate"]
         assert "NOT a review fail" in result["summary"]
@@ -515,7 +536,9 @@ class TestExitNonzeroReasonDetail:
         result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "unavailable"
-        assert saved["reason"] == "exit_nonzero"
+        assert saved["reason"] in EXECUTION_FAILURE_REASONS
+        assert saved["reason"] == QUOTA_REFUSAL_REASON
+        assert saved["reason_before_classification"] == "exit_nonzero"
         assert "usage limit" in saved["summary"]
 
 
