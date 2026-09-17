@@ -339,9 +339,15 @@ def write_skip_rationale(
     has one — a write-refusal audit line without it names the gate and the PR
     but not which head the overwrite guard was protecting, which is the one
     fact a reader needs to tell a live refusal apart from a stale one. Empty
-    string, not omitted, for a caller that has no head to report (the
-    pre-OI-1750 not_executable callers): the field stays present and uniform
-    across every record this writer produces.
+    string, not omitted, so the field stays present and uniform across every
+    record this writer produces, even for a caller with no head to report
+    (e.g. a GATE-4 skip that fires before any commit is resolved). Every
+    not_executable caller (``record_not_executable`` and the three
+    ``gate_request_handler.py`` sites that opt out of
+    :func:`write_result_guarded`'s own audit line, second OI-1750 finding)
+    DOES have a head at this point and passes it here — this is the only
+    place that refusal's ``commit_sha`` survives once the guard's own line
+    is suppressed.
     """
     provider = resolve_gate_provider(gate)
     if provider is None:
@@ -1458,9 +1464,23 @@ def write_result_guarded(
     (:func:`annotate_refused_write`), never in the ledger a later reader
     checks. ``audit_refusal=False`` opts out for a caller that already logs
     its own skip-rationale line for every call regardless of this guard's
-    outcome (:func:`record_not_executable`, OI-1707) — without the opt-out
-    that caller would double-log the SAME refused call, once under its own
-    reason and once under this function's ``gate_result_write_refused``.
+    outcome — without the opt-out that caller would double-log the SAME
+    refused call, once under its own reason and once under this function's
+    ``gate_result_write_refused``.
+
+    That opt-out is not one caller's special case. Every PRODUCTION caller
+    that unconditionally writes its own skip-rationale line passes
+    ``audit_refusal=False``: :func:`record_not_executable` (OI-1707,
+    original) and, since the same shape was found in three more places on a
+    second review pass of this PR, ``gate_request_handler._mark_gate_unavailable``,
+    ``._request_glm`` and ``._request_deepseek`` (OI-1750 second finding).
+    ``tests/test_oi1750_tweede_plek_audit_line_count.py`` pins the exact
+    audit-line COUNT for all four, not just that a line exists, because
+    "a line exists" is what a one-opted-out/three-not state would also
+    satisfy. The default stays ``True``: a future caller earns the opt-out
+    by also carrying its own skip-rationale write (with ``commit_sha``,
+    since that is where the refusal's head now has to live), never by
+    assumption.
     """
     with slot_lock(result_path):
         try:
