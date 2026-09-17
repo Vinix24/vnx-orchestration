@@ -133,6 +133,33 @@ def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def extract_verdict_block(stdout: str) -> Dict[str, Any]:
+    """Extract the shared fenced ``json verdict block every gate contract asks for.
+
+    ``VERDICT_CONTRACT`` (gate_lane_contract.py — glm_gate, kimi_gate and the
+    harness-lane strategy in gate_runner) and ``_REVIEWER_VERDICT_TEMPLATE``
+    (gate_runner.py — codex_gate, gemini_review) ask for the SAME shape: a
+    fenced ```json block containing a ``"verdict"`` key. This is the one
+    place gate_artifacts.materialize_artifacts's OI-1767 fail-closed guard
+    checks for that shape, keyed on the shape itself rather than on a gate
+    name (a name-branch here would repeat OI-1763's defect).
+
+    Reuses the NDJSON-unwrap in :func:`_extract_codex_text` so this also
+    works on codex's ``exec --json`` stream, not only on the plain-text
+    report bodies glm_gate/kimi_gate/gemini_review stdout actually is.
+    Returns ``{}`` when no such block is found — a candidate JSON object that
+    matched on a ``"findings"`` key alone (the looser match
+    :func:`_extract_codex_verdict` itself makes, kept for codex's own
+    findings-extraction fallback) does NOT count here: the contract's shared
+    characteristic is specifically the ``"verdict"`` key.
+    """
+    text = _extract_codex_text(stdout)
+    candidate = _extract_codex_verdict(text)
+    if isinstance(candidate, dict) and "verdict" in candidate:
+        return candidate
+    return {}
+
+
 def parse_codex_findings(stdout: str) -> Dict[str, Any]:
     """Extract findings from Codex headless NDJSON output."""
     text = _extract_codex_text(stdout)

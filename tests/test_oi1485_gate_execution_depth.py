@@ -67,7 +67,10 @@ REAL_STREAM = "\n".join(
 ) + "\n"
 
 # A lane that emits no event stream at all. kimi_gate and glm_gate reports
-# carry prose only — measured, both had zero JSON event lines.
+# carry prose only — measured, both had zero JSON event lines. Ends with a
+# real VERDICT_CONTRACT block (OI-1767) so this fixture clears the
+# verdict-block guard exactly like a real harness-lane report would — this
+# test is about event-stream depth measurement, not verdict-block presence.
 NO_STREAM = (
     "## Review\n\n"
     "No blocking findings. Two advisories below.\n\n"
@@ -76,7 +79,10 @@ NO_STREAM = (
     "   changes behaviour between attempts.\n"
     "2. tests/test_mod.py:12 — the fixture builds its own tmp dir instead of\n"
     "   taking tmp_path, so a failed run leaves it behind.\n\n"
-    "Residual risk: the diff was reviewed against main at 17de88de.\n"
+    "Residual risk: the diff was reviewed against main at 17de88de.\n\n"
+    "```json\n"
+    '{\n  "verdict": "pass",\n  "findings": [],\n  "residual_risk": "reviewed against main at 17de88de"\n}\n'
+    "```\n"
 )
 
 

@@ -135,7 +135,12 @@ def test_a_harness_lane_gate_delegates_to_the_governed_dispatcher(
     """
     result, calls, report_path = _run_harness(
         gate_dirs, monkeypatch, gate,
-        report_text="Review complete.\nNo blocking findings.\nApproved.\n",
+        report_text=(
+            "Review complete.\nNo blocking findings.\nApproved.\n\n"
+            "```json\n"
+            '{\n  "verdict": "pass",\n  "findings": [],\n  "residual_risk": null\n}\n'
+            "```\n"
+        ),
     )
 
     assert result["status"] == "completed", result.get("reason_detail")
@@ -171,7 +176,12 @@ def test_a_harness_lane_run_never_consults_path(gate_dirs, monkeypatch):
 
     result, _calls, _report_path = _run_harness(
         gate_dirs, monkeypatch, "kimi_gate",
-        report_text="Review complete.\nNo blocking findings.\nApproved.\n",
+        report_text=(
+            "Review complete.\nNo blocking findings.\nApproved.\n\n"
+            "```json\n"
+            '{\n  "verdict": "pass",\n  "findings": [],\n  "residual_risk": null\n}\n'
+            "```\n"
+        ),
     )
 
     assert result["status"] == "completed", result.get("reason_detail")
