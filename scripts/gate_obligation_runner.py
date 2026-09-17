@@ -1760,15 +1760,21 @@ def _stale_terminal_evidence(
     only ever repeat the SAME finding forever (noise, not signal) — those
     obligations are silently excluded, not reported as stale.
 
-    When ``open_pr_lookup["prs"]`` is ``None`` (the shared ``gh`` call
-    failed), this function has no way to know which obligations belong to a
-    still-open PR — it does NOT fall back to resolving the full store (that
-    would reintroduce the exact cost this scoping removes) and does NOT
-    silently return ``[]`` either, which would read as "nothing is stale"
-    when the truth is "coverage could not be checked" (OI-1766). It returns
-    a single loud ``binding: "unknown"`` finding with no ``dispatch_id``
-    instead, in the same spirit as the per-obligation ``unknown`` branch
-    below, and skips the per-obligation sweep entirely for that run.
+    When ``open_pr_lookup["prs"]`` is ``None``, this function has no way to
+    know which obligations belong to a still-open PR — it does NOT fall back
+    to resolving the full store (that would reintroduce the exact cost this
+    scoping removes) and does NOT silently return ``[]`` either, which would
+    read as "nothing is stale" when the truth is "coverage could not be
+    checked" (OI-1766). It returns a single loud ``binding: "unknown"``
+    finding with no ``dispatch_id`` instead, in the same spirit as the
+    per-obligation ``unknown`` branch below, and skips the per-obligation
+    sweep entirely for that run. ``prs`` is ``None`` for two distinct
+    reasons, each getting its own accurate ``detail`` text rather than one
+    generic message (PR #1865 review, second fix-forward):
+    ``open_pr_lookup["owner_repo_unresolvable"]`` — no GitHub owner/repo
+    could be resolved at all, so the ``gh pr list`` call was never even
+    attempted — versus the shared ``gh`` call itself failing (binary
+    missing, auth failure, timeout, non-JSON).
 
     When ``open_pr_lookup["suspect"]`` is ``True`` (the open-PR list hit the
     ``--limit`` cap, so more open PRs may exist beyond it, OI-1766), the
@@ -1796,6 +1802,24 @@ def _stale_terminal_evidence(
     """
     open_prs = open_pr_lookup.get("prs")
     if open_prs is None:
+        if open_pr_lookup.get("owner_repo_unresolvable"):
+            detail = (
+                "no GitHub owner/repo could be resolved for this runner — "
+                "the project checkout is not registered (~/.vnx/projects.json) "
+                "and no GitHub 'origin' remote resolves from the checkout or "
+                "cwd, so `gh pr list` was never even attempted — "
+                "stale-terminal-evidence coverage is undetermined this run, "
+                "not clear: an empty result here must never be read as "
+                "'nothing is stale'. Register the project checkout, or run "
+                "from within it, then rerun."
+            )
+        else:
+            detail = (
+                "the open-PR list could not be resolved (gh failure) — "
+                "stale-terminal-evidence coverage is undetermined this run, "
+                "not clear: an empty result here must never be read as "
+                "'nothing is stale'. Rerun once `gh pr list` succeeds."
+            )
         return [{
             "dispatch_id": None,
             "gate": None,
@@ -1806,12 +1830,7 @@ def _stale_terminal_evidence(
             "head_sha": "",
             "evidence_commit_sha": "",
             "binding": "unknown",
-            "detail": (
-                "the open-PR list could not be resolved (gh failure) — "
-                "stale-terminal-evidence coverage is undetermined this run, "
-                "not clear: an empty result here must never be read as "
-                "'nothing is stale'. Rerun once `gh pr list` succeeds."
-            ),
+            "detail": detail,
         }]
     open_pr_numbers: Set[int] = {
         pr.get("number") for pr in open_prs
@@ -3280,15 +3299,28 @@ def run(
     contradictions = _terminal_evidence_contradictions(obligations, result_index)
     # OI-1764 fix-forward: both _stale_terminal_evidence and
     # _find_prs_without_obligation need the open-PR list — resolved ONCE
-    # here and shared, never a second `gh pr list --state open` call. No
-    # resolvable owner/repo (e.g. a local-only checkout) degrades to "no
-    # open PRs known", the same silent-empty contract prs_without_obligation
-    # already had for that case — not a gh failure, so not "suspect" either.
+    # here and shared, never a second `gh pr list --state open` call.
+    #
+    # PR #1865 review (second fix-forward): an unresolvable owner/repo used
+    # to degrade straight to {"prs": [], "suspect": False} — indistinguishable
+    # from "resolved, genuinely zero open PRs", so _stale_terminal_evidence
+    # silently read "not checked" as "checked, nothing found". That broke the
+    # contract _resolve_github_owner_repo itself documents (None -> the
+    # caller surfaces a loud, distinct unresolvable state, never a silent
+    # wait) and that resolve_pr_number already honors. It now degrades to
+    # {"prs": None, ...}, the SAME "coverage undetermined" shape
+    # _list_open_prs returns on an outright gh failure, so
+    # _stale_terminal_evidence's existing loud unknown-finding branch below
+    # covers this case too — with its own accurate detail text
+    # (owner_repo_unresolvable), never the generic "gh failure" wording.
+    # prs_without_obligation (OI-1751) is untouched here: it already guards
+    # on owner_repo_for_sweep directly and keeps its own documented
+    # silent-empty contract for this case.
     owner_repo_for_sweep = _resolve_github_owner_repo(state_dir)
     open_pr_lookup = (
         _list_open_prs(owner_repo_for_sweep)
         if owner_repo_for_sweep
-        else {"prs": [], "suspect": False}
+        else {"prs": None, "suspect": True, "owner_repo_unresolvable": True}
     )
     # OI-1764: a third full-store, read-only diagnostic, scoped to OPEN PRs
     # only — terminal obligations the loop above skips outright (line

@@ -1828,7 +1828,15 @@ class TestStaleTerminalEvidenceDetection:
     def test_retired_without_evidence_path_is_skipped_without_a_gh_call(self, tmp_path, monkeypatch):
         """A retired obligation carries no result/evidence path by
         construction (nothing ever reviewed it) — must be skipped before any
-        PR-head lookup is even attempted, never a wasted/erroring gh call."""
+        PR-head lookup is even attempted, never a wasted/erroring gh call.
+
+        PR #1865 review (second fix-forward): ``pr_number`` is deliberately
+        IN the open-PR set here (unlike the original version of this test,
+        which left it ``None`` against an empty open-PR list) — otherwise
+        the skip could just as well be caused by the open-PR-set check a few
+        lines above the evidence-path check, and this test would pass even
+        if the evidence-path branch were broken. Only the missing evidence
+        path may cause the skip now."""
         state_dir = _make_state_dir(tmp_path)
 
         def _boom(pr_number):
@@ -1836,12 +1844,12 @@ class TestStaleTerminalEvidenceDetection:
 
         monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", _boom)
         record = {
-            "dispatch_id": "20260910-oi1764-retired", "gate": "codex_gate", "pr_number": None,
+            "dispatch_id": "20260910-oi1764-retired", "gate": "codex_gate", "pr_number": 9010,
             "status": STATUS_RETIRED, "evidence_result_path": None, "result_path": None,
         }
 
         findings = runner._stale_terminal_evidence(
-            [(state_dir / "obl.json", record)], _open_pr_lookup(),
+            [(state_dir / "obl.json", record)], _open_pr_lookup(9010),
         )
 
         assert findings == []
@@ -2205,6 +2213,61 @@ class TestStaleTerminalEvidenceReportedByRun:
         assert len(findings) == 1
         assert findings[0]["binding"] == "unknown"
         assert findings[0]["dispatch_id"] is None
+        assert summary.get("stale_terminal_evidence_unknown_count") == 1
+
+    def test_unresolvable_owner_repo_is_reported_as_undetermined_through_run(
+        self, tmp_path, monkeypatch,
+    ):
+        """PR #1865 review, second fix-forward: an unresolvable owner/repo
+        (e.g. an unregistered central-install checkout) used to make run()
+        silently swap in an empty open-PR list — indistinguishable from a
+        resolved, genuinely-empty one — so stale_terminal_evidence read as
+        "checked, nothing found" when the truth was "never checked at all".
+        Before this fix, this scenario produced ``stale_terminal_evidence ==
+        []``, RED. It must now produce the same loud, distinct undetermined
+        finding as an outright `gh pr list` failure (previous test), and
+        `gh` must never even be invoked, since there is no owner/repo to
+        query it with."""
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: None)
+
+        def _no_gh(args, owner_repo=None):
+            raise AssertionError("must not call gh when no owner/repo resolves")
+
+        monkeypatch.setattr(runner, "_gh_json", _no_gh)
+        dispatch_id = "20260917-oi1764-owner-repo-unresolvable"
+        obligation_file = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate",
+            project_id="vnx-dev", pr_number=1871,
+        )
+        result_path = _write_gate_result(
+            state_dir, "pr-1871-codex_gate.json", commit_sha="dededede" * 5, pr_number=1871,
+        )
+        update_obligation(
+            obligation_file,
+            status=STATUS_FULFILLED,
+            pr_number=1871,
+            result_path=str(result_path),
+            evidence_result_path=str(result_path),
+            resolved_at="2026-09-10T00:00:00Z",
+            reason="fulfilled_by_existing_evidence",
+        )
+
+        def _boom(pr_number):
+            raise AssertionError("must not resolve any head when owner/repo is unresolvable")
+
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", _boom)
+
+        summary = runner.run(state_dir, write=False)
+
+        findings = summary.get("stale_terminal_evidence") or []
+        assert len(findings) == 1, (
+            "an unresolvable owner/repo must produce a loud undetermined "
+            "finding, never a silent empty stale_terminal_evidence list"
+        )
+        assert findings[0]["binding"] == "unknown"
+        assert findings[0]["dispatch_id"] is None
+        assert "owner/repo" in findings[0]["detail"]
         assert summary.get("stale_terminal_evidence_unknown_count") == 1
 
     def test_run_shares_one_open_pr_list_call_and_resolves_heads_only_for_open_prs(
