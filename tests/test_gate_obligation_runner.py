@@ -1525,3 +1525,141 @@ class TestEvidenceIndexJoinsOnPrNumber:
         record_b = _read_obligation(state_dir, "20260902-oi1612-shared-mismatch-b")
         assert record_a["status"] == STATUS_RETIRED
         assert record_b["status"] == STATUS_RETIRED
+
+
+# ---------------------------------------------------------------------------
+# OI-1751: a PR the obligation store can never see
+#
+# Every obligation this runner acts on already exists as a file on disk
+# before this module runs (registered at ``vnx dispatch`` time). The
+# per-obligation loop can therefore never notice a PR that never got an
+# obligation registered in the first place — and PR discovery in this file
+# only ever works by matching a head branch against
+# ``dispatch/<dispatch_id>`` (:func:`gate_obligation_runner._pr_from_github`).
+# A PR on any other branch (``docs/...``, ``fix/...``) is invisible to the
+# whole mechanism. Measured live on mission-control: five poortruns in one
+# day, none invoked the review-gate stack, because that day's PRs were named
+# ``docs/`` and ``fix/``.
+# ---------------------------------------------------------------------------
+
+
+class TestFindPRsWithoutObligation:
+    """Unit coverage for :func:`gate_obligation_runner._find_prs_without_obligation`."""
+
+    def test_flags_pr_matching_neither_branch_nor_pr_number(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+
+        def fake_gh_json(args, *, owner_repo=None):
+            assert owner_repo == "Vinix24/vnx-orchestration"
+            assert args[:4] == ["pr", "list", "--state", "open"]
+            return [
+                {"number": 10, "headRefName": "dispatch/20260910-known"},
+                {"number": 20, "headRefName": "fix/typo"},
+            ]
+
+        monkeypatch.setattr(runner, "_gh_json", fake_gh_json)
+        obligations = [(state_dir / "obl.json", {"dispatch_id": "20260910-known"})]
+
+        result = runner._find_prs_without_obligation(
+            state_dir, "Vinix24/vnx-orchestration", obligations,
+        )
+
+        assert [r["pr_number"] for r in result] == [20]
+        assert result[0]["branch"] == "fix/typo"
+        assert "20" in result[0]["reason"]
+
+    def test_matches_by_stamped_pr_number_even_off_convention_branch(self, tmp_path, monkeypatch):
+        """A rework/RESOLVED obligation stamps ``pr_number`` directly onto its
+        record — that alone must be enough to clear a PR, even when its
+        branch does not (or no longer) match ``dispatch/<id>``."""
+        state_dir = _make_state_dir(tmp_path)
+
+        def fake_gh_json(args, *, owner_repo=None):
+            return [{"number": 30, "headRefName": "feat/whatever"}]
+
+        monkeypatch.setattr(runner, "_gh_json", fake_gh_json)
+        obligations = [
+            (state_dir / "obl.json", {"dispatch_id": "20260910-rework", "pr_number": 30}),
+        ]
+
+        result = runner._find_prs_without_obligation(
+            state_dir, "Vinix24/vnx-orchestration", obligations,
+        )
+
+        assert result == []
+
+    def test_gh_unavailable_returns_empty_not_a_crash(self, tmp_path, monkeypatch):
+        state_dir = _make_state_dir(tmp_path)
+        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None: None)
+
+        result = runner._find_prs_without_obligation(state_dir, "Vinix24/vnx-orchestration", [])
+
+        assert result == []
+
+
+class TestPRsWithoutObligationReportedByRun:
+    """Integration coverage through :func:`gate_obligation_runner.run` — the
+    LOUD reporting this dispatch requires, not just the helper's own return
+    value.
+
+    RED on unfixed main (measured against this worktree's pre-fix
+    ``gate_obligation_runner.py``): ``run()``'s summary carries no
+    ``prs_without_obligation`` key at all (``.get(...)`` degrades to
+    ``None``/``[]``), and nothing is logged for PR #4242's ``docs/fix-typo``
+    branch — the assertion fails on the missing BEHAVIOR (a clean
+    ``AssertionError`` with the message below), never on an
+    ``AttributeError``/``ImportError``, because every symbol the test touches
+    (``runner.run``, ``summary.get``) already exists on unfixed main.
+    """
+
+    def test_pr_without_obligation_is_reported_not_silently_skipped(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        state_dir = _make_state_dir(tmp_path)
+        register_obligation(
+            state_dir, dispatch_id="20260917-oi1751-linked", gate="codex_gate",
+            project_id="vnx-dev", pr_number=4241,
+        )
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager)
+
+        def fake_gh_json(args, *, owner_repo=None):
+            if args[:4] == ["pr", "list", "--state", "open"]:
+                return [
+                    {"number": 4241, "headRefName": "dispatch/20260917-oi1751-linked"},
+                    {"number": 4242, "headRefName": "docs/fix-typo"},
+                ]
+            return None
+
+        monkeypatch.setattr(runner, "_gh_json", fake_gh_json)
+        caplog.set_level("WARNING", logger="gate_obligation_runner")
+
+        summary = runner.run(state_dir)
+
+        unlinked = summary.get("prs_without_obligation") or []
+        assert any(u.get("pr_number") == 4242 for u in unlinked), (
+            "PR #4242 (branch docs/fix-typo, no obligation) must be reported "
+            "by run(), not silently dropped from the poortstapel (OI-1751)"
+        )
+        entry = next(u for u in unlinked if u["pr_number"] == 4242)
+        assert entry["branch"] == "docs/fix-typo"
+        assert "4242" in entry["reason"]
+        assert any("4242" in record.message for record in caplog.records), (
+            "a PR without an obligation must be logged loudly (WARNING), not "
+            "only returned in the summary dict"
+        )
+        # Control: the properly-linked PR must never be flagged.
+        assert not any(u.get("pr_number") == 4241 for u in unlinked)
+
+    def test_no_owner_repo_degrades_to_empty_not_a_crash(self, tmp_path, monkeypatch):
+        """No GitHub owner/repo resolves (e.g. a local-only checkout) —
+        the sweep must degrade to an empty finding list, exactly like every
+        other owner_repo-gated lookup in this module, never raise."""
+        state_dir = _make_state_dir(tmp_path)
+        manager = _FakeReviewGateManager(state_dir, result_status="pass")
+        _patch_manager(monkeypatch, manager)
+        monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: None)
+
+        summary = runner.run(state_dir, write=False)
+
+        assert summary.get("prs_without_obligation") == []
