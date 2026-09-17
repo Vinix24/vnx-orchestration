@@ -248,6 +248,48 @@ class BlockedRecommendationError(ValueError):
     """
 
 
+class UnknownTaskClassError(ValueError):
+    """recommend()/decide() got a task_class that is not a key in routing_by_task.
+
+    OI-1756: before this, ``recs.get(task_class, [])`` returned an empty list for
+    BOTH an unknown/typo'd class (e.g. the legacy "implementation" string — not a
+    member of the routing_by_task vocabulary) and a real class that genuinely has
+    zero surviving candidates (e.g. every entry filtered by min_quality_tier). The
+    caller could not tell "this dispatch was never routed because the class does
+    not exist" from "this class legitimately has no recommendations yet" — a typo
+    silently produced the same outcome as a deliberate, correctly-configured empty
+    class. Raising here makes the first case loud; the second case still returns
+    an empty list (see recommend()) — the two outcomes stay distinguishable.
+    """
+
+
+def valid_task_classes(recommendations_path: Optional[Path] = None) -> frozenset[str]:
+    """The closed task_class vocabulary, derived from routing_by_task's own keys.
+
+    OI-1756: this is the single source of truth for "which task_class strings are
+    legal" — callers (the dispatch door, tests) must read it from here rather than
+    hardcode a second Python list of class names. A hardcoded copy is exactly the
+    drift routing_recommendations.yaml's own PROVENANCE NOTICE already documents
+    for model ids (glm-5 recommended in five places after it was blocked
+    elsewhere); task_class must not repeat that pattern.
+
+    Deliberately independent of ``_load_recommendations()``: that function also
+    enriches costs, sorts, and raises ``BlockedRecommendationError`` for a blocked
+    model anywhere in the file. A caller that only wants "which keys exist" must
+    not be blocked by an unrelated blocked-model entry in a DIFFERENT task class —
+    this reads the raw YAML keys only.
+    """
+    yaml_path = recommendations_path or _RECOMMENDATIONS_PATH
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"routing_recommendations.yaml not found at {yaml_path}")
+    raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or "routing_by_task" not in raw:
+        raise ValueError(
+            "Malformed routing_recommendations.yaml: missing 'routing_by_task' key"
+        )
+    return frozenset(raw["routing_by_task"].keys())
+
+
 def _validate_candidates_not_blocked(
     task_class: str,
     candidates: List[RouteCandidate],
@@ -403,6 +445,41 @@ def _load_recommendations(
             entries = task_node.get("candidates") or []
             min_qt: Optional[int] = task_node.get("min_quality_tier")
             max_qt: Optional[int] = task_node.get("max_quality_tier")
+            # OI-1756: min/max_quality_tier share quality_tier's own 1-3 domain
+            # (the per-candidate check a few lines below). A 0 floor READS as "no
+            # candidate below this tier" but every quality_tier is already >= 1,
+            # so it silently filters nothing while looking like a real gate —
+            # reject it the same way an out-of-range quality_tier is already
+            # rejected, rather than let a no-op floor pass as configured.
+            #
+            # Fix-forward (dispatch-20260917-oi1756-fixforward, glm_gate finding,
+            # severity info): coerce via int() the same way the per-candidate
+            # `quality_tier` check a few lines below does (`int(entry["quality_tier"])`)
+            # — a quoted YAML scalar like `min_quality_tier: "3"` was accepted on
+            # the per-candidate side but rejected here, an asymmetry within the
+            # same bounds check introduced by this PR. Coercing (rather than making
+            # the per-candidate side strict) keeps the existing accepted-inputs
+            # surface unchanged for both sides.
+            _coerced_bounds: Dict[str, Optional[int]] = {}
+            for _bound_name, _bound_val in (
+                ("min_quality_tier", min_qt), ("max_quality_tier", max_qt),
+            ):
+                if _bound_val is None:
+                    _coerced_bounds[_bound_name] = None
+                    continue
+                try:
+                    _bound_int = int(_bound_val)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"{_bound_name} must be 1-3, got {_bound_val!r} for task_class {task_class!r}"
+                    )
+                if _bound_int not in (1, 2, 3):
+                    raise ValueError(
+                        f"{_bound_name} must be 1-3, got {_bound_val!r} for task_class {task_class!r}"
+                    )
+                _coerced_bounds[_bound_name] = _bound_int
+            min_qt = _coerced_bounds["min_quality_tier"]
+            max_qt = _coerced_bounds["max_quality_tier"]
         else:
             entries = task_node or []
             min_qt = None
@@ -451,10 +528,19 @@ def recommend(
 ) -> List[RouteCandidate]:
     """Return ranked RouteCandidate list for a task class.
 
-    Returns empty list if the task class has no recommendations.
+    Raises UnknownTaskClassError when task_class is not a key in routing_by_task
+    (OI-1756) — that used to silently return []. Returns an EMPTY list only when
+    the class is real but has no surviving candidates (e.g. every entry filtered
+    by min_quality_tier/max_quality_tier); that outcome is legitimate and stays
+    distinct from "the class does not exist".
     """
     recs = _load_recommendations(recommendations_path)
-    return recs.get(task_class, [])
+    if task_class not in recs:
+        raise UnknownTaskClassError(
+            f"task_class {task_class!r} is not a key in routing_by_task; "
+            f"valid task classes: {', '.join(sorted(recs))}"
+        )
+    return recs[task_class]
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +575,12 @@ def decide(
 
     tags: when 'cost-tier-zero' or 'privacy-required' is present, cost_tier=0
     candidates (e.g. gemma-4b-local) are promoted to the front of the ranking.
+
+    classify_task() only ever returns a member of TASK_CLASSES (or the default
+    class), so recommend()'s UnknownTaskClassError should never fire here in
+    normal operation — if it does, TASK_CLASSES and routing_by_task have drifted
+    apart, and that must propagate loudly rather than be swallowed into a
+    quiet "no recommendations" RouteDecision (OI-1756).
     """
     task_class = classify_task(instruction, role=role, dispatch_paths=dispatch_paths)
     candidates = recommend(task_class, recommendations_path=recommendations_path)

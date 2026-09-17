@@ -18,9 +18,11 @@ from smart_router import (
     BlockedRecommendationError,
     RouteCandidate,
     RouteDecision,
+    UnknownTaskClassError,
     classify_task,
     decide,
     recommend,
+    valid_task_classes,
     _cost_aware_sort_key,
     _load_recommendations,
     TASK_CLASSES,
@@ -80,8 +82,13 @@ def recommendations_yaml(tmp_path):
 
 @pytest.fixture
 def empty_recommendations_yaml(tmp_path):
-    """YAML with routing_by_task but no entries for any class."""
-    data = {"routing_by_task": {}}
+    """YAML declaring classes as routing_by_task keys, each with zero candidates.
+
+    OI-1756: this is the "class exists, no candidates" case, distinct from a
+    class that is not a routing_by_task key at all (recommend() now raises
+    UnknownTaskClassError for that — see TestRecommend.test_unknown_task_class_raises).
+    """
+    data = {"routing_by_task": {"01_code_generation": [], "05_debugging": []}}
     p = tmp_path / "routing_recommendations.yaml"
     p.write_text(yaml.dump(data, default_flow_style=False), encoding="utf-8")
     return p
@@ -304,11 +311,16 @@ class TestRecommend:
         candidates = recommend("02_code_review", recommendations_path=recommendations_yaml)
         assert all(isinstance(c, RouteCandidate) for c in candidates)
 
-    def test_returns_empty_for_unknown_task_class(self, recommendations_yaml):
-        candidates = recommend("99_nonexistent", recommendations_path=recommendations_yaml)
-        assert candidates == []
+    def test_unknown_task_class_raises(self, recommendations_yaml):
+        """OI-1756: an unknown/typo'd class (not a routing_by_task key) must
+        raise, never silently return [] — that used to be indistinguishable
+        from a real class with zero configured candidates."""
+        with pytest.raises(UnknownTaskClassError, match="99_nonexistent"):
+            recommend("99_nonexistent", recommendations_path=recommendations_yaml)
 
-    def test_returns_empty_for_empty_yaml(self, empty_recommendations_yaml):
+    def test_returns_empty_for_declared_empty_class(self, empty_recommendations_yaml):
+        """A class that IS a routing_by_task key, with zero candidates, still
+        returns [] — a legitimate outcome distinct from an unknown class."""
         candidates = recommend("01_code_generation", recommendations_path=empty_recommendations_yaml)
         assert candidates == []
 
@@ -318,6 +330,25 @@ class TestRecommend:
         for tc in TASK_CLASSES:
             assert tc in recs, f"Missing recommendations for {tc}"
             assert len(recs[tc]) > 0, f"Empty recommendations for {tc}"
+
+    def test_valid_task_classes_matches_routing_by_task_keys(self, recommendations_yaml):
+        """valid_task_classes() reads exactly the routing_by_task keys — the
+        single source of truth, never a second hardcoded Python list."""
+        classes = valid_task_classes(recommendations_yaml)
+        assert classes == frozenset({
+            "01_code_generation", "02_code_review", "03_refactoring",
+            "04_documentation", "05_debugging", "06_design", "07_translation",
+        })
+
+    def test_valid_task_classes_matches_real_registry(self):
+        """The shipped routing_recommendations.yaml's keys are exactly
+        smart_router.TASK_CLASSES — no drift between the classifier's
+        vocabulary and the routing table's."""
+        assert valid_task_classes() == frozenset(TASK_CLASSES)
+
+    def test_valid_task_classes_raises_on_missing_file(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            valid_task_classes(tmp_path / "nonexistent.yaml")
 
     def test_raises_on_missing_file(self, tmp_path):
         missing = tmp_path / "nonexistent.yaml"
