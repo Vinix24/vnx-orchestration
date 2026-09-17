@@ -1600,6 +1600,24 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
         return frozenset()
 
 
+def _discover_valid_task_classes() -> frozenset[str]:
+    """Return the closed task_class vocabulary from routing_recommendations.yaml.
+
+    OI-1756: mirrors _discover_valid_roles's fail-closed convention exactly — an
+    unreadable/malformed routing_recommendations.yaml returns EMPTY, so
+    compile_plan's task_class membership check rejects every EXPLICIT task_class
+    (a dispatch that declares no task_class at all is unaffected; the check only
+    fires on a non-empty string). Never a second hardcoded Python list of class
+    names here — smart_router.valid_task_classes() is the single reader of
+    routing_by_task's keys.
+    """
+    try:
+        from smart_router import valid_task_classes as _valid_task_classes  # noqa: PLC0415
+        return _valid_task_classes()
+    except Exception:  # vnx-silent-except: registry discovery must never crash the door; empty set fails closed
+        return frozenset()
+
+
 def _resolve_router_pre_validate(spec: DispatchSpec) -> "Optional[DoorRouteResult]":
     """Run the smart router on a DispatchSpec BEFORE validate().
 
@@ -2092,6 +2110,8 @@ def build_runtime_snapshot(
     P0-2: staging binding verified via spec_file containment check.
     P1-#3: model_pins from provider_constraints.yaml SSOT.
     OI-921: valid_roles discovered from the engine's agents/ registry (fail-closed).
+    OI-1756: valid_task_classes discovered from routing_recommendations.yaml's
+    routing_by_task keys (fail-closed).
     golf 2A: T0 autonomous-chain stop-conditions (stop_conditions.py), measured
     LIVE on every fire — see _check_stop_conditions_verdict for the tri-state
     handling and the override contract.
@@ -2350,6 +2370,13 @@ def build_runtime_snapshot(
     # the registry is missing → compile_plan rejects every role (fail-closed).
     valid_roles = _discover_valid_roles(_resolve_repo_root() / "agents")
 
+    # OI-1756: task_class closed-set — derived from routing_recommendations.yaml's
+    # routing_by_task keys, never a hardcoded Python copy. Empty set when the file
+    # is missing/malformed → compile_plan rejects every EXPLICIT task_class
+    # (fail-closed, same convention as valid_roles above); a spec that declares no
+    # task_class is unaffected.
+    valid_task_classes = _discover_valid_task_classes()
+
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): computed here,
     # door-side (I/O + imports allowed), and passed through the snapshot so
     # compile_plan stays pure. task_class comes from the spec when set, else the
@@ -2409,6 +2436,7 @@ def build_runtime_snapshot(
         target_capable=target_capable,
         model_pins=snapshot_model_pins,
         valid_roles=valid_roles,
+        valid_task_classes=valid_task_classes,
         parent_dispatch=chain_parent,
         task_class=chain_task_class,
         tier_from=chain_tier_from,

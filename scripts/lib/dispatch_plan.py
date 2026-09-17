@@ -109,6 +109,18 @@ class RuntimeSnapshot:
     # membership: an empty set rejects every role, so an undiscoverable registry
     # fails closed instead of silently accepting anything.
     valid_roles: Optional[frozenset[str]] = None
+    # OI-1756: the closed task_class vocabulary, derived from
+    # routing_recommendations.yaml's routing_by_task keys (smart_router.
+    # valid_task_classes()) — mirrors valid_roles exactly, including its None
+    # vs. non-None (possibly EMPTY) semantics. None = registry not provided
+    # (direct/test callers that pre-date the field) — compile_plan skips the
+    # membership check. A non-None frozenset (the door always provides one,
+    # possibly EMPTY on a load failure) ENFORCES membership on an EXPLICIT
+    # spec.task_class: an empty set rejects every declared task_class, so an
+    # undiscoverable routing table fails closed instead of silently accepting
+    # an arbitrary string. A spec that declares NO task_class (None) is never
+    # affected — this only gates a caller-supplied string.
+    valid_task_classes: Optional[frozenset[str]] = None
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): the predecessor
     # dispatch this one continues, the tier escalation, and the smart_router
     # task class. Computed by the door (build_runtime_snapshot) and passed in so
@@ -281,6 +293,25 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
             "unknown-role",
             f"role {spec.role!r} is not a known agent role; "
             f"valid roles: {valid or '(none discovered — agents/ registry unavailable)'}",
+        )
+
+    # OI-1756 — task_class closed-set check: an explicit task_class string not
+    # present in routing_recommendations.yaml's routing_by_task used to reach
+    # smart_router.recommend() and silently return zero routing candidates,
+    # indistinguishable from a real class that legitimately has none. None (no
+    # task_class declared) is always valid — this only fires on an unknown
+    # STRING. snapshot.valid_task_classes=None (registry not provided) skips,
+    # mirroring the valid_roles check immediately above.
+    if (
+        snapshot.valid_task_classes is not None
+        and spec.task_class
+        and spec.task_class not in snapshot.valid_task_classes
+    ):
+        valid = ", ".join(sorted(snapshot.valid_task_classes))
+        return Reject(
+            "unknown-task-class",
+            f"task_class {spec.task_class!r} is not a known routing_by_task class; "
+            f"valid task classes: {valid or '(none discovered — routing_recommendations.yaml unavailable)'}",
         )
 
     # D3 — constraint verdicts; blocking → Reject immediately; warn → collect
