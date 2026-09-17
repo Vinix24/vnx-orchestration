@@ -18,7 +18,13 @@ from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
-from gate_recorder import gate_is_available, get_pr_head_sha, result_is_for_head, write_result_guarded
+from gate_recorder import (
+    QUOTA_REFUSAL_REASON,
+    gate_is_available,
+    get_pr_head_sha,
+    result_is_for_head,
+    write_result_guarded,
+)
 from governance_emit import _classify_lane_log_text
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
@@ -528,6 +534,17 @@ class GateRequestHandlerMixin:
             return "unreadable_verdict"
         if reason == "no_verdict":
             return "no_response"
+        if reason == QUOTA_REFUSAL_REASON:
+            # The record SAYS it is a quota refusal, because gate_recorder
+            # classified it at write time (D-gate-quota-105245). Read it as
+            # what it says. The text scan below still finds the same answer
+            # in reason_detail -- it is the fallback for records written
+            # before that change, and for any gate whose quota text never
+            # reaches the reason field -- but a reader that can only learn
+            # the cause by re-parsing prose is a reader that can forget to,
+            # which is precisely how stop_conditions came to trip E6 on
+            # three quota refusals it read as three generic crashes.
+            return _lane_exhausted_or_expired(result)
         # reason == "dispatch_error" (or an unrecognised reason): scan for
         # the provider's own exhaustion marker via _scan_seat_failure_text --
         # the SAME classifier deliverable 0 built for the lane-log lift,
