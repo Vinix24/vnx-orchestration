@@ -144,6 +144,27 @@ runner fulfils them:
       DELIBERATELY unbounded — a held occupancy lock is kernel-enforced proof
       of a live process and self-corrects the instant the holder exits, so an
       attempt count must never escalate over a provably-running dispatch.
+  12. OI-1751 (2026-09-17): items 1-11 above all describe how this runner
+      fulfils an obligation that ALREADY EXISTS as a file on disk. None of
+      them can ever notice a PR that has no obligation registered for it in
+      the first place — and item 1's own PR-discovery mechanism (GitHub
+      search by ``dispatch/<dispatch_id>`` head branch) is exactly why a PR
+      never gets one: a PR on any other branch (``docs/...``, ``fix/...``, a
+      hand-created branch) never matches, so no obligation is ever attached
+      and it falls silently out of the review-gate stack. Measured live on
+      mission-control: five poortruns in one day, none invoked the stack,
+      because that day's PRs were named ``docs/`` and ``fix/``.
+      :func:`_find_prs_without_obligation` is a THIRD full-store diagnostic
+      (alongside :func:`_terminal_evidence_contradictions`), run
+      unconditionally on every :func:`run` call: it lists every open PR and
+      LOUDLY reports (``_LOG.warning`` + ``governance_audit.ndjson``, plus
+      ``summary["prs_without_obligation"]``) the ones matching neither a
+      known ``dispatch/<dispatch_id>`` branch nor a ``pr_number`` already
+      stamped on a resolved obligation. It is a visibility fix, not a
+      resolver fix — decoupling obligation REGISTRATION itself from the
+      branch name is a separate, larger change (registration happens at
+      ``vnx dispatch`` time, before any PR exists to bind an identifier to)
+      and is filed as an open item rather than forced into this sweep.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -849,6 +870,123 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
         dispatch_live=dispatch_live,
         reason=f"no PR yet for head branch dispatch/{dispatch_id}",
     )
+
+
+# ---------------------------------------------------------------------------
+# OI-1751: PRs the obligation store can never see
+# ---------------------------------------------------------------------------
+#
+# Every obligation this runner fulfils already exists as a file under
+# ``review_gate_obligations`` before this module ever runs (registered at
+# ``vnx dispatch`` time by ``gate_obligations.py``). The per-obligation loop
+# in :func:`run` can therefore only ever act on a PR that ALREADY has an
+# obligation — it structurally cannot notice a PR that never got one
+# registered in the first place. ``resolve_pr_number`` above only answers
+# "which PR belongs to this obligation", by matching the PR's head branch
+# against ``dispatch/<dispatch_id>`` (or a ``pr_number`` a prior run already
+# stamped on the record) — the inverse question, "which open PRs have NO
+# obligation at all", was never asked anywhere. A PR on any other branch
+# (``docs/...``, ``fix/...``, a hand-created branch) falls out of the
+# review-gate stack with nothing to say so: measured live on mission-control,
+# five poortruns in one day, none invoked the stack, because that day's PRs
+# were named ``docs/`` and ``fix/``.
+#
+# :func:`_find_prs_without_obligation` closes the VISIBILITY gap: it lists
+# every open PR and reports the ones matching NEITHER identifier an
+# obligation can be looked up by. It is read-only and additive — it never
+# mutates the obligation store, so it is safe to run on every invocation of
+# :func:`run`, ``write=True`` or not, exactly like the existing
+# :func:`_terminal_evidence_contradictions` full-store diagnostic it sits
+# alongside. Decoupling obligation REGISTRATION itself from the branch name
+# is a separate, larger change — registration happens before any PR exists,
+# so there is no PR identifier to bind to yet at that point — and is filed as
+# an open item with a concrete proposal rather than forced into this sweep.
+
+
+def _find_prs_without_obligation(
+    state_dir: Path,
+    owner_repo: str,
+    obligations: List[Tuple[Path, Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Report every OPEN PR whose obligation cannot be found by either
+    identifier :func:`resolve_pr_number` looks up by: a ``dispatch/<id>``
+    head branch matching a KNOWN ``dispatch_id`` in ``obligations``, or a
+    ``pr_number`` already stamped on a resolved obligation record.
+
+    Returns ``[]`` (never raises) when ``gh`` is unavailable or the query
+    fails — the same tolerant contract :func:`_gh_json` already gives every
+    other caller in this module; a network hiccup here must never crash a
+    run over a diagnostic sweep.
+    """
+    open_prs = _gh_json(
+        ["pr", "list", "--state", "open", "--json", "number,headRefName",
+         "--limit", "200"],
+        owner_repo=owner_repo,
+    )
+    if not isinstance(open_prs, list):
+        return []
+    known_dispatch_ids = {
+        str(record.get("dispatch_id") or path.stem) for path, record in obligations
+    }
+    known_pr_numbers = {
+        record.get("pr_number")
+        for _, record in obligations
+        if isinstance(record.get("pr_number"), int)
+    }
+    prefix = "dispatch/"
+    unlinked: List[Dict[str, Any]] = []
+    for pr in open_prs:
+        if not isinstance(pr, dict):
+            continue
+        number = pr.get("number")
+        branch = pr.get("headRefName")
+        if not isinstance(number, int) or not isinstance(branch, str) or not branch:
+            continue
+        if number in known_pr_numbers:
+            continue
+        if branch.startswith(prefix) and branch[len(prefix):] in known_dispatch_ids:
+            continue
+        unlinked.append({
+            "pr_number": number,
+            "branch": branch,
+            "reason": (
+                f"no review-gate obligation resolves to PR #{number} "
+                f"(branch {branch!r}): the obligation store links a PR only "
+                "via the dispatch/<dispatch_id> branch-name convention or a "
+                "pr_number already stamped on a resolved obligation, and "
+                "neither matched — this PR is invisible to the review-gate "
+                "stack (OI-1751)"
+            ),
+        })
+    return unlinked
+
+
+def _audit_log_pr_without_obligation(state_dir: Path, finding: Dict[str, Any]) -> None:
+    """Append a LOUD entry to the repo's existing governance audit trail
+    (``governance_audit.ndjson``) for a PR the obligation store cannot link
+    to any dispatch (OI-1751).
+
+    Mirrors :func:`_audit_log_provider_not_installed_removal`'s reuse of the
+    SAME general-purpose trail rather than inventing a second one, and its
+    best-effort tolerance: an audit-write failure must never hide (or
+    unwind) the ``_LOG.warning`` the caller already emitted for this finding.
+    """
+    try:
+        os.environ["VNX_DATA_DIR"] = str(Path(state_dir).parent)
+        from governance_audit import log_enforcement  # noqa: PLC0415
+
+        log_enforcement(
+            check_name="pr_without_gate_obligation",
+            level=1,
+            result=False,
+            context={"pr_number": finding["pr_number"], "branch": finding["branch"]},
+            message=finding["reason"],
+        )
+    except Exception as exc:  # noqa: BLE001 — audit-write failure must not unwind the sweep
+        _LOG.warning(
+            "gate_obligation_runner: could not write governance_audit entry "
+            "for PR #%s without obligation: %s", finding.get("pr_number"), exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2794,6 +2932,15 @@ def run(
     resolves on the spot does not count. A dry run therefore never
     UNDER-reports the remaining backlog; it can over-report relative to what
     the next real run actually leaves open.
+
+    ``prs_without_obligation`` (OI-1751) is a THIRD full-store diagnostic,
+    alongside ``terminal_evidence_contradictions``: every open PR that
+    matches no known ``dispatch/<dispatch_id>`` branch and no ``pr_number``
+    already stamped on an obligation record — i.e. a PR the per-obligation
+    loop above structurally cannot ever act on, because no obligation was
+    ever registered for it. Logged LOUD via ``_LOG.warning`` and (when
+    ``write=True``) appended to ``governance_audit.ndjson`` on every call,
+    scoped or not, dry-run or not — see :func:`_find_prs_without_obligation`.
     """
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
@@ -2861,6 +3008,25 @@ def run(
     # --dispatch-prefix slice must not hide an already-burned record outside
     # it. Never rewrites anything (see _terminal_evidence_contradictions).
     contradictions = _terminal_evidence_contradictions(obligations, result_index)
+    # OI-1751: a second full-store, read-only diagnostic sitting alongside
+    # contradictions — the per-obligation loop above can only ever act on a
+    # PR that already has an obligation; this is the one place that asks the
+    # inverse question over every open PR in the repo. Runs unconditionally
+    # (write=True or not) for the same reason contradictions does: it never
+    # mutates anything, so scoping or dry-run must never hide it.
+    owner_repo_for_sweep = _resolve_github_owner_repo(state_dir)
+    prs_without_obligation = (
+        _find_prs_without_obligation(state_dir, owner_repo_for_sweep, obligations)
+        if owner_repo_for_sweep
+        else []
+    )
+    for finding in prs_without_obligation:
+        _LOG.warning(
+            "PR #%s (branch %s) carries no review-gate obligation: %s",
+            finding["pr_number"], finding["branch"], finding["reason"],
+        )
+        if write:
+            _audit_log_pr_without_obligation(state_dir, finding)
     return {
         "state_dir": str(state_dir),
         "timestamp": utc_now_iso(),
@@ -2879,6 +3045,8 @@ def run(
         "swept_provider_not_installed": swept_provider_not_installed,
         "provider_not_installed_sweep_unreadable": sweep_result.unreadable,
         "provider_not_installed_sweep_unreadable_count": len(sweep_result.unreadable),
+        "prs_without_obligation": prs_without_obligation,
+        "prs_without_obligation_count": len(prs_without_obligation),
     }
 
 
@@ -2989,6 +3157,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"reason={c['obligation_reason']!r} ({c['obligation_reason_bucket']}) "
                     f"evidence={c['evidence_result_path']}"
                 )
+        unlinked_prs = summary.get("prs_without_obligation") or []
+        if unlinked_prs:
+            print(
+                f"prs_without_obligation={len(unlinked_prs)} "
+                "(no review-gate obligation resolves to these PRs — OI-1751, "
+                "review manually)"
+            )
+            for u in unlinked_prs:
+                print(f"  PR #{u['pr_number']} branch={u['branch']!r}: {u['reason']}")
 
     if summary.get("error"):
         return 20
