@@ -189,7 +189,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -901,11 +901,45 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
 # is a separate, larger change — registration happens before any PR exists,
 # so there is no PR identifier to bind to yet at that point — and is filed as
 # an open item with a concrete proposal rather than forced into this sweep.
+#
+# OI-1764 fix-forward (PR #1865 review): :func:`_stale_terminal_evidence`
+# below needs this SAME open-PR list to scope its own sweep. The single
+# ``gh pr list --state open`` call is now factored into :func:`_list_open_prs`
+# and fetched ONCE per :func:`run` call, shared by both diagnostics — never a
+# second network round-trip for the same question.
+
+_OPEN_PR_LIST_LIMIT = 200
+
+
+def _list_open_prs(owner_repo: str) -> Dict[str, Any]:
+    """Fetch the open-PR list ONCE, shared by :func:`_find_prs_without_obligation`
+    and :func:`_stale_terminal_evidence` (OI-1764 fix-forward) so :func:`run`
+    never issues the same ``gh pr list --state open`` query twice.
+
+    Returns ``{"prs": <list-or-None>, "suspect": <bool>}``.
+
+    ``prs`` is ``None`` when the ``gh`` call itself failed (see
+    :func:`_gh_json`: missing binary, timeout, non-zero exit, non-JSON) —
+    never silently treated by a caller as "there are no open PRs then".
+
+    ``suspect`` is ``True`` when the returned count hits the ``--limit`` cap
+    exactly: the real open-PR count could be larger and this call has no way
+    to say so (OI-1766) — a caller relying on completeness (like the
+    stale-evidence sweep) must treat a suspect list as partial coverage, not
+    as the whole truth.
+    """
+    open_prs = _gh_json(
+        ["pr", "list", "--state", "open", "--json", "number,headRefName",
+         "--limit", str(_OPEN_PR_LIST_LIMIT)],
+        owner_repo=owner_repo,
+    )
+    if not isinstance(open_prs, list):
+        return {"prs": None, "suspect": True}
+    return {"prs": open_prs, "suspect": len(open_prs) >= _OPEN_PR_LIST_LIMIT}
 
 
 def _find_prs_without_obligation(
-    state_dir: Path,
-    owner_repo: str,
+    open_prs: Optional[List[Dict[str, Any]]],
     obligations: List[Tuple[Path, Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     """Report every OPEN PR whose obligation cannot be found by either
@@ -913,16 +947,15 @@ def _find_prs_without_obligation(
     head branch matching a KNOWN ``dispatch_id`` in ``obligations``, or a
     ``pr_number`` already stamped on a resolved obligation record.
 
-    Returns ``[]`` (never raises) when ``gh`` is unavailable or the query
-    fails — the same tolerant contract :func:`_gh_json` already gives every
-    other caller in this module; a network hiccup here must never crash a
-    run over a diagnostic sweep.
+    ``open_prs`` is the ``"prs"`` field of :func:`_list_open_prs`'s result —
+    fetched ONCE by :func:`run` and shared with :func:`_stale_terminal_evidence`
+    rather than this function issuing its own ``gh`` call.
+
+    Returns ``[]`` (never raises) when ``open_prs`` is ``None`` (the shared
+    ``gh`` query failed) — the same tolerant contract :func:`_gh_json`
+    already gives every other caller in this module; a network hiccup here
+    must never crash a run over a diagnostic sweep.
     """
-    open_prs = _gh_json(
-        ["pr", "list", "--state", "open", "--json", "number,headRefName",
-         "--limit", "200"],
-        owner_repo=owner_repo,
-    )
     if not isinstance(open_prs, list):
         return []
     known_dispatch_ids = {
@@ -1668,6 +1701,230 @@ def _terminal_evidence_contradictions(
     return contradictions
 
 
+# ---------------------------------------------------------------------------
+# OI-1764: terminal evidence that went stale AFTER the obligation closed
+# ---------------------------------------------------------------------------
+#
+# The per-obligation loop in :func:`run` skips every already-terminal record
+# outright (``if status in TERMINAL_STATUSES: continue``) — correct: a closed
+# obligation must never be re-run. The pre-execution sha-binding check
+# (:func:`_has_decided_evidence`, OI-1571 tak 3) only runs while an
+# obligation is still PENDING, so it can only ever catch evidence that was
+# ALREADY stale at the moment a decision was being made — a record that was
+# sha-CURRENT the instant it closed and only drifted stale afterward (a
+# fix-forward push lands a new head on the same PR after the gate already
+# booked fulfilled/failed) is invisible to every check this runner already
+# has. Live measured 2026-09-17 on PR #1864: the fix-forward push landed head
+# ff5183e8 while the glm_gate record on disk still named the pre-push
+# commit e222601b; the obligation happened to still be PENDING at that
+# instant, so the next run's sha check caught it. Had it already been
+# fulfilled, nothing would have noticed — :func:`_stale_terminal_evidence` is
+# the read-only detector for exactly that gap.
+#
+# PR #1865 review (fix-forward): the first shipped version resolved the PR
+# head for EVERY unique PR number across the FULL store, terminal or not,
+# open or closed. Measured live 2026-09-17: 746 terminal obligations, 384 of
+# them carrying an evidence path, 291 unique PR numbers among those — at a
+# measured ~0.53s per ``get_pr_head_sha`` call, a single :func:`run` paid
+# ~156s for this ONE diagnostic, unconditionally, even under ``--no-write``
+# or a ``--dispatch-prefix``-scoped run. Worse: a MERGED PR's head is frozen,
+# so a record that just misses that frozen head reads as "stale" on every
+# future run forever — permanent noise, not a signal, drowning the handful
+# of cases that matter. This function is now scoped to obligations whose
+# ``pr_number`` is a currently OPEN PR (same live store: 3 candidates, not
+# 291) — a closed/merged PR's terminal evidence is never re-examined here.
+
+
+def _stale_terminal_evidence(
+    obligations: List[Tuple[Path, Dict[str, Any]]],
+    open_pr_lookup: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Report every TERMINAL obligation, for a currently OPEN PR, whose own
+    evidence record no longer binds to the PR's current head.
+
+    Read-only, over the FULL (unscoped) obligation store but narrowed to
+    OPEN PRs — a third full-store diagnostic sitting alongside
+    :func:`_terminal_evidence_contradictions` and OI-1751's
+    ``prs_without_obligation``, run unconditionally on every :func:`run`
+    call. Reuses :func:`_classify_sha_binding` — the SAME classifier
+    :func:`_has_decided_evidence` already delegates to (OI-1571 tak 3) —
+    never a second sha comparison.
+
+    ``open_pr_lookup`` is :func:`_list_open_prs`'s result, fetched ONCE by
+    :func:`run` and shared with :func:`_find_prs_without_obligation` — this
+    function issues no ``gh`` call of its own beyond the per-PR head
+    resolution (:func:`_get_pr_head_sha_for_gate`), and only for PRs that
+    are both open and carry a terminal obligation with an evidence path.
+
+    A merged/closed PR's head is frozen, so re-checking it every run would
+    only ever repeat the SAME finding forever (noise, not signal) — those
+    obligations are silently excluded, not reported as stale.
+
+    When ``open_pr_lookup["prs"]`` is ``None``, this function has no way to
+    know which obligations belong to a still-open PR — it does NOT fall back
+    to resolving the full store (that would reintroduce the exact cost this
+    scoping removes) and does NOT silently return ``[]`` either, which would
+    read as "nothing is stale" when the truth is "coverage could not be
+    checked" (OI-1766). It returns a single loud ``binding: "unknown"``
+    finding with no ``dispatch_id`` instead, in the same spirit as the
+    per-obligation ``unknown`` branch below, and skips the per-obligation
+    sweep entirely for that run. ``prs`` is ``None`` for two distinct
+    reasons, each getting its own accurate ``detail`` text rather than one
+    generic message (PR #1865 review, second fix-forward):
+    ``open_pr_lookup["owner_repo_unresolvable"]`` — no GitHub owner/repo
+    could be resolved at all, so the ``gh pr list`` call was never even
+    attempted — versus the shared ``gh`` call itself failing (binary
+    missing, auth failure, timeout, non-JSON).
+
+    When ``open_pr_lookup["suspect"]`` is ``True`` (the open-PR list hit the
+    ``--limit`` cap, so more open PRs may exist beyond it, OI-1766), the
+    obligations for the PRs actually returned are still checked — dropping
+    real findings because the list MIGHT be incomplete would be worse than
+    reporting them — but one more loud ``unknown`` finding is appended
+    noting that this run's coverage is not guaranteed complete.
+
+    Checks ``evidence_result_path`` first, falling back to ``result_path``
+    — an obligation carrying neither (e.g. ``retired``, which by
+    construction was never reviewed by anything) has no evidence that could
+    have gone stale and is silently skipped, exactly as today.
+
+    NEVER mutates anything. The corrective tool for a genuinely stale
+    obligation is the already-audited, hand-triggered
+    ``scripts/gate_obligation_reopen_stale_evidence.py`` — this function
+    only surfaces the candidates for a human (or that script) to act on.
+
+    Returns one entry per obligation whose binding is ``mismatch`` (evidence
+    provably about other code) or ``unknown`` (binding undeterminable — no
+    evidence file, unreadable, or either sha missing, or the list-coverage
+    findings described above) — both loud, neither silently treated as fine
+    or as broken. A ``match``, or an obligation with no evidence path
+    recorded at all, produces no entry.
+    """
+    open_prs = open_pr_lookup.get("prs")
+    if open_prs is None:
+        if open_pr_lookup.get("owner_repo_unresolvable"):
+            detail = (
+                "no GitHub owner/repo could be resolved for this runner — "
+                "the project checkout is not registered (~/.vnx/projects.json) "
+                "and no GitHub 'origin' remote resolves from the checkout or "
+                "cwd, so `gh pr list` was never even attempted — "
+                "stale-terminal-evidence coverage is undetermined this run, "
+                "not clear: an empty result here must never be read as "
+                "'nothing is stale'. Register the project checkout, or run "
+                "from within it, then rerun."
+            )
+        else:
+            detail = (
+                "the open-PR list could not be resolved (gh failure) — "
+                "stale-terminal-evidence coverage is undetermined this run, "
+                "not clear: an empty result here must never be read as "
+                "'nothing is stale'. Rerun once `gh pr list` succeeds."
+            )
+        return [{
+            "dispatch_id": None,
+            "gate": None,
+            "pr_number": None,
+            "obligation_status": None,
+            "obligation_path": None,
+            "evidence_result_path": None,
+            "head_sha": "",
+            "evidence_commit_sha": "",
+            "binding": "unknown",
+            "detail": detail,
+        }]
+    open_pr_numbers: Set[int] = {
+        pr.get("number") for pr in open_prs
+        if isinstance(pr, dict) and isinstance(pr.get("number"), int)
+    }
+
+    findings: List[Dict[str, Any]] = []
+    head_sha_cache: Dict[Any, str] = {}
+    for path, record in obligations:
+        status = record.get("status")
+        if status not in TERMINAL_STATUSES:
+            continue
+        pr_number = record.get("pr_number")
+        if pr_number not in open_pr_numbers:
+            continue
+        evidence_path_str = record.get("evidence_result_path") or record.get("result_path")
+        if not evidence_path_str:
+            continue
+        dispatch_id = str(record.get("dispatch_id") or path.stem)
+        gate = str(record.get("gate") or "")
+
+        evidence_record: Optional[Dict[str, Any]] = None
+        read_error: Optional[str] = None
+        try:
+            evidence_record = json.loads(Path(evidence_path_str).read_text(encoding="utf-8"))
+        except OSError as exc:
+            read_error = f"evidence file unreadable: {exc}"
+        except json.JSONDecodeError as exc:
+            read_error = f"evidence file is not valid JSON: {exc}"
+        if not isinstance(evidence_record, dict):
+            if read_error is None:
+                read_error = "evidence file does not contain a JSON object"
+            evidence_record = {}
+        result_sha = str(evidence_record.get("commit_sha") or "")
+
+        if pr_number not in head_sha_cache:
+            head_sha_cache[pr_number] = _get_pr_head_sha_for_gate(
+                pr_number if isinstance(pr_number, int) else None
+            )
+        head_sha = head_sha_cache[pr_number]
+
+        binding = _classify_sha_binding(head_sha, result_sha)
+        if binding == "match":
+            continue
+        finding: Dict[str, Any] = {
+            "dispatch_id": dispatch_id,
+            "gate": gate,
+            "pr_number": pr_number,
+            "obligation_status": status,
+            "obligation_path": str(path),
+            "evidence_result_path": evidence_path_str,
+            "head_sha": head_sha,
+            "evidence_commit_sha": result_sha,
+            "binding": binding,
+        }
+        if binding == "mismatch":
+            finding["detail"] = (
+                f"{gate} obligation for dispatch {dispatch_id} (PR #{pr_number}) "
+                f"closed {status!r} against commit {result_sha[:8] or '?'}, but "
+                f"the PR head is now {head_sha[:8] or '?'} — this evidence is "
+                "about code that is no longer the PR's head. NOT auto-fixed: "
+                "reopen by hand via scripts/gate_obligation_reopen_stale_evidence.py."
+            )
+        else:
+            finding["detail"] = (
+                f"{gate} obligation for dispatch {dispatch_id} (PR #{pr_number}) "
+                f"closed {status!r} but its sha binding to the PR head could "
+                "not be verified"
+                + (f" ({read_error})" if read_error else "")
+                + " — undetermined, not cleared: review manually or via "
+                "scripts/gate_obligation_reopen_stale_evidence.py."
+            )
+        findings.append(finding)
+    if open_pr_lookup.get("suspect"):
+        findings.append({
+            "dispatch_id": None,
+            "gate": None,
+            "pr_number": None,
+            "obligation_status": None,
+            "obligation_path": None,
+            "evidence_result_path": None,
+            "head_sha": "",
+            "evidence_commit_sha": "",
+            "binding": "unknown",
+            "detail": (
+                f"the open-PR list hit the --limit {_OPEN_PR_LIST_LIMIT} cap "
+                f"({len(open_prs)} PRs returned) — additional open PRs may "
+                "exist beyond the cap and were not checked this run "
+                "(OI-1766): coverage is undetermined, not complete."
+            ),
+        })
+    return findings
+
+
 def _evidence_decision(evidence: Tuple[Path, Dict[str, Any]]) -> Dict[str, Any]:
     """Turn OI-1388-rescue evidence into a decision, split by verdict (BETA3-C2).
 
@@ -2166,10 +2423,22 @@ def fulfill_obligation(
         # fulfill_by_failed_evidence below instead; _fulfilling_result never
         # hands either branch a not_executable or undecided-status record.
         evidence_path, evidence_record = decision["evidence"]
+        evidence_pr_number = evidence_record.get("pr_number") or record.get("pr_number")
+        # OI-1764 point 2: this early (pre-execution) route used to compute
+        # NO fast-fulfillment warning at all, while the late (post-execution)
+        # route below always does for the same terminal outcome — a booked
+        # fulfilment from a stale-by-mtime evidence file was silently
+        # indistinguishable from a genuinely fresh one on THIS route only.
+        # Same helper, same outcome-key convention as the late route: two
+        # routes to the same STATUS_FULFILLED outcome must carry the same
+        # tripwire.
+        fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
+            evidence_path, gate, evidence_pr_number, dispatch_id,
+        )
         updated = update_obligation(
             path,
             status=STATUS_FULFILLED,
-            pr_number=evidence_record.get("pr_number") or record.get("pr_number"),
+            pr_number=evidence_pr_number,
             branch=evidence_record.get("branch") or record.get("branch"),
             attempts=attempts,
             last_attempt_at=now,
@@ -2192,6 +2461,8 @@ def fulfill_obligation(
             "already reviewed and approved this dispatch"
         )
         outcome["result_path"] = updated.get("result_path")
+        if fast_fulfillment_warning:
+            outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
         return outcome
 
     if decision["kind"] == "fulfill_by_failed_evidence":
@@ -2941,6 +3212,24 @@ def run(
     ever registered for it. Logged LOUD via ``_LOG.warning`` and (when
     ``write=True``) appended to ``governance_audit.ndjson`` on every call,
     scoped or not, dry-run or not — see :func:`_find_prs_without_obligation`.
+
+    ``stale_terminal_evidence`` (OI-1764) is a further full-store, read-only
+    diagnostic, SCOPED TO OPEN PRs (PR #1865 review fix-forward — a closed
+    PR's head is frozen, so re-checking it forever would only repeat the
+    same finding as permanent noise): every already-TERMINAL obligation for
+    a currently open PR (skipped outright by the per-obligation loop below)
+    whose own evidence record's ``commit_sha`` no longer binds to the PR's
+    current head — a later commit landed on the same PR after the
+    obligation already closed. Split into
+    ``stale_terminal_evidence_mismatch_count`` (evidence provably about
+    other code) and ``stale_terminal_evidence_unknown_count`` (binding
+    undeterminable, INCLUDING a failed/suspect open-PR list — see
+    :func:`_stale_terminal_evidence`) — neither counts toward
+    ``pending_after``, which means "not yet reviewed"; these obligations
+    WERE reviewed, just not of the code now on the PR. Never mutated by this
+    function. Shares its open-PR list with ``prs_without_obligation`` below
+    via :func:`_list_open_prs` — a single ``gh pr list --state open`` call
+    per :func:`run`, not two.
     """
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
@@ -3008,15 +3297,53 @@ def run(
     # --dispatch-prefix slice must not hide an already-burned record outside
     # it. Never rewrites anything (see _terminal_evidence_contradictions).
     contradictions = _terminal_evidence_contradictions(obligations, result_index)
+    # OI-1764 fix-forward: both _stale_terminal_evidence and
+    # _find_prs_without_obligation need the open-PR list — resolved ONCE
+    # here and shared, never a second `gh pr list --state open` call.
+    #
+    # PR #1865 review (second fix-forward): an unresolvable owner/repo used
+    # to degrade straight to {"prs": [], "suspect": False} — indistinguishable
+    # from "resolved, genuinely zero open PRs", so _stale_terminal_evidence
+    # silently read "not checked" as "checked, nothing found". That broke the
+    # contract _resolve_github_owner_repo itself documents (None -> the
+    # caller surfaces a loud, distinct unresolvable state, never a silent
+    # wait) and that resolve_pr_number already honors. It now degrades to
+    # {"prs": None, ...}, the SAME "coverage undetermined" shape
+    # _list_open_prs returns on an outright gh failure, so
+    # _stale_terminal_evidence's existing loud unknown-finding branch below
+    # covers this case too — with its own accurate detail text
+    # (owner_repo_unresolvable), never the generic "gh failure" wording.
+    # prs_without_obligation (OI-1751) is untouched here: it already guards
+    # on owner_repo_for_sweep directly and keeps its own documented
+    # silent-empty contract for this case.
+    owner_repo_for_sweep = _resolve_github_owner_repo(state_dir)
+    open_pr_lookup = (
+        _list_open_prs(owner_repo_for_sweep)
+        if owner_repo_for_sweep
+        else {"prs": None, "suspect": True, "owner_repo_unresolvable": True}
+    )
+    # OI-1764: a third full-store, read-only diagnostic, scoped to OPEN PRs
+    # only — terminal obligations the loop above skips outright (line
+    # ~2981) whose own evidence has since gone stale (a later commit landed
+    # on the same PR after the obligation already closed). A closed PR's
+    # evidence is never re-examined: its head is frozen, so it would only
+    # ever repeat the same finding forever. Never mutates anything, same
+    # discipline as contradictions/prs_without_obligation.
+    stale_terminal_evidence = _stale_terminal_evidence(obligations, open_pr_lookup)
+    stale_terminal_evidence_mismatch_count = sum(
+        1 for finding in stale_terminal_evidence if finding["binding"] == "mismatch"
+    )
+    stale_terminal_evidence_unknown_count = sum(
+        1 for finding in stale_terminal_evidence if finding["binding"] == "unknown"
+    )
     # OI-1751: a second full-store, read-only diagnostic sitting alongside
     # contradictions — the per-obligation loop above can only ever act on a
     # PR that already has an obligation; this is the one place that asks the
     # inverse question over every open PR in the repo. Runs unconditionally
     # (write=True or not) for the same reason contradictions does: it never
     # mutates anything, so scoping or dry-run must never hide it.
-    owner_repo_for_sweep = _resolve_github_owner_repo(state_dir)
     prs_without_obligation = (
-        _find_prs_without_obligation(state_dir, owner_repo_for_sweep, obligations)
+        _find_prs_without_obligation(open_pr_lookup["prs"], obligations)
         if owner_repo_for_sweep
         else []
     )
@@ -3042,6 +3369,9 @@ def run(
         "action_counts": action_counts,
         "terminal_evidence_contradictions": contradictions,
         "terminal_evidence_contradiction_count": len(contradictions),
+        "stale_terminal_evidence": stale_terminal_evidence,
+        "stale_terminal_evidence_mismatch_count": stale_terminal_evidence_mismatch_count,
+        "stale_terminal_evidence_unknown_count": stale_terminal_evidence_unknown_count,
         "swept_provider_not_installed": swept_provider_not_installed,
         "provider_not_installed_sweep_unreadable": sweep_result.unreadable,
         "provider_not_installed_sweep_unreadable_count": len(sweep_result.unreadable),
@@ -3156,6 +3486,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                     f"  {c['dispatch_id']} gate={c['gate']} status={c['obligation_status']} "
                     f"reason={c['obligation_reason']!r} ({c['obligation_reason_bucket']}) "
                     f"evidence={c['evidence_result_path']}"
+                )
+        stale_terminal = summary.get("stale_terminal_evidence") or []
+        if stale_terminal:
+            print(
+                f"stale_terminal_evidence={len(stale_terminal)} "
+                f"(mismatch={summary.get('stale_terminal_evidence_mismatch_count', 0)} "
+                f"unknown={summary.get('stale_terminal_evidence_unknown_count', 0)}) "
+                "— already-terminal, evidence has drifted — NOT auto-fixed, "
+                "reopen via scripts/gate_obligation_reopen_stale_evidence.py"
+            )
+            for s in stale_terminal:
+                print(
+                    f"  {s['dispatch_id']} gate={s['gate']} status={s['obligation_status']} "
+                    f"binding={s['binding']} evidence={s['evidence_result_path']}"
                 )
         unlinked_prs = summary.get("prs_without_obligation") or []
         if unlinked_prs:
