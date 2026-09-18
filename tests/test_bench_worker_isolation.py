@@ -1,8 +1,12 @@
-"""Parity proof for benchmark worker isolation and seed materialization."""
+"""Proof for benchmark worker isolation and seed materialization.
+
+The tmux lane half of the old parity proof went with that lane on 2026-09-18. A claude
+lane now runs through ``provider_dispatch`` (only with VNX_BENCH_CLAUDE_HEADLESS=1) and
+is refused without it.
+"""
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import sys
@@ -26,8 +30,6 @@ from benchmark_worker_isolation import (  # noqa: E402
     materialize_benchmark_seed,
 )
 from scorer import score_cell  # noqa: E402
-from tmux_interactive_dispatch import TmuxInteractiveDispatch, TmuxResult  # noqa: E402
-from tmux_worktree import ReapResult, WorktreeHandle  # noqa: E402
 
 
 SEED_REL = Path("tasks/trivial/seed")
@@ -77,7 +79,7 @@ def _write_verify(task_folder: Path) -> None:
     )
 
 
-def test_adapter_parity_scores_both_isolated_outputs_and_keeps_main_seed_clean(
+def test_adapter_scores_isolated_outputs_of_both_provider_routed_lanes_and_keeps_main_seed_clean(
     monkeypatch,
     tmp_path,
 ):
@@ -91,22 +93,23 @@ def test_adapter_parity_scores_both_isolated_outputs_and_keeps_main_seed_clean(
 
     monkeypatch.setattr(lane_adapter, "REPO_ROOT", main_repo)
     monkeypatch.setattr(lane_adapter, "REPORT_DIR_CANDIDATES", (reports,))
+    # A claude lane only runs with the operator-authorized headless switch; it then
+    # takes the same provider_dispatch route as every other provider lane.
+    monkeypatch.setenv("VNX_BENCH_CLAUDE_HEADLESS", "1")
 
     def fake_run(cmd, **kwargs):
-        if len(cmd) > 1 and Path(str(cmd[1])).name in {
-            "tmux_interactive_dispatch.py",
-            "provider_dispatch.py",
-        }:
+        if len(cmd) > 1 and Path(str(cmd[1])).name == "provider_dispatch.py":
             dispatch_id = cmd[cmd.index("--dispatch-id") + 1]
-            is_tmux = Path(str(cmd[1])).name == "tmux_interactive_dispatch.py"
-            wt_name = f"dispatch-{dispatch_id}" if is_tmux else f"provider-{dispatch_id}"
-            wt = _make_isolated_copy(main_repo, main_repo / ".vnx-data" / "worktrees" / wt_name)
+            wt = _make_isolated_copy(
+                main_repo, main_repo / ".vnx-data" / "worktrees" / f"provider-{dispatch_id}"
+            )
             worker_cwd = materialize_benchmark_seed(wt, [str(SEED_REL)])
             (worker_cwd / "output.txt").write_text("worker output\n", encoding="utf-8")
-            observed_cwds["claude" if is_tmux else "provider"] = worker_cwd
+            observed_cwds[dispatch_id] = worker_cwd
             (reports / f"{dispatch_id}.md").write_text("report\n", encoding="utf-8")
-            stderr = "" if is_tmux else f"VNX_PROVIDER_WORKDIR={wt}\n"
-            return SimpleNamespace(returncode=0, stdout="", stderr=stderr)
+            return SimpleNamespace(
+                returncode=0, stdout="", stderr=f"VNX_PROVIDER_WORKDIR={wt}\n",
+            )
         return real_run(cmd, **kwargs)
 
     monkeypatch.setattr(lane_adapter.subprocess, "run", fake_run)
@@ -130,9 +133,7 @@ def test_adapter_parity_scores_both_isolated_outputs_and_keeps_main_seed_clean(
 
     for result in (claude, provider):
         assert result.success, result.error
-        worker_cwd = observed_cwds[
-            "claude" if result.lane_id == "claude-test" else "provider"
-        ]
+        worker_cwd = observed_cwds[result.dispatch_id]
         assert result.workdir == worker_cwd.parent
         assert (result.workdir / SEED_REL / "input.txt").read_text(
             encoding="utf-8"
@@ -148,6 +149,41 @@ def test_adapter_parity_scores_both_isolated_outputs_and_keeps_main_seed_clean(
         assert score.correctness == 5.0
         assert score.completeness == 5.0
 
+    assert _git(main_repo, "status", "--porcelain", "--", str(SEED_REL)) == ""
+
+
+def test_claude_lane_without_headless_switch_is_refused_and_runs_no_dispatcher(
+    monkeypatch,
+    tmp_path,
+):
+    main_repo = _make_main_repo(tmp_path)
+    monkeypatch.setattr(lane_adapter, "REPO_ROOT", main_repo)
+    monkeypatch.setattr(lane_adapter, "REPORT_DIR_CANDIDATES", ())
+    monkeypatch.delenv("VNX_BENCH_CLAUDE_HEADLESS", raising=False)
+    dispatchers_run: list[str] = []
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) > 1 and str(cmd[1]).endswith("_dispatch.py"):
+            dispatchers_run.append(str(cmd[1]))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(lane_adapter.subprocess, "run", fake_run)
+
+    result = lane_adapter.dispatch(
+        lane={"id": "claude-test", "provider": "claude", "model_arg": "sonnet"},
+        task_id="trivial",
+        replication=1,
+        instruction="write output.txt",
+        dispatch_paths=str(SEED_REL),
+        deadline_seconds=30,
+    )
+
+    assert not result.success
+    assert "removed on 2026-09-18" in result.error
+    assert "VNX_BENCH_CLAUDE_HEADLESS=1" in result.error
+    assert dispatchers_run == []
     assert _git(main_repo, "status", "--porcelain", "--", str(SEED_REL)) == ""
 
 
@@ -178,108 +214,13 @@ def test_materialize_from_scratch_refuses_main_checkout(tmp_path):
         materialize_benchmark_seed(main, [str(SEED_REL)])
 
 
-class _TmuxRunner:
-    def __init__(self, receipts_file: Path, dispatch_id: str) -> None:
-        self.receipts_file = receipts_file
-        self.dispatch_id = dispatch_id
-        self.cwd: Path | None = None
-        self.pending_paste = False
-        # OI-1126: tracks the -s value from the last new-session call so
-        # display-message '#{session_name}' echoes back the REAL session that was
-        # spawned (matching real tmux), instead of a hardcoded stand-in — otherwise
-        # _verify_pane_identity() sees it disagree with dispatch()'s own `session`
-        # variable and aborts before delivery even in the success path.
-        self._last_session_name: str | None = None
-
-    def available(self) -> bool:
-        return True
-
-    def run(self, args, **kwargs) -> TmuxResult:
-        if args[0] == "new-session":
-            self.cwd = Path(args[args.index("-c") + 1])
-            if "-s" in args:
-                self._last_session_name = args[args.index("-s") + 1]
-            return TmuxResult(0, "%1\n", "")
-        if args[0] == "display-message":
-            if args[-1] == "#{session_name}":
-                return TmuxResult(0, f"{self._last_session_name or ''}\n", "")
-            return TmuxResult(0, "@1\n", "")
-        if args[0] == "capture-pane":
-            return TmuxResult(0, "Welcome to Claude\n? for shortcuts", "")
-        if args[0] == "paste-buffer":
-            self.pending_paste = True
-        if args[0] == "send-keys" and args[-1] == "Enter" and self.pending_paste:
-            self.pending_paste = False
-            assert self.cwd is not None
-            (self.cwd / "output.txt").write_text("claude output\n", encoding="utf-8")
-            self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
-            self.receipts_file.write_text(
-                json.dumps(
-                    {
-                        "event_type": "subprocess_completion",
-                        "dispatch_id": self.dispatch_id,
-                        "status": "done",
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-        return TmuxResult(0, "", "")
-
-
-def test_tmux_and_provider_dispatchers_launch_from_materialized_seed(
+def test_provider_dispatcher_launches_from_materialized_seed(
     monkeypatch,
     tmp_path,
     capsys,
 ):
     main_repo = _make_main_repo(tmp_path)
-    tmux_wt = _make_isolated_copy(main_repo, tmp_path / "tmux-wt")
     provider_wt = _make_isolated_copy(main_repo, tmp_path / "provider-wt")
-    receipts = tmp_path / "receipts.ndjson"
-    dispatch_id = "bench-isolation-parity"
-    runner = _TmuxRunner(receipts, dispatch_id)
-    handle = WorktreeHandle(
-        path=tmux_wt,
-        branch=f"dispatch/{dispatch_id}",
-        base_sha="abc123",
-        base_ref="main",
-        dispatch_id=dispatch_id,
-    )
-    lane = TmuxInteractiveDispatch(
-        tmp_path / "state",
-        runner=runner,
-        project_root=main_repo,
-        receipts_file=receipts,
-    )
-    monkeypatch.setenv("VNX_BENCH_SEED_MATERIALIZE", "1")
-    monkeypatch.setenv("VNX_TMUX_PASTE_SETTLE_SECONDS", "0")
-    monkeypatch.setenv("VNX_TMUX_SUBMIT_RETRY_DELAY", "0")
-
-    with (
-        patch("tmux_interactive_dispatch.allocate", return_value=handle),
-        patch("tmux_interactive_dispatch.classify", return_value="dirty"),
-        patch(
-            "tmux_interactive_dispatch.reap",
-            return_value=ReapResult(removed=False, preserved_path=tmux_wt),
-        ),
-        patch.object(lane, "_start_pipe_pane", return_value=None),
-        patch.object(lane, "_govern_report", return_value=tmp_path / "tmux-report.md"),
-    ):
-        result = lane.dispatch(
-            "write output.txt",
-            dispatch_id,
-            dispatch_paths=[str(SEED_REL)],
-            deadline_seconds=1,
-            poll_interval=0.001,
-            warmup_timeout=0.1,
-            warmup_poll_interval=0.001,
-        )
-
-    assert result.success, result.failure_reason
-    assert runner.cwd == tmux_wt / BENCH_CELL_DIRNAME
-    assert (tmux_wt / SEED_REL).resolve() == runner.cwd.resolve()
-    assert (runner.cwd / "input.txt").exists()
-    assert (runner.cwd / "output.txt").exists()
 
     args = provider_dispatch._build_parser().parse_args(
         [
@@ -305,6 +246,7 @@ def test_tmux_and_provider_dispatchers_launch_from_materialized_seed(
         (provider_cwd["path"] / "output.txt").write_text("provider output\n", encoding="utf-8")
         return spawn_result
 
+    monkeypatch.setenv("VNX_BENCH_SEED_MATERIALIZE", "1")
     monkeypatch.setenv("VNX_ISOLATED_WORKTREE", "1")
     monkeypatch.setenv("VNX_BENCH_REQUIRE_ISOLATION", "1")
     monkeypatch.setenv("VNX_BENCH_PRESERVE_WORKTREE", "1")

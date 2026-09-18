@@ -9,6 +9,7 @@
 **Bijgewerkt na**: #1415, #1416, #1417, #1419, #1420 (main, 2026-08-09) — cellen hermeten tegen de gecorrigeerde codepaden
 **Meetmethode**: codepad-trace van dispatch-deur tot mechanisme-aanroep
 **Vier OI-gaten**: OI-1011, OI-1017, OI-1045, OI-1048 — alle vier gefixt; de matrix-cellen zijn bijgewerkt naar de gecorrigeerde werkelijkheid
+**Stand na 2026-09-18**: de lane `claude_tmux_subscription` en `tmux_interactive_dispatch.py` zijn verwijderd (zie `docs/operations/TMUX_SPAWN_LANE.md`). De tmux-rijen en regelverwijzingen hieronder beschrijven de boom op de gemeten commit en zijn niet bijgewerkt.
 
 ---
 
@@ -83,7 +84,7 @@ Eén full-file rewrite (batch, geen append):
 | Operatie | Functie | Bestand | Gebruikt door |
 |---|---|---|---|
 | Classificatie (git ls-remote) | `classify()` | `tmux_worktree.py:195` | tmux, provider, headless (via `remove_dispatch_worktree()`) |
-| Teardown event emit | `_teardown()` | `tmux_interactive_dispatch.py:2291` | tmux |
+| Teardown event emit | `_teardown()` | `tmux_interactive_dispatch.py (regel 2291 op de gemeten commit)` | tmux |
 | Teardown event emit | `remove_dispatch_worktree()` (L3 block) | `dispatch_worktree_isolation.py:661` | provider, headless |
 | Classificatie + reap | `remove_dispatch_worktree()` (L3 block) | `dispatch_worktree_isolation.py:617,653` | provider, headless |
 
@@ -93,7 +94,7 @@ Eén full-file rewrite (batch, geen append):
 |---|---|---|---|
 | Archive at end-of-dispatch | `_archive_dispatch_events()` | `envelope_govern_support.py:296` | provider, headless (via `_govern()`) |
 | Clear at end-of-dispatch | `_clear_dispatch_events()` | `envelope_govern_support.py` | provider, headless (via `_govern()` finally) |
-| Pre-capture clear (previous dispatch) | `EventStore.clear()` | `tmux_interactive_dispatch.py:2424` | tmux |
+| Pre-capture clear (previous dispatch) | `EventStore.clear()` | `tmux_interactive_dispatch.py (regel 2424 op de gemeten commit)` | tmux |
 
 ### 2.5 PR enforcement
 
@@ -163,9 +164,9 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 
 **tmux — bindt**
 - `_execute_claude()` (`dispatch_cli.py:1377`) hardcodeert `isolated_worktree=True`.
-- `TmuxInteractiveDispatch.dispatch()` roept `allocate()` aan (`tmux_interactive_dispatch.py:2195`) en zet `cwd = worktree_handle.path` (`:2200`).
+- `TmuxInteractiveDispatch.dispatch()` roept `allocate()` aan (`tmux_interactive_dispatch.py (regel 2195 op de gemeten commit)`) en zet `cwd = worktree_handle.path` (`:2200`).
 - De tmux-sessie start met deze cwd. De worker draait IN de worktree.
-- Bewijs: `scripts/lib/tmux_interactive_dispatch.py:2193-2200`
+- Bewijs: `scripts/lib/tmux_interactive_dispatch.py (regel 2193-2200 op de gemeten commit)`
 
 **headless — bindt**
 - `run_envelope_headless_plan()` (`dispatch_envelope.py:666`) roept `create_dispatch_worktree()` aan — de headless lane maakt sinds #1416 wél een worktree aan.
@@ -183,9 +184,9 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 ### 3.4 Celbewijzen — mechanisme 4: Hoofdcheckout-guard
 
 **tmux — bindt (by construction)**
-- De tmux-lane zet `cwd = worktree_handle.path` vóór de tmux-sessie start (`tmux_interactive_dispatch.py:2200`).
+- De tmux-lane zet `cwd = worktree_handle.path` vóór de tmux-sessie start (`tmux_interactive_dispatch.py (regel 2200 op de gemeten commit)`).
 - Er is geen aparte "guard" die detecteert of de worker in de hoofdcheckout werkt — de worker KAN niet in de hoofdcheckout werken omdat zijn cwd de worktree is.
-- Bewijs: `scripts/lib/tmux_interactive_dispatch.py:2200`
+- Bewijs: `scripts/lib/tmux_interactive_dispatch.py (regel 2200 op de gemeten commit)`
 
 **headless — bindt**
 - Sinds #1416 maakt de headless lane een worktree aan (`dispatch_envelope.py:666`) en geeft `cwd=wt_path` mee aan de adapter (regel 695).
@@ -230,10 +231,10 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 ### 3.6 Celbewijzen — mechanisme 6: Teardown meldt `worktree_state`
 
 **tmux — bindt**
-- `_teardown()` (`tmux_interactive_dispatch.py:2291-2365`) roept `classify()` aan (`:2324`) en `reap()` (`:2326`).
+- `_teardown()` (`tmux_interactive_dispatch.py (regel 2291-2365 op de gemeten commit)`) roept `classify()` aan (`:2324`) en `reap()` (`:2326`).
 - Emit `interactive_teardown_worktree` event met metadata: `worktree_state`, `branch_kept_local`, `branch_kept_remote`, `preserved_path` (`:2328-2340`).
 - Bij `dirty` status: extra `interactive_teardown_preserved` event (`:2341-2347`).
-- Bewijs: `scripts/lib/tmux_interactive_dispatch.py:2321-2347`
+- Bewijs: `scripts/lib/tmux_interactive_dispatch.py (regel 2321-2347 op de gemeten commit)`
 
 **headless — bindt**
 - `run_envelope_headless_plan()` (`dispatch_envelope.py:721`) roept `remove_dispatch_worktree()` aan met `terminal_id=plan.target_id`.
@@ -252,11 +253,11 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 ### 3.7 Celbewijzen — mechanisme 7: Push+PR-verplichting
 
 **tmux — bindt (voor `pushed` EN `committed`)**
-- `_enforce_pr_exists()` (`tmux_interactive_dispatch.py:1031-1098`) wordt aangeroepen op regel 2982, vóór `_govern_report()` en vóór `_teardown()`.
+- `_enforce_pr_exists()` (`tmux_interactive_dispatch.py (regel 1031-1098 op de gemeten commit)`) wordt aangeroepen op regel 2982, vóór `_govern_report()` en vóór `_teardown()`.
 - `enforce_pr_exists()` (`pr_enforcement.py:80-164`) bevat de ENIGE per-staat beslissing: `pushed` → PR afdwingen; `committed` → pushen dan PR afdwingen (rij-7 fix); `clean`/`dirty` → `applicable=False`.
-- Een mislukte push of PR-creatie → `ok=False` → `worker_succeeded = False` (`tmux_interactive_dispatch.py:2989`) → `receipt["status"] = "failed"` + `failure_reason=dispatch_branch_no_pr (state=...)`. Geen `exit 0` met werk lokaal gestrand.
+- Een mislukte push of PR-creatie → `ok=False` → `worker_succeeded = False` (`tmux_interactive_dispatch.py (regel 2989 op de gemeten commit)`) → `receipt["status"] = "failed"` + `failure_reason=dispatch_branch_no_pr (state=...)`. Geen `exit 0` met werk lokaal gestrand.
 - De corrective receipt wordt door `pr_enforcement._record_corrective_receipt` zelf geschreven met `autopr_kind` (`push_failed`/`pr_failed`).
-- Bewijs: `scripts/lib/pr_enforcement.py:80-164`, `scripts/lib/tmux_interactive_dispatch.py:2982-3013`
+- Bewijs: `scripts/lib/pr_enforcement.py:80-164`, `scripts/lib/tmux_interactive_dispatch.py (regel 2982-3013 op de gemeten commit)`
 
 **headless — bindt**
 - `run_envelope_headless_plan()` roept `_enforce_push_pr()` aan (`dispatch_envelope.py:706-719`) vóór `remove_dispatch_worktree()` (de worktree is de enige handle naar de lokale branch).
@@ -280,7 +281,7 @@ Uit de enumeratie hierboven zijn twee rijen toegevoegd:
 - `EventStore.clear(label, archive_dispatch_id=_prev_did)` op regel 2424 — dit archiveert de VORIGE dispatch's events.
 - Bij `_teardown()` wordt alleen `_run_capture_normalizer()` aangeroepen (`:2316`) — geen `_archive_dispatch_events()` of `_clear_dispatch_events()`.
 - **Gevolg**: de laatste dispatch in een serie lekt events in de live file. Geen end-of-dispatch rotatie.
-- Bewijs: `scripts/lib/tmux_interactive_dispatch.py:2417-2426` (pre-capture clear) en `:2291-2365` (teardown zonder archive)
+- Bewijs: `scripts/lib/tmux_interactive_dispatch.py (regel 2417-2426 op de gemeten commit)` (pre-capture clear) en `:2291-2365` (teardown zonder archive)
 
 **headless — bindt**
 - `_govern()` roept `_archive_dispatch_events()` aan op regel 99 en `_clear_dispatch_events()` in de finally block.

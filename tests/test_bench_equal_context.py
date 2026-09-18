@@ -1,4 +1,6 @@
-"""Regression tests for benchmark equal-context dispatch mode."""
+"""Regression tests for benchmark equal-context dispatch mode.
+
+The tmux lane's equal-context tests went with that lane on 2026-09-18."""
 
 from __future__ import annotations
 
@@ -19,7 +21,6 @@ sys.path.insert(0, str(RUNNERS))
 import lane_adapter  # noqa: E402
 import provider_dispatch  # noqa: E402
 import subprocess_dispatch  # noqa: E402
-from tmux_interactive_dispatch import TmuxInteractiveDispatch, TmuxResult  # noqa: E402
 
 
 RAW_INSTRUCTION = "  # benchmark prompt\r\n\r\nPreserve trailing whitespace.  \n"
@@ -84,121 +85,6 @@ def test_provider_without_equal_context_invokes_existing_enrichers(monkeypatch):
         {"role": "security-engineer"},
     )
     inject_skill.assert_called_once()
-
-
-def test_tmux_equal_context_skips_all_context_assembly(monkeypatch, tmp_path):
-    lane = TmuxInteractiveDispatch(tmp_path, project_root=tmp_path)
-    monkeypatch.setenv("VNX_BENCH_EQUAL_CONTEXT", "1")
-    monkeypatch.setenv("VNX_SHARED_PREPARE", "1")
-
-    with (
-        patch("dispatch_prepare.prepare") as prepare,
-        patch(
-            "subprocess_dispatch_internals.skill_injection._inject_skill_context",
-        ) as inject_skill,
-    ):
-        result = lane._assemble_context(
-            role="security-engineer",
-            smart_context="must not be added",
-            terminal_id="T1",
-            dispatch_id="bench-equal-context-test",
-            instruction=RAW_INSTRUCTION,
-            dispatch_paths=["scripts/lib/example.py"],
-        )
-
-    assert result == RAW_INSTRUCTION
-    prepare.assert_not_called()
-    inject_skill.assert_not_called()
-
-
-def test_tmux_without_equal_context_invokes_existing_enricher(monkeypatch, tmp_path):
-    lane = TmuxInteractiveDispatch(tmp_path, project_root=tmp_path)
-    monkeypatch.delenv("VNX_BENCH_EQUAL_CONTEXT", raising=False)
-    monkeypatch.setenv("VNX_SHARED_PREPARE", "0")
-
-    with patch(
-        "subprocess_dispatch_internals.skill_injection._inject_skill_context",
-        return_value="skill-context-added",
-    ) as inject_skill:
-        result = lane._assemble_context(
-            role="security-engineer",
-            terminal_id="T1",
-            instruction=RAW_INSTRUCTION,
-        )
-
-    # Enricher output is used; the fallback path also appends the report-contract
-    # directive (gap #3b) so the dispatch stays governed without VNX_SHARED_PREPARE.
-    assert "skill-context-added" in result
-    assert "<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->" in result
-    inject_skill.assert_called_once()
-
-
-def test_equal_context_matches_tmux_and_provider_assembly(monkeypatch, tmp_path):
-    monkeypatch.setenv("VNX_BENCH_EQUAL_CONTEXT", "1")
-    lane = TmuxInteractiveDispatch(tmp_path, project_root=tmp_path)
-
-    tmux_instruction = lane._assemble_context(
-        role="security-engineer",
-        terminal_id="T1",
-        instruction=RAW_INSTRUCTION,
-    )
-    provider_instruction = provider_dispatch._enrich_instruction(
-        _provider_args(),
-    )
-
-    assert tmux_instruction == provider_instruction == RAW_INSTRUCTION
-
-
-def test_tmux_equal_context_delivers_only_the_benchmark_prompt(monkeypatch, tmp_path):
-    runner = Mock()
-    runner.available.return_value = True
-    # OI-1126: tracks the -s value from the last new-session call so
-    # display-message '#{session_name}' echoes back the REAL session that was
-    # spawned (matching real tmux), instead of a hardcoded stand-in — otherwise
-    # _verify_pane_identity() sees it disagree with dispatch()'s own `session`
-    # variable and aborts before delivery even in the success path.
-    last_session_name: dict[str, str] = {}
-
-    def run_tmux(args, **kwargs):
-        if args[0] == "new-session":
-            if "-s" in args:
-                last_session_name["value"] = args[args.index("-s") + 1]
-            return TmuxResult(0, "%1\n", "")
-        if args[0] == "display-message":
-            if args[-1] == "#{session_name}":
-                return TmuxResult(0, f"{last_session_name.get('value', '')}\n", "")
-            return TmuxResult(0, "@1\n", "")
-        if args[0] == "capture-pane":
-            return TmuxResult(0, "Welcome to Claude\n? for shortcuts", "")
-        return TmuxResult(0, "", "")
-
-    runner.run.side_effect = run_tmux
-    lane = TmuxInteractiveDispatch(
-        tmp_path,
-        runner=runner,
-        receipts_file=tmp_path / "receipts.ndjson",
-        project_root=tmp_path,
-    )
-    delivered: list[str] = []
-    monkeypatch.setenv("VNX_BENCH_EQUAL_CONTEXT", "1")
-    monkeypatch.setenv("VNX_SHARED_PREPARE", "1")
-    monkeypatch.setattr(
-        lane,
-        "_deliver_instruction",
-        lambda pane_id, body, dispatch_id: delivered.append(body) or False,
-    )
-
-    lane.dispatch(
-        RAW_INSTRUCTION,
-        "bench-equal-context-test",
-        role="security-engineer",
-        deadline_seconds=1,
-        warmup_timeout=0.05,
-        warmup_poll_interval=0.001,
-        isolated_worktree=False,
-    )
-
-    assert delivered == [RAW_INSTRUCTION]
 
 
 def test_subprocess_equal_context_skips_headless_enrichers(monkeypatch):
@@ -346,10 +232,6 @@ def test_subprocess_equal_context_disables_shared_prepare_and_repo_map(monkeypat
     [
         (
             lane_adapter._claude_subprocess_headless,
-            {"id": "claude-test", "provider": "claude", "model_arg": "sonnet"},
-        ),
-        (
-            lane_adapter._claude_tmux_spawn,
             {"id": "claude-test", "provider": "claude", "model_arg": "sonnet"},
         ),
         (

@@ -456,24 +456,6 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
         help="required human-readable justification when --allow-headless is set",
     )
     dispatch_parser.add_argument(
-        "--force-tmux",
-        action="store_true",
-        default=False,
-        dest="force_tmux",
-        help=(
-            "opt OUT of the claude_headless default back to the "
-            "claude_tmux_subscription lane. Requires --force-tmux-reason and a "
-            "claude provider. Mutually exclusive with --allow-headless."
-        ),
-    )
-    dispatch_parser.add_argument(
-        "--force-tmux-reason",
-        default=None,
-        dest="force_tmux_reason",
-        metavar="REASON",
-        help="required human-readable justification when --force-tmux is set",
-    )
-    dispatch_parser.add_argument(
         "--base-ref",
         default=None,
         dest="base_ref",

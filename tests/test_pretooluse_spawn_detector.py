@@ -360,12 +360,6 @@ class TestShadowLaneScriptDirect:
     def test_subprocess_dispatch_direct_enforce_blocks(self):
         assert _classify("python3 scripts/lib/subprocess_dispatch.py prompt", enforce=True) == "block"
 
-    def test_tmux_interactive_dispatch_shadow_allows(self):
-        assert _classify("python3 scripts/lib/tmux_interactive_dispatch.py --provider claude", enforce=False) == "allow"
-
-    def test_tmux_interactive_dispatch_enforce_blocks(self):
-        assert _classify("python3 scripts/lib/tmux_interactive_dispatch.py --provider claude", enforce=True) == "block"
-
     def test_dispatch_cli_shadow_allows(self):
         assert _classify("scripts/lib/dispatch_cli.py --provider claude", enforce=False) == "allow"
 
@@ -395,12 +389,6 @@ class TestShadowPythonMLane:
     def test_python3_m_subprocess_dispatch_enforce_blocks(self):
         assert _classify("python3 -m subprocess_dispatch", enforce=True) == "block"
 
-    def test_python_m_tmux_interactive_shadow_allows(self):
-        assert _classify("python -m tmux_interactive_dispatch", enforce=False) == "allow"
-
-    def test_python_m_tmux_interactive_enforce_blocks(self):
-        assert _classify("python -m tmux_interactive_dispatch", enforce=True) == "block"
-
     def test_python_m_dispatch_cli_shadow_allows(self):
         assert _classify("python -m dispatch_cli --provider claude", enforce=False) == "allow"
 
@@ -429,12 +417,6 @@ class TestShadowPythonCImport:
 
     def test_python3_c_from_import_enforce_blocks(self):
         assert _classify("python3 -c 'from provider_dispatch import main; main()'", enforce=True) == "block"
-
-    def test_python_c_import_tmux_shadow_allows(self):
-        assert _classify('python3 -c "import tmux_interactive_dispatch"', enforce=False) == "allow"
-
-    def test_python_c_import_tmux_enforce_blocks(self):
-        assert _classify('python3 -c "import tmux_interactive_dispatch"', enforce=True) == "block"
 
     def test_python_c_import_dispatch_cli_shadow_allows(self):
         assert _classify('python -c "import dispatch_cli; dispatch_cli.run()"', enforce=False) == "allow"
@@ -609,7 +591,7 @@ SHADOW_CASES = [
     "python -mprovider_dispatch",
     "python -c'import provider_dispatch'",
     "python3 -c 'import importlib; importlib.import_module(\"provider_dispatch\")'",
-    "tmux_interactive_dispatch.py",
+    "subprocess_dispatch.py",
 ]
 
 

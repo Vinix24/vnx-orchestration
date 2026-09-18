@@ -47,13 +47,13 @@ def test_skill_has_no_provider_routing_table():
     """The provider-string cheat-sheet / lane tables belong in DISPATCH_RULES.md, not the skill.
 
     Heuristic: a markdown table row that names a concrete lane script or provider string
-    (provider_dispatch.py / tmux_interactive_dispatch.py / litellm:) is routing prose.
+    (provider_dispatch.py / litellm:) is routing prose.
     """
     offenders = [
         line.strip()
         for line in _SKILL.read_text(encoding="utf-8").splitlines()
         if "|" in line
-        and re.search(r"provider_dispatch\.py|tmux_interactive_dispatch\.py|litellm:", line)
+        and re.search(r"provider_dispatch\.py|litellm:", line)
     ]
     assert not offenders, (
         "Provider/lane routing TABLE found in the skill — move it to DISPATCH_RULES.md. "
@@ -64,7 +64,7 @@ def test_skill_has_no_provider_routing_table():
 def test_dispatch_rules_carries_the_routing():
     """Sanity: the ruleset actually contains the routing the skill no longer inlines."""
     rules = _RULES.read_text(encoding="utf-8")
-    for token in ("provider_dispatch.py", "tmux_interactive_dispatch.py", "litellm:zai", "claude-tmux"):
+    for token in ("provider_dispatch.py", "litellm:zai", "claude-tmux"):
         assert token in rules, f"DISPATCH_RULES.md is missing expected routing content: {token!r}"
 
 
@@ -88,8 +88,8 @@ def test_claude_snippet_delegates_lane_detail():
         "CLAUDE_SNIPPET.md must reference docs/core/DISPATCH_RULES.md for dispatch mechanics."
     )
     assert _PRUNED_LANE_PROSE not in snippet, (
-        "Verbose tmux-spawn lane prose crept back into CLAUDE_SNIPPET.md — keep it in "
-        "docs/core/DISPATCH_RULES.md / docs/operations/TMUX_SPAWN_LANE.md and link instead."
+        "Verbose tmux-spawn lane prose crept back into CLAUDE_SNIPPET.md — keep lane "
+        "detail in docs/core/DISPATCH_RULES.md and link instead."
     )
 
 

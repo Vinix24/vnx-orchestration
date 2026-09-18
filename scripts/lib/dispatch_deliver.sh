@@ -519,8 +519,7 @@ _ddt_subprocess_delivery() {
     # PR-12 single-entry door (gated by VNX_SINGLE_ENTRY_DISPATCH). When ON, this staged daemon
     # delivery funnels through dispatch_bridge → run_dispatch (validate→snapshot→compile_plan→
     # permit→execute) like every other path. Post-flip behavior is INTENTIONAL (door-flip / ADR-024):
-    #   * the lane change for claude (subprocess → tmux-spawn) is the post-June-15 provider→lane
-    #     target — claude routes via the subscription tmux-spawn lane, never headless claude -p;
+    #   * claude routes via the door's headless lane (claude_headless), the only claude lane;
     #   * --auto-route is moot here — run_dispatch owns deterministic provider-based lane selection,
     #     so _ar_flag is only forwarded on the legacy else-branch below;
     #   * --provider IS forwarded so a non-claude terminal-pinned worker keeps its provider lane

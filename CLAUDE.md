@@ -46,13 +46,12 @@ Your report MUST contain these exact headings (aliases accepted):
 
 ## Dispatch lanes
 
-Three lanes ship on main; T0 picks per task (two of them are the claude-provider split, see the rule below). Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (tmux-spawn lane detail: `docs/operations/TMUX_SPAWN_LANE.md`).
+Two lanes ship on main; T0 picks per task (`claude_headless` is the only claude lane, see the rule below). Full decision rule, provider strings, concurrency, and failure modes live in **`docs/core/DISPATCH_RULES.md`** (the tmux-spawn lane was removed on 2026-09-18: `docs/operations/TMUX_SPAWN_LANE.md`).
 
 - **`dispatch_envelope.run_envelope_headless_plan`** (`claude_headless`, default for `claude`) — `claude -p` via envelope, isolated worktree per dispatch, subscription-preserving. No live pane.
-- **`scripts/lib/tmux_interactive_dispatch.py`** (`claude_tmux_subscription`, explicit opt-out via `--force-tmux` + reason) — leaseless ephemeral, isolated worktree per dispatch, drives an interactive `claude` worker on the subscription. Pick it when a human needs a live pane to watch or intervene.
 - **`scripts/lib/subprocess_dispatch.py`** — terminal-pinned (Wave 5 smart-context, lease, triple-gate). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`. Use for single-worker PRs that benefit from prior-round findings, or work expected to run >30 min. **No Anthropic SDK** — only `subprocess.Popen(["claude", ...])`.
 
-**Provider→lane rule (hard).** `claude`/Opus/Sonnet panelists and workers default to the **headless lane** (`claude -p`, subscription) since A2 (2026-08-26) — NEVER `provider_dispatch` (it refuses claude: claude is not a provider-lane provider). The **tmux-spawn lane** is now the explicit opt-out (`--force-tmux` + reason, mirrors `--allow-headless`): pick it when a human needs a live pane to watch or intervene, not by default. Both lanes run on the Max subscription, not API credits — measured 2026-08-11 via auth state (no `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`, keychain `subscriptionType: max`); the "API-metered post-cutover" reason this line used to carry was never true (Anthropic never carried out that cutover). Isolation and report-gate status for the headless lane: DISPATCH_RULES §8 (do not duplicate the mechanism here — it drifts). `kimi`/`glm`(litellm:zai)/`deepseek` route via `provider_dispatch.py`. Everything dispatches through the **single-entry door** (`vnx dispatch`), which decides the lane; calling a lane script directly is a side door (PR-12 consolidates the remaining ones, incl. the plan-gate panel). The plan-first gate (`plan_gate_panel.py`) honors this split.
+**Provider→lane rule (hard).** `claude`/Opus/Sonnet panelists and workers run on the **headless lane** (`claude -p`, subscription): the default since A2 (2026-08-26) and the only claude lane since the tmux-spawn lane was removed on 2026-09-18 — NEVER `provider_dispatch` (it refuses claude: claude is not a provider-lane provider). The lane runs on the Max subscription, not API credits — measured 2026-08-11 via auth state (no `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`, keychain `subscriptionType: max`); the "API-metered post-cutover" reason this line used to carry was never true (Anthropic never carried out that cutover). Isolation and report-gate status for the headless lane: DISPATCH_RULES §8 (do not duplicate the mechanism here — it drifts). `kimi`/`glm`(litellm:zai)/`deepseek` route via `provider_dispatch.py`. Everything dispatches through the **single-entry door** (`vnx dispatch`), which decides the lane; calling a lane script directly is a side door (PR-12 consolidates the remaining ones, incl. the plan-gate panel). The plan-first gate (`plan_gate_panel.py`) honors this split.
 
 For full documentation: `docs/`
 
@@ -86,7 +85,6 @@ Self-learning loop is dormant. Receipt processor must be running for audit trail
 
 <important if="working on tmux delivery or session hooks">
 Hard rule: Enter ALWAYS as a separate tmux keystroke — combined send-keys misses delivery.
-Leaseless lane live on main (#663+#664). Known bugs: timestamp drift, env-not-inherited.
 </important>
 
 ## Path Resolution

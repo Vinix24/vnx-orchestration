@@ -92,12 +92,7 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
     "cross-project-federation": "Cross-project intelligence federation (not yet implemented).",
     "claude-tmux-serialization": (
         "N-slot serial lock protecting the shared Claude subscription session cap "
-        "for the claude-tmux dispatch lane."
-    ),
-    "claude-tmux-lane": (
-        "Emergency brake that re-enables the retired tmux-interactive claude "
-        "dispatch lane (force_tmux opt-out). PARKed: the lane is retired by "
-        "operator directive 2026-09-12; claude dispatches headless only."
+        "for claude dispatches (the lock class keeps its historical claude-tmux name)."
     ),
     "central-install-cutover": (
         "Cutover behind-guard: every central-install flip measures and names how "
@@ -127,7 +122,6 @@ _ROW_ORDER: List[str] = [
     "receipt-hash-chain",
     "signed-attestation",
     "evidence-bound-gate",
-    "claude-tmux-lane",
     # ACTIVATE-and-measure
     "intelligence-self-learning-loop",
     "dream-consolidation",

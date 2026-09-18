@@ -109,7 +109,7 @@ run_field_tests.main()
        └─ _run_with_retry()              # per cell, up to --max-retries
             └─ run_one_cell()
                  ├─ lane_adapter.dispatch()      # isolation + skill frame + provider route
-                 │     └─ provider_dispatch.py / tmux_interactive_dispatch.py
+                 │     └─ provider_dispatch.py
                  │            └─ worker runs in an ISOLATED git worktree
                  │                 └─ writes a unified report  → DispatchResult
                  └─ scorer.score_cell()          # verify.py + judge → CellScore

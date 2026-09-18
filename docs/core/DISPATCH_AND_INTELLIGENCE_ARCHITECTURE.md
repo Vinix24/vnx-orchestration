@@ -21,7 +21,7 @@ A dispatch is not "paste text into a worker." It is: **stage an intent → route
                                  ▼
    ┌─ THE DOOR — dispatch_cli.run_dispatch (single entry) ────────────┐
    │  reads the bundle → compile_plan → picks the lane:               │
-   │     provider=claude              → claude tmux-spawn lane         │
+   │     provider=claude              → claude headless lane           │
    │     provider=kimi|glm|deepseek   → provider envelope lane         │
    │  Flag: VNX_SINGLE_ENTRY_DISPATCH (default ON, ADR-024 2026-06-24);│
    │  VNX_DISPATCH_LEGACY=1 = hard rollback to legacy routing.         │
@@ -41,11 +41,9 @@ A dispatch is not "paste text into a worker." It is: **stage an intent → route
    └───────────────────────────┬─────────────────────────────────────┘
                                 ▼  = the assembled "body"
    ┌─ DELIVERY ──────────────────────────────────────────────────────┐
-   │  claude lane (tmux-spawn): fresh isolated worktree + tmux pane,  │
-   │    launch interactive `claude` (NEVER `claude -p`), bracketed-   │
-   │    paste(body), settle, Enter as a SEPARATE keystroke, staged-   │
-   │    paste retry. Readiness + submit detection ride on hook        │
-   │    sentinels (§5).                                               │
+   │  claude lane (headless): fresh isolated worktree, `claude -p`,   │
+   │    report gate and receipt bound before the dispatch counts      │
+   │    as done (DISPATCH_RULES §8).                                  │
    │  provider lane (envelope): spawn kimi / glm-harness / deepseek-  │
    │    harness, instruction passed in-process.                       │
    └───────────────────────────┬─────────────────────────────────────┘
@@ -65,13 +63,13 @@ A dispatch is not "paste text into a worker." It is: **stage an intent → route
 
 | Provider | Lane | Mechanism | Billing |
 |---|---|---|---|
-| `claude` (Opus/Sonnet) | **claude tmux-spawn** (`tmux_interactive_dispatch.py`) | interactive `claude` in an ephemeral isolated worktree; leaseless | subscription (June-15 escape) |
+| `claude` (Opus/Sonnet) | **claude headless** (`dispatch_envelope.run_envelope_headless_plan`) | `claude -p` in an ephemeral isolated worktree; leaseless | subscription |
 | `claude` (terminal-pinned, opt-in) | **subprocess** (`subprocess_dispatch.py`) | `claude -p` headless, lease + Wave-5 smart-context + triple-gate | subscription |
 | `kimi` / `glm`(harness) / `deepseek`(harness) | **provider envelope** (`dispatch_envelope.py`) | provider CLI / harness spawn | provider-metered |
 
-Hard rules: **claude workers route via tmux-spawn, never `provider_dispatch`, never headless `claude -p` (post-cutover = API credits).** `glm` always via the claude-CLI harness (`:4141` litellm→OpenRouter proxy), never plain `litellm:zai`. Everything dispatches through the single door (`vnx dispatch`); calling a lane script directly is a side door (the `dispatch_sidedoor_audit.py` gate enforces this).
+Hard rules: **claude workers route via the headless lane, never `provider_dispatch`.** `glm` always via the claude-CLI harness (`:4141` litellm→OpenRouter proxy), never plain `litellm:zai`. Everything dispatches through the single door (`vnx dispatch`); calling a lane script directly is a side door (the `dispatch_sidedoor_audit.py` gate enforces this).
 
-The tmux-spawn lane is the default for parallel/independent feature work. The subprocess lane is opt-in (`VNX_ADAPTER_T{n}=subprocess`) for terminal-pinned PRs, >30-min workers, and burn-in measurement — it uniquely carries Wave-5 smart-context, lease management, triple-gate `contract_hash` binding, and prior-round findings.
+The headless lane is the default for parallel/independent feature work (the tmux-spawn lane was removed on 2026-09-18). The subprocess lane is opt-in (`VNX_ADAPTER_T{n}=subprocess`) for terminal-pinned PRs, >30-min workers, and burn-in measurement — it uniquely carries Wave-5 smart-context, lease management, triple-gate `contract_hash` binding, and prior-round findings.
 
 ## 4. Assembly — where governance value is added
 
@@ -85,7 +83,9 @@ Assembly runs in the lane **before** delivery (`_assemble_context` → `dispatch
 
 ## 5. Delivery reliability — the tmux-signal hook contract
 
-The claude tmux-spawn lane's readiness and submit detection ride on two hook sentinels, dropped by hooks the worker's project must wire and guarded by `VNX_TMUX_SIGNAL_DIR` + `VNX_DISPATCH_ID` (which the lane exports into the worker env):
+**Removed lane.** The tmux-spawn lane that produced these signals was removed on 2026-09-18, and nothing exports `VNX_TMUX_SIGNAL_DIR` any more, so the hooks below are inert. They stay in the tree as session management. The text is kept as the record of the contract.
+
+The claude tmux-spawn lane's readiness and submit detection rode on two hook sentinels, dropped by hooks the worker's project must wire and guarded by `VNX_TMUX_SIGNAL_DIR` + `VNX_DISPATCH_ID` (which the lane exported into the worker env):
 
 - **SessionStart** → `scripts/hooks/tmux_signal_session_ready.sh` writes `<signal_dir>/session_ready` → the lane knows the worker's input box is ready before it pastes.
 - **UserPromptSubmit** → `scripts/hooks/tmux_signal_prompt_received.sh` writes `<signal_dir>/prompt_received` → the lane knows the paste was actually submitted.

@@ -7,9 +7,9 @@ contradicts:
     ``api_metered``. Billing is auth-derived, not lane-derived: without an own
     ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` a headless dispatch bills as
     ``subscription``. Resolver: ``dispatch_plan.claude_auth_is_api_metered``.
-  * OI-1225 — three sites in ``tmux_interactive_dispatch.py`` (plus a doc code
-    block) claimed ADR-012 enforcement was "default ON since 15-08". That flip
-    was reverted; the resolver
+  * OI-1225 — three sites in ``tmux_interactive_dispatch.py`` (removed with the
+    tmux lane on 2026-09-18) plus a doc code block claimed ADR-012 enforcement
+    was "default ON since 15-08". That flip was reverted; the resolver
     ``worker_permissions.worker_permission_enforcement_enabled`` returns False
     by default.
 
@@ -67,7 +67,6 @@ def test_enforcement_default_claim_matches_resolver(monkeypatch):
     assert worker_permission_enforcement_enabled() is False
 
     for rel in (
-        "scripts/lib/tmux_interactive_dispatch.py",
         "docs/operations/WORKER_PERMISSIONS.md",
     ):
         text = _read(*rel.split("/"))

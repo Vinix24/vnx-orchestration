@@ -86,11 +86,11 @@ a diverse-family panel BEFORE any implementation.
   panel runs on the **governed worker path**, and each panelist routes by its lane (the
   single-entry dispatch door decides this; until PR-12 wires/flips that door, the engine calls
   the lanes directly as a marked interim):
-  - **opus / any `claude` panelist → the TMUX-SPAWN lane** (`tmux_interactive_dispatch.py`):
-    interactive `claude` in an ephemeral isolated worktree, billing stays on the
-    **subscription** (CLAUDE.md "June-15 escape"). NEVER `provider_dispatch` (it refuses
-    claude — claude is not a provider-lane provider) and NEVER headless `claude -p` (API
-    credits post-cutover). This is the correction to an earlier wrong note ("force_headless").
+  - **opus / any `claude` panelist → the headless lane** (`dispatch_envelope.run_envelope_headless_plan`):
+    `claude -p` in an isolated worktree, billing stays on the **subscription** (CLAUDE.md
+    "Dispatch lanes"). NEVER `provider_dispatch` (it refuses claude — claude is not a
+    provider-lane provider). The tmux-spawn lane this section used to name was removed on
+    2026-09-18.
   - **kimi / glm / deepseek → `provider_dispatch.py`** (constraint-safe per provider).
 
   Every panelist emits a report -> receipt (the gate that gates everything is in the audit

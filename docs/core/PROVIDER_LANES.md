@@ -22,49 +22,32 @@ do not yet behave identically.
 
 | Lane | Binary / transport | Auth | Primary use | Module |
 |---|---|---|---|---|
-| claude-tmux-spawn | interactive `claude` in a tmux session | OAuth subscription (preserved) | default Claude worker (code + commit) | `scripts/lib/tmux_interactive_dispatch.py` |
-| claude-subprocess | `claude -p` headless | API credits after June 15, 2026 | burst worker, opt-in (blocked by default) | `scripts/lib/subprocess_dispatch.py` |
+| claude-headless | `claude -p` headless, via the door | OAuth subscription (an own `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` switches billing) | the only Claude worker lane (code + commit) | `scripts/lib/dispatch_envelope.py` (`run_envelope_headless_plan`) |
+| claude-subprocess | `claude -p` headless, terminal-pinned | same auth as claude-headless | terminal-pinned single-worker PRs, opt-in per terminal | `scripts/lib/subprocess_dispatch.py` |
 | codex | `codex exec` CLI | OpenAI CLI auth | strict diff-mode review | `scripts/lib/provider_dispatch.py` (`_dispatch_codex`) |
 | gemini | gemini CLI | Google CLI auth | review | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
 | kimi | Kimi CLI (`kimi login` OAuth) | Kimi CLI OAuth | synthesis / operational review | `scripts/lib/provider_dispatch.py` (`_dispatch_kimi`) |
 | deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
 | ollama | local Ollama resolver | none (local) | privacy-sensitive work, resolver layer | routed via litellm `ollama` sub-provider |
 
-### claude-tmux-spawn
+### claude-headless
 
-The default Claude worker lane. `dispatch.sh` selects it unless a dispatch opts
-into the headless burst lane. Interactive `claude` (never `claude -p`) is driven
-inside a fresh, single-shot tmux session: spawn, deliver the instruction, wait
-for the completion receipt, tear down. No session reuse, no leases, no fixed
-terminal identity.
-
-The point of this lane is billing. Interactive Claude Code stays on the
-subscription after the June 15, 2026 billing change, while headless moves to API
-credits. The lane guards that property: `_assert_no_headless_flags` rejects any
-`-p`/`--print` flag in the assembled launch command, so the lane cannot silently
-become a metered headless call.
-
-The lane is subscription-preserving. Its structural work (`PREPARE`, `GOVERN`,
-`RECEIPT`, `CAPTURE`) has shipped, which is what lets it emit a receipt and a
-unified report and normalize the captured conversation into the event store. It
-is still being hardened; I do not yet claim it matches the headless lane on
-every surface (see Lane maturity).
+The only Claude worker lane. The tmux-spawn lane was removed on 2026-09-18
+(`docs/operations/TMUX_SPAWN_LANE.md`), so the door routes every `provider=claude`
+dispatch here: `dispatch_envelope.run_envelope_headless_plan` runs `claude -p` in a
+fresh isolated worktree, and the report gate and the receipt bind before the
+dispatch counts as done. Isolation and report-gate status: `DISPATCH_RULES.md` §8.
 
 **Worker model pin (worker-provider-kimi-flip, 2026-07-23):** T1/T2/T3 default to
 `kimi-k3` on the provider lane (`workers-kimi-pinned` in `provider_constraints.yaml`,
 renamed from `workers-sonnet-pinned`); T0 stays on Opus. Since the pin now resolves
 to a non-Claude model, an explicit `provider=claude` override for a T1/T2/T3 build
-worker on THIS lane is rejected (fail-loud, no silent claude/sonnet fallback) rather
+worker on the claude lane is rejected (fail-loud, no silent claude/sonnet fallback) rather
 than resolving to `claude-sonnet-5`.
 
-**Worker permissions (#1016):** the detached spawn defaults to blanket
-`--dangerously-skip-permissions` — the isolated per-dispatch worktree already
-bounds blast radius, so a scoped allow-list only adds prompt friction, not
-protection. `VNX_WORKER_SCOPED=1` opts back into the scoped posture
-(`--permission-mode acceptEdits` + empty ambient MCP + role allow-list). Detail:
-`docs/operations/WORKER_PERMISSIONS.md`.
+**Worker permissions:** see `docs/operations/WORKER_PERMISSIONS.md`.
 
-**Concurrency (#1017):** the lane's serial lock is an N-slot semaphore, not a
+**Concurrency (#1017):** the claude serial lock is an N-slot semaphore, not a
 single mutex. Default `N=10` (operator directive 2026-08-21, the
 subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (env var, or the
 registry-backed config-store value) raises or lowers it as an explicit
@@ -72,15 +55,13 @@ operator opt-in. See `DISPATCH_RULES.md` §6.
 
 ### claude-subprocess
 
-The headless burst lane. `claude -p` runs via `subprocess_dispatch.py`, enriched
-with skill context, intelligence injection, and the repo map. It has the most
-receipts behind it and is the bar the other lanes are measured against.
+The terminal-pinned headless lane. `claude -p` runs via `subprocess_dispatch.py`,
+enriched with skill context, intelligence injection, and the repo map. It has the
+most receipts behind it and is the bar the other lanes are measured against.
 
-The June 15, 2026 billing change moves headless `claude -p` usage to API
-credits, so this lane is now opt-in and blocked by default. The `claude-headless`
-constraint refuses it unless `VNX_OVERRIDE_CLAUDE_HEADLESS=1` is set, to stop a
-dispatch from silently billing API credits. Use it for burst/batch throughput
-when the API cost is intended.
+Billing follows the auth, not the lane: it runs on the subscription unless the
+environment carries an own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL`
+(`DISPATCH_RULES.md` §7 and §8). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`.
 
 ### codex
 
@@ -133,21 +114,19 @@ leaves the machine. Routed through the litellm `ollama` sub-provider.
 ## Report-writing divergence
 
 This is the most important nuance to get right, because the receipt and report
-are the whole point of the system and the two Claude lanes do not produce them
-the same way.
+are the whole point of the system and the lanes do not produce them the same
+way.
 
-**tmux-spawn lane: the worker authors its own report.** The completion protocol
-appended to every tmux dispatch instructs the worker to write its unified report
-to `unified_reports/` and then emit the completion receipt as its last step. The
-report body is what the worker actually wrote. `govern()` always runs as a
-backstop: if the worker did not produce a usable report, it emits an honest
-minimal body marked `contract_status="synthesized"` rather than leaving a gap.
+**Removed lane, for reference.** The tmux-spawn lane (removed on 2026-09-18) had its
+worker author its own report through a completion protocol, with `govern()` as the
+backstop that emitted a minimal `contract_status="synthesized"` body when no usable
+report existed. `govern()` itself stays in `dispatch_govern.py`.
 
 **claude-subprocess lane: `govern()` wiring is opt-in (`VNX_SHARED_GOVERN=1`,
-default off).** `dispatch_govern.py`'s own module docstring names both the tmux
-and subprocess lanes as intended callers, but only tmux was wired end to end.
-Behind the flag, `deliver_with_recovery` routes both the success and the
-budget-exhausted-failure path through the same `govern()` used by tmux — including
+default off).** `dispatch_govern.py`'s own module docstring names the tmux lane
+(removed) and the subprocess lane as its intended callers. Behind the flag,
+`deliver_with_recovery` routes both the success and the
+budget-exhausted-failure path through `govern()` — including
 git-diff synthesis (`base_sha` = the pre-dispatch commit SHA) and schema-complete
 frontmatter — instead of the legacy stub-only `_ensure_unified_report` (success) or
 no report at all (final failure). `govern()`'s authored-report lookup also checks
@@ -183,8 +162,8 @@ before concluding the dispatch did nothing.
 
 | Work | Lane | Why |
 |---|---|---|
-| Code change that commits | claude-tmux-spawn (default) | Subscription-preserving; worker authors its own report |
-| Burst / batch implementation | claude-subprocess (opt-in, `VNX_OVERRIDE_CLAUDE_HEADLESS=1`) | Headless throughput; lowest overhead per dispatch; bills API credits |
+| Code change that commits | claude-headless (the only Claude lane) | Subscription-billed; report gate binds before the receipt |
+| Terminal-pinned single-worker PR | claude-subprocess (opt-in per terminal) | Lease management, Wave-5 smart-context |
 | Strict diff review | codex (`codex exec`) | Reads the diff, reports defects against it |
 | Second-angle review | gemini | Different reviewer, contract-bound, pairs with codex |
 | Synthesis / operational review | kimi | Reasons about whether the change makes sense, not just diff defects |
@@ -192,8 +171,8 @@ before concluding the dispatch did nothing.
 | Privacy-sensitive work, resolver layer | ollama | Local; no data leaves the machine |
 
 Code-and-commit work goes to a Claude lane because that is where report
-authorship and receipt quality are strongest. The default is claude-tmux-spawn
-(subscription); the headless lane is the intentional, API-billed opt-in. Review
+authorship and receipt quality are strongest. The only Claude lane is
+claude-headless (subscription-billed). Review
 and analysis work goes to codex-exec, gemini, kimi, or the harness, with the
 report-divergence caveat above in mind for analysis-only dispatches.
 
@@ -202,10 +181,9 @@ report-divergence caveat above in mind for analysis-only dispatches.
 I do not claim parity that is not measured.
 
 - **claude-subprocess** has the most receipts and is the bar the others are held
-  to, but it now bills API credits and is opt-in (blocked by default).
-- **claude-tmux-spawn** is the default and is subscription-preserving. Its
-  structural PREPARE/GOVERN/RECEIPT/CAPTURE work has shipped. It is still being
-  hardened; it is not yet proven equal to the subprocess lane on every surface.
+  to. It is opt-in per terminal.
+- **claude-headless** is the only Claude lane since 2026-09-18. Its isolation and
+  report-gate status is in `DISPATCH_RULES.md` §8.
 - **codex / gemini / kimi** are the review lanes. They emit receipts, reports,
   and an event trail. The synthesized-report thinness on analysis-only dispatches
   is the open gap (1.1).

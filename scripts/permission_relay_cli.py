@@ -243,9 +243,7 @@ def _relay_keystroke_to_worker(
         return ("no_session", None)
     try:
         if runner is None:
-            from tmux_interactive_dispatch import TmuxCommandRunner  # noqa: PLC0415
-
-            runner = TmuxCommandRunner()
+            runner = relay._default_tmux_runner()
         if not runner.available():
             logger.warning(
                 "permission approve: tmux unavailable, cannot relay dispatch=%s session=%s",

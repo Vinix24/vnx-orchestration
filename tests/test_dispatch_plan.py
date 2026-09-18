@@ -28,6 +28,7 @@ from dispatch_plan import (
     RuntimeSnapshot,
     claude_auth_is_api_metered,
     compile_plan,
+    resolve_claude_lane,
 )
 from dispatch_spec import (
     DispatchPath,
@@ -159,10 +160,8 @@ class TestAutoRejected:
 
 class TestClaudeLane:
     def test_claude_lane_fields(self, tmp_path: Path) -> None:
-        """A2 (2026-08-26): claude_headless is now the DEFAULT lane for a plain
-        claude spec carrying no explicit lane choice — see TestLaneDefaultFlip
-        for the three-state coverage (default / explicit tmux / explicit
-        headless)."""
+        """claude_headless is the only claude lane — see TestLaneDefaultFlip for
+        the two-state coverage (default / explicit headless)."""
         vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot())
         assert isinstance(plan, ExecutionPlan)
@@ -175,33 +174,21 @@ class TestClaudeLane:
 
 
 # ---------------------------------------------------------------------------
-# A2 (2026-08-26) — the three lane-choice states, forced explicitly
+# A2 (2026-08-26) — the lane-choice states, forced explicitly
 # ---------------------------------------------------------------------------
 
 class TestLaneDefaultFlip:
-    """Deliverable 1 (dispatch-20260826-alpha-a2-headless-default): the three
+    """Deliverable 1 (dispatch-20260826-alpha-a2-headless-default): the lane
     states forced on GEDRAG (plan.lane), not on the absence of a symbol. A test
     that only checks "no exception raised" would still pass pre-flip; each
     assertion here reads the actual resolved lane."""
 
     def test_no_explicit_choice_defaults_to_headless(self, tmp_path: Path) -> None:
-        """provider=claude, no allow_headless/force_tmux set at all → the
-        NEW default, claude_headless. This is the state that was RED before
-        the flip (plan.lane == 'claude_tmux_subscription')."""
+        """provider=claude, no allow_headless set at all → claude_headless."""
         vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot())
         assert isinstance(plan, ExecutionPlan)
         assert plan.lane == "claude_headless"
-
-    def test_explicit_tmux_choice_is_honored_with_reason(self, tmp_path: Path) -> None:
-        """force_tmux=True + reason → claude_tmux_subscription, AND the reason
-        lands in plan.warnings — the lane choice is never silent."""
-        reason = "avoid headless for this interactive debugging session"
-        vspec = _make_vspec_tmux(force_tmux_reason=reason, tmp_path=tmp_path)
-        plan = compile_plan(vspec, _healthy_snapshot())
-        assert isinstance(plan, ExecutionPlan)
-        assert plan.lane == "claude_tmux_subscription"
-        assert any(reason in w for w in plan.warnings)
 
     def test_explicit_headless_choice_unchanged(self, tmp_path: Path) -> None:
         """allow_headless=True + reason (the existing 39-spec shape) →
@@ -608,8 +595,8 @@ class TestInstructionSha256InPlan:
             project_id="vnx-dev",
             provider=Provider.CLAUDE,
             model="sonnet",
-            lane="claude_tmux_subscription",
-            adapter="tmux_claude",
+            lane="claude_headless",
+            adapter="claude_subprocess",
             target_id="ephemeral",
             billing="subscription",
             serialization_class="claude-tmux",
@@ -618,7 +605,7 @@ class TestInstructionSha256InPlan:
             seed_materialize=False,
             instruction_delivery="file_ref",
             report_contract="required",
-            warmup="verify_strict",
+            warmup="n/a",
             deadline_seconds=3600,
             base_ref="origin/main",
             dispatch_paths=(),
@@ -664,46 +651,12 @@ def _make_vspec_headless(
     )
 
 
-def _make_vspec_tmux(
-    *,
-    force_tmux_reason: str = "prefer tmux for this burst",
-    target_slot: str = "T1",
-    model: str | None = None,
-    tmp_path: Path,
-) -> ValidatedSpec:
-    """Build a ValidatedSpec with an EXPLICIT force_tmux=True opt-out (A2,
-    2026-08-26) — for tests that need a genuine tmux-lane plan now that a plain
-    claude spec with no explicit choice resolves to claude_headless instead."""
-    spec = DispatchSpec(
-        schema_version=1,
-        project_id="vnx-dev",
-        dispatch_id="test-tmux-dispatch",
-        staging_id="staging-tmux-001",
-        instruction_file=_fake_instruction_file(tmp_path),
-        role="backend-developer",
-        target_slot=target_slot,
-        gate="codex_gate",
-        dispatch_paths=(),
-        provider=Provider.CLAUDE,
-        model=model,
-        force_tmux=True,
-        force_tmux_reason=force_tmux_reason,
-    )
-    instruction_text = "# Test instruction\n"
-    return ValidatedSpec(
-        spec=spec,
-        instruction_text=instruction_text,
-        normalized_paths=(),
-        instruction_sha256=hashlib.sha256(instruction_text.encode("utf-8")).hexdigest(),
-    )
-
-
 class TestClaudeHeadlessLane:
     def test_headless_optin_lane_fields(self, tmp_path: Path) -> None:
         """allow_headless=True → lane=claude_headless, adapter=claude_subprocess,
         billing=subscription (no own key — billing follows auth, not lane).
-        OI-1417: serialization_class joins the SAME "claude-tmux" slot class as
-        the tmux lane — the subscription is one account-wide resource."""
+        OI-1417: serialization_class is the "claude-tmux" slot class (its historical
+        name) — the subscription is one account-wide resource."""
         vspec = _make_vspec_headless(tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot())
         assert isinstance(plan, ExecutionPlan)
@@ -724,26 +677,12 @@ class TestClaudeHeadlessLane:
         assert any(reason in w for w in plan.warnings)
 
     def test_default_claude_now_headless(self, tmp_path: Path) -> None:
-        """A2 (2026-08-26): default Claude (no explicit lane choice) →
-        claude_headless. Was test_default_claude_remains_tmux pre-flip."""
+        """Default Claude (no explicit lane choice) → claude_headless."""
         vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot())
         assert isinstance(plan, ExecutionPlan)
         assert plan.lane == "claude_headless"
         assert plan.billing == "subscription"
-
-    def test_explicit_force_tmux_lane_fields(self, tmp_path: Path) -> None:
-        """force_tmux=True + reason → lane=claude_tmux_subscription, adapter=
-        tmux_claude, and a visible 'TMUX lane opted-in' warning carrying the
-        reason — the mirror image of the headless opt-in warning."""
-        reason = "keep this benchmark on the interactive lane"
-        vspec = _make_vspec_tmux(force_tmux_reason=reason, tmp_path=tmp_path)
-        plan = compile_plan(vspec, _healthy_snapshot())
-        assert isinstance(plan, ExecutionPlan)
-        assert plan.lane == "claude_tmux_subscription"
-        assert plan.adapter == "tmux_claude"
-        assert any("TMUX lane opted-in" in w for w in plan.warnings)
-        assert any(reason in w for w in plan.warnings)
 
     def test_headless_isolation_always_worktree(self, tmp_path: Path) -> None:
         """claude_headless inherits the universal isolation=WORKTREE rule."""
@@ -753,26 +692,63 @@ class TestClaudeHeadlessLane:
         assert plan.isolation == Isolation.WORKTREE
         assert plan.require_worktree is True
 
-    def test_headless_and_tmux_share_one_serialization_class(self, tmp_path: Path) -> None:
-        """OI-1417: headless and tmux plans resolve to the IDENTICAL
-        serialization_class string when the lock is enabled — one shared
-        account-wide slot pool, not two independent counters."""
-        headless_vspec = _make_vspec_headless(tmp_path=tmp_path)
-        tmux_vspec = _make_vspec_tmux(tmp_path=tmp_path)
-        headless_plan = compile_plan(headless_vspec, _healthy_snapshot(claude_serial_enabled=True))
-        tmux_plan = compile_plan(tmux_vspec, _healthy_snapshot(claude_serial_enabled=True))
-        assert isinstance(headless_plan, ExecutionPlan)
-        assert isinstance(tmux_plan, ExecutionPlan)
-        assert headless_plan.serialization_class == "claude-tmux"
-        assert headless_plan.serialization_class == tmux_plan.serialization_class
-
     def test_headless_serial_disabled_no_serial_class(self, tmp_path: Path) -> None:
-        """claude_serial_enabled=False disables the lock for headless too, same
-        as it already does for the tmux lane."""
+        """claude_serial_enabled=False disables the lock for headless."""
         vspec = _make_vspec_headless(tmp_path=tmp_path)
         plan = compile_plan(vspec, _healthy_snapshot(claude_serial_enabled=False))
         assert isinstance(plan, ExecutionPlan)
         assert plan.serialization_class is None
+
+
+# ---------------------------------------------------------------------------
+# The tmux lane is gone (removed 2026-09-18): resolve_claude_lane has two
+# branches, both headless, and DispatchSpec no longer carries force_tmux.
+# ---------------------------------------------------------------------------
+
+class TestResolveClaudeLaneHasNoTmuxBranch:
+    def test_no_explicit_choice_is_headless_without_a_warning(self, tmp_path: Path) -> None:
+        vspec = _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path)
+        assert resolve_claude_lane(vspec.spec) == ("claude_headless", "claude_subprocess", None)
+
+    def test_explicit_allow_headless_is_the_same_lane_with_an_audit_warning(self, tmp_path: Path) -> None:
+        vspec = _make_vspec_headless(headless_reason="audit me", tmp_path=tmp_path)
+        lane, adapter, warning = resolve_claude_lane(vspec.spec)
+        assert (lane, adapter) == ("claude_headless", "claude_subprocess")
+        assert warning == "HEADLESS lane opted-in: audit me"
+
+    def test_dispatch_spec_no_longer_has_the_force_tmux_fields(self) -> None:
+        import dataclasses
+
+        names = {f.name for f in dataclasses.fields(DispatchSpec)}
+        assert "force_tmux" not in names
+        assert "force_tmux_reason" not in names
+
+    def test_a_spec_cannot_be_built_with_force_tmux(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="force_tmux"):
+            DispatchSpec(
+                schema_version=1,
+                project_id="vnx-dev",
+                dispatch_id="x",
+                staging_id="s",
+                instruction_file=_fake_instruction_file(tmp_path),
+                role="backend-developer",
+                target_slot="T1",
+                gate="codex_gate",
+                dispatch_paths=(),
+                provider=Provider.CLAUDE,
+                force_tmux=True,
+            )
+
+    def test_no_claude_plan_ever_carries_the_removed_lane_or_a_warmup(self, tmp_path: Path) -> None:
+        for vspec in (
+            _make_vspec(provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path),
+            _make_vspec_headless(tmp_path=tmp_path),
+        ):
+            plan = compile_plan(vspec, _healthy_snapshot())
+            assert isinstance(plan, ExecutionPlan)
+            assert plan.lane == "claude_headless"
+            assert plan.adapter == "claude_subprocess"
+            assert plan.warmup == "n/a"
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +757,7 @@ class TestClaudeHeadlessLane:
 
 class TestClaudeBillingAuthDerived:
     """The claude lane's billing label is a function of the AUTH identity
-    (claude_api_metered), never of which lane (tmux vs headless) was chosen."""
+    (claude_api_metered), never of which lane was chosen."""
 
     def test_headless_no_key_is_subscription(self, tmp_path: Path) -> None:
         vspec = _make_vspec_headless(tmp_path=tmp_path)
@@ -795,23 +771,6 @@ class TestClaudeBillingAuthDerived:
         assert isinstance(plan, ExecutionPlan)
         assert plan.lane == "claude_headless"
         assert plan.billing == "api_metered"
-
-    def test_tmux_with_key_is_api_metered(self, tmp_path: Path) -> None:
-        """A2: use an explicit force_tmux opt-out to get a genuine tmux-lane
-        plan now that a plain claude spec defaults to headless instead."""
-        vspec = _make_vspec_tmux(tmp_path=tmp_path)
-        plan = compile_plan(vspec, _healthy_snapshot(claude_api_metered=True))
-        assert isinstance(plan, ExecutionPlan)
-        assert plan.lane == "claude_tmux_subscription"
-        assert plan.billing == "api_metered"
-
-    def test_tmux_no_key_is_subscription(self, tmp_path: Path) -> None:
-        vspec = _make_vspec_tmux(tmp_path=tmp_path)
-        plan = compile_plan(vspec, _healthy_snapshot())
-        assert isinstance(plan, ExecutionPlan)
-        assert plan.lane == "claude_tmux_subscription"
-        assert plan.billing == "subscription"
-
 
 class TestClaudeAuthIdentityPredicate:
     """claude_auth_is_api_metered(env) is the pure source of the auth-identity flag."""

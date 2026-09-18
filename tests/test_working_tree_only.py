@@ -1,17 +1,16 @@
-"""Tests for D2.2 — working-tree-only enforcement.
+"""Tests for D2.2 — working-tree-only scope args.
 
-Two layers:
-  - the SLOT: build_claude_scope_args / _default_launch_command emit a
-    `--disallowedTools Bash(git commit...)/Bash(git push...)` deny when
-    working_tree_only=True (the commit/push deny binds at the tool-permission
-    layer, not just the instruction preamble). This binds in the scoped posture,
-    which is the default since the 14-08 flip (the blanket opt-out carries no
-    allow/deny lists at all).
-  - the SCOPING PRECONDITION (fail-closed): TmuxInteractiveDispatch.dispatch
-    rejects a working_tree_only dispatch on any full opt-out path (attached, or
-    BOTH the scoped opt-out — VNX_WORKER_BLANKET_SKIP=1 / falsy VNX_WORKER_SCOPED
-    — and the ADR-012 enforcement opt-out — VNX_WORKER_ENFORCEMENT_SKIP=1 /
-    falsy VNX_ENFORCE_WORKER_PERMISSIONS) where the deny would not bind.
+The SLOT: ``build_claude_scope_args`` emits a
+``--disallowedTools Bash(git commit...)/Bash(git push...)`` deny when
+``working_tree_only=True`` (the commit/push deny binds at the tool-permission
+layer, not just the instruction preamble). This binds in the scoped posture,
+which is the default since the 14-08 flip (the blanket opt-out carries no
+allow/deny lists at all).
+
+The tmux lane's launch-command tests and its fail-closed scoping precondition
+(``TmuxInteractiveDispatch.dispatch`` rejecting a working_tree_only dispatch on a
+full opt-out path) went with that lane on 2026-09-18. Note that nothing in
+production passes ``working_tree_only`` to ``build_claude_scope_args`` any more.
 """
 
 from __future__ import annotations
@@ -19,33 +18,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 _LIB = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import worker_permissions as wp  # noqa: E402
-import tmux_interactive_dispatch as tid  # noqa: E402
 
 
-class _StubRunner:
-    """Minimal runner — the scoping precondition returns before any tmux call."""
-
-    def available(self) -> bool:
-        return True
-
-
-def _lane(tmp_path: Path) -> "tid.TmuxInteractiveDispatch":
-    return tid.TmuxInteractiveDispatch(
-        tmp_path,
-        runner=_StubRunner(),
-        project_root=tmp_path,
-        receipts_file=tmp_path / "receipts.ndjson",
-    )
-
-
-# ── The slot: scope-args / launch-command git-deny ────────────────────────────
+# ── The slot: scope-args git-deny ─────────────────────────────────────────────
 
 class TestGitDenySlot:
     def test_scope_args_add_git_deny_when_working_tree_only(self):
@@ -63,105 +43,3 @@ class TestGitDenySlot:
         joined = " ".join(wp.build_claude_scope_args(prof, working_tree_only=False))
         assert "git push" not in joined
         assert "git commit" not in joined
-
-    def test_launch_command_includes_git_deny(self, monkeypatch):
-        # The git-commit/push deny only binds in the scoped posture (it rides on
-        # --disallowedTools inside build_claude_scope_args); the blanket default
-        # ignores working_tree_only entirely, so opt into scoping explicitly.
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
-        cmd = tid._default_launch_command(
-            "sonnet", skip_permissions=True, working_tree_only=True
-        )
-        assert "git push" in cmd
-        assert "git commit" in cmd
-
-    def test_launch_command_no_git_deny_by_default(self):
-        cmd = tid._default_launch_command(
-            "sonnet", skip_permissions=True, working_tree_only=False
-        )
-        assert "git push" not in cmd
-        assert "git commit" not in cmd
-
-
-# ── The fail-closed scoping precondition ──────────────────────────────────────
-
-class TestScopingPrecondition:
-    def test_attached_working_tree_only_is_rejected(self, tmp_path):
-        # attach=True -> skip_permissions=False -> the deny would not bind -> reject.
-        lane = _lane(tmp_path)
-        result = lane.dispatch(
-            "noop", "wt-attach", working_tree_only=True, attach=True,
-        )
-        assert result.success is False
-        assert "working_tree_only" in (result.failure_reason or "")
-
-    def test_unscoped_env_working_tree_only_is_rejected(self, tmp_path, monkeypatch):
-        # Detached but BOTH defaults opted out (VNX_WORKER_SCOPED=0 and
-        # VNX_ENFORCE_WORKER_PERMISSIONS=0) -> blanket
-        # --dangerously-skip-permissions, no scope args -> the deny would not
-        # bind -> reject. One opt-out alone is not enough since 15-08: the other
-        # predicate still defaults ON and forces the scoped spawn.
-        monkeypatch.delenv("VNX_WORKER_BLANKET_SKIP", raising=False)
-        monkeypatch.delenv("VNX_WORKER_ENFORCEMENT_SKIP", raising=False)
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
-        monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", "0")
-        lane = _lane(tmp_path)
-        result = lane.dispatch(
-            "noop", "wt-unscoped", working_tree_only=True, skip_permissions=True,
-        )
-        assert result.success is False
-        assert "working_tree_only" in (result.failure_reason or "")
-
-    def test_default_env_working_tree_only_is_accepted_by_precondition(
-        self, tmp_path, monkeypatch
-    ):
-        # Detached with both flags unset -> scoped is the default -> the deny
-        # binds -> the precondition passes (dispatch may still fail later for
-        # other reasons such as the stub runner/tmux plumbing; the wt-only
-        # message must simply not be the failure reason).
-        monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
-        monkeypatch.delenv("VNX_WORKER_BLANKET_SKIP", raising=False)
-        lane = _lane(tmp_path)
-        result = lane.dispatch(
-            "noop", "wt-default-scoped", working_tree_only=True, skip_permissions=True,
-        )
-        assert "working_tree_only requires" not in (result.failure_reason or "")
-
-    def test_blanket_skip_opt_out_working_tree_only_is_rejected(self, tmp_path, monkeypatch):
-        # Detached but explicitly opted back into blanket skip AND enforcement
-        # skip -> no scope args -> the deny would not bind -> reject. Since 15-08
-        # VNX_WORKER_BLANKET_SKIP=1 alone no longer suffices: enforcement still
-        # defaults ON and forces the scoped spawn.
-        monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
-        monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
-        monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
-        monkeypatch.setenv("VNX_WORKER_ENFORCEMENT_SKIP", "1")
-        lane = _lane(tmp_path)
-        result = lane.dispatch(
-            "noop", "wt-blanket-optout", working_tree_only=True, skip_permissions=True,
-        )
-        assert result.success is False
-        assert "working_tree_only" in (result.failure_reason or "")
-
-    def test_scoped_opt_in_working_tree_only_is_accepted_by_precondition(
-        self, tmp_path, monkeypatch
-    ):
-        # Detached with VNX_WORKER_SCOPED=1 satisfies the precondition (the
-        # scoping check itself passes; dispatch may still fail later for other
-        # reasons such as the stub runner/tmux plumbing — the precondition
-        # message must simply not be the failure reason).
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
-        lane = _lane(tmp_path)
-        result = lane.dispatch(
-            "noop", "wt-scoped", working_tree_only=True, skip_permissions=True,
-        )
-        assert "working_tree_only requires" not in (result.failure_reason or "")
-
-    def test_non_working_tree_only_attached_is_not_rejected_by_precondition(self, tmp_path):
-        # A normal attached dispatch must NOT be rejected by the wt-only precondition.
-        # (It may fail later for other reasons, but not with the wt-only message.)
-        lane = _lane(tmp_path)
-        result = lane.dispatch(
-            "noop", "normal-attach", working_tree_only=False, attach=True,
-        )
-        assert "working_tree_only requires" not in (result.failure_reason or "")

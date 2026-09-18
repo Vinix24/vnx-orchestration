@@ -4,18 +4,19 @@ Pins the write-time behaviour: an undeterminable model is left EMPTY (so the
 existing fail-closed ``_validate_model_present`` refuses the dispatch receipt
 loudly) instead of being silently defaulted to the fake literal ``"unknown"``.
 
-The four write sites under test:
+The write sites under test:
 1. ``session_resolver._resolve_model_provider`` — default ``""``, not ``"unknown"``.
 2. ``enrichment._enrich_session_metadata`` — never stamps a sentinel model.
-3. ``tmux_interactive_dispatch._build_completion_protocol`` — receipt JSON default ``""``.
-4. ``worker_heartbeat`` failure reports — ``**Model**: `` default ``""``, not ``"unknown"``.
+3. ``worker_heartbeat`` failure reports — ``**Model**: `` default ``""``, not ``"unknown"``.
+
+(The tmux lane's ``_build_completion_protocol`` was a fourth site; it went with the
+lane on 2026-09-18.)
 
 Each test fails against the pre-fix code and passes against the fix.
 """
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -124,38 +125,7 @@ class TestEnrichmentNoUnknownDefault:
 
 
 # ---------------------------------------------------------------------------
-# 3. completion protocol: no "unknown" default in the worker receipt JSON
-# ---------------------------------------------------------------------------
-
-class TestCompletionProtocolNoUnknownDefault:
-    @staticmethod
-    def _protocol_model(protocol: str) -> str:
-        m = re.search(r'--receipt\s+"((?:[^"\\]|\\.)*)"', protocol)
-        assert m, "no --receipt argument found in protocol"
-        raw = m.group(1).replace('\\"', '"').replace("$_VNX_TS", "2099-01-01T00:00:00Z")
-        return json.loads(raw)["model"]
-
-    def _lane(self, tmp_path):
-        from tmux_interactive_dispatch import TmuxInteractiveDispatch
-        return TmuxInteractiveDispatch(
-            tmp_path,
-            receipts_file=tmp_path / "t0_receipts.ndjson",
-            project_root=tmp_path,
-        )
-
-    def test_default_model_is_empty_not_unknown(self, tmp_path):
-        protocol = self._lane(tmp_path)._build_completion_protocol("disp-oi1184", "T1")
-        assert self._protocol_model(protocol) == ""
-
-    def test_explicit_model_still_baked_in(self, tmp_path):
-        protocol = self._lane(tmp_path)._build_completion_protocol(
-            "disp-oi1184", "T1", model="sonnet-5"
-        )
-        assert self._protocol_model(protocol) == "sonnet-5"
-
-
-# ---------------------------------------------------------------------------
-# 4. worker_heartbeat failure reports: no "unknown" model default
+# 3. worker_heartbeat failure reports: no "unknown" model default
 # ---------------------------------------------------------------------------
 
 class TestHeartbeatReportNoUnknownDefault:

@@ -110,7 +110,7 @@ echo "[dispatch-agent] Created dispatch: $DISPATCH_ID"
 # When ON, route through dispatch_bridge -> run_dispatch so this agent delivery funnels through
 # the door. This is a claude-AGENT dispatcher by design (no provider variable), so the bridge's
 # claude default is correct here. Post-flip behavior is INTENTIONAL (door-flip / ADR-024): claude
-# routes via the subscription tmux-spawn lane (never headless claude -p); --auto-route is moot
+# routes via the door's headless lane, the only claude lane; --auto-route is moot
 # because run_dispatch owns deterministic lane selection, so _ar_flag stays on the legacy branch.
 _ar_flag=()
 [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)

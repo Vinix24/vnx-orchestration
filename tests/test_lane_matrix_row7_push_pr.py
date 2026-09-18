@@ -1,16 +1,17 @@
 """test_lane_matrix_row7_push_pr.py — rij-7 van de lane-conformity-matrix:
-de push+PR-verplichting bindt op alle drie lanes en op de committed-staat.
+de push+PR-verplichting bindt op de envelope-lanes en op de committed-staat.
 
-Dekt de 9 combinaties (3 lanes × 3 worktree-stataten: pushed, committed, clean)
+Dekt de combinaties (2 lanes × 3 worktree-stataten: pushed, committed, clean)
 en de luide-failure-eis: een mislukte push of PR-creatie geeft een niet-nul
 uitkomst, geen ``exit 0`` met werk lokaal gestrand.
 
 Lanes:
-- tmux: getest via de lane-context adapter ``_enforce_pr_exists`` (de call-site
-  die ``worker_succeeded`` naar False zet). De kernbeslissing zit in
-  ``pr_enforcement.enforce_pr_exists`` (unit-tests in test_pr_enforcement.py).
 - headless: ``run_envelope_headless_plan`` via de gedeelde ``_enforce_push_pr``.
 - provider: ``run_envelope_plan`` via dezelfde ``_enforce_push_pr``.
+
+De kernbeslissing zit in ``pr_enforcement.enforce_pr_exists`` (unit-tests in
+test_pr_enforcement.py). De tmux-lane-tests die hier stonden zijn met die lane
+verwijderd op 2026-09-18.
 
 De beslissing zelf is EEN plek (``pr_enforcement.enforce_pr_exists``); deze tests
 verifiëren dat elke lane die beslissing aanroept en de uitkomst correct doorgeeft.
@@ -282,105 +283,3 @@ def test_envelope_lane_clean_failure_path_skips_enforcement(tmp_path):
     assert result.status == "success"
     _spec, gov_result = govern_seen[0]
     assert gov_result.status == "success"
-
-
-# ---------------------------------------------------------------------------
-# tmux lane — call-site integratie (de lane-context adapter _enforce_pr_exists)
-# ---------------------------------------------------------------------------
-
-
-def _tmux_dispatch_instance(tmp_path: Path):
-    """Build a TmuxInteractiveDispatch instance with minimal stubbed tmux."""
-    from tmux_interactive_dispatch import TmuxInteractiveDispatch
-
-    return TmuxInteractiveDispatch(
-        project_root=tmp_path,
-        state_dir=tmp_path / "state",
-        receipts_file=tmp_path / "state" / "t0_receipts.ndjson",
-    )
-
-
-def _wt_handle(tmp_path: Path):
-    from tmux_worktree import WorktreeHandle
-    return WorktreeHandle(
-        path=tmp_path / "wt",
-        branch="dispatch/test-row7",
-        base_sha="abc123",
-        base_ref="origin/main",
-        dispatch_id="test-row7",
-    )
-
-
-@pytest.mark.parametrize("state", ["pushed", "committed", "clean"])
-def test_tmux_enforce_pr_exists_state_matrix(state, tmp_path):
-    """tmux lane: _enforce_pr_exists returns applicable for committed+pushed,
-    not-applicable for clean. The lane adapter is the call-site the dispatch
-    flow uses; enforce_pr_exists itself is unit-tested in test_pr_enforcement.py."""
-    inst = _tmux_dispatch_instance(tmp_path)
-    handle = _wt_handle(tmp_path)
-
-    def fake_enforce(**kw):
-        applicable = state in ("committed", "pushed")
-        return _pr_result(
-            applicable=applicable, ok=True, pushed=True, pr_number=42,
-        )
-
-    with patch("pr_enforcement.enforce_pr_exists", side_effect=fake_enforce):
-        result = inst._enforce_pr_exists(
-            dispatch_id="test-row7",
-            label="T1",
-            worktree_handle=handle,
-            worktree_state=state,
-        )
-    assert result.applicable is (state in ("committed", "pushed"))
-    assert result.ok is True
-    if result.applicable:
-        assert result.pr_number == 42
-
-
-def test_tmux_committed_does_not_pass_as_not_applicable(tmp_path):
-    """The rij-7 fix, pinned: committed on tmux must NOT be applicable=False.
-    (Pre-fix, enforce_pr_exists returned applicable=False for committed, so the
-    dispatch exited 0 with work stranded locally.)"""
-    inst = _tmux_dispatch_instance(tmp_path)
-    handle = _wt_handle(tmp_path)
-
-    captured = {}
-
-    def fake_enforce(*, worktree_state, **kw):
-        captured["state"] = worktree_state
-        # Real enforce_pr_exists for committed returns applicable=True (push+PR).
-        return _pr_result(applicable=True, ok=True, pushed=True, pr_number=99)
-
-    with patch("pr_enforcement.enforce_pr_exists", side_effect=fake_enforce):
-        result = inst._enforce_pr_exists(
-            dispatch_id="test-row7",
-            label="T1",
-            worktree_handle=handle,
-            worktree_state="committed",
-        )
-    assert captured["state"] == "committed"
-    assert result.applicable is True, (
-        "committed must bind (applicable=True), not pass as not-applicable"
-    )
-    assert result.ok is True
-
-
-def test_tmux_pr_failure_marks_worker_failed(tmp_path):
-    """tmux call-site: a failed enforcement (ok=False) is what flips worker_succeeded
-    to False. Verify the adapter propagates the failure so the governed receipt is
-    non-success — the loud, receipt-visible outcome rij-7 requires."""
-    inst = _tmux_dispatch_instance(tmp_path)
-    handle = _wt_handle(tmp_path)
-
-    with patch("pr_enforcement.enforce_pr_exists",
-               return_value=_pr_result(applicable=True, ok=False, reason="gh auth expired")):
-        result = inst._enforce_pr_exists(
-            dispatch_id="test-row7",
-            label="T1",
-            worktree_handle=handle,
-            worktree_state="pushed",
-        )
-    assert result.applicable is True
-    assert result.ok is False
-    assert result.reason == "gh auth expired"

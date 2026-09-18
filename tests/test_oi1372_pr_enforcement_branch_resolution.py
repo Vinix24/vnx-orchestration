@@ -134,86 +134,6 @@ def test_classify_reports_pushed_not_committed_on_custom_branch(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Chokepoint level, tmux lane (the DEFAULT lane) — _enforce_pr_exists
-# ---------------------------------------------------------------------------
-
-def _tmux_dispatch_instance(tmp_path: Path, project_root: Path):
-    from tmux_interactive_dispatch import TmuxInteractiveDispatch
-    return TmuxInteractiveDispatch(
-        project_root=project_root,
-        state_dir=tmp_path / "state",
-        receipts_file=tmp_path / "state" / "t0_receipts.ndjson",
-    )
-
-
-def test_tmux_lane_accepts_pushed_custom_branch_no_dispatch_branch_no_pr(tmp_path):
-    """Requirement 1: a dispatch that pushed to a DIFFERENT branch with a real
-    PR must NOT be status=failure, and dispatch_branch_no_pr must not occur."""
-    local = _init_git_repo_with_origin(tmp_path)
-    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
-        handle = allocate("oi1372-c", repo_root=local)
-    _commit_on_new_branch(handle.path, "fix/report-wrapper-red-tests", "work.txt")
-    subprocess.run(
-        ["git", "-C", str(handle.path), "push", "-u", "origin", "fix/report-wrapper-red-tests"],
-        check=True, capture_output=True,
-    )
-
-    inst = _tmux_dispatch_instance(tmp_path, local)
-    state = classify(handle)
-    assert state == "pushed"
-
-    with patch(
-        "gh_pr_ensure.ensure_pr",
-        return_value={"pr_number": 4242, "created": True, "reason": None},
-    ) as mock_ensure:
-        result = inst._enforce_pr_exists(
-            dispatch_id="oi1372-c", label="T1", worktree_handle=handle, worktree_state=state,
-        )
-
-    assert result.applicable is True
-    assert result.ok is True, f"must not reject as dispatch_branch_no_pr: {result.reason}"
-    assert result.pr_number == 4242
-    mock_ensure.assert_called_once()
-    called_branch = mock_ensure.call_args.args[0] if mock_ensure.call_args.args \
-        else mock_ensure.call_args.kwargs.get("branch")
-    assert called_branch == "fix/report-wrapper-red-tests", (
-        f"PR must be opened against the branch actually pushed, got {called_branch!r}"
-    )
-
-
-def test_tmux_lane_pr_creation_failure_on_custom_branch_is_still_loud(tmp_path):
-    """Requirement 2 (guard preservation): the fix only relocates WHERE the
-    guard looks — a real PR-creation failure on the (correctly resolved)
-    custom branch must still be a loud, receipt-visible failure, not silently
-    swallowed."""
-    local = _init_git_repo_with_origin(tmp_path)
-    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
-        handle = allocate("oi1372-e", repo_root=local)
-    _commit_on_new_branch(handle.path, "fix/report-wrapper-red-tests", "work.txt")
-    subprocess.run(
-        ["git", "-C", str(handle.path), "push", "-u", "origin", "fix/report-wrapper-red-tests"],
-        check=True, capture_output=True,
-    )
-
-    inst = _tmux_dispatch_instance(tmp_path, local)
-    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
-    state = classify(handle)
-    assert state == "pushed"
-
-    with patch(
-        "gh_pr_ensure.ensure_pr",
-        return_value={"pr_number": None, "created": False, "reason": "gh auth expired"},
-    ):
-        result = inst._enforce_pr_exists(
-            dispatch_id="oi1372-e", label="T1", worktree_handle=handle, worktree_state=state,
-        )
-
-    assert result.applicable is True
-    assert result.ok is False
-    assert result.reason and "gh auth expired" in result.reason
-
-
-# ---------------------------------------------------------------------------
 # Chokepoint level, envelope lane (codex/claude-subprocess) — _enforce_push_pr
 # ---------------------------------------------------------------------------
 
@@ -254,3 +174,38 @@ def test_envelope_lane_accepts_pushed_custom_branch_no_dispatch_branch_no_pr(tmp
     called_branch = mock_ensure.call_args.args[0] if mock_ensure.call_args.args \
         else mock_ensure.call_args.kwargs.get("branch")
     assert called_branch == "fix/report-wrapper-red-tests"
+
+
+def test_envelope_lane_pr_creation_failure_on_custom_branch_is_still_loud(tmp_path):
+    """Requirement 2 (guard preservation): the fix only relocates WHERE the
+    guard looks — a real PR-creation failure on the (correctly resolved)
+    custom branch must still be a loud failure, not silently swallowed."""
+    import dispatch_envelope
+    from envelope_types import _AdapterResult
+
+    local = _init_git_repo_with_origin(tmp_path)
+    with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
+        handle = allocate("oi1372-g", repo_root=local)
+    _commit_on_new_branch(handle.path, "fix/report-wrapper-red-tests", "work.txt")
+    subprocess.run(
+        ["git", "-C", str(handle.path), "push", "-u", "origin", "fix/report-wrapper-red-tests"],
+        check=True, capture_output=True,
+    )
+
+    success_result = _AdapterResult(returncode=0, completion_text="done", status="success")
+
+    with patch(
+        "gh_pr_ensure.ensure_pr",
+        return_value={"pr_number": None, "created": False, "reason": "gh auth expired"},
+    ):
+        outcome = dispatch_envelope._enforce_push_pr(
+            dispatch_id="oi1372-g",
+            branch=handle.branch,
+            wt_path=handle.path,
+            repo_root=local,
+            receipts_file=tmp_path / "t0_receipts.ndjson",
+            result=success_result,
+        )
+
+    assert outcome.status == "failure"
+    assert outcome.error and "gh auth expired" in outcome.error

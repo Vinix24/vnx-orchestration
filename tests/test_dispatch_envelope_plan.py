@@ -2,7 +2,7 @@
 
 Covers:
 1. require_permit backstop: forged/bare permit raises PermissionError; valid permit proceeds.
-2. Non-provider lane rejection: claude_tmux_subscription → ValueError.
+2. Non-provider lane rejection: claude_headless → ValueError.
 3. Provider routing: each provider routes to its spawn_* fn; no _dispatch_* wrapper invoked.
 4. File-ref instruction delivery: instruction read from file, spawn receives raw text.
 5. Governance emit: _govern produces receipt line + report (real governance_emit pipeline).
@@ -101,8 +101,8 @@ def _make_claude_plan(tmp_path: Path) -> ExecutionPlan:
         project_id="vnx-dev",
         provider=Provider.CLAUDE,
         model="sonnet",
-        lane="claude_tmux_subscription",
-        adapter="tmux_claude",
+        lane="claude_headless",
+        adapter="claude_subprocess",
         target_id="ephemeral",
         billing="subscription",
         serialization_class="claude-tmux",
@@ -111,7 +111,7 @@ def _make_claude_plan(tmp_path: Path) -> ExecutionPlan:
         seed_materialize=False,
         instruction_delivery="file_ref",
         report_contract="required",
-        warmup="verify_strict",
+        warmup="n/a",
         deadline_seconds=3600,
         base_ref="main",
         dispatch_paths=(),

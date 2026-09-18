@@ -36,7 +36,6 @@ FILE_SIZE_BLOCKING_SHELL = 600
 FILE_SIZE_ALLOWLIST: Dict[str, str] = {
     "scripts/migrate_future_system": "grandfathered monolith; future-state migration",
     "scripts/pr_queue_manager": "grandfathered monolith; PR-queue manager",
-    "scripts/lib/tmux_interactive_dispatch": "grandfathered monolith; tmux subscription lane",
     "scripts/build_t0_state": "grandfathered monolith; T0 state projection",
     "scripts/migrate_to_central_vnx": "grandfathered monolith; central-store migration",
     "scripts/planning_cli": "grandfathered monolith; planning/horizon CLI",

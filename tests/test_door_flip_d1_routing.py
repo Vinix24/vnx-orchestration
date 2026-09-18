@@ -177,7 +177,6 @@ def _make_home(tmp_path: Path) -> dict:
     lib = home / "scripts" / "lib"
     lib.mkdir(parents=True)
     (lib / "dispatch_cli.py").write_text(_DOOR_STUB, encoding="utf-8")
-    (lib / "tmux_interactive_dispatch.py").write_text(_LANE_STUB.format(lane="tmux"), encoding="utf-8")
     (lib / "subprocess_dispatch.py").write_text(_LANE_STUB.format(lane="subprocess"), encoding="utf-8")
     (lib / "dispatch_bridge.py").write_text(_BRIDGE_STUB, encoding="utf-8")
     dispatch_dir = tmp_path / "dispatches"
@@ -235,14 +234,28 @@ def test_door_on_staged_pending_id_hits_door(tmp_path):
 def test_door_on_raw_md_goes_legacy_not_bridge(tmp_path):
     e = _make_home(tmp_path)
     raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), flag="1")
+    r = _run_cmd(e, str(raw), "--adapter", "subprocess", flag="1")
     assert r.returncode == 0, r.stderr
-    # POSITIVE: the legacy tmux lane IS invoked; the door AND the bridge are NOT.
+    # POSITIVE: the legacy delivery lane IS invoked; the door AND the bridge are NOT.
     assert e["lane_marker"].exists(), "legacy delivery lane not invoked for raw .md under door-ON"
-    assert json.loads(e["lane_marker"].read_text())["lane"] == "tmux"
+    assert json.loads(e["lane_marker"].read_text())["lane"] == "subprocess"
     assert not e["door_marker"].exists(), "door wrongly invoked for raw .md"
     assert not e["bridge_marker"].exists(), "bridge wrongly invoked for raw .md (Option X1 violated)"
     assert "DEPRECATED" in r.stderr, "deprecation warning not emitted under door-ON + raw"
+
+
+def test_door_on_raw_md_without_a_lane_is_refused_after_the_deprecation_warning(tmp_path):
+    # The tmux-spawn lane was the raw form's default; it was removed on 2026-09-18, so a raw
+    # .md that names no lane has nowhere to go: refused loud, nothing delivered.
+    e = _make_home(tmp_path)
+    raw = _write_raw(e)
+    r = _run_cmd(e, str(raw), flag="1")
+    assert r.returncode != 0
+    assert "DEPRECATED" in r.stderr
+    assert "removed on 2026-09-18" in r.stderr
+    assert not e["lane_marker"].exists()
+    assert not e["door_marker"].exists()
+    assert not e["bridge_marker"].exists()
 
 
 def test_door_on_raw_md_adapter_subprocess_honored(tmp_path):
@@ -260,7 +273,7 @@ def test_rollback_raw_md_legacy_no_warning(tmp_path):
     # raw .md -> legacy, and NO deprecation warning (the raw form is the sanctioned path here).
     e = _make_home(tmp_path)
     raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), flag=None, legacy="1")
+    r = _run_cmd(e, str(raw), "--adapter", "subprocess", flag=None, legacy="1")
     assert r.returncode == 0, r.stderr
     assert e["lane_marker"].exists()
     assert "DEPRECATED" not in r.stderr, "deprecation warning must not fire when the door is off"
@@ -272,7 +285,7 @@ def test_default_on_raw_md_legacy_with_warning(tmp_path):
     # falls through to legacy delivery, now WITH the deprecation warning.
     e = _make_home(tmp_path)
     raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), flag=None)  # unset -> default ON (post-flip)
+    r = _run_cmd(e, str(raw), "--adapter", "subprocess", flag=None)  # unset -> default ON (post-flip)
     assert r.returncode == 0, r.stderr
     assert e["lane_marker"].exists()
     assert not e["door_marker"].exists()
@@ -405,12 +418,12 @@ def test_claude_code_canonicalizes_to_claude():
 
 # --------------------------------------------------------------------------- #
 # Receipt-lane: the staged spec's provider is the lane determinant
-# (dispatch_cli.py: is_claude_lane = spec.provider == Provider.CLAUDE -> tmux-spawn; else provider lane)
+# (dispatch_cli.py: is_claude_lane = spec.provider == Provider.CLAUDE -> claude_headless; else provider lane)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("emitted,canonical", [
-    ("claude_code", "claude"),   # -> claude_tmux_subscription lane
-    ("codex_cli", "codex"),      # -> provider lane (NOT claude tmux)
+    ("claude_code", "claude"),   # -> claude_headless lane
+    ("codex_cli", "codex"),      # -> provider lane (NOT the claude lane)
     ("gemini_cli", "gemini"),    # -> provider lane
 ])
 def test_staged_spec_carries_canonical_provider_lane_determinant(tmp_path, emitted, canonical):

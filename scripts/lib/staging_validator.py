@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """staging_validator.py — Enforce staging→pending→promote dispatch gate (ADR-006).
 
-Every dispatch fired via subprocess_dispatch or tmux_interactive_dispatch must
+Every dispatch fired via subprocess_dispatch must
 originate from .vnx-data/dispatches/pending/ (or /staging/) — the mandatory
 human approval gate. Callers bypassing the gate must pass
 --allow-unstaged --reason '<text>' for an explicit audit-logged override.
@@ -91,8 +91,8 @@ def validate_staging_path(
         if not _DISPATCH_ID_RE.match(sid):
             _reject("staging-pending-flow violated: invalid dispatch_id format")
         # OI-627 follow-up: compare the RAW dispatch_id (no .strip()) against sid.
-        # Both entry-points (subprocess_dispatch.py, tmux_interactive_dispatch.py)
-        # thread the raw, unstripped args.dispatch_id into every downstream use
+        # The entry-point (subprocess_dispatch.py) threads the raw, unstripped
+        # args.dispatch_id into every downstream use
         # (worktree/branch name, VNX_CURRENT_DISPATCH_ID env var, commit trailer).
         # Stripping only for this comparison let a caller pass e.g. "real-id "
         # (trailing whitespace) and slip past the guard while downstream code
