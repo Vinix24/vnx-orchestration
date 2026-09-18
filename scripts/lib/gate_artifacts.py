@@ -17,7 +17,7 @@ from governance_receipts import utc_now_iso
 import gate_depth
 import gate_recorder
 from final_prompt_integrity import final_prompt_sha_for_dispatch
-from codex_parser import extract_verdict_block, parse_codex_findings
+from codex_parser import extract_verdict_block, parse_codex_findings, _normalize_findings
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +93,13 @@ def format_report(
 ) -> str:
     """Format gate output as a normalized headless report.
 
-    When ``blocking``/``advisory`` are not None (i.e. this gate parses
-    structured findings — currently codex_gate only), a normalized
-    ``## Findings`` section is written ahead of the raw tool-output dump. See
-    ``_format_findings_section`` for why the scan must never see the raw
-    transcript. Gates that do not parse structured findings get no such
-    section, so closure_verifier falls back to its prior full-content scan —
-    unchanged behavior for those gates.
+    When ``blocking``/``advisory`` are not None (i.e. this gate's output
+    actually carried the shared verdict-block shape — see OI-1763 above), a
+    normalized ``## Findings`` section is written ahead of the raw
+    tool-output dump. See ``_format_findings_section`` for why the scan must
+    never see the raw transcript. A gate whose output carried no verdict
+    block gets no such section, so closure_verifier falls back to its prior
+    full-content scan — unchanged behavior for that run.
     """
     pr_ref = request_payload.get("pr_id") or str(request_payload.get("pr_number", ""))
     branch = request_payload.get("branch", "")
@@ -286,18 +286,42 @@ def materialize_artifacts(
 
     # Parsed ahead of the report write (not after, as previously) so the
     # normalized findings section can be embedded in the report itself,
-    # separate from the raw tool-output dump (OI-1394). Only codex_gate
-    # parses structured findings today; other gates pass blocking=None/
-    # advisory=None so format_report omits the section and closure_verifier
-    # falls back to scanning the full report, unchanged from prior behavior.
+    # separate from the raw tool-output dump (OI-1394).
+    #
+    # OI-1763: every gate contract asks for the SAME shared shape — a fenced
+    # ```json block with a "verdict" key (VERDICT_CONTRACT for glm_gate/
+    # kimi_gate/deepseek_gate, _REVIEWER_VERDICT_TEMPLATE for codex_gate/
+    # gemini_review, both in gate_lane_contract.py/gate_runner.py). Before
+    # this fix, ONLY codex_gate's branch below ever set findings_parsed=True
+    # — glm_gate/kimi_gate/deepseek_gate booked findings=[]/residual_risk=""
+    # unconditionally, even when their report carried a real verdict block,
+    # because their result was gated on the gate's NAME rather than on
+    # whether it actually produced the contract's shape. extract_verdict_block
+    # is the poort-agnostic reader of that shared shape (codex_parser.py) —
+    # used here for every gate so a verdict lands in the result record
+    # whenever a gate's output actually carries one.
     findings: List[Dict[str, Any]] = []
     residual_risk = ""
     findings_parsed = False
     if gate == "codex_gate":
+        # codex_gate keeps its own dedicated path, unchanged: besides the
+        # shared verdict-block shape, it has a private text-based fallback
+        # (parse_codex_findings' _extract_findings_from_text markdown-bullet
+        # heuristic) for when the model skips the JSON verdict entirely. That
+        # fallback is a genuine per-provider parsing quirk, not a contract
+        # property — it must stay scoped to codex and never fire for another
+        # gate (repeating it elsewhere would be a new instance of the same
+        # defect this fix removes).
         parsed = parse_codex_findings(stdout)
         findings = parsed["findings"]
         residual_risk = parsed.get("residual_risk", "") or ""
         findings_parsed = True
+    else:
+        verdict_block = extract_verdict_block(stdout)
+        if verdict_block:
+            findings = _normalize_findings(verdict_block.get("findings") or [])
+            residual_risk = verdict_block.get("residual_risk") or ""
+            findings_parsed = True
     blocking, advisory = _classify_findings(findings)
 
     report_file = Path(report_path)
@@ -534,6 +558,15 @@ def materialize_artifacts(
 
     # Emit to dispatch register (codex_gate only — best-effort).
     # Prefer explicit JSON verdict from codex output; fall back to severity-derivation.
+    #
+    # OI-1763 note: this name-check is NOT the same defect fixed above. The
+    # dispatch register is a separate, codex-specific downstream system
+    # (emit_codex_gate_to_register has no equivalent for glm_gate/kimi_gate/
+    # deepseek_gate today — the elif below defers gemini_review/
+    # claude_github_optional register classification too), unrelated to
+    # findings/residual_risk landing in the result record. `parsed` here is
+    # the SAME variable the codex_gate branch above assigns; it is only ever
+    # read when gate == "codex_gate" is also true here.
     if gate == "codex_gate":
         try:
             from gate_register_emit import emit_codex_gate_to_register

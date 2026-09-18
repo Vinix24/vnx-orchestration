@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from gate_lane_contract import VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
+from review_contract import _normalize_line  # canonical line-coercion, never a second copy
 
 
 def _extract_codex_text(stdout: str) -> str:
@@ -120,18 +121,34 @@ def _extract_findings_from_text(text: str) -> List[Dict[str, Any]]:
 
 
 def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Normalize findings to {severity, message} dicts."""
+    """Normalize findings to {severity, message, file_path, line} dicts.
+
+    OI-1769: both verdict-contract templates (gate_lane_contract.py's
+    VERDICT_CONTRACT, gate_runner.py's _REVIEWER_VERDICT_TEMPLATE) ask every
+    gate for file_path/line on each finding, defaulting to ""/0 for a finding
+    that names no single line — a guessed line number is worse than an empty
+    one. This is the one place findings get normalized before landing in the
+    result record, so both fields are preserved here rather than dropped;
+    :func:`review_contract._normalize_line` is the canonical line-coercion
+    (claude_github_receipt.py and gemini_prompt_renderer.py already import
+    the same function rather than each keeping a copy).
+    """
     normalized: List[Dict[str, Any]] = []
     for f in findings or []:
         if isinstance(f, str):
-            normalized.append({"severity": "warning", "message": f})
+            normalized.append({"severity": "warning", "message": f, "file_path": "", "line": 0})
             continue
         if not isinstance(f, dict):
-            normalized.append({"severity": "warning", "message": str(f)})
+            normalized.append({"severity": "warning", "message": str(f), "file_path": "", "line": 0})
             continue
         severity = str(f.get("severity", "warning")).lower()
         message = f.get("message") or f.get("title") or f.get("details") or ""
-        normalized.append({"severity": severity, "message": str(message)})
+        normalized.append({
+            "severity": severity,
+            "message": str(message),
+            "file_path": str(f.get("file_path", "") or ""),
+            "line": _normalize_line(f.get("line", 0)),
+        })
     return normalized
 
 
