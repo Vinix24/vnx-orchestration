@@ -17,7 +17,7 @@ from governance_receipts import utc_now_iso
 import gate_depth
 import gate_recorder
 from final_prompt_integrity import final_prompt_sha_for_dispatch
-from codex_parser import parse_codex_findings
+from codex_parser import extract_verdict_block, parse_codex_findings
 
 logger = logging.getLogger(__name__)
 
@@ -368,12 +368,80 @@ def materialize_artifacts(
             },
         )
 
+    # OI-1767: a run can clear every check above — real report file,
+    # 3+ substantive lines, at least one investigative action where that is
+    # measured — and still never have reached a verdict. Live evidence
+    # (glm_gate, PR #1862, 2026-09-17): a run that wrote "De bevindingen zijn
+    # geen blokkerende problemen. Het oordeel is geslaagd. Laat me het
+    # neerschrijven." and stopped there — 5808 characters, 0 fenced blocks,
+    # 0 mentions of "verdict" — booked `completed` because nothing upstream
+    # of this point looks at whether the model actually WROTE its decision.
+    #
+    # Scoped to harness-lane providers (glm_gate/kimi_gate/deepseek_gate) via
+    # the SAME provider-kind lookup the OI-1725 guard above already uses —
+    # a structural check on the registry, not a gate-name branch (a
+    # name-branch here would repeat OI-1763's defect, tracked separately).
+    # VERDICT_CONTRACT (gate_lane_contract.py) is the hard contract those
+    # gates run under: :func:`extract_verdict_block` checks for its shared
+    # shape — a fenced ```json block with a "verdict" key.
+    #
+    # codex_gate/gemini_review/claude_github_optional are deliberately NOT
+    # checked here: their own tests (test_gate_artifacts_register.py,
+    # test_gate_artifacts_atomicity.py) pin "plain prose, no verdict block,
+    # still completed" as their existing, accepted contract today — codex_gate
+    # additionally has its own separate findings-extraction fallback
+    # (parse_codex_findings' markdown-bullet heuristic). Enforcing the harness
+    # lane's stricter contract on those gates would be a real behavior change
+    # this dispatch does not ask for (klaar-conditie: "Codex-runs veranderen
+    # niet van gedrag") — confirmed by running this guard unscoped and
+    # watching those exact tests turn red.
+    provider_info = gate_recorder.resolve_gate_provider(gate)
+    is_harness_lane_gate = (
+        provider_info is not None
+        and provider_info[0] == gate_recorder.GATE_PROVIDER_HARNESS_LANE
+    )
+    if is_harness_lane_gate and not extract_verdict_block(stdout):
+        logger.warning(
+            "gate_artifacts: REFUSING a %s run with no parseable verdict block "
+            "pr=%s — model produced %d char(s) of output but never wrote a "
+            "structured verdict",
+            gate, pr_id or pr_number, len(stdout),
+        )
+        # "validation_failed" (not a bespoke "no_verdict_block" reason): the
+        # new reason would need registering in
+        # gate_recorder.EXECUTION_FAILURE_REASONS to book `unavailable`
+        # instead of `failed`, and this dispatch is explicitly scoped away
+        # from gate_recorder.py (a concurrent PR touches it). "validation_failed"
+        # is already registered there, already covers "the gate's output
+        # failed a validation check", and carries zero production callers
+        # today (grepped) — reusing it costs no gate_recorder.py edit while
+        # still landing on `unavailable`, never `failed`. The specific cause
+        # lives in reason_detail, greppable via its "no_verdict_block:" prefix.
+        return gate_recorder.record_failure(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            result={
+                "reason": "validation_failed",
+                "reason_detail": (
+                    "no_verdict_block: gate output has no fenced ```json block "
+                    'with a "verdict" key — the model produced text but never '
+                    f"wrote a structured verdict ({len(stdout)} char(s) of output)"
+                ),
+                "duration_seconds": duration_seconds,
+                "partial_output_lines": len(stdout.splitlines()),
+                "runner_pid": os.getpid(),
+            },
+            request_payload=request_payload,
+            requests_dir=requests_dir,
+            results_dir=results_dir,
+        )
+
     contract_hash = _compute_contract_hash(request_payload, gate)
     now = utc_now_iso()
 
     # OI-1748: this function books `completed` unconditionally once it gets
-    # this far — it has no way to tell "the model spoke" from "the caller
-    # handed me an error report as stdout" on its own. That check on purpose
+    # this far (past the OI-1767 verdict-block guard above) — it has no way
+    # to tell a harness-lane spawn failure "the caller handed me an error
+    # report as stdout" from a real run on its own. That check on purpose
     # does NOT live here: a harness-lane spawn failure (quota/auth refusal,
     # proxy outage) is caught upstream, in
     # ``gate_runner._run_harness_lane_path``, by reading the failure_reason

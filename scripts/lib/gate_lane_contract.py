@@ -61,3 +61,12 @@ VERDICT_CONTRACT = (
     "anything that does not point at a single line — a guessed line number is worse than an "
     "empty one.\n"
 )
+
+# The verdict values VERDICT_CONTRACT's own "verdict" field allows. A report
+# that echoes the contract's placeholder text verbatim ("pass|fail|blocked",
+# the literal template string above) must never be mistaken for a real
+# decision — glm_gate, kimi_gate and codex_parser.extract_verdict_block all
+# validate a candidate verdict block against this SAME set (previously three
+# independent literals; OI-1767 fix-forward, this module already being the
+# one source for the contract those values gate).
+VALID_VERDICTS = frozenset({"pass", "fail", "blocked"})

@@ -1318,7 +1318,12 @@ class TestHarnessLaneDelegation:
         gates, so the runner must assemble it from the PR diff exactly like the
         standalone scripts do — diff wrapped as delimited untrusted data and the
         verbatim pass|fail|blocked verdict contract attached."""
-        report_text = "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n"
+        report_text = (
+            "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
+            "```json\n"
+            '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+            "```\n"
+        )
         factory, calls = self._fake_dispatcher(report_text)
 
         monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)

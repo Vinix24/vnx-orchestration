@@ -114,7 +114,10 @@ def test_the_result_record_carries_the_pin(store):
         stdout="## Review\n\nNo blocking findings. Two advisories follow.\n"
                "1. scripts/x.py:4 — the loop re-reads config each pass.\n"
                "2. tests/test_x.py:9 — the fixture builds its own tmp dir.\n"
-               "Residual risk: reviewed against main.\n",
+               "Residual risk: reviewed against main.\n\n"
+               "```json\n"
+               '{\n  "verdict": "pass",\n  "findings": [],\n  "residual_risk": "reviewed against main"\n}\n'
+               "```\n",
         request_payload={
             "gate": "kimi_gate", "pr_id": "1443", "pr_number": 1443,
             "branch": "fix/x", "commit_sha": "b" * 40,
@@ -151,7 +154,10 @@ def test_a_record_without_a_recoverable_prompt_is_not_stamped_with_an_empty_sha(
         stdout="## Review\n\nNo blocking findings. Two advisories follow.\n"
                "1. scripts/x.py:4 — the loop re-reads config each pass.\n"
                "2. tests/test_x.py:9 — the fixture builds its own tmp dir.\n"
-               "Residual risk: reviewed against main.\n",
+               "Residual risk: reviewed against main.\n\n"
+               "```json\n"
+               '{\n  "verdict": "pass",\n  "findings": [],\n  "residual_risk": "reviewed against main"\n}\n'
+               "```\n",
         request_payload={
             "gate": "kimi_gate", "pr_id": "1443", "pr_number": 1443,
             "branch": "fix/x", "commit_sha": "b" * 40,

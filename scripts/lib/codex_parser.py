@@ -9,6 +9,8 @@ import json
 import re
 from typing import Any, Dict, List, Tuple
 
+from gate_lane_contract import VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
+
 
 def _extract_codex_text(stdout: str) -> str:
     """Extract agent_message text from codex NDJSON output."""
@@ -131,6 +133,48 @@ def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         message = f.get("message") or f.get("title") or f.get("details") or ""
         normalized.append({"severity": severity, "message": str(message)})
     return normalized
+
+
+def extract_verdict_block(stdout: str) -> Dict[str, Any]:
+    """Extract the shared fenced ``json verdict block every gate contract asks for.
+
+    ``VERDICT_CONTRACT`` (gate_lane_contract.py — glm_gate, kimi_gate and the
+    harness-lane strategy in gate_runner) and ``_REVIEWER_VERDICT_TEMPLATE``
+    (gate_runner.py — codex_gate, gemini_review) ask for the SAME shape: a
+    fenced ```json block containing a ``"verdict"`` key. This is the one
+    place gate_artifacts.materialize_artifacts's OI-1767 fail-closed guard
+    checks for that shape, keyed on the shape itself rather than on a gate
+    name (a name-branch here would repeat OI-1763's defect).
+
+    Reuses the NDJSON-unwrap in :func:`_extract_codex_text` so this also
+    works on codex's ``exec --json`` stream, not only on the plain-text
+    report bodies glm_gate/kimi_gate/gemini_review stdout actually is.
+
+    Does NOT delegate to :func:`_extract_codex_verdict`: that helper takes the
+    FIRST fenced block and accepts any dict with a ``"verdict"`` key, values
+    unchecked. VERDICT_CONTRACT is itself a fenced ```json block whose
+    ``"verdict"`` value is the literal placeholder text ``"pass|fail|blocked"``
+    — a worker that echoes its own instructions (then dies mid-report) hands
+    back exactly that block first, and the old first-match/any-value logic
+    read it as a genuine, blocking-free verdict (OI-1767 fix-forward,
+    live-reproduced against this scenario). Same rule glm_gate._extract_verdict
+    and kimi_gate._extract_verdict already apply: scan the fenced blocks from
+    the END, and only accept one whose ``verdict`` (trimmed, lowercased) is a
+    real value in :data:`gate_lane_contract.VALID_VERDICTS` — a report that
+    echoes the template and then writes a real verdict resolves to that real
+    verdict, not the template. Returns ``{}`` when no block clears that bar,
+    same as before.
+    """
+    text = _extract_codex_text(stdout)
+    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    for block in reversed(blocks):
+        try:
+            candidate = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and str(candidate.get("verdict", "")).strip().lower() in VALID_VERDICTS:
+            return candidate
+    return {}
 
 
 def parse_codex_findings(stdout: str) -> Dict[str, Any]:
