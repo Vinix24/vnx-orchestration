@@ -40,6 +40,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 from gate_artifacts import materialize_artifacts
 from gate_lane_contract import VERDICT_CONTRACT
+from gate_prompt import sanitize_diff
 import gate_recorder
 
 
@@ -201,6 +202,106 @@ class TestOI1767VerdictBlockGuard:
             f"a real trailing verdict after an echoed template must still book "
             f"completed — {result}"
         )
+
+    def test_bare_verdict_books_completed_and_lands_its_findings(self, env):
+        """Format parity: a harness-lane run whose model wrote its verdict BARE,
+        without a fence, did decide. ``extract_verdict_block`` used to see only
+        a fenced verdict, so this booked `unavailable` (no_verdict_block) and
+        the findings never reached the record. The same reader serves the guard
+        and the findings booking, so both must follow it.
+        """
+        stdout = (
+            "Ik heb de diff gelezen en naast de bijbehorende tests gelegd.\n"
+            "Er zit een blokkerend probleem in de foutafhandeling.\n"
+            "Het oordeel volgt hieronder.\n"
+            '{"verdict": "fail", "findings": [{"severity": "error", "message": "swallowed exception", '
+            '"file_path": "scripts/lib/x.py", "line": 7}], "residual_risk": "geen aanvullend risico gemeten"}\n'
+        )
+        assert "```" not in stdout, "test drifted: the verdict must be bare"
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640003")
+
+        assert result["status"] == "completed", (
+            f"a bare, valid verdict must clear the OI-1767 guard, got {result}"
+        )
+        assert [f["message"] for f in result["blocking_findings"]] == ["swallowed exception"]
+        assert result["blocking_findings"][0]["file_path"] == "scripts/lib/x.py"
+        assert result["residual_risk"] == "geen aanvullend risico gemeten"
+
+    def test_bare_echoed_template_then_death_still_books_unavailable(self, env):
+        """The guard's strictness must survive the format widening: a worker
+        that echoes the contract's JSON body WITHOUT its fence and then dies is
+        no more a verdict than the fenced echo above.
+        """
+        contract_body = VERDICT_CONTRACT.split("```json\n", 1)[1].split("\n```", 1)[0]
+        stdout = (
+            "Ik ga de diff reviewen. Mijn opdracht is:\n"
+            + contract_body
+            + "\n...De bevindingen zijn geen blokkerende problemen. Het oordeel "
+            "is geslaagd. Laat me het neerschrijven."
+        )
+        assert "```" not in stdout, "test drifted: the echoed template must be bare"
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640004")
+
+        assert result["status"] == "unavailable", (
+            f"a bare echoed template booked {result['status']!r} instead of unavailable — {result}"
+        )
+        assert result["reason"] == "validation_failed"
+        assert "no_verdict_block" in result["reason_detail"]
+
+    def test_echoed_sanitized_diff_then_death_books_unavailable(self, env):
+        """OI-1782, measured on PR 1871: a harness-lane gate that dies after
+        echoing the diff of its own prompt must book `unavailable`. The diff went
+        through ``sanitize_diff``, which neutralizes the ```json opener and leaves
+        a bare verdict object in a line of code untouched. Read without a position
+        rule, that quoted object booked `completed` with a verdict nobody wrote.
+        """
+        diff = (
+            "diff --git a/tests/test_x.py b/tests/test_x.py\n"
+            "--- a/tests/test_x.py\n"
+            "+++ b/tests/test_x.py\n"
+            "@@ -1,1 +1,3 @@\n"
+            " import pytest\n"
+            "+def test_the_verdict_value_is_trimmed_and_lowercased_before_the_check():\n"
+            "+    result = extract_verdict_block('{\"verdict\": \" PASS \", \"findings\": []}')\n"
+        )
+        stdout = (
+            "Ik ga de diff reviewen. Dit is wat ik kreeg:\n"
+            + sanitize_diff(diff)
+            + "\n...Het oordeel is geslaagd. Laat me het neerschrijven.\n"
+        )
+        assert "```json" not in stdout, "test drifted: the sanitizer must have run"
+        assert '{"verdict": " PASS "' in stdout, "test drifted: the echo must quote a verdict-shaped object"
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640005")
+
+        assert result["status"] == "unavailable", (
+            f"a quoted verdict in an echoed diff booked {result['status']!r} instead of unavailable — {result}"
+        )
+        assert result["reason"] == "validation_failed"
+        assert "no_verdict_block" in result["reason_detail"]
+
+    def test_echoed_diff_followed_by_a_written_verdict_still_books_completed(self, env):
+        """Control: the echo does not poison the run. A gate that quotes the diff
+        and then writes its answer on a line of its own booked `completed` before
+        OI-1782 and still does, on the answer and not on the quote.
+        """
+        diff = (
+            "+    result = extract_verdict_block('{\"verdict\": \" PASS \", \"findings\": []}')\n"
+        )
+        stdout = (
+            "Ik ga de diff reviewen. Dit is wat ik kreeg:\n"
+            + sanitize_diff(diff)
+            + "\nNa onderzoek is er een blokkerend probleem.\n"
+            '{"verdict": "fail", "findings": [{"severity": "error", "message": "swallowed exception", '
+            '"file_path": "scripts/lib/x.py", "line": 7}], "residual_risk": null}\n'
+        )
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640006")
+
+        assert result["status"] == "completed", f"got {result}"
+        assert [f["message"] for f in result["blocking_findings"]] == ["swallowed exception"]
 
     def test_guard_applies_to_kimi_gate_too_not_just_glm(self, env, tmp_path, monkeypatch):
         """The same no-verdict-block shape must refuse kimi_gate too, not only
