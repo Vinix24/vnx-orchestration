@@ -152,14 +152,39 @@ def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return normalized
 
 
-def _iter_json_objects(text: str) -> Iterator[Dict[str, Any]]:
-    """Yield the top-level JSON objects embedded in *text*, in document order.
+# The one place besides the start of a line where a verdict object may open: right
+# behind a json-fence opener on the same line (```json {...}), the one-line form
+# the fenced reader always accepted. ``gate_prompt.sanitize_diff`` rewrites a
+# quoted fence opener to "``` json (neutralized)", whose "json" is not the last
+# thing before the brace, so a neutralized fence never matches this.
+_FENCE_OPENER_TAIL_RE = re.compile(r"```json[ \t]*\Z", re.IGNORECASE)
+
+
+def _is_written(text: str, idx: int) -> bool:
+    """Whether the ``{`` at *idx* is where a verdict is WRITTEN rather than quoted.
+
+    A verdict is an answer and an answer opens a line, so the brace has nothing
+    but whitespace before it on its line. The exception is the one-line fenced
+    form: a brace directly behind a json fence opener (:data:`_FENCE_OPENER_TAIL_RE`).
+    The same object in the middle of a line (a string literal, a call argument, a
+    field of another document, a diff line behind its ``+``) is quoted material.
+    """
+    before = text[text.rfind("\n", 0, idx) + 1:idx]
+    return not before.strip() or _FENCE_OPENER_TAIL_RE.search(before) is not None
+
+
+def _iter_written_objects(text: str) -> Iterator[Dict[str, Any]]:
+    """Yield the top-level JSON objects *written* in *text*, in document order.
 
     Tries a parse at every ``{`` and, when one succeeds, resumes AFTER it: an
     object nested inside a parsed one is never a candidate in its own right, so
     a finding that happens to carry its own ``"verdict"`` key cannot outrank the
     verdict object it sits in. A ``{`` that does not start a valid object
     (prose braces, an object cut off mid-report) is skipped.
+
+    A parsed object that is not written (:func:`_is_written`) is consumed and
+    skipped as a whole. What is nested in a quoted object is part of the quote,
+    also when it happens to open a line of its own.
 
     A markdown fence needs no handling: the backticks are text between objects
     and the object inside a fence is found exactly like a bare one.
@@ -172,7 +197,8 @@ def _iter_json_objects(text: str) -> Iterator[Dict[str, Any]]:
         except json.JSONDecodeError:
             idx = text.find("{", idx + 1)
             continue
-        yield obj
+        if _is_written(text, idx):
+            yield obj
         idx = text.find("{", end)
 
 
@@ -192,8 +218,30 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
     stream (measured on codex_gate PR 1869, 2026-09-19: 0 fences in 3845
     characters of report), and a reader that demanded the fence saw no verdict
     in such a run at all. Fenced and bare objects are read by one scan
-    (:func:`_iter_json_objects`), so they share one order: the LAST valid
+    (:func:`_iter_written_objects`), so they share one order: the LAST valid
     verdict wins, whichever form it took.
+
+    A bare object counts only where it is WRITTEN: its opening brace opens a
+    line (only whitespace before it) or directly follows a ```json opener
+    (:func:`_is_written`). A run that dies mid-report leaves its prompt echoed,
+    and the prompt carries the diff under review. ``gate_prompt.sanitize_diff``
+    neutralizes the ```json opener in that diff. That was the whole defence
+    while only fenced blocks were read, and it does not touch a bare object.
+    Measured on PR 1871 (commit dc62f19e, OI-1782): its own sanitized diff,
+    echoed into an aborted run, read as ``{'verdict': ' PASS ', 'findings':
+    []}`` from a test line that only quoted it. The position rule keeps all 306
+    readable codex_gate reports under unified_reports/headless/ (of 307) and
+    returns ``{}`` for that echo.
+
+    What the position rule does NOT close: a quoted object that itself opens a
+    line still reads as a verdict. In a diff that is a context line (one space,
+    then the brace) of an existing JSON or NDJSON file. It is also a file the
+    reviewer prints, or an earlier gate's verdict on a line of its own. Measured
+    over the last 300 commits on main (299 non-empty diffs, 2026-09-19): the
+    sanitized echo read as a verdict in 15 without the rule and in 0 with it, so
+    the open case was not reached once. That is a sample of this repository's
+    own diffs. A repository that keeps verdict-shaped JSON at the start of a
+    line would hit it.
 
     Reuses the NDJSON-unwrap in :func:`_extract_codex_text` so this also
     works on codex's ``exec --json`` stream, not only on the plain-text
@@ -216,7 +264,7 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
     """
     text = _extract_codex_text(stdout)
     verdict: Dict[str, Any] = {}
-    for candidate in _iter_json_objects(text):
+    for candidate in _iter_written_objects(text):
         if str(candidate.get("verdict", "")).strip().lower() in VALID_VERDICTS:
             verdict = candidate
     return verdict

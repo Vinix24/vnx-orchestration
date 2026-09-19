@@ -24,6 +24,16 @@ a fence never sees it. Reading bare objects must not loosen the rule above, so
 the classes below pin both halves: a bare verdict is read, and everything the
 fenced reader already refused (echoed template, unknown value, no verdict key)
 is still refused when it is bare.
+
+Position (OI-1782): a bare object counts only where it is WRITTEN, not where it
+is QUOTED. A gate that dies mid-report echoes its prompt, and the prompt carries
+the diff under review. gate_prompt.sanitize_diff neutralizes a ```json opener in
+that diff, which defended the fenced reader completely and does not touch a bare
+object: the sanitized diff of PR 1871 itself, echoed into an aborted run, read as
+``{'verdict': ' PASS ', 'findings': []}``. So a bare object counts only when its
+opening brace opens a line. The echo tests build their diff from the real files
+in this repository and run it through the real ``sanitize_diff``, never a
+hand-written stand-in.
 """
 from __future__ import annotations
 
@@ -39,8 +49,9 @@ FIXTURES_DIR = TESTS_DIR / "fixtures" / "gate_verdict"
 sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
-from codex_parser import extract_verdict_block
+from codex_parser import _extract_codex_text, extract_verdict_block
 from gate_lane_contract import VALID_VERDICTS, VERDICT_CONTRACT
+from gate_prompt import sanitize_diff
 from gate_runner import _REVIEWER_VERDICT_TEMPLATE
 
 
@@ -181,11 +192,6 @@ class TestABareVerdictIsReadLikeAFencedOne:
         assert result.get("verdict") == "fail", f"got {result}"
         assert result["findings"][0]["file_path"] == "scripts/lib/x.py"
         assert result["findings"][0]["line"] == 12
-
-    def test_bare_verdict_on_the_same_line_as_prose_is_read(self):
-        stdout = f"Uitkomst van de review: {_BARE_PASS} en verder niets."
-
-        assert extract_verdict_block(stdout).get("verdict") == "pass"
 
     def test_bare_verdict_in_a_top_level_agent_message_event_is_read(self):
         """The other event shape ``_extract_codex_text`` unwraps: ``type`` and
@@ -336,3 +342,217 @@ class TestMalformedInputNeverRaisesAndNeverInventsAVerdict:
     )
     def test_returns_an_empty_dict(self, stdout):
         assert extract_verdict_block(stdout) == {}
+
+
+# ---------------------------------------------------------------------------
+# Position (OI-1782): a bare object counts only where it is written
+# ---------------------------------------------------------------------------
+
+_PR_1869_FIXTURE = FIXTURES_DIR / "pr-1869-codex_gate-bare-verdict.ndjson"
+
+
+def _diff_that_adds(*paths: Path) -> str:
+    """The unified diff of a PR that adds these files, built from their real content.
+
+    PR 1871 added a test module and a fixture that both quote verdict objects.
+    Reading the files as they are keeps this covering what the repository
+    actually contains, where a pasted literal would freeze one day's content.
+    """
+    parts = []
+    for path in paths:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rel = path.relative_to(VNX_ROOT).as_posix()
+        parts.append(
+            f"diff --git a/{rel} b/{rel}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel}\n"
+            f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines)
+        )
+    return "".join(parts)
+
+
+def _verdict_objects_anywhere(text: str) -> list:
+    """Every well-formed object in *text* whose verdict is a real one, wherever it sits.
+
+    What a reader with no position rule sees. It makes the refusals below
+    non-vacuous: an echo that carried no verdict-shaped object at all would be
+    "refused" for the wrong reason.
+    """
+    decoder = json.JSONDecoder()
+    found = []
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and str(obj.get("verdict", "")).strip().lower() in VALID_VERDICTS:
+            found.append(obj)
+    return found
+
+
+def _echo(diff_text: str) -> str:
+    """What a gate that dies mid-report leaves behind: the diff of its own
+    prompt, run through the real sanitizer, echoed, and an unfinished sentence.
+    """
+    return (
+        "Ik ga de diff reviewen. Dit is wat ik kreeg:\n"
+        + sanitize_diff(diff_text)
+        + "\n...Het oordeel is geslaagd. Laat me het neerschrijven."
+    )
+
+
+class TestAnEchoedDiffIsNotAVerdict:
+    """Measured by T0 on PR 1871 (commit dc62f19e). ``sanitize_diff`` neutralizes
+    only the ```json opener, so a bare verdict object in a diff survives it. The
+    sanitized diff of that PR (24925 characters, no literal fence left), echoed
+    into an aborted run, read as ``{'verdict': ' PASS ', 'findings': []}``: a
+    verdict the reviewer only quoted. The old reader returned ``{}`` for it.
+    """
+
+    def test_the_line_that_read_as_a_verdict_in_pr_1871_is_refused(self):
+        diff = (
+            "+    def test_the_verdict_value_is_trimmed_and_lowercased_before_the_check(self):\n"
+            "+        result = extract_verdict_block('{\"verdict\": \" PASS \", \"findings\": []}')\n"
+        )
+        stdout = _echo(diff)
+        assert "```json" not in stdout, "sanitizer drifted: no literal fence opener may be left"
+        assert _verdict_objects_anywhere(stdout), "test drifted: the echo must carry a well-formed verdict object"
+
+        result = extract_verdict_block(stdout)
+
+        assert result == {}, f"a verdict the reviewer only quoted was read as its own, got {result}"
+
+    def test_the_sanitized_diff_of_a_pr_that_adds_verdict_quoting_files_is_refused(self):
+        diff = _diff_that_adds(_PR_1869_FIXTURE, Path(__file__))
+        stdout = _echo(diff)
+        assert "```json" not in stdout, "sanitizer drifted: no literal fence opener may be left"
+        assert _verdict_objects_anywhere(stdout), "test drifted: the echo must carry a well-formed verdict object"
+
+        result = extract_verdict_block(stdout)
+
+        assert result == {}, f"the echoed diff was read as a verdict, got {result}"
+
+    def test_the_same_echo_inside_an_ndjson_agent_message_is_refused(self):
+        diff = _diff_that_adds(_PR_1869_FIXTURE, Path(__file__))
+        stdout = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": _echo(diff)}})
+
+        result = extract_verdict_block(stdout)
+
+        assert result == {}, f"the echoed diff inside an agent_message was read as a verdict, got {result}"
+
+    def test_a_real_verdict_written_after_the_echo_is_still_read(self):
+        """Control: the echo does not poison the run. A gate that quotes the diff
+        and THEN answers has answered.
+        """
+        diff = _diff_that_adds(_PR_1869_FIXTURE, Path(__file__))
+        stdout = _echo(diff) + f"\n{_BARE_FAIL}\n"
+
+        assert extract_verdict_block(stdout).get("verdict") == "fail"
+
+
+class TestABareVerdictMustOpenItsLine:
+    """A bare object is a verdict when it is written as the answer, and an answer
+    opens a line. The same object in the middle of a line of other text is quoted:
+    a string literal, a call argument, a field of another document.
+    """
+
+    def test_bare_verdict_in_the_middle_of_a_line_of_prose_is_not_read(self):
+        """Was ``test_bare_verdict_on_the_same_line_as_prose_is_read`` until
+        OI-1782, which pinned that an inline object IS read. That is the form a
+        quoted verdict takes. Same input, opposite outcome.
+        """
+        stdout = f"Uitkomst van de review: {_BARE_PASS} en verder niets."
+
+        assert extract_verdict_block(stdout) == {}
+
+    def test_the_real_pr_1869_verdict_opens_its_line_and_is_still_read(self):
+        """The real codex_gate stream is what the anchor must keep reading. Its
+        verdict is the whole text of the last ``agent_message``, so the brace
+        opens a line. Asserting that makes the read below a consequence of the
+        anchor rather than an accident of this fixture.
+        """
+        stdout = _PR_1869_FIXTURE.read_text(encoding="utf-8")
+        unwrapped = _extract_codex_text(stdout)
+        brace = unwrapped.rindex('{\n  "verdict"')
+        line_start = unwrapped.rfind("\n", 0, brace) + 1
+        assert not unwrapped[line_start:brace].strip(), "fixture drifted: the verdict must open its line"
+
+        result = extract_verdict_block(stdout)
+
+        assert result.get("verdict") == "pass", f"got {result}"
+        assert result.get("findings") == []
+
+    @pytest.mark.parametrize("indent", [" ", "    ", "\t", " \t "], ids=["one-space", "four-spaces", "tab", "mixed"])
+    def test_an_indented_bare_verdict_is_still_read(self, indent):
+        """Whitespace before the brace does not quote it: a model that indents its
+        answer still wrote an answer.
+        """
+        stdout = f"Review klaar.\n{indent}{_BARE_FAIL}\n"
+
+        assert extract_verdict_block(stdout).get("verdict") == "fail"
+
+    def test_a_bare_verdict_after_crlf_line_endings_is_still_read(self):
+        stdout = f"Review klaar.\r\n{_BARE_FAIL}\r\n"
+
+        assert extract_verdict_block(stdout).get("verdict") == "fail"
+
+    @pytest.mark.parametrize(
+        "prefix",
+        ["+", "-", "> ", "- ", "1. ", '"', "'", "(", "x = ", "Verdict: ", "# ", "```", "``` json (neutralized) "],
+        ids=[
+            "diff-added", "diff-removed", "quote", "bullet", "numbered", "double-quote", "single-quote",
+            "paren", "assignment", "label", "comment", "unlabelled-fence", "neutralized-fence",
+        ],
+    )
+    def test_a_bare_verdict_behind_any_visible_text_is_not_read(self, prefix):
+        stdout = f"Review klaar.\n{prefix}{_BARE_PASS}\n"
+
+        assert extract_verdict_block(stdout) == {}, f"read a verdict quoted behind {prefix!r}"
+
+    @pytest.mark.parametrize(
+        "opener",
+        ["```json", "```json ", "```JSON\t", "Uitkomst: ```json "],
+        ids=["tight", "space", "upper-case-tab", "after-prose"],
+    )
+    def test_a_verdict_right_behind_a_json_fence_opener_is_still_read(self, opener):
+        """Fenced blocks keep counting as they always did, including the one-line
+        form the fenced reader accepted: ``` ```json {...}``` ```.
+        """
+        stdout = f"Review klaar.\n{opener}{_BARE_FAIL}```\n"
+
+        assert extract_verdict_block(stdout).get("verdict") == "fail"
+
+    def test_the_neutralized_fence_the_sanitizer_writes_does_not_open_a_verdict(self):
+        """``sanitize_diff`` rewrites a quoted json fence to ``` json (neutralized).
+        What follows that text on its line is quoted material. The control proves
+        the same text WAS read before the sanitizer touched it.
+        """
+        raw = f"```json {_BARE_PASS}```\n"
+        assert extract_verdict_block(raw).get("verdict") == "pass", "control drifted: a raw fence-line verdict is read"
+
+        quoted = sanitize_diff(raw)
+
+        assert "```json" not in quoted, "sanitizer drifted: the literal fence must be gone"
+        assert extract_verdict_block(quoted) == {}
+
+    def test_an_object_inside_a_quoted_object_is_not_a_candidate(self):
+        """A parsed object that was not written is skipped as a whole, so what is
+        nested in it stays part of the quote even when it opens a line of its own.
+        """
+        stdout = f'Context: {{"items": [\n{_BARE_PASS}\n]}}\n'
+
+        assert extract_verdict_block(stdout) == {}
+
+    def test_a_written_verdict_after_a_quoted_one_wins(self):
+        stdout = f"Eerder zei de gate: {_BARE_PASS}\nMijn oordeel:\n{_BARE_FAIL}\n"
+
+        assert extract_verdict_block(stdout).get("verdict") == "fail"
+
+    def test_a_quoted_verdict_after_a_written_one_does_not_replace_it(self):
+        """LAST wins among the WRITTEN ones. A quote that comes later, such as a
+        closing remark that repeats an earlier gate's answer, must not outrank the
+        answer the reviewer wrote.
+        """
+        stdout = f"{_BARE_FAIL}\nAchteraf vergeleken met: {_BARE_PASS}\n"
+
+        assert extract_verdict_block(stdout).get("verdict") == "fail"
