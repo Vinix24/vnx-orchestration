@@ -23,6 +23,13 @@ for _p in (SCRIPTS_LIB, SCRIPTS_ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# A real codex_gate run (PR 1869) that ends in a bare verdict: codex_gate is
+# refused when it wrote none (OI-1770), and the sidecar test is not about that.
+CODEX_VERDICT_STREAM = (
+    Path(__file__).resolve().parent / "fixtures" / "gate_verdict"
+    / "pr-1869-codex_gate-bare-verdict.ndjson"
+).read_text(encoding="utf-8")
+
 
 # ─── OI-1062: Event archive in deliver_via_subprocess ────────────────────────
 
@@ -317,7 +324,7 @@ class TestGateSidecar(unittest.TestCase):
                 gate="codex_gate",
                 pr_number=99,
                 pr_id="PR-99",
-                stdout="Finding\nAnother\nThird\n",
+                stdout=CODEX_VERDICT_STREAM,
                 request_payload={**payload, "gate": "codex_gate", "pr_number": 99,
                                   "pr_id": "PR-99",
                                   "report_path": str(reports / "codex-report.md")},

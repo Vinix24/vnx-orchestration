@@ -14,15 +14,21 @@ its two healthy siblings on the same PR (has a fenced verdict block, must
 keep booking `completed` unchanged) — the control case that proves the fix
 does not sweep up good runs along with the bad one.
 
-The guard is scoped to harness-lane gates (glm_gate/kimi_gate/deepseek_gate —
-the ones that actually run VERDICT_CONTRACT via gate_runner's harness-lane
-strategy), via the SAME provider-kind lookup the OI-1725 guard already uses
-just above it in materialize_artifacts. codex_gate/gemini_review/
-claude_github_optional are untouched: their own pre-existing tests
-(test_gate_artifacts_register.py, test_gate_artifacts_atomicity.py) pin
-"plain prose, no verdict block, still completed" as accepted behavior today,
-and widening this guard onto them turns those tests red — verified directly
-by running an unscoped version of this guard against the suite.
+The guard covers the harness-lane gates (glm_gate/kimi_gate/deepseek_gate, the
+ones that run VERDICT_CONTRACT via gate_runner's harness-lane strategy) and, since
+OI-1770, codex_gate. Which gates it covers is decided by
+``gate_artifacts._verdict_is_required`` on the provider registry: the harness-lane
+kind, or a path binary whose stream ``extract_verdict_block`` unwraps. It is not
+decided by a gate name.
+
+Not covered, each for a stated reason (TestOI1770VerdictScope pins the table):
+gemini_review (its output is not one the reader can unwrap, so refusing it would
+book a good review as `unavailable`) and the ``gh`` gates claude_github_optional,
+ci_gate and wiring_gate (they book GitHub state, no model writes a verdict).
+
+The old tests that pinned "plain prose, no verdict block, still completed" for
+codex_gate encoded the defect OI-1767 describes. Their fixtures now end in a
+real verdict and their assertions stayed.
 """
 from __future__ import annotations
 
@@ -38,9 +44,11 @@ FIXTURES_DIR = TESTS_DIR / "fixtures" / "gate_verdict"
 sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
+import gate_artifacts
 from gate_artifacts import materialize_artifacts
 from gate_lane_contract import VERDICT_CONTRACT
 from gate_prompt import sanitize_diff
+from gate_runner import _REVIEWER_VERDICT_TEMPLATE
 import gate_recorder
 
 
@@ -361,13 +369,15 @@ class TestOI1767VerdictBlockGuard:
         assert result["reason"] == "validation_failed"
         assert "no_verdict_block" in result["reason_detail"]
 
-    def test_non_harness_lane_gate_unaffected(self, env, tmp_path, monkeypatch):
-        """gemini_review is a PATH_BINARY gate, not harness-lane: this guard is
-        deliberately scoped to harness-lane providers only, because
-        gemini_review's own tests (test_gate_artifacts_register.py) already
-        pin "plain prose, no verdict block, still completed" as its accepted
-        contract. Documents the scope boundary so a future edit that widens
-        or narrows it does so on purpose, not by accident.
+    def test_gemini_review_is_outside_the_guard(self, env, tmp_path, monkeypatch):
+        """gemini_review is a PATH_BINARY gate on a binary the verdict reader cannot
+        unwrap, so the guard leaves it alone (OI-1770). Its ``--output-format
+        json`` envelope keeps the reply in a string field; a verdict inside reads
+        as ``{}``, and refusing on that would book a good review as `unavailable`.
+        There is no real gemini_review report to measure the reader against (the
+        one under unified_reports/headless/ is a 25-byte stub). Widening onto it
+        is a decision to make after teaching the reader that output, and this test
+        is where that decision has to be made on purpose, not by accident.
         """
         state_dir = tmp_path / "state3"
         reports_dir = tmp_path / "reports3"
@@ -406,3 +416,221 @@ class TestOI1767VerdictBlockGuard:
         )
 
         assert result["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# OI-1770: the guard covers codex_gate, decided on the provider registry
+# ---------------------------------------------------------------------------
+
+
+def _codex_events(*events: dict) -> str:
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+def _codex_command(index: int) -> dict:
+    return {"type": "item.completed", "item": {
+        "id": f"item_{index}", "type": "command_execution",
+        "command": "/bin/zsh -lc \"rg -n 'schema_version' tests scripts\"",
+        "aggregated_output": "", "exit_code": 0, "status": "completed",
+    }}
+
+
+def _codex_message(index: int, text: str) -> dict:
+    return {"type": "item.completed", "item": {
+        "id": f"item_{index}", "type": "agent_message", "text": text,
+    }}
+
+
+def _run_codex_gate(env, stdout: str, gate: str = "codex_gate", pr_number: int = 1869):
+    """Materialize a codex-shaped run. A path_binary gate carries the builder's
+    dispatch-id BY DESIGN (OI-1725 applies to harness-lane gates only), so the
+    id here is a builder id and the run reaches the verdict guard.
+    """
+    report_file = env["reports_dir"] / f"test-report-{gate}-{pr_number}.md"
+    payload = {
+        "gate": gate,
+        "status": "requested",
+        "provider": "codex",
+        "branch": "dispatch/20260919-082000-rolelane-overname",
+        "pr_number": pr_number,
+        "review_mode": "per_pr",
+        "risk_class": "medium",
+        "changed_files": ["scripts/lib/gate_artifacts.py"],
+        "requested_at": "20260919T101223Z",
+        "prompt": "Review this code",
+        "dispatch_id": "20260919-082000-rolelane-overname",
+        "report_path": str(report_file),
+    }
+    result = materialize_artifacts(
+        gate=gate,
+        pr_number=pr_number,
+        pr_id="",
+        stdout=stdout,
+        request_payload=payload,
+        duration_seconds=37.0,
+        requests_dir=env["requests_dir"],
+        results_dir=env["results_dir"],
+        reports_dir=env["reports_dir"],
+    )
+    return result, report_file
+
+
+class TestOI1770CodexGate:
+
+    def test_the_real_bare_verdict_run_still_books_completed(self, env):
+        """The precondition of OI-1770, on the real report. codex_gate PR 1869
+        (2026-09-19) wrote its verdict bare: 0 fences in 3845 characters. Widening
+        the guard while the reader demanded a fence booked exactly this run as
+        `unavailable`. It must keep booking `completed`.
+        """
+        stdout = _load_fixture("pr-1869-codex_gate-bare-verdict.ndjson")
+        assert "```" not in stdout, "fixture drifted: the real codex run wrote its verdict bare"
+
+        result, report_file = _run_codex_gate(env, stdout)
+
+        assert result["status"] == "completed", f"the guard refused a real, good codex run: {result}"
+        assert result["blocking_findings"] == []
+        assert report_file.exists()
+
+    def test_a_run_that_wrote_no_verdict_books_unavailable(self, env):
+        """The defect the old codex tests encoded. Three lines of prose and no
+        verdict used to book `completed`, and those tests asserted it. A record
+        that says `completed` over a review nobody concluded reads as a clean PASS.
+        """
+        stdout = "Review line one.\nReview line two.\nReview line three.\n"
+
+        result, report_file = _run_codex_gate(env, stdout)
+
+        assert result["status"] == "unavailable", (
+            f"a codex_gate run with no verdict booked {result['status']!r}: {result}"
+        )
+        assert result["reason"] == "validation_failed"
+        assert "no_verdict_block" in result["reason_detail"]
+        assert report_file.exists(), "the refused run's report is the evidence and must stay"
+
+        result_file = gate_recorder.result_file_path(
+            env["results_dir"], "codex_gate", pr_number=1869, pr_id="",
+        )
+        assert json.loads(result_file.read_text(encoding="utf-8"))["status"] == "unavailable"
+
+    def test_a_run_that_stopped_mid_investigation_books_unavailable(self, env):
+        """The shape of the one real codex_gate report of 308 that carries no
+        verdict (pr-861, 2026-06-14): the stream ends on a command result. It took
+        an action, so the depth check does not refuse it, and only this guard can.
+        """
+        stdout = _codex_events(
+            {"type": "thread.started", "thread_id": "01a0-dead-run"},
+            {"type": "turn.started"},
+            _codex_message(0, "Ik lees eerst de diff en de tests eromheen."),
+            _codex_command(1),
+        )
+
+        result, _ = _run_codex_gate(env, stdout)
+
+        assert result["status"] == "unavailable"
+        assert result["reason"] == "validation_failed", (
+            f"refused for the wrong reason (the depth check must not be what stops this): {result}"
+        )
+        assert "no_verdict_block" in result["reason_detail"]
+
+    def test_an_echoed_reviewer_template_then_death_books_unavailable(self, env):
+        """The OI-1767 echo case for codex: a reviewer that repeats its own
+        instructions (the real ``_REVIEWER_VERDICT_TEMPLATE``, whose verdict is the
+        placeholder "pass|fail|blocked") and then stops has not decided anything.
+        """
+        stdout = _codex_events(
+            {"type": "thread.started", "thread_id": "01a0-echo"},
+            _codex_command(0),
+            _codex_message(
+                1,
+                "Mijn opdracht is:\n" + _REVIEWER_VERDICT_TEMPLATE
+                + "...Het oordeel is geslaagd. Laat me het neerschrijven.",
+            ),
+        )
+
+        result, _ = _run_codex_gate(env, stdout)
+
+        assert result["status"] == "unavailable", f"got {result}"
+        assert result["reason"] == "validation_failed"
+        assert "no_verdict_block" in result["reason_detail"]
+
+    def test_the_findings_of_a_bare_verdict_land_in_the_record(self, env):
+        """Control: refusing the verdict-less run must not cost a good run its
+        findings. A bare fail verdict is booked as completed with its finding.
+        """
+        stdout = _codex_events(
+            {"type": "thread.started", "thread_id": "01a0-fail"},
+            _codex_command(0),
+            _codex_message(1, json.dumps({
+                "verdict": "fail",
+                "findings": [{"severity": "error", "message": "swallowed exception",
+                              "file_path": "scripts/lib/x.py", "line": 7}],
+                "residual_risk": "geen aanvullend risico gemeten",
+            }, indent=2)),
+        )
+
+        result, _ = _run_codex_gate(env, stdout)
+
+        assert result["status"] == "completed"
+        assert [f["message"] for f in result["blocking_findings"]] == ["swallowed exception"]
+
+
+# gate -> (a run that wrote no verdict is refused, why). Every gate in
+# GATE_PROVIDERS has to be classified here. A gate registered without a decision
+# fails test_every_registered_gate_is_classified instead of silently booking
+# `completed` over a review with no verdict, which is what OI-1763 did to findings.
+_VERDICT_SCOPE = {
+    "glm_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
+    "kimi_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
+    "deepseek_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
+    "codex_gate": (True, "path binary `codex`: its exec --json stream is unwrapped by the reader"),
+    "gemini_review": (False, "path binary `gemini`: its --output-format json envelope is not unwrapped by the reader"),
+    "claude_github_optional": (False, "path binary `gh`: reads GitHub state, no model writes a verdict block"),
+    "ci_gate": (False, "path binary `gh`: reads GitHub state, no model writes a verdict block"),
+    "wiring_gate": (False, "path binary `gh`: reads GitHub state, no model writes a verdict block"),
+}
+
+
+class TestOI1770VerdictScope:
+
+    def test_every_registered_gate_is_classified(self):
+        """A new gate must arrive with a decision about the verdict guard."""
+        assert set(_VERDICT_SCOPE) == set(gate_recorder.GATE_PROVIDERS), (
+            "GATE_PROVIDERS and the verdict-scope table drifted: classify the new "
+            f"gate. registered={sorted(gate_recorder.GATE_PROVIDERS)} "
+            f"classified={sorted(_VERDICT_SCOPE)}"
+        )
+
+    @pytest.mark.parametrize("gate", sorted(_VERDICT_SCOPE))
+    def test_coverage_matches_the_table(self, gate):
+        expected, why = _VERDICT_SCOPE[gate]
+        assert gate_artifacts._verdict_is_required(gate) is expected, (
+            f"{gate}: expected required={expected} ({why})"
+        )
+
+    def test_an_unregistered_gate_is_not_covered(self):
+        """The runner refuses it before it gets here (OI-1490); the guard does not
+        invent an answer for a gate the registry has never heard of."""
+        assert gate_artifacts._verdict_is_required("no_such_gate") is False
+
+    def test_a_second_gate_on_the_codex_binary_is_covered_without_an_edit(self, env, monkeypatch):
+        """The kenmerk is the provider's output, not the gate's name: a gate
+        registered on the ``codex`` binary under any name is held to a verdict,
+        and one registered on ``gemini`` is not."""
+        monkeypatch.setitem(
+            gate_recorder.GATE_PROVIDERS, "codex_second_pass",
+            (gate_recorder.GATE_PROVIDER_PATH_BINARY, "codex"),
+        )
+        monkeypatch.setitem(
+            gate_recorder.GATE_PROVIDERS, "gemini_second_pass",
+            (gate_recorder.GATE_PROVIDER_PATH_BINARY, "gemini"),
+        )
+        assert gate_artifacts._verdict_is_required("codex_second_pass") is True
+        assert gate_artifacts._verdict_is_required("gemini_second_pass") is False
+
+        result, _ = _run_codex_gate(
+            env, "Review line one.\nReview line two.\nReview line three.\n",
+            gate="codex_second_pass", pr_number=1870,
+        )
+        assert result["status"] == "unavailable"
+        assert "no_verdict_block" in result["reason_detail"]

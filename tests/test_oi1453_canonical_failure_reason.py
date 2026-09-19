@@ -145,6 +145,7 @@ def test_a_completed_record_that_failed_on_findings_says_why(dirs):
         json.dumps({"type": "item.completed", "item": {
             "id": "i1", "type": "agent_message",
             "text": json.dumps({
+                "verdict": "fail",
                 "findings": [{
                     "severity": "blocking",
                     "title": "unguarded index access on an empty list",
