@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Set
 
-_LANES = ("subprocess_dispatch", "provider_dispatch", "tmux_interactive_dispatch")
+_LANES = ("subprocess_dispatch", "provider_dispatch")
 
 # NOTE ON REACH: these patterns catch literal lane-script filename references in spawn/exec
 # contexts and direct delivery-function calls. A FULLY dynamic construction (e.g. a lane name
@@ -46,7 +46,7 @@ _LANES = ("subprocess_dispatch", "provider_dispatch", "tmux_interactive_dispatch
 # Real DELIVERY invocations (not a docstring mention): the lane script named in a spawn/exec
 # context, or a delivery-function CALL. Comment/docstring lines are skipped before matching.
 _DELIVERY_PATTERNS = [
-    re.compile(r"(subprocess_dispatch|provider_dispatch|tmux_interactive_dispatch)\.py"),
+    re.compile(r"(subprocess_dispatch|provider_dispatch)\.py"),
     re.compile(r"\bdeliver_with_recovery\s*\("),
     re.compile(r"\b[A-Za-z_]*(provider_dispatch|pd)\.main\s*\("),
 ]

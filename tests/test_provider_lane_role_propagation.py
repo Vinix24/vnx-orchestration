@@ -3,8 +3,8 @@
 
 The worker-scope PreToolUse enforcement hook
 (``scripts/hooks/pretooluse_worker_scope_enforce.py``) reads its role from the
-``VNX_WORKER_ROLE`` env var. The tmux lane already exports it; the provider lane
-(kimi / deepseek-harness / glm-harness / codex / gemini / litellm) did not, so
+``VNX_WORKER_ROLE`` env var. The tmux lane (removed 2026-09-18) exported it; the
+provider lane (kimi / deepseek-harness / glm-harness / codex / gemini / litellm) did not, so
 every provider-lane worker resolved to the restrictive code-worker fallback
 (``resolve_worker_profile: role is None ... is_fallback=True``) even when its
 dispatch spec carried ``role=backend-developer``.
@@ -39,7 +39,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -195,43 +194,6 @@ class TestProviderDispatchPassesRoleEnv(unittest.TestCase):
         extra_env = mock_spawn.call_args.kwargs.get("extra_env")
         self.assertNotIn("VNX_WORKER_ROLE", extra_env)
         self.assertEqual(extra_env.get("VNX_DATA_DIR"), str(pd._resolve_data_dir()))
-
-
-class TestTmuxLaneRegression(unittest.TestCase):
-    """The tmux lane keeps exporting the role exactly as before (OI-1209 must not
-    regress the existing path)."""
-
-    def test_spawn_session_still_exports_role(self):
-        from tmux_interactive_dispatch import TmuxInteractiveDispatch
-
-        class _FakeRunner:
-            def __init__(self) -> None:
-                self.commands: list[list[str]] = []
-
-            def run(self, args, *, timeout: int = 10, input_text=None):
-                self.commands.append(list(args))
-
-                class _R:
-                    returncode = 0
-                    stdout = "pane-1\n"
-                    stderr = ""
-
-                return _R()
-
-        with tempfile.TemporaryDirectory() as td:
-            fake = _FakeRunner()
-            lane = TmuxInteractiveDispatch(
-                td,
-                runner=fake,
-                project_root=td,
-                receipts_file=str(Path(td) / "t0_receipts.ndjson"),
-            )
-            lane._spawn_session(
-                "sess", Path(td), dispatch_id="d1", role="backend-developer"
-            )
-
-        new_session = [c for c in fake.commands if c and c[0] == "new-session"][0]
-        self.assertIn("VNX_WORKER_ROLE=backend-developer", new_session)
 
 
 if __name__ == "__main__":

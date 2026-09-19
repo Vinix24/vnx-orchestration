@@ -5,7 +5,8 @@ AST-scan pattern (PR #1742, OI-1594) rather than inventing a new one.
 Defect this closes: ``phantom_guard.record_phantom_if_any`` accepted ``role``, ``status``,
 ``task_class``, ``read_only``, ``worktree_diff`` as five independent keyword arguments with
 defaults. Each of the three lane call sites (scripts/lib/envelope_govern.py,
-scripts/lib/dispatch_govern.py, scripts/lib/tmux_interactive_dispatch.py) picked its own subset
+scripts/lib/dispatch_govern.py, and the tmux lane's scripts/lib/tmux_interactive_dispatch.py,
+removed 2026-09-18) picked its own subset
 — NONE of them passed ``task_class`` or ``read_only`` — and Python's defaults silently supplied
 ``None`` for whatever a caller forgot. The guard's own exemption rule
 (task_class="research_structured" or read_only=True exempts a no-diff completion) was, and is,
@@ -140,7 +141,7 @@ def _context_field_names(call: ast.Call, *, file_label: str) -> frozenset[str]:
                 f"{file_label}:{call.lineno}: record_phantom_if_any(context=...) is not an "
                 f"inline PhantomDecisionContext(...) construction — this guard cannot "
                 f"statically verify which decision-relevant fields it carries. Construct the "
-                f"context inline at the call site (see the three lane call sites for the "
+                f"context inline at the call site (see the lane call sites for the "
                 f"pattern), or extend this guard to resolve the indirection."
             )
     raise AssertionError(
@@ -153,7 +154,6 @@ def _context_field_names(call: ast.Call, *, file_label: str) -> frozenset[str]:
 _KNOWN_LANE_CALL_SITES = frozenset({
     "scripts/lib/envelope_govern.py",
     "scripts/lib/dispatch_govern.py",
-    "scripts/lib/tmux_interactive_dispatch.py",
 })
 
 
@@ -171,7 +171,7 @@ class TestEveryCallSiteCarriesAllDecisionRelevantFields:
 
     def test_every_call_site_supplies_all_required_context_fields(self):
         sites = _find_record_phantom_call_sites(REPO)
-        assert sites, "expected at least the three known lane call sites"
+        assert sites, "expected at least the known lane call sites"
         problems = []
         for rel, calls in sites.items():
             for call in calls:

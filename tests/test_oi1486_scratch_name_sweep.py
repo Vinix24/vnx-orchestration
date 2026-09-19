@@ -55,7 +55,6 @@ _KNOWN_BACKLOG: dict[str, int] = {
     "skill_refinement.py": 1,
     "smart_router.py": 1,
     "state_rebuild_trigger.py": 1,
-    "tmux_interactive_dispatch.py": 1,
 }
 
 

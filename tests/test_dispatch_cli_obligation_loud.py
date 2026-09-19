@@ -66,8 +66,8 @@ def _make_bundle(
 ) -> "tuple[Path, Path]":
     """A promoted-style staged bundle (spec + instruction inside the bundle dir).
 
-    The spec keeps ``force_tmux`` unset, so it routes through the default
-    ``claude_headless`` lane (``_execute_claude_headless``). These tests assert
+    The spec routes through the only claude lane, ``claude_headless``
+    (``_execute_claude_headless``). These tests assert
     on door-level gate-obligation state, not on lane execution, so they mock
     ``_execute_claude_headless`` — tmp_path is not a real git repo, and the
     headless lane's worktree creation correctly hard-aborts on a non-git cwd.

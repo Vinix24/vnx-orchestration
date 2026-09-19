@@ -494,7 +494,7 @@ def _write_unpinned_claude_spec(tmp_path: Path, *, suffix: str) -> "tuple[Path, 
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        # Deliberately NO force_tmux / allow_headless — this is the case every
+        # Deliberately NO allow_headless — this is the case every
         # other test in this file pins away, so the spec routes through the
         # default claude_headless lane's create_dispatch_worktree.
     }
@@ -517,7 +517,7 @@ def test_unpinned_claude_spec_in_non_git_dir_fails_with_isolation_abort(tmp_path
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0), patch(
+    with patch(
         "dispatch_worktree_isolation.resolve_consumer_project_root",
         return_value=non_git_root,
     ):
@@ -563,7 +563,7 @@ def test_control_isolation_success_makes_the_abort_check_fail(tmp_path, monkeypa
 
     from envelope_types import _AdapterResult  # noqa: PLC0415
 
-    with patch("dispatch_cli._execute_claude", return_value=0), patch(
+    with patch(
         "dispatch_worktree_isolation.resolve_consumer_project_root",
         return_value=fake_repo,
     ), patch(

@@ -473,7 +473,7 @@ class ProviderAdapter:
         raise ValueError(
             f"ProviderAdapter: unsupported provider {pv!r} — "
             f"claude and auto do not route through the provider envelope "
-            f"(claude_tmux_subscription is executed by the tmux lane, wired in PR-4)"
+            f"(claude_headless runs through run_envelope_headless_plan)"
         )
 
     def _run_kimi(

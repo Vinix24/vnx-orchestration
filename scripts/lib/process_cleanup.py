@@ -70,7 +70,6 @@ _WORK_PATTERNS = [
         r"scripts/lib/\w*dispatch",
         r"scripts/lib/\w*worker",
         r"provider_dispatch\.py",
-        r"tmux_interactive_dispatch\.py",
         r"subprocess_dispatch\.py",
         r"benchmark|scout_ab|scout_quality",
         r"pool_worker_runner\.py",

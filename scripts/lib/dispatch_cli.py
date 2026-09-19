@@ -5,14 +5,14 @@ spec -> validate -> snapshot -> compile_plan -> permit -> execute
 Feature-gated by VNX_SINGLE_ENTRY_DISPATCH=1 in dispatch.sh. When the flag is
 unset the bash layer uses the legacy path; this module's logic is unchanged.
 
-BILLING SAFETY: no anthropic SDK import. Claude lane executes via interactive
-tmux (subscription). Provider lane executes via run_envelope_plan (provider_metered).
+BILLING SAFETY: no anthropic SDK import. Claude lane executes headless (claude -p, on
+the subscription unless an own API key is present). Provider lane executes via
+run_envelope_plan (provider_metered).
 """
 
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import logging
 import os
@@ -36,7 +36,6 @@ from dispatch_spec import (  # noqa: E402
     Provider,
     Reject,
     ValidatedSpec,
-    WRITE_GRANTING_PATH_ACCESS,
     validate,
     write_paths,
 )
@@ -47,11 +46,9 @@ from dispatch_plan import (  # noqa: E402
     RuntimeSnapshot,
     claude_auth_is_api_metered,
     compile_plan,
-    resolve_claude_lane,
 )
 from dispatch_internal import (  # noqa: E402
     ExecutionPermit,
-    is_valid_instruction_hash,
     issue_permit,
     require_permit,
 )
@@ -177,9 +174,44 @@ def _sanitize_headless_reason(raw: object) -> "str | None":
     return cleaned or None
 
 
+def _note_removed_lane_keys(raw: dict, spec_file: Path) -> None:
+    """Say so when a spec on disk still carries the keys of the removed tmux lane.
+
+    The tmux-interactive lane was removed 2026-09-18, and with it the ``force_tmux``
+    / ``force_tmux_reason`` fields of DispatchSpec. Staged bundles from before that
+    date still carry them (every bundle staged since A2, 2026-08-26, has
+    ``"force_tmux": false``), and a bundle in the store is not rewritten. Parsing
+    picks known keys only, so the leftovers cannot crash the door; this function
+    makes sure they are not ignored silently either.
+
+    ``force_tmux: true`` asked for something that no longer exists, so the dispatch
+    runs on claude_headless instead: that is a lane the operator did not choose, and
+    it gets a loud stderr warning naming the reason the spec carried. A present but
+    falsy ``force_tmux`` asked for nothing, so it only gets a log line: warning on
+    every old bundle would drown the one that matters.
+    """
+    if not any(key in raw for key in ("force_tmux", "force_tmux_reason")):
+        return
+    if raw.get("force_tmux") is True:
+        reason = _sanitize_headless_reason(raw.get("force_tmux_reason")) or "(none given)"
+        message = (
+            f"spec {spec_file} asks for the tmux lane (force_tmux=true, reason: {reason}) but "
+            f"that lane was removed 2026-09-18. The field is ignored and the dispatch runs "
+            f"on claude_headless."
+        )
+        logger.warning("[dispatch_cli] %s", message)
+        print(f"[dispatch_cli] [WARN] {message}", file=sys.stderr)
+        return
+    logger.info(
+        "[dispatch_cli] spec %s carries the removed force_tmux keys (false/absent); ignored",
+        spec_file,
+    )
+
+
 def load_spec(spec_file: Path) -> DispatchSpec:
     """Parse a DispatchSpec from a JSON dispatch-spec.json file."""
     raw = json.loads(spec_file.read_text(encoding="utf-8"))
+    _note_removed_lane_keys(raw, spec_file)
 
     raw_paths = raw.get("dispatch_paths") or []
     dispatch_paths = tuple(
@@ -221,8 +253,6 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         instruction_sha256=(raw.get("instruction_sha256") or None),
         allow_headless=raw.get("allow_headless") is True,
         headless_reason=_sanitize_headless_reason(raw.get("headless_reason")),
-        force_tmux=raw.get("force_tmux") is True,
-        force_tmux_reason=_sanitize_headless_reason(raw.get("force_tmux_reason")),
         post_merge_verification=raw.get("post_merge_verification") is True,
         irreversible=raw.get("irreversible") is True,
     )
@@ -280,8 +310,7 @@ _HEADLESS_ISOLATION_WARNING = (
     "OI-1158: claude_headless lane isolation is NOT structurally verified by "
     "the door. Every ExecutionPlan claims isolation=worktree (dispatch_plan.py's "
     "D6 rule — Isolation.WORKTREE is the only legal member), but the door has no "
-    "check that the CHOSEN LANE actually delivers it. The claude_tmux_subscription "
-    "lane's isolation is enforced one call away via tmux_worktree.allocate(); the "
+    "check that the CHOSEN LANE actually delivers it. The "
     "claude_headless lane's isolation lives in a parallel code path "
     "(dispatch_envelope.py -> dispatch_worktree_isolation.py) this module never "
     "inspects or cross-checks. Treat this dispatch as isolation-UNVERIFIED by the "
@@ -316,10 +345,8 @@ def _headless_isolation_guard(plan: "ExecutionPlan") -> "Optional[str]":
     bar this dispatch closes: never silent again, escalate to a hard door
     gate only once the real enforcement gap it flags is closed.
 
-    Returns None for every lane other than ``claude_headless`` — the tmux
-    lane's isolation is verified structurally (``tmux_worktree.allocate()``
-    is one call away from ``_execute_claude`` and asserts the worktree's own
-    branch, OI-1124), so it earns no warning here.
+    Returns None for every lane other than ``claude_headless``: the warning is
+    specific to that lane's unverified isolation path.
     """
     if plan.lane != "claude_headless":
         return None
@@ -580,11 +607,11 @@ def _not_checkable_note(
     holds no recent rejection for it — it does not, or the ledger branch above
     would already have returned block=True.
     """
-    if lane in ("claude_tmux_subscription", "claude_headless"):
+    if lane == "claude_headless":
         return (
             f"[dispatch_cli] [reachability] lane={lane} — no cheap endpoint "
-            f"check available (claude runs on the operator's subscription via "
-            f"tmux/headless; it has no network endpoint the door can probe, and "
+            f"check available (claude runs on the operator's subscription "
+            f"headless; it has no network endpoint the door can probe, and "
             f"its auth state is the operator's keychain, not an env key)."
         )
     return (
@@ -800,7 +827,7 @@ _DEFAULT_MODEL_PINS: dict[str, ModelPin] = {
 
 # worker-claude-override (escape-hatch-worker-claude, 2026-07-23): gated, audited
 # operator escape-hatch that routes ONE build-worker dispatch back to claude via
-# the tmux-subscription lane. ALL of these must hold or the default kimi-k3
+# the headless lane. ALL of these must hold or the default kimi-k3
 # hard-reject stands unchanged:
 #   1. VNX_OVERRIDE_WORKER_CLAUDE=1 (explicit env override, per-dispatch)
 #   2. VNX_OVERRIDE_WORKER_CLAUDE_REASON non-empty (audit; inert + blocking refusal without it)
@@ -1264,7 +1291,7 @@ def _persist_dispatch_row(
     state='queued') ever observes this row sitting in 'queued' — the door
     executes synchronously, it does not hand the row to an async claimer.
     terminal_id is deliberately left None on the dispatches row itself:
-    door-fired dispatches (headless / tmux-subscription / provider lanes) do
+    door-fired dispatches (headless / provider lanes) do
     not hold a T1/T2/T3 terminal lease, and
     runtime_supervisor._detect_ghost_dispatches skips any active dispatch row
     with no terminal_id — leaving it None keeps this wiring from ever
@@ -1920,7 +1947,7 @@ def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
 #    must produce zero durable side effects, same as every other dry-run
 #    check in this module. This also means the overwhelming majority of the
 #    existing dispatch-test suite — which fires for real (dry_run=False, with
-#    _execute_claude*/subprocess spawn mocked out) but triggers nothing in
+#    _execute_claude_headless/subprocess spawn mocked out) but triggers nothing in
 #    stop_conditions at all in their own isolated tmp state_dir — never
 #    touches halt.json either: the write is gated on there being a REAL
 #    blocking-eligible trigger to record, which for those tests there never
@@ -2212,16 +2239,10 @@ def build_runtime_snapshot(
     else:
         effective_model = spec.model or "default"
 
-    # claude-headless enforcement: via='headless' whenever THIS spec resolves to the
-    # headless lane — which since A2 (2026-08-26) is the DEFAULT for a claude spec
-    # with no explicit lane choice, not just an explicit allow_headless=True opt-in.
-    # Reuses dispatch_plan.resolve_claude_lane (the same function compile_plan's D1
-    # calls) so this can never independently drift from the actual lane decision.
-    # Normal tmux lane (default off, or an explicit force_tmux opt-out) keeps via='cli'.
+    # claude-headless enforcement: via='headless' for every claude spec, because
+    # claude_headless is the only claude lane (dispatch_plan.resolve_claude_lane).
     if is_claude_lane:
-        _lane_for_via, _, _ = resolve_claude_lane(spec)
-        if _lane_for_via == "claude_headless":
-            via = "headless"
+        via = "headless"
 
     # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
     constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
@@ -2307,7 +2328,7 @@ def build_runtime_snapshot(
             message=(
                 f"operator override {WORKER_CLAUDE_OVERRIDE_ENV}=1 applied for THIS "
                 f"dispatch only: build worker {spec.target_slot} routes to claude "
-                f"model {effective_model!r} via the tmux-subscription lane "
+                f"model {effective_model!r} via the headless lane "
                 f"(kimi-k3 pin skipped). Reason: {worker_claude_override_reason}"
             ),
             override_applied=True,
@@ -2464,116 +2485,6 @@ def build_runtime_snapshot(
 # Lane executors
 # ---------------------------------------------------------------------------
 
-def _dispatch_path_wire_entry(dp: DispatchPath) -> str:
-    """Encode one DispatchPath for the tmux-lane ``--dispatch-paths`` wire format.
-
-    OI-1271: dispatch_cli previously handed the lane bare ``str(dp.path)``
-    strings, so ``DispatchPath.access`` never reached
-    ``worker_permissions.resolve_dispatch_write_scope`` — a path declared
-    ``access=read`` landed in the worker's write scope anyway, because
-    ``_parse_dispatch_path_entry`` defaults a suffix-less entry to
-    READ_WRITE. The receiving parser already understands the ``path:access``
-    suffix form; only the sender was missing it.
-
-    Only READ gets the ``:access`` suffix. WRITE, READ_WRITE, and CREATE
-    (every member of WRITE_GRANTING_PATH_ACCESS) are all emitted as a bare
-    path. This is a deliberate minimal-wire-change choice, not an
-    oversight: ``resolve_dispatch_write_scope`` treats WRITE, READ_WRITE,
-    and CREATE identically, and a suffix-less entry already parses to
-    READ_WRITE — itself write-granting — so tagging WRITE or CREATE changes
-    nothing about the resulting write scope. READ is the only access value
-    that narrows anything, so it is the only one worth the suffix. The
-    membership check against WRITE_GRANTING_PATH_ACCESS (rather than an
-    equality check against PathAccess.READ) keeps this function deriving
-    "which access values need no suffix" from the same single source of
-    truth ``worker_permissions`` already imports for "which access values
-    mean write", instead of redeclaring the inverse.
-
-    That restraint matters beyond this module: ``benchmark_worker_isolation.
-    materialize_benchmark_seed`` and ``TmuxInteractiveDispatch._scope_note``
-    both consume this same list and treat every entry as a literal
-    repo-relative path, not a ``path:access`` pair — neither strips a
-    suffix. Suffixing WRITE/CREATE for no enforcement benefit would only add
-    a way to break those two consumers the day a caller declares
-    ``access=write``/``access=create`` on a path that also flows through
-    them; today no caller does (only READ and the READ_WRITE default are
-    used anywhere in this codebase). Keeping the wire form byte-for-byte
-    unchanged for every access value except the one that actually needs it
-    is the same reasoning the original OI-1271 fix already applied to
-    READ_WRITE, carried through consistently instead of stopping short.
-    """
-    if dp.access in WRITE_GRANTING_PATH_ACCESS:
-        return str(dp.path)
-    return f"{dp.path}:{dp.access.value}"
-
-
-def _execute_claude(
-    plan: ExecutionPlan,
-    permit: ExecutionPermit,
-    *,
-    state_dir: Path,
-    data_dir: Path,
-    role: Optional[str] = None,
-) -> int:
-    """Execute a validated claude_tmux_subscription plan via TmuxInteractiveDispatch.
-
-    require_permit is the first action — un-evadable. P0-3: sha256 of the instruction
-    file is re-verified immediately before delivery to detect TOCTOU swaps.
-    """
-    from tmux_interactive_dispatch import (  # noqa: PLC0415
-        TmuxInteractiveDispatch,
-        _resolve_invocation_project_root,
-    )
-
-    require_permit(plan, permit)  # un-evadable gate — FIRST action, cannot be moved
-
-    # P0-3 (PR-4c): REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
-    # The old `if plan.instruction_sha256:` guard fell OPEN on an empty hash, letting
-    # an empty-hash plan + valid permit spawn mutated content. No hash → no spawn.
-    if not is_valid_instruction_hash(plan.instruction_sha256):
-        raise PermissionError(
-            f"plan.instruction_sha256 is not a valid 64-hex digest "
-            f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
-        )
-
-    # TOCTOU verification — re-read and verify sha256 before delivering
-    instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
-    actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
-    if actual != plan.instruction_sha256:
-        raise PermissionError(
-            f"instruction file mutated after permit: sha256 mismatch "
-            f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
-        )
-
-    # Thread the PROJECT repo root from the invocation context (VNX_PROJECT_ROOT /
-    # cwd-git), NOT the lane code's __file__: in central-install mode the code lives
-    # under the shared keystone, so the constructor's __file__ fallback would spawn
-    # the worker in the keystone instead of the operator's project.
-    lane = TmuxInteractiveDispatch(
-        state_dir, project_root=_resolve_invocation_project_root()
-    )
-    result = lane.dispatch(
-        instruction,
-        plan.dispatch_id,
-        role=role,
-        model=plan.model,
-        dispatch_paths=[_dispatch_path_wire_entry(dp) for dp in plan.dispatch_paths],
-        deadline_seconds=plan.deadline_seconds,
-        base_ref=plan.base_ref,
-        isolated_worktree=True,
-        requires_mcp=plan.requires_mcp,
-    )
-    if not result.success:
-        # Fail-loud: the door must never swallow a claude-lane failure into a
-        # bare exit code - the caller (bin/vnx dispatch) prints nothing else.
-        print(
-            f"[dispatch_cli] claude lane failed: "
-            f"{result.failure_reason or '(no failure_reason captured)'}",
-            file=sys.stderr,
-        )
-    return 0 if result.success else 1
-
-
 def _execute_claude_headless(
     plan: ExecutionPlan,
     permit: ExecutionPermit,
@@ -2627,7 +2538,7 @@ def _register_dispatch_created(
     ``report_to_receipt_converter._is_known_dispatch`` — the guard that cross-
     checks a report's dispatch_id against the register — had almost nothing
     to check against. One write site here, before the lane branch, covers
-    every lane (``provider``, ``claude_tmux_subscription``, ``claude_headless``)
+    every lane (``provider``, ``claude_headless``)
     so a future lane inherits the register entry for free instead of needing
     its own hook.
 
@@ -3110,7 +3021,7 @@ def _owner_finish(
 
     The door's execution is synchronous end-to-end (it blocks until the lane
     executor returns) — there is no separate mid-flight signal from
-    _execute_claude / _execute_claude_headless / run_envelope_plan to hang
+    _execute_claude_headless / run_envelope_plan to hang
     'accepted' (delivery acknowledged) and 'running' (execution in progress)
     on individually, so both are stamped together with the outcome rather
     than left unreached. Never blocks the door.
@@ -3428,7 +3339,7 @@ def run_dispatch(
                 _persist_track_id(vspec.spec, state_dir=state_dir)
 
             # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): export the
-            # resolved fields so the tmux worker pane (and any worker-authored
+            # resolved fields so the worker (and any worker-authored
             # receipt) inherits them — the receipt writers read these env vars as
             # a fallback when the caller did not pass explicit values. Only set
             # when present, so unrelated dispatches keep a clean env.
@@ -3440,7 +3351,7 @@ def run_dispatch(
                 os.environ["VNX_TIER_FROM"] = plan.tier_from
             if plan.tier_to:
                 os.environ["VNX_TIER_TO"] = plan.tier_to
-            # OI-1137: the work-ref / pr-id are exported so the tmux-lane phantom-guard can
+            # OI-1137: the work-ref / pr-id are exported so the phantom-guard can
             # weigh the pushed branch diff for a fix-forward dispatch (its own worktree reads
             # empty). Same fallback pattern as VNX_PARENT_DISPATCH above.
             if plan.work_ref:
@@ -3513,20 +3424,6 @@ def run_dispatch(
                     ),
                 )
                 return result.returncode
-            elif plan.lane == "claude_tmux_subscription":
-                rc = _execute_claude(
-                    plan,
-                    permit,
-                    state_dir=state_dir,
-                    data_dir=data_dir,
-                    role=vspec.spec.role,
-                )
-                _owner_finish(
-                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
-                    success=(rc == 0),
-                    failure_reason=None if rc == 0 else "claude_tmux_subscription lane returned non-zero",
-                )
-                return rc
             elif plan.lane == "claude_headless":
                 # OI-1158: the door never printed anything about isolation on a
                 # real (non-dry-run) fire — _print_plan's warnings loop only

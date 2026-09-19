@@ -37,8 +37,8 @@ Hard-blocked (always, regardless of VNX_HOOK_ENFORCE):
   codex:   exec <subcommand>
 
 Shadow-detected (allow + log when VNX_HOOK_ENFORCE unset/0; block when =1):
-  Direct lane-script invocation: tmux_interactive_dispatch.py,
-    subprocess_dispatch.py, provider_dispatch.py, dispatch_cli.py
+  Direct lane-script invocation: subprocess_dispatch.py,
+    provider_dispatch.py, dispatch_cli.py
   python[3] -m <lane_module>
   python[3] -c "..." importing a lane module
   importlib.import_module("<lane_module>")
@@ -105,7 +105,6 @@ _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Lane/provider module names — the only permitted entry point post-PR-12 is
 # `vnx dispatch`. Direct invocation of these bypasses governance receipts.
 _LANE_MODULE_NAMES = frozenset({
-    "tmux_interactive_dispatch",
     "subprocess_dispatch",
     "provider_dispatch",
     "dispatch_cli",

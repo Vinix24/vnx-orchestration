@@ -305,7 +305,6 @@ class TestDirectCouplingFreeze:
             "plan_gate_panel.py",
             "provider_dispatch.py",
             "staging_validator.py",
-            "tmux_interactive_dispatch.py",
             "worker_permission_relay.py",
         }
         new_violations = [
@@ -338,7 +337,6 @@ class TestDirectCouplingFreeze:
             "plan_gate_panel.py",
             "provider_dispatch.py",
             "staging_validator.py",
-            "tmux_interactive_dispatch.py",
             "worker_permission_relay.py",
         }
         found: set[str] = set()

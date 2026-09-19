@@ -29,39 +29,23 @@ from dispatch_spec import (
 def resolve_claude_lane(spec: DispatchSpec) -> tuple[str, str, "str | None"]:
     """Decide the claude-provider lane + adapter + optional plan-warning.
 
-    A2 (2026-08-26): claude_headless is the DEFAULT lane for a provider=claude
-    spec carrying no explicit lane choice (main 7f93f681 measured both prior
-    governance gaps — isolation=worktree, report-before-receipt — as closed, and
-    the tmux lane's duplicate-PR defect, OI-1115's skip_pr never wired into
-    tmux_interactive_dispatch.py, as still open). Only meaningful when the caller
-    already knows spec.provider == Provider.CLAUDE.
+    claude_headless is the only claude lane (the tmux-interactive lane was removed
+    2026-09-18). Only meaningful when the caller already knows
+    spec.provider == Provider.CLAUDE.
 
-    Single source of truth for this decision: compile_plan's D1 and
-    dispatch_cli.build_runtime_snapshot's via= (which feeds the claude-headless
-    constraint check) BOTH call this rather than re-deriving the lane
-    independently — two call sites computing the same routing fact is exactly
-    how a handler drifts from its sibling (see the codex "same fix to all
-    handlers" lesson).
+    Single source of truth for this decision: compile_plan's D1 calls this rather
+    than re-deriving the lane, so a second call site can never drift from it.
 
-    Exactly one of the three branches fires; every branch names an unambiguous
-    lane. Validation (dispatch_spec.validate Rule 12a/12b/12c) already rejected
-    the contradictory allow_headless=True + force_tmux=True combination and the
-    reason-missing cases before a spec can reach here. Since 2026-09-12
-    (dispatch-20260912-tmux-lane-uit-claude-altijd-headless) Rule 12b additionally
-    refuses force_tmux unless VNX_ALLOW_TMUX_LANE=1 — the tmux lane is retired, so
-    this function's tmux branch only fires when that emergency brake is on.
+    Exactly one of the two branches fires and both name the same lane: a spec that
+    asks for headless by name (allow_headless=True, whose reason validate() Rule 12
+    already required) gets a "HEADLESS lane opted-in" plan-warning for the audit
+    trail; a spec that says nothing gets no warning.
     """
     if spec.allow_headless:
         return (
             "claude_headless",
             "claude_subprocess",
             f"HEADLESS lane opted-in: {spec.headless_reason}",
-        )
-    if spec.force_tmux:
-        return (
-            "claude_tmux_subscription",
-            "tmux_claude",
-            f"TMUX lane opted-in: {spec.force_tmux_reason}",
         )
     return "claude_headless", "claude_subprocess", None
 
@@ -151,8 +135,8 @@ class ExecutionPlan:
     project_id: str
     provider: Provider
     model: str
-    lane: str                           # "claude_tmux_subscription" | "provider"
-    adapter: str                        # "tmux_claude" | "provider"
+    lane: str                           # "claude_headless" | "provider"
+    adapter: str                        # "claude_subprocess" | "provider"
     target_id: str                      # "ephemeral" for the leaseless claude lane
     billing: str                        # "subscription" | "api_metered" | "provider_metered" | "local"
     serialization_class: Optional[str]  # "claude-tmux" | None
@@ -161,7 +145,7 @@ class ExecutionPlan:
     seed_materialize: bool
     instruction_delivery: str           # always "file_ref"
     report_contract: str                # always "required"
-    warmup: str                         # "verify_strict" (claude) | "n/a"
+    warmup: str                         # always "n/a" (no lane has a warmup step)
     deadline_seconds: int
     base_ref: str
     dispatch_paths: tuple[DispatchPath, ...]
@@ -188,10 +172,9 @@ class ExecutionPlan:
     requires_mcp: bool = False          # OI-865: True keeps the worker's ambient MCP config instead
                                         # of the force-empty scoped posture. Default False is the
                                         # choice for a MISSING spec field: DispatchSpec.requires_mcp
-                                        # defaults to False and the tmux lane's dispatch() defaults to
-                                        # False, so a spec that omits the field lands on exactly the
-                                        # value today's code already uses — never silently "no MCP"
-                                        # for a dispatch that already gets MCP. It IS in digest():
+                                        # defaults to False, so a spec that omits the field lands on
+                                        # exactly the value today's code already uses — never silently
+                                        # "no MCP" for a dispatch that already gets MCP. It IS in digest():
                                         # MCP access changes worker behavior, so a permit for a
                                         # requires_mcp plan must not validate a force-empty plan.
 
@@ -345,7 +328,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # provider_metered overstated cost and hid their real quota model.
     #
     # OI-1156: the CLAUDE lane's label is auth-derived, not lane-derived.
-    # claude -p (headless) and the tmux lane both run on the Max subscription
+    # claude -p (headless) runs on the Max subscription
     # unless an own ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL is present — the
     # snapshot's claude_api_metered flag carries that measurement in so
     # compile_plan stays pure. A headless dispatch with no key of its own is
@@ -405,15 +388,15 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     fired.append("D4")
 
     # D5 — serialization class; the subscription is ONE account-wide resource,
-    # so both claude lanes (tmux + headless) share the SAME slot class. OI-1417:
-    # headless previously fell through to None (no-op) here, which meant a
-    # headless burst of `claude -p` processes was unbounded even though it
-    # runs on the same Max subscription (billing already treats it that way —
-    # see D2's claude_api_metered comment). "claude-tmux" is the class name
+    # so every claude dispatch shares the SAME slot class. OI-1417: headless
+    # previously fell through to None (no-op) here, which meant a headless burst
+    # of `claude -p` processes was unbounded even though it runs on the same Max
+    # subscription (billing already treats it that way — see D2's
+    # claude_api_metered comment). "claude-tmux" is the class name
     # dispatch_serialization.py's lock files, force_release(), and the CLI's
-    # --force-release-lock default are keyed on; kept as-is rather than
-    # renamed so the headless lane joins the existing account-wide lock
-    # instead of standing up a second, uncoordinated one.
+    # --force-release-lock default are keyed on. It is a historical name from
+    # when the tmux lane held the lock. Renaming it means touching all three, so
+    # it is a separate change, not part of removing the lane.
     serialization_class: Optional[str]
     if is_claude_lane and snapshot.claude_serial_enabled:
         serialization_class = "claude-tmux"
@@ -439,8 +422,8 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     report_contract = "required"
     fired.append("D9")
 
-    # D10 — warmup; headless lane has no tmux warmup
-    warmup = "verify_strict" if (is_claude_lane and lane != "claude_headless") else "n/a"
+    # D10 — warmup; no lane has a warmup step
+    warmup = "n/a"
     fired.append("D10")
 
     # D12 — target resolution; claude lane is leaseless (ephemeral), skip health checks

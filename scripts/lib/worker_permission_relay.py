@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from tmux_command_runner import TmuxCommandRunner
 from worker_pane_classifier import classify_worker_pane
 
 logger = logging.getLogger(__name__)
@@ -750,10 +751,7 @@ class RelayHandle:
 
 
 def _default_tmux_runner():
-    """Real tmux runner, imported lazily so this module never hard-depends on
-    the (heavy) tmux_interactive_dispatch import chain unless actually used."""
-    from tmux_interactive_dispatch import TmuxCommandRunner  # noqa: PLC0415
-
+    """Real tmux runner (the injectable transport tests replace with a fake)."""
     return TmuxCommandRunner()
 
 

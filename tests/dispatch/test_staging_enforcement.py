@@ -210,7 +210,8 @@ class TestDispatchIdMatchesStagingId:
 
     def test_rejects_dispatch_id_with_trailing_whitespace(self, tmp_path: Path, capsys) -> None:
         """Codex finding: the guard used to compare dispatch_id.strip() against sid while
-        both entry-points (subprocess_dispatch.py, tmux_interactive_dispatch.py) go on to
+        the entry-point (subprocess_dispatch.py; the tmux lane's entry-point did the same
+        until its removal) goes on to
         use the RAW, unstripped args.dispatch_id for the worktree/branch name, the
         VNX_CURRENT_DISPATCH_ID env var, and the commit trailer. A caller passing
         --from-staging-id 'real-id' --dispatch-id 'real-id ' (trailing space) used to
@@ -291,22 +292,6 @@ class TestArgWiring:
             "OI-627: subprocess_dispatch must thread args.dispatch_id into "
             "validate_staging_path so a mismatched --dispatch-id is rejected"
         )
-
-    def test_tmux_interactive_dispatch_declares_staging_args(self) -> None:
-        """tmux_interactive_dispatch main() parser must accept --from-staging-id etc."""
-        src = (
-            Path(__file__).resolve().parents[2]
-            / "scripts" / "lib" / "tmux_interactive_dispatch.py"
-        ).read_text(encoding="utf-8")
-        assert "--from-staging-id" in src
-        assert "--allow-unstaged" in src
-        assert "--reason" in src
-        assert "validate_staging_path" in src
-        assert "dispatch_id=args.dispatch_id" in src, (
-            "OI-627: tmux_interactive_dispatch must thread args.dispatch_id into "
-            "validate_staging_path so a mismatched --dispatch-id is rejected"
-        )
-
 
 # ---------------------------------------------------------------------------
 # Path-traversal hardening (dispatch 20260603-141935-pending-governance-fix1-pathtraversal)

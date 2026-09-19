@@ -25,7 +25,6 @@ import dispatch_cli
 from dispatch_cli import (
     _check_track_link_verdict,
     _DEFAULT_MODEL_PINS,
-    _execute_claude,
     _execute_claude_headless,
     _has_col,
     _load_model_pins_from_yaml,
@@ -60,25 +59,6 @@ from dispatch_spec import (
     ValidatedSpec,
     validate,
 )
-
-
-@pytest.fixture(autouse=True)
-def _allow_tmux_lane_for_lane_routing_tests(monkeypatch):
-    """Retired-lane noodklep (dispatch-20260912-tmux-lane-uit-claude-altijd-headless).
-
-    This file is the door's lane-routing suite. It carries genuine tmux-lane
-    assertions (worker-claude-override -> claude_tmux_subscription,
-    TestHeadlessIsolationGuard's tmux branch) that must keep exercising the real
-    opt-out path, plus door-level tests that pin ``force_tmux=True`` purely to
-    keep the mocked ``_execute_claude`` entry point reachable. With the lane
-    retired, validate() refuses ``force_tmux=True`` fail-loud unless
-    VNX_ALLOW_TMUX_LANE is truthy, so set the brake for the whole file and keep
-    those routing assertions live. The refusal itself is pinned separately in
-    tests/test_tmux_lane_retirement.py; headless-default tests here are
-    unaffected because they never set force_tmux.
-    """
-    monkeypatch.delenv("VNX_OVERRIDE_ALLOW_TMUX_LANE", raising=False)
-    monkeypatch.setenv("VNX_ALLOW_TMUX_LANE", "1")
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +142,12 @@ def _make_minimal_plan(
     """Build a minimal ExecutionPlan for permit / fingerprint tests."""
     if instruction_file is None:
         instruction_file = Path("/tmp/instruction.md")
-    lane = "claude_tmux_subscription" if provider == Provider.CLAUDE else "provider"
-    adapter = "tmux_claude" if provider == Provider.CLAUDE else "provider"
+    lane = "claude_headless" if provider == Provider.CLAUDE else "provider"
+    adapter = "claude_subprocess" if provider == Provider.CLAUDE else "provider"
     billing = "subscription" if provider == Provider.CLAUDE else "provider_metered"
     target_id = "ephemeral" if provider == Provider.CLAUDE else "T1"
     serialization_class = "claude-tmux" if provider == Provider.CLAUDE else None
-    warmup = "verify_strict" if provider == Provider.CLAUDE else "n/a"
+    warmup = "n/a"
     # Compute sha256 from file content if the file exists, else use zero-sentinel
     if instruction_file.exists():
         sha256 = hashlib.sha256(
@@ -206,8 +186,8 @@ def _make_minimal_plan(
 
 @patch("dispatch_cli.build_runtime_snapshot")
 @patch("dispatch_cli.run_envelope_plan")
-@patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch")
-def test_dry_run_prints_plan_no_spawn(mock_tmux, mock_envelope, mock_snapshot, tmp_path, capsys):
+@patch("dispatch_cli._execute_claude_headless")
+def test_dry_run_prints_plan_no_spawn(mock_headless, mock_envelope, mock_snapshot, tmp_path, capsys):
     """--dry-run prints plan + fingerprint and calls NO executor."""
     # OI-968: the envelope mock must replace dispatch_cli's bound reference.
     # dispatch_cli.py does `from dispatch_envelope import run_envelope_plan`, so
@@ -220,7 +200,7 @@ def test_dry_run_prints_plan_no_spawn(mock_tmux, mock_envelope, mock_snapshot, t
 
     assert rc == 0
     mock_envelope.assert_not_called()
-    mock_tmux.assert_not_called()
+    mock_headless.assert_not_called()
 
     out = capsys.readouterr().out
     assert "DRY RUN" in out
@@ -264,21 +244,17 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        # A2: unrelated to lane choice; pin tmux to keep exercising the mocked
-        # dispatch_cli._execute_claude path below.
-        "force_tmux": True,
-        "force_tmux_reason": "test fixture pins the tmux lane",
     }
     spec_file_evil = bundle_dir / "dispatch-spec-evil.json"
     spec_file_evil.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file_evil)
 
     assert rc == 0, "SDK instruction must PROCEED after PR-4e (warn only, not blocking)"
     mock_execute.assert_called_once()
 
-    # Part 2: clean instruction inside bundle → routes to _execute_claude
+    # Part 2: clean instruction inside bundle → routes to _execute_claude_headless
     clean_inst = bundle_dir / "clean_instruction.md"
     clean_inst.write_text(
         "# Clean dispatch\n\nDo something safe and useful.\n",
@@ -297,22 +273,18 @@ def test_claude_runs_compile_plan_and_constraints(tmp_path, monkeypatch):
         "provider": "claude",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        # A2: this test explicitly asserts the tmux lane below (plan_arg.lane),
-        # so pin it explicitly rather than relying on the (now headless) default.
-        "force_tmux": True,
-        "force_tmux_reason": "test fixture pins the tmux lane",
     }
     spec_file_clean = bundle_dir / "dispatch-spec-clean.json"
     spec_file_clean.write_text(json.dumps(spec_dict2), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         mock_execute.return_value = 0
         rc = run_dispatch(spec_file_clean)
 
     assert rc == 0
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
-    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.lane == "claude_headless"
     assert plan_arg.provider == Provider.CLAUDE
 
 
@@ -345,7 +317,7 @@ def test_provider_routes_to_envelope(mock_envelope, mock_snapshot, tmp_path):
     assert plan_arg.provider == Provider.CODEX
 
     # OI-1231/OI-1244: the door threads the spec's role into run_envelope_plan
-    # (mirroring _execute_claude / _execute_claude_headless) so the provider lane
+    # (mirroring _execute_claude_headless) so the provider lane
     # resolves it on the spawn side instead of the code-worker fallback.
     assert kwargs["role"] == "backend-developer"
 
@@ -434,123 +406,6 @@ def test_run_dispatch_rejects_known_rejected_lane_before_spawn(
 
 
 # ---------------------------------------------------------------------------
-# test_claude_routes_to_tmux_with_permit
-# ---------------------------------------------------------------------------
-
-@patch("dispatch_cli.build_runtime_snapshot")
-def test_claude_routes_to_tmux_with_permit(mock_snapshot, tmp_path):
-    """Claude spec → _execute_claude calls require_permit then TmuxInteractiveDispatch.dispatch.
-    Tampered permit → PermissionError before tmux dispatch is reached.
-    """
-    mock_snapshot.return_value = _clean_snapshot()
-    instruction_file = _make_instruction(tmp_path)
-    # A2: this test specifically exercises the tmux dispatch path, so force it
-    # explicitly — a plain claude spec now defaults to claude_headless instead.
-    spec_file = _make_spec_file(
-        tmp_path, provider="claude",
-        extra={"force_tmux": True, "force_tmux_reason": "test fixture pins the tmux lane"},
-    )
-
-    # Part A: valid permit → TmuxInteractiveDispatch.dispatch called
-    mock_dispatch_result = MagicMock()
-    mock_dispatch_result.success = True
-
-    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch",
-               return_value=mock_dispatch_result) as mock_tmux_dispatch:
-        with patch("dispatch_cli.require_permit") as mock_require:
-            rc = run_dispatch(spec_file)
-
-    assert rc == 0
-    # P1-#6 adds require_permit in run_dispatch; _execute_claude also calls it → 2 total
-    assert mock_require.call_count == 2
-    mock_tmux_dispatch.assert_called_once()
-
-    # Part B: tampered permit → PermissionError raised before tmux dispatch
-    plan = _make_minimal_plan(instruction_file=instruction_file)
-    valid_permit = issue_permit(plan)
-
-    # Build a tampered permit: wrong plan_digest, sentinel is None (default)
-    tampered_permit = ExecutionPermit(
-        dispatch_id=plan.dispatch_id,
-        plan_digest="deadbeef" * 8,  # wrong digest
-    )
-    # _sentinel defaults to None, not _PERMIT_SENTINEL — require_permit will reject
-
-    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
-        with pytest.raises(PermissionError):
-            _execute_claude(
-                plan,
-                tampered_permit,
-                state_dir=tmp_path / "state",
-                data_dir=tmp_path,
-            )
-        mock_tmux.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# test_execute_claude_prints_failure_reason_to_stderr (OI-1367)
-# ---------------------------------------------------------------------------
-
-def test_execute_claude_prints_failure_reason_to_stderr(tmp_path, capsys):
-    """OI-1367: the door must never swallow a claude-lane failure into a bare
-    exit code — mirrors the provider lane's fail-loud contract (dispatch_cli.py
-    ~line 2499). A stale rc=1 with no explanation reads as 'lane at capacity',
-    which is the wrong conclusion when the real cause was e.g. a missing tmux
-    binary or a failed worktree add."""
-    instruction_file = _make_instruction(tmp_path)
-    plan = _make_minimal_plan(instruction_file=instruction_file)
-    permit = issue_permit(plan)
-
-    mock_dispatch_result = MagicMock()
-    mock_dispatch_result.success = False
-    mock_dispatch_result.failure_reason = "tmux binary not found in PATH"
-
-    with patch(
-        "tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch",
-        return_value=mock_dispatch_result,
-    ):
-        rc = _execute_claude(
-            plan,
-            permit,
-            state_dir=tmp_path / "state",
-            data_dir=tmp_path,
-        )
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "tmux binary not found in PATH" in err
-    print(f"\n--- captured stderr ---\n{err}")
-
-
-def test_execute_claude_falls_back_to_explicit_marker_on_empty_failure_reason(tmp_path, capsys):
-    """A blank failure_reason must never render as silence — it must render as
-    an explicit '(no failure_reason captured)' marker on stderr."""
-    instruction_file = _make_instruction(tmp_path)
-    plan = _make_minimal_plan(instruction_file=instruction_file)
-    permit = issue_permit(plan)
-
-    mock_dispatch_result = MagicMock()
-    mock_dispatch_result.success = False
-    mock_dispatch_result.failure_reason = None
-
-    with patch(
-        "tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch",
-        return_value=mock_dispatch_result,
-    ):
-        rc = _execute_claude(
-            plan,
-            permit,
-            state_dir=tmp_path / "state",
-            data_dir=tmp_path,
-        )
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "(no failure_reason captured)" in err
-    print(f"\n--- captured stderr ---\n{err}")
-
-
-# ---------------------------------------------------------------------------
 # test_reject_on_validate_failure
 # ---------------------------------------------------------------------------
 
@@ -575,7 +430,7 @@ def test_reject_on_unpromoted_staging(mock_snapshot, tmp_path):
     mock_snapshot.return_value = _clean_snapshot(staging_promoted=False)
     spec_file = _make_spec_file(tmp_path, provider="claude")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1
@@ -661,47 +516,13 @@ def test_staging_binding_required(tmp_path, monkeypatch, capsys):
     spec_file = tmp_path / "dispatch-spec-outside.json"
     spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1
     mock_execute.assert_not_called()
     err = capsys.readouterr().err
     assert "ADR-006-binding" in err
-
-
-# ---------------------------------------------------------------------------
-# test_instruction_mutation_rejected (P0-3)
-# ---------------------------------------------------------------------------
-
-def test_instruction_mutation_rejected(tmp_path):
-    """Mutating instruction file after permit issuance → PermissionError (sha256 mismatch), no spawn."""
-    original_content = "# Clean dispatch\n\nDo something safe.\n"
-    instruction_file = tmp_path / "instruction.md"
-    instruction_file.write_text(original_content, encoding="utf-8")
-
-    plan = _make_minimal_plan(instruction_file=instruction_file)
-    expected_sha = hashlib.sha256(original_content.encode("utf-8")).hexdigest()
-    assert plan.instruction_sha256 == expected_sha
-
-    permit = issue_permit(plan)
-
-    # Mutate the instruction file AFTER permit is issued
-    instruction_file.write_text(
-        "import anthropic\n# Evil override injected after permit",
-        encoding="utf-8",
-    )
-
-    # _execute_claude must fail-closed: sha256 mismatch → PermissionError, no tmux spawn
-    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
-        with pytest.raises(PermissionError, match="sha256 mismatch"):
-            _execute_claude(
-                plan,
-                permit,
-                state_dir=tmp_path / "state",
-                data_dir=tmp_path,
-            )
-        mock_tmux.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -758,21 +579,11 @@ def _make_bundle_spec(
     provider: str = "claude",
     target_slot: str = "T0",
     model: str | None = None,
-    force_tmux: bool = False,
 ) -> tuple[Path, Path]:
     """Build a promoted bundle under <tmp>/vnx-data with the given instruction.
 
     Returns (data_dir, spec_file). spec_file + instruction live inside the bundle so
     the staging-binding check passes and only the edge under test can reject.
-
-    ``force_tmux`` (A2, 2026-08-26): claude_headless is now the DEFAULT claude
-    lane (dispatch_plan.resolve_claude_lane), so a plain claude spec built here
-    with no explicit lane choice now resolves to claude_headless — a real,
-    unmocked code path (run_envelope_headless_plan) that tries an actual
-    worktree. Callers whose test intent is unrelated to the lane choice itself
-    (SDK-scan, track-id, model-pin routing, worker-claude-override, ...) and
-    that mock ``dispatch_cli._execute_claude`` (the tmux-lane entry point) must
-    pass force_tmux=True to keep exercising that already-mocked path.
     """
     data_dir = tmp_path / "vnx-data"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -801,8 +612,6 @@ def _make_bundle_spec(
         "model": model,
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        "force_tmux": bool(force_tmux),
-        "force_tmux_reason": "test fixture pins the tmux lane" if force_tmux else None,
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec), encoding="utf-8")
@@ -828,12 +637,11 @@ def test_sdk_block_is_whitespace_aware(tmp_path, monkeypatch, evil_line):
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text=f"# Dispatch\n\n{evil_line}\n",
-        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, f"SDK form must PROCEED (warn not blocked) after PR-4e: {evil_line!r}"
@@ -846,12 +654,11 @@ def test_clean_import_mentioning_anthropic_word_not_blocked(tmp_path, monkeypatc
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Dispatch\n\nDocument the anthropic routing policy clearly.\n",
-        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -902,7 +709,7 @@ def test_symlinked_pending_root_rejected(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1
@@ -937,16 +744,18 @@ def test_empty_hash_plan_no_spawn_either_lane(tmp_path):
     with pytest.raises(PermissionError):
         issue_permit(provider_plan)
 
-    # Claude lane: even with require_permit bypassed, the executor refuses to spawn
+    # Claude lane: even with require_permit bypassed, the headless envelope fails closed
+    from dispatch_envelope import run_envelope_headless_plan
     bare_claude = ExecutionPermit(dispatch_id=claude_plan.dispatch_id, plan_digest=claude_plan.digest())
-    with patch("dispatch_cli.require_permit", lambda *a, **k: None):
-        with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux:
-            with pytest.raises(PermissionError):
-                _execute_claude(
-                    claude_plan, bare_claude,
-                    state_dir=tmp_path / "state", data_dir=tmp_path,
-                )
-            mock_tmux.assert_not_called()
+    with patch("dispatch_internal.require_permit", lambda *a, **k: None):
+        with patch("dispatch_envelope.ClaudeSubprocessAdapter.run") as mock_claude_run:
+            claude_result = run_envelope_headless_plan(
+                claude_plan, bare_claude,
+                state_dir=tmp_path / "state", data_dir=tmp_path,
+            )
+            assert claude_result.returncode != 0
+            assert claude_result.status == "failure"
+            mock_claude_run.assert_not_called()
 
     # Provider lane: even with require_permit bypassed, the envelope fails closed
     from dispatch_envelope import run_envelope_plan
@@ -1070,12 +879,11 @@ def test_dispatch_gate_codex_deep_forms_proceed(form_id, snippet, tmp_path, monk
         instruction_text=f"# Dispatch\n\n{snippet}\n",
         staging_id=f"20260615-codex-{form_id.replace('_', '-')}",
         dispatch_id=f"20260615-codex-{form_id.replace('_', '-')}",
-        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, f"SDK deep form must PROCEED (warn) after PR-4e: {form_id!r}"
@@ -1179,7 +987,7 @@ def test_symlinked_dispatches_dir_rejected(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1
@@ -1197,12 +1005,11 @@ def test_sdk_instruction_proceeds_warn_not_block(tmp_path, monkeypatch):
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Task\n\nimport anthropic\nclient = anthropic.Anthropic()\n",
-        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_exec:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "SDK import in instruction must PROCEED after PR-4e"
@@ -1214,12 +1021,11 @@ def test_sdk_instruction_url_mention_proceeds(tmp_path, monkeypatch):
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Task\n\nSee https://anthropic.com/docs for the routing policy.\n",
-        force_tmux=True,  # unrelated to lane choice; keep exercising the mocked tmux path
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_exec:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -1304,7 +1110,7 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
         model_pins={"T0": "opus", "T1": "sonnet", "T2": "sonnet", "T3": "sonnet"},
     )
     with patch("dispatch_cli.build_runtime_snapshot", return_value=blocking_snapshot):
-        with patch("dispatch_cli._execute_claude") as mock_exec:
+        with patch("dispatch_cli._execute_claude_headless") as mock_exec:
             rc = run_dispatch(spec_file)
 
     assert rc == 1, "Blocking forbid_route verdict must cause a Reject"
@@ -1686,7 +1492,7 @@ def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatc
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "provider=claude + model=kimi must be rejected, not silently pinned to sonnet"
@@ -1698,7 +1504,7 @@ def test_raw_kimi_model_rejected_despite_workers_sonnet_pin(tmp_path, monkeypatc
 def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, monkeypatch):
     """WPFC PR-4: the workers-kimi-pinned constraint now carries pin_semantics: default.
     An explicit provider=claude with model=opus on T1 (no override env) now routes to
-    opus on the claude tmux-subscription lane, with a warn that the default pin was
+    opus on the claude headless lane, with a warn that the default pin was
     overruled. Before PR-4 the floor pin would have coerced opus -> kimi-k3 and
     rejected; now the explicit model wins."""
     data_dir = tmp_path / "vnx-data"
@@ -1725,15 +1531,11 @@ def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, mo
         "model": "opus",
         "deadline_seconds": 3600,
         "isolation": "worktree",
-        # A2: this test explicitly asserts the tmux lane below; pin it rather
-        # than relying on the (now headless) default.
-        "force_tmux": True,
-        "force_tmux_reason": "test fixture pins the tmux lane",
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, (
@@ -1744,7 +1546,7 @@ def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, mo
     assert plan_arg.model == "opus", (
         f"default semantics: explicit spec.model (opus) must win, got {plan_arg.model!r}"
     )
-    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.lane == "claude_headless"
     assert any("default semantics" in w for w in plan_arg.warnings), (
         f"default pin overridden must produce a warn; warnings: {plan_arg.warnings}"
     )
@@ -1757,7 +1559,7 @@ def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, mo
 
 def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monkeypatch):
     """WPFC PR-4 core behavior: provider=claude, model=sonnet, target_slot=T1 routes
-    to sonnet on the claude tmux-subscription lane with NO env-var. A warn records
+    to sonnet on the claude headless lane with NO env-var. A warn records
     that the default kimi-k3 pin was overruled by the explicit model request.
     Before PR-4 this was a hard reject unless VNX_OVERRIDE_WORKER_CLAUDE=1 +
     VNX_OVERRIDE_WORKER_CLAUDE_REASON was set."""
@@ -1769,13 +1571,12 @@ def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monk
         provider="claude",
         target_slot="T1",
         model="sonnet",
-        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     # No override env vars — the default pin itself yields to the explicit model
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, (
@@ -1787,7 +1588,7 @@ def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monk
         f"explicit spec.model (sonnet) must win over the default kimi-k3 pin, "
         f"got {plan_arg.model!r}"
     )
-    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.lane == "claude_headless"
     assert any("default semantics" in w for w in plan_arg.warnings), (
         f"default pin overridden must produce a warn; warnings: {plan_arg.warnings}"
     )
@@ -1808,7 +1609,7 @@ def test_default_semantics_no_model_on_t1_fills_pin_end_to_end(tmp_path, monkeyp
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, (
@@ -1836,7 +1637,7 @@ def test_kimi_model_on_claude_lane_still_hard_rejected_end_to_end(tmp_path, monk
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "kimi model on claude lane must still hard-reject"
@@ -1857,12 +1658,11 @@ def test_t0_floor_semantics_coerces_explicit_model_to_opus(tmp_path, monkeypatch
         provider="claude",
         target_slot="T0",
         model="sonnet",
-        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "T0 floor semantics: sonnet on T0 must be coerced to opus and dispatch"
@@ -1884,7 +1684,7 @@ def test_t0_floor_semantics_coerces_explicit_model_to_opus(tmp_path, monkeypatch
 @patch("dispatch_cli.run_envelope_headless_plan")
 def test_headless_optin_routes_to_subprocess_adapter(mock_headless, mock_snapshot, tmp_path):
     """allow_headless=True + non-empty reason + VNX_OVERRIDE_CLAUDE_HEADLESS=1 →
-    routes to run_envelope_headless_plan. tmux NOT called; permit passed to the envelope.
+    routes to run_envelope_headless_plan; permit passed to the envelope.
 
     The headless lane is blocked fail-closed by default (claude-headless constraint +
     _execute_claude_headless guard); the override flag is the explicit opt-in, so the
@@ -1900,13 +1700,11 @@ def test_headless_optin_routes_to_subprocess_adapter(mock_headless, mock_snapsho
         "headless_reason": "burst benchmark run",
     })
 
-    with patch("tmux_interactive_dispatch.TmuxInteractiveDispatch.dispatch") as mock_tmux, \
-         patch.dict(os.environ, {"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}):
+    with patch.dict(os.environ, {"VNX_OVERRIDE_CLAUDE_HEADLESS": "1"}):
         rc = run_dispatch(spec_file)
 
     assert rc == 0
     mock_headless.assert_called_once()
-    mock_tmux.assert_not_called()
 
     plan_arg = mock_headless.call_args[0][0]
     assert plan_arg.lane == "claude_headless"
@@ -1927,18 +1725,16 @@ def test_headless_empty_reason_rejected(mock_snapshot, tmp_path, capsys):
     })
 
     with patch("dispatch_cli._execute_claude_headless") as mock_headless:
-        with patch("dispatch_cli._execute_claude") as mock_tmux:
-            rc = run_dispatch(spec_file)
+        rc = run_dispatch(spec_file)
 
     assert rc == 1
     mock_headless.assert_not_called()
-    mock_tmux.assert_not_called()
     err = capsys.readouterr().err
     assert "headless-reason-required" in err
 
 
 def test_default_claude_now_routes_headless(tmp_path, monkeypatch):
-    """A2 (2026-08-26): allow_headless/force_tmux both absent → claude_headless,
+    """A2 (2026-08-26): allow_headless absent → claude_headless,
     the NEW default. Was test_default_claude_still_routes_tmux pre-flip."""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260615-staging-default-tmux"
@@ -1967,22 +1763,20 @@ def test_default_claude_now_routes_headless(tmp_path, monkeypatch):
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
-        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
-            rc = run_dispatch(spec_file)
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
+        rc = run_dispatch(spec_file)
 
     assert rc == 0
     mock_headless.assert_called_once()
-    mock_tmux.assert_not_called()
     plan_arg = mock_headless.call_args[0][0]
     assert plan_arg.lane == "claude_headless"
 
 
 def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
     """VNX_AUTO_ROUTE=1 + VNX_ADAPTER=subprocess env vars have no effect through the
-    door — lane resolution reads only the spec's allow_headless/force_tmux fields,
-    never ambient env. A2 (2026-08-26): without either field set, the plan is now
-    claude_headless (the new default), not claude_tmux_subscription."""
+    door — lane resolution reads only the spec's allow_headless field,
+    never ambient env. Without allow_headless set, the plan is claude_headless
+    (the only claude lane)."""
     data_dir = tmp_path / "vnx-data"
     staging_id = "20260615-legacy-env-probe"
     bundle_dir = data_dir / "dispatches" / "pending" / staging_id
@@ -2012,13 +1806,11 @@ def test_legacy_env_vars_do_not_bypass_headless_gate(tmp_path, monkeypatch):
     spec_file = bundle_dir / "dispatch-spec.json"
     spec_file.write_text(json.dumps(spec_data), encoding="utf-8")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_tmux:
-        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
-            rc = run_dispatch(spec_file)
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
+        rc = run_dispatch(spec_file)
 
     assert rc == 0
     mock_headless.assert_called_once()
-    mock_tmux.assert_not_called()
     plan_arg = mock_headless.call_args[0][0]
     assert plan_arg.lane == "claude_headless"
 
@@ -2058,23 +1850,6 @@ class TestHeadlessIsolationGuard:
         assert "OI-1158" in warning
         assert "isolation" in warning.lower()
 
-    def test_guard_returns_none_for_tmux_lane(self, tmp_path):
-        """The tmux lane's isolation is structurally verified elsewhere — no warning."""
-        from dispatch_cli import _headless_isolation_guard
-
-        # A2: force the tmux lane explicitly — a plain claude spec now defaults
-        # to claude_headless instead.
-        spec_file = _make_spec_file(
-            tmp_path, provider="claude",
-            extra={"force_tmux": True, "force_tmux_reason": "test fixture pins the tmux lane"},
-        )
-        spec = load_spec(spec_file)
-        vspec = validate(spec, project_id="vnx-dev", repo_root=_REPO_ROOT)
-        plan = compile_plan(vspec, _clean_snapshot())
-        assert plan.lane == "claude_tmux_subscription"
-
-        assert _headless_isolation_guard(plan) is None
-
     def test_guard_returns_none_for_provider_lane(self, tmp_path):
         """A provider (non-claude) lane also gets no headless-specific warning."""
         from dispatch_cli import _headless_isolation_guard
@@ -2102,25 +1877,6 @@ class TestHeadlessIsolationGuard:
         out = capsys.readouterr().out
         assert "OI-1158" in out, (
             f"dry-run on a headless spec must surface the isolation warning; got:\n{out}"
-        )
-
-    @patch("dispatch_cli.build_runtime_snapshot")
-    def test_dry_run_default_claude_has_no_isolation_warning(self, mock_snapshot, tmp_path, capsys):
-        """Regression pin: a tmux-lane dry-run must NOT print the OI-1158 warning.
-        A2: claude_headless is now the default, so the tmux lane must be forced
-        explicitly to still exercise this path."""
-        mock_snapshot.return_value = _clean_snapshot()
-        spec_file = _make_spec_file(
-            tmp_path, provider="claude",
-            extra={"force_tmux": True, "force_tmux_reason": "test fixture pins the tmux lane"},
-        )
-
-        rc = run_dispatch(spec_file, dry_run=True)
-
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "OI-1158" not in out, (
-            f"tmux-lane dispatch must not carry the headless isolation warning; got:\n{out}"
         )
 
     @patch("dispatch_cli.build_runtime_snapshot")
@@ -2156,31 +1912,6 @@ class TestHeadlessIsolationGuard:
             "for a headless dispatch"
         )
         assert "OI-1158" in persist_kwargs["isolation_note"]
-
-    def test_real_tmux_dispatch_has_no_isolation_note(self, tmp_path, monkeypatch):
-        """Regression pin: a tmux-lane dispatch's route-decision must carry
-        isolation_note=None — the warning is headless-specific."""
-        data_dir, spec_file = _make_bundle_spec(
-            tmp_path,
-            instruction_text="# OI-1158 tmux regression\n\nDo something safe.\n",
-            staging_id="20260812-staging-oi1158-tmux",
-            dispatch_id="20260812-oi1158-tmux",
-            target_slot="T0",
-            force_tmux=True,  # A2: force tmux explicitly; this test is tmux-specific
-        )
-        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
-        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-
-        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec, \
-             patch("dispatch_cli._persist_route_decision") as mock_persist:
-            rc = run_dispatch(spec_file)
-
-        assert rc == 0
-        mock_exec.assert_called_once()
-        mock_persist.assert_called_once()
-        _, persist_kwargs = mock_persist.call_args
-        assert persist_kwargs.get("isolation_note") is None
-
 
 # ---------------------------------------------------------------------------
 # HIGH-1 — load_spec strict bool coercion for allow_headless / requires_mcp
@@ -2596,7 +2327,7 @@ class TestPersistTrackId:
         conn.close()
 
     def test_noop_when_no_matching_row(self, tmp_path):
-        """UPDATE-only: no pre-existing dispatches row (the leaseless claude-tmux lane's
+        """UPDATE-only: no pre-existing dispatches row (the leaseless claude lane's
         normal case today) must be a safe no-op, never an INSERT, never a raise."""
         state_dir = tmp_path / "state"
         _make_tracks_db(state_dir, dispatches=[])
@@ -2673,15 +2404,11 @@ class TestTrackIdEndToEnd:
             "deadline_seconds": 3600,
             "isolation": "worktree",
             "track_id": "track-linkage-enforcement",
-            # A2: unrelated to lane choice; pin tmux to keep exercising the
-            # mocked dispatch_cli._execute_claude path below.
-            "force_tmux": True,
-            "force_tmux_reason": "test fixture pins the tmux lane",
         }
         spec_file = bundle_dir / "dispatch-spec.json"
         spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-        with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
             rc = run_dispatch(spec_file)
 
         assert rc == 0
@@ -2726,7 +2453,7 @@ class TestTrackIdEndToEnd:
         spec_file = bundle_dir / "dispatch-spec.json"
         spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
-        with patch("dispatch_cli._execute_claude") as mock_execute:
+        with patch("dispatch_cli._execute_claude_headless") as mock_execute:
             rc = run_dispatch(spec_file)
 
         assert rc == 1
@@ -2798,7 +2525,7 @@ class TestTrackIdEndToEnd:
         import config_runtime
         monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
 
-        with patch("dispatch_cli._execute_claude") as mock_execute:
+        with patch("dispatch_cli._execute_claude_headless") as mock_execute:
             rc = run_dispatch(spec_file)
 
         assert rc == 1
@@ -2830,10 +2557,6 @@ class TestTrackIdEndToEnd:
             "deadline_seconds": 3600,
             "isolation": "worktree",
             "tags": ["no-track:exploratory spike"],
-            # A2: unrelated to lane choice; pin tmux to keep exercising the
-            # mocked dispatch_cli._execute_claude path below.
-            "force_tmux": True,
-            "force_tmux_reason": "test fixture pins the tmux lane",
         }
         spec_file = bundle_dir / "dispatch-spec.json"
         spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
@@ -2841,7 +2564,7 @@ class TestTrackIdEndToEnd:
         import config_runtime
         monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
 
-        with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
             rc = run_dispatch(spec_file)
 
         assert rc == 0
@@ -2859,10 +2582,10 @@ def _clear_worker_claude_override_env(monkeypatch) -> None:
     monkeypatch.delenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", raising=False)
 
 
-def test_worker_claude_override_routes_build_worker_to_claude_tmux(tmp_path, monkeypatch):
+def test_worker_claude_override_routes_build_worker_to_claude_lane(tmp_path, monkeypatch):
     """Override env + reason + provider=claude + T1 => the kimi-k3 pin coercion is
     skipped for THIS dispatch: effective/plan model is a claude model, the
-    constraint check passes, and the route is the claude tmux-subscription lane.
+    constraint check passes, and the route is the claude headless lane.
     An audited `worker-claude-override-applied` entry carrying the reason, the
     target_slot, and the resolved model lands on the plan's governed record."""
     data_dir, spec_file = _make_bundle_spec(
@@ -2872,7 +2595,6 @@ def test_worker_claude_override_routes_build_worker_to_claude_tmux(tmp_path, mon
         dispatch_id="20260723-escape-hatch-apply",
         provider="claude",
         target_slot="T1",
-        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -2889,13 +2611,13 @@ def test_worker_claude_override_routes_build_worker_to_claude_tmux(tmp_path, mon
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0, "gated override must route the dispatch, not reject it"
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
-    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.lane == "claude_headless"
     assert plan_arg.provider == Provider.CLAUDE
     assert plan_arg.billing == "subscription"
     assert plan_arg.model == "sonnet", (
@@ -2911,7 +2633,7 @@ def test_worker_claude_override_routes_build_worker_to_claude_tmux(tmp_path, mon
 
 def test_worker_claude_override_honors_requested_claude_model(tmp_path, monkeypatch):
     """Override + explicit spec.model=opus => plan.model is opus (requested claude
-    model), still via the tmux-subscription lane."""
+    model), still via the headless lane."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Escape hatch\n\nRoute this one build task to opus.\n",
@@ -2920,20 +2642,19 @@ def test_worker_claude_override_honors_requested_claude_model(tmp_path, monkeypa
         provider="claude",
         target_slot="T2",
         model="opus",
-        force_tmux=True,  # this test explicitly asserts the tmux lane below
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
     monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", "operator pre-assessed opus-depth task")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
-    assert plan_arg.lane == "claude_tmux_subscription"
+    assert plan_arg.lane == "claude_headless"
     assert plan_arg.model == "opus"
     assert any("worker-claude-override-applied" in w for w in plan_arg.warnings)
 
@@ -2959,7 +2680,7 @@ def test_worker_claude_override_without_reason_is_blocking_refusal(tmp_path, mon
     else:
         monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", reason_value)
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "override without a reason must be a blocking refusal"
@@ -2986,7 +2707,7 @@ def test_no_override_claude_on_build_worker_still_hard_rejects(tmp_path, monkeyp
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _clear_worker_claude_override_env(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "default kimi-k3 hard-reject must stand without the override env"
@@ -3046,7 +2767,7 @@ def test_worker_claude_override_cannot_smuggle_mismatched_model(tmp_path, monkey
     monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
     monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", "attempt to route kimi via the claude lane")
 
-    with patch("dispatch_cli._execute_claude") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 1, "a kimi-branded model on the claude lane must still hard-reject"
@@ -3066,14 +2787,13 @@ def test_worker_claude_override_env_does_not_leak_into_t0_or_kimi(tmp_path, monk
         dispatch_id="20260723-override-t0",
         provider="claude",
         target_slot="T0",
-        force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE", "1")
     monkeypatch.setenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", "stray env must not affect T0")
 
-    with patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
     assert rc == 0
@@ -3185,12 +2905,11 @@ class TestPersistRouteDecision:
             staging_id="20260804-staging-oi849",
             dispatch_id="20260804-oi849-integration",
             target_slot="T0",
-            force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_exec:
             with patch("dispatch_cli._persist_route_decision") as mock_persist:
                 rc = run_dispatch(spec_file)
 
@@ -3269,7 +2988,7 @@ class TestRegisterDispatchCreated:
         assert recs[0]["event"] == "dispatch_created"
         assert recs[0]["dispatch_id"] == "20260810-oi1120-direct"
         assert recs[0]["terminal"] == "T1"
-        assert recs[0]["extra"]["lane"] == "claude_tmux_subscription"
+        assert recs[0]["extra"]["lane"] == "claude_headless"
         assert recs[0]["extra"]["provider"] == "claude"
         assert recs[0]["extra"]["model"] == "sonnet"
         assert recs[0]["extra"]["permit_fingerprint"] == f"{permit.plan_digest[:12]}-{permit.dispatch_id}"
@@ -3308,7 +3027,7 @@ class TestRegisterDispatchCreated:
         )
 
     def test_called_during_run_dispatch_claude_lane(self, tmp_path, monkeypatch):
-        """run_dispatch (non-dry-run, claude_tmux_subscription lane) fires the
+        """run_dispatch (non-dry-run, claude_headless lane) fires the
         register hook and a real record lands under the door's own state_dir."""
         data_dir, spec_file = _make_bundle_spec(
             tmp_path,
@@ -3316,12 +3035,11 @@ class TestRegisterDispatchCreated:
             staging_id="20260810-staging-oi1120",
             dispatch_id="20260810-oi1120-integration",
             target_slot="T0",
-            force_tmux=True,  # this test's docstring asserts the tmux lane specifically
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
-        with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_exec:
             rc = run_dispatch(spec_file)
 
         assert rc == 0
@@ -3340,13 +3058,12 @@ class TestRegisterDispatchCreated:
             staging_id="20260810-staging-oi1120-fail",
             dispatch_id="20260810-oi1120-write-fail",
             target_slot="T0",
-            force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         with patch("dispatch_register.append_event_idempotent", side_effect=OSError("disk full")):
-            with patch("dispatch_cli._execute_claude", return_value=0) as mock_exec:
+            with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_exec:
                 rc = run_dispatch(spec_file)
 
         assert rc == 0, "a register-write failure must not block the dispatch"
@@ -3518,13 +3235,12 @@ class TestSmartRouterPreValidate:
             dispatch_id="20260802-oi962-t0",
             provider="auto",
             target_slot="T0",
-            force_tmux=True,  # unrelated to lane choice; keeps _execute_claude mocked/reachable
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
         with patch("dispatch_cli.build_runtime_snapshot") as mock_snapshot, \
-             patch("dispatch_cli._execute_claude", return_value=0) as mock_execute:
+             patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
             mock_snapshot.return_value = _clean_snapshot()
 
             rc = run_dispatch(spec_file)
@@ -3565,7 +3281,6 @@ class TestSmartRouterPreValidate:
             dispatch_id="20260810-oi1050-mid",
             provider="auto",
             target_slot="T1",
-            force_tmux=True,  # this test explicitly asserts the tmux lane below
         )
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
@@ -3588,8 +3303,8 @@ class TestSmartRouterPreValidate:
             f"model must be the registry-resolved sonnet-5, not left empty for a "
             f"different provider's pin to fill in:\n{captured.out}"
         )
-        assert "lane:         claude_tmux_subscription" in captured.out, (
-            f"claude must route via the tmux-spawn subscription lane, never "
+        assert "lane:         claude_headless" in captured.out, (
+            f"claude must route via the headless lane, never "
             f"provider_dispatch:\n{captured.out}"
         )
 
@@ -3703,3 +3418,100 @@ class TestSmartRouterPreValidate:
         assert plan_arg.model == "kimi-k3", (
             f"explicit model was overwritten by router: {plan_arg.model}"
         )
+
+
+# ---------------------------------------------------------------------------
+# The tmux lane was removed (2026-09-18): a staged spec on disk may still carry
+# force_tmux / force_tmux_reason. It must not crash, and must not be ignored silently.
+# ---------------------------------------------------------------------------
+
+class TestLoadSpecRemovedTmuxKeys:
+    """Bundles staged before the removal are not rewritten (every bundle staged since A2,
+    2026-08-26, carries ``"force_tmux": false``; a few carry ``true``). The door parses
+    known keys only, so the leftovers cannot crash it; ``_note_removed_lane_keys`` makes
+    sure a ``true`` is not ignored silently."""
+
+    def test_true_loads_without_crash_and_warns_loud_with_the_reason(self, tmp_path, capsys, caplog):
+        spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+            "force_tmux": True,
+            "force_tmux_reason": "live pane nodig: de deur moet snel exiten",
+        })
+
+        with caplog.at_level("WARNING"):
+            spec = load_spec(spec_file)
+
+        assert not hasattr(spec, "force_tmux")
+        assert not hasattr(spec, "force_tmux_reason")
+        err = capsys.readouterr().err
+        assert "[dispatch_cli] [WARN]" in err
+        assert "force_tmux=true" in err
+        assert "live pane nodig: de deur moet snel exiten" in err
+        assert "removed 2026-09-18" in err
+        assert "claude_headless" in err
+        assert any(
+            "removed 2026-09-18" in r.getMessage() and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+
+    def test_false_loads_quietly_with_only_a_log_line(self, tmp_path, capsys, caplog):
+        spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+            "force_tmux": False,
+            "force_tmux_reason": None,
+        })
+
+        with caplog.at_level("INFO"):
+            spec = load_spec(spec_file)
+
+        assert spec.provider == Provider.CLAUDE
+        assert capsys.readouterr().err == "", "a false force_tmux asked for nothing: no stderr noise"
+        assert not any(r.levelname == "WARNING" for r in caplog.records)
+        assert any("removed force_tmux keys" in r.getMessage() for r in caplog.records)
+
+    def test_spec_without_the_keys_is_untouched(self, tmp_path, capsys, caplog):
+        spec_file = _make_spec_file(tmp_path, provider="claude")
+
+        with caplog.at_level("INFO"):
+            load_spec(spec_file)
+
+        assert capsys.readouterr().err == ""
+        assert not any("force_tmux" in r.getMessage() for r in caplog.records)
+
+    def test_control_characters_in_the_reason_cannot_break_the_warning_line(self, tmp_path, capsys):
+        spec_file = _make_spec_file(tmp_path, provider="claude", extra={
+            "force_tmux": True,
+            "force_tmux_reason": "line one\nFAKE-LOG-LINE\x1b[31m red",
+        })
+
+        load_spec(spec_file)
+
+        err = capsys.readouterr().err
+        assert err.count("\n") == 1, f"the warning must be exactly one line, got: {err!r}"
+        assert "\x1b" not in err
+
+    def test_old_bundle_with_force_tmux_true_runs_end_to_end_on_the_headless_lane(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The door, not just the parser: a promoted bundle whose spec still says
+        force_tmux=true is not refused (validate() no longer knows the field) and lands
+        on claude_headless with the loud warning on stderr."""
+        data_dir, spec_file = _make_bundle_spec(
+            tmp_path,
+            instruction_text="# Old bundle\n\nDo something safe.\n",
+            staging_id="20260908-staging-old-force-tmux",
+            dispatch_id="20260908-old-force-tmux",
+            target_slot="T0",
+        )
+        raw = json.loads(spec_file.read_text(encoding="utf-8"))
+        raw["force_tmux"] = True
+        raw["force_tmux_reason"] = "live pane nodig"
+        spec_file.write_text(json.dumps(raw), encoding="utf-8")
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_headless:
+            rc = run_dispatch(spec_file)
+
+        assert rc == 0
+        mock_headless.assert_called_once()
+        assert mock_headless.call_args[0][0].lane == "claude_headless"
+        assert "force_tmux=true" in capsys.readouterr().err

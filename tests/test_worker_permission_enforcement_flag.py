@@ -1,8 +1,8 @@
 """ADR-012 worker-permission enforcement feature flag — default-OFF tests (15-08).
 
-Covers both launch lanes:
-  * tmux interactive lane (_default_launch_command)
-  * provider/headless lane (subprocess_adapter._build_worker_scope_args)
+Covers the provider/headless lane (subprocess_adapter._build_worker_scope_args).
+The tmux interactive lane's launch-command and completion-protocol tests went with
+that lane on 2026-09-18.
 
 Verifies:
   - Flag absent (default OFF, since the 15-08 flip was reverted pending a
@@ -21,10 +21,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,7 +30,6 @@ import pytest
 SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
-from tmux_interactive_dispatch import _default_launch_command
 from worker_permissions import (
     UnknownRoleError,
     build_claude_scope_args,
@@ -51,24 +47,6 @@ def _set_enforcement(enforce: bool):
     val = "1" if enforce else "0"
     env = {"VNX_ENFORCE_WORKER_PERMISSIONS": val, "VNX_WORKER_SCOPED": "0"}
     return patch.dict(os.environ, env, clear=False)
-
-
-def _extract_receipt_from_protocol(protocol: str) -> dict:
-    """Parse the receipt JSON from the done/failed bash block."""
-    blocks = re.findall(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
-    assert blocks, "No bash blocks found in protocol"
-    for block in blocks:
-        for line in block.splitlines():
-            if "--receipt" in line:
-                m = re.search(r'--receipt\s+"((?:[^"\\]|\\.)*)"', line)
-                if m:
-                    raw = (
-                        m.group(1)
-                        .replace('\\"', '"')
-                        .replace("$_VNX_TS", "2099-01-01T00:00:00Z")
-                    )
-                    return json.loads(raw)
-    raise AssertionError("Could not find receipt in protocol")
 
 
 # ---------------------------------------------------------------------------
@@ -161,60 +139,6 @@ class TestProviderLaneScopeArgs:
         assert "--allowedTools" in args
         # Fallback code-worker profile denies WebSearch/WebFetch
         assert "WebSearch" in args[args.index("--disallowedTools") + 1]
-
-
-# ---------------------------------------------------------------------------
-# Tmux interactive lane: _default_launch_command
-# ---------------------------------------------------------------------------
-
-class TestTmuxLaneLaunchCommand:
-    def test_flag_off_uses_legacy_skip_flag(self):
-        with _set_enforcement(False):
-            cmd = _default_launch_command("sonnet", skip_permissions=True, role="backend-developer")
-
-        assert "--dangerously-skip-permissions" in cmd
-        assert "--allowedTools" not in cmd
-        assert "--permission-mode" not in cmd
-
-    def test_flag_on_uses_role_scoped_args(self):
-        with _set_enforcement(True):
-            cmd = _default_launch_command("sonnet", skip_permissions=True, role="backend-developer")
-
-        assert "--dangerously-skip-permissions" not in cmd
-        assert "--permission-mode" in cmd
-        assert "--allowedTools" in cmd
-        assert "WebSearch" in cmd  # denied_tools from backend-developer profile
-
-    def test_flag_on_unknown_role_refuses_with_unknown_role_error(self):
-        # Same OI-1069 pt.5 distinction as the provider lane: a role absent
-        # from every register refuses instead of falling back. Red on
-        # pre-fix code: this used to fall back to the code-worker profile.
-        with _set_enforcement(True):
-            with pytest.raises(UnknownRoleError):
-                _default_launch_command("sonnet", skip_permissions=True, role="unknown-role")
-
-    def test_flag_on_role_known_elsewhere_without_yaml_profile_falls_back(self):
-        # linkedin-writer is a real agents/linkedin-writer/ entry with no
-        # profile in .vnx/worker_permissions.yaml — keeps the OI-1100
-        # explicit fallback rather than refusing.
-        with _set_enforcement(True):
-            cmd = _default_launch_command("sonnet", skip_permissions=True, role="linkedin-writer")
-
-        assert "--dangerously-skip-permissions" not in cmd
-        assert "--permission-mode" in cmd
-        assert "--allowedTools" in cmd
-        # Fallback denies WebSearch/WebFetch
-        assert "WebSearch" in cmd
-
-    def test_flag_off_args_are_byte_identical_to_legacy(self):
-        """Default-OFF must produce the exact same launch line as before the feature."""
-        with _set_enforcement(False):
-            cmd = _default_launch_command("sonnet", skip_permissions=True, role="backend-developer")
-
-        expected = (
-            "source ~/.zshrc 2>/dev/null; claude --model sonnet --dangerously-skip-permissions"
-        )
-        assert cmd == expected
 
 
 # ---------------------------------------------------------------------------
@@ -320,31 +244,6 @@ class TestReceiptMarker:
         receipt = json.loads(lines[-1])
         assert "permission_enforcement" not in receipt
 
-    def test_tmux_completion_protocol_includes_marker_when_flag_on(self):
-        from tmux_interactive_dispatch import TmuxInteractiveDispatch
-
-        with tempfile.TemporaryDirectory() as tmp:
-            state_dir = Path(tmp)
-            lane = TmuxInteractiveDispatch(state_dir, project_root=state_dir)
-            with _set_enforcement(True):
-                protocol = lane._build_completion_protocol("disp-003", "T1", model="sonnet")
-
-            receipt = _extract_receipt_from_protocol(protocol)
-            assert receipt["permission_enforcement"] == "enforced"
-
-    def test_tmux_completion_protocol_omits_marker_when_flag_off(self):
-        from tmux_interactive_dispatch import TmuxInteractiveDispatch
-
-        with tempfile.TemporaryDirectory() as tmp:
-            state_dir = Path(tmp)
-            lane = TmuxInteractiveDispatch(state_dir, project_root=state_dir)
-            with _set_enforcement(False):
-                protocol = lane._build_completion_protocol("disp-004", "T1", model="sonnet")
-
-            receipt = _extract_receipt_from_protocol(protocol)
-            assert "permission_enforcement" not in receipt
-
-
 # ---------------------------------------------------------------------------
 # build_claude_scope_args integration
 # ---------------------------------------------------------------------------
@@ -359,40 +258,3 @@ class TestBuildClaudeScopeArgs:
         assert "Read" in args[args.index("--allowedTools") + 1]
         assert "--disallowedTools" in args
         assert "WebSearch" in args[args.index("--disallowedTools") + 1]
-
-
-# ---------------------------------------------------------------------------
-# Import-fault fallback stub (tmux_interactive_dispatch lines 78-141)
-# ---------------------------------------------------------------------------
-
-class TestImportFallbackStubEnforcement:
-    def test_fallback_enforcement_predicate_is_true(self):
-        # Force the `import worker_permissions` inside tmux_interactive_dispatch
-        # to fail: the inline fallback worker_permission_enforcement_enabled()
-        # must return True (fail-closed into the enforcing posture since 15-08),
-        # never False — an import fault must not silently drop the file-write
-        # boundary back to the blanket-skip posture.
-        code = (
-            "import sys\n"
-            f"sys.path.insert(0, {str(SCRIPTS_LIB)!r})\n"
-            "import builtins\n"
-            "_real_import = builtins.__import__\n"
-            "def _blocked(name, *a, **k):\n"
-            "    if name == 'worker_permissions':\n"
-            "        raise ImportError('blocked for test')\n"
-            "    return _real_import(name, *a, **k)\n"
-            "builtins.__import__ = _blocked\n"
-            "import tmux_interactive_dispatch as t\n"
-            "assert t._WP_AVAILABLE is False, 'worker_permissions import was not blocked'\n"
-            "print('ENFORCEMENT=' + repr(t.worker_permission_enforcement_enabled()))\n"
-        )
-        proc = subprocess.run(
-            [sys.executable, "-c", code], capture_output=True, text=True
-        )
-        assert proc.returncode == 0, proc.stderr
-        value_line = next(
-            line[len("ENFORCEMENT="):]
-            for line in proc.stdout.splitlines()
-            if line.startswith("ENFORCEMENT=")
-        )
-        assert value_line == "True"

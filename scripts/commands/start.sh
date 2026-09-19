@@ -607,7 +607,7 @@ RESOLVER
   echo ""
   [ -n "$profile_name" ] && echo "Profile: $profile_name"
   [ -n "$preset_name" ] && echo "Preset: $preset_name"
-  echo "Started T0 in tmux session $session_name. Workers spawn on-demand (subprocess or leaseless tmux lane); attach with \`tmux attach -t vnx-<dispatch_id>\` when needed."
+  echo "Started T0 in tmux session $session_name. Workers spawn on-demand (subprocess lane)."
   echo "Layout: T0 only  |  T0: $t0_provider_label ($t0_model)"
 
   # Show skip-permissions status

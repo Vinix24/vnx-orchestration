@@ -2,12 +2,16 @@
 # VNX Command: dispatch
 # Sourced by bin/vnx — delivers a dispatch .md file to a VNX worker.
 #
-# DEFAULT lane: subscription-preserving ephemeral tmux-spawn
-#   (scripts/lib/tmux_interactive_dispatch.py — interactive claude, never `claude -p`).
-# OPT-IN burst lane: paid headless SubprocessAdapter
-#   (scripts/lib/subprocess_dispatch.py — `claude -p`), selected via:
+# The single-entry door (dispatch_cli.py) is the default lane for STAGED forms.
+# The raw-file form (`vnx dispatch <file.md>`, DEPRECATED per ADR-025) has ONE lane:
+# the headless SubprocessAdapter (scripts/lib/subprocess_dispatch.py — `claude -p`).
+# It is also the default, so the raw form needs no flag:
 #     --adapter subprocess  (CLI flag)  >  Adapter: subprocess  (file header)
-#       >  VNX_ADAPTER=subprocess  (env)  >  default: tmux
+#       >  VNX_ADAPTER=subprocess  (env)  >  default: subprocess
+# The tmux-spawn lane that used to be the raw form's default was removed on 2026-09-18.
+# Naming it (`--adapter tmux`, `Adapter: tmux`, `VNX_ADAPTER=tmux`) is refused. Naming no
+# lane is not: the raw form is the rollback hatch (VNX_DISPATCH_LEGACY=1) and has to work
+# without a flag when the door itself is broken.
 #
 # All variables from bin/vnx (VNX_HOME, VNX_DATA_DIR, VNX_STATE_DIR,
 # VNX_DISPATCH_DIR, VNX_PYTHON, log, err) are available when this runs.
@@ -380,8 +384,8 @@ Usage: vnx dispatch <file.md> [OPTIONS]
 
 Deliver a dispatch .md file to a VNX worker.
 
-Default lane: subscription-preserving ephemeral tmux-spawn (interactive claude).
-Burst lane:   paid headless SubprocessAdapter (claude -p), opt-in via --adapter.
+Lane:         headless SubprocessAdapter (claude -p). It is the default: no flag needed.
+              The tmux-spawn lane was removed on 2026-09-18.
 
 Arguments:
   file.md               Path to the dispatch instruction file
@@ -389,8 +393,8 @@ Arguments:
 Options:
   --terminal <TX>       Override terminal (default: auto-detect from [[TARGET:TX]])
   --model <model>       Override model (default: sonnet)
-  --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
-                        Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
+  --adapter <lane>      Delivery lane: subprocess (the default, and the only lane).
+                        Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > subprocess
   --requires-mcp        Preserve ambient MCP config (Requires-MCP: true header) instead
                         of the force-empty scoped posture
   --dry-run             Show what would happen without dispatching
@@ -408,7 +412,6 @@ Raw-file form (DEPRECATED — removed in 1.x per ADR-025; the file must come FIR
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run
-  vnx dispatch my-dispatch.md --adapter subprocess   # paid burst lane
 HELP
         return 0 ;;
     esac
@@ -442,8 +445,8 @@ Usage: vnx dispatch <file.md> [OPTIONS]
 
 Deliver a dispatch .md file to a VNX worker.
 
-Default lane: subscription-preserving ephemeral tmux-spawn (interactive claude).
-Burst lane:   paid headless SubprocessAdapter (claude -p), opt-in via --adapter.
+Lane:         headless SubprocessAdapter (claude -p). It is the default: no flag needed.
+              The tmux-spawn lane was removed on 2026-09-18.
 
 Arguments:
   file.md               Path to the dispatch instruction file
@@ -451,8 +454,8 @@ Arguments:
 Options:
   --terminal <TX>       Override terminal (default: auto-detect from [[TARGET:TX]])
   --model <model>       Override model (default: sonnet)
-  --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
-                        Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
+  --adapter <lane>      Delivery lane: subprocess (the default, and the only lane).
+                        Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > subprocess
   --requires-mcp        Preserve ambient MCP config (Requires-MCP: true header) instead
                         of the force-empty scoped posture
   --dry-run             Show what would happen without dispatching
@@ -470,7 +473,6 @@ Raw-file form (DEPRECATED — removed in 1.x per ADR-025; the file must come FIR
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run
-  vnx dispatch my-dispatch.md --adapter subprocess   # paid burst lane
 HELP
         return 0 ;;
       *)
@@ -531,30 +533,27 @@ HELP
   fi
 
   # Resolve delivery lane.
-  # Precedence: --adapter flag > 'Adapter:' header > VNX_ADAPTER env > default 'tmux'.
+  # Precedence: --adapter flag > 'Adapter:' header > VNX_ADAPTER env > default 'subprocess'.
+  # The raw form is the rollback hatch (VNX_DISPATCH_LEGACY=1): it must keep working with no
+  # flag when the door itself is broken. Removing the tmux-spawn lane moved its default to the
+  # one lane that is left; it did not make a lane choice mandatory.
   local adapter
-  adapter="${adapter_override:-${adapter_header:-${VNX_ADAPTER:-tmux}}}"
-  # Normalise to lowercase; accept only known lanes.
+  adapter="${adapter_override:-${adapter_header:-${VNX_ADAPTER:-subprocess}}}"
+  # Normalise to lowercase.
   adapter=$(printf '%s' "$adapter" | tr '[:upper:]' '[:lower:]')
+
+  # Naming the removed tmux-spawn lane is refused loud: the operator asked for a lane that no
+  # longer exists, and quietly substituting another would hide that. Naming no lane is fine
+  # (defaulted above).
   case "$adapter" in
-    tmux|subprocess) ;;
-    "") adapter="tmux" ;;
+    subprocess) ;;
+    tmux)
+      err "[dispatch] adapter 'tmux' was removed on 2026-09-18: the tmux dispatch lane no longer exists. Drop the tmux adapter to run on the subprocess lane (the default), or stage the dispatch and run it through the door (vnx dispatch <pending-id>)."
+      return 1 ;;
     *)
-      err "[dispatch] Unknown adapter: '$adapter' (expected 'tmux' or 'subprocess')"
+      err "[dispatch] Unknown adapter: '$adapter' (expected 'subprocess')"
       return 1 ;;
   esac
-
-  # VNX_AUTO_ROUTE=1 overrides the bare default tmux lane so smart routing
-  # is honoured. Yields to any explicit adapter choice (--adapter flag,
-  # Adapter: header, or VNX_ADAPTER env).
-  # LEGACY PATH ONLY — has no effect when VNX_SINGLE_ENTRY_DISPATCH=1.
-  # For headless claude via the door, set allow_headless=true in dispatch-spec.json.
-  if [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && \
-     [[ -z "$adapter_override" ]] && \
-     [[ -z "$adapter_header" ]] && \
-     [[ -z "${VNX_ADAPTER:-}" ]]; then
-    adapter="subprocess"
-  fi
 
   local track
   track=$(_d_resolve_track "$terminal")
@@ -584,7 +583,7 @@ HELP
   log "[dispatch] Gate:       ${gate:-<none>}"
   log "[dispatch] Feature:    ${feature:-<none>}"
   log "[dispatch] Model:      $model_override"
-  log "[dispatch] Adapter:    $adapter$([ "$adapter" = tmux ] && printf ' (default, subscription)' || printf ' (burst, paid)')"
+  log "[dispatch] Adapter:    $adapter"
   log "[dispatch] Requires-MCP: $([ "${#_mcp_flag[@]}" -gt 0 ] && printf 'yes' || printf 'no')"
   log "[dispatch] DispatchID: $dispatch_id"
 
@@ -593,14 +592,10 @@ HELP
     return 0
   fi
 
-  # Terminal availability only applies to the leased subprocess lane.
-  # The tmux-spawn lane is leaseless (each dispatch gets a fresh ephemeral
-  # session + worktree), so there is no fixed terminal to be "busy".
-  if [ "$adapter" = "subprocess" ]; then
-    if ! _d_check_terminal_idle "$terminal"; then
-      err "[dispatch] Terminal $terminal is busy. Use --dry-run to preview, or wait for completion."
-      return 1
-    fi
+  # The subprocess lane is leased: a terminal that is already leased is busy.
+  if ! _d_check_terminal_idle "$terminal"; then
+    err "[dispatch] Terminal $terminal is busy. Use --dry-run to preview, or wait for completion."
+    return 1
   fi
 
   # Read instruction from file
@@ -615,13 +610,8 @@ HELP
 
   log "[dispatch] Dispatching to $terminal via $adapter lane..."
 
-  # Resolve the delivery script for the selected lane.
-  local dispatch_script
-  if [ "$adapter" = "tmux" ]; then
-    dispatch_script="$VNX_HOME/scripts/lib/tmux_interactive_dispatch.py"
-  else
-    dispatch_script="$VNX_HOME/scripts/lib/subprocess_dispatch.py"
-  fi
+  # The delivery script of the one raw-file lane.
+  local dispatch_script="$VNX_HOME/scripts/lib/subprocess_dispatch.py"
   if [ ! -f "$dispatch_script" ]; then
     err "[dispatch] delivery script not found: $dispatch_script"
     rm -f "$active_path"
@@ -631,38 +621,24 @@ HELP
   local exit_code=0
   # Door-flip A / Option X1 (ADR-024): this legacy lane is reached ONLY for raw-file forms.
   # Staged forms route through the door at cmd_dispatch's intercept and never get here, so this
-  # delivery is unconditionally the legacy tmux/subprocess lane — preserving the raw form's full
-  # lane precedence (--adapter > Adapter: > VNX_ADAPTER > VNX_AUTO_ROUTE). The old
+  # delivery is unconditionally the legacy subprocess lane. The old
   # `if vnx_single_entry_enabled -> dispatch_bridge.py` branch was removed: routing raw input
-  # through the bridge would silently drop --adapter (bridge defaults claude -> tmux), the
-  # regression A2 avoids. The bridge is still the door's delivery for STAGED callers elsewhere.
-  if [ "$adapter" = "tmux" ]; then
-    # DEFAULT lane: subscription-preserving ephemeral tmux-spawn.
-    # Leaseless — pass the resolved terminal as the worker label for audit parity.
-    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    "$VNX_PYTHON" "$dispatch_script" \
-      --dispatch-id "$dispatch_id" \
-      --instruction "$instruction" \
-      --model "$model_override" \
-      --worker-label "$terminal" \
-      ${role:+--role "$role"} \
-      ${_mcp_flag[@]+"${_mcp_flag[@]}"} \
-      || exit_code=$?
-  else
-    # OPT-IN burst lane: paid headless SubprocessAdapter.
-    local _ar_flag=()
-    [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
-    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    "$VNX_PYTHON" "$dispatch_script" \
-      --terminal-id "$terminal" \
-      --dispatch-id "$dispatch_id" \
-      --instruction "$instruction" \
-      --model "$model_override" \
-      ${role:+--role "$role"} \
-      ${_ar_flag[@]+"${_ar_flag[@]}"} \
-      ${_mcp_flag[@]+"${_mcp_flag[@]}"} \
-      || exit_code=$?
-  fi
+  # through the bridge would silently drop --adapter. The bridge is still the door's delivery
+  # for STAGED callers elsewhere.
+  # VNX_AUTO_ROUTE=1 forwards --auto-route so smart routing is honoured. LEGACY PATH ONLY: it
+  # has no effect when the door owns the dispatch (set allow_headless=true in dispatch-spec.json).
+  local _ar_flag=()
+  [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
+  PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
+  "$VNX_PYTHON" "$dispatch_script" \
+    --terminal-id "$terminal" \
+    --dispatch-id "$dispatch_id" \
+    --instruction "$instruction" \
+    --model "$model_override" \
+    ${role:+--role "$role"} \
+    ${_ar_flag[@]+"${_ar_flag[@]}"} \
+    ${_mcp_flag[@]+"${_mcp_flag[@]}"} \
+    || exit_code=$?
 
   if [ "$exit_code" -eq 0 ]; then
     # Move to completed/

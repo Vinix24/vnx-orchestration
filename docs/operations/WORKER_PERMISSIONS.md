@@ -7,9 +7,15 @@
 > pending a remeasurement of the outside-rate with directory matching repaired
 > — revising the 03-08 blanket-skip ratification and the 14-08 mcp-scoped-
 > default flip).
-> Covers the two dispatch lanes that spawn a headless/detached Claude worker:
-> the tmux-spawn lane (`tmux_interactive_dispatch.py`) and the subprocess lane
-> (`subprocess_adapter.py`). Module: `scripts/lib/worker_permissions.py`.
+> Covers the dispatch lanes that spawn a headless/detached Claude worker: the
+> subprocess lane (`subprocess_adapter.py`) and, until 2026-09-18, the tmux-spawn
+> lane (`tmux_interactive_dispatch.py`). Module: `scripts/lib/worker_permissions.py`.
+>
+> **The tmux-spawn lane was removed on 2026-09-18** (`docs/operations/TMUX_SPAWN_LANE.md`).
+> Passages below that name `tmux_interactive_dispatch.py`, the tmux lane's
+> `--dispatch-paths` wiring or its `working_tree_only` refusal describe the removed
+> lane. `worker_permissions.py` itself is unchanged, and the subprocess lane's use of
+> it is as described.
 
 ## The default: scoped worker-mode (revised 14-08)
 
@@ -329,5 +335,5 @@ shell variable) remains fine since the gate only fires on non-provably-safe
 
 - `docs/core/DISPATCH_RULES.md` §5 — lane defaults, where this default is called out
 - `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` §5 — delivery invariants
-- `docs/core/PROVIDER_LANES.md` — claude-tmux-spawn lane overview
+- `docs/core/PROVIDER_LANES.md` — Claude lane overview
 - `scripts/lib/worker_permissions.py` — the module this doc describes

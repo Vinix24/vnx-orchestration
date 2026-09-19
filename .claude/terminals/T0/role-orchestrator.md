@@ -78,7 +78,7 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
 
 - All dispatches go through the single-entry door `vnx dispatch <pending-id>`, which decides the lane. Calling a lane script directly is a side door (rollback only: `VNX_DISPATCH_LEGACY=1`).
 - Source vs. consumer: the door above (`bin/vnx dispatch <id>`) is the fabric source repo's form. In a pip-installed consumer repo (no `bin/`), the equivalent governed door is `vnx dispatch-agent --agent <name>` (it routes through the same `deliver_via_door` bridge); `vnx pool` replaces `bin/vnx pool`.
-- Provider→lane (hard): `claude`/Opus/Sonnet default to the **headless lane** (`dispatch_envelope.run_envelope_headless_plan`, `claude -p`, subscription-preserving) since A2 (2026-08-26) — NEVER `provider_dispatch`. The tmux-spawn lane (`scripts/lib/tmux_interactive_dispatch.py`, interactive) is now the explicit opt-out (`--force-tmux` + reason, mirrors `--allow-headless`) — pick it when a human needs a live pane to watch or intervene, not by default. `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`.
+- Provider→lane (hard): `claude`/Opus/Sonnet run on the **headless lane** (`dispatch_envelope.run_envelope_headless_plan`, `claude -p`, subscription-preserving): the default since A2 (2026-08-26) and the only claude lane since the tmux-spawn lane was removed on 2026-09-18 — NEVER `provider_dispatch`. `kimi`/`glm`/`deepseek` route via `provider_dispatch.py`.
 - Build-worker provider and model are a **free per-dispatch choice**: what the dispatch spec says wins (`workers-kimi-pinned`, pin_semantics=default). kimi-k3 is only the default when the spec carries no explicit model — no override env needed. T0 stays Opus as a governance floor (`t0-opus-only`, pin_semantics=floor).
 - `provider=claude` for a build-worker still routes through a separate gate: `VNX_OVERRIDE_WORKER_CLAUDE=1` with an audit reason (`dispatch_cli.py:691-705`). Track `worker-provider-free-choice` aims to eventually remove this remaining lock.
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
@@ -284,7 +284,7 @@ T1 is a headless backend-developer. This is the **dominant dispatch path** — n
 Dispatch via the single-entry door (`vnx dispatch`), which selects the lane from the staged
 spec's `provider` field (D1). Since worker-provider-kimi-flip (2026-07-23) the default `provider`
 for T1/T2/T3 is `kimi` (`workers-kimi-pinned`), so the door routes to the **provider lane**
-(`run_envelope_plan` → `provider_dispatch`/`kimi_spawn.py`), NOT the claude subprocess/tmux lanes —
+(`run_envelope_plan` → `provider_dispatch`/`kimi_spawn.py`), NOT the claude subprocess lane —
 `VNX_ADAPTER_T1=subprocess` and `scripts/lib/subprocess_dispatch.py` only apply when a dispatch
 explicitly overrides `provider="claude"` for T1 (`--terminal-id T1 --dispatch-id <id> --model sonnet`;
 call it directly only to debug that lane, not as the normal path).

@@ -482,7 +482,7 @@ def run_envelope_plan(
     """Execute a validated ExecutionPlan for the provider lane.
 
     Provider lane covers codex, kimi, gemini, litellm:*, deepseek-harness,
-    local-gemma. The claude_tmux_subscription lane is wired separately in PR-4.
+    local-gemma. The claude_headless lane runs through run_envelope_headless_plan.
 
     require_permit is the first action — un-evadable and cannot be moved.
 
@@ -497,7 +497,7 @@ def run_envelope_plan(
     if plan.lane != "provider":
         raise ValueError(
             f"run_envelope_plan handles the provider lane only; got lane={plan.lane!r} "
-            f"(claude_tmux_subscription is executed by the tmux lane, wired in PR-4)"
+            f"(claude_headless runs through run_envelope_headless_plan)"
         )
 
     # P0-3 (PR-4c): REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.

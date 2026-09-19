@@ -3,8 +3,8 @@
 A dispatch spec can carry a ``work_ref`` — the branch a fix-forward dispatch
 delivers onto. ``dispatch_bridge.py`` has supported that field since OI-1137,
 and phantom_guard already honors it. PR *enforcement*
-(``pr_enforcement.enforce_pr_exists``, the tmux lane's ``_enforce_pr_exists``)
-never did: it always enforced push+PR against the worktree's own branch — the
+(``pr_enforcement.enforce_pr_exists``, which the tmux lane's ``_enforce_pr_exists``
+wrapped) never did: it always enforced push+PR against the worktree's own branch — the
 checked-out name OI-1372 (#1623) resolves, which is STILL ``dispatch/<id>``
 when the worker never checks out anything else locally.
 
@@ -23,6 +23,11 @@ must not regress #1623 — test 3 below is the explicit proof it doesn't.
 Real git repos throughout (mirrors test_oi1372_pr_enforcement_branch_resolution.py);
 only ``gh_pr_ensure``'s gh-boundary functions are mocked — nothing here
 touches GitHub.
+
+Since the tmux lane was removed (2026-09-18) these tests call the shared
+``pr_enforcement.enforce_pr_exists`` directly, which is where the work_ref logic
+lives. The removed lane's wrapper was the only caller that passed ``work_ref``
+(from ``VNX_WORK_REF``): ``dispatch_envelope._enforce_push_pr`` does not pass it.
 """
 from __future__ import annotations
 
@@ -35,7 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import tmux_worktree
-from tmux_worktree import allocate, classify
+from pr_enforcement import enforce_pr_exists
+from tmux_worktree import allocate, classify, resolve_effective_branch
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +105,22 @@ def _remote_branch_exists(repo_root: Path, branch: str) -> bool:
     return bool(ls.stdout.strip())
 
 
-def _tmux_dispatch_instance(tmp_path: Path, project_root: Path):
-    from tmux_interactive_dispatch import TmuxInteractiveDispatch
-    return TmuxInteractiveDispatch(
-        project_root=project_root,
-        state_dir=tmp_path / "state",
+def _enforce(tmp_path: Path, repo_root: Path, handle, state: str, dispatch_id: str, work_ref=None):
+    """Call the shared enforcement the way a lane wrapper does: resolve the branch
+    actually checked out in the worktree (OI-1372), then enforce push + PR."""
+    branch = resolve_effective_branch(
+        wt=handle.path, expected_branch=handle.branch, dispatch_id=dispatch_id,
+    )
+    return enforce_pr_exists(
+        dispatch_id=dispatch_id,
+        branch=branch,
+        worktree_state=state,
+        repo_root=repo_root,
         receipts_file=tmp_path / "state" / "t0_receipts.ndjson",
+        wt_path=handle.path,
+        pr_title=f"dispatch({dispatch_id}): test",
+        pr_body="test",
+        work_ref=work_ref,
     )
 
 
@@ -113,9 +129,7 @@ def _tmux_dispatch_instance(tmp_path: Path, project_root: Path):
 # pushes the same sha to the doelbranch — exactly one branch, exactly one PR.
 # ---------------------------------------------------------------------------
 
-def test_work_ref_present_worker_delivers_to_target_exactly_one_branch_one_pr(
-    tmp_path, monkeypatch,
-):
+def test_work_ref_present_worker_delivers_to_target_exactly_one_branch_one_pr(tmp_path):
     local = _init_git_repo_with_origin(tmp_path)
     with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
         handle = allocate("oi1392-a", repo_root=local)
@@ -130,16 +144,13 @@ def test_work_ref_present_worker_delivers_to_target_exactly_one_branch_one_pr(
         check=True, capture_output=True,
     )
 
-    inst = _tmux_dispatch_instance(tmp_path, local)
     state = classify(handle)
     assert state == "committed", "dispatch/oi1392-a was never pushed under its own name"
 
-    monkeypatch.setenv("VNX_WORK_REF", "work/oi1392-target")
-
     with patch("gh_pr_ensure.find_open_pr", return_value=None), \
          patch("gh_pr_ensure.create_pr", return_value=6001) as mock_create:
-        result = inst._enforce_pr_exists(
-            dispatch_id="oi1392-a", label="T1", worktree_handle=handle, worktree_state=state,
+        result = _enforce(
+            tmp_path, local, handle, state, "oi1392-a", work_ref="work/oi1392-target",
         )
 
     assert result.applicable is True
@@ -168,7 +179,7 @@ def test_work_ref_present_worker_delivers_to_target_exactly_one_branch_one_pr(
 # is created.
 # ---------------------------------------------------------------------------
 
-def test_work_ref_pr_already_open_creates_nothing(tmp_path, monkeypatch):
+def test_work_ref_pr_already_open_creates_nothing(tmp_path):
     local = _init_git_repo_with_origin(tmp_path)
     with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
         handle = allocate("oi1392-b", repo_root=local)
@@ -179,19 +190,16 @@ def test_work_ref_pr_already_open_creates_nothing(tmp_path, monkeypatch):
         check=True, capture_output=True,
     )
 
-    inst = _tmux_dispatch_instance(tmp_path, local)
     state = classify(handle)
     assert state == "committed"
-
-    monkeypatch.setenv("VNX_WORK_REF", "work/oi1392-existing")
 
     def _boom(*a, **kw):
         raise AssertionError("gh pr create must never run when a PR already exists for work_ref")
 
     with patch("gh_pr_ensure.find_open_pr", return_value=4321), \
          patch("gh_pr_ensure.create_pr", side_effect=_boom) as mock_create:
-        result = inst._enforce_pr_exists(
-            dispatch_id="oi1392-b", label="T1", worktree_handle=handle, worktree_state=state,
+        result = _enforce(
+            tmp_path, local, handle, state, "oi1392-b", work_ref="work/oi1392-existing",
         )
 
     assert result.applicable is True
@@ -211,11 +219,7 @@ def test_work_ref_pr_already_open_creates_nothing(tmp_path, monkeypatch):
 # branch other than dispatch/<id> must NOT be rejected as dispatch_branch_no_pr.
 # ---------------------------------------------------------------------------
 
-def test_no_work_ref_unchanged_behavior_oi1623_custom_branch_still_fixed(
-    tmp_path, monkeypatch,
-):
-    monkeypatch.delenv("VNX_WORK_REF", raising=False)
-
+def test_no_work_ref_unchanged_behavior_oi1623_custom_branch_still_fixed(tmp_path):
     local = _init_git_repo_with_origin(tmp_path)
     with patch.dict(tmux_worktree._FETCH_CACHE, {}, clear=True):
         handle = allocate("oi1392-c", repo_root=local)
@@ -225,7 +229,6 @@ def test_no_work_ref_unchanged_behavior_oi1623_custom_branch_still_fixed(
         check=True, capture_output=True,
     )
 
-    inst = _tmux_dispatch_instance(tmp_path, local)
     state = classify(handle)
     assert state == "pushed"
 
@@ -233,9 +236,7 @@ def test_no_work_ref_unchanged_behavior_oi1623_custom_branch_still_fixed(
         "gh_pr_ensure.ensure_pr",
         return_value={"pr_number": 8181, "created": True, "reason": None},
     ) as mock_ensure:
-        result = inst._enforce_pr_exists(
-            dispatch_id="oi1392-c", label="T1", worktree_handle=handle, worktree_state=state,
-        )
+        result = _enforce(tmp_path, local, handle, state, "oi1392-c")
 
     assert result.applicable is True
     assert result.ok is True, (

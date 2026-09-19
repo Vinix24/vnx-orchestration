@@ -1,65 +1,37 @@
-# Tmux-Spawn Dispatch Lane
+# Tmux-Spawn Dispatch Lane (removed)
 
-## Overview
+The tmux-spawn dispatch lane was removed on 2026-09-18. Nothing dispatches through it any more.
+This note stays so that old links, ADRs and investigation notes land on the reason instead of a 404.
+The last commit that still contained the lane is `6ad8f587`; `git show 6ad8f587:scripts/lib/tmux_interactive_dispatch.py` reads it.
 
-`scripts/lib/tmux_interactive_dispatch.py` is the leaseless ephemeral dispatch lane VNX uses as default for parallel and independent feature work. Each dispatch spawns a fresh unique tmux session, drives an interactive `claude` worker on the subscription (the 15-juni billing escape), waits for the receipt, and tears down. No reuse, no warm-open, no terminal pin.
+## What was removed
 
-This lane runs Claude workers on the **subscription** (interactive `claude`, never `claude -p`) — that keeps the dispatcher off API-credit billing. It complements `subprocess_dispatch.py` (Wave 5 smart-context + terminal pinning), which runs headless `claude -p` and, after the June 15, 2026 billing change, bills API credits — so the subprocess lane is opt-in and blocked by default (`claude-headless` constraint; `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it).
+- `scripts/lib/tmux_interactive_dispatch.py`, the leaseless ephemeral lane (lane id `claude_tmux_subscription`)
+- the `force_tmux` / `force_tmux_reason` fields of `DispatchSpec`, validate Rule 12b and 12c, and the `--force-tmux` / `--force-tmux-reason` flags
+- the `VNX_ALLOW_TMUX_LANE` emergency brake and its `claude-tmux-lane` row in `docs/core/SUBSYSTEMS.md`
+- the `tmux` adapter of the deprecated raw-file form (`vnx dispatch <file.md>`), which was its default. The form itself still works with no flag and now defaults to the `subprocess` adapter. Naming `tmux` explicitly (`--adapter tmux`, an `Adapter: tmux` header or `VNX_ADAPTER=tmux`) is refused with a message that says why
 
-## When to use which lane
+## Why
 
-| Task | Lane | Why |
-|---|---|---|
-| Parallel / independent feature work | **tmux_interactive_dispatch.py** (default) | Leaseless ephemeral, isolated worktree per dispatch, subscription-safe |
-| Terminal-pinned single-worker PR | subprocess_dispatch.py | Wave 5 +30pp quality lift, lease management, triple-gate contract_hash binding |
-| Long-running worker (>30 min expected) | subprocess_dispatch.py | tmux-spawn has receipt-deadline failures on long workers |
-| Burn-in measurement work | subprocess_dispatch.py | Wave 1 shadow logging pinned to terminal |
-| PR review gate (codex_gate, gemini_review) | scripts/review_gate_manager.py | Creates canonical review_gates request/result artifacts |
-| Utility / ad-hoc claude-as-utility | direct Bash `claude --print` | No PR outcome, no Wave 1/5 contribution |
+The lane existed to keep claude workers on the subscription while headless `claude -p` was believed to be API-metered after the June 2026 cutover. That never happened. Anthropic does not bill headless outside the subscription (measured 2026-08-11 from the auth state, confirmed by the operator on 2026-09-18), so the lane had no billing reason left.
 
-## Canonical command
+It had also been unreachable through the door since 2026-09-12, when `validate()` started refusing `force_tmux` unless `VNX_ALLOW_TMUX_LANE=1`, and nothing set that variable.
 
-```bash
-# VNX paths (VNX_STATE_DIR / VNX_DATA_DIR / VNX_DISPATCH_DIR) resolve centrally
-# via the vnx runtime — do NOT hardcode .vnx-data/ literals here. A repo-local
-# pin forks state from the central store (~/.vnx-data/<project>) = split-brain.
+## What claude dispatches use now
 
-python3 scripts/lib/tmux_interactive_dispatch.py \
-  --dispatch-id "$(date +%Y%m%d-%H%M%S)-<slug>" \
-  --role backend-developer \
-  --model sonnet \
-  --dispatch-paths "<comma-separated-paths>" \
-  --from-staging-id "<dispatch-id>" \
-  --deadline-seconds 2400 \
-  --instruction "<inline instruction text>"
-```
+`claude_headless` (`dispatch_envelope.run_envelope_headless_plan`) is the only claude lane. `dispatch_plan.resolve_claude_lane()` returns it for every `provider=claude` spec. Lane selection, billing and the model rows are in `docs/core/DISPATCH_RULES.md` §5 and §8.
 
-Required flags: `--dispatch-id`, `--instruction`. Defaults: `--isolated-worktree` on, `--model sonnet`, `--base-ref origin/main`. Staging gate enforced via `--from-staging-id` (per ADR-006).
+A staged spec that was written before the removal and still carries `force_tmux: true` does not crash. `dispatch_cli.load_spec` ignores the field, prints a warning to stderr with the reason the spec carried, and the dispatch runs on `claude_headless`.
 
-`--model sonnet` above is illustrative of the claude-lane CLI shape only. Since worker-provider-kimi-flip (2026-07-23), T1/T2/T3 are pinned to `kimi-k3` (`workers-kimi-pinned` constraint, loaded unconditionally by `dispatch_cli._load_model_pins_from_yaml()`), and that pin applies to the `provider` field at staging time, not this tmux-spawn CLI — `tmux_interactive_dispatch.py`/`--model sonnet` only runs for an explicit `provider=claude` build-worker override, and the door's registry check now correctly REJECTS a claude-lane T1/T2/T3 dispatch (the kimi-k3 pin is not a valid Claude model) rather than silently resolving it to `claude-sonnet-5`. T0 stays on Opus.
+## The rollback hatch
 
-The detached spawn also defaults to blanket `--dangerously-skip-permissions` (#1016) — the isolated per-dispatch worktree already bounds blast radius, so the scoped posture is opt-in via `VNX_WORKER_SCOPED=1` rather than the default. See `docs/operations/WORKER_PERMISSIONS.md`.
+The raw-file form is the documented rollback hatch (`VNX_DISPATCH_LEGACY=1`): it is how work gets out when the door itself is broken. It therefore keeps working with no extra flag. `vnx dispatch <file.md>` runs on the subprocess lane where it used to default to tmux, and it prints the same ADR-025 deprecation warning as before. Only the adapter changed. The form still leaves in 1.x per ADR-025; this removal does not change that.
 
-## Concurrency
+## What stayed
 
-The lane's account-level serial lock (`scripts/lib/dispatch_serialization.py`) defaults to `N=10` (operator directive 2026-08-21, dispatch-20260821-t0-tmux-concurrency-10 — the subscription-safe default now that #1451 gives every tmux dispatch its own named paste buffer; see `DISPATCH_RULES.md` §6). Set `VNX_TMUX_MAX_CONCURRENT=<N>` to run up to `N` tmux-spawn workers concurrently instead; this is an explicit operator opt-in (env var, or the registry-backed config-store value), not a default the lane creeps towards, and raising it further trades serialization safety for throughput against the account's real session cap. A stale lock (any slot) is cleared with `vnx dispatch --force-release-lock claude-tmux`.
+The removal is limited to the lane. Tmux session management is untouched:
 
-## Known reliability gaps
-
-- **Receipt-deadline failures on long workers.** If a worker runs longer than the `--deadline-seconds` budget, the lane reaps the session with `worktree_state=clean` and no commits land. Mitigation: budget generously for unknown work, or use `subprocess_dispatch.py` for work expected to exceed 30 min. Tracked in memory `tmux-spawn-regression-dogfood-gap`.
-- **`.claude/skills/` meta-path edits silently no-op.** Workers in this lane (and the subprocess lane) fail silently when asked to edit files inside `.claude/skills/` — the skill the worker just loaded. Observed 2026-06-03 (OI-188). Edit those files manually from T0 or the operator until worker permission handling is investigated.
-
-## Implementation
-
-- Entry point: `scripts/lib/tmux_interactive_dispatch.py`
-- Isolated worktree creation: `scripts/lib/tmux_worktree.py`
-- Receipt flow: writes report under `$VNX_DATA_DIR/unified_reports/<dispatch-id>.md` → receipt processor → `t0_receipts.ndjson`
-- Billing safety: only `subprocess.Popen(["tmux", ...])` and an interactive `claude` binary are invoked; no Anthropic SDK import anywhere in the module
-
-## Related
-
-- `docs/operations/SUBPROCESS_ADAPTER_FEATURE_FLAG.md` — the headless `claude -p` adapter for terminal-pinned workers
-- `docs/operations/WORKER_PERMISSIONS.md` — the `VNX_WORKER_SCOPED` opt-in, `.vnx/worker_permissions.yaml`, and the `working_tree_only` fail-closed rule
-- `docs/core/DISPATCH_RULES.md` §6 — the N-slot serial lock (`VNX_TMUX_MAX_CONCURRENT`) and `--force-release-lock`
-- t0-orchestrator skill §9.2 — full dispatch-routing decision rule (canonical T0 reference)
-- ADR-006 — staging→pending→promote gate enforcement
+- `scripts/lib/tmux_adapter.py` (`TmuxAdapter`), which routes terminal-pinned dispatches, and `scripts/lib/tmux_worktree.py`
+- the signalling and session hooks under `scripts/hooks/` (`tmux_signal_*`, `session_*`)
+- the worker-permission relay (`scripts/lib/worker_permission_relay.py`, `scripts/permission_relay_cli.py`). Its tmux transport moved to `scripts/lib/tmux_command_runner.py`
+- the account-wide serialization lock. Its class keeps the historical name `claude-tmux` and is now held by the headless lane (`VNX_TMUX_MAX_CONCURRENT`)

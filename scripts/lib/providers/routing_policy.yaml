@@ -89,7 +89,7 @@ fallback_chain:
 # scripts/lib/dispatch_cli.py::_execute_claude_headless (the last gate
 # before spawn) instead of a hardcoded env-only check. Every OTHER entry in
 # this block (claude_serial_under_load, codex_retry_once, kimi_quota_fail_fast,
-# tmux_spawn_max_runtime, haiku_receipt_nondeterminism) remains DECLARATIVE —
+# haiku_receipt_nondeterminism) remains DECLARATIVE —
 # exposed by load_lane_safety() for tooling/tests, but not read by any runtime
 # gating decision. Do not rely on them as live guards.
 lane_safety:
@@ -166,15 +166,6 @@ lane_safety:
     on_error_reason: "quota_or_auth"
     max_retries: 0
     reason: "Quota-exhaustion measured 2026-06-07; deterministic failure until cycle reset"
-
-  # tmux-spawn has receipt-deadline failures on long-running workers (documented
-  # lane gap, t0-orchestrator skill §9.2). Workers with an expected runtime
-  # over 30 min must route via subprocess_dispatch instead.
-  tmux_spawn_max_runtime:
-    lane: "tmux-spawn"
-    max_expected_runtime_seconds: 1800
-    overflow_route: "subprocess"
-    reason: "Receipt-deadline failures on >30min workers; known lane gap"
 
   # Haiku on trivial tasks via tmux-spawn produced receipts non-deterministically
   # (measured 2026-06: 10-worker load test, 10/10 clean teardown but 5/10

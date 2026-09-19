@@ -699,12 +699,11 @@ class TestSubprocessLaneMarker(HookTestCase):
          ``--settings`` flag, so a headless ``claude -p`` spawn falls back to the
          same cwd-based settings discovery that the spike proved live for the
          tmux lane (E1/E2) — the discovery mechanism is identical by construction.
-      2. The registration written at worktree allocation anchors the hook at the
-         FABRIC install root (OI-1089 finding 1): the worker-scope script ships
-         only with the fabric, so the command bakes in the fabric-absolute path
-         (vnx_paths._resolve_vnx_home) and never resolves against a
-         consumer/worktree git top-level that lacks ``scripts/hooks/``.
-      3. The hook assets the registration points at exist and are executable.
+      2. The hook assets exist and are executable.
+
+    The tmux lane's registration test (the hook command anchored at the fabric
+    install root, OI-1089 finding 1) went with that lane on 2026-09-18; the
+    registration function lived in it.
 
     What remains DEFERRED (explicit, per spike E4 recommendation): a live-fire
     marker test proving a PreToolUse hook actually fires inside a real
@@ -728,32 +727,6 @@ class TestSubprocessLaneMarker(HookTestCase):
             "subprocess lane must not override settings discovery with --settings; "
             "cwd-based discovery is the mechanism the worktree hook wiring relies on",
         )
-
-    def test_hook_registration_anchors_at_fabric_root(self):
-        from tmux_interactive_dispatch import _worker_scope_hook_entry
-
-        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
-        entry = _worker_scope_hook_entry()
-        command = entry["hooks"][0]["command"]
-        # OI-1089 finding 1: the hook ships only with the fabric. The command
-        # bakes in the fabric-absolute path at registration and must never fall
-        # back to a consumer/worktree git top-level that lacks scripts/hooks/.
-        self.assertNotIn(
-            "git rev-parse",
-            command,
-            "hook command must not resolve against the firing cwd's git top-level",
-        )
-        self.assertIn(
-            "scripts/hooks/pretooluse_worker_scope_enforce.sh",
-            command,
-            "hook command must point at the fabric hook artifact",
-        )
-        self.assertIn(
-            "MISSING",
-            command,
-            "a missing fabric artifact must fail loud instead of silently no-oping",
-        )
-        self.assertEqual(entry["matcher"], "Bash|Write|Edit|MultiEdit")
 
     def test_hook_assets_exist_and_launcher_is_executable(self):
         self.assertTrue(HOOK_PY.exists())

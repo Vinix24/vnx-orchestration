@@ -1213,16 +1213,14 @@ VNX drives every provider as a CLI subprocess and never imports a vendor SDK
 which provider may serve which lane live in one machine-readable SSOT:
 `scripts/lib/providers/provider_constraints.yaml`.
 
-Two Claude worker lanes exist:
+Claude runs on one lane, with a terminal-pinned variant:
 
-- **claude-tmux-spawn** (`scripts/lib/tmux_interactive_dispatch.py`) — the
-  default. Interactive `claude` (never `claude -p`) in a single-shot tmux
-  session, on the subscription. `dispatch.sh` selects it unless a dispatch opts
-  into the burst lane.
-- **claude-subprocess** (`scripts/lib/subprocess_dispatch.py`) — the headless
-  `claude -p` burst lane. After the June 15, 2026 billing change it bills API
-  credits, so it is opt-in and blocked by default (`claude-headless` constraint;
-  `VNX_OVERRIDE_CLAUDE_HEADLESS=1` to open it).
+- **claude-headless** (`dispatch_envelope.run_envelope_headless_plan`) — the only
+  Claude worker lane since the tmux-spawn lane was removed on 2026-09-18.
+  `claude -p` in an isolated worktree, on the subscription.
+- **claude-subprocess** (`scripts/lib/subprocess_dispatch.py`) — the
+  terminal-pinned `claude -p` lane, opt-in per terminal
+  (`VNX_ADAPTER_T{n}=subprocess`).
 
 Non-Claude providers (codex, gemini, kimi, deepseek-harness, litellm sub-providers,
 local-gemma) route through `scripts/lib/provider_dispatch.py`. Kimi is CLI-OAuth

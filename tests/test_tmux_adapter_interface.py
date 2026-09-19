@@ -247,16 +247,18 @@ class TestDirectCouplingFreeze:
 
     PROTECTED_PATH = Path(__file__).parent.parent / "scripts" / "lib"
     # Modules authorized to own direct tmux subprocess calls.
-    # tmux_interactive_dispatch.py (PR-TMUX-1) is a tmux-owning lane: it spawns
-    # ephemeral detached sessions (new-session -d / capture-pane / kill-session)
-    # that TmuxAdapter does not expose, so it belongs in this allowlist.
+    # tmux_command_runner.py is the injectable transport for the worker-permission
+    # relay (worker_permission_relay / permission_relay_cli). It owns the one direct
+    # `subprocess.run(["tmux", ...])` those callers drive through an object runner,
+    # so it belongs in this allowlist. It replaced tmux_interactive_dispatch.py, the
+    # tmux dispatch lane that carried this same code until its removal (2026-09-18).
     # dashboard_actions.py owns the layout-builder layer (direct tmux invocation
     # for 2x2 dev / business-light session creation and session-exists checks).
     # terminal_snapshot.py owns pane-state snapshots via a direct tmux fallback.
     ADAPTER_FILES = {
         "tmux_adapter.py",
         "tmux_session_profile.py",
-        "tmux_interactive_dispatch.py",
+        "tmux_command_runner.py",
         "dashboard_actions.py",          # layout builder — direct tmux invocation authorized
         "terminal_snapshot.py",          # pane snapshot fallback — direct tmux read authorized
         "terminal_state_reconciler.py",  # state reconciler — conditional tmux pane probe authorized

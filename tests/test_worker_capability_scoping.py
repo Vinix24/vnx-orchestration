@@ -19,9 +19,11 @@ Covers:
      skip-permissions opt-in via VNX_WORKER_BLANKET_SKIP=1
   4. resolve_worker_profile() fallback for unknown / empty roles
   5. VNX_WORKER_BLANKET_SKIP=1 / falsy VNX_WORKER_SCOPED opts into the blanket posture
-  6. tmux _default_launch_command() detached spawn is scoped by default (no skip
-     flag, empty MCP); VNX_WORKER_BLANKET_SKIP=1 opts into the blanket posture
-  7. negative-path: empty profile yields a still-valid scope argv
+  6. negative-path: empty profile yields a still-valid scope argv
+
+The tmux lane's detached-spawn tests (scoped by default, no-stall allow-list, build
+toolchain coverage of its launch command and of its inline import fallback) went with
+that lane on 2026-09-18.
 """
 
 from __future__ import annotations
@@ -37,7 +39,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
 from subprocess_adapter import SubprocessAdapter
-from tmux_interactive_dispatch import _default_launch_command
 from worker_permissions import (
     DEFAULT_CODE_WORKER_TOOLS,
     EMPTY_MCP_CONFIG,
@@ -290,31 +291,6 @@ class TestDeliverSpawnArgv:
 
 
 # ---------------------------------------------------------------------------
-# 5. tmux detached spawn
-# ---------------------------------------------------------------------------
-
-class TestTmuxDetachedSpawn:
-    def test_detached_default_is_scoped(self):
-        cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG not in cmd
-        assert "--strict-mcp-config" in cmd
-        assert "--permission-mode acceptEdits" in cmd
-        assert '{"mcpServers":{}}' in cmd
-
-    def test_attached_run_unchanged(self):
-        cmd = _default_launch_command("sonnet", skip_permissions=False)
-        assert SKIP_FLAG not in cmd
-        assert "--strict-mcp-config" not in cmd
-        assert cmd == "source ~/.zshrc 2>/dev/null; claude --model sonnet"
-
-    def test_detached_flag_on_enables_scoping(self, monkeypatch):
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
-        cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG not in cmd
-        assert "--strict-mcp-config" in cmd
-
-
-# ---------------------------------------------------------------------------
 # 6. feature flag helper
 # ---------------------------------------------------------------------------
 
@@ -347,54 +323,6 @@ class TestWorkerScopedEnabled:
         monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
         assert worker_scoped_enabled() is False
-
-
-# ---------------------------------------------------------------------------
-# 7. FIX 1: detached tmux spawn must include --allowedTools (no-stall)
-# ---------------------------------------------------------------------------
-
-class TestTmuxDetachedNoStall:
-    """Detached worker gets the scoped allow-list by default (no TTY to answer
-    prompts); opting into --dangerously-skip-permissions now requires BOTH
-    VNX_WORKER_BLANKET_SKIP=1 (scoped, 14-08) AND VNX_WORKER_ENFORCEMENT_SKIP=1
-    (ADR-012 enforcement, 15-08)."""
-
-    def test_detached_spawn_is_scoped_by_default(self):
-        cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG not in cmd
-        assert "--allowedTools" in cmd
-
-    def test_detached_spawn_blanket_skip_has_no_allowed_tools(self, monkeypatch):
-        monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
-        monkeypatch.delenv("VNX_WORKER_ENFORCEMENT_SKIP", raising=False)
-        monkeypatch.setenv("VNX_WORKER_BLANKET_SKIP", "1")
-        monkeypatch.setenv("VNX_WORKER_ENFORCEMENT_SKIP", "1")
-        cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert SKIP_FLAG in cmd
-        assert "--allowedTools" not in cmd
-
-    def test_detached_spawn_scoped_has_allowed_tools(self, monkeypatch):
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
-        cmd = _default_launch_command("sonnet", skip_permissions=True)
-        assert "--allowedTools" in cmd
-        assert SKIP_FLAG not in cmd
-
-    def test_detached_spawn_scoped_allowed_tools_cover_code_essentials(self, monkeypatch):
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
-        import shlex as _shlex
-        cmd = _default_launch_command("sonnet", skip_permissions=True)
-        tokens = _shlex.split(cmd)
-        idx = tokens.index("--allowedTools")
-        allowed = set(tokens[idx + 1].split(","))
-        assert CODE_WORKER_ESSENTIALS.issubset(allowed), (
-            f"essentials missing from --allowedTools: {CODE_WORKER_ESSENTIALS - allowed}"
-        )
-
-    def test_attached_spawn_no_allowed_tools_injected(self):
-        # Attached (human-in-loop) sessions are unchanged; no allowedTools injected.
-        cmd = _default_launch_command("sonnet", skip_permissions=False)
-        assert "--allowedTools" not in cmd
-        assert SKIP_FLAG not in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -614,9 +542,6 @@ class TestClaudeSpawnRoleForwarding:
 # ---------------------------------------------------------------------------
 
 _REAL_YAML_PATH = Path(__file__).resolve().parents[1] / ".vnx" / "worker_permissions.yaml"
-_TMUX_DISPATCH_SRC_PATH = (
-    Path(__file__).resolve().parents[1] / "scripts" / "lib" / "tmux_interactive_dispatch.py"
-)
 
 
 class TestBuildToolchainAllowlistCoverage:
@@ -658,54 +583,3 @@ class TestBuildToolchainAllowlistCoverage:
         deny_idx = args.index("--disallowedTools")
         denied = set(args[deny_idx + 1].split(","))
         assert {"WebSearch", "WebFetch"}.issubset(denied)
-
-    def test_tmux_detached_spawn_scoped_covers_build_toolchain(self, monkeypatch):
-        # End-to-end: VNX_WORKER_SCOPED=1 + role="backend-developer" resolves
-        # the real project yaml via worker_permissions' sibling-path lookup
-        # (Path(__file__).resolve().parents[2] from scripts/lib/), independent
-        # of ambient VNX_PROJECT_ROOT/PROJECT_ROOT env vars.
-        monkeypatch.delenv("VNX_PROJECT_ROOT", raising=False)
-        monkeypatch.delenv("PROJECT_ROOT", raising=False)
-        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
-        import shlex as _shlex
-        cmd = _default_launch_command(
-            "sonnet", skip_permissions=True, role="backend-developer"
-        )
-        tokens = _shlex.split(cmd)
-        idx = tokens.index("--allowedTools")
-        allowed = set(tokens[idx + 1].split(","))
-        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed), (
-            f"missing from scoped tmux spawn --allowedTools: {BUILD_TOOLCHAIN_PATTERNS - allowed}"
-        )
-
-    def test_enforcement_flag_also_covers_build_toolchain(self, monkeypatch):
-        # VNX_ENFORCE_WORKER_PERMISSIONS=1 (ADR-012) is the other flag that
-        # opts into the scoped posture; must get the same coverage.
-        monkeypatch.delenv("VNX_PROJECT_ROOT", raising=False)
-        monkeypatch.delenv("PROJECT_ROOT", raising=False)
-        monkeypatch.delenv("VNX_WORKER_SCOPED", raising=False)
-        monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", "1")
-        import shlex as _shlex
-        cmd = _default_launch_command(
-            "sonnet", skip_permissions=True, role="backend-developer"
-        )
-        tokens = _shlex.split(cmd)
-        idx = tokens.index("--allowedTools")
-        allowed = set(tokens[idx + 1].split(","))
-        assert BUILD_TOOLCHAIN_PATTERNS.issubset(allowed)
-
-    def test_inline_import_fallback_stays_in_parity_with_default_code_worker_tools(self):
-        # tmux_interactive_dispatch.py defines an inline fallback
-        # _wp_build_claude_scope_args (used only when `import worker_permissions`
-        # fails) with a hardcoded --allowedTools string that must be hand-kept
-        # in parity with DEFAULT_CODE_WORKER_TOOLS. This regression test reads
-        # the source text so drift is caught without simulating an ImportError
-        # at module-load time.
-        source = _TMUX_DISPATCH_SRC_PATH.read_text()
-        start = source.index("def _wp_build_claude_scope_args(profile")
-        end = source.index("def _wp_resolve_worker_profile", start)
-        fallback_body = source[start:end]
-        for pattern in BUILD_TOOLCHAIN_PATTERNS:
-            assert pattern in fallback_body, (
-                f"inline fallback in tmux_interactive_dispatch.py missing {pattern!r}"
-            )

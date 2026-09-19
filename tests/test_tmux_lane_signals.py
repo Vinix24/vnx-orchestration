@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Tests for the hook-driven tmux interactive lane signals.
+"""Tests for the tmux signal hook scripts (scripts/hooks/tmux_signal_*.sh).
 
-Covers the version-agnostic hook-contract path that replaces TUI-string scraping:
-- SessionStart sentinel → readiness (with TUI-marker fallback)
-- UserPromptSubmit sentinel → submission (with _still_staged fallback)
-- _looks_working() structural token-counter detector (2.1.160-robust)
-- The guarded hook sentinel scripts (no-op when worker env unset)
+Covers:
+- The guarded hook sentinel scripts (no-op when the worker env is unset)
 - The Stop hook receipt-guarantee via the #788 converter (hermetic temp dirs)
 
-The receipt remains authoritative for completion; these tests assert the lane no
-longer hard-depends on a specific Claude Code version's TUI wording.
+The tmux dispatch lane that consumed these sentinels was removed on 2026-09-18;
+the hooks stay as session management, so their contract stays under test.
 """
 
 from __future__ import annotations
@@ -28,8 +25,6 @@ SCRIPT_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from tmux_interactive_dispatch import TmuxInteractiveDispatch, TmuxResult  # noqa: E402
-from runtime_coordination import get_connection, get_events, init_schema  # noqa: E402
 
 HOOKS_DIR = SCRIPT_DIR / "hooks"
 SESSION_READY_HOOK = HOOKS_DIR / "tmux_signal_session_ready.sh"
@@ -37,147 +32,21 @@ PROMPT_RECEIVED_HOOK = HOOKS_DIR / "tmux_signal_prompt_received.sh"
 STOP_RECEIPT_HOOK = HOOKS_DIR / "tmux_signal_stop_receipt.sh"
 
 
-class _CaptureRunner:
-    """Minimal tmux runner stub: capture-pane returns a fixed content string."""
+def _completion_protocol_block(dispatch_id: str) -> str:
+    """The appended completion-protocol block the prompt-received hook parses.
 
-    def __init__(self, capture_content: str = "") -> None:
-        self._capture_content = capture_content
-        self.commands: list[list[str]] = []
-
-    def available(self) -> bool:
-        return True
-
-    def run(self, args, *, timeout: int = 10, input_text=None) -> TmuxResult:
-        self.commands.append(list(args))
-        if args and args[0] == "capture-pane":
-            return TmuxResult(0, self._capture_content)
-        return TmuxResult(0, "")
-
-
-def _make_lane(runner: _CaptureRunner, root: Path) -> TmuxInteractiveDispatch:
-    return TmuxInteractiveDispatch(
-        root,
-        runner=runner,
-        receipts_file=root / "t0_receipts.ndjson",
-        project_root=root,
+    The hook anchors on the block's fixed heading and reads the escaped
+    ``dispatch_id`` inside its fenced command. This shape is frozen from the
+    tmux lane's ``_build_completion_protocol`` (last present at commit 6ad8f587,
+    removed 2026-09-18): the lane no longer exists to generate it, so the
+    fixture is now the hook's own contract.
+    """
+    return (
+        "\n## Completion Protocol (interactive lane)\n\n```bash\n"
+        "python3 /abs/scripts/append_receipt.py --receipt "
+        f'"{{\\"event_type\\": \\"subprocess_completion\\", \\"dispatch_id\\": \\"{dispatch_id}\\"}}"\n'
+        "```\n"
     )
-
-
-# ---------------------------------------------------------------------------
-# Readiness: sentinel-first, TUI fallback
-# ---------------------------------------------------------------------------
-class TestReadinessSentinel(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
-
-    def test_session_ready_sentinel_marks_ready_without_tui_marker(self) -> None:
-        # Pane content has NO TUI readiness marker — only the sentinel proves ready.
-        runner = _CaptureRunner(capture_content="(nothing recognizable here)")
-        lane = _make_lane(runner, self.root)
-        sig = self.root / "sig"
-        sig.mkdir()
-        (sig / "session_ready").write_text("dispatch-x\n", encoding="utf-8")
-
-        ready = lane._wait_ready(
-            "%1",
-            ready_markers=("for shortcuts",),
-            warmup_timeout=0.5,
-            poll_interval=0.01,
-            signal_dir=sig,
-        )
-        self.assertTrue(ready)
-
-    def test_empty_signal_dir_falls_back_to_tui_markers(self) -> None:
-        # No sentinel; pane shows a TUI marker → fallback path returns ready.
-        runner = _CaptureRunner(capture_content="Welcome\n? for shortcuts")
-        lane = _make_lane(runner, self.root)
-        sig = self.root / "sig"
-        sig.mkdir()  # empty — no session_ready file
-
-        ready = lane._wait_ready(
-            "%1",
-            ready_markers=("for shortcuts",),
-            warmup_timeout=0.5,
-            poll_interval=0.01,
-            signal_dir=sig,
-        )
-        self.assertTrue(ready)
-
-    def test_no_sentinel_no_marker_times_out(self) -> None:
-        runner = _CaptureRunner(capture_content="(no marker)")
-        lane = _make_lane(runner, self.root)
-        sig = self.root / "sig"
-        sig.mkdir()
-
-        ready = lane._wait_ready(
-            "%1",
-            ready_markers=("for shortcuts",),
-            warmup_timeout=0.1,
-            poll_interval=0.01,
-            signal_dir=sig,
-        )
-        self.assertFalse(ready)
-
-
-# ---------------------------------------------------------------------------
-# Submission: sentinel-first, _still_staged fallback
-# ---------------------------------------------------------------------------
-class TestSubmissionSentinel(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
-
-    def test_prompt_received_sentinel_treated_as_submitted(self) -> None:
-        # Pane still shows the staged paste, but the hook sentinel overrides it.
-        staged = "[Pasted text +120 lines]\n<!-- VNX-END-OF-INSTRUCTION -->"
-        runner = _CaptureRunner(capture_content=staged)
-        lane = _make_lane(runner, self.root)
-        sig = self.root / "sig"
-        sig.mkdir()
-        (sig / "prompt_received").write_text("dispatch-x\n", encoding="utf-8")
-
-        with _fast_submit_env():
-            submitted = lane._verify_submit("%1", "Do the thing.", signal_dir=sig)
-        self.assertTrue(submitted)
-
-    def test_no_sentinel_uses_working_marker_fallback(self) -> None:
-        # No sentinel; pane shows the working token-counter → submitted via fallback.
-        runner = _CaptureRunner(capture_content="✢ Smooshing… (18s · ↓ 739 tokens)")
-        lane = _make_lane(runner, self.root)
-        sig = self.root / "sig"
-        sig.mkdir()  # empty
-
-        with _fast_submit_env():
-            submitted = lane._verify_submit("%1", "Do the thing.", signal_dir=sig)
-        self.assertTrue(submitted)
-
-
-# ---------------------------------------------------------------------------
-# _looks_working: version-robust structural detector
-# ---------------------------------------------------------------------------
-class TestLooksWorking(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.lane = _make_lane(_CaptureRunner(), Path(self._tmp.name))
-
-    def test_true_for_2_1_160_spinner_token_counter(self) -> None:
-        self.assertTrue(self.lane._looks_working("✢ Smooshing… (18s · ↓ 739 tokens)"))
-
-    def test_true_for_up_tokens_variant(self) -> None:
-        self.assertTrue(self.lane._looks_working("● Pondering (3s · ↑ 12 tokens)"))
-
-    def test_true_for_legacy_esc_to_interrupt(self) -> None:
-        self.assertTrue(self.lane._looks_working("... (esc to interrupt)"))
-
-    def test_false_for_idle_prompt_glyph(self) -> None:
-        self.assertFalse(self.lane._looks_working("❯ "))
-
-    def test_false_for_empty(self) -> None:
-        self.assertFalse(self.lane._looks_working(""))
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +178,9 @@ class TestHookGuards(unittest.TestCase):
 
     # -- OI-1126 round 3: scope the extraction to the appended protocol block --
     #
-    # Fixtures below are built the way the lane actually assembles a body:
-    # context text FIRST, completion-protocol block APPENDED LAST (matching
-    # `body = _context_body + ... + self._build_completion_protocol(...)` in
-    # tmux_interactive_dispatch.py's dispatch()). The protocol text itself
-    # comes from the real `_build_completion_protocol()` method, not a
-    # hand-typed guess, so the fixture can't drift from production shape.
+    # Fixtures below are built the way the removed lane assembled a body:
+    # context text FIRST, completion-protocol block APPENDED LAST (see
+    # _completion_protocol_block).
 
     @unittest.skipUnless(shutil.which("jq"), "jq not available")
     def test_prompt_received_ignores_foreign_id_quoted_earlier_in_body(self) -> None:
@@ -325,13 +191,12 @@ class TestHookGuards(unittest.TestCase):
         trip the mismatch guard just because that foreign value appears
         BEFORE the code-guaranteed, always-appended-last protocol block."""
         sig = self.root / "sig-false-kill"
-        lane = _make_lane(_CaptureRunner(), self.root)
         context_body = (
             "Fix the receipt converter so it stops choking on this stale ledger "
             'excerpt: {"dispatch_id": "disp-FOREIGN-OLD", "status": "done"}\n\n'
             "Now implement the fix and commit.\n"
         )
-        protocol_block = lane._build_completion_protocol("disp-prompt", "disp-prompt")
+        protocol_block = _completion_protocol_block("disp-prompt")
         prompt = context_body + protocol_block
         proc = self._run_hook(
             PROMPT_RECEIVED_HOOK,
@@ -352,13 +217,12 @@ class TestHookGuards(unittest.TestCase):
         crossing carried by the appended protocol block — the recorded
         delivered value must be the protocol's, not the body's earlier one."""
         sig = self.root / "sig-masking"
-        lane = _make_lane(_CaptureRunner(), self.root)
         context_body = (
             "Ledger excerpt for reference: "
             '{"dispatch_id": "disp-FOREIGN-OLD", "status": "done"}\n\n'
             "Now implement the fix and commit.\n"
         )
-        protocol_block = lane._build_completion_protocol("disp-CROSSED", "disp-CROSSED")
+        protocol_block = _completion_protocol_block("disp-CROSSED")
         prompt = context_body + protocol_block
         proc = self._run_hook(
             PROMPT_RECEIVED_HOOK,
@@ -376,12 +240,10 @@ class TestHookGuards(unittest.TestCase):
     @unittest.skipUnless(shutil.which("jq"), "jq not available")
     def test_prompt_received_no_mismatch_when_protocol_id_agrees_with_env(self) -> None:
         """Baseline still holds: a realistic context body plus the appended
-        protocol block (built via the real dispatcher method) carrying the
-        correct id writes no sentinel."""
+        protocol block carrying the correct id writes no sentinel."""
         sig = self.root / "sig-baseline-agree"
-        lane = _make_lane(_CaptureRunner(), self.root)
         context_body = "Implement the fix described above, then commit and push.\n"
-        protocol_block = lane._build_completion_protocol("disp-prompt", "disp-prompt")
+        protocol_block = _completion_protocol_block("disp-prompt")
         prompt = context_body + protocol_block
         proc = self._run_hook(
             PROMPT_RECEIVED_HOOK,
@@ -465,97 +327,6 @@ class TestHookGuards(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# F1.1 session_id verifier: lane-side comparison
-# ---------------------------------------------------------------------------
-class TestSessionIdVerifier(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
-        init_schema(self.root)
-        self.lane = _make_lane(_CaptureRunner(), self.root)
-
-    def _events(self, dispatch_id: str, event_type: str) -> list[dict]:
-        with get_connection(self.root) as conn:
-            return get_events(conn, entity_id=dispatch_id, event_type=event_type)
-
-    def test_matching_session_id_emits_no_event(self) -> None:
-        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
-        sig = self.root / "sig-match"
-        sig.mkdir()
-        (sig / "session_id").write_text(session_uuid + "\n", encoding="utf-8")
-
-        self.lane._verify_session_id(
-            sig, session_uuid, dispatch_id="disp-match", label="T1"
-        )
-        self.assertEqual(
-            len(self._events("disp-match", "session_id_mismatch")), 0
-        )
-
-    def test_different_session_id_emits_mismatch_event(self) -> None:
-        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
-        sig = self.root / "sig-mismatch"
-        sig.mkdir()
-        (sig / "session_id").write_text("00000000-0000-0000-0000-000000000000\n", encoding="utf-8")
-
-        self.lane._verify_session_id(
-            sig, session_uuid, dispatch_id="disp-mismatch", label="T1"
-        )
-        events = self._events("disp-mismatch", "session_id_mismatch")
-        self.assertEqual(len(events), 1)
-        meta = json.loads(events[0]["metadata_json"])
-        self.assertEqual(meta["pre_assigned_session_id"], session_uuid)
-        self.assertEqual(meta["hook_session_id"], "00000000-0000-0000-0000-000000000000")
-
-    def test_missing_session_id_file_emits_no_event(self) -> None:
-        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
-        sig = self.root / "sig-missing"
-        sig.mkdir()
-
-        self.lane._verify_session_id(
-            sig, session_uuid, dispatch_id="disp-missing", label="T1"
-        )
-        self.assertEqual(
-            len(self._events("disp-missing", "session_id_mismatch")), 0
-        )
-
-    def test_empty_session_id_file_emits_no_event(self) -> None:
-        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
-        sig = self.root / "sig-empty"
-        sig.mkdir()
-        (sig / "session_id").write_text("\n", encoding="utf-8")
-
-        self.lane._verify_session_id(
-            sig, session_uuid, dispatch_id="disp-empty", label="T1"
-        )
-        self.assertEqual(
-            len(self._events("disp-empty", "session_id_mismatch")), 0
-        )
-
-    def test_none_session_uuid_skips_verification(self) -> None:
-        sig = self.root / "sig-none"
-        sig.mkdir()
-        (sig / "session_id").write_text("unexpected-value\n", encoding="utf-8")
-
-        self.lane._verify_session_id(
-            sig, None, dispatch_id="disp-none", label="T1"
-        )
-        self.assertEqual(
-            len(self._events("disp-none", "session_id_mismatch")), 0
-        )
-
-    def test_none_signal_dir_skips_verification(self) -> None:
-        session_uuid = "123e4567-e89b-12d3-a456-426614174000"
-
-        self.lane._verify_session_id(
-            None, session_uuid, dispatch_id="disp-no-sig", label="T1"
-        )
-        self.assertEqual(
-            len(self._events("disp-no-sig", "session_id_mismatch")), 0
-        )
-
-
-# ---------------------------------------------------------------------------
 # Stop hook: receipt-guarantee via the #788 converter (hermetic)
 # ---------------------------------------------------------------------------
 _VALID_REPORT = """\
@@ -571,7 +342,6 @@ version-agnostic readiness and submission path end to end.
 
 ## Changes
 
-- scripts/lib/tmux_interactive_dispatch.py
 - scripts/hooks/tmux_signal_*.sh
 
 ## Verification
@@ -667,29 +437,6 @@ class TestStopReceiptGuarantee(unittest.TestCase):
         ]
         matching = [r for r in lines if r.get("dispatch_id") == did]
         self.assertEqual(len(matching), 1, f"expected exactly one receipt; got {matching}")
-
-
-class _fast_submit_env:
-    """Context manager: zero out submit-verify timing env so tests run fast."""
-
-    _ENV = {
-        "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
-        "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
-        "VNX_TMUX_SUBMIT_MAX_RETRIES": "1",
-    }
-
-    def __enter__(self):
-        self._saved = {k: os.environ.get(k) for k in self._ENV}
-        os.environ.update(self._ENV)
-        return self
-
-    def __exit__(self, *exc):
-        for k, v in self._saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        return False
 
 
 if __name__ == "__main__":

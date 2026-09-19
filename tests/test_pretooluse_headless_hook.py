@@ -115,8 +115,8 @@ class TestSubprocessPinLaneNotMatched:
 
     @pytest.mark.parametrize("enforce", [False, True])
     def test_adapter_subprocess_not_matched(self, enforce):
-        cmd = "python3 scripts/lib/tmux_interactive_dispatch.py --adapter subprocess --dispatch-id abc"
-        # --adapter is not the headless flag; tmux_interactive_dispatch.py IS a lane script
+        cmd = "python3 scripts/lib/subprocess_dispatch.py --adapter subprocess --dispatch-id abc"
+        # --adapter is not the headless flag; subprocess_dispatch.py IS a lane script
         # so this may be shadow-detected as lane_script_direct, but NOT as claude_allow_headless.
         # The key property: the decision is NOT 'block' in default mode; allow in shadow.
         result = _classify(cmd, enforce=False)

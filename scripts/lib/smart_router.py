@@ -703,7 +703,6 @@ _GOVERNANCE_CORE_PREFIXES: tuple[str, ...] = (
     # dispatch_sidedoor_audit scanner flags a literal "<lane>.py" on a code
     # line as a delivery caller. A bare prefix classifies the same files (and,
     # for subprocess_dispatch, its internals/ dir) without tripping that guard.
-    "scripts/lib/tmux_interactive_dispatch",
     "scripts/lib/subprocess_dispatch",
     "scripts/lib/subprocess_adapter.py",
     "scripts/lib/provider_dispatch",

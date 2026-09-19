@@ -584,14 +584,14 @@ class TestDryRunReachability:
         captured = capsys.readouterr()
         # No exception = green
 
-    def test_reachability_skipped_for_claude_tmux(self, capsys):
-        """Claude tmux lane should indicate it has no cheap endpoint check."""
+    def test_reachability_skipped_for_claude_headless(self, capsys):
+        """The claude headless lane should indicate it has no cheap endpoint check."""
         from dispatch_cli import _check_reachability
         from unittest.mock import MagicMock
 
         plan = MagicMock()
         plan.provider.value = "claude"
-        plan.lane = "claude_tmux_subscription"
+        plan.lane = "claude_headless"
         plan.dispatch_id = "test-claude"
         spec = MagicMock()
 
