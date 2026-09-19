@@ -1393,10 +1393,12 @@ def _make_router_broken(monkeypatch) -> None:
 def test_writing_spec_without_gate_is_refused_when_router_fails(tmp_path, monkeypatch, capsys):
     """A writing dispatch whose gate is still empty after derivation is refused.
 
-    The router fills every silent spec from its governance variant, so an empty
-    gate after ``_resolve_gate_via_router`` can only mean the derivation failed
-    (fail-open). The door must refuse that for a writing dispatch — the empty
-    gate is a governance decision that was never made, not a valid "no gate".
+    A silent spec leaves ``_resolve_gate_via_router`` with two ways to end up
+    empty, and both are refusals rather than a fallback: the router itself
+    raising (this test's case), or a configuration that names no review gate
+    (``tests/test_declared_gate_follows_configured_stack.py``). The door must
+    refuse either one for a writing dispatch — the empty gate is a governance
+    decision that was never made, not a valid "no gate".
     """
     data_dir, spec_file = _make_bundle(
         tmp_path,

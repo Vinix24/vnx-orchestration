@@ -1742,34 +1742,96 @@ def _tier_aware_fallback_model(tier: Optional[str], spec_model: Optional[str]) -
     return "sonnet"
 
 
-def _resolve_gate_via_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Optional[str]]":
-    """Fill the spec's review-gate from the router when the spec is silent.
+def _configured_review_gate() -> str:
+    """The operator's configured primary review gate, or "" when unset.
 
-    Punt 7 (gate-weight-by-variant): the router derives a ``governance_variant``
-    from the change (dispatch_paths + task_class) and maps it to a gate weight,
-    so a docs dispatch and a dispatch-door rewrite no longer land on the same
-    gate because one author chose it. An explicit gate on the spec always wins
-    (worker-provider-free-choice, pin_semantics=default: the router fills in,
-    it never overrides).
+    ``VNX_DEFAULT_REVIEW_STACK`` (config_registry) is the operator knob that
+    routes review gates by NAME — set per project in ``project_config``, e.g.
+    "glm_gate,claude_github_optional" — and it was introduced precisely so an
+    operator could move the review gate without editing code.
+
+    Only the FIRST entry is the dispatch's declared gate: an obligation names
+    one gate, and the head of the stack is the seat the operator put first.
+    ``ci_gate`` is skipped because it is not a review seat — the review stack
+    appends it separately under ``VNX_CI_GATE_REQUIRED`` and this door declares
+    the review gate, not the CI check.
+
+    Returns "" when the key is unset, unreadable or carries no non-ci entry.
+    The caller treats "" as a HARD failure (leaving the spec gate empty, which
+    the door then refuses for a writing dispatch) rather than falling back to
+    ``smart_router.GOVERNANCE_VARIANT_GATE``. That table is a starting
+    suggestion baked into the code; using it as a fallback is exactly how a
+    project sat for hours with obligations declaring ``codex_gate`` while the
+    operator's configuration named another gate (2026-09-19). A configuration
+    this process cannot read is amber, never silently green.
+    """
+    import config_runtime  # noqa: PLC0415
+
+    raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""
+    for item in raw.split(","):
+        name = item.strip()
+        if name and name != "ci_gate":
+            return name
+    return ""
+
+
+def _resolve_gate_via_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Optional[str]]":
+    """Fill the spec's review-gate from operator configuration when the spec is silent.
+
+    An explicit gate on the spec always wins (worker-provider-free-choice,
+    pin_semantics=default: the door fills in, it never overrides).
+
+    When the spec is silent the gate is the operator's configured primary
+    review gate (``_configured_review_gate``). The router still derives the
+    ``governance_variant`` so the trace keeps naming the risk class the change
+    fell into, and how far the configured gate sits from that class's suggested
+    weight — that part of Punt 7 is unchanged. What the configuration decides
+    is WHICH gate is declared; the variant no longer picks the name out of
+    ``smart_router.GOVERNANCE_VARIANT_GATE``.
 
     Returns (vspec, gate_reason): a rebuilt ValidatedSpec carrying the filled
     gate (or the original when the spec already declared one), and a trace
-    string for the dry-run output / receipt; never a bare None when the router
-    ran. Fail-open: a broken derivation returns the original vspec unchanged
-    with the gate left empty (today's baseline), logged at WARNING.
+    string for the dry-run output / receipt.
+
+    Two failures leave the gate empty, both loud and both deliberate:
+    an unreadable/empty ``VNX_DEFAULT_REVIEW_STACK`` (no silent fallback to the
+    hardcoded table), and an unexpected router error. A writing dispatch with
+    an empty gate is refused by the door's ``gate-required`` rule, so neither
+    reaches execution.
     """
     spec = vspec.spec
     if (spec.gate or "").strip():
         return vspec, None
 
     try:
+        configured_gate = _configured_review_gate()
+    except Exception as exc:
+        logger.warning(
+            "VNX_DEFAULT_REVIEW_STACK could not be read (%s); leaving the spec gate "
+            "empty — the door refuses a writing dispatch rather than falling back to a "
+            "hardcoded gate name",
+            exc,
+            exc_info=True,
+        )
+        return vspec, None
+
+    if not configured_gate:
+        logger.warning(
+            "VNX_DEFAULT_REVIEW_STACK resolved to no review gate; leaving the spec gate "
+            "empty — the door refuses a writing dispatch rather than falling back to a "
+            "hardcoded gate name"
+        )
+        return vspec, None
+
+    try:
         from smart_router import resolve_gate  # noqa: PLC0415
 
         resolution = resolve_gate(
-            explicit_gate=spec.gate,
+            explicit_gate=configured_gate,
             dispatch_paths=[str(dp.path) for dp in spec.dispatch_paths],
             task_class=spec.task_class,
             irreversible=spec.irreversible,
+            gate_source="from VNX_DEFAULT_REVIEW_STACK",
         )
     except Exception as exc:
         logger.warning(
