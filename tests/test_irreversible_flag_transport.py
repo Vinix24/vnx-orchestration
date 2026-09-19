@@ -197,10 +197,18 @@ def test_door_path_forwards_irreversible_true_to_resolve_gate(tmp_path, monkeypa
     with irreversible=True and assert on it — that tests the router, which
     already works (see test_smart_router_governance_variant.py).
 
-    A docs/ path is used on purpose: docs alone derives 'minimal' -> ci_gate,
-    so a resulting codex_gate can only be explained by irreversible=True
-    actually reaching the router — not by the path category.
+    A docs/ path is used on purpose: docs alone derives the 'minimal' variant,
+    so a trace naming 'coding-strict' can only be explained by
+    irreversible=True actually reaching the router — not by the path category.
+
+    The gate NAME no longer carries that evidence: since the declared gate
+    follows the operator's VNX_DEFAULT_REVIEW_STACK (2026-09-19), the name is
+    the same whatever variant was derived. The variant in the trace is what
+    proves the flag arrived. The stack is pinned explicitly here so this test
+    never depends on the registry default.
     """
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate,claude_github_optional")
+
     vspec = _validated_spec(
         tmp_path,
         dispatch_id="20260817-oi1274-forward-true",
@@ -224,12 +232,16 @@ def test_door_path_forwards_irreversible_true_to_resolve_gate(tmp_path, monkeypa
     assert captured.get("irreversible") is True, (
         f"resolve_gate must receive irreversible=True from the door path; got kwargs={captured}"
     )
-    assert new_vspec.spec.gate == "codex_gate", (
-        "irreversible=True must force the strictest gate (codex_gate) over the "
-        f"docs-derived minimal/ci_gate; got gate={new_vspec.spec.gate!r}"
+    assert new_vspec.spec.gate == "kimi_gate", (
+        "the declared gate follows the configured stack, not the path-derived "
+        f"variant; got gate={new_vspec.spec.gate!r}"
     )
     assert gate_reason is not None and "irreversible=true" in gate_reason, (
         f"gate_reason must name the irreversible override in the trace; got {gate_reason!r}"
+    )
+    assert "governance_variant='coding-strict'" in gate_reason, (
+        "the trace must name the variant irreversible=True forced onto the router; "
+        f"got {gate_reason!r}"
     )
 
 
@@ -237,7 +249,14 @@ def test_door_path_forwards_irreversible_false_by_default(tmp_path, monkeypatch)
     """Companion negative case: a spec that never declares the flag (loaded
     normally, no dataclasses.replace) must forward irreversible=False — the
     door path must not accidentally force strict on every dispatch once the
-    forwarding leg is fixed."""
+    forwarding leg is fixed.
+
+    The docs path still has to derive the lightest variant ('minimal'); that
+    variant is the evidence in the trace, because the gate NAME follows the
+    configured stack and is the same whatever variant was derived. The stack
+    is pinned explicitly so this test does not lean on the registry default."""
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "glm_gate,claude_github_optional")
+
     vspec = _validated_spec(
         tmp_path,
         dispatch_id="20260817-oi1274-forward-false",
@@ -255,13 +274,17 @@ def test_door_path_forwards_irreversible_false_by_default(tmp_path, monkeypatch)
 
     monkeypatch.setattr(smart_router, "resolve_gate", spy_resolve_gate)
 
-    new_vspec, _gate_reason = dispatch_cli._resolve_gate_via_router(vspec)
+    new_vspec, gate_reason = dispatch_cli._resolve_gate_via_router(vspec)
 
     assert captured.get("irreversible") is False
-    assert new_vspec.spec.gate == "ci_gate"
+    assert new_vspec.spec.gate == "glm_gate"
+    assert "governance_variant='minimal'" in gate_reason, (
+        "a docs path must still derive the lightest variant; "
+        f"got {gate_reason!r}"
+    )
 
 
-def test_door_path_forces_strict_for_irreversible_path_without_flag(tmp_path):
+def test_door_path_forces_strict_for_irreversible_path_without_flag(tmp_path, monkeypatch):
     """Vangnet (must stay green): a path already under an irreversible prefix
     forces coding-strict through the door's OWN resolve_gate call, with no
     flag needed at all — dispatch_paths already reach resolve_gate correctly
@@ -271,7 +294,13 @@ def test_door_path_forces_strict_for_irreversible_path_without_flag(tmp_path):
     already covered by test_smart_router_governance_variant.py) so a fix that
     adds irreversible-forwarding cannot regress the already-working
     path-derived branch through the door.
-    """
+
+    The strict variant is asserted through the trace, not through the gate
+    name: since 2026-09-19 the declared gate follows the operator's
+    VNX_DEFAULT_REVIEW_STACK, so the name no longer tells which variant the
+    migration path forced."""
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "glm_gate,claude_github_optional")
+
     vspec = _validated_spec(
         tmp_path,
         dispatch_id="20260817-oi1274-path-derived",
@@ -282,5 +311,9 @@ def test_door_path_forces_strict_for_irreversible_path_without_flag(tmp_path):
 
     new_vspec, gate_reason = dispatch_cli._resolve_gate_via_router(vspec)
 
-    assert new_vspec.spec.gate == "codex_gate"
+    assert new_vspec.spec.gate == "glm_gate"
     assert gate_reason is not None and "irreversible" in gate_reason
+    assert "governance_variant='coding-strict'" in gate_reason, (
+        "the trace must name the strict variant the migration path forced; "
+        f"got {gate_reason!r}"
+    )

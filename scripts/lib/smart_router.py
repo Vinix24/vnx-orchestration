@@ -966,6 +966,7 @@ def resolve_gate(
     dispatch_paths: Optional[Sequence[str]] = None,
     task_class: Optional[str] = None,
     irreversible: bool = False,
+    gate_source: str = "declared on spec",
 ) -> GateWeightResolution:
     """Resolve the review-gate weight for a dispatch.
 
@@ -979,6 +980,14 @@ def resolve_gate(
     silent, the router derives a governance_variant and maps it to a gate
     weight; the variant, direction and reason are carried in ``reason`` so the
     trace is never silent about a lighter-than-baseline gate.
+
+    ``gate_source`` names WHERE the gate came from in the trace. It defaults to
+    "declared on spec" — the historical wording, so a gate an author really did
+    declare reads exactly as before. The door passes
+    ``"from VNX_DEFAULT_REVIEW_STACK"`` when it resolved the gate from operator
+    configuration instead; without that the trace would credit the spec with a
+    gate the operator configured, and a later audit could not tell the two
+    apart.
     """
     gate = (explicit_gate or "").strip()
     derived = derive_governance_variant(
@@ -990,15 +999,15 @@ def resolve_gate(
         direction = _gate_override_direction(derived, gate)
         if direction:
             reason = (
-                f"gate={gate} declared on spec; OVERRIDES derived "
+                f"gate={gate} {gate_source}; OVERRIDES derived "
                 f"governance_variant={derived.variant!r} (gate={derived.gate}) "
                 f"- {direction.upper()}; {derived.reason}"
             )
         else:
             reason = (
-                f"gate={gate} declared on spec; matches derived "
+                f"gate={gate} {gate_source}; matches derived "
                 f"governance_variant={derived.variant!r} (gate={derived.gate}); "
-                f"router did not override"
+                f"router did not override; {derived.reason}"
             )
         return GateWeightResolution(
             gate=gate,
