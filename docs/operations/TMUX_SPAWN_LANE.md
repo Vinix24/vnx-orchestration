@@ -9,7 +9,7 @@ The last commit that still contained the lane is `6ad8f587`; `git show 6ad8f587:
 - `scripts/lib/tmux_interactive_dispatch.py`, the leaseless ephemeral lane (lane id `claude_tmux_subscription`)
 - the `force_tmux` / `force_tmux_reason` fields of `DispatchSpec`, validate Rule 12b and 12c, and the `--force-tmux` / `--force-tmux-reason` flags
 - the `VNX_ALLOW_TMUX_LANE` emergency brake and its `claude-tmux-lane` row in `docs/core/SUBSYSTEMS.md`
-- the `tmux` adapter of the deprecated raw-file form (`vnx dispatch <file.md>`), which was its default. That form now needs `--adapter subprocess` and refuses `tmux` or no adapter with a message that says why
+- the `tmux` adapter of the deprecated raw-file form (`vnx dispatch <file.md>`), which was its default. The form itself still works with no flag and now defaults to the `subprocess` adapter. Naming `tmux` explicitly (`--adapter tmux`, an `Adapter: tmux` header or `VNX_ADAPTER=tmux`) is refused with a message that says why
 
 ## Why
 
@@ -22,6 +22,10 @@ It had also been unreachable through the door since 2026-09-12, when `validate()
 `claude_headless` (`dispatch_envelope.run_envelope_headless_plan`) is the only claude lane. `dispatch_plan.resolve_claude_lane()` returns it for every `provider=claude` spec. Lane selection, billing and the model rows are in `docs/core/DISPATCH_RULES.md` §5 and §8.
 
 A staged spec that was written before the removal and still carries `force_tmux: true` does not crash. `dispatch_cli.load_spec` ignores the field, prints a warning to stderr with the reason the spec carried, and the dispatch runs on `claude_headless`.
+
+## The rollback hatch
+
+The raw-file form is the documented rollback hatch (`VNX_DISPATCH_LEGACY=1`): it is how work gets out when the door itself is broken. It therefore keeps working with no extra flag. `vnx dispatch <file.md>` runs on the subprocess lane where it used to default to tmux, and it prints the same ADR-025 deprecation warning as before. Only the adapter changed. The form still leaves in 1.x per ADR-025; this removal does not change that.
 
 ## What stayed
 

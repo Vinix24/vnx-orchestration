@@ -232,9 +232,11 @@ def test_door_on_staged_pending_id_hits_door(tmp_path):
 
 
 def test_door_on_raw_md_goes_legacy_not_bridge(tmp_path):
+    # No --adapter: the raw form needs no flag. The tmux-spawn lane that used to be its default
+    # was removed on 2026-09-18, so the default is now the subprocess lane.
     e = _make_home(tmp_path)
     raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), "--adapter", "subprocess", flag="1")
+    r = _run_cmd(e, str(raw), flag="1")
     assert r.returncode == 0, r.stderr
     # POSITIVE: the legacy delivery lane IS invoked; the door AND the bridge are NOT.
     assert e["lane_marker"].exists(), "legacy delivery lane not invoked for raw .md under door-ON"
@@ -242,20 +244,6 @@ def test_door_on_raw_md_goes_legacy_not_bridge(tmp_path):
     assert not e["door_marker"].exists(), "door wrongly invoked for raw .md"
     assert not e["bridge_marker"].exists(), "bridge wrongly invoked for raw .md (Option X1 violated)"
     assert "DEPRECATED" in r.stderr, "deprecation warning not emitted under door-ON + raw"
-
-
-def test_door_on_raw_md_without_a_lane_is_refused_after_the_deprecation_warning(tmp_path):
-    # The tmux-spawn lane was the raw form's default; it was removed on 2026-09-18, so a raw
-    # .md that names no lane has nowhere to go: refused loud, nothing delivered.
-    e = _make_home(tmp_path)
-    raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), flag="1")
-    assert r.returncode != 0
-    assert "DEPRECATED" in r.stderr
-    assert "removed on 2026-09-18" in r.stderr
-    assert not e["lane_marker"].exists()
-    assert not e["door_marker"].exists()
-    assert not e["bridge_marker"].exists()
 
 
 def test_door_on_raw_md_adapter_subprocess_honored(tmp_path):
@@ -273,9 +261,10 @@ def test_rollback_raw_md_legacy_no_warning(tmp_path):
     # raw .md -> legacy, and NO deprecation warning (the raw form is the sanctioned path here).
     e = _make_home(tmp_path)
     raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), "--adapter", "subprocess", flag=None, legacy="1")
+    r = _run_cmd(e, str(raw), flag=None, legacy="1")
     assert r.returncode == 0, r.stderr
     assert e["lane_marker"].exists()
+    assert json.loads(e["lane_marker"].read_text())["lane"] == "subprocess"
     assert "DEPRECATED" not in r.stderr, "deprecation warning must not fire when the door is off"
     assert not e["door_marker"].exists()
 
@@ -285,9 +274,10 @@ def test_default_on_raw_md_legacy_with_warning(tmp_path):
     # falls through to legacy delivery, now WITH the deprecation warning.
     e = _make_home(tmp_path)
     raw = _write_raw(e)
-    r = _run_cmd(e, str(raw), "--adapter", "subprocess", flag=None)  # unset -> default ON (post-flip)
+    r = _run_cmd(e, str(raw), flag=None)  # unset -> default ON (post-flip)
     assert r.returncode == 0, r.stderr
     assert e["lane_marker"].exists()
+    assert json.loads(e["lane_marker"].read_text())["lane"] == "subprocess"
     assert not e["door_marker"].exists()
     assert not e["bridge_marker"].exists()
     assert "DEPRECATED" in r.stderr, "deprecation warning must fire under the door default + raw"

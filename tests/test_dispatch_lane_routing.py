@@ -5,13 +5,13 @@ the real dispatch.sh is sourced, the delivery script is replaced with a stub tha
 records that the lane fired and with which argv, and we assert the resolved lane
 across the precedence chain:
 
-    --adapter flag  >  'Adapter:' header  >  VNX_ADAPTER env  >  VNX_AUTO_ROUTE=1
+    --adapter flag  >  'Adapter:' header  >  VNX_ADAPTER env  >  default 'subprocess'
 
-The raw-file form has ONE lane: the headless subprocess lane. There is no default.
-The tmux-spawn lane that used to be the default was removed on 2026-09-18, so a raw
-file that asks for it, or names no lane at all, is refused loud and runs NO delivery
-script (silently sending it to the subprocess lane would change its isolation and
-lease behaviour). No tmux stub is created on purpose: nothing may try to run it.
+The raw-file form has ONE lane: the headless subprocess lane, and it is also the default.
+The tmux-spawn lane that used to be the default was removed on 2026-09-18. The raw form is
+the rollback hatch (VNX_DISPATCH_LEGACY=1), so a raw file that names no lane must still run,
+on the subprocess lane. A raw file that names the removed lane is refused loud and runs NO
+delivery script. No tmux stub is created on purpose: nothing may try to run it.
 """
 
 from __future__ import annotations
@@ -117,14 +117,17 @@ def _assert_subprocess_lane(env_paths: dict) -> None:
     assert "--dispatch-id" in rec["argv"]
 
 
-def test_no_adapter_is_refused_and_runs_no_delivery(tmp_path):
-    """No flag, no header, no env: the old default (tmux) is gone, so the raw form is refused."""
+def test_no_adapter_defaults_to_subprocess(tmp_path):
+    """No flag, no header, no env: the raw form still runs, on the subprocess lane.
+
+    The raw form is the rollback hatch. Removing the tmux default moved the default to the
+    one lane that is left; it must not make a lane flag mandatory.
+    """
     e = _make_env(tmp_path)
     res = _run(e)
-    assert res.returncode != 0
-    assert not e["marker"].exists()
-    assert "removed on 2026-09-18" in res.stderr
-    assert "--adapter subprocess" in res.stderr
+    assert res.returncode == 0, res.stderr
+    _assert_subprocess_lane(e)
+    assert "--auto-route" not in _lane(e)["argv"], "the default must not imply --auto-route"
 
 
 @pytest.mark.parametrize("how", ["flag", "header", "env"])
@@ -210,6 +213,15 @@ def test_dry_run_no_delivery(tmp_path):
     assert res.returncode == 0, res.stderr
     assert not e["marker"].exists()
     assert "Adapter:" in res.stderr  # lane logged even on dry-run
+
+
+def test_dry_run_without_adapter_logs_the_subprocess_default(tmp_path):
+    """--dry-run with no lane named resolves to subprocess and exits 0 (the hatch, dry)."""
+    e = _make_env(tmp_path)
+    res = _run(e, "--dry-run")
+    assert res.returncode == 0, res.stderr
+    assert not e["marker"].exists()
+    assert "Adapter:    subprocess" in res.stderr
 
 
 def test_auto_route_selects_subprocess_when_no_adapter_chosen(tmp_path):

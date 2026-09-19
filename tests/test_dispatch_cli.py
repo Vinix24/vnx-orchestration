@@ -464,7 +464,7 @@ log() {{ echo "[LOG] $*"; }}
 err() {{ echo "[ERR] $*" >&2; }}
 source '{dispatch_sh}'
 unset VNX_SINGLE_ENTRY_DISPATCH
-cmd_dispatch '{dispatch_md}' --adapter subprocess --dry-run
+cmd_dispatch '{dispatch_md}' --dry-run
 """
     result = subprocess.run(["bash", "-c", bash_cmd], capture_output=True, text=True)
 
@@ -552,7 +552,7 @@ VNX_DISPATCH_LEGACY=1
 log() {{ echo "[LOG] $*"; }}
 err() {{ echo "[ERR] $*" >&2; }}
 source '{dispatch_sh}'
-cmd_dispatch '{dispatch_md}' --adapter subprocess --dry-run
+cmd_dispatch '{dispatch_md}' --dry-run
 """
     result = subprocess.run(["bash", "-c", bash_cmd], capture_output=True, text=True)
 
