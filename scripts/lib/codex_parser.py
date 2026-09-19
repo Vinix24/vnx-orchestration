@@ -12,6 +12,22 @@ from typing import Any, Dict, Iterator, List, Tuple
 from gate_lane_contract import VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
 from review_contract import _normalize_line  # canonical line-coercion, never a second copy
 
+# The PATH-binary providers (gate_recorder.GATE_PROVIDERS, kind ``path_binary``)
+# whose stdout :func:`extract_verdict_block` can read, because
+# :func:`_extract_codex_text` unwraps their stream. codex's ``exec --json`` is an
+# NDJSON event stream whose ``agent_message`` items carry the verdict; that is the
+# one unwrap this module has. gemini's ``--output-format json`` is a single
+# envelope object with the reply inside a string field, which nothing here
+# unwraps: a verdict inside such an envelope reads as ``{}`` (probed on a
+# gemini-shaped envelope, 2026-09-19; there is no real gemini_review report to
+# measure against, the one under unified_reports/headless/ is a 25-byte stub).
+#
+# gate_artifacts refuses a run that wrote no verdict only for a gate whose output
+# this reader can see. Refusing a gate it cannot read would book a good review as
+# `unavailable`. Teaching the reader another provider's output and listing that
+# provider here are one change, made together and measured on real reports.
+VERDICT_READABLE_BINARIES = frozenset({"codex"})
+
 
 def _extract_codex_text(stdout: str) -> str:
     """Extract agent_message text from codex NDJSON output."""

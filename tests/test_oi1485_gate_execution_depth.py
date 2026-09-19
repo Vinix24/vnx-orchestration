@@ -31,13 +31,20 @@ from gate_artifacts import materialize_artifacts
 
 # The two shapes, as codex actually emits them. The degenerate run's single
 # item.completed is an agent_message: the verdict itself. Emitting a verdict is
-# not evidence of having looked at anything.
+# not evidence of having looked at anything. Both streams end in a real verdict
+# object (OI-1770): codex_gate is refused when it wrote none, and these tests
+# are about execution depth, so the depth check has to be the only thing that
+# can refuse the degenerate run.
 DEGENERATE_STREAM = "\n".join([
     json.dumps({"type": "thread.started", "thread_id": "01a0-dead-beef"}),
     json.dumps({"type": "turn.started"}),
     json.dumps({"type": "item.completed", "item": {
         "id": "item_0", "type": "agent_message",
-        "text": "No blocking issues found. The review is limited to the provided diff.",
+        "text": json.dumps({
+            "verdict": "pass",
+            "findings": [],
+            "residual_risk": "The review is limited to the provided diff.",
+        }),
     }}),
     json.dumps({"type": "turn.completed",
                 "usage": {"input_tokens": 18219, "output_tokens": 602}}),
@@ -59,7 +66,16 @@ REAL_STREAM = "\n".join(
     + [
         json.dumps({"type": "item.completed", "item": {
             "id": "item_99", "type": "agent_message",
-            "text": "One advisory: heredoc termination is looser than Bash.",
+            "text": json.dumps({
+                "verdict": "pass",
+                "findings": [{
+                    "severity": "warning",
+                    "message": "heredoc termination is looser than Bash.",
+                    "file_path": "scripts/lib/mod_3.py",
+                    "line": 41,
+                }],
+                "residual_risk": None,
+            }),
         }}),
         json.dumps({"type": "turn.completed",
                     "usage": {"input_tokens": 239992, "output_tokens": 11728}}),

@@ -30,6 +30,13 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 import gate_runner
 from gate_runner import GateRunner
 
+# A real codex_gate run (PR 1869): an `exec --json` stream that ends in a bare
+# verdict. codex_gate is refused when it wrote none (OI-1770), so a test about
+# the runner's plumbing feeds it a run that reached one.
+CODEX_VERDICT_STREAM = (
+    VNX_ROOT / "tests" / "fixtures" / "gate_verdict" / "pr-1869-codex_gate-bare-verdict.ndjson"
+).read_bytes()
+
 
 @pytest.fixture(autouse=True)
 def _fake_gate_worktree(tmp_path, monkeypatch):
@@ -798,7 +805,7 @@ class TestCodexGateExecution:
             prompt="Review this diff for correctness",
         )
 
-        review_output = b'{"type":"message","message":"Code looks correct. No issues found."}\n{"type":"message","message":"All tests pass."}\n{"type":"message","message":"LGTM"}\n'
+        review_output = CODEX_VERDICT_STREAM
 
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
@@ -1036,7 +1043,7 @@ class TestGateWorktreeCheckout:
         )
 
         fake_worktree = tmp_path / "isolated-worktree-abcd1234"
-        review_output = b'{"type":"message","message":"LGTM"}\nAll clear.\nNo issues.\n'
+        review_output = CODEX_VERDICT_STREAM
         mock_proc, mock_os_read = self._mock_completed_proc(review_output)
 
         with patch("gate_runner.create_gate_worktree", return_value=fake_worktree) as mock_create, \
