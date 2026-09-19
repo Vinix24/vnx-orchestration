@@ -202,6 +202,53 @@ class TestOI1767VerdictBlockGuard:
             f"completed — {result}"
         )
 
+    def test_bare_verdict_books_completed_and_lands_its_findings(self, env):
+        """Format parity: a harness-lane run whose model wrote its verdict BARE,
+        without a fence, did decide. ``extract_verdict_block`` used to see only
+        a fenced verdict, so this booked `unavailable` (no_verdict_block) and
+        the findings never reached the record. The same reader serves the guard
+        and the findings booking, so both must follow it.
+        """
+        stdout = (
+            "Ik heb de diff gelezen en naast de bijbehorende tests gelegd.\n"
+            "Er zit een blokkerend probleem in de foutafhandeling.\n"
+            "Het oordeel volgt hieronder.\n"
+            '{"verdict": "fail", "findings": [{"severity": "error", "message": "swallowed exception", '
+            '"file_path": "scripts/lib/x.py", "line": 7}], "residual_risk": "geen aanvullend risico gemeten"}\n'
+        )
+        assert "```" not in stdout, "test drifted: the verdict must be bare"
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640003")
+
+        assert result["status"] == "completed", (
+            f"a bare, valid verdict must clear the OI-1767 guard, got {result}"
+        )
+        assert [f["message"] for f in result["blocking_findings"]] == ["swallowed exception"]
+        assert result["blocking_findings"][0]["file_path"] == "scripts/lib/x.py"
+        assert result["residual_risk"] == "geen aanvullend risico gemeten"
+
+    def test_bare_echoed_template_then_death_still_books_unavailable(self, env):
+        """The guard's strictness must survive the format widening: a worker
+        that echoes the contract's JSON body WITHOUT its fence and then dies is
+        no more a verdict than the fenced echo above.
+        """
+        contract_body = VERDICT_CONTRACT.split("```json\n", 1)[1].split("\n```", 1)[0]
+        stdout = (
+            "Ik ga de diff reviewen. Mijn opdracht is:\n"
+            + contract_body
+            + "\n...De bevindingen zijn geen blokkerende problemen. Het oordeel "
+            "is geslaagd. Laat me het neerschrijven."
+        )
+        assert "```" not in stdout, "test drifted: the echoed template must be bare"
+
+        result, _ = _run_glm_gate(env, stdout, dispatch_id="glm-gate-pr1862-1789640004")
+
+        assert result["status"] == "unavailable", (
+            f"a bare echoed template booked {result['status']!r} instead of unavailable — {result}"
+        )
+        assert result["reason"] == "validation_failed"
+        assert "no_verdict_block" in result["reason_detail"]
+
     def test_guard_applies_to_kimi_gate_too_not_just_glm(self, env, tmp_path, monkeypatch):
         """The same no-verdict-block shape must refuse kimi_gate too, not only
         glm_gate — both run VERDICT_CONTRACT via the SAME harness-lane

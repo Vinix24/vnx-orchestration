@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 from gate_lane_contract import VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
 from review_contract import _normalize_line  # canonical line-coercion, never a second copy
@@ -152,46 +152,74 @@ def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _iter_json_objects(text: str) -> Iterator[Dict[str, Any]]:
+    """Yield the top-level JSON objects embedded in *text*, in document order.
+
+    Tries a parse at every ``{`` and, when one succeeds, resumes AFTER it: an
+    object nested inside a parsed one is never a candidate in its own right, so
+    a finding that happens to carry its own ``"verdict"`` key cannot outrank the
+    verdict object it sits in. A ``{`` that does not start a valid object
+    (prose braces, an object cut off mid-report) is skipped.
+
+    A markdown fence needs no handling: the backticks are text between objects
+    and the object inside a fence is found exactly like a bare one.
+    """
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            obj, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            idx = text.find("{", idx + 1)
+            continue
+        yield obj
+        idx = text.find("{", end)
+
+
 def extract_verdict_block(stdout: str) -> Dict[str, Any]:
-    """Extract the shared fenced ``json verdict block every gate contract asks for.
+    """Extract the verdict object every gate contract asks for, fenced or bare.
 
     ``VERDICT_CONTRACT`` (gate_lane_contract.py — glm_gate, kimi_gate and the
     harness-lane strategy in gate_runner) and ``_REVIEWER_VERDICT_TEMPLATE``
-    (gate_runner.py — codex_gate, gemini_review) ask for the SAME shape: a
-    fenced ```json block containing a ``"verdict"`` key. This is the one
-    place gate_artifacts.materialize_artifacts's OI-1767 fail-closed guard
-    checks for that shape, keyed on the shape itself rather than on a gate
-    name (a name-branch here would repeat OI-1763's defect).
+    (gate_runner.py — codex_gate, gemini_review) ask for the SAME shape: a JSON
+    object containing a ``"verdict"`` key, in a fenced ```json block. This is
+    the one place gate_artifacts.materialize_artifacts's OI-1767 fail-closed
+    guard checks for that shape, keyed on the shape itself rather than on a
+    gate name (a name-branch here would repeat OI-1763's defect).
+
+    The fence is not required. A model does not always keep it: codex writes its
+    verdict as a bare object in an ``agent_message`` of its ``exec --json``
+    stream (measured on codex_gate PR 1869, 2026-09-19: 0 fences in 3845
+    characters of report), and a reader that demanded the fence saw no verdict
+    in such a run at all. Fenced and bare objects are read by one scan
+    (:func:`_iter_json_objects`), so they share one order: the LAST valid
+    verdict wins, whichever form it took.
 
     Reuses the NDJSON-unwrap in :func:`_extract_codex_text` so this also
     works on codex's ``exec --json`` stream, not only on the plain-text
     report bodies glm_gate/kimi_gate/gemini_review stdout actually is.
 
     Does NOT delegate to :func:`_extract_codex_verdict`: that helper takes the
-    FIRST fenced block and accepts any dict with a ``"verdict"`` key, values
-    unchecked. VERDICT_CONTRACT is itself a fenced ```json block whose
-    ``"verdict"`` value is the literal placeholder text ``"pass|fail|blocked"``
-    — a worker that echoes its own instructions (then dies mid-report) hands
-    back exactly that block first, and the old first-match/any-value logic
-    read it as a genuine, blocking-free verdict (OI-1767 fix-forward,
-    live-reproduced against this scenario). Same rule glm_gate._extract_verdict
-    and kimi_gate._extract_verdict already apply: scan the fenced blocks from
-    the END, and only accept one whose ``verdict`` (trimmed, lowercased) is a
-    real value in :data:`gate_lane_contract.VALID_VERDICTS` — a report that
-    echoes the template and then writes a real verdict resolves to that real
-    verdict, not the template. Returns ``{}`` when no block clears that bar,
-    same as before.
+    FIRST fenced block, and its bare-object fallback takes the first object
+    with a ``"verdict"`` OR ``"findings"`` key, values unchecked.
+    VERDICT_CONTRACT is itself a ```json block whose ``"verdict"`` value is the
+    literal placeholder text ``"pass|fail|blocked"`` — a worker that echoes its
+    own instructions (then dies mid-report) hands back exactly that object
+    first, and first-match/any-value logic reads it as a genuine, blocking-free
+    verdict (OI-1767 fix-forward, live-reproduced against this scenario). Same
+    rule glm_gate._extract_verdict and kimi_gate._extract_verdict apply: the
+    LAST object wins, and only one whose ``verdict`` (trimmed, lowercased) is a
+    real value in :data:`gate_lane_contract.VALID_VERDICTS` counts — a report
+    that echoes the template, fenced or not, and then writes a real verdict
+    resolves to that real verdict, not the template. Returns ``{}`` when no
+    object clears that bar.
     """
     text = _extract_codex_text(stdout)
-    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
-    for block in reversed(blocks):
-        try:
-            candidate = json.loads(block)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict) and str(candidate.get("verdict", "")).strip().lower() in VALID_VERDICTS:
-            return candidate
-    return {}
+    verdict: Dict[str, Any] = {}
+    for candidate in _iter_json_objects(text):
+        if str(candidate.get("verdict", "")).strip().lower() in VALID_VERDICTS:
+            verdict = candidate
+    return verdict
 
 
 def parse_codex_findings(stdout: str) -> Dict[str, Any]:
