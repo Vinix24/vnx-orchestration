@@ -14,10 +14,25 @@ Root cause: the spec is silent about its gate, so
 for one, and that function answers with
 ``GOVERNANCE_VARIANT_GATE[derived_variant]`` — a table hardcoded in
 ``scripts/lib/smart_router.py`` whose "default" and "coding-strict" entries
-both read ``codex_gate``. ``VNX_DEFAULT_REVIEW_STACK`` was read only by
-``review_gate_manager``, as the stack for the gate REQUESTS. So two mechanisms
-decided the same question and disagreed: the obligation named codex_gate (the
-hardcoded table), the runner requested glm_gate (the configuration).
+both read ``codex_gate``. So the mechanism that decided the declared name
+consulted the code, while the configuration the operator edits was read only by
+``review_gate_manager``, as the stack for the gate REQUESTS. The obligation
+named codex_gate and the runner requested glm_gate.
+
+Measured on the records, not inferred. ``project_config_audit`` shows the head
+of ``VNX_DEFAULT_REVIEW_STACK`` was ``glm_gate`` continuously from
+2026-09-12T07:43:18Z (``glm_gate,kimi_gate,claude_github_optional``), narrowed
+to ``glm_gate,claude_github_optional`` on 09-14, and it never named
+``codex_gate``. All 31 obligations declared on 2026-09-19 carry
+``gate=codex_gate`` — including ``D-f2429d7d``, the dispatch that produced this
+fix.
+
+The two producers are visibly different on disk, and that is the comparison
+that pins it: the ``D-<slug>`` lane's specs carry ``"gate": "glm_gate"`` written
+in (``D-agenda-fix-103542``, ``D-authority-083137``), so they agreed with the
+configuration. The ``D-<hex>`` lane's specs carry ``"gate": ""`` (``D-da07e641``,
+``D-894b16a1``), leaving the door to supply the name — and it supplied the
+hardcoded one. Nothing was wrong with the configuration; a silent spec was.
 
 The property pinned here is agreement itself, never a particular gate name.
 Every case derives its expected value FROM the configuration it sets, so the
