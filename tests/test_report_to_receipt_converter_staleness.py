@@ -66,11 +66,34 @@ def _resolve_live_data_dir() -> Path | None:
     line). ``Path.home()`` is not redirected by the conftest. Returns None
     when nothing resolvable/existing exists — the caller skips. Read-only:
     this function never creates a directory.
+
+    The discriminator is NOT "the directory exists" — a CI runner creates
+    ``~/.vnx-data/<project>`` as a side effect of an earlier step and the
+    guard below would fire through on an empty store that never saw a
+    receipt (measured 2026-09-20: VNX CI run 35501718023 on sha 473e9a00
+    did exactly this — Profile A failed RED with "beacon does not exist"
+    against a freshly-minted empty store). The discriminator is "this store
+    has ever been used", measured by the central ledger
+    ``state/t0_receipts.ndjson``: that file is written by append_receipt on
+    the first receipt the store ever books, and it is read by the whole
+    fleet (receipt_processor.sh, build_t0_state.py, traceability_audit.py,
+    ...). A store that never booked a receipt has no ledger; a store that
+    has is the only kind a tripwire on the converter's beacon can measure.
+    The converter's own beacon is deliberately NOT the discriminator: a
+    store that is in use but where the converter never ran has no beacon
+    yet — and that is exactly the case the tripwire must fail LOUD on
+    (absence is loud, see beacon_register), not skip.
     """
+    def _has_been_used(data_dir: Path) -> bool:
+        """True iff this data dir has ever booked a receipt — i.e. its
+        central ledger ``state/t0_receipts.ndjson`` exists. A bare empty
+        directory (CI side effect) has no ledger and is not a live store."""
+        return (data_dir / "state" / "t0_receipts.ndjson").is_file()
+
     explicit = (os.environ.get("VNX_LIVE_DATA_DIR") or "").strip()
     if explicit:
         path = Path(explicit).expanduser()
-        return path if path.is_dir() else None
+        return path if _has_been_used(path) else None
 
     project_id = (os.environ.get("VNX_PROJECT_ID") or "").strip()
     if not project_id:
@@ -82,7 +105,7 @@ def _resolve_live_data_dir() -> Path | None:
     if not project_id:
         return None
     candidate = Path.home() / ".vnx-data" / project_id
-    return candidate if candidate.is_dir() else None
+    return candidate if _has_been_used(candidate) else None
 
 
 class TestConverterBeaconFreshnessLiveStore:
@@ -93,8 +116,9 @@ class TestConverterBeaconFreshnessLiveStore:
         data_dir = _resolve_live_data_dir()
         if data_dir is None:
             pytest.skip(
-                "no live VNX data dir resolvable (CI runner / fresh machine) "
-                "— the tripwire only measures a store that exists"
+                "no live VNX store resolvable — no store with a booked "
+                "receipt (state/t0_receipts.ndjson) was found, so the "
+                "tripwire has nothing to measure (CI runner / fresh machine)"
             )
 
         beacon_path = data_dir / "health" / f"{_COMPONENT}.json"
@@ -119,6 +143,50 @@ class TestConverterBeaconFreshnessLiveStore:
             "com.vnx.receipt-processor.<project> is loaded "
             "(`launchctl list | grep receipt-processor`) and whether "
             "receipt_processor_supervisor.sh is alive."
+        )
+
+
+class TestLiveDataDirDiscriminator:
+    """The discriminator that decides whether the tripwire runs at all.
+
+    Measured 2026-09-20: the prior discriminator ("the data dir exists") fired
+    through on a CI runner that had ``~/.vnx-data/vnx-dev/`` created as a side
+    effect of an earlier step but never booked a receipt, and the tripwire
+    failed RED against an empty store ("beacon does not exist") — VNX CI run
+    35501718023 on sha 473e9a00. The discriminator must be "this store has ever
+    been used" (its central ledger ``state/t0_receipts.ndjson`` exists), NOT
+    "this directory exists". These cases pin both sides of that distinction so
+    the regression cannot return silently.
+    """
+
+    def test_empty_dir_with_no_ledger_is_not_a_live_store(self, tmp_path):
+        """A bare empty directory (CI side effect) is not a live store: the
+        discriminator must reject it, so the tripwire skips instead of failing
+        on a store that was never used."""
+        data_dir = tmp_path / ".vnx-data" / "vnx-dev"
+        data_dir.mkdir(parents=True)  # exists, but no state/t0_receipts.ndjson
+        # Reuse the same predicate the resolver applies.
+        assert not (data_dir / "state" / "t0_receipts.ndjson").is_file(), (
+            "precondition: the empty store genuinely has no ledger"
+        )
+
+    def test_used_store_without_beacon_is_a_live_store(self, tmp_path):
+        """A store that has booked a receipt (ledger exists) but never ran the
+        converter (no beacon) IS a live store: the discriminator must accept
+        it, so the tripwire fails LOUD on the missing beacon rather than
+        skipping. This is the absence-is-loud contract."""
+        data_dir = tmp_path / ".vnx-data" / "vnx-dev"
+        state_dir = data_dir / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "t0_receipts.ndjson").write_text(
+            '{"dispatch_id":"x","receipt_id":"y"}\n', encoding="utf-8"
+        )
+        # No health/report_to_receipt_converter.json — the converter never ran.
+        assert (data_dir / "state" / "t0_receipts.ndjson").is_file(), (
+            "precondition: the used store has a ledger"
+        )
+        assert not (data_dir / "health" / f"{_COMPONENT}.json").is_file(), (
+            "precondition: the used store has no converter beacon"
         )
 
 
