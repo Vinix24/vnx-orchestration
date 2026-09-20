@@ -852,8 +852,17 @@ class T0IntelligenceGatherer:
         if last_offered:
             try:
                 parsed = datetime.fromisoformat(str(last_offered).strip())
-                age_days = (datetime.now() - parsed).total_seconds() / 86400.0
-            except ValueError:
+                # vnx-silent-except: malformed/empty timestamps are non-fatal —
+                # age_days stays None and classify_non_adoption_reason skips the
+                # stale branch. The TypeError catch is load-bearing: ISO-8601
+                # strings with a tz offset parse to an offset-aware datetime, and
+                # subtracting it from a naive datetime.now() raises TypeError
+                # (not ValueError). That crash escaped record_adoption_from_receipt's
+                # instrumentation catch for the whole fleet, leaving 0 outcome
+                # rows after 6.919 injections (OI — intelligence-lus dispatch).
+                now = datetime.now(parsed.tzinfo) if parsed.tzinfo is not None else datetime.now()
+                age_days = (now - parsed).total_seconds() / 86400.0
+            except (ValueError, TypeError):
                 age_days = None
         return (float(confidence) if confidence is not None else None), age_days
 
