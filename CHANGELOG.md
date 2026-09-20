@@ -4,6 +4,147 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [Unreleased]
+
+Sixteen commits since v1.6.2. The user-visible shape: the tmux dispatch
+lane is gone outright (not just refused), the harness-lane gates fail
+closed on reports and verdict-blocks that never landed, gate findings
+carry a structured file/line address, and the provider registry admits
+glm-5.3.
+
+### Removed
+
+- **The tmux dispatch lane is removed (#1868, #1869)** —
+  `scripts/lib/tmux_interactive_dispatch.py`, the `force_tmux` spec
+  fields and flags, and the `VNX_ALLOW_TMUX_LANE` emergency brake are
+  gone; `claude_headless` is the only claude lane. Tmux session
+  management (`tmux_adapter.py`, `tmux_worktree.py`, the signalling
+  hooks) is untouched. See `docs/operations/TMUX_SPAWN_LANE.md`.
+
+### Added
+
+- **Gate findings carry a structured address (#1859, #1866)** — findings
+  gain a `file_path`/`line` address, and every gate gets its findings,
+  not just `codex_gate`.
+- **The provider registry admits glm-5.3 and glm-5.3-flash (#1855)** —
+  alongside glm-5.2.
+- **The default review stack is `codex_gate,glm_gate` (#1852)**.
+
+### Fixed
+
+- **Harness-lane failure honesty (#1857, #1858, #1864, #1871, #1874,
+  #1875)** — a spawn-failure report is refused as `completed`; API-error
+  failures with no `failure_reason` are caught; a verdict-block that was
+  never written is refused; the shared verdict reader reads a bare
+  verdict object; the verdict guard covers `codex_gate` with the decision
+  taken on the provider; and the codex booking reads the same verdict the
+  guard reads.
+- **Obligation hygiene (#1861, #1862, #1865)** — PRs that carry no
+  review-gate obligation are reported loudly; a refused overwrite-guard
+  write gets a durable audit line; and terminal obligations whose
+  evidence went stale after closing are detected.
+- **The router refuses an unknown `task_class` (#1860)** — instead of
+  silently routing nothing.
+
+## [1.6.2] — 2026-09-12
+
+Patch release (57 commits since v1.6.1). Headline: the gate-evidence
+chain was closed end-to-end — gate outcomes are booked as result
+receipts, branch protection is declared as code with a summarizing
+gate check, the plan-gate reads its seats honestly, and the interactive
+tmux dispatch lane was retired.
+
+### Added
+
+- **Gate outcomes are booked, not assumed (#1836, #1846, #1842, #1837,
+  #1847)** — every gate outcome lands as a result receipt with verdict,
+  provider and model; the harness-lane verdict contract is consolidated
+  to one source; harness-lane gates sign with their own dispatch-id; the
+  harness-lane strategy delegates glm/kimi to the governed dispatcher;
+  and a test binds `MODEL_DEFAULTS` to the provider registry.
+- **Branch protection as code and a summarizing gate check (golf B,
+  #1807, #1808, #1812, #1814, #1815, #1809, #1820)** — branch protection
+  is declared as YAML with apply, a drift preflight and a doctor check; a
+  GitHub-App client publishes check-runs with the key from the keychain,
+  after the verdict record and under an allowlist and sha states; a
+  summarizing `vnx-gate/review` check is derived from the
+  closure-verifier rules and moved from `pending_checks` to the required
+  checks; the FORGE_GATE runbook and the reader-per-field requirement of
+  the branch-protection preflight are documented.
+- **Fail-closed merge door (golf B/Bx, #1806, #1824, #1805, #1823)** —
+  `contract_invalid` is a fail-closed merge check with its own override
+  that works only on its own reason code; an ADR-number preflight runs
+  against main with a uniqueness test; and the five preflight verdicts
+  land in the ledger, also on a refusal.
+- **Receipt processing and worktree cleanup as per-project launchd jobs
+  (#1830, #1851)** — the receipt-processor and
+  cleanup-reviewed-worktrees run as per-project jobs instead of central
+  ones.
+- **Beacon reader lifecycle (#1832)** — reader-register, park and dedupe.
+- **`vnx objective unlink-pr` (#1821)** — operator-gated, with a receipt
+  and tenancy isolation.
+
+### Changed
+
+- **The interactive tmux dispatch lane is retired (#1845, #1803)** —
+  `force_tmux` is refused at validation and `claude_headless` is the
+  only claude lane (the lane itself was removed after this release, in
+  #1868); plan-gate claude panel seats now run on the headless lane
+  because tmux delivery lost the prompt.
+- **Update and publish cutover guards (#1840, #1841, #1825)** — publish
+  and `update --to <tag>` work repeatedly; the cutover names its
+  behindness and refuses stale targets; and `vnx doctor`'s install:mode
+  warns when the pin differs from the active version.
+
+### Fixed
+
+- **Harness-lane verdict integrity (#1834, #1848, #1835)** — spawn-layer
+  diagnosis surfaces in the report body, the glm gate `failure_reason`
+  and the unified report; and a runner refusal no longer overwrites a
+  provider outcome.
+- **Obligation evidence lifecycle (#1844, #1843, #1839, #1838, #1810,
+  #1811, #1804, #1819)** — terminally parked obligations with missing
+  evidence, and obligations whose evidence file vanished, reopen as a
+  valid reason; the merge door reads the takeover booking from the
+  obligation as a third evidence route; availability is measured via
+  registration and child, not file existence; gate evidence binds to the
+  head so an old verdict does not block a fresh one; a routing notice is
+  not a verdict and does not hold the gate closed; takeover fields are
+  order-independent on the result; and a takeover record without a
+  verdict no longer displaces the independent signer.
+- **The plan-gate reads its seats honestly (#1799, #1801, #1800, #1796)**
+  — empty and unreadable seats are distinguished, verdicts are
+  re-extracted, and the tiebreaker runs only after a read round; the
+  tiebreaker outcome lands in `decision_ref` and backfill recognises
+  tiebreak reports; `execution_depth` is recorded on every lane so a
+  verdict without investigation is no verdict; and a test pins the three
+  signer classes per Gate value.
+- **Stop conditions and hooks (#1828, #1827, #1795, #1816, #1826,
+  #1817)** — the door's blocking verdict is scoped to this dispatch's own
+  provider/gate; `gate_runner_missing` no longer counts toward E6's
+  repeat streak; the worker-scope hook emits the `hookSpecificOutput`
+  deny form; the t0_state hook no longer hangs on a `VNX_HOME` a
+  SessionStart hook never inherits; the dead SessionStart matcher is out
+  of the three install templates with a matcher-watcher in
+  t0_state_health; and the gate-runner plist gains `~/.local/bin` with
+  the `provider_not_installed` cleanup extended.
+- **Dispatch door and prompt safety (#1798, #1797)** — the door refuses
+  the fire when the gate obligation cannot be registered, with
+  bookkeeping failures reaching stderr and the receipt; and
+  glm/kimi/codex/gemini review prompts carry the untrusted-diff
+  sandwich.
+- **Worktree, forge and gate-prompt correctness (#1833, #1850, #1829,
+  #1813, #1822, #1818, #1802)** — the git common dir is resolved instead
+  of assuming `.git` is a directory; the review-gate dispatch worktree is
+  reset at teardown; `publish_check_run` refuses to post in test mode
+  without opt-in; a multiline keychain secret is hex-decoded; the PR
+  number comes from the squash suffix, not the first hash-number; the
+  neutralization of json-fences is reported as a rendering; and the
+  headless worker gets the absolute report path while govern adopts a
+  stray worker report before synthesising.
+- **Docs (#1831)** — the triage report for the augustus-blockers (golf C,
+  OI-1259 through OI-1580) is recorded.
+
 ## [1.6.1] — 2026-09-06
 
 - **The nightly digest sender resolves its own SMTP credential (#1751,
