@@ -74,14 +74,15 @@ LIMIT ?
 def run_join(qi_db: Path, rc_db: Path, limit: int) -> int:
     """Print offered / used / ignored-with-reason per dispatch via ATTACH.
 
-    Returns the number of offer rows printed.
+    Returns 0 on success, 1 if the quality DB is missing. (The number of rows
+    printed is surfaced in the report header, not as the return value, so the
+    CLI boundary can distinguish success from failure by exit code.)
     """
     if not qi_db.exists():
         print(f"quality_intelligence.db not found: {qi_db}", file=sys.stderr)
         return 1
     conn = sqlite3.connect(str(qi_db))
     conn.row_factory = sqlite3.Row
-    printed = 0
     try:
         # vnx-atomic-write: ATTACH is a read-only side-DB attach; the guard
         # prevents accidentally attaching a path that resolves to the same
@@ -90,7 +91,10 @@ def run_join(qi_db: Path, rc_db: Path, limit: int) -> int:
         # is omitted entirely so the query cannot reference a missing table.
         attached = False
         if rc_db.exists() and qi_db.resolve() != rc_db.resolve():
-            conn.execute(f"ATTACH DATABASE '{rc_db}' AS rc")
+            # Bind the path as a parameter, never interpolate it into the SQL
+            # literal: a path containing a quote or space would otherwise break
+            # the ATTACH statement (sqlite3 supports ?-binding for ATTACH).
+            conn.execute("ATTACH DATABASE ? AS rc", (str(rc_db),))
             attached = True
         elif rc_db.exists() and qi_db.resolve() == rc_db.resolve():
             print(
@@ -124,10 +128,9 @@ def run_join(qi_db: Path, rc_db: Path, limit: int) -> int:
                 f"{r['dispatch_id'][:40]:40} {r['pattern_id'][:36]:36} "
                 f"{used_str:>4} {r['reason'][:22]:22} {r['items_injected']:>9}"
             )
-            printed += 1
     finally:
         conn.close()
-    return printed
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +240,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "join":
         qi = _resolve_db(args.qi, "quality_intelligence.db", state_dir)
         rc = _resolve_db(args.rc, "runtime_coordination.db", state_dir)
-        run_join(qi, rc, args.limit)
-        return 0
+        return run_join(qi, rc, args.limit)
     if args.cmd == "adoption":
         qi = _resolve_db(args.qi, "quality_intelligence.db", state_dir)
-        run_adoption(qi, args.limit)
-        return 0
+        return run_adoption(qi, args.limit)
     return 2
 
 

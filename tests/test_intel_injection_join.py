@@ -100,6 +100,32 @@ class TestJoin:
         assert proc.returncode == 0, proc.stderr
         assert "offers: 3" in proc.stdout
 
+    def test_join_rc_path_with_quote_and_space_is_bound_not_interpolated(self, tmp_path):
+        """Regression: a --rc path containing a single quote and a space must
+        not break the ATTACH SQL. Before the fix the path was interpolated into
+        the statement and sqlite raised a syntax error; the bound parameter
+        form (ATTACH DATABASE ? AS rc) passes it as a value."""
+        state = _make_store(tmp_path)
+        qi = state / "quality_intelligence.db"
+        # Rename the rc DB to a path with a quote and a space in it.
+        rc = state / "rc with'quote.db"
+        (state / "runtime_coordination.db").rename(rc)
+        proc = _run("join", "--qi", str(qi), "--rc", str(rc),
+                    "--limit", "10", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert "offers: 3" in proc.stdout
+        # items_injected from the attached rc DB still joins through (d1=1).
+        assert " 1" in proc.stdout
+
+    def test_join_missing_qi_db_exits_nonzero(self, tmp_path):
+        """Regression: a missing quality_intelligence.db must surface as a
+        non-zero exit code, not print an error and then return 0."""
+        missing = tmp_path / "absent.db"
+        proc = _run("join", "--qi", str(missing), "--rc",
+                    str(tmp_path / "nope.db"), cwd=tmp_path)
+        assert proc.returncode != 0, proc.stderr
+        assert "not found" in proc.stderr
+
 
 class TestAdoption:
     def test_adoption_rate_per_pattern_and_over_time(self, tmp_path):
@@ -122,6 +148,14 @@ class TestAdoption:
         assert "Over time" in out
         # SQLite %W is 0-based ISO week; 2026-09-20 falls in W37.
         assert "2026-W37" in out
+
+    def test_adoption_missing_qi_db_exits_nonzero(self, tmp_path):
+        """Regression: a missing quality_intelligence.db must surface as a
+        non-zero exit code, not print an error and then return 0."""
+        missing = tmp_path / "absent.db"
+        proc = _run("adoption", "--qi", str(missing), cwd=tmp_path)
+        assert proc.returncode != 0, proc.stderr
+        assert "not found" in proc.stderr
 
 
 if __name__ == "__main__":
