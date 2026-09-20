@@ -29,7 +29,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 31
+HIGHEST_QI_VERSION = 32
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1635,6 +1635,36 @@ def _migrate_v31(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v32(conn: sqlite3.Connection) -> None:
+    """V32: ab_arm on pattern_injection_outcome + dispatch_pattern_offered.
+
+    The adoption-metric discrimination test (dispatch
+    20260920-191500-placebo-arm) compares adoption rates between a treatment
+    arm (best-fitting pattern) and a placebo arm (a deliberately cross-domain
+    pattern). Without an arm label on the outcome row, the two populations
+    are indistinguishable after the fact and the comparison is impossible.
+
+    ``ab_arm`` is stamped on the offer junction at injection time (the
+    selector knows which arm it ran) and carried forward onto the outcome
+    row by ``_record_one_injection_outcome``. Default ``'treatment'`` so
+    every pre-existing row — written before the placebo arm existed — is
+    readable as treatment without a backfill. Purely additive: two
+    ALTER TABLE ADD COLUMNs, no existing column touched.
+    """
+    pio_cols = {r[1] for r in conn.execute("PRAGMA table_info(pattern_injection_outcome)").fetchall()}
+    if "ab_arm" not in pio_cols:
+        conn.execute(
+            "ALTER TABLE pattern_injection_outcome ADD COLUMN ab_arm TEXT NOT NULL DEFAULT 'treatment'"
+        )
+        log('INFO', "Migrated: added ab_arm column to pattern_injection_outcome (v32)")
+    dpo_cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_pattern_offered)").fetchall()}
+    if "ab_arm" not in dpo_cols:
+        conn.execute(
+            "ALTER TABLE dispatch_pattern_offered ADD COLUMN ab_arm TEXT NOT NULL DEFAULT 'treatment'"
+        )
+        log('INFO', "Migrated: added ab_arm column to dispatch_pattern_offered (v32)")
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1668,6 +1698,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     29: _migrate_v29,
     30: _migrate_v30,
     31: _migrate_v31,
+    32: _migrate_v32,
 }
 
 

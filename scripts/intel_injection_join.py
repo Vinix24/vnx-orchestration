@@ -13,6 +13,7 @@ not a metric.
 Usage:
     python3 scripts/intel_injection_join.py join   [--qi <path>] [--rc <path>] [--limit N]
     python3 scripts/intel_injection_join.py adoption [--qi <path>] [--limit N]
+    python3 scripts/intel_injection_join.py placebo [--qi <path>]
 
 Default DB paths resolve from VNX_STATE_DIR (falling back to
 ~/.vnx-data/vnx-dev/state).
@@ -218,6 +219,130 @@ def run_adoption(qi_db: Path, limit: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# PUNT 3b — adoption rate per arm (placebo discrimination test)
+#
+# Side-by-side adoption rate per injection arm, with the counts that make the
+# rate readable. A rate without its n is a number you cannot interpret, and a
+# placebo arm with 0 rows is the expected state until the arm is activated —
+# the command must print cleanly against zero rows (dispatch
+# 20260920-191500-placebo-arm). Reads ab_arm from pattern_injection_outcome
+# when the column exists (v32); otherwise every row is read as 'treatment'.
+# ---------------------------------------------------------------------------
+
+_PLACEBO_ARM_SQL_TEMPLATE = """
+SELECT
+    COALESCE(pio.ab_arm, 'treatment')                       AS ab_arm,
+    COUNT(*)                                                AS offered,
+    SUM(CASE WHEN pio.used = 1 THEN 1 ELSE 0 END)           AS used,
+    SUM(CASE WHEN pio.used = 0 THEN 1 ELSE 0 END)           AS ignored,
+    CASE WHEN COUNT(*) > 0
+         THEN ROUND(100.0 * SUM(CASE WHEN pio.used = 1 THEN 1 ELSE 0 END) / COUNT(*), 1)
+         ELSE NULL END                                     AS adoption_pct
+FROM dispatch_pattern_offered o
+LEFT JOIN pattern_injection_outcome pio
+    ON pio.dispatch_id = o.dispatch_id
+   AND pio.pattern_id  = o.pattern_id
+GROUP BY COALESCE(pio.ab_arm, 'treatment')
+ORDER BY ab_arm
+"""
+
+_PLACEBO_ARM_SQL_NO_COLUMN = """
+SELECT
+    'treatment'                                             AS ab_arm,
+    COUNT(*)                                                AS offered,
+    SUM(CASE WHEN pio.used = 1 THEN 1 ELSE 0 END)           AS used,
+    SUM(CASE WHEN pio.used = 0 THEN 1 ELSE 0 END)           AS ignored,
+    CASE WHEN COUNT(*) > 0
+         THEN ROUND(100.0 * SUM(CASE WHEN pio.used = 1 THEN 1 ELSE 0 END) / COUNT(*), 1)
+         ELSE NULL END                                     AS adoption_pct
+FROM dispatch_pattern_offered o
+LEFT JOIN pattern_injection_outcome pio
+    ON pio.dispatch_id = o.dispatch_id
+   AND pio.pattern_id  = o.pattern_id
+GROUP BY ab_arm
+ORDER BY ab_arm
+"""
+
+
+def _pio_has_ab_arm(conn: sqlite3.Connection) -> bool:
+    try:
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(pattern_injection_outcome)"
+        ).fetchall()}
+        return "ab_arm" in cols
+    except sqlite3.Error:
+        return False
+
+
+def run_placebo(qi_db: Path) -> int:
+    """Print adoption rate per arm, side-by-side, with counts.
+
+    Returns 0 on a clean print (including the all-zero case, which is the
+    expected state until the placebo arm is activated). Returns 1 only when
+    the quality DB itself is absent.
+    """
+    if not qi_db.exists():
+        print(f"quality_intelligence.db not found: {qi_db}", file=sys.stderr)
+        return 1
+    conn = sqlite3.connect(str(qi_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        has_arm = _pio_has_ab_arm(conn)
+        sql = _PLACEBO_ARM_SQL_TEMPLATE if has_arm else _PLACEBO_ARM_SQL_NO_COLUMN
+        rows = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    # Build a stable arm -> row map so every known arm prints even at zero.
+    arms = ("placebo", "treatment", "control")
+    by_arm: dict = {a: {"offered": 0, "used": 0, "ignored": 0, "adoption_pct": None} for a in arms}
+    for r in rows:
+        arm = r["ab_arm"] or "treatment"
+        by_arm.setdefault(arm, {"offered": 0, "used": 0, "ignored": 0, "adoption_pct": None})
+        by_arm[arm] = {
+            "offered": int(r["offered"]),
+            "used": int(r["used"]),
+            "ignored": int(r["ignored"]),
+            "adoption_pct": r["adoption_pct"],
+        }
+
+    # Header with global counts
+    total_offered = sum(d["offered"] for d in by_arm.values())
+    total_used = sum(d["used"] for d in by_arm.values())
+    total_ignored = sum(d["ignored"] for d in by_arm.values())
+    print(f"# Adoption rate per arm — offered: {total_offered}, "
+          f"used: {total_used}, ignored: {total_ignored}")
+    print(f"#   (ab_arm column {'present' if has_arm else 'ABSENT — every row read as treatment'}"
+          f")\n")
+    header = f"{'arm':12} {'offered':>7} {'used':>5} {'ignored':>7} {'adopt%':>6}"
+    print(header)
+    print("-" * len(header))
+    for arm in arms:
+        d = by_arm[arm]
+        pct = "n/a" if d["adoption_pct"] is None else f"{d['adoption_pct']}"
+        print(f"{arm:12} {d['offered']:>7} {d['used']:>5} {d['ignored']:>7} {pct:>6}")
+    # Any unexpected arm (e.g. a future arm value)
+    for arm, d in by_arm.items():
+        if arm in arms:
+            continue
+        pct = "n/a" if d["adoption_pct"] is None else f"{d['adoption_pct']}"
+        print(f"{arm:12} {d['offered']:>7} {d['used']:>5} {d['ignored']:>7} {pct:>6}")
+
+    # Discrimination readout: the delta the test turns on.
+    placebo = by_arm.get("placebo", {"adoption_pct": None, "offered": 0})
+    treatment = by_arm.get("treatment", {"adoption_pct": None, "offered": 0})
+    p_pct = placebo["adoption_pct"]
+    t_pct = treatment["adoption_pct"]
+    if p_pct is not None and t_pct is not None:
+        delta = round(t_pct - p_pct, 1)
+        print(f"\n# treatment - placebo adoption delta: {delta:+.1f} pp")
+        print(f"#   treatment n={treatment['offered']}, placebo n={placebo['offered']}")
+    else:
+        print("\n# treatment - placebo adoption delta: n/a (one or both arms empty)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -234,6 +359,9 @@ def main(argv: list[str] | None = None) -> int:
     p_adp.add_argument("--qi", help="path to quality_intelligence.db")
     p_adp.add_argument("--limit", type=int, default=20)
 
+    p_pl = sub.add_parser("placebo", help="adoption rate per injection arm (placebo discrimination)")
+    p_pl.add_argument("--qi", help="path to quality_intelligence.db")
+
     args = parser.parse_args(argv)
     state_dir = _default_state_dir()
 
@@ -244,6 +372,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "adoption":
         qi = _resolve_db(args.qi, "quality_intelligence.db", state_dir)
         return run_adoption(qi, args.limit)
+    if args.cmd == "placebo":
+        qi = _resolve_db(args.qi, "quality_intelligence.db", state_dir)
+        return run_placebo(qi)
     return 2
 
 
