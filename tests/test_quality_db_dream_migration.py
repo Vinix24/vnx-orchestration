@@ -333,8 +333,8 @@ class TestNightlyDigestsV31:
         assert row == (0,)
         conn.close()
 
-    def test_user_version_reaches_31(self, tmp_path):
-        """PRAGMA user_version equals HIGHEST_QI_VERSION (31) after bootstrap."""
+    def test_user_version_reaches_highest(self, tmp_path):
+        """PRAGMA user_version equals HIGHEST_QI_VERSION (32) after bootstrap."""
         db_path = tmp_path / "quality_intelligence.db"
         _bootstrap(db_path)
 
@@ -342,4 +342,4 @@ class TestNightlyDigestsV31:
         version = schema_migration.get_user_version(conn)
         conn.close()
 
-        assert version == quality_db_init.HIGHEST_QI_VERSION == 31
+        assert version == quality_db_init.HIGHEST_QI_VERSION == 32
