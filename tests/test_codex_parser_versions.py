@@ -347,16 +347,37 @@ class TestParserResilience:
         severities = {f["severity"] for f in result["findings"]}
         assert "critical" in severities or "high" in severities
 
+    # The next three tests build their stream with json.dumps. They used to be
+    # written as single-quoted literals with ``\"`` inside, which Python turns
+    # into a bare ``"``: the line was not valid JSON, the NDJSON unwrap skipped
+    # it, and the old loose verdict reader then found the object at any brace in
+    # the raw line. They never read an agent_message at all (OI-1786).
+
     def test_fenced_json_verdict_extracted(self):
-        text = '{"type": "agent_message", "text": "Review done.\\n\\n```json\\n{\"verdict\": \"pass\", \"findings\": []}\\n```"}'
+        text = json.dumps({
+            "type": "agent_message",
+            "text": 'Review done.\n\n```json\n{"verdict": "pass", "findings": []}\n```',
+        })
         result = parse_codex_findings(text)
         assert result["verdict"].get("verdict") == "pass"
 
-    def test_unfenced_inline_json_verdict_extracted(self):
-        raw = '{"type": "agent_message", "text": "Summary: {\"verdict\": \"fail\", \"findings\": [{\"severity\": \"critical\", \"message\": \"no tests\"}]}"}'
+    def test_unfenced_verdict_on_its_own_line_extracted(self):
+        message = 'Summary:\n{"verdict": "fail", "findings": [{"severity": "critical", "message": "no tests"}]}'
+        raw = json.dumps({"type": "agent_message", "text": message})
         result = parse_codex_findings(raw)
         assert result["verdict"].get("verdict") == "fail"
         assert len(result["findings"]) == 1
+
+    def test_verdict_quoted_mid_line_is_not_extracted(self):
+        """A verdict object in the middle of a line is quoted, not written
+        (OI-1782). The booking reads it the way the guard does, so it books no
+        verdict from it: the guard would refuse this run as one that wrote none.
+        """
+        message = 'Summary: {"verdict": "fail", "findings": [{"severity": "critical", "message": "no tests"}]}'
+        raw = json.dumps({"type": "agent_message", "text": message})
+        result = parse_codex_findings(raw)
+        assert result["verdict"] == {}
+        assert result["findings"] == []
 
     def test_multiple_agent_messages_concatenated(self):
         lines = [

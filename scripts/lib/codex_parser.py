@@ -56,7 +56,15 @@ def _extract_codex_text(stdout: str) -> str:
 
 
 def _extract_codex_verdict(text: str) -> Dict[str, Any]:
-    """Try to parse a JSON verdict from codex output text."""
+    """Try to parse a JSON verdict from codex output text.
+
+    No production code calls this since OI-1786: :func:`parse_codex_findings`
+    reads its verdict through :func:`extract_verdict_block`. It is the loose
+    reader that made the booking disagree with the guard. It takes the FIRST
+    fenced block, and its bare-object fallback the first object with a
+    ``verdict`` OR a ``findings`` key, value unchecked, so an echoed
+    ``VERDICT_CONTRACT`` reads as a verdict. Do not wire it back in.
+    """
     if not text:
         return {}
     fenced = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
@@ -287,13 +295,32 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
 
 
 def parse_codex_findings(stdout: str) -> Dict[str, Any]:
-    """Extract findings from Codex headless NDJSON output."""
+    """Extract the verdict and findings a codex_gate run booked, from its stdout.
+
+    The verdict is read by :func:`extract_verdict_block`: the reader
+    ``gate_artifacts`` asks "did this run write a verdict" (the OI-1770
+    fail-closed guard), so the record can never say something else than the
+    guard saw (OI-1786). A run that echoed ``VERDICT_CONTRACT`` and then wrote
+    a real verdict used to book the template's placeholder, because the reader
+    this function called before (:func:`_extract_codex_verdict`) took the FIRST
+    fenced block and accepted any value.
+
+    When that reader returns a verdict, that is the verdict, with its own
+    findings and its own residual_risk. An empty ``findings`` list is an answer
+    and is not topped up from the prose. Only a run in which it finds no
+    verdict falls back to :func:`_extract_findings_from_text`, the
+    markdown-bullet heuristic for a model that skips the JSON altogether. That
+    fallback stays codex-specific: it is a quirk of this provider's output, not
+    a property of the contract every gate runs under.
+    """
     text = _extract_codex_text(stdout)
-    verdict = _extract_codex_verdict(text)
-    findings = verdict.get("findings") or [] if verdict else []
-    residual_risk = verdict.get("residual_risk") or "" if verdict else ""
-    if not findings:
+    verdict = extract_verdict_block(stdout)
+    if verdict:
+        findings = verdict.get("findings") or []
+        residual_risk = verdict.get("residual_risk") or ""
+    else:
         findings = _extract_findings_from_text(text)
+        residual_risk = ""
     return {
         "findings": _normalize_findings(findings),
         "residual_risk": residual_risk,

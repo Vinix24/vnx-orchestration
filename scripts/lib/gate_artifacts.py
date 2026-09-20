@@ -342,16 +342,20 @@ def materialize_artifacts(
     residual_risk = ""
     findings_parsed = False
     if gate == "codex_gate":
-        # codex_gate keeps its own dedicated path, unchanged: besides the
-        # shared verdict-block shape, it has a private text-based fallback
-        # (parse_codex_findings' _extract_findings_from_text markdown-bullet
-        # heuristic) for findings written as bullets next to a verdict. That
-        # fallback is a genuine per-provider parsing quirk, not a contract
-        # property — it must stay scoped to codex and never fire for another
-        # gate (repeating it elsewhere would be a new instance of the same
-        # defect this fix removes). It no longer rescues a run that wrote no
-        # verdict at all: the OI-1770 guard below refuses that run before
-        # anything is booked.
+        # codex_gate goes through parse_codex_findings, which reads the verdict
+        # with extract_verdict_block: the SAME reader the OI-1770 guard below
+        # asks whether the run wrote one (OI-1786). Booking and guard used to
+        # read the stream with two different rules and could disagree about
+        # the verdict, so a `fail` could land in the record as a `completed`
+        # run with no blockers. What stays codex-specific is the fallback for
+        # a run in which that reader finds no verdict: the markdown-bullet
+        # heuristic (_extract_findings_from_text) for a model that skips the
+        # JSON. That is a genuine per-provider parsing quirk, not a contract
+        # property, so it stays scoped to codex and never fires for another
+        # gate (repeating it elsewhere would be a new instance of the defect
+        # OI-1763 removed). It does not rescue a run that wrote no verdict at
+        # all: the OI-1770 guard below refuses that run before anything is
+        # booked.
         parsed = parse_codex_findings(stdout)
         findings = parsed["findings"]
         residual_risk = parsed.get("residual_risk", "") or ""
@@ -611,8 +615,11 @@ def materialize_artifacts(
     if gate == "codex_gate":
         try:
             from gate_register_emit import emit_codex_gate_to_register
+            # Trimmed and lowercased the way extract_verdict_block checks the
+            # value: the dict it returns keeps the raw text, so " FAIL " clears
+            # the guard as a fail and must register as one (OI-1786).
             verdict_obj = parsed.get("verdict", {})
-            verdict_str = verdict_obj.get("verdict", "").lower() if isinstance(verdict_obj, dict) else ""
+            verdict_str = str(verdict_obj.get("verdict", "")).strip().lower() if isinstance(verdict_obj, dict) else ""
             if verdict_str in ("pass", "passed"):
                 register_event = "gate_passed"
             elif verdict_str in ("fail", "failed", "blocked"):
