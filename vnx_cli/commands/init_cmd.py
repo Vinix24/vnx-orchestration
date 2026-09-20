@@ -699,7 +699,8 @@ def vnx_init(args) -> int:
     if version_pin.exists() and not force:
         print(
             f"\n  error: .vnx-version already exists ({version_pin.read_text().strip()}).\n"
-            "  Use --force to reinitialise.",
+            "  Use --force to reinitialise (keeps the current pin), or\n"
+            "  --force --set-version <ver> to repin.",
             file=sys.stderr,
         )
         return 1
