@@ -768,7 +768,15 @@ class TestEnvelopeWorktreeIsolation:
         )
 
     def test_worktree_removed_on_spawn_failure(self, tmp_path):
-        """remove_dispatch_worktree is called even when ProviderAdapter.run raises."""
+        """remove_dispatch_worktree is called even when ProviderAdapter.run raises.
+
+        OI-1743: a spawn that raises is no longer allowed to propagate past
+        GOVERN. The exception is caught, a failure result is built, and the
+        dispatch falls through to _govern (which writes a failure receipt) and
+        the worktree teardown. So this test now asserts the NEW contract: the
+        run does NOT raise, the worktree IS removed, and the dispatch reports
+        a governed failure. The worktree-teardown assertion (the test's
+        original purpose) is unchanged."""
         plan = _make_provider_plan(tmp_path, dispatch_id="wt-rm-fail-test")
         permit = issue_permit(plan)
         state_dir = tmp_path / "state"
@@ -784,8 +792,17 @@ class TestEnvelopeWorktreeIsolation:
              patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=_FAKE_WT_PATH), \
              patch("dispatch_worktree_isolation.remove_dispatch_worktree") as mock_remove, \
              patch.object(ProviderAdapter, "run", bad_adapter_run):
-            with pytest.raises(RuntimeError, match="spawn exploded"):
-                run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+            result = run_envelope_plan(plan, permit, state_dir=state_dir, data_dir=data_dir)
+
+        # OI-1743: the exception is absorbed into a governed failure, not
+        # propagated — a spawn failure must still reach _govern and write a
+        # receipt rather than exit the lane with an uncaught raise.
+        assert result.status == "failure", (
+            f"a spawn that raises must surface as a governed failure, not a "
+            f"raise and not a silent success — got {result.status!r}"
+        )
+        assert result.error is not None
+        assert "spawn exploded" in result.error
 
         # teardown carries terminal_id=plan.target_id (dispatch_envelope.py) —
         # pin the full call contract, not a hardcoded 'T1' that happens to match.
