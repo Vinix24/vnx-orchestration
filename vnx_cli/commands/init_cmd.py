@@ -694,9 +694,14 @@ def vnx_init(args) -> int:
     print(f"Initialising VNX project at: {project_dir}")
     print(f"  template: {template}")
 
-    # Safety gate: abort if already initialised and --force not set.
+    # Safety gate: abort if already initialised and --force not set. The one
+    # explicit exception is --set-version: repinning IS the requested
+    # operation there (main.py help: "explicitly (re)write the .vnx-version
+    # pin to VERSION, even if a pin already exists"), and _write_vnx_version
+    # only touches the pin — scaffold files are still preserved because
+    # force stays False.
     version_pin = project_dir / ".vnx-version"
-    if version_pin.exists() and not force:
+    if version_pin.exists() and not force and not set_version:
         print(
             f"\n  error: .vnx-version already exists ({version_pin.read_text().strip()}).\n"
             "  Use --force to reinitialise.",

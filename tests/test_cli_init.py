@@ -191,14 +191,33 @@ class TestVnxInitCli:
         assert rc != 0
         assert not (tmp_path / ".vnx-version").exists()
 
-    def test_init_set_version_without_force_on_existing_still_aborts(self, tmp_path):
-        # --set-version does not bypass the existing-init safety gate; an
-        # operator repinning an already-initialised project still needs
-        # --force too (consistent with every other scaffold file).
+    def test_init_set_version_repins_existing_without_force(self, tmp_path):
+        # --set-version IS the explicit repin route (main.py help: "explicitly
+        # (re)write the .vnx-version pin to VERSION, even if a pin already
+        # exists"). It must pass the existing-init safety gate WITHOUT --force
+        # and must not overwrite existing scaffold files (force stays False).
         vnx_init(_args(tmp_path))
+        version_file = tmp_path / ".vnx-version"
+        version_file.write_text("v1.3.0\n")
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("customised\n")
+
         rc = vnx_init(_args(tmp_path, set_version="v1.4.0"))
-        assert rc != 0
-        assert (tmp_path / ".vnx-version").read_text().strip() == __version__
+        assert rc == 0
+        assert version_file.read_text().strip() == "v1.4.0"
+        assert claude_md.read_text() == "customised\n"
+
+    def test_init_existing_pin_without_set_version_or_force_still_aborts(self, tmp_path):
+        # The safety gate is NOT weakened: an existing pin plus no
+        # --set-version and no --force must still abort (protection against
+        # accidental reinitialise), leaving the pin untouched.
+        vnx_init(_args(tmp_path))
+        version_file = tmp_path / ".vnx-version"
+        version_file.write_text("v1.3.0\n")
+
+        rc = vnx_init(_args(tmp_path))
+        assert rc == 1
+        assert version_file.read_text().strip() == "v1.3.0"
 
     def test_init_project_path_positional(self, tmp_path):
         ns = argparse.Namespace(
