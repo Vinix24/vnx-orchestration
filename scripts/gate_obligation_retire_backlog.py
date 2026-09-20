@@ -70,7 +70,12 @@ from gate_obligations import (  # noqa: E402
     iter_obligations,
     update_obligation,
 )
-from gate_obligation_runner import _gh_json, _resolve_github_owner_repo  # noqa: E402
+from gate_obligation_runner import (  # noqa: E402
+    _gh_json,
+    _git_remote_origin,
+    _owner_repo_from_remote_url,
+    _resolve_github_owner_repo,
+)
 
 # A growing repo needs headroom; 2026-08-23 measured 1537 merged + 113
 # closed-without-merge + 3 open on this repo — 5000 leaves ample margin
@@ -99,7 +104,19 @@ def fetch_prs(owner_repo: str, state: str, fields: str, limit: int = _GH_LIST_LI
 
 
 def fetch_existing_branches(project_root: Path) -> Set[str]:
-    """``dispatch/<id>`` branch names that currently exist on origin."""
+    """``dispatch/<id>`` branch names that currently exist on origin.
+
+    Returns an empty set on any git failure, including the case where
+    ``project_root`` is not a git repository at all (measured 2026-09-20:
+    ``~/Desktop/BUSINESS/clients/vincent/pacompany`` is no git repo, so
+    ``git ls-remote`` returns nothing and every branch reads as gone —
+    which would retire every obligation with a fabricated reason).
+
+    A silent empty set is dangerous here: the caller cannot tell "no
+    dispatch branches exist" from "this is not a git repo". The
+    :func:`assert_repos_consistent` guard below turns that ambiguity into
+    a loud refusal BEFORE the empty set ever feeds the classifier.
+    """
     try:
         proc = subprocess.run(
             ["git", "-C", str(project_root), "ls-remote", "--heads", "origin"],
@@ -118,6 +135,93 @@ def fetch_existing_branches(project_root: Path) -> Set[str]:
         if ref.startswith("refs/heads/"):
             names.add(ref[len("refs/heads/"):])
     return names
+
+
+def _project_root_owner_repo(project_root: Path) -> Optional[str]:
+    """Resolve the GitHub ``owner/repo`` of the ``--project-root`` checkout.
+
+    Mirrors :func:`gate_obligation_runner._resolve_github_owner_repo` but reads
+    ONLY the ``--project-root`` checkout's ``origin`` remote — the same source
+    :func:`fetch_existing_branches` runs ``git ls-remote`` against. A
+    local-filesystem origin (a release/install artifact) returns None, same
+    contract as the runner's helper.
+    """
+    url = _git_remote_origin(project_root)
+    if not url:
+        return None
+    return _owner_repo_from_remote_url(url)
+
+
+class RepoMismatchError(RuntimeError):
+    """The PR-source repo and the branch-source repo do not match.
+
+    Raised by :func:`assert_repos_consistent` when the ``owner_repo`` the
+    PR queries resolve to (from the STATE-DIR, via
+    ``_resolve_github_owner_repo``) is not the same GitHub repo the
+    branch-existence check runs against (the ``--project-root`` checkout's
+    ``origin``). Measured 2026-09-20 (OI-1795): for project-store
+    ``website-vincentvandeth`` with
+    ``--project-root ~/Development/website_vincentvandeth`` (origin
+    ``Vinix24/vincentD``) the script reported
+    ``owner_repo=Vinix24/vnx-orchestration`` — the dispatch-branches of
+    project X were sought in the repo of project Y, so EVERY obligation
+    landed ``reason=no_pr_branch_gone`` with a fabricated reason.
+
+    A wrong repo gives no error, only a wrong verdict — the most dangerous
+    shape. A loud refusal is better than a default here.
+    """
+
+
+def assert_repos_consistent(
+    owner_repo: str,
+    project_root: Path,
+) -> None:
+    """Refuse to run when the PR-source repo and branch-source repo disagree.
+
+    ``owner_repo`` is the GitHub ``owner/repo`` the three ``gh pr list``
+    queries resolve to (from the STATE-DIR via
+    ``_resolve_github_owner_repo``). ``project_root`` is the checkout
+    :func:`fetch_existing_branches` runs ``git ls-remote`` against.
+
+    Three loud failure modes, each a distinct fault rather than a silent
+    wrong verdict:
+
+      - the two resolve to DIFFERENT GitHub repos — the PRs of project X
+        checked against the branches of project Y (OI-1795).
+      - ``--project-root`` is not a git repo at all — ``git ls-remote``
+        returns nothing and every branch reads as gone, which would
+        retire every obligation with ``no_pr_branch_gone`` (observed for
+        ``~/Desktop/BUSINESS/clients/vincent/pacompany``).
+      - ``--project-root`` has no GitHub ``origin`` — a local-filesystem
+        origin is an install artifact, never a project identity, so the
+        branch source cannot be attributed.
+
+    Only when the ``--project-root`` checkout resolves to the SAME
+    ``owner/repo`` as the STATE-DIR does the run proceed.
+    """
+    root_owner_repo = _project_root_owner_repo(project_root)
+    if root_owner_repo is None:
+        raise RepoMismatchError(
+            f"cannot resolve a GitHub owner/repo for --project-root "
+            f"{project_root} (no 'origin' remote, not a git repo, or a "
+            f"local-filesystem origin). The branch-existence check would "
+            f"run against an unknown repo, so every dispatch branch would "
+            f"read as gone and retire every obligation with a fabricated "
+            f"'no_pr_branch_gone' reason. Point --project-root at the "
+            f"checkout whose 'origin' remote is the GitHub repo this "
+            f"store lives in (owner/repo {owner_repo})."
+        )
+    if root_owner_repo != owner_repo:
+        raise RepoMismatchError(
+            f"repo mismatch: the STATE-DIR resolves the PR source to "
+            f"{owner_repo}, but --project-root {project_root} resolves the "
+            f"branch source to {root_owner_repo}. The PR queries and the "
+            f"branch-existence check would run against TWO different "
+            f"repositories, producing a mixed verdict visible nowhere "
+            f"except one owner_repo line. Point --project-root at the "
+            f"checkout whose 'origin' remote is {owner_repo}, or pass a "
+            f"--state-dir that belongs to {root_owner_repo}."
+        )
 
 
 def build_pr_index(
@@ -326,6 +430,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     owner_repo = _resolve_github_owner_repo(state_dir)
     if not owner_repo:
         print("ERROR: cannot resolve a GitHub owner/repo for this store", file=sys.stderr)
+        return 20
+
+    # OI-1795: the PR queries go to the STATE-DIR's repo (``owner_repo``
+    # above) and the branch-existence check to ``--project-root``. Let
+    # those disagree and the verdict is a mix of two repos, visible
+    # nowhere except one owner_repo line — and every obligation retires
+    # with a fabricated ``no_pr_branch_gone`` reason. Refuse hard before
+    # any fetch rather than ship a wrong verdict. A wrong repo gives no
+    # error, only a wrong verdict; the refusal is the safer default.
+    try:
+        assert_repos_consistent(owner_repo, args.project_root)
+    except RepoMismatchError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 20
 
     merged_raw = fetch_prs(owner_repo, "merged", "number,headRefName,mergedAt", args.limit)
