@@ -55,7 +55,7 @@ def record_injection_audit(
     injection_id = _new_id()
     items_json = json.dumps([item.to_dict() for item in result.items])
     suppressed_json = json.dumps([s.to_dict() for s in result.suppressed])
-    ab_arm = getattr(result, "ab_arm", "treatment") or "treatment"
+    ab_arm = getattr(result, "ab_arm", None)
     try:
         from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
     except ImportError:
@@ -213,9 +213,14 @@ def record_pattern_usage(
                 _upsert_pattern_usage(db, item, now, project_id, pu_has_project, pu_conflict_target)
             if dpo_conflict_target is not None:
                 rearm_busy_timeout(db, deadline)
+                # The selector always stamps ab_arm on a new offer (treatment
+                # / placebo / control). getattr's default only fires for a
+                # pre-v32 result object that never carried the field; in that
+                # case None keeps the row readable as "unknown" rather than
+                # fabricating a treatment arm.
                 _upsert_dispatch_pattern_offered(
                     db, item, result.dispatch_id, now, project_id, dpo_has_project, dpo_has_ab_arm,
-                    getattr(result, "ab_arm", "treatment") or "treatment", dpo_conflict_target,
+                    getattr(result, "ab_arm", None), dpo_conflict_target,
                 )
             _stamp_source_dispatch_id(db, item, result.dispatch_id)
         rearm_busy_timeout(db, deadline)

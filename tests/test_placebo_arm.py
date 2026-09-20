@@ -114,7 +114,7 @@ def _db_with_outcome_and_ab_arm() -> sqlite3.Connection:
             pattern_title TEXT NOT NULL,
             offered_at    TEXT NOT NULL,
             project_id    TEXT NOT NULL DEFAULT '',
-            ab_arm        TEXT NOT NULL DEFAULT 'treatment',
+            ab_arm        TEXT,
             PRIMARY KEY (dispatch_id, pattern_id, project_id)
         )
     """)
@@ -129,7 +129,7 @@ def _db_with_outcome_and_ab_arm() -> sqlite3.Connection:
             evidence    TEXT,
             project_id  TEXT    NOT NULL DEFAULT 'vnx-dev',
             created_at  TEXT    NOT NULL,
-            ab_arm      TEXT    NOT NULL DEFAULT 'treatment',
+            ab_arm      TEXT,
             UNIQUE (project_id, dispatch_id, pattern_id)
         )
     """)
@@ -307,7 +307,13 @@ class TestMigrationV32:
         finally:
             conn.close()
 
-    def test_ab_arm_defaults_to_treatment(self, tmp_path):
+    def test_ab_arm_defaults_to_null_for_historical_rows(self, tmp_path):
+        """A row written without an explicit ab_arm (the historical case: a
+        row that predates the v32 arm label) reads NULL, not a fabricated
+        'treatment'. Giving every historical row a invented treatment arm is
+        the measurement defect this migration repairs — a row whose arm we
+        do not know is NULL, which the per-arm report surfaces as 'unknown'.
+        """
         db_path = tmp_path / "qi.db"
         assert bootstrap_qi_db(db_path, schema_file=_SCHEMA_FILE) is True
         conn = sqlite3.connect(str(db_path))
@@ -318,7 +324,8 @@ class TestMigrationV32:
                 "VALUES ('d1', 'p1', 'p1', 1, 'proj', '2026-09-20T00:00:00Z')"
             )
             # dispatch_pattern_offered has no project_id column in the base
-            # schema (v17); ab_arm is added by v32 with a 'treatment' default.
+            # schema (v17); ab_arm is added by v32 as a nullable column, so
+            # a row inserted without an explicit arm stays NULL.
             conn.execute(
                 "INSERT INTO dispatch_pattern_offered "
                 "(dispatch_id, pattern_id, pattern_title, offered_at) "
@@ -331,8 +338,8 @@ class TestMigrationV32:
             dpo_arm = conn.execute(
                 "SELECT ab_arm FROM dispatch_pattern_offered WHERE dispatch_id='d1'"
             ).fetchone()[0]
-            assert pio_arm == "treatment"
-            assert dpo_arm == "treatment"
+            assert pio_arm is None
+            assert dpo_arm is None
         finally:
             conn.close()
 
@@ -478,14 +485,14 @@ class TestRunPlacebo:
             CREATE TABLE dispatch_pattern_offered (
                 dispatch_id TEXT, pattern_id TEXT, pattern_title TEXT,
                 offered_at TEXT, project_id TEXT DEFAULT '',
-                ab_arm TEXT DEFAULT 'treatment',
+                ab_arm TEXT,
                 PRIMARY KEY (dispatch_id, pattern_id, project_id)
             );
             CREATE TABLE pattern_injection_outcome (
                 id INTEGER PRIMARY KEY, dispatch_id TEXT, pattern_id TEXT,
                 pattern_hash TEXT, used INTEGER, reason TEXT, evidence TEXT,
                 project_id TEXT DEFAULT 'vnx-dev', created_at TEXT,
-                ab_arm TEXT DEFAULT 'treatment',
+                ab_arm TEXT,
                 UNIQUE (project_id, dispatch_id, pattern_id)
             );
         """)
@@ -496,9 +503,11 @@ class TestRunPlacebo:
         out = capsys.readouterr().out
         assert rc == 0
         assert "arm" in out and "offered" in out and "adopt%" in out
-        # all arms present even at zero
-        for arm in ("placebo", "treatment", "control"):
+        # all arms present even at zero, including the unknown bucket
+        for arm in ("placebo", "treatment", "control", "unknown"):
             assert arm in out
+        # no_outcome column is present in the header even at zero
+        assert "no_out" in out
 
     def test_side_by_side_with_data(self, tmp_path, capsys):
         iij = self._import_run_placebo()
@@ -508,14 +517,14 @@ class TestRunPlacebo:
             CREATE TABLE dispatch_pattern_offered (
                 dispatch_id TEXT, pattern_id TEXT, pattern_title TEXT,
                 offered_at TEXT, project_id TEXT DEFAULT '',
-                ab_arm TEXT DEFAULT 'treatment',
+                ab_arm TEXT,
                 PRIMARY KEY (dispatch_id, pattern_id, project_id)
             );
             CREATE TABLE pattern_injection_outcome (
                 id INTEGER PRIMARY KEY, dispatch_id TEXT, pattern_id TEXT,
                 pattern_hash TEXT, used INTEGER, reason TEXT, evidence TEXT,
                 project_id TEXT DEFAULT 'vnx-dev', created_at TEXT,
-                ab_arm TEXT DEFAULT 'treatment',
+                ab_arm TEXT,
                 UNIQUE (project_id, dispatch_id, pattern_id)
             );
         """)
@@ -586,8 +595,158 @@ class TestRunPlacebo:
         rc = iij.run_placebo(qi)
         out = capsys.readouterr().out
         assert rc == 0
-        # explicit note that the column is absent
+        # explicit note that the column is absent, and every offer reads as
+        # "unknown" (the report no longer fabricates a 'treatment' arm for
+        # rows that predate the arm label)
         assert "ABSENT" in out
+        assert "unknown" in out
+
+    # The OLD query grouped on the OUTCOME's arm with COALESCE(pio.ab_arm,
+    # 'treatment'), so a placebo offer that produced no outcome row fell
+    # through the COALESCE into the 'treatment' bucket. The NEW query groups
+    # on the OFFER's arm, so the same offer counts in 'placebo' and surfaces
+    # as no_outcome. This test pins both: the old SQL misclassifies, the new
+    # run_placebo does not.
+    _OLD_PLACEBO_SQL = """
+SELECT
+    COALESCE(pio.ab_arm, 'treatment')                       AS ab_arm,
+    COUNT(*)                                                AS offered,
+    SUM(CASE WHEN pio.used = 1 THEN 1 ELSE 0 END)           AS used,
+    SUM(CASE WHEN pio.used = 0 THEN 1 ELSE 0 END)           AS ignored,
+    SUM(CASE WHEN pio.used IS NULL THEN 1 ELSE 0 END)       AS no_outcome
+FROM dispatch_pattern_offered o
+LEFT JOIN pattern_injection_outcome pio
+    ON pio.dispatch_id = o.dispatch_id
+   AND pio.pattern_id  = o.pattern_id
+GROUP BY COALESCE(pio.ab_arm, 'treatment')
+ORDER BY ab_arm
+"""
+
+    def test_placebo_offer_without_outcome_counts_as_placebo_not_treatment(
+        self, tmp_path, capsys
+    ):
+        iij = self._import_run_placebo()
+        qi = tmp_path / "quality_intelligence.db"
+        conn = sqlite3.connect(str(qi))
+        conn.executescript("""
+            CREATE TABLE dispatch_pattern_offered (
+                dispatch_id TEXT, pattern_id TEXT, pattern_title TEXT,
+                offered_at TEXT, project_id TEXT DEFAULT '',
+                ab_arm TEXT,
+                PRIMARY KEY (dispatch_id, pattern_id, project_id)
+            );
+            CREATE TABLE pattern_injection_outcome (
+                id INTEGER PRIMARY KEY, dispatch_id TEXT, pattern_id TEXT,
+                pattern_hash TEXT, used INTEGER, reason TEXT, evidence TEXT,
+                project_id TEXT DEFAULT 'vnx-dev', created_at TEXT,
+                ab_arm TEXT,
+                UNIQUE (project_id, dispatch_id, pattern_id)
+            );
+        """)
+        # One placebo offer, NO outcome row (dispatch failed / no report /
+        # writer never ran). Plus one treatment offer WITH a used=1 outcome.
+        conn.execute(
+            "INSERT INTO dispatch_pattern_offered "
+            "(dispatch_id, pattern_id, pattern_title, offered_at, project_id, ab_arm) "
+            "VALUES ('d-pl', 'p-pl', 'Placebo pattern', '2026-09-20T00:00:00Z', 'p', 'placebo')"
+        )
+        conn.execute(
+            "INSERT INTO dispatch_pattern_offered "
+            "(dispatch_id, pattern_id, pattern_title, offered_at, project_id, ab_arm) "
+            "VALUES ('d-tr', 'p-tr', 'Treatment pattern', '2026-09-20T00:00:00Z', 'p', 'treatment')"
+        )
+        conn.execute(
+            "INSERT INTO pattern_injection_outcome "
+            "(dispatch_id, pattern_id, pattern_hash, used, project_id, created_at, ab_arm) "
+            "VALUES ('d-tr', 'p-tr', 'p-tr', 1, 'p', '2026-09-20T00:00:00Z', 'treatment')"
+        )
+        conn.commit()
+        conn.close()
+
+        # --- OLD query: groups on the outcome's arm with COALESCE to treatment ---
+        old_conn = sqlite3.connect(str(qi))
+        old_conn.row_factory = sqlite3.Row
+        old_rows = {
+            r["ab_arm"]: dict(r)
+            for r in old_conn.execute(self._OLD_PLACEBO_SQL).fetchall()
+        }
+        old_conn.close()
+        # The old query drops the no-outcome placebo offer into 'treatment':
+        # pio.ab_arm is NULL for the unmatched placebo row, COALESCE makes it
+        # 'treatment'. So 'treatment' gets offered=2 (the real treatment offer
+        # PLUS the misclassified placebo offer), and 'placebo' gets offered=0.
+        assert old_rows["treatment"]["offered"] == 2
+        assert "placebo" not in old_rows or old_rows["placebo"]["offered"] == 0
+        assert old_rows["treatment"]["no_outcome"] == 1  # the leaked placebo
+
+        # --- NEW run_placebo: groups on the OFFER's arm ---
+        rc = iij.run_placebo(qi)
+        out = capsys.readouterr().out
+        assert rc == 0
+        # The placebo offer counts in placebo (offered=1, no_outcome=1), not
+        # in treatment. Treatment keeps offered=1, used=1.
+        # Parse the per-arm rows from the printed table.
+        assert "placebo" in out
+        # The placebo line: offered 1, used 0, ignored 0, no_out 1, adopt% n/a
+        placebo_line = [
+            ln for ln in out.splitlines() if ln.lstrip().startswith("placebo")
+        ][0]
+        parts = placebo_line.split()
+        # columns: arm offered used ignored no_out adopt%
+        assert parts[1] == "1"   # offered
+        assert parts[2] == "0"   # used
+        assert parts[3] == "0"   # ignored
+        assert parts[4] == "1"   # no_outcome
+        # treatment line: offered 1, used 1, ignored 0, no_out 0, adopt% 100.0
+        treatment_line = [
+            ln for ln in out.splitlines() if ln.lstrip().startswith("treatment")
+        ][0]
+        tparts = treatment_line.split()
+        assert tparts[1] == "1"  # offered
+        assert tparts[2] == "1"  # used
+        assert tparts[4] == "0"  # no_outcome
+
+    def test_historical_offer_without_arm_shown_as_unknown(self, tmp_path, capsys):
+        """An offer whose ab_arm is NULL (predates the v32 arm label) shows
+        up in the 'unknown' bucket, not folded into 'treatment'. This is the
+        three-billion-rows defense: a historical row is not a treatment row."""
+        iij = self._import_run_placebo()
+        qi = tmp_path / "quality_intelligence.db"
+        conn = sqlite3.connect(str(qi))
+        conn.executescript("""
+            CREATE TABLE dispatch_pattern_offered (
+                dispatch_id TEXT, pattern_id TEXT, pattern_title TEXT,
+                offered_at TEXT, project_id TEXT DEFAULT '',
+                ab_arm TEXT,
+                PRIMARY KEY (dispatch_id, pattern_id, project_id)
+            );
+            CREATE TABLE pattern_injection_outcome (
+                id INTEGER PRIMARY KEY, dispatch_id TEXT, pattern_id TEXT,
+                pattern_hash TEXT, used INTEGER, reason TEXT, evidence TEXT,
+                project_id TEXT DEFAULT 'vnx-dev', created_at TEXT,
+                ab_arm TEXT,
+                UNIQUE (project_id, dispatch_id, pattern_id)
+            );
+        """)
+        # A historical offer: no ab_arm written (NULL).
+        conn.execute(
+            "INSERT INTO dispatch_pattern_offered "
+            "(dispatch_id, pattern_id, pattern_title, offered_at, project_id) "
+            "VALUES ('d-hist', 'p-hist', 'Old pattern', '2026-09-20T00:00:00Z', 'p')"
+        )
+        conn.commit()
+        conn.close()
+
+        rc = iij.run_placebo(qi)
+        out = capsys.readouterr().out
+        assert rc == 0
+        # The unknown bucket carries the historical offer.
+        unknown_line = [
+            ln for ln in out.splitlines() if ln.lstrip().startswith("unknown")
+        ][0]
+        parts = unknown_line.split()
+        assert parts[1] == "1"  # offered
+        assert parts[4] == "1"  # no_outcome (no outcome row either)
 
 
 if __name__ == "__main__":

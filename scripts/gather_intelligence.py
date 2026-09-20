@@ -158,7 +158,7 @@ def _emit_injection_outcome_event(
     reason: Optional[str],
     project_id: str,
     timestamp: str,
-    ab_arm: str = "treatment",
+    ab_arm: Optional[str] = None,
 ) -> None:
     """ADR-005 audit event for the pattern_injection_outcome DB mutation.
 
@@ -174,7 +174,9 @@ def _emit_injection_outcome_event(
 
     ``ab_arm`` is stamped on the event so the append-only ledger carries
     the arm label alongside the DB row — the placebo discrimination test
-    reads both.
+    reads both. ``None`` means the offer predates the v32 arm label (a
+    historical row); the event records that as-is rather than inventing
+    a ``'treatment'`` arm.
     """
     record_id = hashlib.sha256(
         f"{project_id}:{dispatch_id}:{pattern_id}:{timestamp}".encode("utf-8")
@@ -536,8 +538,9 @@ class T0IntelligenceGatherer:
                                 offered_titles[pid] = rec.get("title", "") or ""
                                 offered_content[pid] = rec.get("content", "") or ""
                                 # Legacy NDJSON offers predate the arm label and
-                                # carry none — default to treatment.
-                                offered_arms.setdefault(pid, "treatment")
+                                # carry none — leave as None so the outcome
+                                # row inherits "unknown", not a fabricated arm.
+                                offered_arms.setdefault(pid, None)
             except OSError as e:
                 log.warning("Failed to read usage log %s: %s", usage_log, e)
 
@@ -546,19 +549,21 @@ class T0IntelligenceGatherer:
         # signal; DB rows fill in offers the ndjson writer never logged.
         # The junction is the source of truth for the arm label: it is stamped
         # at injection time by the selector, so a DB-sourced arm always wins
-        # over the NDJSON default.
+        # over the NDJSON default. A NULL DB arm (row predating v32) stays
+        # None — the outcome reads "unknown", not treatment.
         for pid, meta in self._db_offers_for_dispatch(dispatch_id).items():
+            db_arm = meta.get("ab_arm")
             if pid not in offered:
                 offered[pid] = meta["file_path"]
                 offered_titles[pid] = meta["title"]
                 offered_content[pid] = meta["content"]
-                offered_arms[pid] = meta.get("ab_arm", "treatment") or "treatment"
+                offered_arms[pid] = db_arm
             else:
                 if not offered_titles.get(pid):
                     offered_titles[pid] = meta["title"]
                 if not offered_content.get(pid):
                     offered_content[pid] = meta["content"]
-                offered_arms[pid] = meta.get("ab_arm", "treatment") or "treatment"
+                offered_arms[pid] = db_arm
 
         if not offered:
             return {"adoptions": 0, "checked": 0}
@@ -621,9 +626,11 @@ class T0IntelligenceGatherer:
         success_patterns.id N) for the token-overlap adoption signal.
         ``ab_arm`` is the injection arm the offer was made under (treatment /
         placebo / control), stamped at injection time so the outcome row can
-        inherit it; absent on DBs predating v32, defaulting to "treatment".
-        Never raises; a failed lookup is logged at WARNING because an
-        unreadable offer store silently zeroes the adoption measurement.
+        inherit it. Absent on DBs predating v32, or NULL on rows that predate
+        the arm label: both read as ``None`` here so the outcome row inherits
+        "unknown" rather than a fabricated ``'treatment'`` arm. Never raises;
+        a failed lookup is logged at WARNING because an unreadable offer
+        store silently zeroes the adoption measurement.
         """
         offers: Dict[str, Dict[str, str]] = {}
         if not self.quality_db:
@@ -650,9 +657,9 @@ class T0IntelligenceGatherer:
             title = row["pattern_title"] if isinstance(row, sqlite3.Row) else row[1]
             if not pid:
                 continue
-            arm = "treatment"
+            arm = None
             if has_ab_arm:
-                arm = (row["ab_arm"] if isinstance(row, sqlite3.Row) else row[2]) or "treatment"
+                arm = row["ab_arm"] if isinstance(row, sqlite3.Row) else row[2]
             offers[pid] = {
                 "file_path": "",
                 "title": title or "",
@@ -739,7 +746,7 @@ class T0IntelligenceGatherer:
                 "file_path": fp or "",
                 "title": offered_titles.get(pid, ""),
                 "content": offered_content.get(pid, ""),
-                "ab_arm": (offered_arms.get(pid) or "treatment"),
+                "ab_arm": offered_arms.get(pid),
             }
 
         try:
@@ -755,9 +762,9 @@ class T0IntelligenceGatherer:
                 ):
                     pid = row["pattern_id"] if isinstance(row, sqlite3.Row) else row[0]
                     title = row["pattern_title"] if isinstance(row, sqlite3.Row) else row[1]
-                    arm = "treatment"
+                    arm = None
                     if has_ab_arm:
-                        arm = (row["ab_arm"] if isinstance(row, sqlite3.Row) else row[2]) or "treatment"
+                        arm = row["ab_arm"] if isinstance(row, sqlite3.Row) else row[2]
                     if pid and pid not in merged:
                         merged[pid] = {"file_path": "", "title": title or "", "content": "", "ab_arm": arm}
                     elif pid:
@@ -853,7 +860,10 @@ class T0IntelligenceGatherer:
                 content_overlap=overlap,
             )
 
-        ab_arm = meta.get("ab_arm") or "treatment"
+        # Inherit the offer's arm verbatim. A NULL offer arm (a row predating
+        # the v32 arm label) stays NULL on the outcome row so the per-arm
+        # report reads it as "unknown" rather than inventing a treatment arm.
+        ab_arm = meta.get("ab_arm")
         _emit_injection_outcome_event(
             dispatch_id=dispatch_id,
             pattern_id=pattern_id,

@@ -1641,26 +1641,30 @@ def _migrate_v32(conn: sqlite3.Connection) -> None:
     The adoption-metric discrimination test (dispatch
     20260920-191500-placebo-arm) compares adoption rates between a treatment
     arm (best-fitting pattern) and a placebo arm (a deliberately cross-domain
-    pattern). Without an arm label on the outcome row, the two populations
-    are indistinguishable after the fact and the comparison is impossible.
+    pattern). The arm is decided at offer time (the selector knows which arm
+    it ran), so the arm label lives on ``dispatch_pattern_offered`` and is
+    carried forward onto the outcome row by ``_record_one_injection_outcome``.
 
-    ``ab_arm`` is stamped on the offer junction at injection time (the
-    selector knows which arm it ran) and carried forward onto the outcome
-    row by ``_record_one_injection_outcome``. Default ``'treatment'`` so
-    every pre-existing row — written before the placebo arm existed — is
-    readable as treatment without a backfill. Purely additive: two
-    ALTER TABLE ADD COLUMNs, no existing column touched.
+    The column is nullable with NO default. A row that predates the arm
+    label (written before v32 existed) stays NULL, which the per-arm report
+    reads as "unknown" rather than silently inventing a ``'treatment'`` arm
+    for it. Giving three billion rows a fabricated ``'treatment'`` is the
+    measurement defect this migration repairs: a historical offer without an
+    arm is not a treatment offer, it is an offer whose arm we do not know.
+    Rows written after v32 always carry an explicit arm (the selector stamps
+    it), so NULL is never a valid arm for a modern row. Purely additive:
+    two ALTER TABLE ADD COLUMNs, no existing column touched.
     """
     pio_cols = {r[1] for r in conn.execute("PRAGMA table_info(pattern_injection_outcome)").fetchall()}
     if "ab_arm" not in pio_cols:
         conn.execute(
-            "ALTER TABLE pattern_injection_outcome ADD COLUMN ab_arm TEXT NOT NULL DEFAULT 'treatment'"
+            "ALTER TABLE pattern_injection_outcome ADD COLUMN ab_arm TEXT"
         )
         log('INFO', "Migrated: added ab_arm column to pattern_injection_outcome (v32)")
     dpo_cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_pattern_offered)").fetchall()}
     if "ab_arm" not in dpo_cols:
         conn.execute(
-            "ALTER TABLE dispatch_pattern_offered ADD COLUMN ab_arm TEXT NOT NULL DEFAULT 'treatment'"
+            "ALTER TABLE dispatch_pattern_offered ADD COLUMN ab_arm TEXT"
         )
         log('INFO', "Migrated: added ab_arm column to dispatch_pattern_offered (v32)")
 
