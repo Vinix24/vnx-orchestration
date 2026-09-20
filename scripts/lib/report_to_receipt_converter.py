@@ -769,7 +769,8 @@ def _run_fail_closed_checks(
 
 
 def _build_receipt_from_report_core(
-    report_path: Path, text: str, *, state_dir: Optional[Path] = None
+    report_path: Path, text: str, *, state_dir: Optional[Path] = None,
+    dry_run: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Build a minimal governed receipt dict from report content.
 
@@ -783,6 +784,13 @@ def _build_receipt_from_report_core(
       dispatch_id AND does NOT claim a terminal success status.
       Filename-only dispatch_id is a contract violation.
     - None when no dispatch_id can be determined at all (warning logged).
+
+    ``dry_run=True``: the dead-letter quarantine move is suppressed (logged
+    as a would-do instead) so a measuring scan never mutates the store it
+    reads — the same "nothing on disk changes" contract scan_and_convert()'s
+    dry-run documents. OI-1744: before this flag existed the dead-letter move
+    fired even under --dry-run, so the documented measurement instrument
+    could not be pointed at a live store safely.
 
     Never raises.
     """
@@ -849,6 +857,14 @@ def _build_receipt_from_report_core(
     # lane retries it.
     if not content_id_valid and state_dir is not None:
         if not _is_known_dispatch(dispatch_id, state_dir):
+            if dry_run:
+                logger.info(
+                    "report_to_receipt_converter: [dry-run] would dead-letter "
+                    "dispatch_id=%r (from filename %s) — not found in dispatch "
+                    "register; no file moved",
+                    dispatch_id, report_path.name,
+                )
+                return None
             logger.warning(
                 "report_to_receipt_converter: dispatch_id=%r (from filename %s) "
                 "not found in dispatch register — dead-lettering",
@@ -1104,6 +1120,7 @@ _PR_LINK_REFUSED = "refused"
 
 def _resolve_pr_link(
     dispatch_id: Optional[str], merged: Dict[str, Any], state_dir: Optional[Path],
+    dry_run: bool = False,
 ) -> Tuple[str, Optional[str]]:
     """Best-effort: stamp this dispatch's PR number onto its gate obligation.
 
@@ -1126,6 +1143,11 @@ def _resolve_pr_link(
       d. the obligation is still ``pending`` and carries no ``pr_number`` yet
          — an existing link is never overwritten and a terminal status is
          never reopened.
+
+    ``dry_run=True``: every check still runs (the returned value is what a
+    real run WOULD stamp) but the final ``update_obligation`` write is
+    skipped — a measuring scan must not mutate gate-obligation state
+    (OI-1744: same dry-run side-effect class as the dead-letter move).
 
     Never raises: obligation linking is best-effort relative to the receipt
     write path, the same contract ``register_obligation`` keeps at the door.
@@ -1162,6 +1184,14 @@ def _resolve_pr_link(
         if record.get("pr_number") is not None:
             return _PR_LINK_REFUSED, "obligation_already_linked"
 
+        if dry_run:
+            logger.info(
+                "report_to_receipt_converter: [dry-run] would link obligation "
+                "dispatch=%s pr_number=%d branch=%s — no write",
+                dispatch_id, pr_number, expected_branch,
+            )
+            return _PR_LINK_LINKED, None
+
         update_obligation(path, pr_number=pr_number, branch=expected_branch)
         return _PR_LINK_LINKED, None
     except Exception as exc:  # noqa: BLE001 — best-effort, mirrors register_obligation
@@ -1173,7 +1203,8 @@ def _resolve_pr_link(
 
 
 def build_receipt_from_report(
-    report_path: Path, text: str, *, state_dir: Optional[Path] = None
+    report_path: Path, text: str, *, state_dir: Optional[Path] = None,
+    dry_run: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Build a governed receipt dict from report content (see
     :func:`_build_receipt_from_report_core` for the full return-shape
@@ -1185,15 +1216,21 @@ def build_receipt_from_report(
     ``pr_link`` field: ``"linked"``, ``"unreported"``, or ``"refused"`` (see
     :func:`_resolve_pr_link`). ``None`` results (no dispatch_id resolvable at
     all) pass through untouched — there is nothing to link.
+    ``dry_run=True`` is threaded into the core builder (dead-letter move
+    suppressed) and into ``_resolve_pr_link`` (obligation write suppressed)
+    so the function honours the scan-level dry-run contract "nothing on disk
+    changes" end to end (OI-1744).
     """
-    receipt = _build_receipt_from_report_core(report_path, text, state_dir=state_dir)
+    receipt = _build_receipt_from_report_core(report_path, text, state_dir=state_dir, dry_run=dry_run)
     if receipt is None:
         return receipt
 
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)
     merged: Dict[str, Any] = {**body, **fm}
-    pr_link, pr_link_reason = _resolve_pr_link(receipt.get("dispatch_id"), merged, state_dir)
+    pr_link, pr_link_reason = _resolve_pr_link(
+        receipt.get("dispatch_id"), merged, state_dir, dry_run=dry_run,
+    )
     receipt["pr_link"] = pr_link
     if pr_link_reason:
         receipt["pr_link_reason"] = pr_link_reason
@@ -1219,10 +1256,14 @@ def build_receipt_from_report(
 #   "skipped_non_dispatch" — OI-1120: report classified as a known non-dispatch
 #                 producer (HEADLESS gate report, panel output, worktree-release
 #                 output) — never a receipt candidate, never dead-lettered.
-#   "would_append" — OI-1383/OI-1382 (--dry-run): the receipt built cleanly and
-#                 would have been appended, but dry_run=True suppressed the
-#                 actual append_receipt_payload() call — nothing was written,
-#                 no watermark entry, no fail-closed check even attempted.
+#   "would_append" — OI-1383/OI-1382 (--dry-run): the receipt built cleanly,
+#                 passed the SAME append-time fail-closed validation a real
+#                 run applies (OI-1744: _validate_receipt runs under dry-run
+#                 too — a receipt that would be REJECTED on a real run counts
+#                 as "rejected", never as "would_append"), and would have
+#                 been appended, but dry_run=True suppressed the actual
+#                 append_receipt_payload() call — nothing was written and no
+#                 watermark entry was made.
 
 def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
     """Best-effort: push *text*'s ``## Open Items`` entries into the ledger.
@@ -1309,7 +1350,9 @@ def _convert_one_detailed(
 
     state_dir_for_route = Path(receipts_file).parent if receipts_file else None
     try:
-        receipt = build_receipt_from_report(report_path, text, state_dir=state_dir_for_route)
+        receipt = build_receipt_from_report(
+            report_path, text, state_dir=state_dir_for_route, dry_run=dry_run,
+        )
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
@@ -1408,6 +1451,52 @@ def _convert_one_detailed(
         ), "duplicate"
 
     if dry_run:
+        # OI-1744: a dry run must measure what a real scan would WRITE — and
+        # a report whose receipt fails the append-time fail-closed validation
+        # (append_receipt_internals/validation.py::_validate_receipt →
+        # _validate_model_present et al.) writes NOTHING on a real run.
+        # Before this check, dry-run reported every buildable receipt as
+        # "would_append", counting would-be REJECTED reports as future
+        # bookings (measured on the vnx-dev backlog 2026-09-20: reports still
+        # missing a real model — the 14 F1-3 could not restore — counted as
+        # "would book"). Run the same PURE validation append_receipt_payload()
+        # runs and mirror the real path's outcome mapping exactly
+        # (missing_model -> "rejected", any other AppendReceiptError ->
+        # "error"), so a dry-run count is a faithful preview, not an
+        # overestimate. _validate_receipt writes nothing — it only raises.
+        try:
+            from append_receipt_internals.validation import (  # noqa: PLC0415
+                _validate_receipt,
+            )
+            _validate_receipt(receipt)
+        except AppendReceiptError as exc:
+            if exc.code == "missing_model":
+                logger.warning(
+                    "report_to_receipt_converter: [dry-run] REJECTED (fail-closed) "
+                    "dispatch=%s file=%s reason=%s",
+                    receipt.get("dispatch_id"), report_path.name, exc.message,
+                )
+                if rejected_detail_sink is not None:
+                    rejected_detail_sink.append({
+                        "dispatch_id": str(receipt.get("dispatch_id") or ""),
+                        "file": report_path.name,
+                        "reason": exc.message,
+                        "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    })
+                return None, "rejected"
+            logger.warning(
+                "report_to_receipt_converter: [dry-run] append validation failed "
+                "for %s: %s",
+                report_path.name, exc,
+            )
+            return None, "error"
+        except Exception as exc:
+            logger.warning(
+                "report_to_receipt_converter: [dry-run] append validation crashed "
+                "for %s: %s: %s",
+                report_path.name, type(exc).__name__, exc,
+            )
+            return None, "error"
         logger.info(
             "report_to_receipt_converter: [dry-run] would book dispatch=%s "
             "event_type=%s status=%s file=%s",
