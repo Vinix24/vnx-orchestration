@@ -604,35 +604,35 @@
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 786,
+      "line": 794,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 818,
+      "line": 835,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 819,
+      "line": 836,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 860,
+      "line": 877,
       "mechanism": "patch.object-attr",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
     },
     {
       "file": "tests/test_dispatch_envelope_plan.py",
-      "line": 861,
+      "line": 878,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
@@ -1180,6 +1180,90 @@
       "file": "tests/test_oi1372_pr_enforcement_branch_resolution.py",
       "line": 201,
       "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 35,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 37,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 38,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_headless_plan"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 39,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 140,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 141,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 192,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 235,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter.run"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 236,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 287,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_oi1743_govern_on_success_path.py",
+      "line": 288,
+      "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
