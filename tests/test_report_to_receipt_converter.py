@@ -3096,6 +3096,157 @@ class TestDryRunGatesEveryOutcomeNotJustWouldAppend:
 
 
 # ---------------------------------------------------------------------------
+# OI-1744: --dry-run must be side-effect-free END TO END. Before this fix the
+# dry-run flag suppressed the receipt append, the watermark entries and the
+# health beacon, but NOT the two state mutations hiding inside
+# build_receipt_from_report(): the OI-1102 dead-letter quarantine MOVE and
+# the OI-1599 gate-obligation pr_link write. A measuring scan against a live
+# store (exactly what the OI-1744 dispatch prescribes — "draai hem een keer
+# met de hand tegen de echte reports-map en tel wat hij zou schrijven") could
+# therefore move reports into receipt_deadletter/ and stamp obligation files
+# while claiming "nothing on disk changes".
+# ---------------------------------------------------------------------------
+
+class TestDryRunSuppressesStateMutations:
+    def test_dry_run_does_not_deadletter_phantom_report(self, reports_dir, state_dir):
+        """A filename-only phantom id (not in the dispatch register) would be
+        dead-letter MOVED by a real scan; under dry_run the file must stay
+        exactly where it is and no quarantine dir may appear."""
+        # Empty register: the filename-only phantom id is guaranteed unknown.
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = reports_dir / "dispatch-20260920-oi1744-dry-phantom.md"
+        report.write_text(_CONTRACT_BODY, encoding="utf-8")
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.malformed_count == 1
+        assert report.exists(), "dry-run must never move a report into quarantine"
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+
+    def test_real_run_still_deadletters_the_same_phantom(self, reports_dir, state_dir):
+        """Pair proof the suppression is dry-run-scoped, not a removed
+        feature: the identical fixture under a REAL scan is quarantined."""
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = reports_dir / "dispatch-20260920-oi1744-real-phantom.md"
+        report.write_text(_CONTRACT_BODY, encoding="utf-8")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.malformed_count == 1
+        assert not report.exists()
+        moved = list(
+            (state_dir / "receipt_deadletter").glob(
+                "dispatch-20260920-oi1744-real-phantom*.md"
+            )
+        )
+        assert moved, "real scan must still dead-letter the phantom"
+
+    def test_dry_run_does_not_stamp_obligation_pr_link(
+        self, reports_dir, state_dir, monkeypatch,
+    ):
+        """A verified pr_ref against a pending, unlinked obligation would be
+        stamped by a real scan (OI-1599); under dry_run the obligation file
+        must be byte-identical to before the scan."""
+        dispatch_id = "20260920-oi1744-dry-prlink"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        before = obl_path.read_bytes()
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, pr_ref="#4242",
+        )
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: True,
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.would_append_count == 1
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] is None, "dry-run must not stamp the obligation"
+        assert record["branch"] is None
+        assert record["status"] == STATUS_PENDING
+        assert obl_path.read_bytes() == before
+
+    def test_real_run_still_stamps_the_same_obligation(
+        self, reports_dir, state_dir, monkeypatch,
+    ):
+        """Pair proof the suppression did not delete the OI-1599 feature: the
+        same fixture under a REAL scan links pr_number + branch."""
+        dispatch_id = "20260920-oi1744-real-prlink"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, pr_ref="#4242",
+        )
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: True,
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.new_count == 1
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] == 4242
+        assert record["branch"] == f"dispatch/{dispatch_id}"
+
+
+class TestDryRunCountsRejectionsFaithfully:
+    """OI-1744: a dry run must predict what a real scan would WRITE. A report
+    whose receipt fails the append-time fail-closed model check
+    (_validate_model_present) writes nothing on a real run — it is REJECTED.
+    Before this fix the dry-run branch returned before the append call, so
+    such a report counted as "would_append": the instrument the OI-1744
+    dispatch prescribes for measuring the backlog ("tel wat hij zou
+    schrijven") overcounted by exactly the stranded-rejection set (measured
+    on the live-store copy, 2026-09-20: reports like
+    test-shared-datadir-isolation counted as would-book while a real run
+    rejects them)."""
+
+    def test_dry_run_counts_missing_model_as_rejected_not_would_append(
+        self, reports_dir, state_dir,
+    ):
+        dispatch_id = "20260920-oi1744-dry-reject"
+        # model sentinel "unknown" -> _validate_model_present raises
+        # missing_model on the real append path; status "unknown" (ignorable)
+        # keeps the terminal-success fail-closed checks (network) out of this.
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, model="unknown",
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.rejected_count == 1
+        assert stats.would_append_count == 0
+        assert len(stats.rejected) == 1
+        detail = stats.rejected[0]
+        assert detail["dispatch_id"] == dispatch_id
+        assert detail["file"] == f"{dispatch_id}.md"
+        assert detail["reason"]
+        # Still a dry run: nothing on disk.
+        assert _count_receipts(state_dir) == 0
+        assert not (state_dir / _WATERMARK_FILENAME).exists()
+
+    def test_dry_run_rejection_matches_real_run_rejection(
+        self, reports_dir, state_dir,
+    ):
+        """The same fixture must produce the same outcome class under
+        dry_run=True and dry_run=False: rejected both times (the real run
+        additionally writes nothing to the ledger for it)."""
+        dispatch_id = "20260920-oi1744-real-reject"
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, model="unknown",
+        )
+
+        dry_stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+        assert dry_stats.rejected_count == 1
+
+        real_stats = scan_and_convert([reports_dir], state_dir)
+        assert real_stats.rejected_count == 1
+        assert _count_receipts(state_dir) == 0
+
+
+# ---------------------------------------------------------------------------
 # PR #1635 codex-gate fix: convert_dispatch_ids() must validate dispatch_id
 # against the canonical id-shape regex (dispatch_spec._ID_RE) BEFORE calling
 # resolve_report_path() — an id containing "/" or ".." would otherwise let
