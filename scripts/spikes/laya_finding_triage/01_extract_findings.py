@@ -3,16 +3,35 @@
 
 Read-only over the gate-results store. Writes scripts/spikes/laya_finding_triage/data/findings.jsonl
 and prints token-length statistics.
+
+The review-gates store is the central per-project data directory
+(``~/.vnx-data/<project_id>/state/review_gates/results``), resolved via the
+``scripts/lib`` helpers (``resolve_project_id`` + ``resolve_central_data_dir``)
+rather than a hardcoded path. That keeps the spike portable across machines
+and projects: the project_id is read from the ``.vnx-project-id`` marker or
+git remote, and ``VNX_PROJECT_ID`` can override it (issue #225).
 """
-import json
 import glob
+import json
 import os
 import statistics
 import sys
+from pathlib import Path
 
-RESULTS_DIR = os.path.expanduser("~/.vnx-data/vnx-dev/state/review_gates/results")
-OUT = os.path.join(os.path.dirname(__file__), "data", "findings.jsonl")
-os.makedirs(os.path.dirname(OUT), exist_ok=True)
+# Resolve scripts/lib via the project root so the helpers are importable
+# regardless of the current working directory (issue #225).
+_HERE = Path(__file__).resolve()
+_LIB_DIR = _HERE.parents[2] / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
+from vnx_paths import resolve_central_data_dir, resolve_project_id  # noqa: E402
+
+_PROJECT_ID = resolve_project_id()
+_DATA_DIR = resolve_central_data_dir(_PROJECT_ID)
+RESULTS_DIR = _DATA_DIR / "state" / "review_gates" / "results"
+OUT = _HERE.parent / "data" / "findings.jsonl"
+os.makedirs(OUT.parent, exist_ok=True)
 
 
 def approx_tokens(text):
