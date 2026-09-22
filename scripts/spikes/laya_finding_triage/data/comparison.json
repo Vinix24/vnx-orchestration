@@ -1,0 +1,137 @@
+{
+  "total_findings_rows": 657,
+  "unique_findings_ids": 618,
+  "duplicate_findings_ids": 39,
+  "regex_distribution": {
+    "stijl": 113,
+    "correctheid": 24,
+    "beveiliging": 43,
+    "beleid": 77,
+    "overig": 400
+  },
+  "runs": {
+    "ane_nl": {
+      "rows_read": 657,
+      "covered_findings": 657,
+      "distribution": {
+        "stijl": 47,
+        "correctheid": 158,
+        "beveiliging": 109,
+        "beleid": 14,
+        "CAPACITY_ERROR": 329,
+        "OTHER_ERROR": 0
+      },
+      "capacity_errors": 329,
+      "other_errors": 0,
+      "classified_ok": 328,
+      "confidence_median": 0.3189,
+      "confidence_mean": 0.3688,
+      "above_0.50": 84,
+      "above_0.50_pct": 25.6,
+      "latency_ms_p50": 0.39,
+      "latency_ms_p95": 68.05,
+      "label_lang": "nl",
+      "source": "laya_predictions_ane96.jsonl"
+    },
+    "td_nl": {
+      "rows_read": 657,
+      "covered_findings": 657,
+      "distribution": {
+        "stijl": 26,
+        "correctheid": 213,
+        "beveiliging": 178,
+        "beleid": 240,
+        "CAPACITY_ERROR": 0,
+        "OTHER_ERROR": 0
+      },
+      "capacity_errors": 0,
+      "other_errors": 0,
+      "classified_ok": 657,
+      "confidence_median": 0.0137,
+      "confidence_mean": 0.0185,
+      "above_0.50": 0,
+      "above_0.50_pct": 0.0,
+      "latency_ms_p50": 318.72,
+      "latency_ms_p95": 511.27,
+      "label_lang": "nl",
+      "source": "laya_predictions_td1024.jsonl"
+    },
+    "ane_en": {
+      "rows_read": 657,
+      "covered_findings": 657,
+      "distribution": {
+        "style": 6,
+        "correctness": 273,
+        "security": 73,
+        "policy": 2,
+        "CAPACITY_ERROR": 303,
+        "OTHER_ERROR": 0
+      },
+      "capacity_errors": 303,
+      "other_errors": 0,
+      "classified_ok": 354,
+      "confidence_median": 0.6698,
+      "confidence_mean": 0.6515,
+      "above_0.50": 259,
+      "above_0.50_pct": 73.2,
+      "latency_ms_p50": 5.38,
+      "latency_ms_p95": 6.36,
+      "label_lang": "en",
+      "source": "laya_predictions_ane96_en.jsonl"
+    },
+    "td_en": {
+      "rows_read": 657,
+      "covered_findings": 657,
+      "distribution": {
+        "style": 110,
+        "correctness": 375,
+        "security": 143,
+        "policy": 29,
+        "CAPACITY_ERROR": 0,
+        "OTHER_ERROR": 0
+      },
+      "capacity_errors": 0,
+      "other_errors": 0,
+      "classified_ok": 657,
+      "confidence_median": 0.0252,
+      "confidence_mean": 0.0343,
+      "above_0.50": 0,
+      "above_0.50_pct": 0.0,
+      "latency_ms_p50": 323.5,
+      "latency_ms_p95": 522.24,
+      "label_lang": "en",
+      "source": "laya_predictions_td1024_en.jsonl"
+    }
+  },
+  "disagree_td_nl_vs_td_en_total": 657,
+  "disagree_td_nl_vs_td_en_pairs": {
+    "correctheid->correctness": 176,
+    "beleid->correctness": 121,
+    "beveiliging->security": 77,
+    "beveiliging->correctness": 64,
+    "beleid->style": 54,
+    "beleid->security": 49,
+    "correctheid->style": 30,
+    "beveiliging->style": 20,
+    "beveiliging->policy": 14,
+    "beleid->policy": 14,
+    "correctheid->security": 12,
+    "stijl->correctness": 12,
+    "stijl->style": 7,
+    "stijl->security": 6,
+    "correctheid->policy": 1
+  },
+  "disagree_ane_nl_vs_ane_en_total": 321,
+  "disagree_ane_nl_vs_ane_en_pairs": {
+    "correctheid->correctness": 141,
+    "beveiliging->correctness": 64,
+    "beveiliging->security": 41,
+    "stijl->correctness": 35,
+    "correctheid->security": 15,
+    "beleid->correctness": 9,
+    "stijl->style": 6,
+    "stijl->security": 6,
+    "beleid->security": 3,
+    "beleid->policy": 1
+  }
+}

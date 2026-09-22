@@ -1,0 +1,8 @@
+# Laya spike lokaal: modellen (1,4 GB) en venv (189 MB) worden niet gecommit.
+# Deze .gitignore is scoped op de spike-map zelf, niet op de repo-brede .gitignore.
+# Zowel de map-vorm (models/, .venv/) als de symlink-vorm (models, .venv) gedekt,
+# omdat modellen en venv hier als symlinks naar de ronde-1 worktree staan.
+models/
+.venv/
+models
+.venv
