@@ -1,0 +1,102 @@
+{
+  "literal (124)": {
+    "n": 124,
+    "regex": {
+      "total": 124,
+      "missing": 0,
+      "label_counts": {
+        "stijl": 77,
+        "overig": 41,
+        "beleid": 4,
+        "beveiliging": 2
+      },
+      "correct_label": "stijl",
+      "correct": 77,
+      "pct_correct_of_total": 62.1
+    },
+    "ronde2": {
+      "total": 124,
+      "capacity_errors": 28,
+      "missing": 0,
+      "non_cap": 96,
+      "label_counts": {
+        "correctness": 71,
+        "security": 21,
+        "style": 4
+      },
+      "correct_label": "style",
+      "correct": 4,
+      "pct_correct_of_total": 3.23,
+      "pct_correct_of_non_cap": 4.17,
+      "median_confidence": 0.6519
+    },
+    "new_run": {
+      "total": 124,
+      "capacity_errors": 112,
+      "missing": 0,
+      "non_cap": 12,
+      "label_counts": {
+        "correctness": 7,
+        "security": 3,
+        "style": 2
+      },
+      "correct_label": "style",
+      "correct": 2,
+      "pct_correct_of_total": 1.61,
+      "pct_correct_of_non_cap": 16.67,
+      "median_confidence": 0.3418,
+      "verdict": "FAIL",
+      "threshold": 69.0
+    }
+  },
+  "strict-110": {
+    "n": 110,
+    "regex": {
+      "total": 110,
+      "missing": 0,
+      "label_counts": {
+        "stijl": 67,
+        "overig": 37,
+        "beleid": 4,
+        "beveiliging": 2
+      },
+      "correct_label": "stijl",
+      "correct": 67,
+      "pct_correct_of_total": 60.91
+    },
+    "ronde2": {
+      "total": 110,
+      "capacity_errors": 25,
+      "missing": 0,
+      "non_cap": 85,
+      "label_counts": {
+        "correctness": 62,
+        "security": 19,
+        "style": 4
+      },
+      "correct_label": "style",
+      "correct": 4,
+      "pct_correct_of_total": 3.64,
+      "pct_correct_of_non_cap": 4.71,
+      "median_confidence": 0.6391
+    },
+    "new_run": {
+      "total": 110,
+      "capacity_errors": 98,
+      "missing": 0,
+      "non_cap": 12,
+      "label_counts": {
+        "correctness": 7,
+        "security": 3,
+        "style": 2
+      },
+      "correct_label": "style",
+      "correct": 2,
+      "pct_correct_of_total": 1.82,
+      "pct_correct_of_non_cap": 16.67,
+      "median_confidence": 0.3418,
+      "verdict": "FAIL",
+      "threshold": 69.0
+    }
+  }
+}
