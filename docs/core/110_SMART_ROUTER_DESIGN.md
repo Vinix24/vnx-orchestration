@@ -168,6 +168,124 @@ The registry's current, non-deprecated model set: `claude-opus-4-8` (T0-tier), `
 
 ---
 
+## 5. Where the scores come from, and how they stay current
+
+### 5.1 The benchmark is the memory
+
+The router never starts cheap and escalates on failure. A model that cannot do the job is excluded before the first attempt, by the capability bar in §3.2. That only works if the bar rests on something measured, which is what the benchmark suite is for.
+
+The important property: **the suite runs on your own task corpus, not on a public leaderboard.** A published score tells you how a model does on someone else's problems. A routing decision needs to know how it does on yours.
+
+```
+scripts/benchmark/
+  run_benchmark.py          N models x M tasks, one result file per (model, task)
+  prompts/                  the task corpus — 7 seeds, one per task class
+  judge_quality.py          scores each response on quality, correctness, completeness
+  analyze_results.py        ranks models per task class
+  export_routing_matrix.py  writes routing_recommendations.yaml
+```
+
+The framework is fixed; the corpus is not. `--tasks-dir` and `--models-file` (or `VNX_BENCH_TASKS_DIR` / `VNX_BENCH_MODELS_FILE`) point the same harness at your own prompts and your own model list. The bundled seven are seeds to be replaced, not a benchmark to be trusted as-is.
+
+Each result carries the measurements the ranking needs: a quality score, wall-clock duration, launch success, and cost per call. `composite_score` is derived from those, per task class, and `n` travels with it — a score without its sample size is not a score.
+
+### 5.2 Why a static table is not enough
+
+A benchmark is a snapshot. Models change underneath a stable name: a provider ships a new checkpoint, a quantisation changes, a context policy shifts. A model that cleared the capability bar in one generation can drop below it without anything in the config changing.
+
+The static table cannot see that. Everything it knows was true on the day the suite ran.
+
+### 5.3 The self-learning loop
+
+**Status: design, under active test.** This section describes the intended mechanism. The live behavior today is the capability bar in §3.2 over a benchmark-derived table; §4.3 governs how that table's provenance is recorded.
+
+Every dispatch already emits a receipt carrying model, task class, outcome and duration, and every review gate emits a result carrying blocking and advisory findings. That is the same shape of evidence the benchmark produces, generated continuously as a by-product of real work. The loop closes the gap between the two.
+
+```
+              ┌─────────────── BENCHMARK (periodic, offline) ────────────────┐
+              │                                                               │
+              │   own task corpus ──► run_benchmark ──► judge_quality         │
+              │                              │                                │
+              │                              ▼                                │
+              │                       analyze_results                          │
+              └──────────────────────────────┼────────────────────────────────┘
+                                             ▼
+                              routing_recommendations.yaml
+                          (composite_score, cost, n — per model,
+                                    per task class)
+                                             │
+                                             ▼
+                              ┌──────────────────────────┐
+                              │   CAPABILITY BAR  7.0    │
+                              │  above: cheapest wins    │
+                              │  below: never attempted  │
+                              └──────────────────────────┘
+                                             │
+                                             ▼
+                                      dispatch runs
+                                             │
+              ┌──────────────────────────────┴────────────────────────────────┐
+              │                                                               │
+              │   receipt:      model, task_class, outcome, duration           │
+              │   gate result:  blocking / advisory findings                   │
+              │                              │                                │
+              │                              ▼                                │
+              │        rolling rate per (model, task_class), carrying n        │
+              │                              │                                │
+              │                              ▼                                │
+              │          compare against the benchmarked baseline              │
+              │                              │                                │
+              │                    drifted below band?                         │
+              │                              │                                │
+              │                              ▼                                │
+              │                     ┌─────────────────┐                        │
+              │                     │  RAISE SIGNAL   │                        │
+              │                     └─────────────────┘                        │
+              └──────────────────────────────┼────────────────────────────────┘
+                                             ▼
+                                   ┌───────────────────┐
+                                   │    HUMAN GATE     │
+                                   │  operator decides │
+                                   └───────────────────┘
+                                             │
+                             ┌───────────────┴───────────────┐
+                             ▼                               ▼
+                  re-run the suite for              accept, and record
+                  that model / task class           the reason
+                             │
+                             └────────► new scores ────────► back to the table
+```
+
+### 5.4 Four properties the loop must have
+
+**It raises a signal; it does not rewrite the table.** A routing config that silently re-ranks itself destroys the reason deterministic routing exists. `route_reason` is audit evidence: a reader must be able to reconstruct, months later, why a dispatch landed on a given model. That reconstruction breaks the moment the table changes without a recorded decision. The loop's output is therefore a signal into the open-items plane, and a human decides.
+
+**Degradation and instrumentation failure look identical from inside the loop.** This is the property that rules out automation, and the one most easily underestimated. A rolling rate is computed from labels, and a label can be wrong: a status vocabulary that carries `failed` next to `failure`, a dispatch that records a provider it did not run on, a run that fails completely and still exits 0. Every one of those presents as "this model is getting worse", and an automatic loop would act on it — attributing one model's work to another and demoting a model that never degraded. Nothing inside the loop can tell the two apart, because both arrive as the same drop in the same number. Only a reader who can go back to the underlying receipts can, which is why the decision belongs outside the loop.
+
+**A drift signal is not a score.** Production outcomes and benchmark scores are different measurements: the benchmark is controlled, production is not. A model can look worse because the incoming work got harder, not because the model changed. Drift therefore triggers a re-benchmark; it does not overwrite `composite_score` directly. Mixing the two makes the table's provenance unreadable, which §4.3 exists to prevent.
+
+**Every rate carries its n.** A model with three production dispatches has no measurable rate. The threshold that raises a signal is a threshold on the rate *and* on the sample size. A rate printed without its denominator is a number nobody can act on.
+
+### 5.5 What the human decides
+
+The signal is deliberately cheap and reversible; the table change is expensive and permanent. That asymmetry is the whole reason for the split: automate the cheap half, keep a person in front of the expensive one.
+
+A raised signal names the pair, both numbers, and the sample size — for example: `glm-5.2` on `01_code_generation`, benchmarked at 9.1, rolling production rate below band over the last n dispatches. The operator resolves it one of three ways:
+
+| Verdict | Action | What the table does |
+|---|---|---|
+| Real degradation | Re-run the benchmark suite for that model and task class | Updates from the new controlled measurement, provenance intact |
+| Instrumentation failure | Fix the labelling or the vocabulary, then re-measure | Unchanged — the model was never the problem |
+| Real but acceptable | Record the reason against the signal | Unchanged, with the decision on the record |
+
+In all three cases the table only ever changes as the output of a benchmark run. One kind of measurement, one provenance chain, and a recorded reason for every movement.
+
+### 5.6 Outcome vocabulary is the precondition
+
+The loop consumes dispatch outcomes, so those outcomes must mean one thing. A single normalized status vocabulary across receipt producers is a prerequisite for §5.3, not an implementation detail of it: a rolling success rate computed over an inconsistent vocabulary measures the vocabulary, not the model. Normalisation lands first; the rolling rate lands on top of it.
+
+---
+
 ## Cross-references
 
 - Pin/lane enforcement: `scripts/lib/providers/provider_constraints.yaml`
