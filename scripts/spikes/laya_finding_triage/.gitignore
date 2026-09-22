@@ -1,0 +1,16 @@
+# Laya spike lokaal: modellen (1,4 GB), venv (189 MB) en het data-corpus
+# worden niet gecommit. Deze .gitignore is scoped op de spike-map zelf, niet
+# op de repo-brede .gitignore. Zowel de map-vorm (models/, .venv/, data/) als
+# de symlink-vorm (models, .venv) gedekt, omdat modellen en venv hier als
+# symlinks naar de ronde-1 worktree staan.
+models/
+.venv/
+models
+.venv
+
+# data/ is regenereerbaar: 01_extract_findings.py bouwt findings.jsonl uit de
+# gate-results store van wie het ook draait, 02/03/03b/04/05 vullen de rest.
+# Een gecommit corpus lekt bovendien de legacy-path-tekst als inhoud in de
+# bevindingen, en de CI-gate merkt die string als schending aan. Mijn store
+# is niet de hunne.
+data/
