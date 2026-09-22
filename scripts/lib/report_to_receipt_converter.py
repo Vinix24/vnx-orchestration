@@ -438,10 +438,23 @@ def _dispatch_id_from_filename(path: Path) -> Optional[str]:
 
 
 def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str, Any]]:
-    """Load per-dispatch route decision JSON written by smart_router.write_route_decision().
+    """Load per-dispatch route decision JSON.
 
-    Returns the parsed dict (with strategy/task_class/selected_model) or None when
-    the file does not exist or cannot be parsed.
+    Two writers, two shapes, live in the same directory:
+
+    1. ``dispatch_cli._persist_route_decision`` (the door — the dominant shape):
+       ``{"decision": {"provider": ..., "model": ..., ...}, "dispatch_id": ...}``.
+       Measured 2026-09-22 on the vnx-dev store: 764 of 765 files carry this
+       shape. ``decision.provider`` and ``decision.model`` are the lane's OWN
+       canonical values (already the short lane form, e.g. ``glm-harness`` /
+       ``glm-5.2``), so they need NO ``parse_route_model_id`` round-trip.
+    2. ``smart_router.write_route_decision`` (the legacy smart-router writer):
+       ``{"strategy": "smart_router", "selected_model": <model_id>, ...}``.
+       1 of 765 files. ``selected_model`` is a routing-recommendation model_id
+       that MUST go through ``parse_route_model_id`` to split provider/model.
+
+    Returns the parsed dict (either shape) or None when the file does not
+    exist or cannot be parsed.
     """
     path = state_dir / "route_decisions" / f"{dispatch_id}.json"
     if not path.exists():
@@ -454,6 +467,117 @@ def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str
             dispatch_id, type(exc).__name__, exc,
         )
         return None
+
+
+# ---------------------------------------------------------------------------
+# Route-decision identity extraction (OI-1546 / OI-1547)
+# ---------------------------------------------------------------------------
+#
+# Three explicit outcomes, NOT a silent fall-through to the report body:
+#
+#   ("lane", provider, model)   — the route decision is the authoritative
+#                                 identity (the lane's own record of what ran).
+#   ("body", None, None)         — no usable route decision; the report body is
+#                                 the ONLY source left (OI-1547: this used to be
+#                                 a silent fall-through indistinguishable from
+#                                 "no route-decision file at all", so a decision
+#                                 that existed but carried no identity read as
+#                                 "the lane said nothing" — letting the body's
+#                                 false self-declaration win by default).
+#   ("legacy", provider, model)  — the legacy ``selected_model`` shape (1 of 765);
+#                                 the model_id needs ``parse_route_model_id``.
+#
+# The "geen bruikbaar route-besluit" case is the THIRD branch, made explicit so
+# a caller can tell "the lane left no record" apart from "the lane left a
+# record with no identity" (OI-1547). Before this, both fell through to the body
+# the same way, so the body's self-declaration — which on a harness lane is a
+# LIE the worker cannot know is wrong (it introspects as sonnet/claude while
+# the lane runs glm-5.2) — won by default for 764 of 765 dispatches.
+_ROUTE_SOURCE_LANE = "lane"
+_ROUTE_SOURCE_LEGACY = "legacy"
+_ROUTE_SOURCE_BODY = "body"
+
+
+def _extract_route_identity(
+    route_dec: Optional[Dict[str, Any]],
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Split a route-decision dict into (source, provider, model).
+
+    Returns one of the three ``_ROUTE_SOURCE_*`` outcomes above. Never raises:
+    a malformed/empty route decision returns ``("body", None, None)`` so the
+    caller falls back to the report body — but EXPLICITLY, not silently.
+
+    Shape A (764 of 765, the door's ``_persist_route_decision``):
+        ``decision.provider`` + ``decision.model`` are already canonical lane
+        values (``glm-harness`` / ``glm-5.2``). Provider is normalised through
+        the closed vocabulary; model passes through verbatim. A provider the
+        vocabulary does not recognise demotes this branch to ``("body", ...)``
+        — a stale/malformed decision is an auxiliary hint, not the sole source
+        of truth (mirrors the legacy-shape contract one branch down).
+    Shape B (1 of 765, the legacy ``smart_router.write_route_decision``):
+        ``selected_model`` is a routing-recommendation model_id, split into
+        (provider, model) via ``parse_route_model_id``.
+    """
+    if not isinstance(route_dec, dict):
+        return _ROUTE_SOURCE_BODY, None, None
+
+    # Shape A: the door's per-dispatch record (764 of 765).
+    decision = route_dec.get("decision")
+    if isinstance(decision, dict):
+        lane_provider_raw = decision.get("provider")
+        lane_model = decision.get("model")
+        if lane_provider_raw and lane_model:
+            try:
+                lane_provider = _normalise_provider(str(lane_provider_raw))
+            except UnrecognizedProviderError as exc:
+                logger.warning(
+                    "report_to_receipt_converter: route decision carries "
+                    "unrecognized provider %r (%s) -- falling back to the "
+                    "report body",
+                    lane_provider_raw, exc,
+                )
+                return _ROUTE_SOURCE_BODY, None, None
+            return _ROUTE_SOURCE_LANE, lane_provider, str(lane_model)
+        # decision block present but missing provider/model -> explicit body
+        # fallback (OI-1547), NOT a silent pass-through.
+        if lane_provider_raw is not None or lane_model is not None:
+            logger.warning(
+                "report_to_receipt_converter: route decision present but "
+                "incomplete (provider=%r, model=%r) -- explicit body fallback",
+                lane_provider_raw, lane_model,
+            )
+            return _ROUTE_SOURCE_BODY, None, None
+
+    # Shape B: the legacy smart-router record (1 of 765).
+    selected_model = route_dec.get("selected_model")
+    if selected_model:
+        model_id = str(selected_model)
+        try:
+            from smart_router import parse_route_model_id  # noqa: PLC0415
+            lane_provider_raw, lane_model = parse_route_model_id(model_id)
+        except Exception:
+            logger.debug(
+                "report_to_receipt_converter: legacy selected_model lane "
+                "resolution failed for model_id=%s",
+                model_id,
+                exc_info=True,
+            )
+            return _ROUTE_SOURCE_BODY, None, None
+        if lane_provider_raw:
+            try:
+                lane_provider = _normalise_provider(lane_provider_raw)
+            except UnrecognizedProviderError as exc:
+                logger.warning(
+                    "report_to_receipt_converter: legacy route decision carries "
+                    "unrecognized provider %r (%s) -- falling back to the "
+                    "report body",
+                    lane_provider_raw, exc,
+                )
+                return _ROUTE_SOURCE_BODY, None, None
+            return _ROUTE_SOURCE_LEGACY, lane_provider, lane_model
+
+    # No usable identity in either shape — the explicit third branch (OI-1547).
+    return _ROUTE_SOURCE_BODY, None, None
 
 
 def _resolve_report_role(
@@ -535,57 +659,59 @@ def _resolve_report_provider_model(
     ``_resolve_report_role``, where the body wins because the author's own
     role stamp is the authoritative source.
 
-    Resolution order:
+    Resolution order (OI-1546):
       1. Route decision JSON (``state_dir/route_decisions/<dispatch_id>.json``)
-         — the lane's own record of which model was selected.
-      2. Report body/frontmatter fields — fallback when no route decision
-         exists (e.g. plan-gate seats that do not go through the smart router).
+         — the lane's own record of which model was selected. Read in BOTH
+         shapes: ``decision.provider``/``decision.model`` (the door's record,
+         764 of 765) and the legacy ``selected_model`` (smart_router, 1 of 765).
+         ``_extract_route_identity`` returns an explicit THIRD outcome
+         (``_ROUTE_SOURCE_BODY``) when a decision file exists but carries no
+         usable identity, so that case no longer reads as "the lane was silent"
+         (OI-1547).
+      2. Report body/frontmatter fields — fallback when the route decision
+         yielded no identity (e.g. plan-gate seats that do not go through the
+         smart router, or a decision file that exists but is incomplete).
 
     Raises:
         UnrecognizedProviderError: propagated from the body-fallback call to
         ``_normalise_provider`` (step 2) when NEITHER the lane nor the body
         yields a recognisable provider. A lane-side normalisation failure
-        (step 1) is caught here and demoted to a WARNING + fall-through to
-        the body — a stale/malformed route-decision file is an auxiliary
-        hint, not the sole source of truth, so it must not by itself refuse
-        the receipt. Only exhausting BOTH sources raises.
+        (step 1) is caught inside ``_extract_route_identity`` and demoted to a
+        WARNING + explicit body fallback — a stale/malformed route-decision
+        file is an auxiliary hint, not the sole source of truth, so it must
+        not by itself refuse the receipt. Only exhausting BOTH sources raises.
     """
     provider: Optional[str] = None
     model: Optional[str] = None
+    route_source: str = _ROUTE_SOURCE_BODY
 
-    # Lane identity first: the route decision knows which model ran.
+    # Lane identity first: the route decision knows which model ran. Read it
+    # in BOTH shapes (OI-1546) — the door's ``decision`` block (764 of 765)
+    # AND the legacy ``selected_model`` (1 of 765). The old code only checked
+    # ``selected_model``, so for 764 of 765 dispatches the lane never fired and
+    # the converter silently fell back to the body's self-declaration — which
+    # on a harness lane is a LIE the worker cannot know is wrong.
     if state_dir and dispatch_id:
         route_dec = _load_route_decision(dispatch_id, state_dir)
-        if route_dec and route_dec.get("selected_model"):
-            model_id = route_dec["selected_model"]
-            lane_provider: Optional[str] = None
-            lane_model: Optional[str] = None
-            try:
-                from smart_router import parse_route_model_id  # noqa: PLC0415
-                lane_provider, lane_model = parse_route_model_id(model_id)
-            except Exception:
-                logger.debug(
-                    "report_to_receipt_converter: provider/model lane resolution "
-                    "failed for dispatch=%s model_id=%s",
-                    dispatch_id, model_id,
-                    exc_info=True,
-                )
-            if lane_provider:
-                try:
-                    provider = _normalise_provider(lane_provider)
-                    model = lane_model
-                except UnrecognizedProviderError as exc:
-                    logger.warning(
-                        "report_to_receipt_converter: route decision for "
-                        "dispatch=%s carries unrecognized provider %r (%s) "
-                        "-- falling back to the report body",
-                        dispatch_id, lane_provider, exc,
-                    )
+        route_source, lane_provider, lane_model = _extract_route_identity(route_dec)
+        if route_source in (_ROUTE_SOURCE_LANE, _ROUTE_SOURCE_LEGACY) and lane_provider:
+            provider = lane_provider
+            model = lane_model
+            logger.info(
+                "report_to_receipt_converter: lane identity from route decision "
+                "(source=%s) dispatch=%s provider=%s model=%s",
+                route_source, dispatch_id, provider, model,
+            )
 
     # Body fallback: only used when lane resolution produced nothing. Left
     # UNPROTECTED by design — an UnrecognizedProviderError here means both
     # sources are exhausted and must propagate (see docstring).
     if not provider:
+        logger.info(
+            "report_to_receipt_converter: no usable lane identity "
+            "(route_source=%s) dispatch=%s -- using report body",
+            route_source, dispatch_id,
+        )
         provider = _normalise_provider(merged.get("provider", "unknown"))
     if not model:
         model = (merged.get("model") or "").strip()

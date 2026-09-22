@@ -1980,6 +1980,44 @@ class TestLaneIdentityResolution:
             "timestamp": "2026-08-09T12:00:00Z",
         }), encoding="utf-8")
 
+    def _write_route_decision_decision_block(
+        self, state_dir: Path, dispatch_id: str,
+        *, provider: str, model: str,
+    ) -> None:
+        """Write the DOMINANT route-decision shape (764 of 765 on the vnx-dev
+        store, 2026-09-22): the door's ``_persist_route_decision`` record with
+        ``decision.provider`` + ``decision.model`` as canonical lane values.
+
+        This is the shape ``_resolve_report_provider_model`` did NOT read before
+        OI-1546 — it only checked top-level ``selected_model`` (the legacy
+        smart-router shape, 1 of 765). A test using ONLY this helper reproduces
+        the 764/765 bug: the lane leaves a complete identity but the converter
+        ignored it and fell back to the body's false self-declaration.
+        """
+        import json as _json
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": "2026-09-22T06:42:04.235179+00:00",
+            "dispatch_id": dispatch_id,
+            "fingerprint": f"abcdef123456-{dispatch_id}",
+            "plan_digest": "abcdef123456" + "0" * 52,
+            "decision": {
+                "adapter": "provider",
+                "lane": "provider",
+                "provider": provider,
+                "model": model,
+                "dispatch_id": dispatch_id,
+                "billing": "provider_metered",
+                "isolation": "worktree",
+                "report_contract": "required",
+                "target_id": "T1",
+            },
+        }
+        (rd_dir / f"{dispatch_id}.json").write_text(
+            _json.dumps(record, indent=2, sort_keys=True), encoding="utf-8",
+        )
+
     def test_glm_harness_lane_wins_over_body_sonnet_claude(self, tmp_path):
         """Core OI-1111 case: route_decision says glm-5.2, body says sonnet/claude.
         The receipt must carry glm-harness/glm-5.2, not sonnet/claude."""
@@ -2239,6 +2277,286 @@ class TestLaneIdentityResolution:
         # No route_decision → body is the fallback. "claude" is already canonical.
         assert receipt["provider"] == "claude"
         assert receipt["model"] == "sonnet"
+
+    # ------------------------------------------------------------------
+    # OI-1546 / OI-1547 — the dominant route-decision shape (764 of 765)
+    # ------------------------------------------------------------------
+    #
+    # T0 measured (2026-09-22, ~/.vnx-data/vnx-dev/state): 765 route decisions.
+    # 764 carry ``decision.provider`` + ``decision.model``; 1 carries top-level
+    # ``selected_model``. The converter read ONLY ``selected_model``, so for 764
+    # of 765 dispatches the lane identity never fired and the converter fell
+    # back to the body's self-declaration — which on a harness lane is a LIE
+    # the worker cannot know is wrong (it introspects as sonnet/claude while the
+    # lane runs glm-5.2). The canonical repro: dispatch 20260922-ff-1884-legacy-
+    # path — the report claims **Model**: sonnet / **Provider**: claude, the
+    # route decision says glm-harness / glm-5.2, and the CLI's own init event
+    # in events/archive/T1 wrote model=glm-5.2. The decision was right; the body
+    # lied. The lane must win.
+
+    def test_decision_block_lane_wins_over_body_sonnet_claude(self, tmp_path):
+        """OI-1546 RED->GREEN: the 764-shape (``decision`` block) must win over
+        a body that claims claude/sonnet. Before the fix, the converter ignored
+        ``decision.provider``/``decision.model`` and fell back to the body."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-ff-1884-legacy-path"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="glm-harness", model="glm-5.2",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-ff-1884-legacy-path\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nHarness-lane worker that introspects as claude/sonnet "
+            "while the lane runs glm-5.2. The route decision's ``decision`` block "
+            "is the authoritative identity, not the body's self-declaration.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # The decision block wins — NOT the body's claude/sonnet lie.
+        assert receipt["provider"] == "glm-harness", (
+            f"Expected glm-harness from decision block, got {receipt.get('provider')}"
+        )
+        assert receipt["model"] == "glm-5.2", (
+            f"Expected glm-5.2 from decision block, got {receipt.get('model')}"
+        )
+
+    def test_decision_block_deepseek_lane_wins(self, tmp_path):
+        """The 764-shape for a deepseek-harness lane: decision.provider says
+        deepseek-harness, body says claude/sonnet. Lane wins."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-deepseek-decision-block"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="deepseek-harness", model="deepseek-v4-pro",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-deepseek-decision-block\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nDeepSeek harness worker whose body claims claude/sonnet. "
+            "The decision block carries the real lane identity.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "deepseek-harness"
+        assert receipt["model"] == "deepseek-v4-pro"
+
+    def test_decision_block_incomplete_falls_back_to_body_explicitly(self, tmp_path):
+        """OI-1547: a decision block that EXISTS but carries no identity (no
+        provider/model) is the explicit THIRD branch — the body is used, but
+        NOT silently. This is distinct from 'no route-decision file at all'."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-incomplete-decision"
+        # Decision block present but provider/model are null.
+        import json as _json
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        (rd_dir / f"{dispatch_id}.json").write_text(_json.dumps({
+            "timestamp": "2026-09-22T06:42:04.235179+00:00",
+            "dispatch_id": dispatch_id,
+            "decision": {"adapter": "provider", "lane": "provider"},
+        }), encoding="utf-8")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-incomplete-decision\n"
+            "provider: kimi\nmodel: kimi-k3\nstatus: unknown\nterminal: T1\n---\n\n"
+            "## Summary\n\nAn incomplete decision block must fall back to the body "
+            "explicitly — this is the third branch (OI-1547), not a silent pass.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Body fallback: kimi/kimi-k3 are honest here (no harness lying).
+        assert receipt["provider"] == "kimi"
+        assert receipt["model"] == "kimi-k3"
+
+    def test_decision_block_unrecognized_provider_falls_back_to_body(self, tmp_path):
+        """A decision block whose provider the closed vocabulary does not
+        recognise demotes to the body fallback — a stale/malformed decision is
+        an auxiliary hint, not the sole source of truth."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-bad-decision-provider"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="some-unknown-lane", model="weird-model",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-bad-decision-provider\n"
+            "provider: kimi\nmodel: kimi-k3\nstatus: unknown\nterminal: T1\n---\n\n"
+            "## Summary\n\nA decision block with an unrecognized provider must not "
+            "refuse the receipt by itself — it falls back to the body.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Body wins because the decision's provider was unrecognized.
+        assert receipt["provider"] == "kimi"
+        assert receipt["model"] == "kimi-k3"
+
+    def test_legacy_selected_model_still_read(self, tmp_path):
+        """The 1-of-765 legacy shape (top-level ``selected_model``) is still
+        read and still wins over the body — OI-1546 did not regress it."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-legacy-shape"
+        self._write_route_decision_for(state_dir, dispatch_id, "glm-5.2")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-legacy-shape\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nThe legacy selected_model shape (1 of 765) must still "
+            "fire lane identity over the body's false claim.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "glm-harness"
+        assert receipt["model"] == "glm-5.2"
+
+    # ------------------------------------------------------------------
+    # OI-1546 PUNT 2 — prose is not a provider
+    # ------------------------------------------------------------------
+    #
+    # T0 measured 12 receipts in the ledger that carry a provider scraped
+    # from the report TEXT (the `` ` regel. Zonder die identiteitsregels ``
+    # fragment among them). The body fallback must REFUSE a value that
+    # ``_normalise_provider`` does not recognise, and book that refusal
+    # VISIBLY (an ``unrecognized_provider`` contract violation + WARNING)
+    # rather than letting prose through as a provider string.
+
+    def test_body_prose_provider_refused_and_booked_visibly(self, tmp_path, caplog):
+        """A body whose ``**Provider**`` field is scraped prose (not a lane
+        value) is refused and booked as ``unrecognized_provider`` — never
+        passed through as the provider string. No route decision exists, so
+        the body fallback is the only source: exhausting it raises."""
+        import logging as _logging
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        # No route_decision JSON — forces the body-fallback path.
+        dispatch_id = "20260922-prose-provider"
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-prose-provider\nmodel: sonnet\nterminal: T1\n---\n\n"
+            "## Summary\n\nReport whose body Provider field is a scraped prose "
+            "fragment, not a lane value. The converter must refuse it.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n\n"
+            # The exact 2026-08-09 corruption shape: a torn-off instruction
+            # sentence scraped as the provider field.
+            "**Provider**: ` regel. Zonder die identiteitsregels landt je receipt niet.\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level(_logging.WARNING, logger="report_to_receipt_converter"):
+            receipt = build_receipt_from_report(
+                report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+            )
+        assert receipt is not None, "must never crash"
+        # Refused visibly: the contract violation is booked on the receipt.
+        assert receipt["event_type"] == "report_contract_invalid"
+        assert "unrecognized_provider" in receipt["contract_violations"], (
+            f"expected unrecognized_provider violation, got {receipt.get('contract_violations')}"
+        )
+        # The prose must NOT survive as the provider value.
+        assert receipt["provider"] == "unknown", (
+            f"prose must not pass through as provider, got {receipt.get('provider')!r}"
+        )
+        # And the refusal is logged (visible, not silent).
+        assert any(
+            "unrecognized provider" in rec.getMessage()
+            for rec in caplog.records
+        ), "the refusal must be logged visibly, not silent"
+
+    def test_prose_provider_with_lane_decision_lane_still_wins(self, tmp_path):
+        """OI-1546 interaction: when the lane identity (764-shape) IS present,
+        a prose provider in the body is irrelevant — the lane wins, so the
+        prose never reaches the fallback. This is the 'after' for the 12: a
+        dispatch that has a route decision no longer lets body prose anywhere
+        near the provider field."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-prose-with-lane"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="glm-harness", model="glm-5.2",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-prose-with-lane\nmodel: sonnet\nterminal: T1\n---\n\n"
+            "## Summary\n\nBody carries prose in the Provider field, but the lane "
+            "decision block is present — the lane wins and the prose is ignored.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n\n"
+            "**Provider**: ` regel. Zonder die identiteitsregels landt je receipt niet.\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Lane wins; the prose never reached the provider field.
+        assert receipt["provider"] == "glm-harness"
+        assert receipt["model"] == "glm-5.2"
+        # No contract violation: the lane resolved cleanly.
+        assert "unrecognized_provider" not in (receipt.get("contract_violations") or [])
 
 
 # ---------------------------------------------------------------------------
