@@ -9,8 +9,10 @@ models
 .venv
 
 # data/ is regenereerbaar: 01_extract_findings.py bouwt findings.jsonl uit de
-# gate-results store van wie het ook draait, 02/03/03b/04/05 vullen de rest.
+# gate-results store van wie het ook draait, 02/03/03b/03d/04/05 vullen de rest.
 # Een gecommit corpus lekt bovendien de legacy-path-tekst als inhoud in de
 # bevindingen, en de CI-gate merkt die string als schending aan. Mijn store
-# is niet de hunne.
+# is niet de hunne. Zowel de map-vorm (data/) als de symlink-vorm (data) gedekt,
+# conform models en .venv hierboven.
 data/
+data
