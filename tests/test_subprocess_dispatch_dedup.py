@@ -87,8 +87,7 @@ class TestTaskCompleteDedup:
             if real_update:
                 real_update(db, dispatch_id, terminal, outcome)
 
-        with patch("append_receipt.resolve_state_dir", return_value=db_path.parent), \
-             patch("append_receipt._register_quality_open_items"), \
+        with patch("append_receipt._register_quality_open_items"), \
              patch("append_receipt._emit_dispatch_register"), \
              patch("append_receipt._maybe_trigger_state_rebuild"), \
              patch("append_receipt._enrich_completion_receipt", side_effect=lambda r: r), \
@@ -101,7 +100,7 @@ class TestTaskCompleteDedup:
                 side_effect=counting_upcf,
             ):
                 # Manually call _update_confidence_from_receipt directly
-                append_receipt._update_confidence_from_receipt(receipt)
+                append_receipt._update_confidence_from_receipt(receipt, state_dir=db_path.parent)
 
         assert len(call_count) == 1, (
             f"Expected exactly 1 call to update_confidence_from_outcome, got {len(call_count)}: {call_count}"
@@ -164,13 +163,12 @@ class TestTaskFailedDedup:
             call_count.append((dispatch_id, terminal, outcome))
 
         import append_receipt
-        with patch("append_receipt.resolve_state_dir", return_value=db_path.parent):
-            with patch.object(
-                sys.modules.get("intelligence_persist", MagicMock()),
-                "update_confidence_from_outcome",
-                side_effect=counting_upcf,
-            ):
-                append_receipt._update_confidence_from_receipt(receipt)
+        with patch.object(
+            sys.modules.get("intelligence_persist", MagicMock()),
+            "update_confidence_from_outcome",
+            side_effect=counting_upcf,
+        ):
+            append_receipt._update_confidence_from_receipt(receipt, state_dir=db_path.parent)
 
         assert len(call_count) == 1, (
             f"Expected exactly 1 confidence update for task_failed, got {len(call_count)}"

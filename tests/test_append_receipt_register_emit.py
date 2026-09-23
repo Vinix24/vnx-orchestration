@@ -760,9 +760,8 @@ def _run_confidence_update(ar_mod, receipt: dict, captured: list) -> None:
     fake_db = fake_state_dir / "quality_intelligence.db"
 
     with patch.dict(sys.modules, {"intelligence_persist": fake_persist}), \
-         patch.object(ar_mod, "resolve_state_dir", return_value=fake_state_dir), \
          patch("pathlib.Path.exists", return_value=True):
-        ar_mod._update_confidence_from_receipt(receipt)
+        ar_mod._update_confidence_from_receipt(receipt, state_dir=fake_state_dir)
 
 
 def test_confidence_task_complete_success_yields_success(ar):

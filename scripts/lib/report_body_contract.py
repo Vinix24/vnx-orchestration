@@ -39,6 +39,26 @@ _REQUIRED_SECTIONS = ("## Summary", "## Changes", "## Verification", "## Open It
 # split that let the two lanes drift out of sync in the first place.
 CONTRACT_INVALID_STATUS = "contract_invalid"
 
+# The ONE receipt-status value for a report that satisfies this contract and
+# declares no status of its own. This is the definition dispatch_govern already
+# applies (OI-1202: "an authored report with no declared failure is done"),
+# stated once so the report parser and the report converter cannot drift from
+# it. It is a literal of the canonical vocabulary (event_outcome_semantics
+# success category), not a new one.
+AUTHORED_UNDECLARED_STATUS = "done"
+
+# Values that are a placeholder for "no status", not a status. The unified
+# report frontmatter the fabric itself writes carries ``status: unknown`` and a
+# worker-authored report carries no status line at all; both declare nothing.
+UNDECLARED_STATUS_PLACEHOLDERS = frozenset(
+    {"", "unknown", "none", "null", "n/a", "na", "unset", "-"}
+)
+
+# ``receipt["status_source"]`` value stamped when the status was derived by
+# ``resolve_undeclared_status`` instead of declared by the report, so the audit
+# trail can tell a derived ``done`` from a claimed one.
+DERIVED_STATUS_SOURCE = "report_contract"
+
 # Aliases accepted by the validator so existing authored reports do not break.
 _SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "## Changes": ("## Files Modified", "## Work Completed"),
@@ -62,6 +82,66 @@ class BodyResult:
     # "authored" = passes all checks; "violated" = any check failed;
     # "synthesized" is used externally by govern() on synthesized bodies.
     status: str = "authored"
+
+
+# How much of a report is searched for its identity block (Dispatch-ID, Model,
+# Provider): the first and the last IDENTITY_WINDOW characters. The directive
+# tells workers to put field-style stamps in the first 3000; a worker report in
+# the corpus closes with the block instead (measured: 22 of 6025 reports, all
+# within 414 characters of the end but one). A block in the middle of a long
+# report is not searched: quoted dispatch ids in prose live there.
+IDENTITY_WINDOW = 3000
+
+
+def identity_windows(text: str) -> "list[str]":
+    """The parts of ``text`` that are searched for the identity block, head first.
+
+    Head first so a report that stamps its identity on top resolves exactly as
+    it always did; the tail is only consulted for a key the head did not carry.
+    """
+    if len(text) <= IDENTITY_WINDOW:
+        return [text]
+    tail = text[-IDENTITY_WINDOW:]
+    if text[-IDENTITY_WINDOW - 1] != "\n":
+        # The window opens mid-line. Drop that fragment: a line-anchored
+        # pattern would otherwise read the tail of a longer line as a line of
+        # its own.
+        tail = tail.partition("\n")[2]
+    return [text[:IDENTITY_WINDOW], tail]
+
+
+def clean_identity_value(raw: "str | None") -> str:
+    """Strip the markdown a worker wraps around an identity value.
+
+    ``Dispatch-ID: **20260922-x**`` and ``**Dispatch-ID:** 20260922-x`` both
+    reach a parser as a value that still carries ``*`` or ``:``; taken
+    verbatim that value is a different dispatch identity from the clean one.
+    Surrounding ``*`` and ``:`` are removed. Neither can occur inside a
+    dispatch id, a model name or a provider name, so nothing legitimate is
+    touched. Backticks are deliberately NOT removed: a backtick-wrapped model
+    is refused on purpose (report_parser's plausibility guard, OI-1194).
+    """
+    return str(raw or "").strip().strip("*:").strip()
+
+
+def resolve_undeclared_status(declared_status: "str | None", *, body_valid: bool) -> "str | None":
+    """Status for a report that declares none, else None (nothing to derive).
+
+    The contract requires four sections and a dispatch id. It does not require
+    a status, so a report can satisfy every part of it and still carry no
+    status: the receipt writers then stamped ``unknown`` (or ``no_signal``) on a
+    dispatch that demonstrably delivered, and the quality score excluded it.
+
+    Only evidence the report itself provides is used: a report that passes
+    ``validate_body`` and declares no status is ``AUTHORED_UNDECLARED_STATUS``.
+    A declared status is never overridden, a report that fails the body
+    contract gets no derived status (there is no evidence of completion), and
+    delivery (a pushed branch, a PR, a merge) is not inferred here: that is the
+    gate's evidence, not the report's.
+    """
+    if str(declared_status or "").strip().lower() not in UNDECLARED_STATUS_PLACEHOLDERS:
+        return None
+    return AUTHORED_UNDECLARED_STATUS if body_valid else None
 
 
 def build_directive(dispatch_id: str, *, pr_id: "str | None" = None) -> str:

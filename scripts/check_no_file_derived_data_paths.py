@@ -208,7 +208,12 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 #   - worker_permission_relay: last-resort except-branch AFTER vnx_paths.ensure_env()
 #     (the VNX_HOME+marker-aware resolver) failed — mirrors the grandfathered
 #     defensive-fallback pattern above.
-#   - append_receipt_internals (payload/session_resolver/warning_destination),
+#   - append_receipt_internals/payload.py: MIGRATED. Its confidence hook fed
+#     __file__ to the resolver and so wrote to <checkout>/.vnx-data/state, a
+#     store without the intelligence tables (every update a silent no-op). It now
+#     writes to the store the receipt itself was appended to. Dropped from the
+#     list, as the gate requires of a migrated site.
+#   - append_receipt_internals (session_resolver/warning_destination),
 #     subsystem_health, the *_effectiveness_probe modules: receipt-provenance /
 #     intelligence side paths; read-mostly, env-overridable, and outside this
 #     dispatch's blast radius.
@@ -227,9 +232,6 @@ GRANDFATHERED_RESOLVER_ANCHORS: Dict[str, Set[str]] = {
     },
     "scripts/lib/subsystem_health.py": {
         "project_root.resolve_data_dir(__file__)",
-    },
-    "scripts/lib/append_receipt_internals/payload.py": {
-        "facade.resolve_state_dir(__file__)",
     },
     "scripts/lib/append_receipt_internals/session_resolver.py": {
         "facade.resolve_state_dir(__file__)",
