@@ -77,7 +77,7 @@ def _injection_probe_health(state_dir: Path) -> str:
     """Run the injection-effectiveness probe (PR-6) and return its health status.
 
     This is the PR-17 activation gate for the dream-cycle executor: read-only,
-    never raises — a probe/import failure degrades to ``"unknown"`` (not in
+    never raises. A probe/import failure degrades to ``"unknown"`` (not in
     ``_PROBE_HEALTH_RUNNABLE``, so gated like ``produces_crap``) rather than
     crashing the cycle.
     """
