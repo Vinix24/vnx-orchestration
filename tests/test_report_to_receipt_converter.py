@@ -380,10 +380,13 @@ class TestStatusVocabularyFailClosed:
         assert receipt["event_type"] == "task_failed"
         assert receipt["status"] == "failed"
 
-    def test_missing_status_and_exit_code_falls_back_to_no_signal_literal(self, tmp_path):
-        # The genuine residual case: neither status nor a usable exit_code.
-        # The receipt must still carry a readable literal ("no_signal"),
-        # never an empty string.
+    def test_missing_status_and_exit_code_derives_done_from_the_contract(self, tmp_path):
+        # The residual case: neither status nor a usable exit_code. This report
+        # satisfies the body contract (four sections) and declares no failure,
+        # so the receipt carries the contract-derived status, marked as derived,
+        # never an empty string and no longer "no_signal" beside a same-shaped
+        # report that happened to carry an exit_code. The canonical mapping of
+        # an empty status is unchanged: only the writer stopped reaching it.
         from event_outcome_semantics import resolve_status_category
 
         p = tmp_path / "20260823-truly-signal-less.md"
@@ -393,8 +396,8 @@ class TestStatusVocabularyFailClosed:
         receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
         assert receipt is not None
         assert receipt["event_type"] == "task_complete"
-        assert receipt["status"] == "no_signal"
-        assert receipt["status"] != ""
+        assert receipt["status"] == "done"
+        assert receipt["status_source"] == "report_contract"
         assert resolve_status_category("") == "no_signal"
 
 
@@ -3183,9 +3186,12 @@ class TestNoStatusExitCodeFallbackOnDisk:
         assert booked["event_type"] == "task_failed"
         assert booked["status"] == "failed"
 
-    def test_missing_status_and_exit_code_lands_as_no_signal_literal_on_disk(
+    def test_missing_status_and_exit_code_lands_as_contract_derived_done_on_disk(
         self, reports_dir, state_dir,
     ):
+        # Neither status nor exit_code, body contract satisfied: the line on
+        # disk reads as the contract-derived ``done`` (marked as derived), not
+        # as the ``no_signal`` this used to land as.
         _write_v1_report_missing_fields(
             reports_dir / "20260823-disk-truly-signal-less.md",
             "20260823-disk-truly-signal-less",
@@ -3198,9 +3204,10 @@ class TestNoStatusExitCodeFallbackOnDisk:
         assert len(receipts) == 1
         booked = receipts[0]
         assert booked["event_type"] == "task_complete"
-        assert booked["status"] == "no_signal"
+        assert booked["status"] == "done"
+        assert booked["status_source"] == "report_contract"
         assert booked["status"] != "", (
-            "no-signal task_complete receipt landed with an empty status on "
+            "task_complete receipt landed with an empty status on "
             f"disk — no readable outcome on the line: {booked}"
         )
 

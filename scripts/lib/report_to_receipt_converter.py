@@ -50,6 +50,15 @@ from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel 
 # no longer carries its own hand-copied terminal-status sets; it resolves every
 # declared status through resolve_status_category() below.
 from event_outcome_semantics import UnknownStatusError, resolve_status_category
+# Identity-block windows, value cleaning and the undeclared-status rule live
+# with the report body contract so the converter and report_parser.py share one
+# definition of each.
+from report_body_contract import (
+    DERIVED_STATUS_SOURCE,
+    clean_identity_value,
+    identity_windows,
+    resolve_undeclared_status,
+)
 # Closed provider vocabulary (golf1a-provider-enum). _normalise_provider below
 # is a thin wrapper around normalize_provider() — see provider_identity.py for
 # the full reconciliation with governance_emit._PROVIDER_RE.
@@ -399,14 +408,21 @@ def parse_frontmatter(text: str) -> Dict[str, Any]:
     return fm
 
 
-def _extract_body_fields(text: str) -> Dict[str, Any]:
-    """Extract **Key**: value fields + plain-text Dispatch-ID fallback from body."""
-    fields: Dict[str, Any] = {}
-    for m in _BOLD_KV_RE.finditer(text[:3000]):
+# The keys of a report's identity block. Only these are looked for outside the
+# head of the report; every other body field stays head-only.
+_IDENTITY_KEYS = ("dispatch_id", "model", "provider")
+
+
+def _bold_fields(window: str, *, only: Optional[Tuple[str, ...]] = None) -> Dict[str, str]:
+    """``**Key**: value`` / ``**Key:** value`` fields of ``window``, first one per key."""
+    fields: Dict[str, str] = {}
+    for m in _BOLD_KV_RE.finditer(window):
         raw_key, raw_val = (
             (m.group(1), m.group(2)) if m.group(1) is not None else (m.group(3), m.group(4))
         )
         key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
+        if only is not None and key not in only:
+            continue
         # A bold key whose value is whitespace-only (e.g. truncated at the
         # text[:3000] scan boundary, or genuinely empty in the source report)
         # strips down to "" — splitlines() on "" is [], so index [0] would
@@ -415,14 +431,50 @@ def _extract_body_fields(text: str) -> Dict[str, Any]:
         val = value_lines[0].strip() if value_lines else ""
         if key and val:
             fields.setdefault(key, val)
-    if "dispatch_id" not in fields:
-        m = _DISPATCH_PLAIN_RE.search(text[:3000])
+    return fields
+
+
+def _plain_dispatch_id(window: str) -> Optional[str]:
+    """``Dispatch-ID: x`` / ``dispatch_id: x`` plain-text stamp in ``window``."""
+    for pattern in (_DISPATCH_PLAIN_RE, _DISPATCH_ID_KEY_RE):
+        m = pattern.search(window)
         if m:
-            fields["dispatch_id"] = m.group(1).strip()
+            return m.group(1).strip()
+    return None
+
+
+def _extract_body_fields(text: str) -> Dict[str, Any]:
+    """Extract **Key**: value fields + plain-text Dispatch-ID fallback from body.
+
+    Every field is read from the head of the report (first 3000 characters).
+    The identity block (Dispatch-ID, Model, Provider) is also looked for at the
+    tail, but only for a key the head did not carry, so a report that stamps its
+    identity on top resolves exactly as before. Before the tail was searched a
+    report that closed with its identity block read as having none and was
+    booked ``report_contract_invalid`` (``missing_content_dispatch_id``).
+
+    Identity values come back without the markdown around them:
+    ``Dispatch-ID: **x**`` and ``**Dispatch-ID:** x`` both yield ``x``.
+    """
+    fields: Dict[str, Any] = dict(_bold_fields(text[:3000]))
     if "dispatch_id" not in fields:
-        m = _DISPATCH_ID_KEY_RE.search(text[:3000])
-        if m:
-            fields["dispatch_id"] = m.group(1).strip()
+        plain = _plain_dispatch_id(text[:3000])
+        if plain:
+            fields["dispatch_id"] = plain
+    for window in identity_windows(text)[1:]:
+        for key, val in _bold_fields(window, only=_IDENTITY_KEYS).items():
+            fields.setdefault(key, val)
+        if "dispatch_id" not in fields:
+            plain = _plain_dispatch_id(window)
+            if plain:
+                fields["dispatch_id"] = plain
+    for key in _IDENTITY_KEYS:
+        if key in fields:
+            cleaned = clean_identity_value(fields[key])
+            if cleaned:
+                fields[key] = cleaned
+            else:
+                del fields[key]
     return fields
 
 
@@ -734,10 +786,14 @@ def _resolve_report_provider_model(
 #
 # OI-1408: an absent status is resolved BEFORE the categorization above by
 # falling back to the report's exit_code (required by schemas/unified_report_v1.
-# json, unlike status) — exit_code==0 -> "success", nonzero -> "failed". Only
-# when exit_code is ALSO absent/unparseable does a report fall through to
-# "no_signal". This derives the input to the one canonical mapping; it is not
-# a second mapping.
+# json, unlike status): exit_code==0 -> "success", nonzero -> "failed". When
+# exit_code is ALSO absent/unparseable, a report that satisfies the body
+# contract is derived as "done" (report_body_contract.resolve_undeclared_status,
+# the definition dispatch_govern applies too) and marked ``status_source:
+# report_contract``. Only a report the contract gives no evidence for falls
+# through to "no_signal" (in practice one that fails the contract lands as
+# report_contract_invalid first). This derives the input to the one canonical
+# mapping; it is not a second mapping.
 
 
 def _check_branch_on_origin(dispatch_id: str) -> bool:
@@ -1080,6 +1136,7 @@ def _build_receipt_from_report_core(
     # "contract_invalid" bucket (which received 96 hits in 7 days and is
     # invisible to any alarm).
     status_raw = (merged.get("status") or "").strip().lower()
+    status_derived = False
     if not status_raw:
         # OI-1408: schemas/unified_report_v1.json REQUIRES exit_code but never
         # required status — a schema-valid v1 report can carry no status field
@@ -1102,6 +1159,24 @@ def _build_receipt_from_report_core(
                     "derived status=%r from exit_code=%d",
                     dispatch_id, status_raw, exit_code,
                 )
+    if not status_raw:
+        # No status and no usable exit_code. The report still says something:
+        # one that satisfies the body contract and declares no failure
+        # delivered its deliverable (the definition dispatch_govern already
+        # applies, OI-1202). Before this step such a report landed as
+        # ``no_signal`` beside a same-shaped report that happened to carry an
+        # exit_code, and the quality score excluded it. Derived, not declared:
+        # the receipt says so (``status_source``). A DECLARED status, the
+        # literal ``unknown`` included, is a claim and is never re-derived.
+        derived = resolve_undeclared_status(status_raw, body_valid=body_result.valid)
+        if derived is not None:
+            status_raw = derived
+            status_derived = True
+            logger.info(
+                "report_to_receipt_converter: dispatch=%s no status and no "
+                "exit_code, derived status=%r from the report contract",
+                dispatch_id, status_raw,
+            )
     try:
         status_category = resolve_status_category(status_raw)
     except UnknownStatusError:
@@ -1128,9 +1203,13 @@ def _build_receipt_from_report_core(
             ] if resolved is not None else []
         return receipt_out
 
-    is_terminal_success = status_category == "success"
+    is_terminal_success = status_category == "success" and not status_derived
 
     if is_terminal_success:
+        # A derived status is not a success CLAIM, so the claim checks (a
+        # verified PR, a branch on origin) do not apply to it: the report
+        # made no assertion for them to refute. Delivery stays the merge
+        # gate's evidence.
         fail_closed_violations = _run_fail_closed_checks(
             text, dispatch_id, body_result, merged=merged,
         )
@@ -1208,6 +1287,8 @@ def _build_receipt_from_report_core(
         "event_type": "task_complete",
         "status": status_raw or "no_signal",
     }
+    if status_derived:
+        receipt["status_source"] = DERIVED_STATUS_SOURCE
     if ambiguous_report:
         receipt["ambiguous_report_path"] = True
         receipt["report_path_candidates"] = [
@@ -1641,7 +1722,11 @@ def _convert_one_detailed(
             receipt,
             receipts_file=receipts_file,
             cache_window_seconds=cache_window_seconds,
-            skip_enrichment=True,  # converter receipts skip quality advisory
+            # skip_enrichment covers the quality advisory hooks and the
+            # provenance/session/cqs enrichment. The confidence update is an
+            # outcome hook and runs regardless: a converter receipt is the
+            # only outcome record a dispatch gets when the lane wrote none.
+            skip_enrichment=True,
         )
     except AppendReceiptError as exc:
         if exc.code == "missing_model":

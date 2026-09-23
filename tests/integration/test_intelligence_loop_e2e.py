@@ -570,21 +570,17 @@ class TestCaseHOutcomePropagationChain:
             source_dispatch_ids=[dispatch_id],
         )
 
-        # append_receipt._update_confidence_from_receipt resolves the DB path via
-        # resolve_state_dir().  Patch that to return our tmp state dir holding
-        # the synthetic quality_intelligence.db.
+        # append_receipt._update_confidence_from_receipt writes to the store the
+        # receipt was appended to; the caller passes that state dir. Hand it our
+        # tmp state dir holding the synthetic quality_intelligence.db.
         state_dir = tmp_path / "h_state"
         state_dir.mkdir()
-        # Move the db into that dir so resolve_state_dir() lookup matches.
         target_db = state_dir / "quality_intelligence.db"
         target_db.write_bytes(quality_db.read_bytes())
 
-        # Import append_receipt and patch its resolve_state_dir reference.
         if str(_SCRIPTS_DIR) not in sys.path:
             sys.path.insert(0, str(_SCRIPTS_DIR))
         import append_receipt  # noqa: E402
-
-        monkeypatch.setattr(append_receipt, "resolve_state_dir", lambda *a, **kw: state_dir)
 
         receipt = {
             "event_type": "task_complete",
@@ -594,7 +590,7 @@ class TestCaseHOutcomePropagationChain:
         }
 
         before = _confidence(target_db, sp_id)
-        append_receipt._update_confidence_from_receipt(receipt)
+        append_receipt._update_confidence_from_receipt(receipt, state_dir=state_dir)
         after = _confidence(target_db, sp_id)
 
         assert after > before, (
@@ -633,8 +629,6 @@ class TestCaseHOutcomePropagationChain:
             sys.path.insert(0, str(_SCRIPTS_DIR))
         import append_receipt  # noqa: E402
 
-        monkeypatch.setattr(append_receipt, "resolve_state_dir", lambda *a, **kw: state_dir)
-
         receipt = {
             "event_type": "task_failed",
             "status": "failure",
@@ -643,7 +637,7 @@ class TestCaseHOutcomePropagationChain:
         }
 
         before = _confidence(target_db, sp_id)  # = 0.5 (seed)
-        append_receipt._update_confidence_from_receipt(receipt)
+        append_receipt._update_confidence_from_receipt(receipt, state_dir=state_dir)
         after = _confidence(target_db, sp_id)
 
         # Beta(2, 0+1) = 3/5 = 0.6 (writes back current pattern_usage state)

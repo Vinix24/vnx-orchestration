@@ -37,6 +37,19 @@ _MODEL_NAME_MAX_LENGTH = 64
 # retired dot-form token (kimi-k2.5) is a model-shaped token, not prose.
 _SENTENCE_PUNCT_RE = re.compile(r"[,;:!?()\[\]{}\"']")
 
+# One line of a report's identity block, in the three shapes workers write it:
+# `**Key**: v`, `**Key:** v` and `Key: v`, each with an optional list marker and
+# a value that is a single token (which may itself still be wrapped in `**`;
+# clean_identity_value strips that). Anchored at the line start so
+# quoted diffs and indented code blocks are never read as a stamp. Only
+# Dispatch-ID is case-insensitive: lowercase `model:` is the frontmatter form.
+_IDENTITY_LINE_RE = re.compile(
+    r"^(?:[-*] )?(?P<bold>\*\*)?(?P<key>(?i:Dispatch-ID)|Model|Provider)"
+    r"(?(bold)(?:\*\*:|:\*\*)|:)"
+    r"[ \t]*(?P<value>\S+)[ \t]*$",
+    re.MULTILINE,
+)
+
 
 def _normalize_model_to_canonical(value: str) -> "Optional[str]":
     """Return the canonical registry key for *value*.
@@ -259,12 +272,14 @@ class ReportParser:
         # body must NOT enter the audit trail as a clean task_complete. Fail-soft: any import/validate
         # error leaves the receipt's behaviour unchanged (treated as valid).
         extracted['_body_contract_valid'] = True
+        extracted['_body_contract_evaluated'] = False
         try:
             _lib = str(Path(__file__).resolve().parent / "lib")
             if _lib not in sys.path:
                 sys.path.insert(0, _lib)
             from report_body_contract import validate_body as _validate_body
             extracted['_body_contract_valid'] = bool(_validate_body(content).valid)
+            extracted['_body_contract_evaluated'] = True
         except Exception:
             extracted['_body_contract_valid'] = True
 
@@ -433,6 +448,39 @@ class ReportParser:
             )
             if plain_dispatch_match:
                 metadata["dispatch_id"] = plain_dispatch_match.group(1).strip()
+
+        # Identity block, every shape and either end of the report. The scans
+        # above cover `**Key**: v` and `Key: v` in the head of the report and
+        # miss two things: the colon INSIDE the bold markers (`**Dispatch-ID:**
+        # v`) and a block that closes the report instead of opening it. Only
+        # keys still absent are filled, so a report that stamps its identity on
+        # top resolves exactly as before.
+        _lib = str(Path(__file__).resolve().parent / "lib")
+        if _lib not in sys.path:
+            sys.path.insert(0, _lib)
+        from report_body_contract import clean_identity_value, identity_windows
+        for _window in identity_windows(content):
+            for _im in _IDENTITY_LINE_RE.finditer(_window):
+                _ikey = _normalize_meta_key(_im.group('key'))
+                if str(metadata.get(_ikey) or '').strip():
+                    continue
+                if _is_inside_inline_code(_window, _im.start()):
+                    continue
+                _ival = _im.group('value')
+                if _ikey == 'model' and not _is_plausible_model_name(clean_identity_value(_ival)):
+                    continue
+                metadata[_ikey] = _ival
+
+        # The markdown a worker wraps around an identity value is not part of
+        # the value: `Dispatch-ID: **x**` is dispatch `x`, not a dispatch named
+        # `**x**` (a second, phantom dispatch beside the real one).
+        for _ikey in ('dispatch_id', 'model', 'provider'):
+            if _ikey in metadata:
+                _cleaned = clean_identity_value(metadata[_ikey])
+                if _cleaned:
+                    metadata[_ikey] = _cleaned
+                else:
+                    metadata.pop(_ikey)
 
         # Normalize unknown-like values so fallback logic can run consistently.
         if str(metadata.get("dispatch_id", "")).strip().lower() in {"", "unknown", "none", "null"}:
@@ -731,12 +779,27 @@ class ReportParser:
         _contract_valid = extracted.get('_body_contract_valid', True)
         _status = str(metadata.get('status', 'unknown')).lower()
         _claims_success = _status in ('success', 'done', 'complete', 'completed', 'pass', 'passed')
+        # A report that satisfies the body contract but declares no status
+        # (the contract does not ask for one) used to leave here as `unknown`,
+        # which the quality score excludes: a dispatch that delivered counted
+        # as no measurement. Derive its status from the contract, the same
+        # definition dispatch_govern and the converter apply. The check is on
+        # the metadata as extracted, so a report that declared a status keeps
+        # exactly that status. `_body_contract_valid` defaults to True when the
+        # validator could not run, which must not mint a status: only a
+        # validator verdict counts as evidence.
+        _derived_status = None
+        if extracted.get('_body_contract_evaluated', False):
+            from report_body_contract import resolve_undeclared_status
+            _derived_status = resolve_undeclared_status(
+                metadata.get('status'), body_valid=_contract_valid,
+            )
         if _claims_success and not _contract_valid:
             _event_type = 'report_contract_invalid'
             _receipt_status = 'contract_invalid'
         else:
             _event_type = 'task_complete'
-            _receipt_status = metadata.get('status', 'unknown')
+            _receipt_status = _derived_status or metadata.get('status', 'unknown')
 
         # OI-1092: the receipt timestamp must be the time the WORK was done,
         # not the time the report was PROCESSED. A backlog of 103 previously
@@ -773,6 +836,9 @@ class ReportParser:
             'report_file': Path(report_path).name,  # Add filename for easier tracking
             'title': metadata.get('title', 'No title')
         }
+        if _derived_status:
+            from report_body_contract import DERIVED_STATUS_SOURCE
+            receipt['status_source'] = DERIVED_STATUS_SOURCE
 
         # OI-1408: task_id is NOT part of the receipt_kind="dispatch" field
         # contract — measured across 3903 dispatch receipts, no emitter has
