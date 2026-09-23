@@ -11,6 +11,8 @@ Coverage:
 - TestActivationGate: PR-17 gate — VNX_DREAM_SCHEDULER_ENABLED + injection-effectiveness
   probe health (PR-6) must both pass before the executor runs; scheduler.py is not
   involved (it only installs the LaunchAgent/crontab)
+- TestDegradedProbeProposalMode: a degraded probe runs the cycle as a proposal (no
+  pattern is mutated, operator_reviewed stays 0); only {ok, degraded} pass the gate
 """
 from __future__ import annotations
 
@@ -888,11 +890,13 @@ class TestActivationGate:
             for e in events
         )
 
-    @pytest.mark.parametrize("probe_health", ["unknown", "degraded", "produces_crap"])
+    @pytest.mark.parametrize("probe_health", ["unknown", "produces_crap"])
     def test_probe_not_ok_skips_without_kimi(self, tmp_path, monkeypatch, probe_health):
-        """Scheduler armed but probe health != 'ok' -> skip, kimi never invoked.
+        """Scheduler armed but probe health outside {'ok', 'degraded'} -> skip, kimi
+        never invoked.
 
-        Covers all three non-'ok' probe states — only a clean 'ok' may activate.
+        'degraded' used to be in this list; it now runs as a proposal-only cycle
+        (TestDegradedProbeProposalMode). 'unknown' and 'produces_crap' still gate.
         """
         monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
         monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: probe_health)
@@ -908,7 +912,9 @@ class TestActivationGate:
 
     def test_probe_not_ok_emits_skipped_event(self, tmp_path, monkeypatch):
         monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
-        monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "degraded")
+        monkeypatch.setattr(
+            consolidator, "_injection_probe_health", lambda state_dir: "produces_crap"
+        )
         db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
 
         consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
@@ -987,3 +993,229 @@ class TestActivationGate:
         conn.close()
 
         assert _REAL_INJECTION_PROBE_HEALTH(state_dir) == "produces_crap"
+
+
+_ARCHIVES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS dream_pattern_archives (
+    archive_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id          TEXT    NOT NULL,
+    project_id        TEXT    NOT NULL DEFAULT 'vnx-dev',
+    original_pattern_id INTEGER NOT NULL,
+    original_table    TEXT    NOT NULL,
+    archived_reason   TEXT    NOT NULL,
+    archived_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+"""
+
+# Consolidation that names real rows in every bucket, so an accidental mutation
+# by the cycle (instead of a proposal) would be visible in the snapshot below.
+_PROPOSING_CONSOLIDATION = {
+    "merged": [{"keep_id": 1, "drop_ids": [2], "merge_note": "same intent"}],
+    "dropped": [{"id": 1, "table": "antipatterns", "reason": "stale_30d"}],
+    "archived": [{"id": 2, "table": "success_patterns", "reason": "superseded"}],
+    "flagged": [{"id": 1, "table": "success_patterns", "reason": "novel"}],
+    "summary": "Merged 1, dropped 1, archived 1, flagged 1.",
+}
+
+
+def _snapshot_pattern_rows(db_path: Path) -> dict[str, list[tuple]]:
+    """Every column of every row in both pattern tables, ordered by id."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return {
+            table: conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+            for table in ("success_patterns", "antipatterns")
+        }
+    finally:
+        conn.close()
+
+
+def _read_dream_events(data_root: Path) -> list[dict]:
+    event_files = list((data_root / "events" / "dream").glob("*.ndjson"))
+    assert event_files, "No NDJSON event file written"
+    return [
+        json.loads(line)
+        for line in event_files[0].read_text().strip().splitlines()
+    ]
+
+
+class TestDegradedProbeProposalMode:
+    """A degraded injection probe lets the cycle run in proposal-only mode.
+
+    Consolidation is the remedy for the ignored patterns that make the probe
+    degraded, so gating it on 'ok' blocked its own fix. The cycle never mutates
+    patterns itself (only review_gate.approve_cycle does), so running it while
+    degraded changes nothing about approval.
+    """
+
+    def _seed_db(self, tmp_path: Path) -> tuple[Path, Path]:
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(_ARCHIVES_SCHEMA)
+        conn.executemany(
+            "INSERT INTO success_patterns (project_id, title, description) VALUES (?, ?, ?)",
+            [("vnx-dev", "second-pattern", "second desc"), ("vnx-dev", "third", "third desc")],
+        )
+        conn.executemany(
+            "INSERT INTO antipatterns (project_id, title, why_problematic) VALUES (?, ?, ?)",
+            [("vnx-dev", "anti-one", "flaky"), ("vnx-dev", "anti-two", "slow")],
+        )
+        conn.commit()
+        conn.close()
+        return db_path, data_root
+
+    def test_degraded_cycle_completes_as_proposal_and_changes_no_pattern(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            consolidator, "_injection_probe_health", lambda state_dir: "degraded"
+        )
+        db_path, data_root = self._seed_db(tmp_path)
+        before = _snapshot_pattern_rows(db_path)
+        assert before["success_patterns"] and before["antipatterns"]
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            return_value=_PROPOSING_CONSOLIDATION,
+        ) as mock_kimi:
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        mock_kimi.assert_called_once()
+        assert result.get("status") != "skipped"
+        assert result["probe_health"] == "degraded"
+        assert result["merged_count"] == 1
+        assert result["dropped_count"] == 1
+        assert result["archived_count"] == 1
+        assert result["flagged_count"] == 1
+
+        # The review JSON says what this cycle is: a proposal from a degraded probe.
+        review = json.loads(Path(result["review_path"]).read_text())
+        assert review["mode"] == "proposal_only"
+        assert review["probe_health"] == "degraded"
+        assert review["requires_operator_review"] is True
+        assert review["consolidation"] == _PROPOSING_CONSOLIDATION
+
+        # dream_cycles carries the row, unreviewed. No schema column was added for this.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT status, operator_reviewed FROM dream_cycles WHERE cycle_id = ?",
+                (result["cycle_id"],),
+            ).fetchall()
+            archives = conn.execute("SELECT COUNT(*) FROM dream_pattern_archives").fetchone()[0]
+        finally:
+            conn.close()
+        assert rows == [("completed", 0)]
+        assert archives == 0
+
+        # Nothing was applied: both pattern tables are byte-identical to before.
+        assert _snapshot_pattern_rows(db_path) == before
+
+        events = _read_dream_events(data_root)
+        started = [e for e in events if e["event_type"] == "dream_cycle_started"]
+        completed = [e for e in events if e["event_type"] == "dream_cycle_completed"]
+        assert [e["probe_health"] for e in started] == ["degraded"]
+        assert [e["probe_health"] for e in completed] == ["degraded"]
+        assert not [e for e in events if e["event_type"] == "dream_cycle_skipped"]
+
+    def test_ok_probe_carries_probe_health_for_symmetry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "ok")
+        db_path, data_root = self._seed_db(tmp_path)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation", return_value=_FAKE_CONSOLIDATION
+        ):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        assert result["probe_health"] == "ok"
+        review = json.loads(Path(result["review_path"]).read_text())
+        assert review["probe_health"] == "ok"
+        assert review.get("mode") != "proposal_only"
+        events = _read_dream_events(data_root)
+        for event_type in ("dream_cycle_started", "dream_cycle_completed"):
+            assert [e["probe_health"] for e in events if e["event_type"] == event_type] == ["ok"]
+
+    def test_degraded_cycle_dry_run_writes_review_but_no_row(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            consolidator, "_injection_probe_health", lambda state_dir: "degraded"
+        )
+        db_path, data_root = self._seed_db(tmp_path)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            return_value=_PROPOSING_CONSOLIDATION,
+        ):
+            result = consolidator.run_dream_cycle(
+                "vnx-dev", db_path, dry_run=True, data_root=data_root
+            )
+
+        review = json.loads(Path(result["review_path"]).read_text())
+        assert review["mode"] == "proposal_only"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM dream_cycles").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize(
+        "probe_health", ["produces_crap", "unknown", "degradedd", "OK", "", "Degraded"]
+    )
+    def test_only_ok_and_degraded_pass_the_gate(self, tmp_path, monkeypatch, probe_health):
+        """Allow-set, not a deny-set: a new or misspelled status fails closed."""
+        monkeypatch.setattr(
+            consolidator, "_injection_probe_health", lambda state_dir: probe_health
+        )
+        db_path, data_root = self._seed_db(tmp_path)
+
+        with patch("consolidator._dispatch_kimi_consolidation") as mock_kimi:
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "probe_not_ok"
+        assert result["probe_health"] == probe_health
+        mock_kimi.assert_not_called()
+        events = _read_dream_events(data_root)
+        assert [e["reason"] for e in events if e["event_type"] == "dream_cycle_skipped"] == [
+            "probe_not_ok"
+        ]
+        assert not [e for e in events if e["event_type"] == "dream_cycle_started"]
+
+    @pytest.mark.parametrize("reason", ["incomplete_data", "insufficient_data"])
+    def test_degraded_probe_still_hits_the_later_guards(self, tmp_path, monkeypatch, reason):
+        """Letting a degraded probe through does not bypass receipt completeness or
+        the insufficient-data guard: kimi stays uncalled."""
+        monkeypatch.setattr(
+            consolidator, "_injection_probe_health", lambda state_dir: "degraded"
+        )
+        if reason == "incomplete_data":
+            db_path, data_root = self._seed_db(tmp_path)
+            ledger = data_root / "state" / "t0_receipts.ndjson"
+            ledger.write_text("", encoding="utf-8")
+        else:
+            db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=False)
+
+        with patch("consolidator._dispatch_kimi_consolidation") as mock_kimi:
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == reason
+        mock_kimi.assert_not_called()
+
+    def test_degraded_kimi_timeout_still_reports_timeout(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            consolidator, "_injection_probe_health", lambda state_dir: "degraded"
+        )
+        db_path, data_root = self._seed_db(tmp_path)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            side_effect=subprocess.TimeoutExpired(cmd="kimi", timeout=1),
+        ):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        assert result["status"] == "timeout"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM dream_cycles").fetchone()[0] == 0
+        finally:
+            conn.close()
