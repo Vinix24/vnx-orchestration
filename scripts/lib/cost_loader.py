@@ -64,6 +64,9 @@ _ROUTING_MODEL_MAP: dict[str, tuple[str, str]] = {
     "claude-opus-4-7": ("anthropic", "opus"),
     "claude-opus-4-8": ("anthropic", "opus-4-8"),
     "claude-opus-5": ("anthropic", "opus-5"),
+    # 2026-09-23 dispatch-20260923-model-defaults-sonnet-opus55: opus-5-5 added
+    # alongside opus-5 so a smart_router decision on 5.5 is not cost-blind.
+    "claude-opus-5-5": ("anthropic", "opus-5-5"),
     "claude-fable-5": ("anthropic", "fable-5"),
     "claude-haiku-4-5": ("anthropic", "haiku"),
     "deepseek-v4-flash": ("deepseek", "deepseek-v4-flash"),

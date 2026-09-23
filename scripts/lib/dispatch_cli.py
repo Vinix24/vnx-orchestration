@@ -816,19 +816,29 @@ def _check_reachability(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MODEL_PINS: dict[str, ModelPin] = {
-    # T0 falls back to the canonical opus-5 registry key (model-ssot-en-ketenlink);
-    # the provider_constraints.yaml t0-opus-only pin is the live SSOT and overrides
+    # T0 falls back to the canonical opus-5-5 registry key (model-ssot-en-
+    # ketenlink + dispatch-20260923-model-defaults-sonnet-opus55); the
+    # provider_constraints.yaml t0-opus-only pin is the live SSOT and overrides
     # this when readable.
-    "T0": ModelPin(model="opus-5", semantics="floor"),
-    "T1": ModelPin(model="kimi-k3", semantics="default"),
-    "T2": ModelPin(model="kimi-k3", semantics="default"),
-    "T3": ModelPin(model="kimi-k3", semantics="default"),
+    "T0": ModelPin(model="opus-5-5", semantics="floor"),
+    # Build workers default to sonnet (dispatch-20260923-model-defaults-sonnet-
+    # opus55): sonnet is the standing default; kimi-k3 was a temporary fallback
+    # while the sonnet quota was exhausted. `default` semantics = advisory, a
+    # spec that carries its own model always wins over the pin.
+    "T1": ModelPin(model="sonnet", semantics="default"),
+    "T2": ModelPin(model="sonnet", semantics="default"),
+    "T3": ModelPin(model="sonnet", semantics="default"),
 }
 
 # worker-claude-override (escape-hatch-worker-claude, 2026-07-23): gated, audited
 # operator escape-hatch that routes ONE build-worker dispatch back to claude via
-# the headless lane. ALL of these must hold or the default kimi-k3
-# hard-reject stands unchanged:
+# the headless lane. Since dispatch-20260923-model-defaults-sonnet-opus55 the
+# build-worker default is sonnet (workers-kimi-pinned, pin_semantics=default),
+# so a claude-lane build-worker dispatch with no explicit model now resolves to
+# sonnet and passes on its own — the override is no longer needed for that path.
+# The override is kept (harmless, audited) for any future pin that would otherwise
+# coerce a claude build-worker dispatch. ALL of these must hold or the default
+# route stands unchanged:
 #   1. VNX_OVERRIDE_WORKER_CLAUDE=1 (explicit env override, per-dispatch)
 #   2. VNX_OVERRIDE_WORKER_CLAUDE_REASON non-empty (audit; inert + blocking refusal without it)
 #   3. spec.provider is explicitly claude
@@ -2170,18 +2180,15 @@ def build_runtime_snapshot(
 
     # P0-1: effective model — same computation compile_plan uses in D4
     #
-    # worker-provider-kimi-flip (20260723): model_pin_specs now resolves T1/T2/T3 to
-    # "kimi-k3" (workers-kimi-pinned). The "sonnet" fallback below is intentionally
-    # UNCHANGED — it only fires when is_claude_lane is True (an explicit provider=
-    # claude override, or a non-standard target_slot with no pin) and spec.model was
-    # not given; it must stay a valid Claude model name. If an explicit claude
-    # override lands on T1/T2/T3 under a `floor` pin, the resolved model is
-    # "kimi-k3" (a non-Claude label) which correctly fails the check_registry gate
-    # below (model-not-in-current-registry, blocking) instead of silently
-    # dispatching sonnet — matching the "kimi-only, no fallback" policy (fail loud,
-    # never a silent claude rescue). The ONLY sanctioned way past that reject is
-    # the gated, audited operator escape-hatch directly below (worker-claude-
-    # override); everything else about the default path is unchanged.
+    # dispatch-20260923-model-defaults-sonnet-opus55: model_pin_specs resolves
+    # T1/T2/T3 to "sonnet" (workers-kimi-pinned, pin_semantics=default). A
+    # claude-lane build-worker dispatch with no explicit model therefore
+    # resolves to sonnet and PASSES (sonnet is a valid Claude registry key),
+    # where it used to resolve to kimi-k3 and hard-reject. The "sonnet"
+    # fallback below is unchanged and still fires when is_claude_lane is True
+    # and spec.model was not given. kimi-k3 remains an explicit per-dispatch
+    # choice: a spec that names model=kimi-k3 still hard-rejects on the claude
+    # lane (kimi-via-cli-only), exactly as before.
     is_claude_lane = spec.provider == Provider.CLAUDE
 
     # worker-claude-override gate (escape-hatch-worker-claude): evaluate the
@@ -2275,15 +2282,16 @@ def build_runtime_snapshot(
         ),)
 
     # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): a worker-model pin
-    # (workers-kimi-pinned) replaces spec.model with effective_model BEFORE the check above
-    # ever runs, so a cross-provider requested model (e.g. --model kimi resolved onto the claude
-    # lane) is invisible to the kimi-via-cli-only guard by the time it inspects effective_model.
-    # Since worker-provider-kimi-flip (2026-07-23) effective_model on a claude-lane T1/T2/T3 is
-    # itself "kimi-k3" whenever a pin exists — that mismatch is already caught by check_registry
-    # in the block above, so this raw-model re-check is belt-and-suspenders for any target_slot
-    # outside the SSOT pin dict. Re-run the check against the RAW requested model too, so the pin
-    # can never mask a mismatched provider. Only BLOCKING verdicts are folded in — warn-only pin
-    # noise (e.g. --model opus pinned to kimi-k3) is already reported once via D4's own warning.
+    # (workers-kimi-pinned, currently sonnet) replaces spec.model with effective_model
+    # BEFORE the check above ever runs, so a cross-provider requested model (e.g. --model
+    # kimi resolved onto the claude lane) is invisible to the kimi-via-cli-only guard by
+    # the time it inspects effective_model. A mismatched requested model is already
+    # caught by check_registry in the block above when the pin coerces it, so this
+    # raw-model re-check is belt-and-suspenders for any target_slot outside the SSOT pin
+    # dict. Re-run the check against the RAW requested model too, so the pin can never
+    # mask a mismatched provider. Only BLOCKING verdicts are folded in — warn-only pin
+    # noise (e.g. --model opus pinned to sonnet) is already reported once via D4's own
+    # warning.
     raw_model = spec.model
     if raw_model and raw_model != effective_model:
         try:
@@ -2390,10 +2398,11 @@ def build_runtime_snapshot(
         target_health = {target_id: "healthy"}
         target_capable = {target_id: True}
 
-    # worker-claude-override: strip the kimi-k3 pin for THIS dispatch's snapshot
-    # only, so compile_plan's D4 resolves the requested claude model instead of the
-    # pin. The loaded model_pin_specs dict itself is never mutated; every dispatch
-    # that does not carry the override still sees the full pins (kimi stays default).
+    # worker-claude-override: strip the build-worker pin for THIS dispatch's
+    # snapshot only, so compile_plan's D4 resolves the requested claude model
+    # instead of the pin. The loaded model_pin_specs dict itself is never
+    # mutated; every dispatch that does not carry the override still sees the
+    # full pins (the build-worker default, currently sonnet, stays in place).
     snapshot_model_pins = model_pin_specs
     if worker_claude_override_reason is not None:
         snapshot_model_pins = {

@@ -42,6 +42,7 @@ from providers.constraint_enforcer import (
     ConstraintEnforcer,
     scan_anthropic_sdk_text,
 )
+from providers import provider_registry
 from dispatch_plan import (
     ConstraintVerdict,
     ExecutionPlan,
@@ -504,9 +505,9 @@ def test_staging_binding_required(tmp_path, monkeypatch, capsys):
         "staging_id": staging_id,
         "instruction_file": str(instruction_file),
         "role": "backend-developer",
-        "target_slot": "T0",  # T1/T2/T3 default-pin to kimi-k3 (workers-kimi-pinned,
+        "target_slot": "T0",  # T1/T2/T3 default-pin to sonnet (workers-kimi-pinned,
         # pin_semantics=default since WPFC PR-4); explicit model on a worker slot
-        # overrules the default pin. T0 stays floor-pinned to opus (t0-opus-only).
+        # overrules the default pin. T0 stays floor-pinned to opus-5-5 (t0-opus-only).
         "gate": "codex_gate",
         "dispatch_paths": [],
         "provider": "claude",
@@ -598,13 +599,13 @@ def _make_bundle_spec(
         "instruction_file": str(inst),
         "role": "backend-developer",
         # T0 (not T1): these callers all use provider="claude" to exercise the
-        # SDK-scan/claude-lane mechanics, unrelated to worker model routing. Since
-        # WPFC PR-4, T1/T2/T3 carry a default pin to kimi-k3 (workers-kimi-pinned,
-        # pin_semantics=default) — an explicit model on a worker slot overrules it,
-        # but without one the pin fills in and hard-rejects (model-not-in-current-
-        # registry). T0's pin (t0-opus-only -> claude-opus-4-8) stays a valid Claude
-        # model with floor semantics, so it's the
-        # clean slot for a generic "claude dispatch that should proceed" fixture.
+        # SDK-scan/claude-lane mechanics, unrelated to worker model routing.
+        # dispatch-20260923-model-defaults-sonnet-opus55: T1/T2/T3 carry a default
+        # pin to sonnet (workers-kimi-pinned, pin_semantics=default) — a valid
+        # Claude model, so a worker slot with no explicit model now dispatches.
+        # T0's pin (t0-opus-only -> opus-5-5) stays a valid Claude model with
+        # floor semantics, so it's the clean slot for a generic "claude dispatch
+        # that should proceed" fixture.
         "target_slot": target_slot,
         "gate": "codex_gate",
         "dispatch_paths": [],
@@ -1121,33 +1122,40 @@ def test_forbid_route_blocking_verdict_rejects_dispatch(tmp_path):
 # worker-provider-kimi-flip (2026-07-23) — pin-loader id rename regression tests
 # ---------------------------------------------------------------------------
 
-def test_default_model_pins_flip_workers_to_kimi_k3():
-    """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to kimi-k3 post-flip; T0 stays opus.
+def test_default_model_pins_flip_workers_to_sonnet():
+    """_DEFAULT_MODEL_PINS must pin T1/T2/T3 to sonnet post-flip; T0 stays opus.
     WPFC PR-4: worker pins carry default semantics (spec.model wins over the pin);
     T0 stays floor (pin always wins). ModelPin, not a bare string.
     dispatch-20260802-model-ssot-en-ketenlink: T0's fallback is the canonical
-    opus-5 registry key (the fleet runs Opus 5), not the bare opus alias."""
+    opus-5-5 registry key (dispatch-20260923-model-defaults-sonnet-opus55 moved
+    T0 to Opus 5.5), not the bare opus alias.
+    dispatch-20260923-model-defaults-sonnet-opus55: build workers default to
+    sonnet (kimi-k3 was a temporary fallback while the sonnet quota was
+    exhausted)."""
     assert _DEFAULT_MODEL_PINS == {
-        "T0": ModelPin(model="opus-5", semantics="floor"),
-        "T1": ModelPin(model="kimi-k3", semantics="default"),
-        "T2": ModelPin(model="kimi-k3", semantics="default"),
-        "T3": ModelPin(model="kimi-k3", semantics="default"),
+        "T0": ModelPin(model="opus-5-5", semantics="floor"),
+        "T1": ModelPin(model="sonnet", semantics="default"),
+        "T2": ModelPin(model="sonnet", semantics="default"),
+        "T3": ModelPin(model="sonnet", semantics="default"),
     }
 
 
 def test_load_model_pins_from_yaml_reads_workers_kimi_pinned():
     """_load_model_pins_from_yaml() matches the RENAMED constraint id
     (workers-kimi-pinned, not workers-sonnet-pinned) and loads its
-    required_route.model (kimi-k3) for T1/T2/T3 from the real
+    required_route.model (sonnet) for T1/T2/T3 from the real
     provider_constraints.yaml SSOT. T0 still resolves via t0-opus-only.
-    WPFC PR-4: workers carry pin_semantics: default; T0 stays floor."""
+    WPFC PR-4: workers carry pin_semantics: default; T0 stays floor.
+    dispatch-20260923-model-defaults-sonnet-opus55: the id stays
+    `workers-kimi-pinned` (the loader hard-keys on it) but the model moved to
+    sonnet; T0 moved from opus-5 to opus-5-5."""
     pins = _load_model_pins_from_yaml()
-    # dispatch-20260802-model-ssot-en-ketenlink: t0-opus-only now pins the
-    # canonical opus-5 registry key.
-    assert pins["T0"] == ModelPin(model="opus-5", semantics="floor")
-    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="default")
-    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="default")
-    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="default")
+    # dispatch-20260923-model-defaults-sonnet-opus55: t0-opus-only pins the
+    # canonical opus-5-5 registry key.
+    assert pins["T0"] == ModelPin(model="opus-5-5", semantics="floor")
+    assert pins["T1"] == ModelPin(model="sonnet", semantics="default")
+    assert pins["T2"] == ModelPin(model="sonnet", semantics="default")
+    assert pins["T3"] == ModelPin(model="sonnet", semantics="default")
 
 
 def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
@@ -1170,11 +1178,11 @@ def test_load_model_pins_from_yaml_ignores_stale_sonnet_pinned_id(tmp_path):
     }))
     with patch("dispatch_cli._LIB_DIR", tmp_path):
         pins = _load_model_pins_from_yaml()
-    assert pins["T1"] == ModelPin(model="kimi-k3", semantics="default"), (
+    assert pins["T1"] == ModelPin(model="sonnet", semantics="default"), (
         "stale workers-sonnet-pinned id must not override the default pin"
     )
-    assert pins["T2"] == ModelPin(model="kimi-k3", semantics="default")
-    assert pins["T3"] == ModelPin(model="kimi-k3", semantics="default")
+    assert pins["T2"] == ModelPin(model="sonnet", semantics="default")
+    assert pins["T3"] == ModelPin(model="sonnet", semantics="default")
 
 
 # ---------------------------------------------------------------------------
@@ -1190,6 +1198,120 @@ def test_load_model_pins_reads_semantics_from_real_yaml():
     assert pins["T1"].semantics == "default"
     assert pins["T2"].semantics == "default"
     assert pins["T3"].semantics == "default"
+
+
+# ---------------------------------------------------------------------------
+# dispatch-20260923-model-defaults-sonnet-opus55 — regression tests
+# ---------------------------------------------------------------------------
+
+def test_claude_on_t1_without_model_and_without_override_dispatches_on_sonnet(
+    tmp_path, monkeypatch, capsys,
+):
+    """NEW behavior: provider=claude, target_slot=T1, no explicit model, override
+    env NOT set => the plan resolves to sonnet and the dispatch PASSES (no REJECT).
+    Before this dispatch the pin was kimi-k3 and this path hard-rejected via
+    kimi-via-cli-only. This is the interaction the operator asked to prove, not
+    assume: the default route is no longer blocked by the worker-claude-override
+    gate."""
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# Claude T1 no model no override\n\nMust dispatch on sonnet.\n",
+        staging_id="20260923-staging-claude-t1-no-model",
+        dispatch_id="20260923-claude-t1-no-model",
+        provider="claude",
+        target_slot="T1",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _clear_worker_claude_override_env(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0, (
+        "claude on T1 without a model and without the override must dispatch on "
+        "sonnet, not reject"
+    )
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "sonnet", (
+        f"no explicit model must resolve to the sonnet pin, got {plan_arg.model!r}"
+    )
+    assert plan_arg.lane == "claude_headless"
+    err = capsys.readouterr().err
+    assert "kimi-via-cli-only" not in err
+    assert "model-not-in-current-registry" not in err
+    assert "worker-claude-override" not in err
+
+
+def test_opus_5_5_in_registry_and_t0_dispatch_resolves_to_it(tmp_path, monkeypatch):
+    """NEW behavior: opus-5-5 is registered in wave7_models.yaml (litellm_name
+    anthropic/claude-opus-5-5, $4/$20 per Mtok) and a T0 dispatch resolves to it
+    via the t0-opus-only floor pin. Before this dispatch opus-5-5 was absent and
+    any dispatch asking for 5.5 failed at the registry."""
+    registry = provider_registry.load()
+    anthropic = registry["anthropic"]
+    assert "opus-5-5" in anthropic.models, "opus-5-5 must be registered under anthropic"
+    model = anthropic.models["opus-5-5"]
+    assert model.litellm_name == "anthropic/claude-opus-5-5"
+    assert model.cost_input_per_mtok == 4.00
+    assert model.cost_output_per_mtok == 20.00
+    assert model.context_window == 1000000
+    assert model.max_tokens == 128000
+    # opus-5 stays registered for the side-by-side measurement
+    assert "opus-5" in anthropic.models, "opus-5 must stay registered for comparison"
+
+    data_dir, spec_file = _make_bundle_spec(
+        tmp_path,
+        instruction_text="# T0 dispatch to opus-5-5\n\nPin must resolve to 5.5.\n",
+        staging_id="20260923-staging-t0-opus55",
+        dispatch_id="20260923-t0-opus55",
+        provider="claude",
+        target_slot="T0",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "opus-5-5", (
+        f"T0 pin must resolve to opus-5-5 (t0-opus-only), got {plan_arg.model!r}"
+    )
+
+
+def test_load_model_pins_still_uses_workers_kimi_pinned_id(tmp_path):
+    """NEW regression: the pin-loader still reads the worker pin via the exact id
+    `workers-kimi-pinned` (the loader hard-keys on it). The id is unchanged even
+    though the model moved from kimi-k3 to sonnet; this test proves the id-string
+    match still fires by patching in a YAML with a DISTINCT model under that id —
+    if the id match broke, the loader would fall back to _DEFAULT_MODEL_PINS
+    (sonnet) instead of the fabricated opus-5-5."""
+    import yaml as _yaml
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir(parents=True, exist_ok=True)
+    (providers_dir / "provider_constraints.yaml").write_text(_yaml.safe_dump({
+        "version": 1,
+        "constraints": [
+            {
+                "id": "workers-kimi-pinned",
+                "rule": "require_route",
+                "required_route": {"role": ["T1", "T2", "T3"], "model": "opus-5-5"},
+                "pin_semantics": "default",
+            },
+        ],
+    }))
+    with patch("dispatch_cli._LIB_DIR", tmp_path):
+        pins = _load_model_pins_from_yaml()
+    # The fabricated opus-5-5 only reaches T1/T2/T3 if the loader matched the
+    # workers-kimi-pinned id. A broken id match falls back to _DEFAULT_MODEL_PINS
+    # (sonnet), so asserting opus-5-5 proves the id match fired.
+    assert pins["T1"] == ModelPin(model="opus-5-5", semantics="default")
+    assert pins["T2"] == ModelPin(model="opus-5-5", semantics="default")
+    assert pins["T3"] == ModelPin(model="opus-5-5", semantics="default")
 
 
 def test_load_model_pins_missing_pin_semantics_reads_as_floor(tmp_path):
@@ -1250,7 +1372,7 @@ def test_load_model_pins_unreadable_yaml_fails_loud_and_falls_back(tmp_path, cap
             pins = _load_model_pins_from_yaml()
 
     assert pins == _DEFAULT_MODEL_PINS
-    assert pins["T0"] == ModelPin(model="opus-5", semantics="floor")
+    assert pins["T0"] == ModelPin(model="opus-5-5", semantics="floor")
     assert any("model-pins YAML unreadable" in rec.message for rec in caplog.records), (
         "unreadable YAML must log loudly, not silently fall back"
     )
@@ -1558,16 +1680,18 @@ def test_raw_opus_model_on_worker_now_routes_with_default_semantics(tmp_path, mo
 
 
 def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monkeypatch):
-    """WPFC PR-4 core behavior: provider=claude, model=sonnet, target_slot=T1 routes
-    to sonnet on the claude headless lane with NO env-var. A warn records
-    that the default kimi-k3 pin was overruled by the explicit model request.
-    Before PR-4 this was a hard reject unless VNX_OVERRIDE_WORKER_CLAUDE=1 +
-    VNX_OVERRIDE_WORKER_CLAUDE_REASON was set."""
+    """dispatch-20260923-model-defaults-sonnet-opus55: provider=claude, model=sonnet,
+    target_slot=T1 routes to sonnet on the claude headless lane with NO env-var.
+    The build-worker default pin is now sonnet, so an explicit model=sonnet matches
+    the pin exactly and produces NO "default semantics" override warning (the
+    warn only fires when requested != pinned). The dispatch still passes, proving
+    the default route is not blocked. Before PR-4 this was a hard reject unless
+    VNX_OVERRIDE_WORKER_CLAUDE=1 + VNX_OVERRIDE_WORKER_CLAUDE_REASON was set."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
         instruction_text="# Default semantics\n\nExplicit sonnet on T1 must route.\n",
-        staging_id="20260730-staging-sonnet-default",
-        dispatch_id="20260730-sonnet-default",
+        staging_id="20260923-staging-sonnet-default",
+        dispatch_id="20260923-sonnet-default",
         provider="claude",
         target_slot="T1",
         model="sonnet",
@@ -1585,40 +1709,55 @@ def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monk
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
     assert plan_arg.model == "sonnet", (
-        f"explicit spec.model (sonnet) must win over the default kimi-k3 pin, "
+        f"explicit spec.model (sonnet) must resolve to sonnet on T1, "
         f"got {plan_arg.model!r}"
     )
     assert plan_arg.lane == "claude_headless"
-    assert any("default semantics" in w for w in plan_arg.warnings), (
-        f"default pin overridden must produce a warn; warnings: {plan_arg.warnings}"
+    # The "default semantics" override warning only fires when requested != pinned;
+    # with the sonnet pin and an explicit sonnet request they are equal, so no
+    # override warning is produced. An explicit DIFFERING model (e.g. opus) would
+    # still trip the warn — that branch is covered by the floor/default fabricated
+    # SSOT tests below.
+    assert not any("default semantics" in w for w in plan_arg.warnings), (
+        f"sonnet pin + sonnet request must not produce an override warn; "
+        f"warnings: {plan_arg.warnings}"
     )
 
 
 def test_default_semantics_no_model_on_t1_fills_pin_end_to_end(tmp_path, monkeypatch, capsys):
-    """Default semantics still fills the pin when the spec carries no model at all:
-    provider=claude, target_slot=T1, no explicit model → kimi-k3 fills in →
-    kimi-via-cli-only blocks. This is the half that must not change."""
+    """dispatch-20260923-model-defaults-sonnet-opus55: the build-worker default is
+    sonnet, so a claude-lane T1 dispatch with no explicit model resolves to sonnet
+    and PASSES (no REJECT, no VNX_OVERRIDE_WORKER_CLAUDE). Before this dispatch the
+    pin was kimi-k3 and this path hard-rejected via kimi-via-cli-only; sonnet is a
+    valid Claude registry key so the same path now dispatches."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
-        instruction_text="# Default semantics, no explicit model\n\nPin must fill in.\n",
-        staging_id="20260730-staging-no-model-default",
-        dispatch_id="20260730-no-model-default",
+        instruction_text="# Default semantics, no explicit model\n\nPin fills in to sonnet.\n",
+        staging_id="20260923-staging-no-model-default",
+        dispatch_id="20260923-no-model-default",
         provider="claude",
         target_slot="T1",
     )
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    _clear_worker_claude_override_env(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 1, (
-        "default semantics without explicit model: pin (kimi-k3) must fill in and "
-        "still hard-reject via kimi-via-cli-only"
+    assert rc == 0, (
+        "default semantics without explicit model: pin (sonnet) must fill in and "
+        "dispatch, not reject"
     )
-    mock_execute.assert_not_called()
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "sonnet", (
+        f"no explicit model on T1 must resolve to the sonnet pin, got {plan_arg.model!r}"
+    )
+    assert plan_arg.lane == "claude_headless"
     err = capsys.readouterr().err
-    assert "kimi-via-cli-only" in err or "model-not-in-current-registry" in err
+    assert "kimi-via-cli-only" not in err
+    assert "model-not-in-current-registry" not in err
 
 
 def test_kimi_model_on_claude_lane_still_hard_rejected_end_to_end(tmp_path, monkeypatch, capsys):
@@ -2689,17 +2828,18 @@ def test_worker_claude_override_without_reason_is_blocking_refusal(tmp_path, mon
     assert "worker-claude-override-reason-required" in err
 
 
-def test_no_override_claude_on_build_worker_still_hard_rejects(tmp_path, monkeypatch, capsys):
-    """DEFAULT INTACT: no override env + provider=claude + T1 + no explicit model
-    => the default pin (kimi-k3) fills in and the constraint engine still hard-
-    rejects via kimi-via-cli-only. The default semantics only change the outcome
-    when the spec carries an explicit model; without one, the pin still does
-    its job exactly as before. No silent claude fallback is ever introduced."""
+def test_no_override_claude_on_build_worker_dispatches_on_sonnet(tmp_path, monkeypatch, capsys):
+    """dispatch-20260923-model-defaults-sonnet-opus55: no override env + provider=
+    claude + T1 + no explicit model => the default pin (sonnet) fills in and the
+    dispatch PASSES on the headless lane. Before this dispatch the pin was kimi-k3
+    and this path hard-rejected via kimi-via-cli-only; sonnet is a valid Claude
+    registry key so the same path now dispatches without the override. The
+    worker-claude-override gate stays harmless: no override artifacts on the plan."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
-        instruction_text="# No override\n\nThis must keep hard-rejecting.\n",
-        staging_id="20260723-staging-no-override",
-        dispatch_id="20260723-no-override-reject",
+        instruction_text="# No override\n\nThis must dispatch on sonnet.\n",
+        staging_id="20260923-staging-no-override",
+        dispatch_id="20260923-no-override-dispatch",
         provider="claude",
         target_slot="T1",
     )
@@ -2707,15 +2847,19 @@ def test_no_override_claude_on_build_worker_still_hard_rejects(tmp_path, monkeyp
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     _clear_worker_claude_override_env(monkeypatch)
 
-    with patch("dispatch_cli._execute_claude_headless") as mock_execute:
+    with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
         rc = run_dispatch(spec_file)
 
-    assert rc == 1, "default kimi-k3 hard-reject must stand without the override env"
-    mock_execute.assert_not_called()
+    assert rc == 0, (
+        "no override + claude + T1 + no model must dispatch on sonnet, not reject"
+    )
+    mock_execute.assert_called_once()
+    plan_arg = mock_execute.call_args[0][0]
+    assert plan_arg.model == "sonnet"
+    assert plan_arg.lane == "claude_headless"
     err = capsys.readouterr().err
-    # The emergent reject surfaces as the first blocking verdict for a kimi-branded
-    # model on the claude lane (kimi-via-cli-only fires ahead of the registry gate).
-    assert "kimi-via-cli-only" in err or "model-not-in-current-registry" in err
+    assert "kimi-via-cli-only" not in err
+    assert "model-not-in-current-registry" not in err
     assert "worker-claude-override" not in err
 
 
@@ -2799,9 +2943,9 @@ def test_worker_claude_override_env_does_not_leak_into_t0_or_kimi(tmp_path, monk
     assert rc == 0
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
-    # dispatch-20260802-model-ssot-en-ketenlink: t0-opus-only pins the canonical
-    # opus-5 registry key.
-    assert plan_arg.model == "opus-5", (
+    # dispatch-20260923-model-defaults-sonnet-opus55: t0-opus-only pins the
+    # canonical opus-5-5 registry key (moved from opus-5).
+    assert plan_arg.model == "opus-5-5", (
         f"T0 pin (t0-opus-only) must be unaffected by the worker override (got {plan_arg.model!r})"
     )
     assert not any("worker-claude-override" in w for w in plan_arg.warnings)
