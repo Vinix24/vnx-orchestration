@@ -22,7 +22,7 @@ if str(_SCRIPTS_LIB) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_LIB))
 
 from health_beacon import all_beacons, beacon_summary  # noqa: E402
-from beacon_register import expected_component_names  # noqa: E402
+from beacon_register import expected_component_names, parked_component_names  # noqa: E402
 
 
 def _resolve_data_dir() -> Path:
@@ -89,11 +89,19 @@ def _operator_get_health() -> Dict[str, Any]:
     ``_subsystem_effectiveness_summary``'s own, separate "unknown for an
     unprobed cockpit subsystem" handling below, which answers a different
     question over a different namespace and is left untouched.
+
+    ``parked=parked_component_names()`` gives the same verdict t0_state and the
+    SessionStart digest give for a component parked by operator decision
+    (``parked``, not ``stale``/``absent``).
     """
     now = datetime.now(timezone.utc).isoformat()
     data_dir = _resolve_data_dir()
     try:
-        summary = beacon_summary(data_dir, expected=expected_component_names())
+        summary = beacon_summary(
+            data_dir,
+            expected=expected_component_names(),
+            parked=parked_component_names(),
+        )
         return {
             "queried_at": now,
             "data_dir": str(data_dir),
