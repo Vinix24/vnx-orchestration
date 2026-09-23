@@ -176,7 +176,7 @@ class TestModeWriteGuard:
 
         Before the fix, ``_guard_mode_write_target`` returned on the
         ``except RuntimeError: return`` branch before ever calling
-        ``refuse_real_central_store_write_under_pytest``, silently allowing
+        ``refuse_real_central_store_write_under_test_runner``, silently allowing
         the write to land under the (mocked) real central store. RED on
         43600f56.
         """

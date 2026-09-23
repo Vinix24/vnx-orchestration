@@ -279,6 +279,6 @@ class TestGuardExceptionContract:
         monkeypatch.setenv("HOME", str(home))
 
         with pytest.raises(IsolationGuardError, match="TEST ISOLATION GUARD"):
-            vnx_paths.refuse_real_central_store_write_under_pytest(target)
+            vnx_paths.refuse_real_central_store_write_under_test_runner(target)
         # Backwards compatible: still a RuntimeError with the same message.
         assert issubclass(IsolationGuardError, RuntimeError)

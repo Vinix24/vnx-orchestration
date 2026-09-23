@@ -32,7 +32,7 @@ from result_contract import (
     result_exit_code,
     result_ok,
 )
-from vnx_paths import ensure_env
+from vnx_paths import ensure_env, refuse_real_central_store_write_under_test_runner
 
 
 class IntelligenceQueryAPI:
@@ -43,6 +43,7 @@ class IntelligenceQueryAPI:
         self.gatherer = T0IntelligenceGatherer()
         state_dir = Path(ensure_env()["VNX_STATE_DIR"])
         self.usage_log = state_dir / "intelligence_usage.ndjson"
+        refuse_real_central_store_write_under_test_runner(self.usage_log)
         self.usage_log.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -61,6 +62,7 @@ class IntelligenceQueryAPI:
         }
 
         try:
+            refuse_real_central_store_write_under_test_runner(self.usage_log)
             with open(self.usage_log, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(usage, separators=(",", ":")) + "\n")
         except OSError as exc:

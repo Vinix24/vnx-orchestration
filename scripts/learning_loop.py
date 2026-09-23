@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(script_dir / "lib"))
 try:
-    from vnx_paths import ensure_env
+    from vnx_paths import ensure_env, refuse_real_central_store_write_under_test_runner
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 from contract_invalid_window import is_stale_contract_invalid
@@ -313,6 +313,7 @@ class LearningLoop:
                 "old_confidence": round(old_confidence, 6),
                 "new_confidence": round(new_confidence, 6),
             }
+            refuse_real_central_store_write_under_test_runner(usage_log)
             with open(usage_log, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event, separators=(",", ":")) + "\n")
         except OSError:
@@ -1321,6 +1322,7 @@ def _emit_archival_decision_event(
     gather_intelligence._record_injection_why_event's convention.
     """
     usage_log = state_dir / "intelligence_usage.ndjson"
+    refuse_real_central_store_write_under_test_runner(usage_log)
     state_dir.mkdir(parents=True, exist_ok=True)
     event = {
         "event_type": "archival_decision",

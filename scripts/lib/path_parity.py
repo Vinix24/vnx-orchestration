@@ -753,9 +753,9 @@ def main(argv: Optional[list] = None) -> int:
             # store instead of a tmp_path sandbox — see the function's own
             # docstring in this same concern's precedent, vnx_paths.py.
             try:
-                from vnx_paths import refuse_real_central_store_write_under_pytest
+                from vnx_paths import refuse_real_central_store_write_under_test_runner
 
-                refuse_real_central_store_write_under_pytest(out.parent)
+                refuse_real_central_store_write_under_test_runner(out.parent)
             except ImportError:
                 pass
             out.parent.mkdir(parents=True, exist_ok=True)

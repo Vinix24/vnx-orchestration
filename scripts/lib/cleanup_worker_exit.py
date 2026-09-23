@@ -40,6 +40,7 @@ if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 import state_writer
+from vnx_paths import refuse_real_central_store_write_under_test_runner
 
 
 VALID_EXIT_STATUSES = ("success", "failure", "timeout", "killed", "stuck")
@@ -502,10 +503,18 @@ def cleanup_worker_exit(
                           resolution.
 
     Returns:
-        CleanupResult — never raises.
+        CleanupResult — never raises, with one exception: a pytest or unittest
+        run whose store resolves to the real central store gets
+        ``TestIsolationGuardError`` before any step runs. Every step below
+        writes that store (lease and worker rows in runtime_coordination.db,
+        the dispatch file move, the register event, the beacon), and the
+        best-effort wrappers around them would swallow a per-step refusal into
+        a WARN, leaving the violation invisible. A ``fail`` beacon for
+        ``dispatch-fwd-01`` sat in the real store for exactly that reason.
     """
     exit_status = _normalize_exit_status(exit_status, dispatch_id)
     resolved_state_dir = state_dir if state_dir is not None else _resolve_state_dir()
+    refuse_real_central_store_write_under_test_runner(resolved_state_dir)
     result = CleanupResult()
     _run_cleanup_steps(
         terminal_id=terminal_id,
