@@ -20,8 +20,10 @@ Each role profile may also declare ``mcp_servers`` — a per-role allowlist of
 named MCP servers. Materialized by :func:`build_claude_scope_args` /
 :func:`resolve_role_mcp_config` into a scoped ``--mcp-config`` limited to just
 those names (definitions read from the ambient global config, see
-``VNX_GLOBAL_MCP_CONFIG_PATH`` / ``_resolve_global_mcp_config_path``). An empty
-allowlist (the default) keeps the existing zero-MCP posture.
+``VNX_GLOBAL_MCP_CONFIG_PATH`` / ``mcp_server_config.global_mcp_config_path``), with
+``env`` and ``headers`` reduced to ``${VAR}`` references so no literal credential
+reaches the ``--mcp-config`` argv. An empty allowlist (the default) keeps the existing
+zero-MCP posture.
 
 BILLING SAFETY: No Anthropic SDK. No api.anthropic.com calls.
 """
@@ -38,6 +40,11 @@ from typing import Optional
 
 from dispatch_identity import _IDENTITY_UNRESOLVED
 from dispatch_spec import PathAccess, WRITE_GRANTING_PATH_ACCESS
+from mcp_server_config import (
+    global_mcp_config_path,
+    load_global_mcp_servers,
+    reference_only_definition,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -293,33 +300,6 @@ def generate_claude_settings(profile: PermissionProfile) -> dict:
     }
 
 
-def _resolve_global_mcp_config_path() -> Path:
-    """Resolve the ambient MCP server source file.
-
-    Priority: ``VNX_GLOBAL_MCP_CONFIG_PATH`` override (tests/operators) then the
-    Claude Code global config (``~/.claude.json``) — the same source
-    ``scripts/vnx_init.py:_generate_mcp_configs`` reads for interactive T0-T3
-    ``.mcp.json`` generation.
-    """
-    override = os.environ.get("VNX_GLOBAL_MCP_CONFIG_PATH")
-    if override:
-        return Path(override)
-    return Path.home() / ".claude.json"
-
-
-def _load_global_mcp_servers(config_path: Path) -> dict:
-    """Read the ``mcpServers`` block from *config_path*. Returns {} on any failure."""
-    if not config_path.exists():
-        return {}
-    try:
-        data = json.loads(config_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("worker_permissions: failed to load %s: %s", config_path, exc)
-        return {}
-    servers = data.get("mcpServers") if isinstance(data, dict) else None
-    return servers if isinstance(servers, dict) else {}
-
-
 def resolve_role_mcp_config(
     profile: PermissionProfile,
     global_config_path: Path | None = None,
@@ -331,17 +311,22 @@ def resolve_role_mcp_config(
     ``profile.mcp_servers`` that has no matching entry in the ambient config is
     skipped and logged, never silently invented.
 
+    A server keeps its ``env`` and ``headers`` only as ``${VAR}`` references the
+    runtime resolves. The result is serialised into ``--mcp-config <json>``, an argv
+    element, so a literal value would sit in the process list; a literal is dropped and
+    logged by key. Measurements and rationale: ``mcp_server_config`` module docstring.
+
     Returns ``{"mcpServers": {}}`` when the profile declares no allowlist.
     """
     if not profile.mcp_servers:
         return {"mcpServers": {}}
     if global_config_path is None:
-        global_config_path = _resolve_global_mcp_config_path()
-    available = _load_global_mcp_servers(global_config_path)
+        global_config_path = global_mcp_config_path()
+    available = load_global_mcp_servers(global_config_path)
     scoped: dict = {}
     for name in profile.mcp_servers:
         if name in available:
-            scoped[name] = available[name]
+            scoped[name] = reference_only_definition(name, available[name])
         else:
             logger.warning(
                 "worker_permissions: role '%s' allowlists mcp_servers entry '%s' "
