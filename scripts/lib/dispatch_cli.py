@@ -2217,7 +2217,9 @@ def build_runtime_snapshot(
                     f"{WORKER_CLAUDE_OVERRIDE_ENV}=1 is set but "
                     f"{WORKER_CLAUDE_OVERRIDE_REASON_ENV} is empty/absent — the "
                     "worker-claude override is inert without an audit reason. "
-                    "Refusing; the default kimi-k3 hard-reject stands."
+                    "Refusing; without a reason the override does not apply and "
+                    "this dispatch is blocked — it does not fall through to the "
+                    "sonnet default pin."
                 ),
             ))
 
@@ -2337,7 +2339,7 @@ def build_runtime_snapshot(
                 f"operator override {WORKER_CLAUDE_OVERRIDE_ENV}=1 applied for THIS "
                 f"dispatch only: build worker {spec.target_slot} routes to claude "
                 f"model {effective_model!r} via the headless lane "
-                f"(kimi-k3 pin skipped). Reason: {worker_claude_override_reason}"
+                f"(model-pin coercion skipped). Reason: {worker_claude_override_reason}"
             ),
             override_applied=True,
         ),)

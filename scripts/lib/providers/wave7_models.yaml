@@ -111,12 +111,18 @@ providers:
       # pin to 5.5 and so 5 and 5.5 can be measured side by side. opus-5 stays
       # registered for that comparison. Facts from the official Anthropic model
       # table (cache 2026-06-24): model-id claude-opus-5-5, 1M context, 128K max
-      # output, $4/$20 per Mtok, cache-read $0.20. Compare opus-5 at $5/$25.
+      # output, $4/$20 per Mtok. Compare opus-5 at $5/$25.
       # NOTE on effort: the API defaults Opus 5.5 to reasoning effort `medium` and
       # Opus 5 to `high`. This registry does not send an effort flag (the headless
       # lane, scripts/lib/dispatch_envelope.py, carries no --effort/reasoning_effort
       # argument), so 5.5 runs at the API default `medium` unless the harness is
       # later taught to steer it.
+      # NOT MODELLED: cache-read is $0.20/Mtok per the same source. ProviderModel
+      # (scripts/lib/providers/provider_registry.py) has no cache-price attribute
+      # and _parse_model never reads one, so a `cache_read_per_mtok` key here would
+      # sit in the YAML unread — silently dropped, not applied. No other model in
+      # this registry carries a cache price either; that is a registry-wide gap,
+      # not something specific to this entry.
       opus-5-5:
         litellm_name: "anthropic/claude-opus-5-5"
         cost_input_per_mtok: 4.00
@@ -127,7 +133,6 @@ providers:
         supports_tool_calls: true
         price_source: "Anthropic first-party model table (cache 2026-06-24)"
         price_checked_at: "2026-09-23"
-        cache_read_per_mtok: 0.20
         task_classes: ["coding-premium", "review", "analysis"]
       fable-5:
         litellm_name: "anthropic/claude-fable-5"
