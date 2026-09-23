@@ -45,6 +45,15 @@ glm-5.3.
   evidence went stale after closing are detected.
 - **The router refuses an unknown `task_class` (#1860)** — instead of
   silently routing nothing.
+- **A generated MCP config no longer carries a credential.** `vnx init`
+  and `vnx bootstrap-terminals` copied every global server, `env` and all,
+  into each terminal `.mcp.json`. Claude Code ignores the `disabled` flag
+  they added, so the copy started with frozen keys and outranked
+  `~/.claude.json`. Both now share `scripts/lib/mcp_server_config.py` and
+  write a name-only mask (`{"command": "true"}`) per global server, derived
+  again on every run. The role-scoped worker `--mcp-config` keeps `env` and
+  `headers` only as `${VAR}` references, so no literal reaches the process
+  list. The dead `scripts/mcp_profile_manager.sh` is removed.
 
 ## [1.6.2] — 2026-09-12
 
