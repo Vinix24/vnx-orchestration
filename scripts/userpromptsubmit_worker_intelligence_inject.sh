@@ -1,12 +1,19 @@
 #!/bin/bash
 # userpromptsubmit_worker_intelligence_inject.sh
 # Purpose: Inject task-relevant intelligence into T1-T3 worker prompts
-# Compatible with Claude Code 2.1+ hook decision system
+# Compatible with the Claude Code 2.1+ UserPromptSubmit hook contract
 #
 # Injects per-prompt: relevant patterns (max 3), prevention rules, session insights
 # Token budget: <400 tokens (≈1600 chars) per injection
 # Degrades gracefully when no dispatch or empty intelligence (A-5)
 # Logs all injection events to intelligence_usage.ndjson (G-L7)
+#
+# Hook contract (UserPromptSubmit):
+#   no-op   : exit 0 with EMPTY stdout. Stdout of this hook lands in the model's
+#             context, so a no-op must not print anything.
+#   context : {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+#             "additionalContext": "..."}}
+#   OI-1816 : the deprecated top-level {"decision": "allow"} shape is gone.
 
 set -uo pipefail
 
@@ -16,9 +23,8 @@ STATE_DIR="${VNX_STATE_DIR:-$PROJECT_ROOT/.vnx-data/state}"
 TERMINAL_STATE="$STATE_DIR/terminal_state.json"
 USAGE_LOG="$STATE_DIR/intelligence_usage.ndjson"
 
-# ── Safe exit: always allow, never block dispatch (A-5) ────────────
+# ── Safe exit: silent no-op, never block dispatch (A-5) ────────────
 safe_exit() {
-  echo '{"decision": "allow"}'
   exit 0
 }
 
@@ -163,6 +169,6 @@ echo "$AUDIT_EVENT" >> "$USAGE_LOG" 2>/dev/null || true
 # Cache hash for change detection
 echo "$INTEL_HASH" > "$LAST_HASH_FILE" 2>/dev/null || true
 
-# ── Output JSON decision for Claude Code 2.1+ ─────────────────────
+# ── Output hookSpecificOutput for Claude Code 2.1+ ────────────────
 ESCAPED=$(echo -e "$FULL_OUTPUT" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "%s\\n", $0}' | sed 's/\\n$//')
-echo "{\"decision\": \"allow\", \"additionalContext\": \"${ESCAPED}\"}"
+echo "{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"${ESCAPED}\"}}"
