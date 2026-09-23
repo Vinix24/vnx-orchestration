@@ -32,7 +32,7 @@ from subprocess_dispatch import (
 
 class TestGetDirtyFiles(unittest.TestCase):
     def _run(self, stdout: str) -> set:
-        with patch("subprocess_dispatch.subprocess") as mock_sp:
+        with patch("subprocess_dispatch_internals.path_utils.subprocess") as mock_sp:
             proc = MagicMock()
             proc.stdout = stdout
             mock_sp.run.return_value = proc
@@ -331,7 +331,8 @@ class TestDeliverWithRecoveryPreDispatchCapture(unittest.TestCase):
         dirty set and the dispatch_touched_files captured from tool events."""
         fake_pre_dirty = {"existing_file.py"}
 
-        with patch("subprocess_dispatch.SubprocessAdapter") as mock_cls, \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as mock_cls, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls), \
              patch("subprocess_dispatch._write_receipt") as mock_receipt, \
              patch("subprocess_dispatch._check_commit_since", return_value=True), \
              patch("subprocess_dispatch._get_commit_hash", return_value="abc123"), \
@@ -369,7 +370,8 @@ class TestDeliverWithRecoveryPreDispatchCapture(unittest.TestCase):
         """On failure path, _auto_stash_changes receives the pre-dispatch dirty set."""
         fake_pre_dirty = {"other_terminal_work.py"}
 
-        with patch("subprocess_dispatch.SubprocessAdapter") as mock_cls, \
+        with patch("provider_spawns.claude_spawn.SubprocessAdapter") as mock_cls, \
+             patch("subprocess_dispatch.SubprocessAdapter", new=mock_cls), \
              patch("subprocess_dispatch._write_receipt") as mock_receipt, \
              patch("subprocess_dispatch._check_commit_since", return_value=False), \
              patch("subprocess_dispatch._get_commit_hash", return_value="abc123"), \

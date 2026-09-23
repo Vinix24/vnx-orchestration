@@ -104,7 +104,6 @@ tests/test_adr007_dispatches_repair.py  # OI-1227: red solo — 70-line gate fla
 tests/test_adr007_structural_conformance.py  # OI-1227: red solo — sqlite3: cannot start a transaction within a transaction (1 failed, 1 passed)
 tests/test_agent_stream_sse.py  # OI-1227: hangs — exceeds 90s wall-cap solo (per-test --timeout=180), no output within cap
 tests/test_agent_validation.py  # OI-1227: red solo — T0IntelligenceGatherer: 'Developer' not valid (1 failed)
-tests/test_auto_commit_stash_isolation.py  # OI-1227: exceeds 90s wall-cap solo (per-test --timeout=180)
 tests/test_auto_report_integration.py  # OI-1227: red solo — manual report status parsed 'contract_invalid' not 'success' (1 failed, 38 passed)
 tests/test_behavior_contracts.py  # OI-1227: red solo — routing_policy lanes missing BehaviorContract: kimi x4 (1 failed, 22 passed)
 tests/test_bench_headless_routing.py  # OI-1227: red solo — 'claude-sonnet-4-6' not in HEADLESS_FORCED_MODELS (3 failed, 2 passed)
