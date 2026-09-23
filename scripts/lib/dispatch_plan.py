@@ -350,15 +350,14 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     #   default: spec.model wins when the caller set one; the pin is the fallback
     #            when spec.model is absent.
     #
-    # worker-provider-kimi-flip (20260723): snapshot.model_pins now resolves T1/T2/T3
-    # to "kimi-k3". This branch only runs when is_claude_lane is True (explicit
-    # provider=claude). The "sonnet" fallback below deliberately stays a valid Claude
-    # model name — it is the no-pin-found default for the claude lane specifically,
-    # not a worker-role default. When a pin IS found for a claude-lane T1/T2/T3
-    # (pinned="kimi-k3") with floor semantics, `model = pinned` intentionally yields
-    # a non-Claude label; the D3 registry/constraint gate upstream rejects that
-    # combination fail-loud rather than silently falling back to sonnet (kimi-only,
-    # no fallback policy).
+    # dispatch-20260923-model-defaults-sonnet-opus55: snapshot.model_pins resolves
+    # T1/T2/T3 to "sonnet" (workers-kimi-pinned, pin_semantics=default). This
+    # branch only runs when is_claude_lane is True (explicit provider=claude). The
+    # "sonnet" fallback below deliberately stays a valid Claude model name — it is
+    # the no-pin-found default for the claude lane specifically, not a worker-role
+    # default. A spec that names a kimi-branded model on the claude lane (e.g.
+    # model=kimi-k3) still hard-rejects via kimi-via-cli-only / the registry gate
+    # upstream, never a silent fallback.
     target_slot = spec.target_slot
     if is_claude_lane:
         pin = snapshot.model_pins.get(target_slot)
