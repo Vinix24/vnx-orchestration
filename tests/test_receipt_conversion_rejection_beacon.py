@@ -122,6 +122,198 @@ class TestRecordRejections:
         assert beacon_mod._COMPONENT in names
 
 
+def _iso(hours_ago: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours_ago * 3600))
+
+
+def _entry(name: str, hours_ago: float) -> dict:
+    return {
+        "dispatch_id": name, "file": f"{name}.md", "reason": "missing model", "rejected_at": _iso(hours_ago),
+    }
+
+
+def _seed_converter_history(data_dir: Path, *entries: dict) -> Path:
+    """Leave the converter beacon as a scan with these refusals wrote it."""
+    from health_beacon import HealthBeacon
+
+    HealthBeacon(data_dir, "report_to_receipt_converter", expected_interval_seconds=3600).heartbeat(
+        status="fail", details={"rejected": list(entries)},
+    )
+    state_dir = data_dir / "state"
+    state_dir.mkdir(exist_ok=True)
+    return state_dir
+
+
+class TestRecentRejections:
+    def test_only_entries_inside_the_window_count(self) -> None:
+        history = [_entry("old", 25), _entry("young", 23), _entry("fresh", 0)]
+        recent = beacon_mod.recent_rejections(history)
+        assert [e["dispatch_id"] for e in recent] == ["young", "fresh"]
+
+    def test_window_is_one_day(self) -> None:
+        assert beacon_mod.REJECTION_ALARM_WINDOW_SECONDS == 24 * 3600
+
+    @pytest.mark.parametrize("rejected_at", [None, "", "yesterday", "2026-09-23", 1727000000, "2026-09-23T10:00:00+00:00"])
+    def test_entry_without_a_parseable_timestamp_counts_as_old(self, rejected_at) -> None:
+        """An age that cannot be shown must not hold the alarm: such an entry
+        would pin the beacon at fail until 200 newer entries evicted it, which
+        on a quiet store is never."""
+        entry = {"dispatch_id": "x", "file": "x.md", "reason": "r", "rejected_at": rejected_at}
+        assert beacon_mod.recent_rejections([entry]) == []
+
+    def test_entry_without_the_key_at_all_counts_as_old(self) -> None:
+        assert beacon_mod.recent_rejections([{"dispatch_id": "x"}]) == []
+
+
+class TestLoadRejectedHistory:
+    def test_missing_beacon_file_is_an_empty_history(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        assert beacon_mod.load_rejected_history(state_dir, beacon_mod.CONVERTER_COMPONENT) == []
+
+    def test_corrupt_beacon_file_is_an_empty_history(self, tmp_path: Path) -> None:
+        (tmp_path / "state").mkdir()
+        (tmp_path / "health").mkdir()
+        (tmp_path / "health" / f"{beacon_mod.CONVERTER_COMPONENT}.json").write_text("{not json", encoding="utf-8")
+        assert beacon_mod.load_rejected_history(tmp_path / "state", beacon_mod.CONVERTER_COMPONENT) == []
+
+    def test_non_dict_entries_are_dropped(self, tmp_path: Path) -> None:
+        state_dir = _seed_converter_history(tmp_path, _entry("a", 1), "not-a-dict", 7)
+        assert [e["dispatch_id"] for e in beacon_mod.load_rejected_history(state_dir, beacon_mod.CONVERTER_COMPONENT)] == ["a"]
+
+
+class TestStatusFollowsTheConverterHistory:
+    """The scan after a quarantine sees no report, so its stderr carries no
+    REJECTED line. The status must still come from the refusal history the
+    converter beacon keeps, or this beacon says ok while that one says fail."""
+
+    def _payload(self, data_dir: Path) -> dict:
+        return json.loads((data_dir / "health" / "receipt_conversion_rejections.json").read_text(encoding="utf-8"))
+
+    def test_empty_scan_with_a_refusal_inside_the_window_is_fail(self, tmp_path: Path) -> None:
+        state_dir = _seed_converter_history(tmp_path, _entry("young", 3))
+
+        beacon_mod.record_rejections(state_dir, [])
+
+        payload = self._payload(tmp_path)
+        assert payload["status"] == "fail"
+        assert payload["details"]["count"] == 0
+        assert [e["dispatch_id"] for e in payload["details"]["recent_rejected"]] == ["young"]
+
+    def test_empty_scan_with_only_old_refusals_is_ok_and_keeps_naming_nothing_as_recent(self, tmp_path: Path) -> None:
+        state_dir = _seed_converter_history(tmp_path, _entry("old", 30))
+
+        beacon_mod.record_rejections(state_dir, [])
+
+        payload = self._payload(tmp_path)
+        assert payload["status"] == "ok"
+        assert payload["details"]["recent_rejected"] == []
+
+    def test_a_rejection_in_this_scan_is_fail_even_when_the_converter_history_is_old_or_absent(self, tmp_path: Path) -> None:
+        state_dir = _seed_converter_history(tmp_path, _entry("old", 30))
+
+        beacon_mod.record_rejections(state_dir, [{"dispatch_id": "A", "file": "a.md", "reason": "missing model"}])
+
+        assert self._payload(tmp_path)["status"] == "fail"
+
+    def test_a_report_refused_on_every_scan_is_named_once_with_its_newest_timestamp(self, tmp_path: Path) -> None:
+        state_dir = _seed_converter_history(
+            tmp_path, _entry("again", 5), _entry("again", 3), _entry("again", 1), _entry("other", 2),
+        )
+
+        beacon_mod.record_rejections(state_dir, [])
+
+        recent = self._payload(tmp_path)["details"]["recent_rejected"]
+        # Ascending by rejected_at: "other" (2h ago), then "again" at its newest (1h ago).
+        assert [(e["dispatch_id"], e["rejected_at"]) for e in recent] == [
+            ("other", _entry("other", 2)["rejected_at"]),
+            ("again", _entry("again", 1)["rejected_at"]),
+        ]
+
+    def test_window_is_reported_so_a_reader_can_see_why_it_is_fail(self, tmp_path: Path) -> None:
+        state_dir = _seed_converter_history(tmp_path)
+        beacon_mod.record_rejections(state_dir, [])
+        assert self._payload(tmp_path)["details"]["alarm_window_seconds"] == beacon_mod.REJECTION_ALARM_WINDOW_SECONDS
+
+
+class TestBothBeaconsAgreeOnTheSameScan:
+    """Requirement: no contradictory verdict between report_to_receipt_converter
+    and receipt_conversion_rejections over the same scan. Drives the REAL
+    converter scan, then feeds the beacon what receipt_processor.sh feeds it:
+    the scan's stderr."""
+
+    _REPORT = (
+        "---\ndispatch_id: {name}\nprovider: claude\n---\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n"
+    )
+
+    def _scan_and_feed_the_beacon(self, reports_dir: Path, state_dir: Path, caplog) -> tuple[str, str, int]:
+        """(converter status, rejections-beacon status, REJECTED lines this scan wrote to stderr)."""
+        import logging
+
+        import report_to_receipt_converter as rtc
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            rtc.scan_and_convert([reports_dir], state_dir)
+        stderr = "\n".join(f"WARNING report_to_receipt_converter: {r.getMessage()}" for r in caplog.records)
+        scan_rejections = beacon_mod.parse_rejections(stderr)
+        beacon_mod.record_rejections(state_dir, scan_rejections)
+
+        health = state_dir.parent / "health"
+        verdicts = [
+            json.loads((health / f"{component}.json").read_text(encoding="utf-8"))["status"]
+            for component in ("report_to_receipt_converter", "receipt_conversion_rejections")
+        ]
+        return verdicts[0], verdicts[1], len(scan_rejections)
+
+    def test_same_verdict_on_the_refusing_scan_and_the_scan_after_it(self, tmp_path: Path, caplog) -> None:
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (reports_dir / "20260601-agree.md").write_text(self._REPORT.format(name="20260601-agree"), encoding="utf-8")
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
+        # Scan 2 sees no report and its stderr carries no REJECTED line: the
+        # rejections beacon can only say fail by reading the history.
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 0)
+
+    def test_same_verdict_once_the_refusal_is_older_than_the_window(self, tmp_path: Path, caplog) -> None:
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = _seed_converter_history(tmp_path, _entry("20260601-aged", 30))
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("ok", "ok", 0)
+
+    def test_same_verdict_for_a_refusal_next_to_a_booked_receipt(self, tmp_path: Path, caplog) -> None:
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (reports_dir / "20260601-no-model.md").write_text(self._REPORT.format(name="20260601-no-model"), encoding="utf-8")
+        (reports_dir / "20260601-with-model.md").write_text(
+            self._REPORT.format(name="20260601-with-model").replace(
+                "provider: claude\n", "provider: claude\nmodel: claude-sonnet-4-6\n"
+            ),
+            encoding="utf-8",
+        )
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
+
+
+def test_converter_component_name_matches_the_converter_beacon() -> None:
+    """The reader in this module and the writer in the converter name the same
+    file; a rename on one side alone would make this beacon read nothing."""
+    import report_to_receipt_converter as rtc
+
+    assert beacon_mod.CONVERTER_COMPONENT == rtc._HEALTH_COMPONENT
+
+
 class TestMainCli:
     def test_stdin_to_beacon_end_to_end(self, tmp_path: Path, capsys) -> None:
         state_dir = tmp_path / "state"

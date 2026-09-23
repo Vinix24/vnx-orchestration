@@ -63,6 +63,13 @@ from report_body_contract import (
 # is a thin wrapper around normalize_provider() — see provider_identity.py for
 # the full reconciliation with governance_emit._PROVIDER_RE.
 from provider_identity import ProviderIdentity, UnrecognizedProviderError, normalize_provider
+# The rejection-alarm rule this beacon shares with receipt_conversion_rejections:
+# both beacons judge the same accumulated history by the same window.
+from receipt_conversion_rejection_beacon import (
+    REJECTION_ALARM_WINDOW_SECONDS,
+    load_rejected_history,
+    recent_rejections,
+)
 
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent  # scripts/ — append_receipt.py lives here
@@ -1456,7 +1463,9 @@ def build_receipt_from_report(
 #                 validation (e.g. missing Model — see AppendReceiptError
 #                 code "missing_model" in append_receipt_internals/validation.py).
 #                 A WARNING is logged here with dispatch_id + reason so the
-#                 refusal is loud, not silent.
+#                 refusal is loud, not silent. The report is quarantined into
+#                 receipt_deadletter/ (reason code "missing_model") when the
+#                 state dir is known, so no later scan retries it.
 #   "malformed" — file unreadable, or no dispatch_id resolvable at all.
 #   "error"     — anything else: a crash while parsing/building the receipt,
 #                 or an append failure other than the fail-closed rejection.
@@ -1741,6 +1750,19 @@ def _convert_one_detailed(
                     "reason": exc.message,
                     "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 })
+            # A missing model is a verdict on the report's bytes: no later
+            # scan can turn it into a receipt, so keeping the file in the
+            # scanned directory only re-fails the beacon on every scan and
+            # buries the next new refusal under an alarm that is already on.
+            # Quarantine, not deletion: the report stays readable in
+            # receipt_deadletter/ and an operator can put it back once a model
+            # has been added (new bytes, new hash, so the watermark entry
+            # _deadletter_report leaves does not shadow it). Only when the
+            # state dir is known, the same guard as the unknown_dispatch
+            # quarantine; a caller without receipts_file leaves the report for
+            # the next directory scan to quarantine.
+            if state_dir_for_route is not None:
+                _deadletter_report(report_path, "missing_model", state_dir_for_route)
             return None, "rejected"
         logger.warning(
             "report_to_receipt_converter: append failed for %s: %s",
@@ -1876,16 +1898,11 @@ def _load_prior_rejected_history(state_dir: Path) -> List[Dict[str, Any]]:
 
     Best-effort: a missing, unreadable, or malformed health file yields an
     empty history rather than raising — a corrupt beacon must never block a
-    scan from completing.
+    scan from completing. The reader itself lives in
+    receipt_conversion_rejection_beacon, which reads this same history to
+    judge its own status.
     """
-    path = state_dir.parent / "health" / f"{_HEALTH_COMPONENT}.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    details = payload.get("details") if isinstance(payload, dict) else None
-    prior = details.get("rejected") if isinstance(details, dict) else None
-    return [entry for entry in prior if isinstance(entry, dict)] if isinstance(prior, list) else []
+    return load_rejected_history(state_dir, _HEALTH_COMPONENT)
 
 
 def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
@@ -1909,11 +1926,18 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     at <data_root>/health/. cleanup_worker_exit.py's own call site already
     does the ``.parent`` correctly; this one didn't).
 
-    status="fail" specifically for the case this dispatch closes: reports
-    were scanned this cycle (attempted_count > 0) but NONE resulted in a
-    receipt landing (new_count == duplicate_count == 0) — "zero receipts"
-    while work was actually attempted. A quiet scan with nothing new to do
-    (attempted_count == 0) stays "ok" — that is the healthy, common case.
+    status="fail" in two cases. (1) Reports were scanned this cycle
+    (attempted_count > 0) but NONE resulted in a receipt landing
+    (new_count == duplicate_count == 0): "zero receipts" while work was
+    actually attempted (OI-998). (2) The accumulated rejection history holds a
+    refusal younger than REJECTION_ALARM_WINDOW_SECONDS. A refused report is
+    quarantined on the spot, so the scan after it attempts nothing; without
+    case (2) the alarm would clear one scan later and a refusal nobody has
+    read would vanish, and a refusal next to a successful receipt never
+    raised it at all. Once the newest refusal is older than the window the
+    status is "ok" again and the history stays in ``details.rejected``.
+    A quiet scan with nothing new to do (attempted_count == 0) and no recent
+    refusal stays "ok", the healthy and common case.
     Best-effort: heartbeat write failures never raise into the caller.
     """
     try:
@@ -1936,6 +1960,10 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     if len(rejected_history) > _HEALTH_REJECTED_HISTORY_MAX:
         rejected_history = rejected_history[-_HEALTH_REJECTED_HISTORY_MAX:]
 
+    recent_rejected = recent_rejections(rejected_history)
+    if recent_rejected:
+        status = "fail"
+
     beacon = HealthBeacon(
         state_dir.parent, _HEALTH_COMPONENT, expected_interval_seconds=_HEALTH_EXPECTED_INTERVAL_SECONDS,
     )
@@ -1948,6 +1976,8 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
             "malformed_count": stats.malformed_count,
             "error_count": stats.error_count,
             "skipped_non_dispatch_count": stats.skipped_non_dispatch_count,
+            "recent_rejected_count": len(recent_rejected),
+            "rejection_alarm_window_seconds": REJECTION_ALARM_WINDOW_SECONDS,
             "rejected": rejected_history,
         },
     )
@@ -1972,7 +2002,11 @@ def scan_and_convert(
     _convert_one_detailed()'s outcome tags. Newly-appended, duplicate, and
     skipped_non_dispatch reports are marked processed (the classification
     that produced skipped_non_dispatch is permanent — a panel-*.md report
-    never becomes a dispatch report on a later scan); rejected, malformed,
+    never becomes a dispatch report on a later scan). A rejected report (no
+    real model) is moved into ``receipt_deadletter/`` by
+    ``_convert_one_detailed`` and its hash goes into the Bash watermark, so it
+    is not retried; the beacon keeps the refusal visible for
+    REJECTION_ALARM_WINDOW_SECONDS (see ``_write_scan_heartbeat``). Malformed
     and errored reports are NOT marked processed, so they are retried on the
     next scan once their cause is fixed.
 
@@ -2107,8 +2141,10 @@ def scan_and_convert(
                 malformed_count += 1
             else:  # "error"
                 error_count += 1
-            # rejected / malformed / error reports are NOT marked processed:
-            # retried on the next scan once the cause is fixed.
+            # malformed / error reports are NOT marked processed: retried on
+            # the next scan once the cause is fixed. A rejected report is not
+            # marked here either, but it is already out of reports_dir:
+            # _convert_one_detailed quarantined it.
 
     stats = ScanStats(
         new_count=new_count,
