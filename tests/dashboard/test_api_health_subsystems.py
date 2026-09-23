@@ -84,6 +84,44 @@ def test_operator_get_health_includes_subsystems(monkeypatch, tmp_path):
     assert "beacons" in body
 
 
+def test_operator_get_health_reads_parked_components_as_parked(monkeypatch, tmp_path):
+    """The dashboard is the third reader of the beacon store, next to t0_state and
+    the SessionStart digest. learning_loop is parked by operator decision
+    (beacon_register.PARKED_COMPONENTS), so an old beacon must not read
+    ``stale`` here while the other two readers say ``parked``."""
+    import json
+    import time
+
+    health_dir = tmp_path / "health"
+    health_dir.mkdir()
+    old = int(time.time()) - 90 * 86400
+    (health_dir / "learning_loop.json").write_text(json.dumps({
+        "component": "learning_loop",
+        "last_run_ts": old,
+        "last_run_iso": "2026-06-25T00:00:00Z",
+        "status": "ok",
+        "details": {},
+        "expected_interval_seconds": 86400,
+    }), encoding="utf-8")
+    monkeypatch.setattr(api_health, "_resolve_data_dir", lambda: tmp_path)
+
+    body = api_health._operator_get_health()
+
+    assert body["beacons"]["learning_loop"]["health"] == "parked"
+    assert body["beacons"]["intelligence_daemon"]["health"] == "parked"
+
+
+def test_operator_get_health_does_not_report_an_event_driven_writer_absent(monkeypatch, tmp_path):
+    """cleanup_worker_exit writes only when a worker exits
+    (expected_interval_seconds=None): no event, no beacon, no finding."""
+    monkeypatch.setattr(api_health, "_resolve_data_dir", lambda: tmp_path)
+
+    body = api_health._operator_get_health()
+
+    assert body["beacons"].get("cleanup_worker_exit", {}).get("health") != "absent"
+    assert body["beacons"]["fleet_role_drift"]["health"] == "absent"
+
+
 def test_operator_get_health_error_path_reports_empty_subsystems(monkeypatch, tmp_path):
     def _boom(_data_dir):
         raise RuntimeError("boom")

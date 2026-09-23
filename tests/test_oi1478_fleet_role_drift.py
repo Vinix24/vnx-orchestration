@@ -379,18 +379,75 @@ def test_measuring_writes_nothing_without_write_state(tmp_path):
 
 
 def test_write_state_is_opt_in_and_lands(tmp_path):
+    """The beacon belongs in ``<data_dir>/health/``: every reader (t0_state,
+    health_check, the dashboard, the SessionStart digest) looks there, and the
+    data dir is the parent of the state dir. Writing it beside the state dir was
+    the same defect #1736 fixed for report_to_receipt_converter."""
     clean = _make_repo(tmp_path / "clean", hook=WIRED_HOOK, settings=WIRED_SETTINGS)
-    state = tmp_path / "state"
-    state.mkdir()
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
 
     frd.main([*_canon_arg(tmp_path), "--project-dir", str(clean),
               "--state-dir", str(state), "--write-state"])
 
-    beacon = state / "health" / "fleet_role_drift.json"
+    beacon = data_dir / "health" / "fleet_role_drift.json"
     assert beacon.exists()
+    assert not (state / "health").exists(), "no beacon may land under <data_dir>/state/health/"
     payload = json.loads(beacon.read_text(encoding="utf-8"))
     assert payload["status"] == "ok"
     assert payload["details"]["projects_behind"] == 0
+
+
+def test_write_state_beacon_is_found_by_the_reader(tmp_path):
+    """A beacon nobody reads is the failure this track closes: the beacon the
+    meter writes must show up in the reader's map, not as ``absent``."""
+    from health_beacon import all_beacons
+
+    clean = _make_repo(tmp_path / "clean", hook=WIRED_HOOK, settings=WIRED_SETTINGS)
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
+
+    frd.main([*_canon_arg(tmp_path), "--project-dir", str(clean),
+              "--state-dir", str(state), "--write-state"])
+
+    beacons = all_beacons(data_dir, expected=["fleet_role_drift"])
+    assert beacons["fleet_role_drift"]["health"] == "ok"
+
+
+def test_write_state_without_state_dir_uses_the_resolved_store(tmp_path, monkeypatch):
+    """The default branch resolves VNX_STATE_DIR and puts the beacon beside it,
+    in the data dir, the same way ``--state-dir`` does."""
+    import vnx_paths
+
+    clean = _make_repo(tmp_path / "clean", hook=WIRED_HOOK, settings=WIRED_SETTINGS)
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
+    monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {"VNX_STATE_DIR": str(state)})
+
+    frd.main([*_canon_arg(tmp_path), "--project-dir", str(clean), "--write-state"])
+
+    assert (data_dir / "health" / "fleet_role_drift.json").exists()
+    assert not (state / "health").exists()
+
+
+def test_write_state_records_a_fail_status_when_the_fleet_is_behind(tmp_path):
+    stale = _make_repo(tmp_path / "stale", role=STALE_ROLE)
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
+
+    rc = frd.main([*_canon_arg(tmp_path), "--project-dir", str(stale),
+                   "--state-dir", str(state), "--write-state"])
+
+    assert rc == 1
+    beacon = data_dir / "health" / "fleet_role_drift.json"
+    assert beacon.exists()
+    payload = json.loads(beacon.read_text(encoding="utf-8"))
+    assert payload["status"] == "fail"
+    assert payload["details"]["behind"] == ["stale"]
 
 
 def test_json_output_is_machine_readable(tmp_path, capsys):

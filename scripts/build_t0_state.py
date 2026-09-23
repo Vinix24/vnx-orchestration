@@ -2263,18 +2263,31 @@ def _build_system_health(
     # from real daemon-process state; production leaves it unset and gets
     # the live register. A register-discovery failure must not blank out an
     # otherwise-successful beacon read, so it has its own inner try/except.
+    #
+    # Same register, same expectations as the SessionStart hook (which hands
+    # health_check.py both --expected and --parked): a component parked by
+    # operator decision (beacon_register.PARKED_COMPONENTS) reads "parked", not
+    # "stale", and an event-driven writer is not in the expected set at all.
+    # Two readers of one beacon store must not give two verdicts.
     beacon_health: Optional[Dict[str, Any]] = None
     try:
         from health_beacon import beacon_summary
         data_dir = state_dir.parent
-        if expected_beacon_components is None:
-            try:
-                from beacon_register import expected_component_names
+        parked_beacon_components: Sequence[str] = ()
+        try:
+            from beacon_register import expected_component_names, parked_component_names
+            parked_beacon_components = parked_component_names()
+            if expected_beacon_components is None:
                 expected_beacon_components = expected_component_names()
-            except Exception as exc:  # vnx-silent-except: register discovery is best-effort, mirrors beacon_health/daemon_liveness's own best-effort contract
-                log.debug("beacon_register unavailable (non-critical): %s", exc)
+        except Exception as exc:  # vnx-silent-except: register discovery is best-effort, mirrors beacon_health/daemon_liveness's own best-effort contract
+            log.debug("beacon_register unavailable (non-critical): %s", exc)
+            if expected_beacon_components is None:
                 expected_beacon_components = ()
-        beacon_health = beacon_summary(data_dir, expected=expected_beacon_components)
+        beacon_health = beacon_summary(
+            data_dir,
+            expected=expected_beacon_components,
+            parked=parked_beacon_components,
+        )
     except Exception as exc:
         log.debug("beacon_summary failed (non-critical): %s", exc)
 
