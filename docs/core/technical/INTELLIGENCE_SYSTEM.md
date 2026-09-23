@@ -1030,10 +1030,15 @@ INTELLIGENCE_JSON=$(python3 "$GATHER_SCRIPT" gather \
 # 3. Hash-based change detection (skip if unchanged)
 INTEL_HASH=$(echo "$INTELLIGENCE_JSON" | sha256sum | cut -d' ' -f1)
 
-# 4. Inject into Claude Code prompt via additionalContext
+# 4. Inject into Claude Code prompt via hookSpecificOutput.additionalContext.
+#    Nothing to inject (no dispatch, unchanged hash, empty intelligence): exit 0
+#    with empty stdout. Stdout of a UserPromptSubmit hook lands in the model's
+#    context, so a no-op must not print a decision object.
 {
-  "decision": "allow",
-  "additionalContext": "=== VNX [T1] Dispatch: ABC-123 | Gate: implementation ===\n..."
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "=== VNX [T1] Dispatch: ABC-123 | Gate: implementation ===\n..."
+  }
 }
 ```
 

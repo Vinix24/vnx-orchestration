@@ -2,17 +2,22 @@
 
 # userpromptsubmit_intelligence_inject.sh - V5 Compatible with Claude Code 2.1+
 # Purpose: Inject VNX intelligence updates into T0 terminal as hook
-# Compatible with Claude Code 2.1.37 hook decision system
+# Compatible with the Claude Code 2.1+ UserPromptSubmit hook contract
 #
 # Changes in V5:
 # - Capture all output to inject into JSON additionalContext
-# - Output proper JSON decision object for Claude Code 2.1+
 # - Fix unbound variable errors
-# - Output format: {"decision": "allow", "additionalContext": "message"}
 #
 # V5.1 (PR-2):
 # - Removed terminal status injection (redundant with t0_brief.json, already visible)
 # - T0 injection now focuses on quality hotspots and recommendations only
+#
+# Hook contract (UserPromptSubmit), OI-1816:
+#   no-op   : exit 0 with EMPTY stdout. Stdout of this hook lands in the model's
+#             context, so a no-op must not print anything.
+#   context : {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+#             "additionalContext": "message"}}
+#   The deprecated top-level {"decision": "allow"} shape is gone.
 
 set -euo pipefail
 
@@ -96,9 +101,8 @@ fi
 # Part 5: Build output messages based on changes
 # ═══════════════════════════════════════════════════════════════
 
-# Nothing changed - output nothing special
+# Nothing changed - silent no-op (stdout lands in the model's context)
 if [[ "$tags_changed" == false ]] && [[ "$quality_changed" == false ]] && [[ "$recommendations_changed" == false ]]; then
-  echo '{"decision": "allow"}'
   exit 0
 fi
 
@@ -157,15 +161,13 @@ if [[ "$recommendations_changed" == true ]] && [[ -f "$RECOMMENDATIONS" ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# Part 6: Output JSON decision for Claude Code 2.1+
+# Part 6: Output hookSpecificOutput for Claude Code 2.1+
 # ═══════════════════════════════════════════════════════════════
 
 # Escape the output messages for JSON (replace newlines and quotes)
 ESCAPED_MESSAGES=$(echo -e "$OUTPUT_MESSAGES" | sed 's/"/\\"/g' | awk '{printf "%s\\n", $0}' | sed 's/\\n$//')
 
-# Output JSON decision object (required for Claude Code 2.1+)
+# Context goes out as hookSpecificOutput; nothing to say means no stdout at all
 if [[ -n "$ESCAPED_MESSAGES" ]]; then
-  echo "{\"decision\": \"allow\", \"additionalContext\": \"${ESCAPED_MESSAGES}\"}"
-else
-  echo '{"decision": "allow"}'
+  echo "{\"hookSpecificOutput\": {\"hookEventName\": \"UserPromptSubmit\", \"additionalContext\": \"${ESCAPED_MESSAGES}\"}}"
 fi

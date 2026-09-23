@@ -246,8 +246,8 @@ class TestWorkerIntelligenceInjection:
         )
         assert result.returncode == 0, f"bash -n failed:\n{result.stderr}"
 
-    def test_outputs_allow_when_vnx_terminal_unset_and_pwd_unknown(self):
-        """Graceful degradation: no terminal context → {"decision": "allow"}."""
+    def test_silent_noop_when_vnx_terminal_unset_and_pwd_unknown(self):
+        """Graceful degradation: no terminal context → exit 0, empty stdout (OI-1816)."""
         env = {
             **os.environ,
             "VNX_STATE_DIR": _TMP_STATE,
@@ -264,12 +264,10 @@ class TestWorkerIntelligenceInjection:
             env=env,
         )
         assert result.returncode == 0, f"Script exited non-zero:\n{result.stderr}"
-        output = result.stdout.strip()
-        parsed = json.loads(output)
-        assert parsed == {"decision": "allow"}
+        assert result.stdout == ""
 
-    def test_outputs_allow_json_when_no_terminal_state(self):
-        """No terminal_state.json → always returns {"decision": "allow"}."""
+    def test_silent_noop_when_no_terminal_state(self):
+        """No terminal_state.json → exit 0, empty stdout (stdout lands in the model's context)."""
         with tempfile.TemporaryDirectory() as state_dir:
             env = {
                 **os.environ,
@@ -285,11 +283,14 @@ class TestWorkerIntelligenceInjection:
                 env=env,
             )
             assert result.returncode == 0
-            parsed = json.loads(result.stdout.strip())
-            assert parsed == {"decision": "allow"}
+            assert result.stdout == ""
 
-    def test_outputs_additional_context_with_dispatch(self):
-        """Script outputs additionalContext JSON when dispatch context is present."""
+    def test_silent_noop_when_dispatch_file_is_not_resolvable(self):
+        """A claimed dispatch with no dispatch file under the script's own project
+        root is a silent no-op. The script derives PROJECT_ROOT from its location,
+        so the PROJECT_ROOT env var below does not redirect the dispatch lookup.
+        The context-emitting path is covered in
+        tests/test_settings_template_hook_contract.py."""
         with tempfile.TemporaryDirectory() as state_dir:
             # Create terminal_state.json with claimed_by
             dispatch_id = "test-dispatch-001"
@@ -325,11 +326,7 @@ class TestWorkerIntelligenceInjection:
                 env=env,
             )
             assert result.returncode == 0
-            output = result.stdout.strip()
-            # Must be valid JSON
-            parsed = json.loads(output)
-            assert "decision" in parsed
-            assert parsed["decision"] == "allow"
+            assert result.stdout == ""
 
     def test_injection_stays_under_token_budget(self):
         """Injected additionalContext must be under 1600 characters."""
@@ -365,8 +362,9 @@ class TestWorkerIntelligenceInjection:
                 env=env,
             )
             assert result.returncode == 0
-            parsed = json.loads(result.stdout.strip())
-            context = parsed.get("additionalContext", "")
+            context = ""
+            if result.stdout.strip():
+                context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
             assert len(context) <= 1600, (
                 f"additionalContext too long: {len(context)} chars (max 1600)"
             )
