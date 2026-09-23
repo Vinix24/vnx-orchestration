@@ -228,6 +228,159 @@ def test_smoke_model_predicts_on_subset():
     check("pred-record sleutels == LAYA_KEYS", tuple(sorted(got_keys)) == tuple(sorted(mod.LAYA_KEYS)))
 
 
+def _patch_replace(boom):
+    """Vervang os.replace op de module van 03d door een functie die raised.
+
+    Simuleert een onderbreking vlak voor de atomische rename. Onderbroken
+    schrijfacties zijn precies het scenario dat atomisch schrijven voorkomt:
+    het doel mag nooit een afgekapt bestand dragen.
+    """
+    real = mod.os.replace
+
+    def replacement(src, dst):
+        raise boom
+
+    mod.os.replace = replacement
+    return real
+
+
+def test_write_jsonl_atomic_interrupted_keeps_old_content():
+    """Bij onderbreking voor os.replace behoudt het doel de oude inhoud.
+    De nieuwe inhoud staat in <pad>.tmp. Het doel draagt nooit een halve
+    nieuwe regel. Rood op de oude code (geen helper), groen na de fix."""
+    print("test_write_jsonl_atomic_interrupted_keeps_old_content:")
+    if not hasattr(mod, "write_jsonl_atomic"):
+        check("write_jsonl_atomic bestaat (atomische schrijfactie)", False)
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        old_line = json.dumps({"id": "old", "laya_choice": "stijl"}, ensure_ascii=False)
+        fh.write(old_line + "\n")
+        path = fh.name
+    try:
+        old_content = open(path).read()
+        preds_new = [{"id": "new", "laya_choice": "beleid"}]
+        new_line = json.dumps(preds_new[0], ensure_ascii=False) + "\n"
+        real = _patch_replace(RuntimeError("interrupted before rename"))
+        try:
+            try:
+                mod.write_jsonl_atomic(path, preds_new)
+            except RuntimeError:
+                pass
+        finally:
+            mod.os.replace = real
+        doel = open(path).read()
+        check("doel behoudt oude inhoud bij onderbroken schrijfactie", doel == old_content)
+        check("doel draagt nooit de halve nieuwe regel (oude inhoud intact)",
+              doel == old_content and doel != new_line)
+        tmp = f"{path}.tmp"
+        check(".tmp draagt de volledige nieuwe inhoud",
+              os.path.exists(tmp) and open(tmp).read() == new_line)
+    finally:
+        for p in (path, f"{path}.tmp"):
+            if os.path.exists(p):
+                os.unlink(p)
+
+
+def test_write_jsonl_atomic_success_full_new_content():
+    """Bij geslaagde schrijfactie draagt het doel de volledige nieuwe inhoud
+    en blijft geen .tmp achter."""
+    print("test_write_jsonl_atomic_success_full_new_content:")
+    if not hasattr(mod, "write_jsonl_atomic"):
+        check("write_jsonl_atomic bestaat", False)
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        fh.write(json.dumps({"id": "old", "laya_choice": "stijl"}, ensure_ascii=False) + "\n")
+        path = fh.name
+    try:
+        preds_new = [{"id": "new", "laya_choice": "beleid"}]
+        new_line = json.dumps(preds_new[0], ensure_ascii=False) + "\n"
+        mod.write_jsonl_atomic(path, preds_new)
+        check("doel draagt de volledige nieuwe inhoud", open(path).read() == new_line)
+        check("geen .tmp meer na geslaagde schrijfactie",
+              not os.path.exists(f"{path}.tmp"))
+    finally:
+        for p in (path, f"{path}.tmp"):
+            if os.path.exists(p):
+                os.unlink(p)
+
+
+def test_write_json_atomic_interrupted_keeps_old_content():
+    """Bij onderbreking voor os.replace behoudt het doel de oude JSON.
+    De nieuwe JSON staat in <pad>.tmp. Het doel is nooit deels overschreven."""
+    print("test_write_json_atomic_interrupted_keeps_old_content:")
+    if not hasattr(mod, "write_json_atomic"):
+        check("write_json_atomic bestaat (atomische schrijfactie)", False)
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        old_obj = {"status": "old", "n": 1}
+        fh.write(json.dumps(old_obj, indent=2, ensure_ascii=False))
+        path = fh.name
+    try:
+        old_content = open(path).read()
+        new_obj = {"status": "no_labels", "n_predictions": 5,
+                   "confidence_measure": "x", "note": "y"}
+        new_content = json.dumps(new_obj, indent=2, ensure_ascii=False)
+        real = _patch_replace(RuntimeError("interrupted before rename"))
+        try:
+            try:
+                mod.write_json_atomic(path, new_obj)
+            except RuntimeError:
+                pass
+        finally:
+            mod.os.replace = real
+        check("doel behoudt oude inhoud bij onderbroken schrijfactie",
+              open(path).read() == old_content)
+        tmp = f"{path}.tmp"
+        check(".tmp draagt de volledige nieuwe inhoud",
+              os.path.exists(tmp) and open(tmp).read() == new_content)
+    finally:
+        for p in (path, f"{path}.tmp"):
+            if os.path.exists(p):
+                os.unlink(p)
+
+
+def test_write_json_atomic_success_full_new_content():
+    """Bij geslaagde schrijfactie draagt het doel de volledige nieuwe JSON
+    en blijft geen .tmp achter."""
+    print("test_write_json_atomic_success_full_new_content:")
+    if not hasattr(mod, "write_json_atomic"):
+        check("write_json_atomic bestaat", False)
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write(json.dumps({"status": "old"}, indent=2, ensure_ascii=False))
+        path = fh.name
+    try:
+        new_obj = {"status": "no_labels", "n_predictions": 5,
+                   "confidence_measure": "x", "note": "y"}
+        new_content = json.dumps(new_obj, indent=2, ensure_ascii=False)
+        mod.write_json_atomic(path, new_obj)
+        check("doel draagt de volledige nieuwe inhoud", open(path).read() == new_content)
+        check("geen .tmp meer na geslaagde schrijfactie",
+              not os.path.exists(f"{path}.tmp"))
+    finally:
+        for p in (path, f"{path}.tmp"):
+            if os.path.exists(p):
+                os.unlink(p)
+
+
+def test_main_uses_atomic_writes_not_open_w():
+    """main() schrijft de drie canonieke uitvoerbestanden via de atomic helpers,
+    niet via open(<pad>, 'w'). Dit toetst de dispatch-eis direct: alle 3 plekken
+    via tmp + os.replace. Rood op de oude code (open-vorm), groen na de fix."""
+    print("test_main_uses_atomic_writes_not_open_w:")
+    src = open(os.path.join(HERE, "03d_laya_mlx_classify.py")).read()
+    check("main roept write_jsonl_atomic(out, preds)",
+          "write_jsonl_atomic(out, preds)" in src)
+    check("main roept write_json_atomic(CALIB_OUT, cal)",
+          "write_json_atomic(CALIB_OUT, cal)" in src)
+    check("main roept write_json_atomic voor no_labels",
+          "write_json_atomic(CALIB_OUT," in src and '"no_labels"' in src)
+    check("geen open(out, \"w\") meer in bron",
+          'open(out, "w")' not in src and "open(out, 'w')" not in src)
+    check("geen open(CALIB_OUT, \"w\") meer in bron",
+          'open(CALIB_OUT, "w")' not in src and "open(CALIB_OUT, 'w')" not in src)
+
+
 def main():
     test_laya_keys_exact()
     test_build_criteria_nl_keeps_definitions()
@@ -239,6 +392,11 @@ def main():
     test_calibration_bins_match_03c()
     test_load_ground_truth_labels_missing_returns_empty()
     test_load_ground_truth_labels_parses()
+    test_write_jsonl_atomic_interrupted_keeps_old_content()
+    test_write_jsonl_atomic_success_full_new_content()
+    test_write_json_atomic_interrupted_keeps_old_content()
+    test_write_json_atomic_success_full_new_content()
+    test_main_uses_atomic_writes_not_open_w()
     test_smoke_model_predicts_on_subset()
     print()
     if FAILS:

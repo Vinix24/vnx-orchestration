@@ -170,6 +170,31 @@ def load_ground_truth_labels(path=LABELS_PATH):
     return out
 
 
+def write_jsonl_atomic(path, rows):
+    """Schrijf JSONL atomisch: naar <path>.tmp in dezelfde map, dan os.replace.
+
+    Een open(path, "w") kan bij onderbreking een afgekapt bestand achterlaten.
+    os.replace is atomisch binnen hetzelfde bestandssysteem, en omdat de tmp in
+    dezelfde map staat als het doel is dat hier gewaarborgd.
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
+        for p in rows:
+            fh.write(json.dumps(p, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+
+
+def write_json_atomic(path, obj):
+    """Schrijf een JSON-object atomisch: naar <path>.tmp, dan os.replace.
+
+    Zelfde reden als write_jsonl_atomic: geen afgekapt bestand bij onderbreking.
+    """
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(obj, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 def compute_calibration(predictions, labels_by_id, n_bins=10):
     """Betrouwbaarheidscurve + ECE over de gelabelde voorspellingen.
 
@@ -372,9 +397,7 @@ def main():
                   f"head_cap={head_capacity_errors}, other_err={other_errors})")
 
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, "w") as fh:
-        for p in preds:
-            fh.write(json.dumps(p, ensure_ascii=False) + "\n")
+    write_jsonl_atomic(out, preds)
 
     print(f"\n=== {out_name} results -> {out} ===")
     print(f"label_lang: {lang}")
@@ -431,8 +454,7 @@ def main():
     labels = load_ground_truth_labels()
     if labels:
         cal = compute_calibration(preds, labels)
-        with open(CALIB_OUT, "w") as fh:
-            json.dump(cal, fh, indent=2, ensure_ascii=False)
+        write_json_atomic(CALIB_OUT, cal)
         print(f"\ncalibration -> {CALIB_OUT}")
         print(f"  confidence measure: {cal['confidence_measure']}")
         print(f"  labeled predictions: {cal['n_labeled_predictions']}")
@@ -447,12 +469,10 @@ def main():
         print(f"\nkalibratie overgeslagen: geen ground_truth_labels.jsonl gevonden.")
         print(f"  Plaats {LABELS_PATH} met {{id, true_label}} per regel om de")
         print(f"  betrouwbaarheidscurve + ECE te laten draaien. Geen labels, geen curve.")
-        with open(CALIB_OUT, "w") as fh:
-            json.dump({"status": "no_labels",
+        write_json_atomic(CALIB_OUT, {"status": "no_labels",
                        "n_predictions": len(preds),
                        "confidence_measure": "normalized_shannon_entropy_1_minus_H_over_log_k",
-                       "note": "Plaats ground_truth_labels.jsonl om ECE te rekenen."},
-                      fh, indent=2, ensure_ascii=False)
+                       "note": "Plaats ground_truth_labels.jsonl om ECE te rekenen."})
 
     if other_errors:
         return 1
