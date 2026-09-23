@@ -150,6 +150,26 @@ DEFECT_CRITERIA = {
 CLASSES = list(CRITERIA.keys())
 
 
+def atomic_write(path, writer):
+    """Schrijf naar ``<path>.tmp`` en hernoem atomisch naar ``path``.
+
+    ``os.replace`` is atomisch binnen hetzelfde bestandssysteem: een lezer
+    ziet ofwel het oude bestand ofwel het volledige nieuwe, nooit een halve.
+    Bij een onderbreking (crash, exception in ``writer``) bereikt de rename
+    het doel niet en blijft het oude bestand staan. De tmp wordt opgeruimd.
+
+    ``writer`` krijgt een geopend bestandsobject en mag erin schrijven. De
+    tmp staat in dezelfde map als het doel, op hetzelfde bestandssysteem,
+    anders is ``os.replace`` niet atomisch.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        writer(fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
 def pct(vals, p):
     if not vals:
         return 0.0
@@ -462,12 +482,17 @@ def main():
         time.sleep(MIN_INTERVAL_S)
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w") as fh:
+
+    def _write_predictions(fh):
         for p in preds:
             fh.write(json.dumps(p, ensure_ascii=False) + "\n")
-    with open(DEFECT_OUT, "w") as fh:
+
+    def _write_defect_signals(fh):
         for d in defect_signals:
             fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+    atomic_write(OUT, _write_predictions)
+    atomic_write(DEFECT_OUT, _write_defect_signals)
 
     print(f"\n=== JEV results -> {OUT} ===")
     print(f"defect signals -> {DEFECT_OUT}")
@@ -488,8 +513,8 @@ def main():
     labels = load_ground_truth_labels()
     if labels:
         cal = compute_calibration(preds, labels)
-        with open(CALIB_OUT, "w") as fh:
-            json.dump(cal, fh, indent=2, ensure_ascii=False)
+        atomic_write(CALIB_OUT, lambda fh: json.dump(cal, fh, indent=2,
+                                                     ensure_ascii=False))
         print(f"\ncalibration -> {CALIB_OUT}")
         print(f"  labeled predictions: {cal['n_labeled_predictions']}")
         print(f"  overall accuracy: {cal['overall_accuracy']}")
@@ -503,11 +528,11 @@ def main():
         print(f"\nkalibratie overgeslagen: geen ground_truth_labels.jsonl gevonden.")
         print(f"  Plaats {LABELS_PATH} met {{id, true_label}} per regel om de")
         print(f"  betrouwbaarheidscurve + ECE te laten draaien. Geen labels, geen curve.")
-        with open(CALIB_OUT, "w") as fh:
-            json.dump({"status": "no_labels",
-                       "n_predictions": len(preds),
-                       "note": "Plaats ground_truth_labels.jsonl om ECE te rekenen."},
-                      fh, indent=2, ensure_ascii=False)
+        atomic_write(CALIB_OUT, lambda fh: json.dump(
+            {"status": "no_labels",
+             "n_predictions": len(preds),
+             "note": "Plaats ground_truth_labels.jsonl om ECE te rekenen."},
+            fh, indent=2, ensure_ascii=False))
 
     if errors:
         return 1

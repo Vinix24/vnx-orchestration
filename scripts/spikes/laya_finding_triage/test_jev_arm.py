@@ -397,6 +397,52 @@ def test_main_no_key_does_not_print_value():
     check("melding noemt de af te wijzen vorm (key:-)", "key:-" in text)
 
 
+def test_atomic_write_partial_failure_preserves_target():
+    """Bij onderbreking van de schrijfactie draagt het doelbestand ofwel de oude
+    inhoud ofwel de volledige nieuwe inhoud, nooit een halve.
+
+    De writer faalt halverwege. Met ``atomic_write`` bereikt ``os.replace`` het
+    doel niet, dus het doel behoudt de oude inhoud. Op de oude code
+    (``open(path, 'w')`` direct) werd het doel eerst afgekapt en bleef een halve
+    inhoud achter. Daarom staat deze test ROOD op de code vóór de fix.
+    """
+    print("test_atomic_write_partial_failure_preserves_target:")
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "jev_predictions.jsonl")
+        with open(target, "w") as fh:
+            fh.write('{"id":"old","laya_choice":"stijl"}\n')
+        old = open(target).read()
+
+        def failing_writer(fh):
+            fh.write('{"id":"new1"}\n')
+            raise OSError("simulated interruption")
+
+        raised = False
+        try:
+            jev.atomic_write(target, failing_writer)
+        except OSError:
+            raised = True
+        check("writer-fout propageert (niet geslikt)", raised)
+        after = open(target).read()
+        check("doel draagt oude inhoud, niet halve nieuwe", after == old)
+        check("geen afgekapt nieuw record in doel", '{"id":"new1"}' not in after)
+
+
+def test_atomic_write_success_writes_full_content():
+    """Een geslaagde schrijfactie levert de volledige nieuwe inhoud en ruimt de
+    tmp op. Geen .tmp achtergebleven."""
+    print("test_atomic_write_success_writes_full_content:")
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "jev_calibration.json")
+        with open(target, "w") as fh:
+            fh.write('{"old": true}')
+        payload = {"status": "no_labels", "n_predictions": 3, "ece": None}
+        jev.atomic_write(target, lambda fh: json.dump(payload, fh, indent=2))
+        after = open(target).read()
+        check("volledige nieuwe inhoud", json.loads(after) == payload)
+        check("geen .tmp achtergebleven", not os.path.exists(target + ".tmp"))
+
+
 def test_default_http_post_retries_on_429():
     """default_http_post herstelt na een tijdelijke 429 en geeft dan het antwoord."""
     print("test_default_http_post_retries_on_429:")
@@ -453,6 +499,8 @@ def main():
     test_05_laya_stats_reads_jev_output()
     test_main_no_key_exits_clean()
     test_main_no_key_does_not_print_value()
+    test_atomic_write_partial_failure_preserves_target()
+    test_atomic_write_success_writes_full_content()
     test_default_http_post_retries_on_429()
     print()
     if FAILS:
