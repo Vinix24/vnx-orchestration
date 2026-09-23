@@ -18,6 +18,9 @@ defects found while wiring the SessionStart surface into settings.json:
      shell script — including a regression test for the exit-code-gating bug
      (--json exits 1 on a *found* dead pin; an `|| exit 0` on that capture
      silently swallowed the positive case) found and fixed in this same PR.
+ 10. an absolute/home-relative token must start at a token boundary: a path
+     fragment inside a word (``scripts/hooks/x.sh`` in a printf error text)
+     is not an absolute path, while a real dead absolute pin is still caught.
 """
 from __future__ import annotations
 
@@ -538,3 +541,90 @@ def test_hookpin_check_sh_noop_without_settings_file(tmp_path):
 
     assert result.returncode == 0
     assert result.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# 10. Token boundary: a path fragment inside a word is not an absolute path
+# ---------------------------------------------------------------------------
+
+_PRINTF_FRAGMENT_COMMAND = (
+    "bash -c 'if [ -f \"${VNX_HOME}/scripts/hooks/x.sh\" ]; then "
+    "exec bash \"${VNX_HOME}/scripts/hooks/x.sh\"; "
+    "else printf \"[vnx] artifact MISSING (no scripts/hooks/x.sh under %s); "
+    "will not refresh\\n\" \"${VNX_HOME}\" >&2; exit 0; fi'"
+)
+
+
+def test_relative_fragment_in_printf_text_is_not_a_dead_pin(tmp_path, monkeypatch):
+    """Measured 2026-09-23: the SessionStart t0_state command spells
+    ``scripts/hooks/build_t0_state_hook.sh`` inside its printf error text. The
+    ``/`` alternative matched from the mid-word slash and reported
+    ``/hooks/build_t0_state_hook.sh`` as a dead absolute pin in every session."""
+    engine = tmp_path / "engine"
+    (engine / "scripts" / "hooks").mkdir(parents=True)
+    (engine / "scripts" / "hooks" / "x.sh").write_text("x")
+    monkeypatch.setenv("VNX_HOME", str(engine))
+    project = tmp_path / "proj"
+    _write_settings(project, {"SessionStart": [{
+        "matcher": "",
+        "hooks": [{"type": "command", "command": _PRINTF_FRAGMENT_COMMAND}],
+    }]})
+
+    findings = check_project_hook_pins(project)
+
+    assert [f for f in findings if f.status == STATUS_MISSING] == []
+    assert not any(f.raw_path.startswith("/hooks") for f in findings)
+    assert [f.raw_path for f in findings] == ["${VNX_HOME}/scripts/hooks/x.sh"]
+    assert findings[0].status == STATUS_OK
+    assert findings[0].resolved_path == str(engine / "scripts" / "hooks" / "x.sh")
+
+
+def test_relative_fragment_in_printf_text_yields_only_the_real_pin_token():
+    assert hookpin_check.extract_path_tokens(_PRINTF_FRAGMENT_COMMAND) == [
+        "${VNX_HOME}/scripts/hooks/x.sh"
+    ]
+
+
+@pytest.mark.parametrize("command", [
+    "bash -c 'x=a/b/c.sh'",
+    "echo see scripts/hooks/x.sh",
+    "bash ./scripts/x.sh",
+    "bash ../scripts/x.sh",
+    "bash my-tool-/x.sh",
+    "echo a~b/x.sh",
+])
+def test_mid_word_fragment_yields_no_token(command):
+    assert hookpin_check.extract_path_tokens(command) == []
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("bash /abs/x.sh", ["/abs/x.sh"]),
+    ('bash "/abs/x.sh"', ["/abs/x.sh"]),
+    ("bash '/abs/x.sh'", ["/abs/x.sh"]),
+    ("FOO=/abs/x.sh bash", ["/abs/x.sh"]),
+    ("/abs/x.sh", ["/abs/x.sh"]),
+    ("true;/abs/x.sh", ["/abs/x.sh"]),
+    ("bash ~/x.sh", ["~/x.sh"]),
+    ("FOO=~/x.sh bash", ["~/x.sh"]),
+    ('bash "$HOME_DIR/x.sh"', ["$HOME_DIR/x.sh"]),
+    ("bash ${VNX_HOME}/scripts/x.sh", ["${VNX_HOME}/scripts/x.sh"]),
+])
+def test_token_at_boundary_still_matches(command, expected):
+    assert hookpin_check.extract_path_tokens(command) == expected
+
+
+def test_dead_absolute_pin_after_boundary_is_still_reported_missing(tmp_path):
+    """The boundary rule must not blind the checker: a real dead absolute pin
+    that follows a space, a quote or ``=`` is still a ``missing`` finding."""
+    project = tmp_path / "proj"
+    _write_settings(project, _stop_hook(
+        f'bash "{tmp_path}/gone-quoted.sh"; FOO={tmp_path}/gone-assigned.sh bash '
+        f"{tmp_path}/gone-spaced.sh"
+    ))
+
+    findings = check_project_hook_pins(project)
+
+    assert [f.status for f in findings] == [STATUS_MISSING] * 3
+    assert {Path(f.raw_path).name for f in findings} == {
+        "gone-quoted.sh", "gone-assigned.sh", "gone-spaced.sh",
+    }
