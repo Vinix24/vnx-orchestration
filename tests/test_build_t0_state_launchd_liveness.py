@@ -45,6 +45,7 @@ for p in (_LIB, _SCRIPTS):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+import beacon_register  # noqa: E402
 import build_t0_state as bts  # noqa: E402
 
 
@@ -451,6 +452,164 @@ class TestCombineLivenessOverall:
 # ---------------------------------------------------------------------------
 # _measure_launchd_liveness — end-to-end (still with injected state_dir/runner)
 # ---------------------------------------------------------------------------
+
+
+class TestParkedJobs:
+    """absence-is-loud, punt 2 (C). Three plists (nightly-intelligence-pipeline,
+    receipt-classifier-batch, headless-trigger) were never installed and pinned
+    launchd_liveness.overall on fail for good. Two are the intelligence layer
+    the operator PARKED on 2026-09-09; the third is the F41 autonomous T0
+    trigger, an operator opt-in. beacon_register.PARKED_LAUNCHD_JOBS holds them
+    with a reason. Parking covers the ABSENCE only: a parked job that is loaded
+    and failing is not laundered into a decision, and a job that is not parked
+    stays a finding."""
+
+    PARKED = "com.vnx.nightly-intelligence-pipeline"
+
+    def _measure(self, tmp_path: Path, labels: List[str], loaded: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        launchd_dir = tmp_path / "launchd"
+        for label in labels:
+            _write_plist(launchd_dir, label)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        return bts._measure_launchd_liveness(
+            state_dir, launchd_dir=launchd_dir, runner=_fake_runner(loaded), which_fn=_present_which
+        )
+
+    def test_missing_parked_job_reads_parked_with_reason_and_overall_is_not_fail(self, tmp_path: Path) -> None:
+        result = self._measure(
+            tmp_path,
+            [self.PARKED, "com.vnx.alpha-job"],
+            {"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}},
+        )
+
+        job = result["jobs"][self.PARKED]
+        assert job["state"] == "parked"
+        assert result["overall"] == "ok"
+        assert job["reason"] == beacon_register.parked_launchd_reason(self.PARKED)
+
+    def test_missing_job_that_is_not_parked_still_fails(self, tmp_path: Path) -> None:
+        result = self._measure(tmp_path, [self.PARKED, "com.vnx.alpha-job"], {})
+
+        assert result["jobs"][self.PARKED]["state"] == "parked"
+        assert result["jobs"]["com.vnx.alpha-job"]["state"] == "not_loaded"
+        assert "reason" not in result["jobs"]["com.vnx.alpha-job"]
+        assert result["overall"] == "fail"
+
+    def test_parked_job_that_is_loaded_and_exiting_nonzero_is_not_parked(self, tmp_path: Path) -> None:
+        """Parking dekt alleen de afwezigheid. A parked job that IS loaded and
+        sits on exit 1 stays visible as what it is: loaded, with its status."""
+        result = self._measure(
+            tmp_path,
+            [self.PARKED],
+            {self.PARKED: {"pid": None, "last_exit_status": 1}},
+        )
+
+        job = result["jobs"][self.PARKED]
+        assert job["state"] == "loaded"
+        assert job["state"] != "parked"
+        assert job["last_exit_status"] == 1
+        assert "reason" not in job
+
+    def test_loaded_job_carries_its_live_exit_status_even_at_zero(self, tmp_path: Path) -> None:
+        result = self._measure(
+            tmp_path,
+            ["com.vnx.alpha-job"],
+            {"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}},
+        )
+
+        assert result["jobs"]["com.vnx.alpha-job"]["last_exit_status"] == 0
+
+    def test_unmeasurable_launchctl_does_not_read_parked(self, tmp_path: Path) -> None:
+        """If launchctl could not be queried nobody knows the job is absent, so
+        it must not be reported as a measured, explained absence."""
+        launchd_dir = tmp_path / "launchd"
+        _write_plist(launchd_dir, self.PARKED)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        result = bts._measure_launchd_liveness(
+            state_dir,
+            launchd_dir=launchd_dir,
+            runner=_raising_runner(FileNotFoundError("no launchctl")),
+            which_fn=_present_which,
+        )
+
+        assert result["jobs"][self.PARKED]["state"] == "unknown"
+        assert result["overall"] == "unknown"
+
+    def test_all_three_parked_jobs_are_parked_when_nothing_else_is_missing(self, tmp_path: Path) -> None:
+        parked = [
+            "com.vnx.headless-trigger",
+            "com.vnx.nightly-intelligence-pipeline",
+            "com.vnx.receipt-classifier-batch",
+        ]
+        result = self._measure(
+            tmp_path,
+            parked + ["com.vnx.alpha-job"],
+            {"com.vnx.alpha-job": {"pid": None, "last_exit_status": 0}},
+        )
+
+        assert [result["jobs"][label]["state"] for label in parked] == ["parked"] * 3
+        assert result["overall"] == "ok"
+
+
+class TestRealRegisterWithTheParkedJobs:
+    """The measured shape on main 264e9460: seven templates loaded, three never
+    installed. With the parked register, the never-installed three no longer
+    pin overall on fail. The two new driver templates ARE expected, so until
+    they are installed they are a real not_loaded finding."""
+
+    PROJECT = "vnx-dev"
+    # The three jobs named in the operator decision, spelled out here so the
+    # verdict is checked against the decision and not against the register
+    # under test.
+    PARKED_LABELS = {
+        "com.vnx.nightly-intelligence-pipeline",
+        "com.vnx.receipt-classifier-batch",
+        "com.vnx.headless-trigger",
+    }
+    # This checkout's own templates, never the ambient default: build_t0_state
+    # resolves its default launchd directory to the canonical project root,
+    # which in a dispatch worktree is the MAIN checkout, not the tree under test.
+    TEMPLATES = _ROOT / "scripts" / "launchd"
+
+    def _snapshot(self, *, leave_out: "set[str]") -> Dict[str, Dict[str, Any]]:
+        labels = bts._discover_launchd_jobs(self.TEMPLATES, project_id=self.PROJECT)
+        return {label: {"pid": None, "last_exit_status": 0} for label in labels if label not in leave_out}
+
+    def _measure(self, tmp_path: Path, loaded: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(exist_ok=True)
+        return bts._measure_launchd_liveness(
+            state_dir,
+            launchd_dir=self.TEMPLATES,
+            runner=_fake_runner(loaded),
+            which_fn=_present_which,
+            project_id=self.PROJECT,
+        )
+
+    def test_the_two_new_drivers_are_expected_jobs(self) -> None:
+        labels = bts._discover_launchd_jobs(self.TEMPLATES, project_id=self.PROJECT)
+        assert "com.vnx.dashboard-generator.vnx-dev" in labels
+        assert "com.vnx.fleet-role-drift" in labels
+
+    def test_everything_loaded_except_the_parked_three_is_ok(self, tmp_path: Path) -> None:
+        loaded = self._snapshot(leave_out=self.PARKED_LABELS)
+
+        result = self._measure(tmp_path, loaded)
+
+        assert result["overall"] == "ok", result["jobs"]
+        parked = {label for label, job in result["jobs"].items() if job["state"] == "parked"}
+        assert parked == self.PARKED_LABELS
+
+    def test_a_new_driver_that_is_not_installed_yet_is_a_real_finding(self, tmp_path: Path) -> None:
+        loaded = self._snapshot(leave_out=self.PARKED_LABELS | {"com.vnx.fleet-role-drift"})
+
+        result = self._measure(tmp_path, loaded)
+
+        assert result["jobs"]["com.vnx.fleet-role-drift"]["state"] == "not_loaded"
+        assert result["overall"] == "fail"
 
 
 class TestMeasureLaunchdLiveness:

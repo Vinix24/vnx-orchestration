@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.fleet-role-drift</string>
+  <!--
+    absence-is-loud, punt 3: fleet_role_drift.py measures how far the fleet has
+    fallen behind the canonical T0 role, and its write-state flag records the
+    verdict as the fleet_role_drift health beacon. Nothing ever invoked it, so
+    the beacon did not exist and the SessionStart digest read the component as
+    absent. This job is the driver, nothing else: it runs the measurement on a
+    cadence. It does not sync roles and does not touch any project checkout
+    (the tool is read-only apart from that one beacon).
+
+    Interval: every 6h (21600s), the same reasoning as com.vnx.ledger-health.
+    The tool writes its beacon with expected_interval_seconds=86400, and
+    health_beacon.all_beacons() reads a beacon whose age exceeds that as
+    "stale". A StartInterval at or above 86400 would make the beacon stale by
+    construction. 21600s gives 4 runs a day: even 3 consecutive missed runs
+    (an 18h gap) still land inside the window with margin. RunAtLoad makes the
+    first run happen on install, so the beacon exists right away instead of
+    after the first interval.
+
+    A non-zero exit is expected and normal, not a job failure. Exit 1 means at
+    least one project is behind the canon: that is the finding the tool exists
+    to record, and it is what launchctl list shows as the last exit status
+    whenever the fleet is behind (measured 2026-09-23: 4 of 4 projects behind).
+    The beacon carries the same verdict as status fail. Exit 2 means the meter
+    could not measure (canon absent, registry unreadable) and no beacon is
+    written, so it ages out to stale on its own. Do not wire this job's exit
+    code into anything that fails a build.
+
+    The store is NOT pinned by path. The job identifies its project through
+    VNX_PROJECT_ID (below); the ambient resolver (vnx_paths.resolve_paths())
+    derives the data and state directories from that id, and the beacon lands
+    in that project's health directory. A consumer installing this template
+    for their own project MUST set VNX_PROJECT_ID to their project id;
+    reload_plist.sh substitutes the placeholder from its second argument,
+    then from VNX_PROJECT_ID, then from the .vnx-project-id marker.
+    Hardcoding a store path here would make a copied template write the
+    beacon of the original project (same failure mode com.vnx.ledger-health
+    already documents).
+
+    vnx init is not wired to install this job. Install it manually:
+      bash scripts/launchd/reload_plist.sh com.vnx.fleet-role-drift
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/fleet_role_drift.py --write-state</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key><string>/tmp/vnx-fleet-role-drift.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-fleet-role-drift.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>VNX_PROJECT_ID</key>
+    <string>${VNX_PROJECT_ID}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

@@ -74,7 +74,8 @@ import functools
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple
+from types import MappingProxyType
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -91,6 +92,47 @@ import project_root  # noqa: E402
 # this list only tells health_beacon.all_beacons() to stop classifying their
 # age as "stale", not to stop expecting/reading them.
 PARKED_COMPONENTS: frozenset = frozenset({"learning_loop", "intelligence_daemon"})
+
+# The same operator decision has readers beyond the beacon reader, and each of
+# them used to report the consequence as a fault: a state artifact whose producer
+# is a parked component reads STALE (and blocks SessionStart), and a launchd job
+# that was deliberately never installed reads not_loaded (and pins
+# launchd_liveness.overall on fail). Measured on main 264e9460, 2026-09-23:
+# t0_recommendations.json at 98 days, three plists never installed.
+#
+# This is the one place that says what is parked and why, for state artifacts and
+# launchd jobs. It extends PARKED_COMPONENTS rather than replacing it, so every
+# existing reader of that set is untouched. A reason is a string, never a bare
+# name: a reader prints it next to the age or the absence, so the lookup shows
+# that the silence is a decision and what the decision was. Parking covers the
+# ABSENCE only. An artifact that is fresh reads fresh, and a parked job that IS
+# loaded and exiting non-zero reads loaded, because a failure is not a decision.
+_INTELLIGENCE_LAYER_PARKED = (
+    "intelligence layer parked by operator decision 2026-09-09 (golf C / #1832) "
+    "until the governance ledger is falsifiable"
+)
+
+# state artifact name (session_state_freshness.ARTIFACTS key) -> reason
+PARKED_ARTIFACTS: Mapping[str, str] = MappingProxyType({
+    "t0_recommendations": (
+        "producer is generate_t0_recommendations.py, phase 10 of the nightly "
+        "intelligence pipeline; " + _INTELLIGENCE_LAYER_PARKED
+    ),
+})
+
+# resolved launchd Label (as `launchctl list` reports it) -> reason
+PARKED_LAUNCHD_JOBS: Mapping[str, str] = MappingProxyType({
+    "com.vnx.nightly-intelligence-pipeline": (
+        "the nightly intelligence pipeline itself; " + _INTELLIGENCE_LAYER_PARKED
+    ),
+    "com.vnx.receipt-classifier-batch": (
+        "ARC-3 intelligence classifier, the same layer; " + _INTELLIGENCE_LAYER_PARKED
+    ),
+    "com.vnx.headless-trigger": (
+        "F41 autonomous T0 trigger is an operator opt-in (human in the loop), "
+        "never installed since April; not a forgotten daemon"
+    ),
+})
 
 
 @dataclass(frozen=True)
@@ -237,6 +279,17 @@ def parked_component_names() -> Tuple[str, ...]:
     return tuple(sorted(PARKED_COMPONENTS))
 
 
+def parked_artifact_reason(name: str) -> Optional[str]:
+    """Why the state artifact ``name`` is parked, or ``None`` when it is not."""
+    return PARKED_ARTIFACTS.get(name)
+
+
+def parked_launchd_reason(label: str) -> Optional[str]:
+    """Why the launchd job ``label`` (resolved, as ``launchctl list`` reports
+    it) is parked, or ``None`` when it is not."""
+    return PARKED_LAUNCHD_JOBS.get(label)
+
+
 # Historical duplicate-write locations for the same beacon component (C2a).
 # report_to_receipt_converter's own writer passed VNX_STATE_DIR straight
 # through to HealthBeacon instead of its parent (data dir) until #1736
@@ -276,6 +329,10 @@ __all__ = [
     "read_beacon_register",
     "expected_component_names",
     "PARKED_COMPONENTS",
+    "PARKED_ARTIFACTS",
+    "PARKED_LAUNCHD_JOBS",
     "parked_component_names",
+    "parked_artifact_reason",
+    "parked_launchd_reason",
     "find_duplicate_beacon_writers",
 ]

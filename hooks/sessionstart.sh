@@ -300,16 +300,25 @@ $_PF_LINES"
         if [ "$_FRESHNESS_PARSE_OK" = "yes" ]; then
           _FRESHNESS_THRESHOLD=$(echo "$_FRESHNESS_JSON" | jq -r '.threshold_hours')
           _FRESHNESS_ANY_STALE=$(echo "$_FRESHNESS_JSON" | jq -r '.any_stale')
+          _FRESHNESS_ANY_PARKED=$(echo "$_FRESHNESS_JSON" | jq -r '.any_parked // false')
+          # "parked" = the artifact's producer is parked by operator decision
+          # (beacon_register.PARKED_ARTIFACTS). It is not hidden: the age (or
+          # "not found") and the reason stay on the line, so the reader sees how
+          # old it is and why that is allowed. It does not count toward BLOCKED.
           _FRESHNESS_LINES=$(echo "$_FRESHNESS_JSON" | jq -r '
             .artifacts | to_entries | sort_by(.key)[] |
             if .value.status == "missing" then "  - [missing] \(.key): not found"
             elif .value.status == "unknown" then "  - [unknown] \(.key): timestamp unreadable"
+            elif .value.status == "parked" then "  - [PARKED] \(.key): \(if .value.age_human then "age \(.value.age_human)" else "not found" end) — \(.value.reason)"
             elif .value.status == "stale" then "  - [STALE] \(.key): age \(.value.age_human) (source: \(.value.source))"
             else "  - [fresh] \(.key): age \(.value.age_human) (source: \(.value.source))"
             end
           ')
           if [ "$_FRESHNESS_ANY_STALE" = "true" ]; then
             FRESHNESS_SECTION="STATE FRESHNESS: BLOCKED — one or more session-start artifacts are older than ${_FRESHNESS_THRESHOLD}h (one working session; see scripts/lib/session_state_freshness.py for the measured commit-cadence this threshold is based on). DO NOT dispatch, merge, or close deliverables on the strength of this state — refresh it, or independently re-verify the specific facts it claims, before acting on it.
+$_FRESHNESS_LINES"
+          elif [ "$_FRESHNESS_ANY_PARKED" = "true" ]; then
+            FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than ${_FRESHNESS_THRESHOLD}h, except the PARKED ones below (an operator decision, each with its reason)
 $_FRESHNESS_LINES"
           else
             FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than ${_FRESHNESS_THRESHOLD}h
