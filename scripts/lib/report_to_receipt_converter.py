@@ -1459,13 +1459,13 @@ def build_receipt_from_report(
 # scan_and_convert() for per-scan counting (OI-998):
 #   "appended"  — new receipt written.
 #   "duplicate" — idempotent re-send, no new receipt.
-#   "rejected"  — fail-closed refusal by append_receipt_payload's own
-#                 validation (e.g. missing Model — see AppendReceiptError
-#                 code "missing_model" in append_receipt_internals/validation.py).
+#   "rejected"  — fail-closed refusal by append_receipt_payload's own model
+#                 validation (see MODEL_REFUSAL_CODES below: a missing Model,
+#                 or a Model value that is not a model name).
 #                 A WARNING is logged here with dispatch_id + reason so the
 #                 refusal is loud, not silent. The report is quarantined into
-#                 receipt_deadletter/ (reason code "missing_model") when the
-#                 state dir is known, so no later scan retries it.
+#                 receipt_deadletter/ (reason code = the refusal's own code)
+#                 when the state dir is known, so no later scan retries it.
 #   "malformed" — file unreadable, or no dispatch_id resolvable at all.
 #   "error"     — anything else: a crash while parsing/building the receipt,
 #                 or an append failure other than the fail-closed rejection.
@@ -1480,6 +1480,17 @@ def build_receipt_from_report(
 #                 been appended, but dry_run=True suppressed the actual
 #                 append_receipt_payload() call — nothing was written and no
 #                 watermark entry was made.
+
+# The AppendReceiptError codes _validate_model_present raises
+# (append_receipt_internals/validation.py): ``missing_model`` (no model, or a
+# sentinel such as "unknown") and ``invalid_model_shape`` (a value that is not
+# a model name: spaces, backticks, too long). Both are a verdict on the
+# report's bytes, so both take the "rejected" outcome: counted as rejected,
+# named in the rejection history, quarantined on the first refusal. This is the
+# ONE place that decides which codes take that path; every other refusal stays
+# an "error" and is retried. A test pins this set to what the validator raises.
+MODEL_REFUSAL_CODES = frozenset({"missing_model", "invalid_model_shape"})
+
 
 def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
     """Best-effort: push *text*'s ``## Open Items`` entries into the ledger.
@@ -1680,13 +1691,14 @@ def _convert_one_detailed(
         # (missing_model -> "rejected", any other AppendReceiptError ->
         # "error"), so a dry-run count is a faithful preview, not an
         # overestimate. _validate_receipt writes nothing — it only raises.
+        # (Model refusals are the codes in MODEL_REFUSAL_CODES.)
         try:
             from append_receipt_internals.validation import (  # noqa: PLC0415
                 _validate_receipt,
             )
             _validate_receipt(receipt)
         except AppendReceiptError as exc:
-            if exc.code == "missing_model":
+            if exc.code in MODEL_REFUSAL_CODES:
                 logger.warning(
                     "report_to_receipt_converter: [dry-run] REJECTED (fail-closed) "
                     "dispatch=%s file=%s reason=%s",
@@ -1738,7 +1750,10 @@ def _convert_one_detailed(
             skip_enrichment=True,
         )
     except AppendReceiptError as exc:
-        if exc.code == "missing_model":
+        if exc.code in MODEL_REFUSAL_CODES:
+            # receipt_conversion_rejection_beacon.parse_rejections keys on the
+            # exact "REJECTED (fail-closed) dispatch=... file=... reason=..."
+            # shape of this line: every model refusal logs it, whatever its code.
             logger.warning(
                 "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
                 receipt.get("dispatch_id"), report_path.name, exc.message,
@@ -1750,19 +1765,21 @@ def _convert_one_detailed(
                     "reason": exc.message,
                     "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 })
-            # A missing model is a verdict on the report's bytes: no later
-            # scan can turn it into a receipt, so keeping the file in the
-            # scanned directory only re-fails the beacon on every scan and
-            # buries the next new refusal under an alarm that is already on.
+            # A model refusal (no model, or a value that is not a model name)
+            # is a verdict on the report's bytes: no later scan can turn it
+            # into a receipt, so keeping the file in the scanned directory
+            # only re-fails the beacon on every scan and buries the next new
+            # refusal under an alarm that is already on.
             # Quarantine, not deletion: the report stays readable in
-            # receipt_deadletter/ and an operator can put it back once a model
-            # has been added (new bytes, new hash, so the watermark entry
-            # _deadletter_report leaves does not shadow it). Only when the
-            # state dir is known, the same guard as the unknown_dispatch
-            # quarantine; a caller without receipts_file leaves the report for
-            # the next directory scan to quarantine.
+            # receipt_deadletter/ and an operator can put it back once the
+            # model has been fixed (new bytes, new hash, so the watermark entry
+            # _deadletter_report leaves does not shadow it). The INDEX line
+            # carries the refusal's own code. Only when the state dir is
+            # known, the same guard as the unknown_dispatch quarantine; a
+            # caller without receipts_file leaves the report for the next
+            # directory scan to quarantine.
             if state_dir_for_route is not None:
-                _deadletter_report(report_path, "missing_model", state_dir_for_route)
+                _deadletter_report(report_path, exc.code, state_dir_for_route)
             return None, "rejected"
         logger.warning(
             "report_to_receipt_converter: append failed for %s: %s",
@@ -1869,7 +1886,7 @@ class ScanStats:
     # dry-run so this count never influences health status either way.
     would_append_count: int = 0
     # F1-3: per-rejection detail ({dispatch_id, file, reason, rejected_at})
-    # for THIS scan's missing-model rejections — see _write_scan_heartbeat,
+    # for THIS scan's model refusals (MODEL_REFUSAL_CODES) — see _write_scan_heartbeat,
     # which merges this into the beacon's accumulated details.rejected
     # history. A tuple (not a list) so the frozen dataclass never exposes a
     # mutable default shared across instances.
@@ -2003,7 +2020,8 @@ def scan_and_convert(
     skipped_non_dispatch reports are marked processed (the classification
     that produced skipped_non_dispatch is permanent — a panel-*.md report
     never becomes a dispatch report on a later scan). A rejected report (no
-    real model) is moved into ``receipt_deadletter/`` by
+    real model, or a model value that is not a model name) is moved into
+    ``receipt_deadletter/`` by
     ``_convert_one_detailed`` and its hash goes into the Bash watermark, so it
     is not retried; the beacon keeps the refusal visible for
     REJECTION_ALARM_WINDOW_SECONDS (see ``_write_scan_heartbeat``). Malformed

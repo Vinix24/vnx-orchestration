@@ -305,6 +305,24 @@ class TestBothBeaconsAgreeOnTheSameScan:
 
         assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
 
+    def test_same_verdict_for_a_model_name_in_the_wrong_shape(self, tmp_path: Path, caplog) -> None:
+        """``invalid_model_shape`` is the other model refusal. Before it took
+        the quarantine path the converter beacon said fail (error, retried) and
+        this beacon said ok (it never saw a REJECTED line)."""
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (reports_dir / "20260601-glued.md").write_text(
+            "**Dispatch-ID:** 20260601-glued\n"
+            "**Model:** glm-5.2 · **Provider:** claude\n\n"
+            + self._REPORT.split("---\n\n", 1)[1],
+            encoding="utf-8",
+        )
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 0)
+
 
 def test_converter_component_name_matches_the_converter_beacon() -> None:
     """The reader in this module and the writer in the converter name the same
