@@ -67,12 +67,35 @@ and worktree_state arguments are never consulted, nothing is ever pushed (the
 worker already delivered there), and at most one PR is ensured for
 *work_ref* itself. See ``_enforce_pr_exists_for_work_ref``.
 
+Where git and gh run (OI-1846): a step that can run hooks or that resolves a
+repository from its cwd runs from the dispatch worktree when ``wt_path`` is
+known, never from the main checkout. That is ``git push`` (the main checkout
+brings the operator's pre-push hooks and venv, which timed the push out at 120 s
+in sales-copilot) and every ``gh`` call. The read-only lookups stay on
+``repo_root``: ``git ls-remote origin`` asks the remote, and ``git merge-base
+--is-ancestor`` reads the object store that every worktree of the repo shares,
+so both give the same answer from either directory and neither runs a hook.
+Without ``wt_path`` everything runs from ``repo_root`` as before.
+
+A tree dirty only through a generated artifact (``_GENERATED_ARTIFACTS``,
+today FEATURE_PLAN.md) is not forgotten work and is never salvaged. Its commit
+state is read from the commits alone (``classify_path(ignore_working_tree=True)``)
+and enforced as that state, so the regen noise neither strands unpushed worker
+commits nor fails a delivered dispatch.
+
+Delivered work is not turned into a failure by a failing cleanup (OI-1846): when
+the salvage push fails and the worker's own commits are already on origin with a
+PR, the outcome stays ok=True and carries ``warning``, plus a
+``pr_enforcement_warning`` receipt that names the reason. It is a warning
+receipt, not a failed completion: it has no ``status`` and no ``autopr_rejected``.
+
 BILLING SAFETY: No Anthropic SDK. CLI-only (gh/git via subprocess, through
 gh_pr_ensure).
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import subprocess
@@ -100,6 +123,10 @@ class PrEnforcementResult:
     applicable=True, ok=False: the branch was committed (or pushed) but the push,
         PR creation, or containment check failed — a corrective receipt has
         already been appended.
+    applicable=True, ok=True, warning set: the worker's work is on origin with a
+        PR, but a cleanup step (the salvage push) stumbled. The outcome follows
+        the work; ``warning`` says what stumbled and a ``pr_enforcement_warning``
+        receipt has already been appended (OI-1846).
     """
     applicable: bool
     ok: bool
@@ -107,6 +134,7 @@ class PrEnforcementResult:
     created: bool = False
     pushed: bool = False
     reason: Optional[str] = None
+    warning: Optional[str] = None
 
 
 def is_dispatch_branch_ref(base_ref: "Optional[str]") -> bool:
@@ -152,6 +180,9 @@ def _get_remote_head(*, branch: str, repo_root: Path) -> "Optional[str]":
     Uses ``git ls-remote origin refs/heads/<branch>``.  Returns None when the
     branch does not exist on origin or when the lookup fails (network error,
     timeout).  Never raises: a lookup failure is a degraded skip, not a crash.
+
+    Runs from *repo_root* on purpose (OI-1846): ls-remote asks the remote, which
+    is the same from the main checkout and from any worktree, and it runs no hook.
     """
     remote_ref = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
     try:
@@ -175,6 +206,10 @@ def _check_containment(*, branch: str, old_head: str, repo_root: Path) -> "tuple
     Returns ``(True, None)`` when containment holds (fast-forward or merge).
     Returns ``(False, reason)`` when the check fails or the new HEAD cannot be
     resolved.  Never raises.
+
+    Runs from *repo_root* on purpose (OI-1846): ``merge-base --is-ancestor`` reads
+    the object store, which every worktree of the repo shares, so the answer is
+    the same from the worktree and it runs no hook.
     """
     new_head = _get_remote_head(branch=branch, repo_root=repo_root)
     if new_head is None:
@@ -212,6 +247,44 @@ class _DirtyClassification:
     evidence: str
     tracked_paths: "tuple[str, ...]" = ()
     untracked_paths: "tuple[str, ...]" = ()
+    # OI-1846: paths git listed that are generated artifacts (see
+    # _GENERATED_ARTIFACTS). Set aside: neither substantive nor salvaged.
+    generated_paths: "tuple[str, ...]" = ()
+
+
+# OI-1846: files a background process regenerates inside every checkout, so a
+# dirty worktree may hold them without the worker ever having touched them.
+# Explicit and small on purpose: a path belongs here only when it is measured to
+# be regenerated into dispatch worktrees. Maps the repo-root-relative path to the
+# module and attribute holding the generator's own first-line marker, so this
+# list can never drift from the marker the generator writes.
+_GENERATED_ARTIFACTS: "dict[str, tuple[str, str]]" = {
+    "FEATURE_PLAN.md": ("build_feature_plan", "_AUTOGEN_HEADER"),
+}
+
+
+def _is_generated_artifact(wt_path: "Path | str", rel_path: str) -> bool:
+    """True when *rel_path* is a listed generated artifact whose content in the
+    worktree still carries the generator's marker on its first line.
+
+    The marker check is what makes the file provably generated: a FEATURE_PLAN.md
+    a worker wrote by hand (a plan of its own, no marker) is real work and is
+    never set aside. A missing file (a deletion), an unreadable file, or a
+    generator module that cannot be imported all answer False, so doubt keeps a
+    path substantive. Never raises.
+    """
+    entry = _GENERATED_ARTIFACTS.get(rel_path)
+    if entry is None:
+        return False
+    module_name, attr = entry
+    try:
+        if _SCRIPTS_DIR not in sys.path:
+            sys.path.insert(0, _SCRIPTS_DIR)
+        marker = getattr(importlib.import_module(module_name), attr)
+        with open(Path(wt_path) / rel_path, "r", encoding="utf-8") as fh:
+            return fh.readline().strip() == marker
+    except Exception:  # doubt keeps the path substantive
+        return False
 
 
 def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
@@ -277,14 +350,35 @@ def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
         if path:
             tracked_paths.append(path)
 
+    # OI-1846: set generated artifacts aside before deciding anything. They are
+    # neither evidence of forgotten work nor part of a salvage commit.
+    generated_paths = tuple(
+        p for p in (*tracked_paths, *untracked_paths) if _is_generated_artifact(wt_path, p)
+    )
+    if generated_paths:
+        tracked_paths = [p for p in tracked_paths if p not in generated_paths]
+        untracked_paths = [p for p in untracked_paths if p not in generated_paths]
+    generated_note = (
+        f"generated artifact(s) set aside, not worker work: {', '.join(generated_paths)}"
+        if generated_paths else ""
+    )
+
     if not tracked_paths:
+        evidence = (
+            f"dirty worktree has only untracked paths ({len(untracked_paths)} file(s)) — "
+            "no tracked source/test changes; treated as scratch/non-substantive"
+        )
+        if generated_paths:
+            evidence = (
+                f"dirty worktree has no worker changes: {generated_note}"
+                + (f"; plus {len(untracked_paths)} untracked scratch file(s)" if untracked_paths else "")
+                + " — nothing to salvage"
+            )
         return _DirtyClassification(
             substantive=False,
-            evidence=(
-                f"dirty worktree has only untracked paths ({len(untracked_paths)} file(s)) — "
-                "no tracked source/test changes; treated as scratch/non-substantive"
-            ),
+            evidence=evidence,
             untracked_paths=tuple(untracked_paths),
+            generated_paths=generated_paths,
         )
 
     shown = tracked_paths[:10]
@@ -294,6 +388,8 @@ def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
         f"dirty worktree has {len(tracked_paths)} tracked file(s) with uncommitted "
         f"changes the worker never committed: {listing}"
     )
+    if generated_note:
+        evidence += f"; {generated_note}"
     if untracked_paths:
         u_shown = untracked_paths[:10]
         u_more = len(untracked_paths) - len(u_shown)
@@ -307,6 +403,7 @@ def _classify_dirty_worktree(*, wt_path: "Path | str") -> _DirtyClassification:
         evidence=evidence,
         tracked_paths=tuple(tracked_paths),
         untracked_paths=tuple(untracked_paths),
+        generated_paths=generated_paths,
     )
 
 
@@ -323,6 +420,7 @@ def enforce_pr_exists(
     skip_pr: bool = False,
     wt_path: "Optional[Path | str]" = None,
     work_ref: "Optional[str]" = None,
+    base_sha: "Optional[str]" = None,
 ) -> PrEnforcementResult:
     """Ensure *branch* is pushed to origin AND has an open PR.
 
@@ -355,7 +453,15 @@ def enforce_pr_exists(
     vs non-substantive (scratch/untracked only) — see
     ``_classify_dirty_worktree``.  When ``None`` (a caller that hasn't wired
     this through yet), a ``dirty`` verdict keeps the pre-OI-1119 behaviour:
-    applicable=False, ok=True.
+    applicable=False, ok=True.  OI-1846: when known, *wt_path* is also the
+    directory ``git push`` and every ``gh`` call run from, so the operator's
+    pre-push hooks in the main checkout do not run; without it they run from
+    *repo_root* as before.
+
+    *base_sha* (OI-1846): the worktree's base commit, only used when a ``dirty``
+    tree holds nothing but generated artifacts and its commit state must be read
+    from the commits alone.  ``None`` falls back to the merge-base with
+    ``origin/main`` (see ``tmux_worktree.classify_path``).
 
     *work_ref* (OI-1392): when set, it is the authoritative delivery branch —
     *branch*, *worktree_state* and *wt_path* are never consulted, and nothing
@@ -370,12 +476,17 @@ def enforce_pr_exists(
     propagated, so a transient git/GitHub/network error never crashes the dispatch
     lane.
     """
+    # OI-1846: the directory git push and gh run from. The worktree when known
+    # (the operator's pre-push hooks and venv belong to the main checkout, not
+    # here), repo_root otherwise. Read-only remote lookups keep using repo_root.
+    run_dir = Path(wt_path) if wt_path is not None else Path(repo_root)
+
     work_ref_branch = _normalize_work_ref(work_ref)
     if work_ref_branch:
         return _enforce_pr_exists_for_work_ref(
             dispatch_id=dispatch_id,
             work_ref_branch=work_ref_branch,
-            repo_root=repo_root,
+            run_dir=run_dir,
             receipts_file=receipts_file,
             pr_title=pr_title,
             pr_body=pr_body,
@@ -400,21 +511,45 @@ def enforce_pr_exists(
                 ),
             )
         classification = _classify_dirty_worktree(wt_path=wt_path)
-        if not classification.substantive:
+        if classification.substantive:
+            return _handle_dirty_substantive(
+                dispatch_id=dispatch_id, branch=branch, wt_path=Path(wt_path),
+                repo_root=repo_root, receipts_file=receipts_file,
+                tracked_paths=classification.tracked_paths,
+                untracked_paths=classification.untracked_paths,
+                evidence=classification.evidence,
+                pr_title=pr_title, pr_body=pr_body, skip_pr=skip_pr, base_sha=base_sha,
+            )
+        if not classification.generated_paths:
             return PrEnforcementResult(applicable=False, ok=True, reason=classification.evidence)
-        return _handle_dirty_substantive(
-            dispatch_id=dispatch_id, branch=branch, wt_path=Path(wt_path),
-            repo_root=repo_root, receipts_file=receipts_file,
-            tracked_paths=classification.tracked_paths,
-            untracked_paths=classification.untracked_paths,
-            evidence=classification.evidence,
-            pr_title=pr_title, pr_body=pr_body, skip_pr=skip_pr,
+
+        # OI-1846: the tree is dirty only through generated artifacts (plus at
+        # most scratch). "dirty" wins over "committed"/"pushed" in classify_path,
+        # so that verdict hid what the worker actually delivered. Read the state
+        # from the commits alone and enforce THAT: a worker that had already
+        # pushed stays a success, one that never pushed still gets pushed.
+        from tmux_worktree import classify_path
+        worktree_state = classify_path(
+            wt=wt_path, branch=branch, dispatch_id=dispatch_id,
+            base_sha=base_sha, ignore_working_tree=True,
         )
+        logger.info(
+            "pr_enforcement: dirty tree holds only generated artifacts dispatch=%s branch=%s "
+            "— enforcing the commit state %r instead (OI-1846): %s",
+            dispatch_id, branch, worktree_state, classification.evidence,
+        )
+        if worktree_state in ("clean", "dirty"):
+            # clean: nothing was committed. dirty: OI-1124 identity drift, which
+            # classify_path reports whatever the flag says — never act on it.
+            return PrEnforcementResult(
+                applicable=False, ok=True,
+                reason=f"{classification.evidence}; commit state {worktree_state!r} — nothing to push",
+            )
 
     # committed or pushed are the two states with work that must reach a PR.
     pushed = worktree_state == "pushed"
     if worktree_state == "committed":
-        push_outcome = _push_branch(branch=branch, repo_root=repo_root)
+        push_outcome = _push_branch(branch=branch, cwd=run_dir)
         if not push_outcome.ok:
             reason = push_outcome.reason
             logger.warning(
@@ -464,7 +599,7 @@ def enforce_pr_exists(
 
     try:
         from gh_pr_ensure import ensure_pr  # noqa: PLC0415
-        result = ensure_pr(branch, repo_root, title=pr_title, body=pr_body, draft=False)
+        result = ensure_pr(branch, run_dir, title=pr_title, body=pr_body, draft=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning("pr_enforcement: ensure_pr raised for %s: %s", branch, exc)
         result = {"pr_number": None, "created": False, "reason": f"ensure_pr exception: {exc}"}
@@ -491,13 +626,13 @@ def _enforce_pr_exists_for_work_ref(
     *,
     dispatch_id: str,
     work_ref_branch: str,
-    repo_root: Path,
+    run_dir: Path,
     receipts_file: "str | Path",
     pr_title: str,
     pr_body: str,
 ) -> PrEnforcementResult:
     """OI-1392: enforcement scoped to a spec-declared work_ref — never the
-    worktree's own branch.
+    worktree's own branch. *run_dir* is where ``gh`` runs (OI-1846).
 
     Never pushes anything: ``gh_pr_ensure.ensure_pr``/``create_pr`` only ever
     run ``gh pr create --head <branch>``, which requires the branch to already
@@ -517,7 +652,7 @@ def _enforce_pr_exists_for_work_ref(
     """
     try:
         from gh_pr_ensure import ensure_pr  # noqa: PLC0415
-        result = ensure_pr(work_ref_branch, repo_root, title=pr_title, body=pr_body, draft=False)
+        result = ensure_pr(work_ref_branch, run_dir, title=pr_title, body=pr_body, draft=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "pr_enforcement: ensure_pr raised for work_ref=%s: %s", work_ref_branch, exc,
@@ -564,6 +699,7 @@ def _handle_dirty_substantive(
     pr_body: str,
     skip_pr: bool,
     untracked_paths: "tuple[str, ...]" = (),
+    base_sha: "Optional[str]" = None,
 ) -> PrEnforcementResult:
     """OI-1119: a ``dirty`` tree with substantive uncommitted work — loud AND salvaged.
 
@@ -586,6 +722,15 @@ def _handle_dirty_substantive(
     a **draft** PR with a title/body banner saying the same thing, so it can
     never be mistaken for a normal, ready-for-review delivery.
 
+    Push and PR run from *wt_path* (OI-1846), so the operator's pre-push hooks
+    in the main checkout do not run; *repo_root* only serves the read-only remote
+    lookups. When the SALVAGE push fails, that is a stumbling cleanup step and
+    not automatically a lost delivery: if the worker's own commits are already
+    on origin with a PR (``_verify_delivered_work``), the outcome follows that
+    work (ok=True + warning + a ``pr_enforcement_warning`` receipt). The salvage
+    commit stays on the local branch, so the worktree is preserved at teardown
+    and nothing is lost. Any other failure keeps ok=False.
+
     Never raises: every git/gh step is wrapped; a failure at any stage still
     reaches the corrective receipt below (kind="dirty_substantive_unsalvaged")
     instead of crashing or hanging the dispatch teardown.
@@ -594,6 +739,9 @@ def _handle_dirty_substantive(
     committed = False
     pushed = False
     pr_number: "Optional[int]" = None
+    # The worker's own HEAD, taken BEFORE the salvage commit changes it: the
+    # yardstick for "the worker's commits are already on origin".
+    pre_salvage_head = _head_sha(wt_path)
 
     try:
         add_proc = subprocess.run(
@@ -629,10 +777,22 @@ def _handle_dirty_substantive(
             reason = f"{evidence}; salvage git-commit raised: {exc}"
 
     if committed:
-        push_outcome = _push_branch(branch=branch, repo_root=repo_root)
+        push_outcome = _push_branch(branch=branch, cwd=wt_path)
         pushed = push_outcome.ok
         if not pushed:
             reason = f"{evidence}; salvage committed locally but push failed: {push_outcome.reason}"
+            delivery = _verify_delivered_work(
+                branch=branch, wt_path=wt_path, repo_root=repo_root,
+                pre_salvage_head=pre_salvage_head, base_sha=base_sha, skip_pr=skip_pr,
+                pr_title=pr_title, pr_body=pr_body,
+            )
+            if delivery.ok:
+                return _delivered_despite_failed_salvage(
+                    dispatch_id=dispatch_id, branch=branch, receipts_file=receipts_file,
+                    salvage_reason=reason, delivery=delivery,
+                    tracked_paths=tracked_paths, untracked_paths=untracked_paths,
+                )
+            reason = f"{reason}; worker delivery not established: {delivery.reason}"
 
     if pushed and not skip_pr:
         try:
@@ -644,7 +804,7 @@ def _handle_dirty_substantive(
                 "reaped. Do not merge without review; verify the diff matches the dispatch "
                 "instruction before treating this as a normal delivery.\n\n---\n\n" + pr_body
             )
-            pr_result = ensure_pr(branch, repo_root, title=salvage_title, body=salvage_body, draft=True)
+            pr_result = ensure_pr(branch, wt_path, title=salvage_title, body=salvage_body, draft=True)
             pr_number = pr_result.get("pr_number")
             if pr_number is None:
                 reason = f"{evidence}; salvage pushed but PR creation failed: {pr_result.get('reason')}"
@@ -684,15 +844,159 @@ def _handle_dirty_substantive(
 
 
 @dataclass(frozen=True)
+class _Delivery:
+    """Whether the worker's own work is already on origin with a PR (OI-1846)."""
+    ok: bool
+    pr_number: "Optional[int]" = None
+    created: bool = False
+    reason: "Optional[str]" = None
+
+
+def _head_sha(wt_path: "Path | str") -> "Optional[str]":
+    """HEAD of the worktree, or None when git cannot say. Never raises."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:  # a missing HEAD only means delivery cannot be established
+        return None
+    sha = proc.stdout.strip()
+    return sha if proc.returncode == 0 and sha else None
+
+
+def _is_ancestor(*, cwd: "Path | str", ancestor: str, descendant: str) -> "Optional[bool]":
+    """True/False from ``git merge-base --is-ancestor``; None when git errors
+    (a missing object, a missing ref). Never raises."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "merge-base", "--is-ancestor", ancestor, descendant],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:  # unverifiable is reported as None, never as True
+        return None
+    if proc.returncode == 0:
+        return True
+    return False if proc.returncode == 1 else None
+
+
+def _verify_delivered_work(
+    *,
+    branch: str,
+    wt_path: Path,
+    repo_root: Path,
+    pre_salvage_head: "Optional[str]",
+    base_sha: "Optional[str]",
+    skip_pr: bool,
+    pr_title: str,
+    pr_body: str,
+) -> _Delivery:
+    """OI-1846: are the worker's OWN commits already on origin, with a PR?
+
+    Only then may a failing salvage push leave the dispatch's outcome alone.
+    All three must hold, and any doubt answers "not established" (so the
+    failure stays a failure):
+
+    1. the worker committed something (its pre-salvage HEAD is not already
+       contained in the worktree's base commit, *base_sha*, or in
+       ``origin/main`` when no base is known);
+    2. the branch on origin contains that HEAD, i.e. every commit the worker
+       made is there. A branch someone else moved on does not qualify;
+    3. an open PR exists for the branch. It is looked up and, when missing,
+       created as an ordinary PR: origin holds exactly what the worker
+       vouched for, because the salvage commit never got there. With
+       *skip_pr* (an existing PR already covers the branch) that is accepted
+       as in the normal path.
+
+    The remote lookups run from *repo_root* (see the module docstring); gh runs
+    from *wt_path*.
+    """
+    if not pre_salvage_head:
+        return _Delivery(ok=False, reason="the worker's HEAD could not be read")
+    base = base_sha or "origin/main"
+    on_base = _is_ancestor(cwd=wt_path, ancestor=pre_salvage_head, descendant=base)
+    if on_base is None:
+        return _Delivery(ok=False, reason=f"the base {base!r} could not be compared with the worker's HEAD")
+    if on_base:
+        return _Delivery(ok=False, reason="the worker made no commit of its own")
+    remote_head = _get_remote_head(branch=branch, repo_root=repo_root)
+    if remote_head is None:
+        return _Delivery(ok=False, reason=f"{branch!r} is not on origin")
+    if _is_ancestor(cwd=repo_root, ancestor=pre_salvage_head, descendant=remote_head) is not True:
+        return _Delivery(
+            ok=False,
+            reason=f"origin's {branch!r} ({remote_head[:12]}) does not contain the worker's HEAD "
+                   f"({pre_salvage_head[:12]})",
+        )
+    if skip_pr:
+        return _Delivery(ok=True)
+    try:
+        from gh_pr_ensure import ensure_pr
+        result = ensure_pr(branch, wt_path, title=pr_title, body=pr_body, draft=False)
+    except Exception as exc:  # a lookup that raises cannot establish delivery
+        return _Delivery(ok=False, reason=f"looking up the PR raised: {exc}")
+    if result.get("pr_number") is None:
+        return _Delivery(ok=False, reason=f"no PR found or created: {result.get('reason')}")
+    return _Delivery(ok=True, pr_number=result["pr_number"], created=bool(result.get("created")))
+
+
+def _delivered_despite_failed_salvage(
+    *,
+    dispatch_id: str,
+    branch: str,
+    receipts_file: "str | Path",
+    salvage_reason: str,
+    delivery: _Delivery,
+    tracked_paths: "tuple[str, ...]",
+    untracked_paths: "tuple[str, ...]",
+) -> PrEnforcementResult:
+    """The salvage push failed but the worker's work is on origin with a PR: stay
+    loud, keep the outcome. Warning log + ``pr_enforcement_warning`` receipt; the
+    result is ok=True with ``warning`` carrying the reason."""
+    warning = (
+        f"{salvage_reason}; the worker's own commits are already on origin"
+        + (f" with PR #{delivery.pr_number}" if delivery.pr_number else " (existing PR covers the branch)")
+        + " — the outcome follows that work. The salvage commit is kept on the local "
+        "branch and holds real uncommitted worker changes that are NOT on origin: review it"
+    )
+    logger.warning(
+        "pr_enforcement: salvage push failed, delivery intact dispatch=%s branch=%s — %s",
+        dispatch_id, branch, warning,
+    )
+    _record_delivery_warning_receipt(
+        dispatch_id=dispatch_id, branch=branch, reason=warning, receipts_file=receipts_file,
+        kind="dirty_substantive_salvage_push_failed_delivery_intact",
+        extra_fields={
+            "pr_number": delivery.pr_number,
+            "dirty_substantive": True,
+            "dirty_files": list(tracked_paths[:25]),
+            "dirty_file_count": len(tracked_paths),
+            "salvaged_untracked_files": list(untracked_paths[:25]),
+            "salvaged_untracked_count": len(untracked_paths),
+            "salvaged": False,
+            "salvage_committed_locally": True,
+        },
+    )
+    return PrEnforcementResult(
+        applicable=True, ok=True, pushed=True,
+        pr_number=delivery.pr_number, created=delivery.created,
+        reason="worker's work already on origin with a PR; salvage push failed (warning)",
+        warning=warning,
+    )
+
+
+@dataclass(frozen=True)
 class _PushOutcome:
     ok: bool
     reason: "Optional[str]" = None
 
 
-def _push_branch(*, branch: str, repo_root: Path) -> "_PushOutcome":
+def _push_branch(*, branch: str, cwd: Path) -> "_PushOutcome":
     """Push *branch* (``dispatch/<id>``) to origin. Never raises.
 
-    Runs ``git push -u origin <branch>`` from *repo_root*. The branch already
+    Runs ``git push -u origin <branch>`` from *cwd*: the dispatch worktree when
+    the caller knows it (OI-1846, so the operator's pre-push hooks in the main
+    checkout do not run), the main checkout otherwise. The branch already
     exists locally (the worker committed to it); this is the step the worker
     skipped. A failed push returns ok=False with the git stderr as the reason —
     the caller records a corrective receipt, so a committed-but-not-pushed
@@ -700,7 +1004,7 @@ def _push_branch(*, branch: str, repo_root: Path) -> "_PushOutcome":
     """
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo_root), "push", "-u", "origin", branch],
+            ["git", "-C", str(cwd), "push", "-u", "origin", branch],
             capture_output=True, text=True, timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — a push error must never crash the lane
@@ -727,35 +1031,78 @@ def _record_corrective_receipt(
     kind-specific evidence — file lists, salvage outcome — without every
     other corrective-receipt caller needing to know about it.
     """
+    payload = {
+        "event_type": "subprocess_completion",
+        "receipt_kind": "dispatch",
+        "dispatch_id": dispatch_id,
+        "status": "failed",
+        "autopr_rejected": True,
+        "autopr_reason": reason,
+        "autopr_kind": kind,
+        # OI-1415: the canonical failure_reason field (receipt_schema.py /
+        # failure_classification.py, read generically by e.g.
+        # dispatch_outcome_classifier._classify_receipts) — same text as
+        # autopr_reason above. Lane-specific field is kept unchanged; this is
+        # additive so a generic failure-reason reader sees the same rejection
+        # an autopr_reason-aware reader already does.
+        "failure_reason": reason,
+        "branch": branch,
+        **_receipt_identity(),
+    }
+    if extra_fields:
+        payload.update(extra_fields)
+    _append_enforcement_receipt(payload, receipts_file=receipts_file, dispatch_id=dispatch_id)
+
+
+def _record_delivery_warning_receipt(
+    *, dispatch_id: str, branch: str, reason: str, receipts_file: "str | Path",
+    kind: str, extra_fields: "Optional[dict]" = None,
+) -> None:
+    """Append a WARNING receipt (OI-1846): a cleanup step stumbled but the
+    worker's work is delivered. Never raises.
+
+    Deliberately not a completion receipt. It has no ``status``,
+    no ``autopr_rejected`` and no ``failure_reason``, and its event_type is
+    not a completion event, so ``dedup_completion_receipts`` and
+    ``dispatch_outcome_classifier`` cannot read it as the dispatch's outcome
+    (that is the whole point: the outcome follows the work). It is still on the
+    ledger with the reason, so the stumble is never silent.
+    """
+    payload = {
+        "event_type": "pr_enforcement_warning",
+        "receipt_kind": "dispatch",
+        "dispatch_id": dispatch_id,
+        "autopr_reason": reason,
+        "autopr_kind": kind,
+        "branch": branch,
+        **_receipt_identity(),
+    }
+    if extra_fields:
+        payload.update(extra_fields)
+    _append_enforcement_receipt(payload, receipts_file=receipts_file, dispatch_id=dispatch_id)
+
+
+def _receipt_identity() -> dict:
+    """Fields every pr_enforcement receipt carries."""
+    return {
+        "source": "pr_enforcement",
+        "synthesized": False,
+        # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
+        # model when the door exported it (best-effort; exempt source).
+        "model": os.environ.get("VNX_CURRENT_MODEL") or None,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _append_enforcement_receipt(
+    payload: dict, *, receipts_file: "str | Path", dispatch_id: str,
+) -> None:
+    """Append *payload* to the receipts ledger. Never raises: a failed append
+    must never break the lane."""
     try:
         if _SCRIPTS_DIR not in sys.path:
             sys.path.insert(0, _SCRIPTS_DIR)
-        from append_receipt import append_receipt_payload  # noqa: PLC0415
-        payload = {
-            "event_type": "subprocess_completion",
-            "receipt_kind": "dispatch",
-            "dispatch_id": dispatch_id,
-            "status": "failed",
-            "autopr_rejected": True,
-            "autopr_reason": reason,
-            "autopr_kind": kind,
-            # OI-1415: the canonical failure_reason field (receipt_schema.py /
-            # failure_classification.py, read generically by e.g.
-            # dispatch_outcome_classifier._classify_receipts) — same text as
-            # autopr_reason above. Lane-specific field is kept unchanged; this is
-            # additive so a generic failure-reason reader sees the same rejection
-            # an autopr_reason-aware reader already does.
-            "failure_reason": reason,
-            "branch": branch,
-            "source": "pr_enforcement",
-            "synthesized": False,
-            # dispatch-20260802-model-ssot-en-ketenlink: carry the dispatch
-            # model when the door exported it (best-effort; exempt source).
-            "model": os.environ.get("VNX_CURRENT_MODEL") or None,
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        if extra_fields:
-            payload.update(extra_fields)
+        from append_receipt import append_receipt_payload
         append_receipt_payload(
             payload,
             receipts_file=str(receipts_file),

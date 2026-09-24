@@ -8,6 +8,20 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ### Fixed
 
+- **A finished dispatch no longer fails because of its own cleanup (OI-1846).**
+  Three defects in the post-dispatch salvage (`pr_enforcement`), measured in
+  sales-copilot where two dispatches whose PR already existed ended on
+  `failure`. `git push` and every `gh` call now run from the dispatch worktree
+  when it is known, not from the main checkout, so the operator's pre-push
+  hooks no longer time the push out at 120 s. A worktree that is dirty only
+  through the generated `FEATURE_PLAN.md` is not forgotten work: it is never
+  salvage-committed, and its real commit state (unpushed worker commits, an
+  existing PR) is enforced instead. `write_feature_plan` also stops writing
+  inside a dispatch worktree, which is where the regen dirtied a tracked copy.
+  When the salvage push fails after the worker had already pushed with a PR,
+  the outcome stays a success and a `pr_enforcement_warning` receipt records
+  the reason. `classify_path` gained `ignore_working_tree` for the commit-state
+  read.
 - **A consumer dispatch no longer books "failed" for work that succeeded
   because the receipt's warning counter sat in the read-only install (OI-1788).**
   On mission-control (v1.6.3, probe D-615f4dc5) `envelope._govern` logged

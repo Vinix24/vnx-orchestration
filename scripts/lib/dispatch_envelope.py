@@ -147,7 +147,10 @@ def _enforce_push_pr(
     opens a draft PR) and still reports ok=False, so it takes the same
     status="failure" path as a failed push below; it is treated exactly like a
     committed-but-unpushed branch, because that is what the reaper would
-    otherwise destroy. Never raises: an internal error fails open (the worktree
+    otherwise destroy. Two exceptions keep the outcome instead (OI-1846): a
+    dirty tree holding only generated files (FEATURE_PLAN.md) is enforced as
+    the commit state it hides, and a failing SALVAGE push after the worker
+    already pushed with a PR is a warning, not a failure. Never raises: an internal error fails open (the worktree
     is still torn down by the caller's finally block), matching the tmux lane's
     _enforce_pr_exists contract.
 
@@ -224,7 +227,12 @@ def _enforce_push_pr(
             # substantive (loud + salvaged) vs scratch-only (unchanged). The
             # worktree still exists here — this call runs BEFORE
             # remove_dispatch_worktree in the caller's finally block.
+            # OI-1846: it is also where git push and gh run from.
             wt_path=wt_path,
+            # OI-1846: the same base classify_path was given, for the case where
+            # a dirty tree holds only generated files and the commit state is
+            # read again without the working-tree verdict.
+            base_sha=base_sha,
         )
     except Exception as exc:  # noqa: BLE001 — never block a real completion on this guard
         logger.error(
@@ -239,6 +247,13 @@ def _enforce_push_pr(
             "envelope: PR-enforcement OK dispatch=%s state=%s pr=%s created=%s",
             dispatch_id, state, pr_result.pr_number, pr_result.created,
         )
+        if pr_result.warning:
+            # OI-1846: delivered work, a cleanup step stumbled. The outcome
+            # follows the work; the stumble stays loud.
+            logger.warning(
+                "envelope: PR-enforcement OK WITH WARNING dispatch=%s state=%s — %s",
+                dispatch_id, state, pr_result.warning,
+            )
         return result
 
     logger.warning(

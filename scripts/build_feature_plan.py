@@ -385,15 +385,52 @@ def generate_feature_plan(
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _inside_dispatch_worktree(path: Path) -> bool:
+    """True when *path* lies inside a dispatch worktree.
+
+    A dispatch worktree is ``<root>/.vnx-data/worktrees/dispatch-<id>`` — the one
+    layout dispatch_worktree_isolation allocates and _repo_root_from_worktree_path
+    reads back. (A worktree relocated with VNX_BENCH_WORKTREE_ROOT carries no such
+    marker; the benchmark runs no consumer build with a tracked FEATURE_PLAN.md.)
+    """
+    for ancestor in Path(path).resolve().parents:
+        if (
+            ancestor.name.startswith("dispatch-")
+            and ancestor.parent.name == "worktrees"
+            and ancestor.parent.parent.name == ".vnx-data"
+        ):
+            return True
+    return False
+
+
 def write_feature_plan(
     output_path: Optional[Path] = None,
     dry_run: bool = False,
     state_dir: Optional[Path] = None,
     recent_days: int = 14,
 ) -> str:
-    """Read all sources, generate content, write to output_path. Returns content."""
+    """Read all sources, generate content, write to output_path. Returns content.
+
+    OI-1846: never writes inside a dispatch worktree; returns "" there instead.
+    Every background regen funnels through this function (build_t0_state's
+    SessionStart hook, its receipt-triggered rebuild, ``vnx status``, this
+    script's CLI), and inside a dispatch worktree the file lands in the
+    worker's own tree. Where a consumer tracks FEATURE_PLAN.md (this repo
+    ignores it since OI-1376), that turns a finished dispatch into a dirty
+    worktree, and the salvage step then commits the regenerated file as
+    "forgotten work". The canonical copy is the main checkout's, which the same
+    regen keeps current. ``dry_run`` is unaffected: it writes nothing.
+    """
     if output_path is None:
         output_path = _REPO_ROOT / "FEATURE_PLAN.md"
+
+    if not dry_run and _inside_dispatch_worktree(output_path):
+        log.info(
+            "FEATURE_PLAN.md regen skipped: %s is inside a dispatch worktree "
+            "(OI-1846); the main checkout carries the canonical copy",
+            output_path,
+        )
+        return ""
 
     register_events = read_register_events(state_dir=state_dir)
     merged_prs = fetch_merged_prs()
