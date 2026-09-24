@@ -6,119 +6,264 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
-Sixteen commits since v1.6.2. The user-visible shape: the tmux dispatch
-lane is gone outright (not just refused), the harness-lane gates fail
-closed on reports and verdict-blocks that never landed, gate findings
-carry a structured file/line address, and the provider registry admits
-glm-5.3.
+## [1.6.3] - 2026-09-24
 
-### Removed
-
-- **The tmux dispatch lane is removed (#1868, #1869)** —
-  `scripts/lib/tmux_interactive_dispatch.py`, the `force_tmux` spec
-  fields and flags, and the `VNX_ALLOW_TMUX_LANE` emergency brake are
-  gone; `claude_headless` is the only claude lane. Tmux session
-  management (`tmux_adapter.py`, `tmux_worktree.py`, the signalling
-  hooks) is untouched. See `docs/operations/TMUX_SPAWN_LANE.md`.
+Patch release (49 commits since v1.6.2). Headline: consumers no longer stall
+on an exhausted codex quota. The dispatch door declares the reviewer from
+`VNX_DEFAULT_REVIEW_STACK` instead of a hardcoded `codex_gate` (#1872), and a
+provider quota refusal counts as a reviewer being absent, not as a gate cause
+that trips E6 (#1863). Around that sit the absence-is-loud run (beacons,
+receipt gaps, quarantine, parked components, launchd drivers), a T0 that
+blocks subagents, and the removal of the tmux dispatch lane.
 
 ### Added
 
-- **Gate findings carry a structured address (#1859, #1866)** — findings
-  gain a `file_path`/`line` address, and every gate gets its findings,
-  not just `codex_gate`.
-- **The provider registry admits glm-5.3 and glm-5.3-flash (#1855)** —
-  alongside glm-5.2.
-- **The default review stack is `codex_gate,glm_gate` (#1852)**.
+- **T0 blocks subagents and warns when its role is not loaded (#1907).** A
+  PreToolUse hook (`scripts/hooks/pretooluse_t0_no_subagents.py`) denies the
+  `Agent` and `Task` tools in a T0 session and points to `vnx dispatch`. T0 is
+  recognised by the session cwd or by the launch directory encoded in
+  `transcript_path`. Workers and every other tool are untouched. The hook ships
+  through the settings templates. SessionStart puts `ROLE NOT LOADED` at the top
+  of the T0 injection when the terminal `CLAUDE.md` does not import the
+  canonical role, measured with `fleet_role_drift --reach`. The rule used to
+  live only in the role file: one consumer project logged 280 `Agent` calls in
+  13 T0 transcripts.
+- **An explained receipt gap can be acknowledged (#1897).**
+  `ledger_health.py acknowledge --dispatch-id ID --reason "..."` appends to
+  `<state_dir>/ledger_coverage_acknowledged.ndjson`. `receipt_coverage`
+  subtracts acknowledged ids and stays `finding` only for an unacknowledged
+  gap, so the check can go green and a new gap is visible again. A blank reason
+  is refused. An unreadable acknowledgement file reads as unverified and
+  silences nothing. The two lane events that reuse `dispatch_id` for a lane
+  label no longer count as gaps.
+- **One parked register, with a reason per item (#1900, #1904).**
+  `beacon_register` gains `PARKED_ARTIFACTS` and `PARKED_LAUNCHD_JOBS` next to
+  `PARKED_COMPONENTS`. The intelligence layer was parked on 2026-09-09 but only
+  the beacon reader knew, so two other readers reported the consequence as a
+  fault. SessionStart now reads a parked `t0_recommendations.json` as
+  `[PARKED] <name>: age N days` plus the reason instead of STALE and BLOCKED.
+  `launchd_liveness` reads the three never-installed jobs (nightly intelligence
+  pipeline, receipt classifier batch, F41 headless trigger) as `parked` and no
+  longer pins `overall` on fail. The `intelligence-self-learning-loop` beacon
+  joined the register on 2026-09-24. Parking covers absence only: a fresh
+  artifact reads fresh, a beacon that says `status: fail` stays `fail`, and a
+  parked job that is loaded and exiting non-zero stays `loaded` with its exit
+  status.
+- **Three launchd drivers for producers that only ran by hand (#1900, #1902).**
+  Templates under `scripts/launchd/`, installed with `reload_plist.sh`.
+  `com.vnx.dashboard-generator` keeps `generate_valid_dashboard.sh` running (it
+  only ran as a child of `vnx start`, so `dashboard_status.json` was 88 days
+  old). `com.vnx.fleet-role-drift` runs `fleet_role_drift.py --write-state`
+  every 6 hours. `com.vnx.subsystem-probe` runs
+  `python3 -m vnx_cli.main subsystems --probe` every 6 hours and once on
+  install. The `governance-enforcement-stack` and `plan-gate-panel` beacons had
+  read stale from 12 July to 24 September, because
+  `subsystem_health.aggregate()` only ran when someone typed the command.
+  Install the probe driver from the primary checkout: the probes read the
+  git-ignored `.vnx-attest/` ledger of the checkout they run from, so a
+  worktree measures nothing and writes no beacon.
+- **Gate findings carry a structured address (#1859, #1866).** Findings gain a
+  `file_path`/`line` address, and every gate gets its findings, not just
+  `codex_gate`.
+- **The provider registry admits glm-5.3 and glm-5.3-flash (#1855)**, alongside
+  glm-5.2.
+- **`scripts/intel_injection_join.py` (#1882).** A per-dispatch join of offered,
+  used and ignored-with-reason patterns over the injection offers, plus an
+  adoption-rate report (used against offered, per pattern and over time).
+- **Finding-triage spike scripts (#1884, #1888, #1889).**
+  `scripts/spikes/laya_finding_triage/` measures a regex baseline against
+  classifier arms (Laya on CoreML and MLX, JEV via OpenRouter) on gate findings.
+  Nothing in the runtime imports them.
+- **Documentation (#1885, #1905, #1908, #1909).** The smart-router design doc
+  gains section 5 on benchmark provenance and the self-learning loop design. The
+  tmux clean-up is inventoried (106 files under `scripts/lib`, 71 files outside
+  it and 9 daemons) and planned in 23 slices over four phases, in
+  `claudedocs/2026-09-24-tmux-inventaris-A-scripts-lib.md`,
+  `claudedocs/2026-09-24-tmux-inventaris-B-rest-en-daemons.md` and
+  `claudedocs/2026-09-24-tmux-opruimplan.md`. The plan keeps the tmux injection
+  path into interactive kimi, codex and gemini terminals and removes the old
+  claude-pane architecture. Analysis only: no code changed.
+
+### Changed
+
+- **Build-workers default to sonnet and T0 is pinned to Opus 5.5 (#1890).**
+  Operator decisions of 2026-09-23. A claude-lane build-worker dispatch without
+  an explicit model now resolves to sonnet and passes. Before it resolved to
+  kimi-k3 and was rejected by `kimi-via-cli-only`. kimi-k3 stays an explicit
+  per-dispatch choice. `opus-5-5` (`claude-opus-5-5`) is registered and the
+  `t0-opus-only` pin points at it. `opus-5` stays registered for the side-by-side
+  measurement. The constraint id stays `workers-kimi-pinned` because the pin
+  loader keys on that exact string.
+- **The default review stack is `codex_gate,glm_gate` (#1852).** The door now
+  follows the configured stack (#1872, see Fixed).
+- **README and CHANGELOG aligned with the code at v1.6.2 (#1877).** The README
+  no longer mentions the removed tmux dispatch lane, opens with subscription
+  billing next to governance, and carries re-measured numbers.
+- **`vnx init` help text matches the repin gate (#1878).** Repinning an
+  initialised project takes `--force --set-version`. `--set-version` alone still
+  aborts. Text only, no behaviour change.
 
 ### Fixed
 
-- **The SessionStart hook finds the central store from a consumer project** —
-  the v1.6.2 hook located `vnx_paths.py` at `$_HOOK_DIR/../scripts`, which is
-  the repo's own `scripts/` only in the fabric repo. A consumer's deployed hook
-  sits in `<project>/.claude/hooks/`, so it looked in a `.claude/scripts/` that
-  does not exist and reported "VNX STATE STORE NOT FOUND" with terminal states,
-  open items, receipts, beacon health, producer freshness and state freshness
-  all UNMEASURED. The hook now picks one scripts root, once: `../scripts` when
-  it holds `lib/vnx_paths.py`, else `$VNX_HOME/scripts`, else
+- **The review obligation follows the configured review stack, and a quota
+  refusal no longer trips E6 (#1872, #1863).** The door filled a silent
+  `spec.gate` from a hardcoded table that named `codex_gate` for the default and
+  coding-strict variants and never read `VNX_DEFAULT_REVIEW_STACK`. On
+  2026-09-19 in mission-control the project config carried
+  `glm_gate,claude_github_optional`. Every new obligation still named
+  `codex_gate`, and five PRs sat for hours on an exhausted codex quota while the
+  glm gate the project had configured had already approved all five. The door now
+  declares the heaviest seat of the configured stack, so a project that never
+  changed its stack sees no difference. An unreadable, empty or unknown stack is
+  refused with `gate-config-unreadable` instead of falling back to a default.
+  `deepseek_gate` is now in the one registry of legal gate names. On the other
+  side `gate_recorder` booked a provider quota refusal as `exit_nonzero`, so
+  `stop_conditions` read three of them as one systemic cause and E6 halted every
+  dispatch in mission-control on 2026-09-17. The refusal is now classified once,
+  at write time, and booked as a quota refusal. E6 excludes it from its streak
+  the way it already excludes `gate_runner_missing`, with its own loud notice.
+  The threshold is unchanged and E6 still triggers on any cause the fabric owns.
+  Together the two lift the E6 block that left consumers stalled on a codex
+  quota.
+- **The SessionStart hook finds the central store from a consumer project
+  (#1906).** The v1.6.2 hook located `vnx_paths.py` at `$_HOOK_DIR/../scripts`,
+  which is the repo's own `scripts/` only in the fabric repo. A consumer's
+  deployed hook sits in `<project>/.claude/hooks/`, so it looked in a
+  `.claude/scripts/` that does not exist. It reported "VNX STATE STORE NOT FOUND"
+  with terminal states, open items, receipts, beacon health, producer freshness
+  and state freshness all UNMEASURED. The hook now picks one scripts root, once:
+  `../scripts` when it holds `lib/vnx_paths.py`, else `$VNX_HOME/scripts`, else
   `~/.vnx-system/current/scripts`. `resolve_paths()` stays the only resolver.
-  When no root exists the UNMEASURED line names the three places tried. The
-  fix reaches a consumer when its hook is redeployed (`bootstrap_hooks`).
-
-- **Harness-lane failure honesty (#1857, #1858, #1864, #1871, #1874,
-  #1875)** — a spawn-failure report is refused as `completed`; API-error
-  failures with no `failure_reason` are caught; a verdict-block that was
-  never written is refused; the shared verdict reader reads a bare
-  verdict object; the verdict guard covers `codex_gate` with the decision
-  taken on the provider; and the codex booking reads the same verdict the
-  guard reads.
-- **Obligation hygiene (#1861, #1862, #1865)** — PRs that carry no
-  review-gate obligation are reported loudly; a refused overwrite-guard
-  write gets a durable audit line; and terminal obligations whose
-  evidence went stale after closing are detected.
-- **The router refuses an unknown `task_class` (#1860)** — instead of
-  silently routing nothing.
-- **A generated MCP config no longer carries a credential.** `vnx init`
-  and `vnx bootstrap-terminals` copied every global server, `env` and all,
-  into each terminal `.mcp.json`. Claude Code ignores the `disabled` flag
-  they added, so the copy started with frozen keys and outranked
-  `~/.claude.json`. Both now share `scripts/lib/mcp_server_config.py` and
-  write a name-only mask (`{"command": "true"}`) per global server, derived
-  again on every run. The role-scoped worker `--mcp-config` keeps `env` and
-  `headers` only as `${VAR}` references, so no literal reaches the process
-  list. The dead `scripts/mcp_profile_manager.sh` is removed.
-- **What the operator parked no longer reports as broken.** The
-  intelligence layer was parked on 2026-09-09, but only the beacon reader
-  knew. `beacon_register` now holds one register, with a reason per item,
-  for state artifacts and launchd jobs next to `PARKED_COMPONENTS`.
-  SessionStart reads a parked `t0_recommendations.json` as
-  `[PARKED] <name>: age N days` plus the reason instead of STALE and
-  BLOCKED. `launchd_liveness` reads the three never-installed jobs
-  (nightly intelligence pipeline, receipt classifier batch, F41 headless
-  trigger) as `parked` and no longer pins `overall` on fail. Parking
-  covers absence only: a fresh artifact reads fresh, and a parked job
-  that is loaded and exiting non-zero stays `loaded` with its exit status.
-- **Two producers get a driver.** `com.vnx.dashboard-generator` keeps
-  `generate_valid_dashboard.sh` running (it only ever ran as a child of
-  `vnx start`, so `dashboard_status.json` was 88 days old) and
-  `com.vnx.fleet-role-drift` runs `fleet_role_drift.py --write-state` every
-  6 hours so its beacon exists. Both are templates under `scripts/launchd/`
-  and are installed by hand with `reload_plist.sh`.
-- **The two subsystem beacons get a driver.** `governance-enforcement-stack`
-  and `plan-gate-panel` read stale in t0_state from 12 July to 24 September.
-  `subsystem_health.aggregate()` only ran when someone typed
-  `vnx subsystems --probe`, and the beacons it writes carry a 24-hour window.
-  `com.vnx.subsystem-probe` runs `python3 -m vnx_cli.main subsystems --probe`
-  (the entry `vnx subsystems` wraps) every 6 hours and once on install, and
-  the beacons land in `<data_dir>/health/`. It is installed by hand with
-  `reload_plist.sh`, from the primary checkout: the probes read the
-  git-ignored `.vnx-attest/` ledger of the checkout they run from, so a
-  worktree measures nothing and writes no beacon.
-- **A test run outside pytest could write the real central store.** The #1333
-  guard only recognised pytest, and `tests/conftest.py` pins a tmp store only
-  under pytest. So `python -m unittest test_auto_commit_stash_isolation` put a
-  `fail` beacon, register events and a `runtime_coordination.db` for
-  `dispatch-fwd-01` into `~/.vnx-data/vnx-dev`. The guard is now
+  When no root exists the UNMEASURED line names the three places tried. A
+  consumer gets the fix when its hook is redeployed (`bootstrap_hooks`).
+- **Hook hygiene (#1894, #1891).** The UserPromptSubmit fallback in the settings
+  template ended on `echo '{"decision": "allow"}'`. It fires wherever `$PWD` does
+  not end in T0 to T3, so in every worktree, and the literal text reached every
+  worker's context (OI-1816). The fallback is now `exit 0`, the two inject scripts
+  exit 0 with empty stdout on their no-op paths, and context goes out as
+  `hookSpecificOutput.additionalContext`. A new test holds every settings
+  template to "no top-level decision". Separately, a path fragment inside a word
+  is no longer read as an absolute path: `/hooks/build_t0_state_hook.sh` inside a
+  printf error text was reported as a dead absolute pin in every T0 session.
+- **Beacon readers expect what the writers do (#1896).** t0_state and the
+  dashboard health API now pass the parked component names, so `learning_loop`
+  and `intelligence_daemon` no longer read `stale` where SessionStart says
+  `parked`. An event-driven writer (`expected_interval_seconds=None`) owes no
+  beacon between two events, so its silence no longer reads `absent` and counts
+  as fail. A beacon on disk with `status: fail` stays `fail`.
+  `fleet_role_drift --write-state` writes its beacon to `<data_dir>/health/`
+  where the readers look.
+- **A report refused for its model is quarantined, and the refusal stays loud
+  for 24 hours (#1898, #1901).** The converter refused a report with no real
+  model and left it in `unified_reports/`. Every scan retried it, so
+  `report_to_receipt_converter` stayed at fail and 15 reports hid the next new
+  refusal behind an alarm that was already on. `missing_model` and
+  `invalid_model_shape` (a `**Model:** glm-5.2 · **Provider:** claude` line
+  made the parser read the rest of the line as the model) now move to
+  `receipt_deadletter/` with an INDEX line. Nothing is deleted. Both beacons
+  stay at fail while a refusal younger than 24 hours is in the history, then
+  return to ok with the history kept in `details.rejected`.
+  `receipt_conversion_rejections` applies the same rule, so the two beacons no
+  longer contradict each other on one scan. The fail-closed model check itself
+  is unchanged.
+- **Lane identity reaches the receipt (#1886, OI-1546, OI-1547).** The
+  converter read only the legacy `selected_model` (1 of 765 route decisions) and
+  ignored the `decision` block that 764 use. It therefore fell back to the
+  report's own claim almost every time. On a harness lane that claim is wrong:
+  the CLI says sonnet/claude while the lane runs glm-5.2. The converter now reads
+  both shapes and treats "no usable route decision" as an explicit third source.
+  Provider prose in the provider field is refused as a visible
+  `unrecognized_provider` contract violation.
+- **The receipt converter dry-run is side-effect-free and faithful (#1879,
+  OI-1744).** A dry run moved reports into `receipt_deadletter/` and wrote
+  gate-obligation `pr_link`s. It also counted a report as `would_append` that
+  the fail-closed model check would refuse (45 would-book, 0 rejected against 28
+  booked and 16 rejected on a copy of the live store). Both are fixed. A
+  staleness tripwire test fails when the live converter beacon is older than the
+  interval it promises: the converter had stood still for more than 17 days because the
+  per-project launchd job of its host loop was never installed for vnx-dev.
+- **A successful dispatch writes its own receipt (#1880, OI-1743).** The
+  worker run and `_enforce_push_pr` had a `finally` and no `except`, so an
+  exception after a successful worker skipped `_govern` and left neither report
+  nor receipt. The exception is now turned into a failure result that keeps what
+  the worker produced, and `_govern` runs regardless. `run_envelope` has the same
+  shape.
+- **The effectiveness probes read the central store, and a failed `--probe`
+  exits non-zero (#1903).** Without an env pin the probes resolved the
+  checkout-local state, a stale copy. On 2026-09-24 the `plan-gate-panel` beacon
+  said ok while the live store held 90 unresolved OI-PLAN blockers.
+  `vnx subsystems --probe` now hands its data dir to every probe that takes a
+  state dir and fails with a message on stderr and exit code 1, instead of
+  rendering every row as `unknown` and exiting 0.
+- **A test run outside pytest could write the real central store (#1899).** The
+  #1333 guard only recognised pytest, so `python -m unittest
+  test_auto_commit_stash_isolation` put a `fail` beacon, register events and a
+  `runtime_coordination.db` into `~/.vnx-data/vnx-dev`. The guard is now
   `vnx_paths.refuse_real_central_store_write_under_test_runner` (the pytest-only
-  name is gone, no alias) and reads the runner itself: a `unittest` frame on any
-  thread's call stack, via `running_under_test_runner()`. It is not an
-  environment variable and not `import unittest`, so a production process that
-  imports `unittest` or `unittest.mock` is untouched. It sits on
-  `state_writer` (every state NDJSON append, the dispatch register included),
-  `HealthBeacon`, `cleanup_worker_exit` and the four writers of
-  `intelligence_usage.ndjson`, next to the receipt append that already had it.
-  The test itself is hermetic now: it patched `subprocess_dispatch.SubprocessAdapter`,
-  but `claude_spawn` imports its own, so each delivery test spawned a real
-  `claude -p`, bounded only by the 900 s `total_deadline`.
-- **The self-learning-loop beacon is parked with the layer it measures.**
-  Since #1903 the subsystem probes read the central store, so
-  `subsystem_health.aggregate()` writes `intelligence-self-learning-loop`
-  (measured 2026-09-24: `ignore_rate` 0.868, 585 ignored against 89 used,
-  no dream cycle) and it read `stale` in t0_state. It measures the learning
-  loop the operator parked on 2026-09-09 (#1832), and on 2026-09-24 the
-  operator parked it under the same decision. It is now in
-  `beacon_register.PARKED_COMPONENTS`, so t0_state and the SessionStart digest
-  read `parked`. Parking covers stale, unknown and absent only: a beacon that
-  says `status: fail` stays `fail`.
+  name is gone, no alias). It reads the runner itself, a `unittest` frame on any
+  thread's call stack, so a production process that merely imports `unittest`
+  is untouched. It sits on `state_writer`, `HealthBeacon`,
+  `cleanup_worker_exit` and the writers of `intelligence_usage.ndjson`, next to
+  the receipt append that already had it. The test that leaked is hermetic now:
+  it patched the wrong `SubprocessAdapter`, so each delivery test spawned a real
+  `claude -p`.
+- **The confidence loop writes outcomes again (#1893).** On 2026-09-23
+  `confidence_events` held 1 row (from 13 June) and 239 of 241 dispatch receipts
+  with a cqs field read `unknown` in the quality score. `skip_enrichment=True`
+  had skipped every post-append hook, the confidence update included. Now only
+  the advisory hooks stay behind the flag. The update also resolved its store
+  from its own checkout and now writes to the store the receipt went to, and the
+  lane's own outcome receipt calls it too. An outcome counts once per project,
+  dispatch and outcome. A lane or provider failure (`empty_completion`,
+  `credit_exhausted`) is not a signal about the patterns and does not count. A
+  report that passes the contract and declares no status becomes `done`, with
+  `status_source` on the receipt. The identity block is also read at the bottom
+  of a report.
+- **Injection outcome rows land (#1882).** `_pattern_usage_signals` subtracted a
+  naive `datetime.now()` from an offset-aware `last_offered`. The `TypeError`
+  escaped the instrument's own catch, so `pattern_injection_outcome` held 0 rows
+  after 6919 injections. The subtraction is tz-aware now.
+- **The dream cycle runs as a proposal when the injection probe is degraded
+  (#1892).** `com.vnx.auto-dream` ran 55 times since 2026-07-31 and skipped every
+  run on `probe_not_ok`, so `dream_cycles` has 0 rows: the gate blocked the
+  consolidation that remedies the ignored patterns. A `degraded` probe now lets
+  the cycle run with `mode=proposal_only`. Archiving still happens only in
+  `review_gate.approve_cycle`, an operator action. `produces_crap`, `unknown` and
+  any unrecognised status still skip.
+- **Harness-lane failure honesty (#1857, #1858, #1864, #1871, #1874, #1875).** A
+  spawn-failure report is refused as `completed`. API-error failures with no
+  `failure_reason` are caught. A verdict-block that was never written is
+  refused. The shared verdict reader reads a bare verdict object. The verdict
+  guard covers `codex_gate`, with the decision taken on the provider. The codex
+  booking reads the same verdict the guard reads.
+- **Obligation hygiene (#1861, #1862, #1865, #1881).** PRs that carry no
+  review-gate obligation are reported loudly. A refused overwrite-guard write
+  gets a durable audit line. Terminal obligations whose evidence went stale after
+  closing are detected. `gate_obligation_retire_backlog.py` refuses (exit 20)
+  when its PR source and its branch source resolve to different repositories,
+  when `--project-root` is not a git repository, or when there is no GitHub
+  origin. Before, a mixed source would have retired 40 obligations with a
+  fabricated `no_pr_branch_gone` reason (OI-1795).
+- **The router refuses an unknown `task_class` (#1860)** instead of silently
+  routing nothing.
+- **A generated MCP config no longer carries a credential (#1895).** `vnx init`
+  and `vnx bootstrap-terminals` copied every global server, `env` and all, into
+  each terminal `.mcp.json`. Claude Code ignores the `disabled` flag they added,
+  so the copy started with frozen keys and outranked `~/.claude.json`. Both now
+  share `scripts/lib/mcp_server_config.py` and write a name-only mask
+  (`{"command": "true"}`) per global server, derived again on every run. The
+  role-scoped worker `--mcp-config` keeps `env` and `headers` only as `${VAR}`
+  references, so no literal reaches the process list. The dead
+  `scripts/mcp_profile_manager.sh` is removed.
+
+### Removed
+
+- **The tmux dispatch lane (#1868, #1869).**
+  `scripts/lib/tmux_interactive_dispatch.py`, the `force_tmux` spec fields and
+  flags, and the `VNX_ALLOW_TMUX_LANE` emergency brake are gone.
+  `claude_headless` is the only claude lane. Tmux session management
+  (`tmux_adapter.py`, `tmux_worktree.py`, the signalling hooks) is untouched. See
+  `docs/operations/TMUX_SPAWN_LANE.md`.
 
 ## [1.6.2] — 2026-09-12
 
