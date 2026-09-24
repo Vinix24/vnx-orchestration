@@ -22,6 +22,27 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   the outcome stays a success and a `pr_enforcement_warning` receipt records
   the reason. `classify_path` gained `ignore_working_tree` for the commit-state
   read.
+- **A consumer dispatch no longer books "failed" for work that succeeded
+  because the receipt's warning counter sat in the read-only install (OI-1788).**
+  On mission-control (v1.6.3, probe D-615f4dc5) `envelope._govern` logged
+  `VNX_RECEIPT_EMIT_FAILURE work_status=success: Failed to acquire append lock:
+  [Errno 13] Permission denied: '~/.vnx-system/versions/v1.6.3/.vnx-data'`,
+  75 times since 2026-09-15. The lock was never the problem: `spec.state_dir`
+  was the project's central store and the ledger path was right. The failing
+  call was the receipt's pre-write hook. A `warnings[]` entry that resolves to
+  `counted` (every worker report that misses a contract heading stamps one)
+  bumps a recurrence counter, and `warning_destination._default_counter_path`
+  built that path with `resolve_state_dir(__file__)`. Inside an install that is
+  the version directory (`dr-xr-xr-x`), so the counter's `mkdir` raised. Both
+  receipt writers (`governance_emit.emit_dispatch_receipt` and
+  `append_receipt_payload`) now keep the counter beside the ledger they append
+  to. The no-ledger default and `session_resolver`'s fallback use
+  `vnx_paths.resolve_state_dir()`, where an explicit `VNX_STATE_DIR` still
+  wins. Both files left the grandfather list of the central-mode path gate.
+  `_write_receipt_under_lock` also stopped reporting every `OSError` from the
+  pre-write hook as "Failed to acquire append lock": that label sent the first
+  diagnosis after the lock path while the lock was held. It now says
+  `pre_write_hook_failed` and names the real path.
 
 ## [1.6.3] - 2026-09-24
 

@@ -122,10 +122,34 @@ def derive_open_items_created(warnings_list: Optional[Any]) -> int:
     )
 
 
-def _default_counter_path() -> Path:
-    from project_root import resolve_state_dir
+def counter_path_beside(receipts_file: Path) -> Path:
+    """The recurrence counter for a ledger: next to that ledger, in its own state dir.
 
-    return resolve_state_dir(__file__) / _COUNTER_FILENAME
+    Both receipt writers (``append_receipt_payload`` and
+    ``governance_emit.emit_dispatch_receipt``) pass this as ``counter_path``, so
+    a warning is counted in the store its receipt lands in. Nothing about the
+    location comes from the environment, the working directory or the location
+    of this module (OI-1788).
+    """
+    return Path(receipts_file).parent / _COUNTER_FILENAME
+
+
+def _default_counter_path() -> Path:
+    """The counter for a caller that does not know which ledger it serves.
+
+    The canonical per-project store (ADR-026): an explicit ``VNX_STATE_DIR``
+    first, otherwise ``vnx_paths.resolve_paths()``, which for a governed project
+    is the central ``~/.vnx-data/<project_id>/state``.
+
+    Not ``project_root.resolve_state_dir(__file__)``: that anchors on the
+    location of THIS FILE. Inside a central install that is the read-only
+    ``~/.vnx-system/versions/<v>/`` tree, so the counter's ``mkdir`` raised
+    ``PermissionError`` and every dispatch whose receipt carried a ``counted``
+    warning was booked as failed (OI-1788, mission-control v1.6.3).
+    """
+    import vnx_paths
+
+    return vnx_paths.resolve_state_dir() / _COUNTER_FILENAME
 
 
 def _counter_lock_path(counter_path: Path) -> Path:

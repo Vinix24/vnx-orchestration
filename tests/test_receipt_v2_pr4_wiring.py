@@ -514,6 +514,13 @@ def test_t25_multi_provider_subpath_pending_report(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _ambient_counter_path_forbidden():
+    raise AssertionError(
+        "the receipt write path must pass the ledger's own counter path "
+        "(warning_destination.counter_path_beside), not resolve one from the environment"
+    )
+
+
 def test_fixr1_dedup_never_commits_warning_side_effects(tmp_path, monkeypatch):
     """A receipt that idempotency dedups (same dispatch_id, second append
     attempt) must not touch the OI store or bump the recurrence counter on
@@ -522,8 +529,11 @@ def test_fixr1_dedup_never_commits_warning_side_effects(tmp_path, monkeypatch):
     on-disk counter value before/after the duplicate attempt."""
     import append_receipt_internals.warning_destination as wd
 
-    counter_path = tmp_path / "counts.json"
-    monkeypatch.setattr(wd, "_default_counter_path", lambda: counter_path)
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    # OI-1788: the write path keeps the counter beside the ledger it appends to
+    # and must never fall back to the ambient default location.
+    counter_path = wd.counter_path_beside(receipts_path)
+    monkeypatch.setattr(wd, "_default_counter_path", _ambient_counter_path_forbidden)
 
     oi_calls = {"n": 0}
 
@@ -542,8 +552,6 @@ def test_fixr1_dedup_never_commits_warning_side_effects(tmp_path, monkeypatch):
                 {"code": "dedup_counted_check", "severity": "warn", "message": "m"},
             ],
         )
-
-    receipts_path = tmp_path / "t0_receipts.ndjson"
 
     result1 = _path2_append(_fresh_receipt(), receipts_path)
     assert result1.status == "appended"
@@ -574,8 +582,9 @@ def test_fixr1_validator_rejection_never_commits_warning_side_effects(tmp_path, 
     receipt that ends up rejected."""
     import append_receipt_internals.warning_destination as wd
 
-    counter_path = tmp_path / "counts.json"
-    monkeypatch.setattr(wd, "_default_counter_path", lambda: counter_path)
+    receipts_path = tmp_path / "t0_receipts.ndjson"
+    counter_path = wd.counter_path_beside(receipts_path)
+    monkeypatch.setattr(wd, "_default_counter_path", _ambient_counter_path_forbidden)
 
     class _NeverCalledOIM:
         def add_item_programmatic(self, **kwargs):
@@ -583,7 +592,6 @@ def test_fixr1_validator_rejection_never_commits_warning_side_effects(tmp_path, 
 
     monkeypatch.setattr(wd, "_get_open_items_manager", lambda: _NeverCalledOIM())
 
-    receipts_path = tmp_path / "t0_receipts.ndjson"
     receipt = {
         "timestamp": "2026-07-22T10:00:00Z",
         "event_type": "task_complete",
