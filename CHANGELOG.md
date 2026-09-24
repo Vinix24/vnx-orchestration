@@ -6,10 +6,31 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-09-24
+
+Patch release (3 commits since v1.6.3). A consumer dispatch no longer books
+successful work as failed. Two causes are fixed: the receipt's warning counter
+no longer writes into the read-only install (OI-1788, #1912), and the salvage
+step no longer fails a dispatch whose PR was already delivered (OI-1846,
+#1913). The only other change is a research document on subagent
+observability (#1910).
+
+### Added
+
+- **Documentation (#1910).** A read-only study of what Claude Code 2.1.281
+  offers for subagent observability (hooks, transcripts, OTel, isolation),
+  measured against 70 subagents in one SEOcrawler_v2 T0 session and against the
+  headless lane per property, in
+  `claudedocs/2026-09-24-subagent-observability-onderzoek.md`. None of the 70
+  carried a dispatch id, report or receipt while 67 pushed code. Three options
+  are laid out (forbid subagents for governed work, read-only research with a
+  receipt via a hook, replace the headless lane) and nine points stay open with
+  the measurement that decides each. Analysis only: no code changed.
+
 ### Fixed
 
-- **A finished dispatch no longer fails because of its own cleanup (OI-1846).**
-  Three defects in the post-dispatch salvage (`pr_enforcement`), measured in
+- **A finished dispatch no longer fails because of its own cleanup (OI-1846,
+  #1913).** Three defects in the post-dispatch salvage (`pr_enforcement`), measured in
   sales-copilot where two dispatches whose PR already existed ended on
   `failure`. `git push` and every `gh` call now run from the dispatch worktree
   when it is known, not from the main checkout, so the operator's pre-push
@@ -23,7 +44,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   the reason. `classify_path` gained `ignore_working_tree` for the commit-state
   read.
 - **A consumer dispatch no longer books "failed" for work that succeeded
-  because the receipt's warning counter sat in the read-only install (OI-1788).**
+  because the receipt's warning counter sat in the read-only install (OI-1788,
+  #1912).**
   On mission-control (v1.6.3, probe D-615f4dc5) `envelope._govern` logged
   `VNX_RECEIPT_EMIT_FAILURE work_status=success: Failed to acquire append lock:
   [Errno 13] Permission denied: '~/.vnx-system/versions/v1.6.3/.vnx-data'`,
