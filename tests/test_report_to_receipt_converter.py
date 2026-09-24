@@ -1446,6 +1446,220 @@ class TestMissingModelQuarantine:
         assert report.is_file()
 
 
+# The report that made the converter beacon fail for an hour-by-hour retry
+# (20260830-provider-agnostic-review-lane-glm-5-2-harness-plan-review_report.md,
+# measured 2026-09-23 19:48Z): Model and Provider on ONE line. The bold-field
+# parser reads everything after `**Model:**` as the value.
+_GLUED_MODEL = "glm-5.2 · **Provider:** claude"
+
+
+def _write_report_with_glued_model_line(path: Path, dispatch_id: str) -> Path:
+    path.write_text(
+        "# Plan Review\n\n"
+        f"**Dispatch-ID:** {dispatch_id}\n"
+        f"**Model:** {_GLUED_MODEL}\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _append_receipt_facade():
+    """The ``append_receipt`` facade the converter itself imports (the converter
+    puts scripts/ on sys.path lazily, so a test that patches it must do the
+    same instead of depending on test order)."""
+    sys.path.insert(0, str(SCRIPTS_LIB.parent))
+    sys.path.insert(0, str(SCRIPTS_LIB))
+    import append_receipt
+
+    return append_receipt
+
+
+class TestInvalidModelShapeQuarantine:
+    """The fail-closed model check refuses with two codes: ``missing_model``
+    (no model at all) and ``invalid_model_shape`` (a value that is not a model
+    name). Both are a verdict on the report's bytes, so both take the same
+    path: counted as rejected, named in the rejection history, quarantined.
+    Before this, ``invalid_model_shape`` fell into the generic error branch:
+    retried every scan, and ``attempted > 0`` with nothing booked held the
+    converter beacon at fail for good."""
+
+    def test_the_fixture_is_the_shape_the_parser_really_produces(self, reports_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-shape.md", "20260601-shape")
+
+        body = _extract_body_fields(report.read_text(encoding="utf-8"))
+
+        assert body["model"] == _GLUED_MODEL
+
+    def test_refused_report_is_quarantined_with_its_code_and_not_retried(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-glued.md", "20260601-glued")
+        file_hash = _compute_sha256(report)
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats1.rejected_count == 1
+        assert stats1.error_count == 0
+        assert stats1.new_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-glued.md").is_file()
+        index_lines = _quarantine_index_lines(state_dir)
+        assert len(index_lines) == 1
+        _ts, indexed_hash, reason_code, indexed_name = index_lines[0].split(" ")
+        assert reason_code == "invalid_model_shape"
+        assert indexed_name == "20260601-glued.md"
+        assert indexed_hash == file_hash
+        assert file_hash in _load_watermark(state_dir / "processed_receipts.txt")
+
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats2.attempted_count == 0
+        assert stats2.rejected_count == 0
+        assert stats2.error_count == 0
+        assert len(_quarantine_index_lines(state_dir)) == 1
+
+    def test_refusal_lands_in_the_history_with_a_timestamp_and_holds_the_beacon_at_fail(
+        self, reports_dir, state_dir
+    ):
+        _write_report_with_glued_model_line(reports_dir / "20260601-history.md", "20260601-history")
+
+        scan_and_convert([reports_dir], state_dir)
+        scan_and_convert([reports_dir], state_dir)  # nothing left to scan
+
+        beacon = _converter_beacon(state_dir)
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["rejected_count"] == 0
+        assert beacon["details"]["error_count"] == 0
+        assert beacon["details"]["recent_rejected_count"] == 1
+        [entry] = beacon["details"]["rejected"]
+        assert entry["dispatch_id"] == "20260601-history"
+        assert entry["file"] == "20260601-history.md"
+        assert _GLUED_MODEL in entry["reason"]
+        assert entry["rejected_at"]
+
+    def test_refusal_is_logged_on_the_line_the_rejection_beacon_parses(
+        self, reports_dir, state_dir, caplog
+    ):
+        from receipt_conversion_rejection_beacon import parse_rejections
+
+        _write_report_with_glued_model_line(reports_dir / "20260601-logline.md", "20260601-logline")
+
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            scan_and_convert([reports_dir], state_dir)
+
+        stderr = "\n".join(f"WARNING report_to_receipt_converter: {r.getMessage()}" for r in caplog.records)
+        [rejection] = parse_rejections(stderr)
+        assert rejection["dispatch_id"] == "20260601-logline"
+        assert rejection["file"] == "20260601-logline.md"
+        assert _GLUED_MODEL in rejection["reason"]
+
+    def test_dry_run_counts_it_as_rejected_and_moves_nothing(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-dry-glued.md", "20260601-dry-glued")
+        before = report.read_bytes()
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.rejected_count == 1
+        assert stats.error_count == 0
+        assert stats.would_append_count == 0
+        [detail] = stats.rejected
+        assert detail["dispatch_id"] == "20260601-dry-glued"
+        assert detail["rejected_at"]
+        assert report.read_bytes() == before
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert not (state_dir.parent / "health" / "report_to_receipt_converter.json").exists()
+
+    def test_targeted_dispatch_id_run_quarantines_the_same_way(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-targeted-glued.md", "20260601-targeted-glued")
+
+        stats = convert_dispatch_ids(["20260601-targeted-glued"], state_dir)
+
+        assert stats.rejected_count == 1
+        assert stats.error_count == 0
+        assert not report.exists()
+        assert _quarantine_index_lines(state_dir)[0].split(" ")[2] == "invalid_model_shape"
+
+    def test_a_valid_report_next_to_it_still_books(self, reports_dir, state_dir):
+        _write_report_with_glued_model_line(reports_dir / "20260601-glued-sibling.md", "20260601-glued-sibling")
+        _write_frontmatter_report(reports_dir / "20260601-fine-sibling.md", "20260601-fine-sibling")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats.new_count, stats.rejected_count, stats.error_count) == (1, 1, 0)
+        assert [r["dispatch_id"] for r in _receipts(state_dir)] == ["20260601-fine-sibling"]
+
+    def test_missing_model_keeps_its_own_code_in_the_index(self, reports_dir, state_dir):
+        _write_report_without_model(reports_dir / "20260601-still-missing.md", "20260601-still-missing")
+
+        scan_and_convert([reports_dir], state_dir)
+
+        assert _quarantine_index_lines(state_dir)[0].split(" ")[2] == "missing_model"
+
+    def test_the_refusal_set_covers_every_code_the_model_check_raises(self):
+        """The set the converter quarantines on is the set of codes
+        ``_validate_model_present`` can raise. A third code added there without
+        being added here would fall back into the retry-forever branch."""
+        from append_receipt_internals.validation import _validate_model_present
+        from report_to_receipt_converter import MODEL_REFUSAL_CODES
+
+        raised = set()
+        for model in (None, "unknown", "the real model that ran this dispatch", "`sonnet`", "x" * 100):
+            receipt = {"receipt_kind": "dispatch", "source": "worker", "model": model}
+            with pytest.raises(_append_receipt_facade().AppendReceiptError) as excinfo:
+                _validate_model_present(receipt)
+            raised.add(excinfo.value.code)
+
+        assert raised == {"missing_model", "invalid_model_shape"}
+        assert MODEL_REFUSAL_CODES == frozenset(raised)
+
+    def test_a_non_model_append_error_stays_an_error_and_is_not_quarantined(
+        self, reports_dir, state_dir, monkeypatch
+    ):
+        """Only the model refusals are verdicts on the report's bytes. Any
+        other refusal (here ``missing_status``) may be a transient or a
+        writer bug: it stays an error, stays in place, is retried."""
+        facade = _append_receipt_facade()
+        from append_receipt_internals.common import EXIT_VALIDATION_ERROR
+
+        def _refuse(*args, **kwargs):
+            raise facade.AppendReceiptError(
+                "missing_status", EXIT_VALIDATION_ERROR, "receipt carries no status at all",
+            )
+
+        monkeypatch.setattr(facade, "append_receipt_payload", _refuse)
+        report = _write_frontmatter_report(reports_dir / "20260601-other-refusal.md", "20260601-other-refusal")
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats1.error_count, stats1.rejected_count) == (1, 0)
+        assert (stats2.error_count, stats2.rejected_count) == (1, 0)
+        assert report.is_file()
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert _converter_beacon(state_dir)["details"]["rejected"] == []
+
+    def test_a_non_model_error_stays_an_error_in_a_dry_run_too(self, reports_dir, state_dir, monkeypatch):
+        facade = _append_receipt_facade()
+        from append_receipt_internals import validation
+        from append_receipt_internals.common import EXIT_VALIDATION_ERROR
+
+        def _refuse(receipt):
+            raise facade.AppendReceiptError(
+                "missing_status", EXIT_VALIDATION_ERROR, "receipt carries no status at all",
+            )
+
+        monkeypatch.setattr(validation, "_validate_receipt", _refuse)
+        _write_frontmatter_report(reports_dir / "20260601-dry-other.md", "20260601-dry-other")
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert (stats.error_count, stats.rejected_count, stats.would_append_count) == (1, 0, 0)
+
+
 class TestRejectedDetailHistory:
     """F1-3: a rejected_count integer alone is anonymous — nobody can tell
     WHICH report was refused or WHY without re-running the scan by hand.

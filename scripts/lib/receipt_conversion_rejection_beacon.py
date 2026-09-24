@@ -19,7 +19,8 @@ line matching the converter's own fail-closed log format —
     "REJECTED (fail-closed) dispatch=<id> file=<name> reason=<msg>"
 
 (``report_to_receipt_converter.py``'s ``_convert_one_detailed``, logged via
-``logger.warning`` on ``AppendReceiptError.code == "missing_model"``) — is
+``logger.warning`` on every ``AppendReceiptError`` whose code is in
+``MODEL_REFUSAL_CODES``: ``missing_model`` and ``invalid_model_shape``) — is
 parsed into a ``{dispatch_id, file, reason}`` record and written as this
 scan's beacon detail. Any other line (INFO chatter, the per-scan summary
 line, a different WARNING) is ignored: it is not this beacon's job to
