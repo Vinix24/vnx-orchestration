@@ -34,9 +34,10 @@ facts, both in the hook payload, both measured:
   ``settings.local.json`` carry that hook). A worker runs in an isolated
   worktree root or a scratch dir, never in a terminal dir.
 - ``transcript_path``: the current ``cwd`` is not stable. 3 of 143 T0 sessions
-  also carry ``/Users/vincentvandeth`` as cwd, and a cwd check alone lets a
-  subagent through at exactly that moment. The transcript lives in ``~/.claude/projects/<launch cwd, non-alphanumerics as "-">/``, so
-  its parent directory names the launch directory for the whole session.
+  also carry the operator's home directory as cwd, and a cwd check alone lets
+  a subagent through at exactly that moment. The transcript lives in
+  ``~/.claude/projects/<launch cwd, non-alphanumerics as "-">/``, so its
+  parent directory names the launch directory for the whole session.
   ``.claude/terminals/T0`` encodes to ``--claude-terminals-T0`` and the name
   must END with it: the scratch sessions T0 itself starts from its own
   scratchpad carry that text in the middle and are not T0.

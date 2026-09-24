@@ -22,7 +22,7 @@ exists:
    headless workers included, so a hook that also caught a worker would break
    dispatches. T0 is recognised by the session's cwd AND by the launch
    directory encoded in transcript_path, because the current cwd is not stable
-   (3 of 143 real T0 sessions also carry ``/Users/vincentvandeth`` as cwd).
+   (3 of 143 real T0 sessions also carry the operator's home directory as cwd).
 4. Other tools are left completely alone.
 5. The three settings templates ship it, the merge engine writes it into a
    project without touching the project's own settings, and the command string
