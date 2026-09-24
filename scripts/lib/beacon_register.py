@@ -91,7 +91,31 @@ import project_root  # noqa: E402
 # generic all_beacons(expected=...) readers every other component does) --
 # this list only tells health_beacon.all_beacons() to stop classifying their
 # age as "stale", not to stop expecting/reading them.
-PARKED_COMPONENTS: frozenset = frozenset({"learning_loop", "intelligence_daemon"})
+#
+# Extended by the operator on 2026-09-24 (absence-is-loud, punt 1) with
+# "intelligence-self-learning-loop": the same layer, the same reason. Since
+# #1903 the subsystem probes read the central store, so
+# subsystem_health.aggregate() now writes that beacon (measured 2026-09-24
+# 06:45Z: ignore_rate 0.868, 585 ignored against 89 used, last_dream_cycle_iso
+# null, pending_proposals 0) and it read "stale" in t0_state. It measures the
+# learning loop that was parked on 2026-09-09, so it is parked with it rather
+# than reported as a fault of its own. Unlike the two writers above it is a
+# cockpit SUBSYSTEM name (kebab-case, written through a loop variable in
+# subsystem_health.py) and is therefore not in read_beacon_register(); it needs
+# no entry there, because parking only changes how a beacon that exists is
+# classified.
+#
+# The reason lives here, in this comment, and not in a mapping: the registers
+# below (PARKED_ARTIFACTS, PARKED_LAUNCHD_JOBS) carry a reason string per entry
+# because their readers print it, but health_beacon.all_beacons() takes only
+# names (``parked=``) and a beacon entry has no reason field to print it in.
+# Parking covers stale/unknown/absent only: a beacon that says ``status: fail``
+# while fresh stays ``fail``.
+PARKED_COMPONENTS: frozenset = frozenset({
+    "learning_loop",
+    "intelligence_daemon",
+    "intelligence-self-learning-loop",
+})
 
 # The same operator decision has readers beyond the beacon reader, and each of
 # them used to report the consequence as a fault: a state artifact whose producer

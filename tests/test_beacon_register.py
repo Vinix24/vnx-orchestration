@@ -249,16 +249,36 @@ def test_real_tree_cleanup_worker_exit_is_event_driven_and_fleet_role_drift_is_n
 # ---------------------------------------------------------------------------
 
 
-def test_parked_component_names_is_learning_loop_and_intelligence_daemon() -> None:
+def test_parked_component_names_is_the_intelligence_layer() -> None:
     """Operator decision 2026-09-09: the intelligence layer stays parked
     until the governance ledger is falsifiable (per the PRD) -- both
-    already-silent components get a deliberate status, not a removal."""
-    assert br.parked_component_names() == ("intelligence_daemon", "learning_loop")
+    already-silent components get a deliberate status, not a removal.
+    Extended 2026-09-24 with the cockpit subsystem beacon that measures the
+    same learning loop."""
+    assert br.parked_component_names() == (
+        "intelligence-self-learning-loop", "intelligence_daemon", "learning_loop",
+    )
 
 
-def test_parked_components_is_a_subset_of_the_real_register() -> None:
-    names = {s.name for s in br.read_beacon_register()}
-    assert set(br.parked_component_names()) <= names
+def test_parked_components_are_names_a_beacon_writer_can_actually_carry() -> None:
+    """A parked name that no writer can ever produce parks nothing, silently.
+    Each name is either a resolvable HealthBeacon(...) call site
+    (read_beacon_register) or a cockpit subsystem whose beacon
+    subsystem_health.aggregate() writes through a loop variable, which the
+    register deliberately cannot resolve (see the module docstring)."""
+    import subsystem_health
+
+    register_names = {s.name for s in br.read_beacon_register()}
+    subsystem_names = set(subsystem_health.known_subsystems())
+    unreachable = set(br.parked_component_names()) - register_names - subsystem_names
+    assert not unreachable, f"parked names no beacon writer can produce: {unreachable}"
+
+
+def test_the_self_learning_loop_beacon_is_parked_but_not_an_expected_writer() -> None:
+    """It is a subsystem beacon, not a HealthBeacon(...) literal: parking must not
+    make it ``expected``, which would turn its silence into ``absent``."""
+    assert "intelligence-self-learning-loop" in br.parked_component_names()
+    assert "intelligence-self-learning-loop" not in br.expected_component_names()
 
 
 # ---------------------------------------------------------------------------

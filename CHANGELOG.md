@@ -97,6 +97,16 @@ glm-5.3.
   The test itself is hermetic now: it patched `subprocess_dispatch.SubprocessAdapter`,
   but `claude_spawn` imports its own, so each delivery test spawned a real
   `claude -p`, bounded only by the 900 s `total_deadline`.
+- **The self-learning-loop beacon is parked with the layer it measures.**
+  Since #1903 the subsystem probes read the central store, so
+  `subsystem_health.aggregate()` writes `intelligence-self-learning-loop`
+  (measured 2026-09-24: `ignore_rate` 0.868, 585 ignored against 89 used,
+  no dream cycle) and it read `stale` in t0_state. It measures the learning
+  loop the operator parked on 2026-09-09 (#1832), and on 2026-09-24 the
+  operator parked it under the same decision. It is now in
+  `beacon_register.PARKED_COMPONENTS`, so t0_state and the SessionStart digest
+  read `parked`. Parking covers stale, unknown and absent only: a beacon that
+  says `status: fail` stays `fail`.
 
 ## [1.6.2] — 2026-09-12
 
