@@ -111,7 +111,7 @@ def _resolve_workflow_name(workflow_name: Optional[str], project_workflow: Optio
     """Resolve the workflow name: explicit arg > the project's ``ci_workflow`` >
     env var > fabric default.
 
-    Mirrors pre_merge_gate._resolve_ci_workflow_name() — keep the two in sync
+    Mirrors pre_merge_gate._resolve_ci_workflow_name(). Keep the two in sync
     (tests/test_ci_workflow_resolution_parity.py holds them to it).
     """
     if workflow_name:

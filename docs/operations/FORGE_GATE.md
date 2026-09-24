@@ -315,6 +315,70 @@ branch-protection-YAML op de PR-head ongeldig: branch_protection.yaml heeft onbe
 
 Zie ook de docstring van `_run_branch_protection_gate` (stap d) in `scripts/pr_merge.py` voor de codekant van dit contract.
 
+## 11. Per project: doelrepo, strengheid en CI-workflow (OI-1849)
+
+Tot OI-1849 toetste de merge-deur elke merge tegen de repo waar hij uit geïnstalleerd is. Vanuit een centrale installatie (`~/.vnx-system/versions/<v>`, een clone van `Vinix24/vnx-orchestration`) betekende dat: de YAML op `main`, de YAML op de PR-head, de live protection en de ADR-nummers kwamen van vnx-orchestration, terwijl `gh pr merge` en de CI-poort naar de map gingen waar je stond. Een consumer-merge kreeg "geen drift" over een repo die hij niet mergde.
+
+### 11.1 Welke repo de deur toetst
+
+De deur bepaalt één keer, vóór de eerste poort, in welk project hij merget. Die bepaling is de bestaande resolver (`vnx_paths`): `VNX_PROJECT_ROOT` als die gezet is, anders de git-toplevel van de cwd. De repo is wat `gh repo view` in die map zegt. Alles wat de merge beoordeelt draait in die map: de CI-run, de ADR-poort, de YAML op `main` en op de PR-head, de live protection, en `gh pr merge` zelf. De eerste regel van de uitvoer is `doelrepo: owner/name`. Onder `--json` staat die regel op stderr en zit hij als `target_repo` in het object.
+
+Kan de deur de repo niet bepalen, dan weigert hij vóór de eerste poort. Een installatie is nooit zijn eigen doel: start je de merge vanuit de installatiemap zelf, dan weigert hij ook.
+
+**De deur zelf** toets je tegen de fabric, nooit tegen het project. In een checkout van de fabric is dat `main`. In een installatie is dat de tag waar hij uit komt: `v<VERSION>` in de repo waar de installatie een clone van is. Een installatie vergelijken met `main` zou elke installatie weigeren die niet op de laatste commit staat, want `main` loopt na een release door. Alle zes de deurbestanden (`_DOOR_INTEGRITY_PATHS`, sinds OI-1849 inclusief `scripts/lib/merge_target.py`) moeten byte-identiek zijn aan die versie.
+
+### 11.2 Het bestand en de leesvolgorde
+
+De deur, `apply_branch_protection.py` en `vnx doctor` lezen hetzelfde bestand in dezelfde volgorde, in de projectmap:
+
+1. `.vnx/branch_protection.yaml`
+2. `scripts/forge/branch_protection.yaml` (zo staat het in vnx-orchestration zelf)
+
+Het eerste bestand dat bestaat wint. De deur leest ze via de contents-API op `main` (en op de PR-head voor stap d), dus het bestand moet op `main` gecommit staan. `apply_branch_protection.py` en `vnx doctor` lezen de schijf.
+
+### 11.3 De drie standen
+
+`enforcement: enforce | warn | off` staat op het hoogste niveau van dat bestand.
+
+| Stand | Wat de deur doet | Wat er in het record staat |
+|---|---|---|
+| `enforce` | Drift tussen `main`'s YAML en de live protection is een weigering. Dit is ook wat een bestand betekent dat er niets over zegt. | `mode: enforce` |
+| `warn` | Drift wordt gemeld en de merge gaat door. Een live state die niet te lezen is (een repo zonder protection antwoordt 404) is dezelfde melding. | `mode: warn`, `reason_code: enforcement_warn_findings`, de velden in het bericht |
+| `off` | De deur kijkt niet naar live protection en niet naar de PR-head. | `mode: off`, `reason_code: enforcement_off` |
+
+Een project **zonder bestand** wordt behandeld als `warn`, en de deur zegt dat luid: `geen branch_protection.yaml in <owner/name>, niets te toetsen`. Op stderr staat die melding als `WARN:`, en het record heeft `reason_code: protection_file_missing`. Dit vervangt de oude bootstrap-GO, die dezelfde melding gaf.
+
+`warn` verzacht wat de deur met **drift** doet. Het verzacht niet wat een PR met de declaratie mag doen: een PR die een vereiste check schrapt, blijft `--allow-weaken` vragen, in `warn` net als in `enforce`. Een PR die het bestand verwijdert wordt ook geweigerd. Wil je de toetsing bewust uitzetten, zet dan `enforcement: off`, met `--allow-weaken`.
+
+**Verlagen is verzwakken.** `enforce` naar `warn`, `warn` naar `off` en `enforce` naar `off` gaan via `forge_protection_drift.is_weakening` en vragen `--allow-weaken "<reden>"`. Het veld weghalen is geen verlaging: zonder veld is het `enforce`, dus het kan alleen gelijk blijven of hoger worden.
+
+De CI-poort blijft voor iedereen aan. `enforcement` raakt hem niet.
+
+Let op bij `off`: PyYAML leest het kale woord `off` als het boolean `False`. De lezer neemt dat als `off`. `on`, `yes` en `true` noemen geen stand en worden geweigerd met een melding.
+
+### 11.4 De CI-workflow
+
+De CI-poort zoekt standaard de workflow `VNX CI`. Een consumer heet anders: mission-control en sales-copilot `CI`, SEOcrawler_v2 `CI/CD Pipeline`. Zet dat in hetzelfde bestand:
+
+```yaml
+ci_workflow: "CI"
+```
+
+Volgorde: expliciet argument, dan `ci_workflow` in het project-YAML, dan `VNX_CI_WORKFLOW_NAME`, dan `VNX CI`. De deur leest het veld uit `main`'s YAML, nooit uit een lokale kopie: de checkout naast de deur kan op elke branch staan, ook die van de PR. Bestaat het bestand maar is het onleesbaar, dan weigert de CI-poort in plaats van een naam te raden. `vnx pre-merge-gate` en de `merge_preflight_ci_check`-CLI draaien in de checkout die ze beoordelen en lezen het lokale bestand. `pre_merge_gate._resolve_ci_workflow_name` en `merge_preflight_ci_check._resolve_workflow_name` volgen dezelfde volgorde, en `tests/test_ci_workflow_resolution_parity.py` houdt ze daaraan.
+
+### 11.5 Een consumer inrichten
+
+1. Zet `.vnx/branch_protection.yaml` in het project. Begin met de stand die past bij wat er op GitHub staat: heeft de repo geen protection (sales-copilot, SEOcrawler_v2), kies dan `enforcement: warn`. Het schema is dat van `scripts/forge/branch_protection.yaml`, inclusief alle verplichte velden. Een minimaal voorbeeld staat in `tests/merge_target_helpers.py::consumer_yaml`.
+2. Voeg `ci_workflow` toe als de workflow niet `VNX CI` heet.
+3. Bekijk wat er zou gebeuren, vanuit de projectmap: `python3 <install>/scripts/forge/apply_branch_protection.py --dry-run`. Het toont het PUT-object uit het project-YAML en werkt tegen de repo van het project.
+4. Pas toe met `python3 <install>/scripts/forge/apply_branch_protection.py`. Het schrijft `doelrepo: owner/name` op stderr voordat het iets wijzigt en weigert als het die repo niet kan noemen.
+5. Merge via `python3 <install>/scripts/pr_merge.py --pr <n>`, vanuit de projectmap of met `VNX_PROJECT_ROOT` gezet. Controleer de eerste regel: `doelrepo:`.
+6. `vnx doctor` toetst dezelfde drift: `FAIL` onder `enforce`, `WARN` onder `warn`, en onder `off` meldt hij dat de toetsing uit staat.
+
+### 11.6 Twee PR's voor het veld in vnx-orchestration zelf
+
+De lezer van `enforcement` en `ci_workflow` staat sinds OI-1849 op `main`. Het veld staat bewust nog **niet** in `scripts/forge/branch_protection.yaml` van vnx-orchestration: zonder veld is het `enforce`, precies wat het bestand nu is, en een PR die lezer en veld samen levert komt door de regel van §10 niet door stap d. Wil vnx-orchestration het veld expliciet vastleggen, dan is dat een tweede PR.
+
 ## Cross-references
 
 - Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md`
@@ -322,3 +386,4 @@ Zie ook de docstring van `_run_branch_protection_gate` (stap d) in `scripts/pr_m
 - Code op `main`: `scripts/forge/branch_protection.yaml`, `scripts/forge/apply_branch_protection.py`, `scripts/lib/forge_protection_drift.py`, `scripts/pr_merge.py::_run_branch_protection_gate`, `scripts/vnx_doctor.py::check_branch_protection_drift`
 - Publicatielaag op `main`: `scripts/lib/forge_check_run.py` (client), `scripts/lib/forge_gate_publisher.py` (afbeelding, samenvattende check, CLI), `tests/test_forge_check_run_client.py`, `tests/test_forge_review_summary.py`
 - Lezer-voor-veld-contract (OI-1672): §10 hierboven, bewaakt door `tests/test_branch_protection_gate_reader_for_field_doc.py`
+- Doelrepo, strengheid en CI-workflow per project (OI-1849): §11 hierboven. Code: `scripts/lib/merge_target.py`, `scripts/pr_merge.py`, `scripts/lib/forge_protection_drift.py`. Tests: `tests/test_merge_target.py`, `tests/test_pr_merge_target_repo.py`, `tests/test_forge_protection_enforcement.py`, `tests/test_branch_protection_project_root.py`, `tests/test_ci_workflow_resolution_parity.py`

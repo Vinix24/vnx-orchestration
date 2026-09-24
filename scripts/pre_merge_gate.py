@@ -71,7 +71,7 @@ PYTEST_TIMEOUT = 120
 
 # CI workflow name queried via `gh run list --workflow`. Overridable per-repo
 # via `ci_workflow` in the project's branch_protection.yaml, the
-# VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag —
+# VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag,
 # see _resolve_ci_workflow_name() for why this isn't auto-detected instead.
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
 CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
@@ -859,7 +859,7 @@ def _resolve_ci_workflow_name(workflow_name: Optional[str], project_workflow: Op
     env var (per-repo operator override) > this fabric's own default,
     "VNX CI".
 
-    Mirrors ``merge_preflight_ci_check._resolve_workflow_name`` — keep the two
+    Mirrors ``merge_preflight_ci_check._resolve_workflow_name``. Keep the two
     in sync (tests/test_ci_workflow_resolution_parity.py holds them to it).
 
     Auto-detecting "the" CI workflow from ``.github/workflows/*.yml`` was
@@ -922,7 +922,7 @@ def check_ci_workflow(
             "check": "ci_workflow",
             "status": SKIPPED_UNVERIFIED,
             "detail": (
-                f"could not read the project's branch_protection.yaml ({exc}) — "
+                f"could not read the project's branch_protection.yaml ({exc}); "
                 "CI workflow could not be verified"
             ),
             "ci_conclusion": None,

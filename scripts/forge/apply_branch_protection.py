@@ -7,7 +7,7 @@ Reads the project's YAML, fetches live state via
 The project is the one the merge door would merge into (OI-1849): its root comes
 from ``vnx_paths`` (``VNX_PROJECT_ROOT`` if set, else the git toplevel of the cwd
 for a central install), and the file is ``.vnx/branch_protection.yaml`` in it, or
-``scripts/forge/branch_protection.yaml`` (``PROTECTION_YAML_SEARCH_PATHS``) — the
+``scripts/forge/branch_protection.yaml`` (``PROTECTION_YAML_SEARCH_PATHS``): the
 same root and the same reading order the door and ``vnx doctor`` use. Run from a
 central install without those defaults, this used to apply the FABRIC's YAML to
 whichever repo the install's git remote named. ``--yaml-path`` and

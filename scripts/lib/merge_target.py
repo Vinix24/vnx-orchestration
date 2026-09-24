@@ -19,7 +19,7 @@ the install's git remote for everything: a consumer merge was judged against
 into another one.
 
 The project root comes from ``vnx_paths.resolve_paths`` (``VNX_PROJECT_ROOT`` if
-set, else the git toplevel of the cwd for a central install) — the resolver every
+set, else the git toplevel of the cwd for a central install), the resolver every
 other VNX script already uses; nothing here resolves a root itself. What this
 module adds is the repo name (``gh repo view`` run IN that root, so it is the
 same repo ``gh`` resolves for the ``{owner}/{repo}`` placeholders of every call

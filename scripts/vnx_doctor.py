@@ -942,7 +942,7 @@ def check_t0_state_freshness(paths: Dict[str, str]) -> List[CheckResult]:
 
 def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
     """Live branch protection on main must match the project's
-    ``branch_protection.yaml`` — the same comparison
+    ``branch_protection.yaml``, the same comparison
     ``pr_merge.py``'s merge preflight and ``apply_branch_protection.py`` use
     (``forge_protection_drift.compare``), so this can never disagree with
     what the door itself would refuse on.
@@ -961,7 +961,7 @@ def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
     verified). An invalid YAML, or a genuine diff between live and the YAML,
     is a FAIL under ``enforcement: enforce`` (what a file that does not say
     means); under ``warn`` the same diff is a WARN, and under ``off`` the check
-    reports that it is off and looks at nothing — the door treats the project
+    reports that it is off and looks at nothing. The door treats the project
     the same way, so the doctor cannot go red on what the door would let through.
     """
     project_root = Path(paths["PROJECT_ROOT"])

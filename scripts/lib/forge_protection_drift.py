@@ -36,7 +36,7 @@ caller that cannot read the state must refuse, not pass.
 Two optional top-level fields describe the PROJECT rather than the branch
 (OI-1849), so a consumer repo can declare how strictly the merge door treats it:
 
-  ``enforcement``  ``enforce`` | ``warn`` | ``off`` — what the door does with
+  ``enforcement``  ``enforce`` | ``warn`` | ``off``: what the door does with
                    drift between this file and live protection. Absent means
                    ``enforce``. It is a policy about the door, not something
                    GitHub holds, so :func:`compare` never reports it and
@@ -114,10 +114,10 @@ _KNOWN_TOP_LEVEL_FIELDS = frozenset({
 #: ``ci_workflow`` (OI-1849) are the door's own per-project settings and follow
 #: the same rule; ``enforcement`` alone is carried in the normalized dict, for
 #: :func:`is_weakening` and for nothing else. This is an allowlist of exactly
-#: these keys, not an opening of the schema — an unrecognized top-level key is
+#: these keys, not an opening of the schema. An unrecognized top-level key is
 #: still refused. Being optional at the top level only excuses its ABSENCE;
 #: when present, its own shape is still validated (see
-#: :func:`_validate_app_block`, :func:`_parse_enforcement`) — an unknown key
+#: :func:`_validate_app_block`, :func:`_parse_enforcement`). An unknown key
 #: inside ``app:`` is refused exactly like everywhere else in this schema.
 _OPTIONAL_TOP_LEVEL_FIELDS = frozenset({"app", "enforcement", "ci_workflow"})
 _KNOWN_APP_FIELDS = frozenset({"slug", "app_id"})
@@ -244,7 +244,7 @@ def _parse_enforcement(doc: Dict[str, Any]) -> str:
 
     PyYAML reads the bare word ``off`` (and ``no``, ``false``) as the boolean
     ``False``, so the documented value ``enforcement: off`` arrives here as
-    ``False``. That is accepted as ``off`` — the only way to produce it is to
+    ``False``. That is accepted as ``off``, because the only way to produce it is to
     have written one of those words. ``True`` (``on``, ``yes``, ``true``) names
     no mode and is refused with the quoting hint rather than guessed at.
     """
@@ -911,7 +911,7 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
     ``allow_auto_merge`` turned on, or ``enforcement`` lowered (``enforce`` ->
     ``warn`` -> ``off``). Fields outside this vocabulary (e.g. ``rulesets``,
     which this repo only ever checks and never writes) never trigger a
-    weakening verdict — see the module docstring's list of the exact cases
+    weakening verdict; see the module docstring's list of the exact cases
     this covers.
     """
     weak_fields: List[str] = []
@@ -945,7 +945,7 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
             continue
 
     # ``enforcement`` is deliberately outside compare(): live state never
-    # carries it. It is judged here, and only when BOTH sides declare it — a
+    # carries it. It is judged here, and only when BOTH sides declare it: a
     # live-vs-YAML comparison (apply, doctor) has one side without it and has
     # no policy to lower. A missing key on the PR side is not read as "lowered":
     # to_normalized_dict always writes the RESOLVED value, so removing the field
@@ -961,26 +961,33 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
 # ---------------------------------------------------------------------------
 
 
-def _default_yaml_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "forge" / "branch_protection.yaml"
-
-
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
         prog="forge_protection_drift",
-        description="Compare live branch protection to scripts/forge/branch_protection.yaml",
+        description="Compare live branch protection to the project's branch_protection.yaml",
     )
-    parser.add_argument("--yaml-path", default=str(_default_yaml_path()))
+    parser.add_argument(
+        "--yaml-path", default=None,
+        help="default: .vnx/branch_protection.yaml, else scripts/forge/branch_protection.yaml, in --project-root",
+    )
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--branch", default="main")
     parser.add_argument("--gh-bin", default="gh")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    yaml_path = Path(args.yaml_path) if args.yaml_path else find_local_protection_yaml(Path(args.project_root))
+    if yaml_path is None:
+        print(
+            f"FOUT: geen branch_protection.yaml in {args.project_root} "
+            f"(gezocht: {', '.join(PROTECTION_YAML_SEARCH_PATHS)})",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        config = load_protection_config(Path(args.yaml_path))
+        config = load_protection_config(yaml_path)
     except (ProtectionConfigError, OSError) as exc:
         print(f"FOUT: {exc}", file=sys.stderr)
         return 1
@@ -995,7 +1002,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.json:
         print(json.dumps(diffs, indent=2, default=str))
     elif not diffs:
-        print(f"geen verschillen: branch-protection op {args.branch} komt overeen met {args.yaml_path}")
+        print(f"geen verschillen: branch-protection op {args.branch} komt overeen met {yaml_path}")
     else:
         for d in diffs:
             print(f"DRIFT {d['field']}: yaml={d['a']!r} live={d['b']!r}")

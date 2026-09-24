@@ -151,12 +151,12 @@ Register event written to dispatch_register.ndjson:
     terminal    : "T0"
 
 Branch-protection preflight (Golf B, B1): a fourth fail-closed gate after
-contract_invalid — live branch protection on main must match the project's
+contract_invalid. Live branch protection on main must match the project's
 ``branch_protection.yaml`` as committed on main, and this PR's own copy of that
 YAML must not weaken main's (see ``_run_branch_protection_gate`` and
 ``scripts/lib/forge_protection_drift.py`` for the full four-step check). The
 only override is ``--allow-weaken "<reason>"``, which accepts ONLY a weakening
-the PR's own YAML edit introduces relative to main — under ``enforce`` a drift
+the PR's own YAML edit introduces relative to main. Under ``enforce`` a drift
 between live state and main's own declared YAML has no override at all (run
 ``apply_branch_protection.py`` first).
 
@@ -328,7 +328,7 @@ def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Di
     checked and found nothing.
 
     Every key is written on every record, including for the gates that
-    publish no code or no mode at all — they decide on their own logic and their
+    publish no code or no mode at all: they decide on their own logic and their
     record carries ``reason_code: ""``. That is the same rule ``VERDICT_NOT_EVALUATED``
     exists for: a key that is present on some records and absent on others
     forces its first reader to guess, and the natural repair for the resulting
@@ -480,7 +480,7 @@ def _query_pr(pr_number: int) -> Optional[Dict[str, Any]]:
 def _fetch_protection_yaml(project_root: Path, ref: str) -> Tuple[str, YamlFetchResult]:
     """The project's ``branch_protection.yaml`` at ``ref``, walking the reading order.
 
-    Returns ``(path, result)`` for the first path that is not a confirmed 404 —
+    Returns ``(path, result)`` for the first path that is not a confirmed 404:
     a found file, or an error, which stops the walk (an unreadable first
     candidate must not fall through to a second one that says something else).
     When every candidate is a confirmed 404 the result is ``not_found`` with an
@@ -967,19 +967,19 @@ _DOOR_INTEGRITY_PATHS = (
 
 def _door_blob_hash_gate(engine_root: Path) -> Dict[str, Any]:
     """Golf B, B1: the merge door only runs its preflight checks from a door that
-    is byte-identical to the published one — a fix-forward pushed straight to a
+    is byte-identical to the published one. A fix-forward pushed straight to a
     feature branch (bypassing review of the door's own code) must not be able to
     weaken what this door enforces just by running from a stale or edited local
     checkout. Compares the git blob hash of every file in
     ``_DOOR_INTEGRITY_PATHS`` (``git hash-object``, computed locally in
     ``engine_root``) against the sha GitHub reports for that same path in the
-    fabric's repo (the contents API's ``sha`` field IS a git blob hash —
+    fabric's repo (the contents API's ``sha`` field IS a git blob hash;
     measured equal on this repo's own ``scripts/pr_merge.py`` on 2026-09-07).
     Any mismatch refuses, naming the files that differ; an unreadable local or
     remote hash refuses too (fail-closed).
 
     ``engine_root`` is the root of the RUNNING door, and the remote read runs in
-    it too, so it names the fabric's repo — never the merge target's (OI-1849).
+    it too, so it names the fabric's repo and never the merge target's (OI-1849).
     What it is compared to depends on what it is (``merge_target.door_reference``):
     a dev checkout to ``main``; a central install to the tag it says it is
     (``v<VERSION>``), because main moves on after a release is cut and a
@@ -1044,8 +1044,8 @@ def _run_branch_protection_gate(
     must match the project's ``branch_protection.yaml`` as committed on
     main, and this PR's own copy of that YAML must not weaken main's.
 
-    Everything the gate reads — the YAML at main, the YAML at the PR head, live
-    protection — is read from the merge TARGET's repo (``_target_root()``), the
+    Everything the gate reads (the YAML at main, the YAML at the PR head, live
+    protection) is read from the merge TARGET's repo (``_target_root()``), the
     same repo ``gh pr merge`` and the CI gate go to (OI-1849). The file is
     ``.vnx/branch_protection.yaml`` if the project has one, else
     ``scripts/forge/branch_protection.yaml`` (``PROTECTION_YAML_SEARCH_PATHS``).
@@ -1054,7 +1054,7 @@ def _run_branch_protection_gate(
 
     (a) The RUNNING door must be byte-identical to its published copy
         (``_door_blob_hash_gate`` over ``_DOOR_INTEGRITY_PATHS``: main for a
-        checkout, its own release tag for an install) — the door only runs any
+        checkout, its own release tag for an install). The door only runs any
         of the checks below from an unedited door. FIRST, not last: every step
         after this one has a branch that returns early, and a check that proves
         the door is unedited is worthless when the edited door can route around
@@ -1064,13 +1064,13 @@ def _run_branch_protection_gate(
         never fetches). A confirmed 404 on every candidate path, at a ref
         confirmed to exist, means the project has no such file: a loud ``warn``
         GO (nothing to check against, nothing blocked). Any other read/parse
-        failure blocks — including a 404 whose ref cannot be confirmed, which is
+        failure blocks, including a 404 whose ref cannot be confirmed, which is
         indistinguishable from an unknown ref or an unresolvable repo (see
         ``forge_protection_drift._confirm_ref_exists``). The file's
         ``enforcement`` (``enforce``, ``warn`` or ``off``; absent means
         ``enforce``) is the door's strictness for this project: ``off`` stops
         here, GO, and the preflight record says the gate was off.
-    (c) Live protection on main must match main's own declared YAML — under
+    (c) Live protection on main must match main's own declared YAML. Under
         ``enforce`` any drift blocks, with the differing fields named. No
         override: a drift here means ``apply_branch_protection.py`` must be run
         first, not that this merge should be waved through. Under ``warn`` the
@@ -1087,7 +1087,7 @@ def _run_branch_protection_gate(
 
         Reader-for-field contract: the parser used here (``parse_protection_config``)
         is the LOCAL checkout's code, which step (a) has just proven
-        byte-identical to its published copy — never the PR's own copy. A PR that
+        byte-identical to its published copy, never the PR's own copy. A PR that
         adds a new schema field to ``branch_protection.yaml`` AND teaches the
         reader that field in the same PR can therefore never pass this
         step: main's reader, the only one running, does not know the field
@@ -1096,7 +1096,7 @@ def _run_branch_protection_gate(
         branch_protection.yaml uitbreiden gaat in twee PR's (OI-1672)" for
         the measured cases and the exact refusal text.
 
-    No override besides ``--allow-weaken`` — a drift found in (c) under
+    No override besides ``--allow-weaken``: a drift found in (c) under
     ``enforce`` or an unreadable/unparseable state anywhere else has no escape
     hatch.
 
