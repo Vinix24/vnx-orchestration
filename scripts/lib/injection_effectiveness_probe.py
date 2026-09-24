@@ -62,7 +62,11 @@ if _LIB not in sys.path:
 
 import config_registry  # noqa: E402
 import project_root  # noqa: E402
-from effectiveness_probe import EffectivenessProbe, register_probe  # noqa: E402
+from effectiveness_probe import (  # noqa: E402
+    EffectivenessProbe,
+    register_probe,
+    resolve_probe_state_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,9 +196,7 @@ class InjectionEffectivenessProbe(EffectivenessProbe):
     subsystem = "intelligence-self-learning-loop"
 
     def __init__(self, state_dir: Optional[Path] = None) -> None:
-        self.state_dir = (
-            Path(state_dir) if state_dir is not None else project_root.resolve_state_dir(__file__)
-        )
+        self.state_dir = resolve_probe_state_dir(state_dir)
 
     def probe(self) -> Dict[str, Any]:
         db_path = self.state_dir / "quality_intelligence.db"
@@ -343,9 +345,7 @@ class InjectionReasonEvaluator:
     never writes to any table it reads."""
 
     def __init__(self, state_dir: Optional[Path] = None) -> None:
-        self.state_dir = (
-            Path(state_dir) if state_dir is not None else project_root.resolve_state_dir(__file__)
-        )
+        self.state_dir = resolve_probe_state_dir(state_dir)
 
     def evaluate(self) -> Dict[str, Any]:
         db_path = self.state_dir / "quality_intelligence.db"

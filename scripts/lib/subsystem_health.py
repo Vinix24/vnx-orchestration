@@ -25,11 +25,12 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import config_registry  # noqa: E402  (after the scripts/lib path guard above)
-import project_root  # noqa: E402
+import vnx_paths  # noqa: E402
 from effectiveness_probe import (  # noqa: E402
     EFFECTIVENESS_PROBES,
     PROBE_TO_BEACON,
     ProbeResult,
+    build_probe,
 )
 from health_beacon import HealthBeacon  # noqa: E402
 
@@ -65,13 +66,22 @@ def aggregate(
     cockpit subsystem), write a beacon for each probed result, and return a dict
     keyed by subsystem name -> ``{"status", "signal", "detail"}``.
 
+    ``state_dir`` is, despite the name, the data ROOT (``VNX_DATA_DIR``): beacons
+    go under ``<state_dir>/health`` and the probes read ``<state_dir>/state``.
+    Left as ``None`` both come from the canonical resolver
+    (``vnx_paths.resolve_paths()``, the central store for a governed project).
+
     A subsystem with no entry in ``EFFECTIVENESS_PROBES`` reports
     ``status="unknown"``, ``signal="no probe registered"`` and gets NO beacon
     written (there is nothing measured to persist).
     """
     if state_dir is None:
-        state_dir = project_root.resolve_data_dir(__file__)
-    state_dir = Path(state_dir)
+        paths = vnx_paths.resolve_paths()
+        data_dir = Path(paths["VNX_DATA_DIR"])
+        probe_state_dir = Path(paths["VNX_STATE_DIR"])
+    else:
+        data_dir = Path(state_dir)
+        probe_state_dir = data_dir / "state"
 
     target = sorted(subsystems) if subsystems is not None else known_subsystems()
 
@@ -81,13 +91,13 @@ def aggregate(
         if probe_cls is None:
             result = ProbeResult(status="unknown", signal="no probe registered", detail={})
         else:
-            result = probe_cls().run()
+            result = build_probe(probe_cls, probe_state_dir).run()
 
         results[name] = {"status": result.status, "signal": result.signal, "detail": result.detail}
 
         beacon_status = PROBE_TO_BEACON.get(result.status)
         if beacon_status is not None:
-            HealthBeacon(state_dir, name).heartbeat(status=beacon_status, details=result.detail)
+            HealthBeacon(data_dir, name).heartbeat(status=beacon_status, details=result.detail)
 
     return results
 
