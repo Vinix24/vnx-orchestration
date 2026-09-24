@@ -65,6 +65,15 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{VNX_HOME}}/scripts/hooks/pretooluse_t0_no_subagents.py"
+          }
+        ]
       }
     ],
     "SessionStart": [

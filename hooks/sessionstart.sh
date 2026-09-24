@@ -363,6 +363,48 @@ $_FRESHNESS_LINES"
       FRESHNESS_SECTION="STATE FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — state dir unresolved or scripts/lib/session_state_freshness.py missing."
     fi
 
+    # ── Role-loaded alarm (a T0 without its role must say so at the top) ──
+    # The canonical T0 role (role-orchestrator.md) reaches a Claude session only
+    # through an `@role-orchestrator.md` import in this directory's CLAUDE.md.
+    # Found 24-09 (operator): SEOcrawler_v2 ran T0 sessions without that import
+    # from 16-07 (an uncommitted edit had dropped the line) and every rule the
+    # role carries, "no subagents" included, was simply absent. Nothing said so
+    # until the six-hourly scripts/fleet_role_drift.py sweep, and that only as a
+    # beacon.
+    #
+    # The measurement is fleet_role_drift's own reach axis (--reach), not a second
+    # copy of it. The engine is looked up under $_VNX_SCRIPTS_ROOT, the one scripts
+    # root this hook resolves above (hook-relative, then $VNX_HOME, then the
+    # installed fabric). This file is COPIED into <project>/.claude/hooks/ by
+    # bootstrap_hooks, so a lookup anchored on the hook alone would be dead in
+    # exactly the projects that need the alarm; the shared root is not, and it
+    # keeps this hook on a single locator.
+    #
+    # A warning, never a block: the session runs on. A check that cannot be run
+    # says so instead of passing (UNMEASURED, not zero), like every block above.
+    ROLE_ALARM=""
+    _ROLE_DRIFT_PY="$_VNX_SCRIPTS_ROOT/fleet_role_drift.py"
+    _ROLE_REACH_JSON=""
+    if [ -n "$_VNX_PY" ] && [ -f "$_ROLE_DRIFT_PY" ]; then
+      _ROLE_REACH_JSON="$("$_VNX_PY" "$_ROLE_DRIFT_PY" --reach "$PWD" 2>/dev/null || true)"
+    fi
+    case "$_ROLE_REACH_JSON" in
+      *'"ok": true'*)
+        ;;
+      *'"ok": false'*)
+        _ROLE_REASON=""
+        if command -v jq &>/dev/null; then
+          _ROLE_REASON="$(echo "$_ROLE_REACH_JSON" | jq -r '.reason // empty' 2>/dev/null || true)"
+        fi
+        ROLE_ALARM="ROLE NOT LOADED: deze T0 draait zonder de canonieke rol.
+${_ROLE_REASON:+$_ROLE_REASON
+}De rol staat in role-orchestrator.md en komt alleen in je context via de regel @role-orchestrator.md in ${PWD}/CLAUDE.md. Zonder die regel geldt geen enkele regel uit de rol. Zet de regel terug bovenaan CLAUDE.md (vnx role sync doet dat niet: het ververst alleen het bestand). Meld dit in je eerste antwoord aan de operator. Dit is een waarschuwing, de sessie loopt door."
+        ;;
+      *)
+        ROLE_ALARM="ROLE CHECK UNAVAILABLE this session (UNMEASURED, not zero). fleet_role_drift.py was not reachable from this hook or returned no verdict. Whether this T0 loads the canonical role is unknown: check that ${PWD}/CLAUDE.md contains the line @role-orchestrator.md."
+        ;;
+    esac
+
     # ── T0 Orchestrator playbook body (in-context injection) ────────────
     # t0-orchestrator is intentionally not model-invocable
     # (disable-model-invocation: true, A-4 hardening), so its content has to
@@ -384,7 +426,9 @@ $_FRESHNESS_LINES"
       fi
     fi
 
-    ADDITIONAL_CONTEXT="T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
+    ADDITIONAL_CONTEXT="${ROLE_ALARM:+$ROLE_ALARM
+
+}T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
 Model-invocable skills: @horizon @planner @panel @fabric-reference
 Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
