@@ -22,9 +22,12 @@ What these tests pin:
 3. It is T0-only: a worker terminal without an import is not a defect.
 4. It works from a COPIED hook. bootstrap_hooks copies this file into
    ``<project>/.claude/hooks/``, where ``$_HOOK_DIR/../scripts`` does not exist
-   (measured in sales-copilot), so the engine is looked up along the same
-   candidates hookpin_check uses. An alarm that only worked where the engine
-   sits next to the hook would be dead in exactly the projects that need it.
+   (measured in sales-copilot), so the engine is looked up under
+   ``$_VNX_SCRIPTS_ROOT``: the one scripts root the hook resolves for every
+   call it makes (hook-relative, ``VNX_HOME``, ``~/.vnx-system/current``). An
+   alarm that only worked where the engine sits next to the hook would be dead
+   in exactly the projects that need it, and a locator of its own would let
+   the alarm and the state resolver disagree about where the fabric is.
 5. A check that cannot run says UNMEASURED instead of passing.
 
 Isolation: every project is a tmp_path and every run has HOME and the central
@@ -220,23 +223,9 @@ def _engine_via_central_current(root: Path, tmp_path: Path) -> dict:
     return env
 
 
-def _engine_via_project_vnx_system_link(root: Path, tmp_path: Path) -> dict:
-    (root / ".claude" / "vnx-system").symlink_to(REPO)
-    return _env(tmp_path)
-
-
-def _engine_via_project_dot_vnx(root: Path, tmp_path: Path) -> dict:
-    scripts = root / ".vnx" / "scripts"
-    scripts.mkdir(parents=True)
-    shutil.copy2(FLEET_ROLE_DRIFT, scripts / "fleet_role_drift.py")
-    return _env(tmp_path)
-
-
 ENGINE_LOCATORS = [
     pytest.param(_engine_via_vnx_home, id="VNX_HOME"),
     pytest.param(_engine_via_central_current, id="home-.vnx-system-current"),
-    pytest.param(_engine_via_project_vnx_system_link, id="project-.claude-vnx-system"),
-    pytest.param(_engine_via_project_dot_vnx, id="project-.vnx-scripts"),
 ]
 
 
@@ -245,6 +234,20 @@ def test_the_copied_hook_cannot_see_the_engine_through_its_own_location(tmp_path
     root = _make_project(tmp_path, CLAUDE_MD_WITHOUT_IMPORT)
     hook = _copy_hook_into(root)
     assert not (hook.parent.parent / "scripts" / "fleet_role_drift.py").exists()
+
+
+def test_a_project_local_engine_copy_is_not_a_second_locator(tmp_path):
+    """One scripts root for the whole hook. An engine copy under <project>/.vnx
+    is not on it, so the alarm reports UNMEASURED exactly like the state block
+    does, instead of finding a fabric the rest of the hook cannot see."""
+    root = _make_project(tmp_path, CLAUDE_MD_WITHOUT_IMPORT)
+    hook = _copy_hook_into(root)
+    scripts = root / ".vnx" / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(FLEET_ROLE_DRIFT, scripts / "fleet_role_drift.py")
+    _, ctx = _run(hook, _t0(root), _env(tmp_path))
+    assert ctx.startswith(UNAVAILABLE), ctx[:300]
+    assert ALARM not in ctx
 
 
 @pytest.mark.parametrize("locate", ENGINE_LOCATORS)

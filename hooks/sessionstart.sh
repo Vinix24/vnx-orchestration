@@ -373,32 +373,20 @@ $_FRESHNESS_LINES"
     # beacon.
     #
     # The measurement is fleet_role_drift's own reach axis (--reach), not a second
-    # copy of it. The engine is looked up along the same candidates hookpin_check
-    # uses, because this file is COPIED into <project>/.claude/hooks/ by
-    # bootstrap_hooks: there "$_HOOK_DIR/../scripts" is <project>/.claude/scripts,
-    # which does not exist (measured in sales-copilot), and an alarm that only
-    # works where the engine sits next to the hook would be dead in exactly the
-    # projects that need it.
+    # copy of it. The engine is looked up under $_VNX_SCRIPTS_ROOT, the one scripts
+    # root this hook resolves above (hook-relative, then $VNX_HOME, then the
+    # installed fabric). This file is COPIED into <project>/.claude/hooks/ by
+    # bootstrap_hooks, so a lookup anchored on the hook alone would be dead in
+    # exactly the projects that need the alarm; the shared root is not, and it
+    # keeps this hook on a single locator.
     #
     # A warning, never a block: the session runs on. A check that cannot be run
     # says so instead of passing (UNMEASURED, not zero), like every block above.
     ROLE_ALARM=""
-    _ROLE_DRIFT_PY=""
-    _ROLE_PROJECT_ROOT="${PROJECT_ROOT:-${PWD%/.claude/terminals/T0}}"
-    for _cand in \
-      "${_HOOK_DIR:+$_HOOK_DIR/../scripts/fleet_role_drift.py}" \
-      "${VNX_HOME:+$VNX_HOME/scripts/fleet_role_drift.py}" \
-      "$HOME/.vnx-system/current/scripts/fleet_role_drift.py" \
-      "$_ROLE_PROJECT_ROOT/.vnx/scripts/fleet_role_drift.py" \
-      "$_ROLE_PROJECT_ROOT/.claude/vnx-system/scripts/fleet_role_drift.py"; do
-      if [ -n "$_cand" ] && [ -f "$_cand" ]; then
-        _ROLE_DRIFT_PY="$_cand"
-        break
-      fi
-    done
+    _ROLE_DRIFT_PY="$_VNX_SCRIPTS_ROOT/fleet_role_drift.py"
     _ROLE_REACH_JSON=""
-    if [ -n "$_ROLE_DRIFT_PY" ]; then
-      _ROLE_REACH_JSON="$("${_VNX_PY:-python3}" "$_ROLE_DRIFT_PY" --reach "$PWD" 2>/dev/null || true)"
+    if [ -n "$_VNX_PY" ] && [ -f "$_ROLE_DRIFT_PY" ]; then
+      _ROLE_REACH_JSON="$("$_VNX_PY" "$_ROLE_DRIFT_PY" --reach "$PWD" 2>/dev/null || true)"
     fi
     case "$_ROLE_REACH_JSON" in
       *'"ok": true'*)
