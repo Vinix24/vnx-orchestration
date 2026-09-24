@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.subsystem-probe</string>
+  <!--
+    absence-is-loud, punt 1: governance-enforcement-stack and plan-gate-panel
+    read stale in t0_state from 12 July to 24 September 2026. Their producer,
+    subsystem_health.aggregate(), writes one health beacon per subsystem and
+    only ran when someone typed `vnx subsystems` with the probe flag. Both
+    probes work and measure real values. Nothing drove them. This job is the
+    driver, nothing else: it runs the probes on a cadence. It does not change
+    a probe, does not gate anything and does not touch the checkout.
+
+    Interval: every 6h (21600s), the same reasoning as com.vnx.ledger-health.
+    aggregate() builds its beacons with HealthBeacon's default
+    expected_interval_seconds of 86400 (it passes none), and
+    health_beacon.all_beacons() reads a beacon older than that as "stale". A
+    StartInterval at or above 86400 would make the beacons stale by
+    construction. 21600s gives 4 runs a day: 3 consecutive missed runs (an 18h
+    gap) still land inside the window. RunAtLoad makes the first run happen on
+    install, so the beacons are fresh right away and not after one interval.
+
+    Command: the same entry point `vnx subsystems` runs. scripts/commands/
+    subsystems.sh is a thin wrapper around `python3 -m vnx_cli.main
+    subsystems`, and this job names that module directly instead of going
+    through bin/vnx, for two reasons. bin/vnx unsets VNX_HOME and PROJECT_ROOT
+    and re-derives them from its own location and the working directory, so
+    the environment below would stop being the source of truth. And behind
+    bin/vnx the interpreter is invisible to the PATH-parity guard
+    (scripts/lib/path_parity.py reads "no python invocation found"); naming
+    python3 here lets it check the interpreter against requires-python.
+
+    Where the beacons land: the module resolves the project from
+    VNX_PROJECT_ID and the data directory from that id (the central
+    per-project store when it exists), and writes each beacon to
+    <data_dir>/health/<subsystem>.json.
+    That is the directory all_beacons() reads. Nothing lands in state/health.
+    Measured with a tmp HOME and a tmp VNX_DATA_DIR in
+    tests/test_launchd_subsystem_probe_driver.py, which runs this command as
+    installed.
+
+    VNX_HOME must be the primary checkout, never a dispatch worktree. The
+    probes measure the checkout they run from: the governance probe reads
+    .vnx-attest/plan-gates.ndjson at that checkout's git root and the plan-gate
+    probe reads the coordination database in that checkout's own data
+    directory.
+    .vnx-attest is git-ignored, so a worktree or a fresh clone has none. The
+    probes then report "unknown", unknown writes no beacon and the job still
+    exits 0, so the beacons would go stale again without a sound. This is also
+    why the Label is bare: the job measures a checkout, not a project, so
+    there is one instance per machine. A per-project Label would make every
+    project's t0_state expect an instance that has nothing to measure for it.
+
+    Exit status is not proof. The subsystems command catches an error inside
+    the probe run, renders every row as a bare "unknown" and still exits 0. A
+    run that failed shows up as beacons going stale after 24h, and in
+    /tmp/vnx-subsystem-probe.log as governance-enforcement-stack and
+    plan-gate-panel printing a bare "unknown" where a working run prints a
+    status and a signal.
+
+    vnx init is not wired to install this job. Install it manually, from the
+    primary checkout:
+      bash scripts/launchd/reload_plist.sh com.vnx.subsystem-probe
+    reload_plist.sh substitutes the placeholders below from VNX_HOME and from
+    its optional second argument, then VNX_PROJECT_ID, then the
+    .vnx-project-id marker.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec python3 -m vnx_cli.main subsystems --probe</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key><string>/tmp/vnx-subsystem-probe.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-subsystem-probe.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>VNX_PROJECT_ID</key>
+    <string>${VNX_PROJECT_ID}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
