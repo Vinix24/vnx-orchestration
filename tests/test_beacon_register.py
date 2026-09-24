@@ -156,20 +156,129 @@ def test_expected_component_names_is_just_the_names(fixture_scripts: Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# Event-driven writers (absence-is-loud, punt 1 / defect B)
+#
+# A component whose call site passes a literal ``expected_interval_seconds=None``
+# writes only when something happens. Its silence is not a finding, so the
+# register must not put it in the ``expected`` set that turns silence into
+# ``absent``. Asserted through ``expected_component_names`` (the one place every
+# reader gets its expected set from), not through a new attribute.
+# ---------------------------------------------------------------------------
+
+
+def test_keyword_none_interval_is_event_driven_and_not_expected(fixture_scripts: Path) -> None:
+    _write(fixture_scripts, "evt.py", """
+        from health_beacon import HealthBeacon
+        HealthBeacon(state_dir, "evt", expected_interval_seconds=None)
+        HealthBeacon(state_dir, "per", expected_interval_seconds=3600)
+    """)
+    reg = br.read_beacon_register(fixture_scripts)
+    assert {s.name for s in reg} == {"evt", "per"}, "the register still lists the event-driven writer"
+    assert br.expected_component_names(reg) == ("per",)
+
+
+def test_positional_none_interval_is_event_driven(fixture_scripts: Path) -> None:
+    _write(fixture_scripts, "evt.py", """
+        from health_beacon import HealthBeacon
+        HealthBeacon(state_dir, "evt", None)
+    """)
+    reg = br.read_beacon_register(fixture_scripts)
+    assert br.expected_component_names(reg) == ()
+
+
+def test_omitted_interval_is_periodic_not_event_driven(fixture_scripts: Path) -> None:
+    """HealthBeacon's own default is 86400: leaving the argument out is a daily
+    writer, so its absence stays loud."""
+    _write(fixture_scripts, "per.py", """
+        from health_beacon import HealthBeacon
+        HealthBeacon(state_dir, "per")
+    """)
+    reg = br.read_beacon_register(fixture_scripts)
+    assert br.expected_component_names(reg) == ("per",)
+
+
+def test_interval_that_is_not_a_literal_none_stays_expected(fixture_scripts: Path) -> None:
+    """An interval the parser cannot prove is None (a name, an expression) is
+    treated as periodic. Guessing event-driven there would hide a real silence."""
+    _write(fixture_scripts, "var.py", """
+        from health_beacon import HealthBeacon
+        INTERVAL = None
+        HealthBeacon(state_dir, "by_name", expected_interval_seconds=INTERVAL)
+        HealthBeacon(state_dir, "by_expr", expected_interval_seconds=cfg.interval or None)
+    """)
+    reg = br.read_beacon_register(fixture_scripts)
+    assert br.expected_component_names(reg) == ("by_expr", "by_name")
+
+
+def test_a_periodic_call_site_makes_the_whole_component_expected(fixture_scripts: Path) -> None:
+    """One component, two writers: if any of them promises a cadence, the
+    component owes a beacon, so it is only event-driven when EVERY site says so."""
+    _write(fixture_scripts, "mixed.py", """
+        from health_beacon import HealthBeacon
+
+        def on_event():
+            HealthBeacon(state_dir, "mixed", expected_interval_seconds=None)
+
+        def on_schedule():
+            HealthBeacon(state_dir, "mixed", expected_interval_seconds=3600)
+    """)
+    _write(fixture_scripts, "both_none.py", """
+        from health_beacon import HealthBeacon
+
+        def a():
+            HealthBeacon(state_dir, "both_none", expected_interval_seconds=None)
+
+        def b():
+            HealthBeacon(state_dir, "both_none", None)
+    """)
+    reg = br.read_beacon_register(fixture_scripts)
+    assert br.expected_component_names(reg) == ("mixed",)
+
+
+def test_real_tree_cleanup_worker_exit_is_event_driven_and_fleet_role_drift_is_not() -> None:
+    """The two real shapes: cleanup_worker_exit passes ``expected_interval_seconds=None``
+    (it writes when a worker exits), fleet_role_drift a daily 86400."""
+    expected = set(br.expected_component_names())
+    assert "cleanup_worker_exit" not in expected
+    assert "fleet_role_drift" in expected
+    assert "cleanup_worker_exit" in {s.name for s in br.read_beacon_register()}
+
+
+# ---------------------------------------------------------------------------
 # PARKED_COMPONENTS / parked_component_names (golf C, C2a)
 # ---------------------------------------------------------------------------
 
 
-def test_parked_component_names_is_learning_loop_and_intelligence_daemon() -> None:
+def test_parked_component_names_is_the_intelligence_layer() -> None:
     """Operator decision 2026-09-09: the intelligence layer stays parked
     until the governance ledger is falsifiable (per the PRD) -- both
-    already-silent components get a deliberate status, not a removal."""
-    assert br.parked_component_names() == ("intelligence_daemon", "learning_loop")
+    already-silent components get a deliberate status, not a removal.
+    Extended 2026-09-24 with the cockpit subsystem beacon that measures the
+    same learning loop."""
+    assert br.parked_component_names() == (
+        "intelligence-self-learning-loop", "intelligence_daemon", "learning_loop",
+    )
 
 
-def test_parked_components_is_a_subset_of_the_real_register() -> None:
-    names = {s.name for s in br.read_beacon_register()}
-    assert set(br.parked_component_names()) <= names
+def test_parked_components_are_names_a_beacon_writer_can_actually_carry() -> None:
+    """A parked name that no writer can ever produce parks nothing, silently.
+    Each name is either a resolvable HealthBeacon(...) call site
+    (read_beacon_register) or a cockpit subsystem whose beacon
+    subsystem_health.aggregate() writes through a loop variable, which the
+    register deliberately cannot resolve (see the module docstring)."""
+    import subsystem_health
+
+    register_names = {s.name for s in br.read_beacon_register()}
+    subsystem_names = set(subsystem_health.known_subsystems())
+    unreachable = set(br.parked_component_names()) - register_names - subsystem_names
+    assert not unreachable, f"parked names no beacon writer can produce: {unreachable}"
+
+
+def test_the_self_learning_loop_beacon_is_parked_but_not_an_expected_writer() -> None:
+    """It is a subsystem beacon, not a HealthBeacon(...) literal: parking must not
+    make it ``expected``, which would turn its silence into ``absent``."""
+    assert "intelligence-self-learning-loop" in br.parked_component_names()
+    assert "intelligence-self-learning-loop" not in br.expected_component_names()
 
 
 # ---------------------------------------------------------------------------

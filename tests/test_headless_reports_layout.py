@@ -16,6 +16,13 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+# A real codex_gate run (PR 1869) that ends in a bare verdict: codex_gate is
+# refused when it wrote none (OI-1770), and these tests are about where the
+# report lands, not about the verdict.
+CODEX_VERDICT_STREAM = (
+    VNX_ROOT / "tests" / "fixtures" / "gate_verdict" / "pr-1869-codex_gate-bare-verdict.ndjson"
+).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # vnx_paths.py: VNX_HEADLESS_REPORTS_DIR is defined and points to headless/
@@ -190,7 +197,7 @@ class TestMaterializeArtifactsHeadlessPath:
         results_dir.mkdir()
 
         report_file = headless_dir / "20260424-120000-HEADLESS-codex_gate-pr-2.md"
-        stdout = "Finding A\nFinding B\nFinding C\n"
+        stdout = CODEX_VERDICT_STREAM
         request_payload = {
             "gate": "codex_gate",
             "pr_number": 2,

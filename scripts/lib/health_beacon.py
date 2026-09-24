@@ -57,6 +57,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+from vnx_paths import refuse_real_central_store_write_under_test_runner
+
 # D3a: an event-driven beacon (expected_interval_seconds=None) has no
 # interval to measure staleness against, but that must not mean "never
 # stale" — a component that wrote once and died is otherwise eternally
@@ -97,6 +99,7 @@ class HealthBeacon:
         expected_interval_seconds: Optional[int] = 86400,
     ) -> None:
         self.path = Path(state_dir) / "health" / f"{component}.json"
+        refuse_real_central_store_write_under_test_runner(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.component = component
         self.expected_interval = expected_interval_seconds
@@ -110,7 +113,9 @@ class HealthBeacon:
 
         Best-effort: I/O failures are swallowed so a beacon write never
         breaks the calling component. Callers that need confirmation
-        should call :meth:`heartbeat_strict`.
+        should call :meth:`heartbeat_strict`. A test-isolation violation
+        (``TestIsolationGuardError``: a pytest or unittest run about to write
+        the real central store) is not an I/O failure and is not swallowed.
         """
         try:
             self.heartbeat_strict(status=status, details=details)
@@ -123,6 +128,7 @@ class HealthBeacon:
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically write the heartbeat, raising on I/O failure."""
+        refuse_real_central_store_write_under_test_runner(self.path)
         now = time.time()
         payload: Dict[str, Any] = {
             "component": self.component,
@@ -175,7 +181,10 @@ def all_beacons(
         directly; any unrecognized status falls to ``"fail"``, never ``"ok"``)
 
     ``expected`` (D3a gap 2, optional): component names that MUST have a
-    beacon — see ``beacon_register.expected_component_names()``. Any name in
+    beacon — see ``beacon_register.expected_component_names()``, which leaves
+    out event-driven components (``expected_interval_seconds=None``: they owe
+    no beacon between two events, so their silence is not ``absent``; a beacon
+    they DID write is still read below and keeps its own ``fail``). Any name in
     ``expected`` with no beacon found on disk at all gets a synthetic entry
     with ``health = "absent"``. Mirrors the existing fabric convention (see
     ``worker_permissions.resolve_dispatch_write_scope``): ``None`` means "no

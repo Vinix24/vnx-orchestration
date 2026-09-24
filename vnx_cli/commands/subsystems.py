@@ -21,14 +21,19 @@ so a live probe never forces a ledger recommit. Before a beacon exists for a
 subsystem, health falls back to the value committed in the seed table (parsed
 from the file itself), so the round-trip is byte-identical before PR-5..7 land.
 
-``--probe`` is this PR's owned flag surface (PR-5 supplies the aggregator, via
-a guarded import, with no edit back to this file). A subsystem with no probe
+``--probe`` is this PR's owned flag surface (PR-5 supplies the aggregator, imported
+at call time with no edit back to this file). A subsystem with no probe
 registered in ``EFFECTIVENESS_PROBES`` reports ``unknown`` / ``"no probe
-registered"``; if the aggregator module itself is absent, every row does.
+registered"``. A probe RUN that fails (the aggregator module cannot be imported,
+or the aggregator raises) is not a table of ``unknown`` rows: nothing is
+printed to stdout, the reason goes to stderr and the exit code is 1, so a
+launchd job running ``vnx subsystems --probe`` can show that it failed. Without
+``--probe`` the aggregator is never touched.
 """
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -236,23 +241,30 @@ def _parse_seed_health(engine_root: Path) -> Dict[str, str]:
     return out
 
 
-def _run_registered_probes(data_dir: Path) -> Optional[Dict[str, Any]]:
-    """Guarded import of scripts/lib/subsystem_health.py (PR-5). Returns None
-    when the module does not exist yet — the caller then reports 'unknown' /
-    'no probe registered' for every subsystem. PR-3 owns this flag surface;
-    PR-5 supplies the module with no edit back to this file.
+class ProbeRunError(RuntimeError):
+    """The probe run itself failed, so no measurement exists to report."""
 
-    Beacons are written under the same resolved ``data_dir`` (VNX_DATA_DIR)
-    this CLI already uses for reading them, rather than letting the
-    aggregator re-resolve it independently."""
+
+def _run_registered_probes(data_dir: Path) -> Dict[str, Any]:
+    """Run scripts/lib/subsystem_health.py's aggregator (PR-5) and return its
+    per-subsystem results.
+
+    Raises ``ProbeRunError`` when the module cannot be imported or the
+    aggregator raises; the message carries the cause so ``vnx_subsystems`` can
+    put it on stderr.
+
+    ``data_dir`` (VNX_DATA_DIR) is the root this CLI already uses for reading
+    beacons: the aggregator writes them under ``<data_dir>/health`` and hands
+    ``<data_dir>/state`` to the probes, rather than re-resolving either
+    independently."""
     try:
         from subsystem_health import aggregate  # type: ignore[import-not-found]
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise ProbeRunError(f"cannot import subsystem_health: {exc}") from exc
     try:
         return aggregate(state_dir=data_dir)
-    except Exception as exc:  # probe internals are owned by PR-5+; never crash the CLI
-        return {"__error__": str(exc)}
+    except Exception as exc:
+        raise ProbeRunError(f"probe run failed: {type(exc).__name__}: {exc}") from exc
 
 
 def _attach_health(
@@ -266,7 +278,7 @@ def _attach_health(
     if use_probe:
         probe_results = _run_registered_probes(data_dir)
         for row in rows:
-            result = probe_results.get(row["subsystem"]) if probe_results else None
+            result = probe_results.get(row["subsystem"])
             if isinstance(result, dict) and "status" in result:
                 status = result.get("status", "unknown")
                 signal = result.get("signal", "")
@@ -335,7 +347,11 @@ def vnx_subsystems(args) -> int:
 
     rows = build_rows(project_id)
     seed_health = _parse_seed_health(engine_root)
-    _attach_health(rows, data_dir, seed_health, use_probe)
+    try:
+        _attach_health(rows, data_dir, seed_health, use_probe)
+    except ProbeRunError as exc:
+        print(f"vnx subsystems --probe: {exc}", file=sys.stderr)
+        return 1
 
     if emit_md:
         print(_render_md(rows))

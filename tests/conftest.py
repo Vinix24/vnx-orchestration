@@ -194,7 +194,7 @@ def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     The "fail loud when about to WRITE into the real ~/.vnx-data" half lives
     at the actual write surfaces instead:
-    ``vnx_paths.refuse_real_central_store_write_under_pytest`` is called from
+    ``vnx_paths.refuse_real_central_store_write_under_test_runner`` is called from
     ``PRQueueManager.__init__`` (scripts/pr_queue_manager.py) and from
     ``vnx_mode._guard_mode_write_target`` (scripts/lib/vnx_mode.py, alongside
     the existing OI-911 divergence/cross-project checks). New write surfaces

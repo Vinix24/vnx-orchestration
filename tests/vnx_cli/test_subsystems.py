@@ -116,25 +116,120 @@ def test_md_health_falls_back_to_committed_seed_when_no_beacon(tmp_path, capsys)
 
 
 # ---------------------------------------------------------------------------
-# --probe: guarded import of scripts/lib/subsystem_health.py (PR-5's owned
-# module). PR-3 must behave correctly whether PR-5 has merged yet or not, so
-# the guarded-import fallback is exercised directly via monkeypatch rather
-# than depending on ambient module presence in the test environment.
+# --probe: import of scripts/lib/subsystem_health.py (PR-5's owned module).
+# A probe run that cannot happen (module missing) or that dies (aggregator
+# raises) is a FAILED run, not a table of "unknown" rows: exit != 0, the reason
+# on stderr, nothing on stdout. A launchd job running `vnx subsystems --probe`
+# has no other way to show it failed (absence-is-loud, punt 1).
 # ---------------------------------------------------------------------------
 
-def test_probe_falls_back_to_unknown_when_aggregator_module_absent(tmp_path, monkeypatch, capsys):
-    import vnx_cli.commands.subsystems as subsystems_mod
+_OUTPUT_FLAGS = [
+    pytest.param({"json_flag": True}, id="json"),
+    pytest.param({"md": True}, id="md"),
+    pytest.param({}, id="table"),
+]
 
-    monkeypatch.setattr(subsystems_mod, "_run_registered_probes", lambda data_dir: None)
+
+@pytest.mark.parametrize("flags", _OUTPUT_FLAGS)
+def test_probe_fails_loud_when_aggregator_module_absent(tmp_path, monkeypatch, capsys, flags):
+    # A None entry in sys.modules makes `from subsystem_health import ...` raise
+    # ImportError, exercising the real import path in _run_registered_probes.
+    monkeypatch.setitem(sys.modules, "subsystem_health", None)
+
+    rc = vnx_subsystems(_args(tmp_path, probe=True, **flags))
+
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "subsystem_health" in captured.err
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize("flags", _OUTPUT_FLAGS)
+def test_probe_fails_loud_when_the_aggregator_raises(tmp_path, monkeypatch, capsys, flags):
+    _engine.ensure_engine_on_path()
+    import subsystem_health
+
+    def _boom(**kwargs):
+        raise RuntimeError("coordination db is locked")
+
+    monkeypatch.setattr(subsystem_health, "aggregate", _boom)
+
+    rc = vnx_subsystems(_args(tmp_path, probe=True, **flags))
+
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "RuntimeError" in captured.err
+    assert "coordination db is locked" in captured.err
+    assert captured.out == ""
+
+
+def test_without_probe_a_broken_aggregator_is_never_reached(tmp_path, monkeypatch, capsys):
+    _engine.ensure_engine_on_path()
+    import subsystem_health
+
+    calls = []
+
+    def _boom(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("must not run without --probe")
+
+    monkeypatch.setattr(subsystem_health, "aggregate", _boom)
+
+    rc = vnx_subsystems(_args(tmp_path, json_flag=True))
+
+    assert rc == 0
+    assert calls == []
+    assert capsys.readouterr().err == ""
+
+
+def test_dispatch_command_turns_a_failed_probe_run_into_a_nonzero_exit(tmp_path, monkeypatch, capsys):
+    from vnx_cli import main as main_mod
+
+    _engine.ensure_engine_on_path()
+    import subsystem_health
+
+    def _boom(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(subsystem_health, "aggregate", _boom)
+    args = _args(tmp_path, probe=True)
+    args.command = "subsystems"
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_mod._dispatch_command(args, parser=None)
+
+    assert excinfo.value.code not in (0, None)
+    assert "boom" in capsys.readouterr().err
+
+
+def test_probe_reads_the_data_dir_the_cli_resolved(tmp_path, monkeypatch, capsys):
+    """The CLI resolves its own data_dir from --project-dir (the pip-installed
+    CLI cannot rely on the ambient env). That dir must reach the probes: the
+    plan-gate row has to reflect ``<data_dir>/state``, not whatever the probe
+    would resolve on its own."""
+    import sqlite3
+
+    cli_data = tmp_path / "cli-data"
+    (cli_data / "state").mkdir(parents=True)
+    conn = sqlite3.connect(str(cli_data / "state" / "runtime_coordination.db"))
+    conn.execute(
+        "CREATE TABLE track_open_items (track_id TEXT, project_id TEXT, oi_id TEXT, "
+        "link_type TEXT, linked_at TEXT, resolved_at TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO track_open_items VALUES (?, 'p', ?, 'blocks', '2099-01-01T00:00:00+00:00', NULL)",
+        [("t1", "OI-PLAN-t1"), ("t2", "OI-PLAN-t2")],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(_engine, "resolve_data_root", lambda project_dir: cli_data)
 
     rc = vnx_subsystems(_args(tmp_path, json_flag=True, probe=True))
-    assert rc == 0
 
+    assert rc == 0
     rows = json.loads(capsys.readouterr().out)["subsystems"]
-    assert rows, "expected at least one subsystem row"
-    for row in rows:
-        assert row["health"] == "unknown"
-        assert row["last_signal"] == "no probe registered"
+    plan_gate = next(r for r in rows if r["subsystem"] == "plan-gate-panel")
+    assert "2 unresolved OI-PLAN blocker(s)" in plan_gate["health"]
 
 
 def test_probe_uses_live_aggregator_result_when_present(tmp_path, monkeypatch, capsys):
@@ -174,7 +269,6 @@ def test_probe_guarded_import_matches_current_subsystem_health_contract(tmp_path
 
     result = subsystems_mod._run_registered_probes(tmp_path)
     assert isinstance(result, dict)
-    assert "__error__" not in result
 
 
 # ---------------------------------------------------------------------------

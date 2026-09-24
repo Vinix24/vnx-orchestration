@@ -217,9 +217,9 @@ def record_lane_failure(
         sd = Path(state_dir) if state_dir is not None else _resolve_state_dir()
         # New write surface: fail loud if this would write the live central
         # store under pytest (test-store-isolation guard, w19c/OI-934).
-        from vnx_paths import refuse_real_central_store_write_under_pytest  # noqa: PLC0415
+        from vnx_paths import refuse_real_central_store_write_under_test_runner  # noqa: PLC0415
 
-        refuse_real_central_store_write_under_pytest(sd)
+        refuse_real_central_store_write_under_test_runner(sd)
         from incident_taxonomy import (  # noqa: PLC0415
             classify_provider_failure,
             get_contract,

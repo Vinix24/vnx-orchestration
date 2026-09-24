@@ -156,7 +156,7 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
         try:
             _validate_model_present(receipt)
         except AppendReceiptError as exc:
-            if exc.code in ("missing_model", "invalid_model_shape"):
+            if exc.code in rc.MODEL_REFUSAL_CODES:
                 candidates.append(Candidate(
                     path=path,
                     dispatch_id=str(receipt.get("dispatch_id") or ""),

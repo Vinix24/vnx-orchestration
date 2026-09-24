@@ -236,7 +236,8 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
         "--force",
         action="store_true",
         help="overwrite existing scaffold files (allows reinitialisation); "
-             "never resets an existing .vnx-version pin — use --set-version for that; "
+             "the .vnx-version pin is operator-owned: --force always preserves it — "
+             "to repin an existing project, combine --force with --set-version; "
              "never clobbers an existing .claude/settings.json (project-owned) — "
              "use `vnx regen-settings --merge` to refresh the VNX-owned keys",
     )
@@ -245,9 +246,12 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
         dest="set_version",
         default=None,
         metavar="VERSION",
-        help="explicitly (re)write the .vnx-version pin to VERSION, even if a pin "
-             "already exists; must match [A-Za-z0-9._-]+. The central-install pip "
-             "CLI honors the pin by re-exec'ing the pinned version at startup "
+        help="explicitly (re)write the .vnx-version pin to VERSION; must match "
+             "[A-Za-z0-9._-]+. On a first init this sets the pin directly. "
+             "Repinning an already-initialised project requires --force "
+             "--set-version VERSION — --set-version alone still aborts with "
+             "exit 1 when a pin already exists. The central-install pip CLI "
+             "honors the pin by re-exec'ing the pinned version at startup "
              "(vnx_cli/_reexec.py)",
     )
 

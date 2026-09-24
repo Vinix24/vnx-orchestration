@@ -15,6 +15,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 for _p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
     if str(_p) not in sys.path:
@@ -423,3 +425,160 @@ def test_run_backlog_is_idempotent(tmp_path):
     assert merged_record["status"] == STATUS_RETIRED
     assert dead_record["status"] == STATUS_RETIRED
     assert running_record["status"] == STATUS_PENDING
+
+
+# ---------------------------------------------------------------------------
+# 6. OI-1795 (DEEL A): the script must not read two repositories at once.
+#    ``owner_repo`` (PR source, from the STATE-DIR) and the branch source
+#    (``--project-root``) must come from ONE repo, or the script refuses
+#    hard. A wrong repo gives no error, only a wrong verdict — the most
+#    dangerous shape — so a loud refusal is better than a default.
+# ---------------------------------------------------------------------------
+
+
+def test_assert_repos_consistent_passes_when_repos_match(monkeypatch, tmp_path):
+    """Control case: same owner/repo on both sides -> no raise."""
+    monkeypatch.setattr(
+        backlog, "_git_remote_origin",
+        lambda root: "https://github.com/Vinix24/vnx-orchestration.git",
+    )
+    # Must not raise.
+    backlog.assert_repos_consistent("Vinix24/vnx-orchestration", tmp_path)
+
+
+def test_assert_repos_consistent_refuses_mismatched_repos(monkeypatch, tmp_path):
+    """OI-1795 measured: STATE-DIR resolves PRs to Vinix24/vnx-orchestration
+    while --project-root's origin is a different repo. The PR queries and the
+    branch-existence check would run against two repos, so every obligation
+    would land ``no_pr_branch_gone`` with a fabricated reason. Refuse hard."""
+    monkeypatch.setattr(
+        backlog, "_git_remote_origin",
+        lambda root: "https://github.com/Vinix24/website-vincentvandeth.git",
+    )
+    with pytest.raises(backlog.RepoMismatchError) as excinfo:
+        backlog.assert_repos_consistent("Vinix24/vnx-orchestration", tmp_path)
+    msg = str(excinfo.value)
+    assert "repo mismatch" in msg
+    assert "Vinix24/vnx-orchestration" in msg
+    assert "Vinix24/website-vincentvandeth" in msg
+
+
+def test_assert_repos_consistent_refuses_non_git_project_root(monkeypatch, tmp_path):
+    """OI-1795 second cause: --project-root is not a git repo at all (measured
+    on ~/Desktop/BUSINESS/clients/vincent/pacompany). ``git ls-remote``
+    returns nothing and every branch reads as gone, which would retire every
+    obligation with ``no_pr_branch_gone``. A missing origin is a loud refusal,
+    not a silent empty branch set."""
+    monkeypatch.setattr(backlog, "_git_remote_origin", lambda root: None)
+    with pytest.raises(backlog.RepoMismatchError) as excinfo:
+        backlog.assert_repos_consistent("Vinix24/vnx-orchestration", tmp_path)
+    assert "cannot resolve a GitHub owner/repo for --project-root" in str(excinfo.value)
+
+
+def test_assert_repos_consistent_refuses_local_filesystem_origin(monkeypatch, tmp_path):
+    """A local-filesystem origin is a release/install artifact, never a
+    project identity (OI-1253). The branch source cannot be attributed, so
+    the run must refuse rather than read every branch as gone."""
+    monkeypatch.setattr(
+        backlog, "_git_remote_origin",
+        lambda root: "/var/folders/ab/cd/T/vnx-checkout",
+    )
+    with pytest.raises(backlog.RepoMismatchError) as excinfo:
+        backlog.assert_repos_consistent("Vinix24/vnx-orchestration", tmp_path)
+    assert "cannot resolve a GitHub owner/repo for --project-root" in str(excinfo.value)
+
+
+def test_main_refuses_hard_on_repo_mismatch(monkeypatch, tmp_path, capsys):
+    """The CLI surface of OI-1795: when the STATE-DIR's owner_repo and
+    --project-root's origin disagree, ``main`` returns 20 and writes NO
+    obligations. A wrong verdict is the gevaarlijkste vorm; the refusal is
+    the safer default."""
+    state_dir = _make_state_dir(tmp_path)
+    # A pending obligation that WOULD be retired by a fabricated reason if
+    # the guard did not refuse — left pending on disk to prove nothing ran.
+    register_obligation(
+        state_dir, dispatch_id="20260920-mismatch-victim", gate="codex_gate", project_id="web",
+    )
+
+    monkeypatch.setattr(
+        backlog, "_resolve_github_owner_repo",
+        lambda state_dir_arg: "Vinix24/vnx-orchestration",
+    )
+    monkeypatch.setattr(
+        backlog, "_git_remote_origin",
+        lambda root: "https://github.com/Vinix24/website-vincentvandeth.git",
+    )
+    monkeypatch.setattr(backlog, "fetch_prs", lambda *a, **k: [])
+
+    rc = backlog.main([
+        "--state-dir", str(state_dir),
+        "--project-root", str(tmp_path),
+        "--write",
+    ])
+
+    assert rc == 20
+    err = capsys.readouterr().err
+    assert "repo mismatch" in err
+    # The obligation stays pending: nothing was written past the guard.
+    record = _read_obligation(state_dir, "20260920-mismatch-victim")
+    assert record["status"] == STATUS_PENDING
+
+
+def test_main_refuses_hard_when_project_root_not_a_repo(monkeypatch, tmp_path, capsys):
+    """The non-git --project-root case (pacompany) refuses at the CLI too,
+    before any PR fetch, so no obligation is retired with a fabricated
+    reason."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260920-nongit-victim", gate="codex_gate", project_id="pacompany",
+    )
+
+    monkeypatch.setattr(
+        backlog, "_resolve_github_owner_repo",
+        lambda state_dir_arg: "Vinix24/pacompany-engine",
+    )
+    monkeypatch.setattr(backlog, "_git_remote_origin", lambda root: None)
+    monkeypatch.setattr(backlog, "fetch_prs", lambda *a, **k: [])
+
+    rc = backlog.main([
+        "--state-dir", str(state_dir),
+        "--project-root", str(tmp_path),
+        "--write",
+    ])
+
+    assert rc == 20
+    assert "cannot resolve a GitHub owner/repo for --project-root" in capsys.readouterr().err
+    record = _read_obligation(state_dir, "20260920-nongit-victim")
+    assert record["status"] == STATUS_PENDING
+
+
+def test_main_proceeds_when_repos_match(monkeypatch, tmp_path, capsys):
+    """Control: when the STATE-DIR's owner_repo and --project-root's origin
+    are the SAME repo, the run proceeds as before (no false refusal)."""
+    state_dir = _make_state_dir(tmp_path)
+    register_obligation(
+        state_dir, dispatch_id="20260920-consistent-dead", gate="codex_gate", project_id="vnx-dev",
+    )
+
+    monkeypatch.setattr(
+        backlog, "_resolve_github_owner_repo",
+        lambda state_dir_arg: "Vinix24/vnx-orchestration",
+    )
+    monkeypatch.setattr(
+        backlog, "_git_remote_origin",
+        lambda root: "https://github.com/Vinix24/vnx-orchestration.git",
+    )
+    # No PRs, no branches -> the one pending obligation retires as no_pr_branch_gone.
+    monkeypatch.setattr(backlog, "fetch_prs", lambda *a, **k: [])
+    monkeypatch.setattr(backlog, "fetch_existing_branches", lambda root: set())
+
+    rc = backlog.main([
+        "--state-dir", str(state_dir),
+        "--project-root", str(tmp_path),
+        "--write",
+        "--json",
+    ])
+    assert rc == 0
+    record = _read_obligation(state_dir, "20260920-consistent-dead")
+    assert record["status"] == STATUS_RETIRED
+    assert record["reason"] == REASON_NO_PR_BRANCH_GONE

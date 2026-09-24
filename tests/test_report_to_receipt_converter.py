@@ -21,6 +21,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -380,10 +381,13 @@ class TestStatusVocabularyFailClosed:
         assert receipt["event_type"] == "task_failed"
         assert receipt["status"] == "failed"
 
-    def test_missing_status_and_exit_code_falls_back_to_no_signal_literal(self, tmp_path):
-        # The genuine residual case: neither status nor a usable exit_code.
-        # The receipt must still carry a readable literal ("no_signal"),
-        # never an empty string.
+    def test_missing_status_and_exit_code_derives_done_from_the_contract(self, tmp_path):
+        # The residual case: neither status nor a usable exit_code. This report
+        # satisfies the body contract (four sections) and declares no failure,
+        # so the receipt carries the contract-derived status, marked as derived,
+        # never an empty string and no longer "no_signal" beside a same-shaped
+        # report that happened to carry an exit_code. The canonical mapping of
+        # an empty status is unchanged: only the writer stopped reaching it.
         from event_outcome_semantics import resolve_status_category
 
         p = tmp_path / "20260823-truly-signal-less.md"
@@ -393,8 +397,8 @@ class TestStatusVocabularyFailClosed:
         receipt = build_receipt_from_report(p, p.read_text(encoding="utf-8"))
         assert receipt is not None
         assert receipt["event_type"] == "task_complete"
-        assert receipt["status"] == "no_signal"
-        assert receipt["status"] != ""
+        assert receipt["status"] == "done"
+        assert receipt["status_source"] == "report_contract"
         assert resolve_status_category("") == "no_signal"
 
 
@@ -1183,16 +1187,18 @@ class TestRejectionVisibility:
             for r in caplog.records
         )
 
-    def test_rejected_report_retried_on_next_scan_not_watermarked(self, reports_dir, state_dir):
-        """A rejected report must NOT be marked processed — it is retried
-        every scan until the cause (missing Model) is fixed."""
-        _write_report_without_model(reports_dir / "20260601-retry-me.md", "20260601-retry-me")
+    def test_rejected_report_is_not_marked_processed_in_the_converter_watermark(
+        self, reports_dir, state_dir
+    ):
+        """A rejected report is quarantined, not accepted: the converter's own
+        watermark (which means "this report has a receipt") must not carry it.
+        The quarantine leaves its hash only in the Bash watermark."""
+        report = _write_report_without_model(reports_dir / "20260601-not-marked.md", "20260601-not-marked")
+        file_hash = _compute_sha256(report)
 
-        stats1 = scan_and_convert([reports_dir], state_dir)
-        stats2 = scan_and_convert([reports_dir], state_dir)
+        scan_and_convert([reports_dir], state_dir)
 
-        assert stats1.rejected_count == 1
-        assert stats2.rejected_count == 1  # retried, not silently watermarked away
+        assert file_hash not in _load_watermark(state_dir / _WATERMARK_FILENAME)
 
     def test_convert_report_to_receipt_returns_none_for_rejected(
         self, tmp_path, state_dir, caplog
@@ -1234,9 +1240,14 @@ class TestRejectionVisibility:
         assert beacon["details"]["rejected_count"] == 1
         assert beacon["details"]["new_count"] == 0
 
-    def test_scan_with_at_least_one_success_keeps_beacon_ok(self, reports_dir, state_dir):
-        """A rejection alongside a successful receipt is normal, expected,
-        contract-driven behavior — it must NOT flip the whole scan unhealthy."""
+    def test_valid_report_next_to_an_invalid_one_books_and_the_invalid_one_is_quarantined(
+        self, reports_dir, state_dir
+    ):
+        """One scan, two reports: the valid one gets its receipt, the one
+        without a model goes to quarantine. The refusal still raises the
+        beacon: a quarantined report is out of every later scan, so a beacon
+        that stayed ok because a sibling succeeded would let the refusal
+        vanish unread (this test used to assert ``ok`` here)."""
         _write_report_without_model(reports_dir / "20260601-no-model-3.md", "20260601-no-model-3")
         _write_frontmatter_report(reports_dir / "20260601-healthy-c.md", "20260601-healthy-c")
 
@@ -1244,9 +1255,409 @@ class TestRejectionVisibility:
         assert stats.new_count == 1
         assert stats.rejected_count == 1
 
+        receipts = _receipts(state_dir)
+        assert [r["dispatch_id"] for r in receipts] == ["20260601-healthy-c"]
+        assert not (reports_dir / "20260601-no-model-3.md").exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-no-model-3.md").is_file()
+        assert (reports_dir / "20260601-healthy-c.md").is_file()
+
         beacon_path = state_dir.parent / "health" / "report_to_receipt_converter.json"
         beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["new_count"] == 1
+        assert beacon["details"]["recent_rejected_count"] == 1
+
+
+def _quarantine_index_lines(state_dir: Path) -> list:
+    index = state_dir / "receipt_deadletter" / "INDEX.txt"
+    return index.read_text(encoding="utf-8").splitlines() if index.is_file() else []
+
+
+def _converter_beacon(state_dir: Path) -> dict:
+    return json.loads(
+        (state_dir.parent / "health" / "report_to_receipt_converter.json").read_text(encoding="utf-8")
+    )
+
+
+def _seed_rejected_history(state_dir: Path, *hours_old: float) -> None:
+    """Write a converter beacon whose history holds one rejection per age,
+    through the real HealthBeacon writer, as a scan some hours ago left it."""
+    from health_beacon import HealthBeacon
+
+    now = time.time()
+    entries = [
+        {
+            "dispatch_id": f"20260601-seeded-{i}",
+            "file": f"20260601-seeded-{i}.md",
+            "reason": "missing model",
+            "rejected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - hours * 3600)),
+        }
+        for i, hours in enumerate(hours_old)
+    ]
+    HealthBeacon(
+        state_dir.parent, "report_to_receipt_converter", expected_interval_seconds=3600,
+    ).heartbeat(status="fail", details={"rejected": entries})
+
+
+class TestMissingModelQuarantine:
+    """Absence-is-loud: a report that can never gain a model must leave the
+    scanned directory on its first refusal, or the converter beacon re-fails
+    on the same file every hour and the next NEW refusal hides behind an
+    alarm that is already on (15 reports, 07-09 to 08-09, measured on main
+    264e9460)."""
+
+    def test_refused_report_is_quarantined_with_an_index_line_and_not_retried(
+        self, reports_dir, state_dir
+    ):
+        report = _write_report_without_model(reports_dir / "20260601-quarantine-me.md", "20260601-quarantine-me")
+        file_hash = _compute_sha256(report)
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats1.rejected_count == 1
+        assert not report.exists()
+        moved = state_dir / "receipt_deadletter" / "20260601-quarantine-me.md"
+        assert moved.is_file()
+        index_lines = _quarantine_index_lines(state_dir)
+        assert len(index_lines) == 1
+        _ts, indexed_hash, reason_code, indexed_name = index_lines[0].split(" ")
+        assert reason_code == "missing_model"
+        assert indexed_name == "20260601-quarantine-me.md"
+        assert indexed_hash == file_hash
+        # The Bash processor must skip it too: same shared watermark entry
+        # the unknown_dispatch quarantine leaves.
+        assert file_hash in _load_watermark(state_dir / "processed_receipts.txt")
+
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats2.attempted_count == 0
+        assert stats2.rejected_count == 0
+        assert len(_quarantine_index_lines(state_dir)) == 1  # not quarantined twice
+
+    def test_quarantined_report_stays_skipped_when_restored_unchanged(self, reports_dir, state_dir):
+        """Putting the same bytes back does not re-open the case: the hash is
+        in the shared watermark, so no scan retries it."""
+        report = _write_report_without_model(reports_dir / "20260601-restore-same.md", "20260601-restore-same")
+        scan_and_convert([reports_dir], state_dir)
+        shutil.copy2(state_dir / "receipt_deadletter" / report.name, report)
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.attempted_count == 0
+        assert _count_receipts(state_dir) == 0
+
+    def test_quarantined_report_books_once_a_model_is_added_and_it_is_put_back(
+        self, reports_dir, state_dir
+    ):
+        """The way back the quarantine promises: edit the model in, copy it
+        back to the scanned directory. New bytes, new hash, normal booking."""
+        report = _write_report_without_model(reports_dir / "20260601-restore-fixed.md", "20260601-restore-fixed")
+        scan_and_convert([reports_dir], state_dir)
+        text = (state_dir / "receipt_deadletter" / report.name).read_text(encoding="utf-8")
+        report.write_text(text.replace("provider: claude\n", "provider: claude\nmodel: claude-sonnet-4-6\n"), encoding="utf-8")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.new_count == 1
+        assert [r["dispatch_id"] for r in _receipts(state_dir)] == ["20260601-restore-fixed"]
+
+    def test_beacon_fails_on_the_scan_that_refuses_and_on_the_next_one_within_a_day(
+        self, reports_dir, state_dir
+    ):
+        _write_report_without_model(reports_dir / "20260601-loud-a.md", "20260601-loud-a")
+
+        scan_and_convert([reports_dir], state_dir)
+        assert _converter_beacon(state_dir)["status"] == "fail"
+
+        stats2 = scan_and_convert([reports_dir], state_dir)  # nothing left to scan
+        assert stats2.attempted_count == 0
+        beacon = _converter_beacon(state_dir)
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["rejected_count"] == 0
+        assert beacon["details"]["recent_rejected_count"] == 1
+        assert [e["dispatch_id"] for e in beacon["details"]["rejected"]] == ["20260601-loud-a"]
+
+    def test_beacon_is_ok_again_once_every_refusal_is_older_than_the_window(self, reports_dir, state_dir):
+        _seed_rejected_history(state_dir, 25, 48)
+
+        stats = scan_and_convert([reports_dir], state_dir)  # empty directory
+
+        assert stats.attempted_count == 0
+        beacon = _converter_beacon(state_dir)
         assert beacon["status"] == "ok"
+        assert beacon["details"]["recent_rejected_count"] == 0
+        assert len(beacon["details"]["rejected"]) == 2  # the history stays readable
+
+    def test_one_refusal_inside_the_window_holds_the_beacon_at_fail(self, reports_dir, state_dir):
+        _seed_rejected_history(state_dir, 48, 23)
+
+        scan_and_convert([reports_dir], state_dir)
+
+        beacon = _converter_beacon(state_dir)
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["recent_rejected_count"] == 1
+
+    def test_dry_run_moves_nothing(self, reports_dir, state_dir):
+        report = _write_report_without_model(reports_dir / "20260601-dry-keep.md", "20260601-dry-keep")
+        before = report.read_bytes()
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.rejected_count == 1
+        assert report.read_bytes() == before
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+        assert not (state_dir.parent / "health" / "report_to_receipt_converter.json").exists()
+
+    def test_targeted_dispatch_id_run_quarantines_the_same_way(self, reports_dir, state_dir):
+        report = _write_report_without_model(reports_dir / "20260601-targeted.md", "20260601-targeted")
+
+        stats = convert_dispatch_ids(["20260601-targeted"], state_dir)
+
+        assert stats.rejected_count == 1
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-targeted.md").is_file()
+
+    def test_a_failed_quarantine_keeps_the_report_and_the_refusal_stays_loud(self, reports_dir, state_dir):
+        """If the move cannot happen (here: the dead-letter path is a file),
+        the report stays where it is and every scan refuses it again, so the
+        beacon keeps failing. A quarantine that cannot quarantine must never
+        turn into silence."""
+        (state_dir / "receipt_deadletter").write_text("in the way", encoding="utf-8")
+        report = _write_report_without_model(reports_dir / "20260601-stuck.md", "20260601-stuck")
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert report.is_file()
+        assert stats1.rejected_count == 1
+        assert stats2.rejected_count == 1
+        assert _converter_beacon(state_dir)["status"] == "fail"
+
+    def test_a_caller_without_a_state_dir_leaves_the_report_for_the_scan(self, tmp_path):
+        """convert_report_to_receipt() without receipts_file has no state dir
+        to quarantine into (the same guard the unknown_dispatch dead-letter
+        has): the report stays and the next directory scan quarantines it."""
+        report = _write_report_without_model(tmp_path / "20260601-no-state.md", "20260601-no-state")
+
+        result = convert_report_to_receipt(report)
+
+        assert result is None
+        assert report.is_file()
+
+
+# The report that made the converter beacon fail for an hour-by-hour retry
+# (20260830-provider-agnostic-review-lane-glm-5-2-harness-plan-review_report.md,
+# measured 2026-09-23 19:48Z): Model and Provider on ONE line. The bold-field
+# parser reads everything after `**Model:**` as the value.
+_GLUED_MODEL = "glm-5.2 · **Provider:** claude"
+
+
+def _write_report_with_glued_model_line(path: Path, dispatch_id: str) -> Path:
+    path.write_text(
+        "# Plan Review\n\n"
+        f"**Dispatch-ID:** {dispatch_id}\n"
+        f"**Model:** {_GLUED_MODEL}\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _append_receipt_facade():
+    """The ``append_receipt`` facade the converter itself imports (the converter
+    puts scripts/ on sys.path lazily, so a test that patches it must do the
+    same instead of depending on test order)."""
+    sys.path.insert(0, str(SCRIPTS_LIB.parent))
+    sys.path.insert(0, str(SCRIPTS_LIB))
+    import append_receipt
+
+    return append_receipt
+
+
+class TestInvalidModelShapeQuarantine:
+    """The fail-closed model check refuses with two codes: ``missing_model``
+    (no model at all) and ``invalid_model_shape`` (a value that is not a model
+    name). Both are a verdict on the report's bytes, so both take the same
+    path: counted as rejected, named in the rejection history, quarantined.
+    Before this, ``invalid_model_shape`` fell into the generic error branch:
+    retried every scan, and ``attempted > 0`` with nothing booked held the
+    converter beacon at fail for good."""
+
+    def test_the_fixture_is_the_shape_the_parser_really_produces(self, reports_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-shape.md", "20260601-shape")
+
+        body = _extract_body_fields(report.read_text(encoding="utf-8"))
+
+        assert body["model"] == _GLUED_MODEL
+
+    def test_refused_report_is_quarantined_with_its_code_and_not_retried(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-glued.md", "20260601-glued")
+        file_hash = _compute_sha256(report)
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats1.rejected_count == 1
+        assert stats1.error_count == 0
+        assert stats1.new_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-glued.md").is_file()
+        index_lines = _quarantine_index_lines(state_dir)
+        assert len(index_lines) == 1
+        _ts, indexed_hash, reason_code, indexed_name = index_lines[0].split(" ")
+        assert reason_code == "invalid_model_shape"
+        assert indexed_name == "20260601-glued.md"
+        assert indexed_hash == file_hash
+        assert file_hash in _load_watermark(state_dir / "processed_receipts.txt")
+
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats2.attempted_count == 0
+        assert stats2.rejected_count == 0
+        assert stats2.error_count == 0
+        assert len(_quarantine_index_lines(state_dir)) == 1
+
+    def test_refusal_lands_in_the_history_with_a_timestamp_and_holds_the_beacon_at_fail(
+        self, reports_dir, state_dir
+    ):
+        _write_report_with_glued_model_line(reports_dir / "20260601-history.md", "20260601-history")
+
+        scan_and_convert([reports_dir], state_dir)
+        scan_and_convert([reports_dir], state_dir)  # nothing left to scan
+
+        beacon = _converter_beacon(state_dir)
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["rejected_count"] == 0
+        assert beacon["details"]["error_count"] == 0
+        assert beacon["details"]["recent_rejected_count"] == 1
+        [entry] = beacon["details"]["rejected"]
+        assert entry["dispatch_id"] == "20260601-history"
+        assert entry["file"] == "20260601-history.md"
+        assert _GLUED_MODEL in entry["reason"]
+        assert entry["rejected_at"]
+
+    def test_refusal_is_logged_on_the_line_the_rejection_beacon_parses(
+        self, reports_dir, state_dir, caplog
+    ):
+        from receipt_conversion_rejection_beacon import parse_rejections
+
+        _write_report_with_glued_model_line(reports_dir / "20260601-logline.md", "20260601-logline")
+
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            scan_and_convert([reports_dir], state_dir)
+
+        stderr = "\n".join(f"WARNING report_to_receipt_converter: {r.getMessage()}" for r in caplog.records)
+        [rejection] = parse_rejections(stderr)
+        assert rejection["dispatch_id"] == "20260601-logline"
+        assert rejection["file"] == "20260601-logline.md"
+        assert _GLUED_MODEL in rejection["reason"]
+
+    def test_dry_run_counts_it_as_rejected_and_moves_nothing(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-dry-glued.md", "20260601-dry-glued")
+        before = report.read_bytes()
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.rejected_count == 1
+        assert stats.error_count == 0
+        assert stats.would_append_count == 0
+        [detail] = stats.rejected
+        assert detail["dispatch_id"] == "20260601-dry-glued"
+        assert detail["rejected_at"]
+        assert report.read_bytes() == before
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert not (state_dir.parent / "health" / "report_to_receipt_converter.json").exists()
+
+    def test_targeted_dispatch_id_run_quarantines_the_same_way(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-targeted-glued.md", "20260601-targeted-glued")
+
+        stats = convert_dispatch_ids(["20260601-targeted-glued"], state_dir)
+
+        assert stats.rejected_count == 1
+        assert stats.error_count == 0
+        assert not report.exists()
+        assert _quarantine_index_lines(state_dir)[0].split(" ")[2] == "invalid_model_shape"
+
+    def test_a_valid_report_next_to_it_still_books(self, reports_dir, state_dir):
+        _write_report_with_glued_model_line(reports_dir / "20260601-glued-sibling.md", "20260601-glued-sibling")
+        _write_frontmatter_report(reports_dir / "20260601-fine-sibling.md", "20260601-fine-sibling")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats.new_count, stats.rejected_count, stats.error_count) == (1, 1, 0)
+        assert [r["dispatch_id"] for r in _receipts(state_dir)] == ["20260601-fine-sibling"]
+
+    def test_missing_model_keeps_its_own_code_in_the_index(self, reports_dir, state_dir):
+        _write_report_without_model(reports_dir / "20260601-still-missing.md", "20260601-still-missing")
+
+        scan_and_convert([reports_dir], state_dir)
+
+        assert _quarantine_index_lines(state_dir)[0].split(" ")[2] == "missing_model"
+
+    def test_the_refusal_set_covers_every_code_the_model_check_raises(self):
+        """The set the converter quarantines on is the set of codes
+        ``_validate_model_present`` can raise. A third code added there without
+        being added here would fall back into the retry-forever branch."""
+        from append_receipt_internals.validation import _validate_model_present
+        from report_to_receipt_converter import MODEL_REFUSAL_CODES
+
+        raised = set()
+        for model in (None, "unknown", "the real model that ran this dispatch", "`sonnet`", "x" * 100):
+            receipt = {"receipt_kind": "dispatch", "source": "worker", "model": model}
+            with pytest.raises(_append_receipt_facade().AppendReceiptError) as excinfo:
+                _validate_model_present(receipt)
+            raised.add(excinfo.value.code)
+
+        assert raised == {"missing_model", "invalid_model_shape"}
+        assert MODEL_REFUSAL_CODES == frozenset(raised)
+
+    def test_a_non_model_append_error_stays_an_error_and_is_not_quarantined(
+        self, reports_dir, state_dir, monkeypatch
+    ):
+        """Only the model refusals are verdicts on the report's bytes. Any
+        other refusal (here ``missing_status``) may be a transient or a
+        writer bug: it stays an error, stays in place, is retried."""
+        facade = _append_receipt_facade()
+        from append_receipt_internals.common import EXIT_VALIDATION_ERROR
+
+        def _refuse(*args, **kwargs):
+            raise facade.AppendReceiptError(
+                "missing_status", EXIT_VALIDATION_ERROR, "receipt carries no status at all",
+            )
+
+        monkeypatch.setattr(facade, "append_receipt_payload", _refuse)
+        report = _write_frontmatter_report(reports_dir / "20260601-other-refusal.md", "20260601-other-refusal")
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats1.error_count, stats1.rejected_count) == (1, 0)
+        assert (stats2.error_count, stats2.rejected_count) == (1, 0)
+        assert report.is_file()
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert _converter_beacon(state_dir)["details"]["rejected"] == []
+
+    def test_a_non_model_error_stays_an_error_in_a_dry_run_too(self, reports_dir, state_dir, monkeypatch):
+        facade = _append_receipt_facade()
+        from append_receipt_internals import validation
+        from append_receipt_internals.common import EXIT_VALIDATION_ERROR
+
+        def _refuse(receipt):
+            raise facade.AppendReceiptError(
+                "missing_status", EXIT_VALIDATION_ERROR, "receipt carries no status at all",
+            )
+
+        monkeypatch.setattr(validation, "_validate_receipt", _refuse)
+        _write_frontmatter_report(reports_dir / "20260601-dry-other.md", "20260601-dry-other")
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert (stats.error_count, stats.rejected_count, stats.would_append_count) == (1, 0, 0)
 
 
 class TestRejectedDetailHistory:
@@ -1289,9 +1700,10 @@ class TestRejectedDetailHistory:
         )
         scan_and_convert([reports_dir], state_dir)
 
-        # Scan 1's offending report is now "fixed" (removed) — a scan that
-        # only reflects the CURRENT cycle would show zero rejections here.
-        (reports_dir / "20260906-stranded-a.md").unlink()
+        # Scan 1's offending report is out of the scanned directory (the
+        # converter quarantined it). A scan that only reflects the CURRENT
+        # cycle would show zero rejections here.
+        assert not (reports_dir / "20260906-stranded-a.md").exists()
         _write_report_without_model(
             reports_dir / "20260906-stranded-b.md", "20260906-stranded-b"
         )
@@ -1313,7 +1725,7 @@ class TestRejectedDetailHistory:
             report = reports_dir / f"{name}.md"
             _write_report_without_model(report, name)
             scan_and_convert([reports_dir], state_dir)
-            report.unlink()
+            assert not report.exists()  # quarantined by the scan
 
         entries = self._rejected_entries(state_dir)
         assert len(entries) == _HEALTH_REJECTED_HISTORY_MAX
@@ -1980,6 +2392,44 @@ class TestLaneIdentityResolution:
             "timestamp": "2026-08-09T12:00:00Z",
         }), encoding="utf-8")
 
+    def _write_route_decision_decision_block(
+        self, state_dir: Path, dispatch_id: str,
+        *, provider: str, model: str,
+    ) -> None:
+        """Write the DOMINANT route-decision shape (764 of 765 on the vnx-dev
+        store, 2026-09-22): the door's ``_persist_route_decision`` record with
+        ``decision.provider`` + ``decision.model`` as canonical lane values.
+
+        This is the shape ``_resolve_report_provider_model`` did NOT read before
+        OI-1546 — it only checked top-level ``selected_model`` (the legacy
+        smart-router shape, 1 of 765). A test using ONLY this helper reproduces
+        the 764/765 bug: the lane leaves a complete identity but the converter
+        ignored it and fell back to the body's false self-declaration.
+        """
+        import json as _json
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": "2026-09-22T06:42:04.235179+00:00",
+            "dispatch_id": dispatch_id,
+            "fingerprint": f"abcdef123456-{dispatch_id}",
+            "plan_digest": "abcdef123456" + "0" * 52,
+            "decision": {
+                "adapter": "provider",
+                "lane": "provider",
+                "provider": provider,
+                "model": model,
+                "dispatch_id": dispatch_id,
+                "billing": "provider_metered",
+                "isolation": "worktree",
+                "report_contract": "required",
+                "target_id": "T1",
+            },
+        }
+        (rd_dir / f"{dispatch_id}.json").write_text(
+            _json.dumps(record, indent=2, sort_keys=True), encoding="utf-8",
+        )
+
     def test_glm_harness_lane_wins_over_body_sonnet_claude(self, tmp_path):
         """Core OI-1111 case: route_decision says glm-5.2, body says sonnet/claude.
         The receipt must carry glm-harness/glm-5.2, not sonnet/claude."""
@@ -2239,6 +2689,286 @@ class TestLaneIdentityResolution:
         # No route_decision → body is the fallback. "claude" is already canonical.
         assert receipt["provider"] == "claude"
         assert receipt["model"] == "sonnet"
+
+    # ------------------------------------------------------------------
+    # OI-1546 / OI-1547 — the dominant route-decision shape (764 of 765)
+    # ------------------------------------------------------------------
+    #
+    # T0 measured (2026-09-22, ~/.vnx-data/vnx-dev/state): 765 route decisions.
+    # 764 carry ``decision.provider`` + ``decision.model``; 1 carries top-level
+    # ``selected_model``. The converter read ONLY ``selected_model``, so for 764
+    # of 765 dispatches the lane identity never fired and the converter fell
+    # back to the body's self-declaration — which on a harness lane is a LIE
+    # the worker cannot know is wrong (it introspects as sonnet/claude while the
+    # lane runs glm-5.2). The canonical repro: dispatch 20260922-ff-1884-legacy-
+    # path — the report claims **Model**: sonnet / **Provider**: claude, the
+    # route decision says glm-harness / glm-5.2, and the CLI's own init event
+    # in events/archive/T1 wrote model=glm-5.2. The decision was right; the body
+    # lied. The lane must win.
+
+    def test_decision_block_lane_wins_over_body_sonnet_claude(self, tmp_path):
+        """OI-1546 RED->GREEN: the 764-shape (``decision`` block) must win over
+        a body that claims claude/sonnet. Before the fix, the converter ignored
+        ``decision.provider``/``decision.model`` and fell back to the body."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-ff-1884-legacy-path"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="glm-harness", model="glm-5.2",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-ff-1884-legacy-path\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nHarness-lane worker that introspects as claude/sonnet "
+            "while the lane runs glm-5.2. The route decision's ``decision`` block "
+            "is the authoritative identity, not the body's self-declaration.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # The decision block wins — NOT the body's claude/sonnet lie.
+        assert receipt["provider"] == "glm-harness", (
+            f"Expected glm-harness from decision block, got {receipt.get('provider')}"
+        )
+        assert receipt["model"] == "glm-5.2", (
+            f"Expected glm-5.2 from decision block, got {receipt.get('model')}"
+        )
+
+    def test_decision_block_deepseek_lane_wins(self, tmp_path):
+        """The 764-shape for a deepseek-harness lane: decision.provider says
+        deepseek-harness, body says claude/sonnet. Lane wins."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-deepseek-decision-block"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="deepseek-harness", model="deepseek-v4-pro",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-deepseek-decision-block\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nDeepSeek harness worker whose body claims claude/sonnet. "
+            "The decision block carries the real lane identity.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "deepseek-harness"
+        assert receipt["model"] == "deepseek-v4-pro"
+
+    def test_decision_block_incomplete_falls_back_to_body_explicitly(self, tmp_path):
+        """OI-1547: a decision block that EXISTS but carries no identity (no
+        provider/model) is the explicit THIRD branch — the body is used, but
+        NOT silently. This is distinct from 'no route-decision file at all'."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-incomplete-decision"
+        # Decision block present but provider/model are null.
+        import json as _json
+        rd_dir = state_dir / "route_decisions"
+        rd_dir.mkdir(parents=True, exist_ok=True)
+        (rd_dir / f"{dispatch_id}.json").write_text(_json.dumps({
+            "timestamp": "2026-09-22T06:42:04.235179+00:00",
+            "dispatch_id": dispatch_id,
+            "decision": {"adapter": "provider", "lane": "provider"},
+        }), encoding="utf-8")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-incomplete-decision\n"
+            "provider: kimi\nmodel: kimi-k3\nstatus: unknown\nterminal: T1\n---\n\n"
+            "## Summary\n\nAn incomplete decision block must fall back to the body "
+            "explicitly — this is the third branch (OI-1547), not a silent pass.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Body fallback: kimi/kimi-k3 are honest here (no harness lying).
+        assert receipt["provider"] == "kimi"
+        assert receipt["model"] == "kimi-k3"
+
+    def test_decision_block_unrecognized_provider_falls_back_to_body(self, tmp_path):
+        """A decision block whose provider the closed vocabulary does not
+        recognise demotes to the body fallback — a stale/malformed decision is
+        an auxiliary hint, not the sole source of truth."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-bad-decision-provider"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="some-unknown-lane", model="weird-model",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-bad-decision-provider\n"
+            "provider: kimi\nmodel: kimi-k3\nstatus: unknown\nterminal: T1\n---\n\n"
+            "## Summary\n\nA decision block with an unrecognized provider must not "
+            "refuse the receipt by itself — it falls back to the body.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Body wins because the decision's provider was unrecognized.
+        assert receipt["provider"] == "kimi"
+        assert receipt["model"] == "kimi-k3"
+
+    def test_legacy_selected_model_still_read(self, tmp_path):
+        """The 1-of-765 legacy shape (top-level ``selected_model``) is still
+        read and still wins over the body — OI-1546 did not regress it."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-legacy-shape"
+        self._write_route_decision_for(state_dir, dispatch_id, "glm-5.2")
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-legacy-shape\n"
+            "provider: claude\nmodel: sonnet\nstatus: success\nterminal: T1\n---\n\n"
+            "## Summary\n\nThe legacy selected_model shape (1 of 765) must still "
+            "fire lane identity over the body's false claim.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        assert receipt["provider"] == "glm-harness"
+        assert receipt["model"] == "glm-5.2"
+
+    # ------------------------------------------------------------------
+    # OI-1546 PUNT 2 — prose is not a provider
+    # ------------------------------------------------------------------
+    #
+    # T0 measured 12 receipts in the ledger that carry a provider scraped
+    # from the report TEXT (the `` ` regel. Zonder die identiteitsregels ``
+    # fragment among them). The body fallback must REFUSE a value that
+    # ``_normalise_provider`` does not recognise, and book that refusal
+    # VISIBLY (an ``unrecognized_provider`` contract violation + WARNING)
+    # rather than letting prose through as a provider string.
+
+    def test_body_prose_provider_refused_and_booked_visibly(self, tmp_path, caplog):
+        """A body whose ``**Provider**`` field is scraped prose (not a lane
+        value) is refused and booked as ``unrecognized_provider`` — never
+        passed through as the provider string. No route decision exists, so
+        the body fallback is the only source: exhausting it raises."""
+        import logging as _logging
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        # No route_decision JSON — forces the body-fallback path.
+        dispatch_id = "20260922-prose-provider"
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-prose-provider\nmodel: sonnet\nterminal: T1\n---\n\n"
+            "## Summary\n\nReport whose body Provider field is a scraped prose "
+            "fragment, not a lane value. The converter must refuse it.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n\n"
+            # The exact 2026-08-09 corruption shape: a torn-off instruction
+            # sentence scraped as the provider field.
+            "**Provider**: ` regel. Zonder die identiteitsregels landt je receipt niet.\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level(_logging.WARNING, logger="report_to_receipt_converter"):
+            receipt = build_receipt_from_report(
+                report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+            )
+        assert receipt is not None, "must never crash"
+        # Refused visibly: the contract violation is booked on the receipt.
+        assert receipt["event_type"] == "report_contract_invalid"
+        assert "unrecognized_provider" in receipt["contract_violations"], (
+            f"expected unrecognized_provider violation, got {receipt.get('contract_violations')}"
+        )
+        # The prose must NOT survive as the provider value.
+        assert receipt["provider"] == "unknown", (
+            f"prose must not pass through as provider, got {receipt.get('provider')!r}"
+        )
+        # And the refusal is logged (visible, not silent).
+        assert any(
+            "unrecognized provider" in rec.getMessage()
+            for rec in caplog.records
+        ), "the refusal must be logged visibly, not silent"
+
+    def test_prose_provider_with_lane_decision_lane_still_wins(self, tmp_path):
+        """OI-1546 interaction: when the lane identity (764-shape) IS present,
+        a prose provider in the body is irrelevant — the lane wins, so the
+        prose never reaches the fallback. This is the 'after' for the 12: a
+        dispatch that has a route decision no longer lets body prose anywhere
+        near the provider field."""
+        from report_to_receipt_converter import build_receipt_from_report
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        dispatch_id = "20260922-prose-with-lane"
+        self._write_route_decision_decision_block(
+            state_dir, dispatch_id, provider="glm-harness", model="glm-5.2",
+        )
+
+        report = tmp_path / f"{dispatch_id}.md"
+        report.write_text(
+            "---\ndispatch_id: 20260922-prose-with-lane\nmodel: sonnet\nterminal: T1\n---\n\n"
+            "## Summary\n\nBody carries prose in the Provider field, but the lane "
+            "decision block is present — the lane wins and the prose is ignored.\n\n"
+            "## Changes\n\n- scripts/lib/foo.py: edited\n\n"
+            "## Verification\n\npytest tests/ -x: all green\n\n"
+            "## Open Items\n\nNone\n\n"
+            "**Provider**: ` regel. Zonder die identiteitsregels landt je receipt niet.\n",
+            encoding="utf-8",
+        )
+
+        receipt = build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir,
+        )
+        assert receipt is not None
+        # Lane wins; the prose never reached the provider field.
+        assert receipt["provider"] == "glm-harness"
+        assert receipt["model"] == "glm-5.2"
+        # No contract violation: the lane resolved cleanly.
+        assert "unrecognized_provider" not in (receipt.get("contract_violations") or [])
 
 
 # ---------------------------------------------------------------------------
@@ -2865,9 +3595,12 @@ class TestNoStatusExitCodeFallbackOnDisk:
         assert booked["event_type"] == "task_failed"
         assert booked["status"] == "failed"
 
-    def test_missing_status_and_exit_code_lands_as_no_signal_literal_on_disk(
+    def test_missing_status_and_exit_code_lands_as_contract_derived_done_on_disk(
         self, reports_dir, state_dir,
     ):
+        # Neither status nor exit_code, body contract satisfied: the line on
+        # disk reads as the contract-derived ``done`` (marked as derived), not
+        # as the ``no_signal`` this used to land as.
         _write_v1_report_missing_fields(
             reports_dir / "20260823-disk-truly-signal-less.md",
             "20260823-disk-truly-signal-less",
@@ -2880,9 +3613,10 @@ class TestNoStatusExitCodeFallbackOnDisk:
         assert len(receipts) == 1
         booked = receipts[0]
         assert booked["event_type"] == "task_complete"
-        assert booked["status"] == "no_signal"
+        assert booked["status"] == "done"
+        assert booked["status_source"] == "report_contract"
         assert booked["status"] != "", (
-            "no-signal task_complete receipt landed with an empty status on "
+            "task_complete receipt landed with an empty status on "
             f"disk — no readable outcome on the line: {booked}"
         )
 
@@ -3093,6 +3827,157 @@ class TestDryRunGatesEveryOutcomeNotJustWouldAppend:
         assert not (state_dir / _WATERMARK_FILENAME).exists()
         assert not (state_dir / "processed_receipts.txt").exists()
         assert report.exists()
+
+
+# ---------------------------------------------------------------------------
+# OI-1744: --dry-run must be side-effect-free END TO END. Before this fix the
+# dry-run flag suppressed the receipt append, the watermark entries and the
+# health beacon, but NOT the two state mutations hiding inside
+# build_receipt_from_report(): the OI-1102 dead-letter quarantine MOVE and
+# the OI-1599 gate-obligation pr_link write. A measuring scan against a live
+# store (exactly what the OI-1744 dispatch prescribes — "draai hem een keer
+# met de hand tegen de echte reports-map en tel wat hij zou schrijven") could
+# therefore move reports into receipt_deadletter/ and stamp obligation files
+# while claiming "nothing on disk changes".
+# ---------------------------------------------------------------------------
+
+class TestDryRunSuppressesStateMutations:
+    def test_dry_run_does_not_deadletter_phantom_report(self, reports_dir, state_dir):
+        """A filename-only phantom id (not in the dispatch register) would be
+        dead-letter MOVED by a real scan; under dry_run the file must stay
+        exactly where it is and no quarantine dir may appear."""
+        # Empty register: the filename-only phantom id is guaranteed unknown.
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = reports_dir / "dispatch-20260920-oi1744-dry-phantom.md"
+        report.write_text(_CONTRACT_BODY, encoding="utf-8")
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.malformed_count == 1
+        assert report.exists(), "dry-run must never move a report into quarantine"
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+
+    def test_real_run_still_deadletters_the_same_phantom(self, reports_dir, state_dir):
+        """Pair proof the suppression is dry-run-scoped, not a removed
+        feature: the identical fixture under a REAL scan is quarantined."""
+        (state_dir / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+        report = reports_dir / "dispatch-20260920-oi1744-real-phantom.md"
+        report.write_text(_CONTRACT_BODY, encoding="utf-8")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.malformed_count == 1
+        assert not report.exists()
+        moved = list(
+            (state_dir / "receipt_deadletter").glob(
+                "dispatch-20260920-oi1744-real-phantom*.md"
+            )
+        )
+        assert moved, "real scan must still dead-letter the phantom"
+
+    def test_dry_run_does_not_stamp_obligation_pr_link(
+        self, reports_dir, state_dir, monkeypatch,
+    ):
+        """A verified pr_ref against a pending, unlinked obligation would be
+        stamped by a real scan (OI-1599); under dry_run the obligation file
+        must be byte-identical to before the scan."""
+        dispatch_id = "20260920-oi1744-dry-prlink"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        before = obl_path.read_bytes()
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, pr_ref="#4242",
+        )
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: True,
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.would_append_count == 1
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] is None, "dry-run must not stamp the obligation"
+        assert record["branch"] is None
+        assert record["status"] == STATUS_PENDING
+        assert obl_path.read_bytes() == before
+
+    def test_real_run_still_stamps_the_same_obligation(
+        self, reports_dir, state_dir, monkeypatch,
+    ):
+        """Pair proof the suppression did not delete the OI-1599 feature: the
+        same fixture under a REAL scan links pr_number + branch."""
+        dispatch_id = "20260920-oi1744-real-prlink"
+        obl_path = _register_pending_obligation(state_dir, dispatch_id)
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, pr_ref="#4242",
+        )
+        monkeypatch.setattr(
+            "report_to_receipt_converter._verify_pr_exists",
+            lambda *a, **kw: True,
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.new_count == 1
+        record = _read_obligation(obl_path)
+        assert record["pr_number"] == 4242
+        assert record["branch"] == f"dispatch/{dispatch_id}"
+
+
+class TestDryRunCountsRejectionsFaithfully:
+    """OI-1744: a dry run must predict what a real scan would WRITE. A report
+    whose receipt fails the append-time fail-closed model check
+    (_validate_model_present) writes nothing on a real run — it is REJECTED.
+    Before this fix the dry-run branch returned before the append call, so
+    such a report counted as "would_append": the instrument the OI-1744
+    dispatch prescribes for measuring the backlog ("tel wat hij zou
+    schrijven") overcounted by exactly the stranded-rejection set (measured
+    on the live-store copy, 2026-09-20: reports like
+    test-shared-datadir-isolation counted as would-book while a real run
+    rejects them)."""
+
+    def test_dry_run_counts_missing_model_as_rejected_not_would_append(
+        self, reports_dir, state_dir,
+    ):
+        dispatch_id = "20260920-oi1744-dry-reject"
+        # model sentinel "unknown" -> _validate_model_present raises
+        # missing_model on the real append path; status "unknown" (ignorable)
+        # keeps the terminal-success fail-closed checks (network) out of this.
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, model="unknown",
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.rejected_count == 1
+        assert stats.would_append_count == 0
+        assert len(stats.rejected) == 1
+        detail = stats.rejected[0]
+        assert detail["dispatch_id"] == dispatch_id
+        assert detail["file"] == f"{dispatch_id}.md"
+        assert detail["reason"]
+        # Still a dry run: nothing on disk.
+        assert _count_receipts(state_dir) == 0
+        assert not (state_dir / _WATERMARK_FILENAME).exists()
+
+    def test_dry_run_rejection_matches_real_run_rejection(
+        self, reports_dir, state_dir,
+    ):
+        """The same fixture must produce the same outcome class under
+        dry_run=True and dry_run=False: rejected both times (the real run
+        additionally writes nothing to the ledger for it)."""
+        dispatch_id = "20260920-oi1744-real-reject"
+        _write_frontmatter_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, model="unknown",
+        )
+
+        dry_stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+        assert dry_stats.rejected_count == 1
+
+        real_stats = scan_and_convert([reports_dir], state_dir)
+        assert real_stats.rejected_count == 1
+        assert _count_receipts(state_dir) == 0
 
 
 # ---------------------------------------------------------------------------

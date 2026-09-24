@@ -4,7 +4,7 @@
 
 ### Governance-first runtime for AI coding agents
 
-**Glass-box governance · Local NDJSON receipts · No vendor SDK**
+**Glass-box governance · Local NDJSON receipts · Bills the CLI subscriptions you already have**
 
 [![PyPI version](https://img.shields.io/pypi/v/vnx-orchestration?color=1f6feb&label=pypi)](https://pypi.org/project/vnx-orchestration/)
 &nbsp;![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
@@ -13,7 +13,7 @@
 
 [![Stars](https://img.shields.io/github/stars/Vinix24/vnx-orchestration?logo=github)](https://github.com/Vinix24/vnx-orchestration/stargazers)
 &nbsp;![Forks](https://img.shields.io/github/forks/Vinix24/vnx-orchestration?logo=github)
-&nbsp;![Audit trail](https://img.shields.io/badge/audit%20trail-27k%2B%20receipts-2ea043)
+&nbsp;![Audit trail](https://img.shields.io/badge/audit%20trail-36k%2B%20receipts-2ea043)
 &nbsp;![Vendor SDK](https://img.shields.io/badge/vendor%20SDK-none-24292f)
 
 **[Docs](docs/) · [Architecture](docs/core/00_VNX_ARCHITECTURE.md) · [State Fabric](docs/core/STATE_FABRIC.md) · [ADRs](docs/governance/decisions/) · [Writing](https://vincentvandeth.nl) · [Changelog](CHANGELOG.md)**
@@ -22,28 +22,26 @@
 
 ---
 
-VNX runs AI coding CLI workers in tmux, isolated git worktrees, through review gates, with an append-only NDJSON receipt per dispatch.
+VNX runs AI coding CLI workers in isolated git worktrees, through review gates, with an append-only NDJSON receipt per dispatch.
 
-It is a local control plane for the AI coding CLIs that already sit on your machine. One orchestrator dispatches work to ephemeral workers; each worker runs in its own git worktree; review gates decide what merges; every dispatch leaves a receipt. VNX drives `claude`, `codex`, `gemini`, `kimi`, and local `ollama` with no vendor SDK. It calls the CLIs as subprocesses and never imports a provider library.
+It is a local control plane for the AI coding CLIs that already sit on your machine. One orchestrator dispatches work to ephemeral workers; each worker runs in its own git worktree; review gates decide what merges; every dispatch leaves a receipt. VNX drives `claude`, `codex`, `gemini`, `kimi`, and local `ollama` with no vendor SDK. It calls the CLIs as subprocesses and never imports a provider library. Because the workers are the CLIs themselves, dispatches bill to the provider subscriptions already on the machine, not per-call API credits — measured, not assumed: `cost=$0.0000` receipts under a `subscriptionType: max` auth state (see "Billing follows auth, not the lane").
 
 Most agent projects build SDK-native agents. I orchestrate the binaries instead. The difference shows up in the audit trail: I can reconstruct what was dispatched, what was reviewed, what merged, and what each gate cost.
 
-I built this for my own work, across 3,000+ hours of Claude Code and 18,816 test functions across 1,008 test files. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+I built this for my own work, across 3,000+ hours of Claude Code and 22,621 test functions across 1,233 test files. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
-This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
+This is not a security sandbox; it isolates work with git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
 
-## What's new in 1.4
+## What's new in 1.6
 
-Six patch releases (1.4.0 through 1.4.5, July 31 to August 7, 2026), all documented in the [CHANGELOG](CHANGELOG.md). The headlines:
+Three releases on the 1.6 line so far (1.6.0 through 1.6.2, August 20 to September 12, 2026), all documented in the [CHANGELOG](CHANGELOG.md). The headlines:
 
-- **Worker-provider free choice shipped end-to-end** (1.4.0): a `ModelPin` floor-vs-default contract replaces the old hard pin, so a dispatch can choose its provider instead of inheriting a fleet default.
-- **Fleet-wide plan-gate outage fixed** (1.4.1, #1280): a central install resolved the plan-gate's data directory from the module's own (read-only, pinned) install path instead of the project's central store, so every plan-gate on the machine died with `PermissionError` across all five provider lanes. Now resolved from the central store for the active `project_id`.
-- **Reconcile chain and open-item cleanup** (1.4.2): open items went from 773 to 53 across eight triage rounds, and the auto-close reconciler's 31-hour silent outage on a bare `gh` lookup is fixed.
-- **CI measured 2% of the suite** (1.4.3): Profile A ran 18 of 933 test files; it now runs the full suite, and two tests that could write into the live production store are fail-closed.
-- **ReceiptV2 schema + measured token capture** (1.4.4): real `token_usage` harvested from claude-harness transcripts and the kimi session log, replacing modeled estimates.
-- **Release-publish guard + `vnx horizon link-pr`/`set-lane-hint` on the pip CLI** (1.4.5).
-
-Since 1.4.5, three defaults have flipped by direct operator decision, all in this repository's history: the headless `claude -p` lane opened by default (#1455), per-dispatch git-worktree isolation became unconditional for the provider/subprocess lanes (#1449), and `vnx gate-check` landed on the pip CLI (#1462) — see "What works today vs what is opt-in" and "Your first dispatch" below for what that means in practice.
+- **A review gate can no longer be skipped** (1.6.0, #1588–#1591): an ungated write or an ungated merge is refused outright — closing the gap where 95 PRs merged over four days with zero review-gate runs — and a merge is pinned to the exact head SHA the gates approved.
+- **The door refuses earlier and louder** (1.6.0, #1584, #1586): a dispatch refuses to fire on a lane with a recent quota/auth rejection before any worker spawns, and a constraint-blocked model is a hard load-time error instead of a silent filter.
+- **Gate outcomes are booked, not assumed** (1.6.2, #1836, #1846, #1842): every gate outcome lands as a result receipt with verdict, provider and model, the harness-lane verdict contract is consolidated to one source, and harness-lane gates sign with their own dispatch-id.
+- **Branch protection is declared as code** (1.6.2, #1807, #1806, #1823): branch protection is YAML with apply, drift-preflight and a doctor check; `contract_invalid` is a fail-closed merge check with its own override; and the five preflight verdicts land in the ledger, also on a refusal.
+- **The interactive tmux dispatch lane was retired** (1.6.2, #1845; removed outright in #1868): `claude_headless` is the only Claude lane and `force_tmux` is refused. Tmux session management itself is untouched — see [TMUX_SPAWN_LANE.md](docs/operations/TMUX_SPAWN_LANE.md).
+- **The nightly digest sender resolves its own SMTP credential** (1.6.1, #1751): it falls back to the macOS keychain when `VNX_SMTP_PASS` is empty, and fails loudly when both are empty.
 
 Full history for every minor and patch back to 0.1.0 is in the [CHANGELOG](CHANGELOG.md).
 
@@ -77,9 +75,9 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 
 ## What works today vs what is opt-in
 
-The audit trail is the whole point, so I am honest about maturity. Verified against code and receipts on 2026-08-12 (version 1.4.5, unreleased fixes on top).
+The audit trail is the whole point, so I am honest about maturity. Verified against code and receipts on 2026-09-20 (version 1.6.2, unreleased fixes on top).
 
-**Tier 1 — in production.** Append-only NDJSON receipts with hash-chain verification (`audit_chain`); per-append enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. Multi-CLI provider hub, no vendor SDK. Review gates (codex + gemini) with deterministic CI as the third gate. Per-worker git worktree isolation, default-on since #1449 — unconditional for the provider and subprocess lanes, on by default for the tmux lane (`--no-isolated-worktree` opts out), with teardown classification for clean, committed, or dirty state. Default interactive tmux worker lane on the subscription; headless `claude -p` opened by default since #1455 (both lanes bill the subscription, not API credits — see "Billing" below). Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
+**Tier 1 — in production.** Append-only NDJSON receipts with hash-chain verification (`audit_chain`); per-append enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. Multi-CLI provider hub, no vendor SDK. Review gates (codex + gemini) with deterministic CI as the third gate. Per-worker git worktree isolation, default-on since #1449 — unconditional for the provider and subprocess lanes — with teardown classification for clean, committed, or dirty state. Headless `claude -p` is the only Claude lane since the interactive tmux dispatch lane was removed on 2026-09-18 (#1868); it bills the subscription, not API credits — see "Billing" below. Zero-LLM context injection and repo map. Cost tracking per gate. Governed memory (past + current).
 
 **Tier 2 — shipped, opt-in, burning in.** Smart routing (`VNX_AUTO_ROUTE`), elastic worker pool (`bin/vnx pool`), track layer + roadmap autopilot (`VNX_ROADMAP_AUTOPILOT=1`), auto-dream consolidation, and an operator-gated self-learning proposal tier that mines the receipt stream for recurring failures into `pending_rules.json` for a human to accept (G-L1; nothing auto-activates). These default off and are not yet proven at the Tier 1 bar. The single-entry dispatch door (`dispatch_cli.py`) is the exception: default-ON since 2026-06-24 (ADR-024), normalizing GLM to the harness lane and running a phantom-guard that rejects evidence-free GATE-GREEN receipts — recent enough that I still hold it here. Roll back per terminal with `VNX_DISPATCH_LEGACY=1`.
 
@@ -126,7 +124,7 @@ vnx migrate
 vnx doctor
 ```
 
-`vnx doctor` reported `agents   11 agent(s) resolvable (10 engine, 1 examples)`. The "1 examples" entry is `examples/hello-world/`, the same agent the old Install snippet dispatched. It does not actually work: the single-entry door validates the role against its own `agents/` registry (this repository's ten built-in fleet roles: `backend-developer`, `blog-writer`, `code-reviewer`, `frontend-developer`, `linkedin-writer`, `orchestrator`, `quality-engineer`, `research-analyst`, `security-engineer`, `system-architect`), not `examples/`. `doctor` discovers `hello-world`; the dispatch door rejects it with `role 'hello-world' is not a known agent role`. Use one of the ten role names instead:
+`vnx doctor` reported `agents   11 agent(s) resolvable (10 engine, 1 examples)`. The "1 examples" entry is `examples/hello-world/`, the same agent the old Install snippet dispatched. It does not actually work: the single-entry door validates the role against its own `agents/` registry (this repository's thirteen built-in fleet roles: `backend-developer`, `blog-writer`, `code-reviewer`, `deliberation-panelist`, `frontend-developer`, `linkedin-writer`, `orchestrator`, `plan-reviewer`, `quality-engineer`, `research-analyst`, `review-gate`, `security-engineer`, `system-architect`), not `examples/`. `doctor` discovers `hello-world`; the dispatch door rejects it with `role 'hello-world' is not a known agent role`. Use one of the thirteen role names instead:
 
 ```bash
 vnx dispatch-agent --agent research-analyst \
@@ -137,7 +135,7 @@ vnx dispatch-agent --agent research-analyst \
 Dispatching to agent 'research-analyst' (dispatch_id=D-4d7b2a30, project_id=readme-walkthrough-demo) ...
 ```
 
-The worker appears in its own tmux session (`vnx-D-4d7b2a30`), running the worker CLI in an isolated git worktree on branch `dispatch/D-4d7b2a30`. In my run it wrote `findings.md`, committed it as `712280f`, and left a report at `$VNX_DATA_DIR/unified_reports/D-4d7b2a30.md`. Real output, trimmed:
+The worker runs headless (`claude -p`, the only Claude lane since the tmux dispatch lane was removed on 2026-09-18) in an isolated git worktree on branch `dispatch/D-4d7b2a30`. In my run it wrote `findings.md`, committed it as `712280f`, and left a report at `$VNX_DATA_DIR/unified_reports/D-4d7b2a30.md`. Real output, trimmed:
 
 ```yaml
 ---
@@ -149,7 +147,7 @@ duration_seconds: 42.94
 exit_code: 0
 token_usage: {input: 0, output: 369, cache_read: 0}
 cost_usd: 0.0
-lane: tmux_interactive
+lane: claude_headless
 ---
 ## Summary
 Quick-depth research task: define what "orchestration" means in software systems...
@@ -206,7 +204,7 @@ Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, inclu
 
 Memory is the unsolved problem in agentic AI. Most systems bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
 
-The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. It is forensic, not lossy. This is in production now, with 15,000+ receipts in the audit trail behind it.
+The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) over it. Per-append chain enforcement is designed as epoch-rotation ([ADR-029](docs/governance/decisions/ADR-029-hashchain-epoch-rotation.md)) and rolling out. It is forensic, not lossy. This is in production now, with 36,000+ receipts in the audit trail behind it.
 
 The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. As of 1.1.0 the `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
 
@@ -218,7 +216,7 @@ The point is not that the AI remembers. The point is that what it remembers is g
 
 ## Architecture decisions
 
-The decisions behind VNX are written down, not implied. There are 34 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
+The decisions behind VNX are written down, not implied. There are 38 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
 
 - [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
 - [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
@@ -237,7 +235,7 @@ VNX is not a thin "supports many models" wrapper. The provider layer is governed
 
 | Provider | How VNX drives it | Billing / constraint |
 |---|---|---|
-| **claude** | interactive tmux CLI (default) · headless `claude -p` (open by default since #1455) | subscription, both lanes (own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` routes outside both) |
+| **claude** | headless `claude -p` (only lane since the interactive tmux dispatch lane was removed on 2026-09-18, #1868) | subscription (own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` routes outside) |
 | **codex** | CLI subprocess | provider sub/credits · review gate + worker |
 | **gemini** | CLI subprocess | provider sub/credits · review gate + worker |
 | **kimi** | Kimi CLI over OAuth | `kimi-via-cli-only`, no Moonshot SDK |
@@ -262,10 +260,10 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-1.4.6 (August 12, 2026): `VERSION` is `1.4.6`, tagged today (`v1.4.6`) and rolled out to the central version store. This patch release hardens the dispatch lanes and worker receipt semantics: the claude headless lane is open by default (#1455), tmux concurrency is raised to 5, worktree isolation is default-on and salvages untracked non-gitignored files on teardown, the heartbeat silence threshold moved from 600s to 1800s with failure-shaped kills, `gate-check` is exposed on the pip CLI (#1462), and the pre-merge gate can no longer report GO on unverified checks. Full entry, and every release back to 0.1.0, in [CHANGELOG.md](CHANGELOG.md). Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+1.6.2 (September 12, 2026): `VERSION` is `1.6.2`, tagged `v1.6.2`. This patch release consolidates the gate-evidence chain: every gate outcome books a result receipt with verdict, provider and model (#1836), harness-lane gates sign with their own dispatch-id (#1842), branch protection is declared as YAML with a drift preflight (#1807), the interactive tmux dispatch lane was retired (#1845), and the receipt-processor and worktree-cleanup jobs run as per-project launchd jobs (#1830, #1851). Sixteen commits on top are unreleased, including the outright removal of the tmux dispatch lane (#1868). Full entry, and every release back to 0.1.0, in [CHANGELOG.md](CHANGELOG.md). Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md) and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 
 ## Credits
 
-Anthropic Claude Code is the foundation. I add receipts, provider routing, tmux dispatch, and worktree isolation around it.
+Anthropic Claude Code is the foundation. I add receipts, provider routing, multi-CLI dispatch, and worktree isolation around it.

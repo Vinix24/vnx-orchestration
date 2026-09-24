@@ -17,7 +17,12 @@ from governance_receipts import utc_now_iso
 import gate_depth
 import gate_recorder
 from final_prompt_integrity import final_prompt_sha_for_dispatch
-from codex_parser import extract_verdict_block, parse_codex_findings, _normalize_findings
+from codex_parser import (
+    VERDICT_READABLE_BINARIES,
+    extract_verdict_block,
+    parse_codex_findings,
+    _normalize_findings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +170,38 @@ def _classify_findings(
     return blocking, advisory
 
 
+def _verdict_is_required(gate: str) -> bool:
+    """Whether a run of *gate* that wrote no verdict is refused instead of booked.
+
+    Decided on the provider registry, never on a gate name (OI-1763): a name
+    check here is the defect that left glm_gate/kimi_gate/deepseek_gate without
+    their findings. Two structural cases carry the contract AND an output the
+    reader can see:
+
+    - ``harness_lane``: the governed dispatcher hands back the lane's report as
+      text, which :func:`extract_verdict_block` reads fenced or bare.
+    - ``path_binary`` on a provider in :data:`VERDICT_READABLE_BINARIES`: today
+      that is the ``codex`` binary, whose ``exec --json`` stream the reader
+      unwraps. A second gate registered on that binary is covered without an edit
+      here, because what makes the guard sound is the provider's output format.
+
+    Everything else is outside it, and each for a reason. gemini_review is a
+    path_binary gate on a binary the reader cannot unwrap (its verdict would read
+    as ``{}``), so refusing it would book a good review as `unavailable`.
+    claude_github_optional, ci_gate and wiring_gate run on ``gh``: what they book
+    is read from GitHub, and this runner asks no model for a verdict block. An
+    unregistered gate is not covered either; the runner refuses it earlier
+    (OI-1490).
+    """
+    provider = gate_recorder.resolve_gate_provider(gate)
+    if provider is None:
+        return False
+    kind, binary = provider
+    if kind == gate_recorder.GATE_PROVIDER_HARNESS_LANE:
+        return True
+    return kind == gate_recorder.GATE_PROVIDER_PATH_BINARY and binary in VERDICT_READABLE_BINARIES
+
+
 def _cleanup_orphan_report(report_file: Path) -> None:
     """Best-effort removal of a report whose result record never landed."""
     try:
@@ -288,10 +325,11 @@ def materialize_artifacts(
     # normalized findings section can be embedded in the report itself,
     # separate from the raw tool-output dump (OI-1394).
     #
-    # OI-1763: every gate contract asks for the SAME shared shape — a fenced
-    # ```json block with a "verdict" key (VERDICT_CONTRACT for glm_gate/
-    # kimi_gate/deepseek_gate, _REVIEWER_VERDICT_TEMPLATE for codex_gate/
-    # gemini_review, both in gate_lane_contract.py/gate_runner.py). Before
+    # OI-1763: every gate contract asks for the SAME shared shape: a JSON
+    # object with a "verdict" key, asked for in a fenced ```json block
+    # (VERDICT_CONTRACT for glm_gate/kimi_gate/deepseek_gate,
+    # _REVIEWER_VERDICT_TEMPLATE for codex_gate/gemini_review, both in
+    # gate_lane_contract.py/gate_runner.py) and read fenced or bare. Before
     # this fix, ONLY codex_gate's branch below ever set findings_parsed=True
     # — glm_gate/kimi_gate/deepseek_gate booked findings=[]/residual_risk=""
     # unconditionally, even when their report carried a real verdict block,
@@ -304,14 +342,20 @@ def materialize_artifacts(
     residual_risk = ""
     findings_parsed = False
     if gate == "codex_gate":
-        # codex_gate keeps its own dedicated path, unchanged: besides the
-        # shared verdict-block shape, it has a private text-based fallback
-        # (parse_codex_findings' _extract_findings_from_text markdown-bullet
-        # heuristic) for when the model skips the JSON verdict entirely. That
-        # fallback is a genuine per-provider parsing quirk, not a contract
-        # property — it must stay scoped to codex and never fire for another
-        # gate (repeating it elsewhere would be a new instance of the same
-        # defect this fix removes).
+        # codex_gate goes through parse_codex_findings, which reads the verdict
+        # with extract_verdict_block: the SAME reader the OI-1770 guard below
+        # asks whether the run wrote one (OI-1786). Booking and guard used to
+        # read the stream with two different rules and could disagree about
+        # the verdict, so a `fail` could land in the record as a `completed`
+        # run with no blockers. What stays codex-specific is the fallback for
+        # a run in which that reader finds no verdict: the markdown-bullet
+        # heuristic (_extract_findings_from_text) for a model that skips the
+        # JSON. That is a genuine per-provider parsing quirk, not a contract
+        # property, so it stays scoped to codex and never fires for another
+        # gate (repeating it elsewhere would be a new instance of the defect
+        # OI-1763 removed). It does not rescue a run that wrote no verdict at
+        # all: the OI-1770 guard below refuses that run before anything is
+        # booked.
         parsed = parse_codex_findings(stdout)
         findings = parsed["findings"]
         residual_risk = parsed.get("residual_risk", "") or ""
@@ -401,30 +445,30 @@ def materialize_artifacts(
     # 0 mentions of "verdict" — booked `completed` because nothing upstream
     # of this point looks at whether the model actually WROTE its decision.
     #
-    # Scoped to harness-lane providers (glm_gate/kimi_gate/deepseek_gate) via
-    # the SAME provider-kind lookup the OI-1725 guard above already uses —
-    # a structural check on the registry, not a gate-name branch (a
-    # name-branch here would repeat OI-1763's defect, tracked separately).
-    # VERDICT_CONTRACT (gate_lane_contract.py) is the hard contract those
-    # gates run under: :func:`extract_verdict_block` checks for its shared
-    # shape — a fenced ```json block with a "verdict" key.
+    # OI-1770: the same holds for codex_gate. It was left out while
+    # extract_verdict_block demanded a markdown fence, because codex writes its
+    # verdict bare and the guard would then have booked a GOOD review as
+    # `unavailable`. The reader now reads bare (with a line anchor against
+    # echoed diffs, OI-1782), so that precondition holds. Measured on the 308
+    # codex_gate reports under unified_reports/headless/: the reader finds a
+    # verdict in 307. The one it does not (pr-861, 2026-06-14) is a run whose
+    # stream ends on a command_execution result, with no verdict in either of
+    # its two agent_messages. That is exactly the run this guard exists to refuse.
     #
-    # codex_gate/gemini_review/claude_github_optional are deliberately NOT
-    # checked here: their own tests (test_gate_artifacts_register.py,
-    # test_gate_artifacts_atomicity.py) pin "plain prose, no verdict block,
-    # still completed" as their existing, accepted contract today — codex_gate
-    # additionally has its own separate findings-extraction fallback
-    # (parse_codex_findings' markdown-bullet heuristic). Enforcing the harness
-    # lane's stricter contract on those gates would be a real behavior change
-    # this dispatch does not ask for (klaar-conditie: "Codex-runs veranderen
-    # niet van gedrag") — confirmed by running this guard unscoped and
-    # watching those exact tests turn red.
-    provider_info = gate_recorder.resolve_gate_provider(gate)
-    is_harness_lane_gate = (
-        provider_info is not None
-        and provider_info[0] == gate_recorder.GATE_PROVIDER_HARNESS_LANE
-    )
-    if is_harness_lane_gate and not extract_verdict_block(stdout):
+    # Coverage is decided by :func:`_verdict_is_required`, on the provider
+    # registry (harness lane, or a path binary whose stream the reader
+    # unwraps). That is a structural check, not a gate-name branch (a
+    # name-branch here would repeat OI-1763's defect). The contract these
+    # gates run under (VERDICT_CONTRACT in gate_lane_contract.py,
+    # _REVIEWER_VERDICT_TEMPLATE in gate_runner.py) asks for a JSON object
+    # with a "verdict" key, and :func:`extract_verdict_block` checks for that
+    # shape, fenced or bare.
+    #
+    # gemini_review, claude_github_optional, ci_gate and wiring_gate are NOT
+    # covered; _verdict_is_required says why for each. For gemini_review the
+    # cause is that its output is not one this reader can unwrap, so widening
+    # onto it means teaching the reader first.
+    if _verdict_is_required(gate) and not extract_verdict_block(stdout):
         logger.warning(
             "gate_artifacts: REFUSING a %s run with no parseable verdict block "
             "pr=%s — model produced %d char(s) of output but never wrote a "
@@ -446,9 +490,10 @@ def materialize_artifacts(
             result={
                 "reason": "validation_failed",
                 "reason_detail": (
-                    "no_verdict_block: gate output has no fenced ```json block "
-                    'with a "verdict" key — the model produced text but never '
-                    f"wrote a structured verdict ({len(stdout)} char(s) of output)"
+                    "no_verdict_block: gate output has no JSON object with a "
+                    '"verdict" of pass, fail or blocked, fenced or bare: the '
+                    "model produced text but never wrote a structured verdict "
+                    f"({len(stdout)} char(s) of output)"
                 ),
                 "duration_seconds": duration_seconds,
                 "partial_output_lines": len(stdout.splitlines()),
@@ -570,8 +615,11 @@ def materialize_artifacts(
     if gate == "codex_gate":
         try:
             from gate_register_emit import emit_codex_gate_to_register
+            # Trimmed and lowercased the way extract_verdict_block checks the
+            # value: the dict it returns keeps the raw text, so " FAIL " clears
+            # the guard as a fail and must register as one (OI-1786).
             verdict_obj = parsed.get("verdict", {})
-            verdict_str = verdict_obj.get("verdict", "").lower() if isinstance(verdict_obj, dict) else ""
+            verdict_str = str(verdict_obj.get("verdict", "")).strip().lower() if isinstance(verdict_obj, dict) else ""
             if verdict_str in ("pass", "passed"):
                 register_event = "gate_passed"
             elif verdict_str in ("fail", "failed", "blocked"):

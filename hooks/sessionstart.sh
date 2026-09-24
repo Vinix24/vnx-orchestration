@@ -75,17 +75,46 @@ case "$TERMINAL" in
     # lockstep with the runtime — never a second hand-rolled resolver.
     # Anchored on this hook's OWN file location (not $PWD), so resolution
     # doesn't depend on which terminal directory happened to be current.
+    #
+    # The scripts root is found ONCE, below, and every script call in this hook
+    # uses it. It used to be "$_HOOK_DIR/../scripts" everywhere, which only holds
+    # in the fabric repo (hook in hooks/, ../scripts = the repo's scripts/). A
+    # consumer's deployed hook sits in <project>/.claude/hooks/, so ../scripts is
+    # <project>/.claude/scripts, which does not exist: v1.6.2 reported "STATE
+    # STORE NOT FOUND" and every section below it as UNMEASURED in every consumer
+    # (measured in sales-copilot, mission-control and SEOcrawler_v2). The
+    # resolver is still vnx_paths.resolve_paths() and nothing else; this only
+    # decides which copy of it to run.
     _VNX_STATE_DIR=""
     _VNX_DATA_DIR=""
     _VNX_PY=""
+    _VNX_SCRIPTS_ROOT=""
+    _VNX_SCRIPTS_TRIED=""
     _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || _HOOK_DIR=""
-    if [ -n "$_HOOK_DIR" ] && [ -f "$_HOOK_DIR/../scripts/lib/vnx_paths.py" ]; then
-      _VNX_PY="$_HOOK_DIR/../.venv/bin/python"
+    # $1 = label for the "tried" list, $2 = candidate root ('' when its source
+    # is unset). The first candidate that carries lib/vnx_paths.py wins.
+    _vnx_try_scripts_root() {
+      _VNX_SCRIPTS_TRIED="${_VNX_SCRIPTS_TRIED:+$_VNX_SCRIPTS_TRIED; }$1 ${2:-not set}"
+      if [ -z "$_VNX_SCRIPTS_ROOT" ] && [ -n "$2" ] && [ -f "$2/lib/vnx_paths.py" ]; then
+        _VNX_SCRIPTS_ROOT="$2"
+      fi
+      return 0
+    }
+    _vnx_try_scripts_root "(a) hook-relative:" "${_HOOK_DIR:+$_HOOK_DIR/../scripts}"
+    _vnx_try_scripts_root "(b) \$VNX_HOME/scripts:" "${VNX_HOME:+$VNX_HOME/scripts}"
+    _vnx_try_scripts_root "(c) installed fabric:" "${HOME:+$HOME/.vnx-system/current/scripts}"
+    if [ -z "$_VNX_SCRIPTS_ROOT" ]; then
+      _VNX_RESOLVE_WHY="no scripts root with lib/vnx_paths.py found. Tried ${_VNX_SCRIPTS_TRIED}"
+    else
+      _VNX_RESOLVE_WHY="vnx_paths.resolve_paths() ran from ${_VNX_SCRIPTS_ROOT} and returned no state dir"
+    fi
+    if [ -n "$_VNX_SCRIPTS_ROOT" ]; then
+      _VNX_PY="$_VNX_SCRIPTS_ROOT/../.venv/bin/python"
       [ -x "$_VNX_PY" ] || _VNX_PY="/opt/homebrew/opt/python@3.12/bin/python3.12"
       [ -x "$_VNX_PY" ] || _VNX_PY="python3"
       _VNX_PATHS_OUT="$("$_VNX_PY" -c "
 import sys
-sys.path.insert(0, '$_HOOK_DIR/../scripts/lib')
+sys.path.insert(0, '$_VNX_SCRIPTS_ROOT/lib')
 from vnx_paths import resolve_paths
 p = resolve_paths()
 print(p['VNX_STATE_DIR'])
@@ -167,7 +196,7 @@ ${T0_CONTRACT_INVALID}"
       # "No open items data" default that would read as an ordinary quiet
       # project instead of an unresolved store — the exact fail-open this
       # fix closes.
-      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: vnx_paths.py unreachable from here>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
+      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: ${_VNX_RESOLVE_WHY}>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
     fi
 
     # ── Beacon health digest (component heartbeats, D3b absence-is-loud) ──
@@ -187,7 +216,7 @@ ${T0_CONTRACT_INVALID}"
     # on VNX_HOME (D1 poort B, unmerged as of this PR) — a live read here
     # cannot inherit that staleness.
     BEACON_SECTION=""
-    _HEALTH_CHECK_PY="$_HOOK_DIR/../scripts/health_check.py"
+    _HEALTH_CHECK_PY="$_VNX_SCRIPTS_ROOT/health_check.py"
     if [ -n "$_VNX_DATA_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_HEALTH_CHECK_PY" ]; then
       _HEALTH_CHECK_ARGS=(--state-dir "$_VNX_DATA_DIR" --json)
       [ -n "${_VNX_EXPECTED_BEACONS:-}" ] && _HEALTH_CHECK_ARGS+=(--expected "$_VNX_EXPECTED_BEACONS")
@@ -247,7 +276,7 @@ $_BEACON_BAD"
     # enough for this hot path, unlike a full sweep (directory globs, sqlite
     # queries, a launchd harvest) which stays a scheduled batch job.
     PRODUCER_FINDINGS_SECTION=""
-    _PF_MONITOR_PY="$_HOOK_DIR/../scripts/producer_freshness_monitor.py"
+    _PF_MONITOR_PY="$_VNX_SCRIPTS_ROOT/producer_freshness_monitor.py"
     if [ -n "$_VNX_STATE_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_PF_MONITOR_PY" ]; then
       _PF_JSON="$("$_VNX_PY" "$_PF_MONITOR_PY" --state-dir "$_VNX_STATE_DIR" --latest-findings 2>/dev/null || true)"
       if [ -n "$_PF_JSON" ] && command -v jq &>/dev/null; then
@@ -292,7 +321,7 @@ $_PF_LINES"
     # branches, never conflating "never populated" with "went stale". Reused here via
     # subprocess exactly like health_check.py above, not reimplemented inline.
     FRESHNESS_SECTION=""
-    _FRESHNESS_PY="$_HOOK_DIR/../scripts/lib/session_state_freshness.py"
+    _FRESHNESS_PY="$_VNX_SCRIPTS_ROOT/lib/session_state_freshness.py"
     if [ -n "$_VNX_STATE_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_FRESHNESS_PY" ]; then
       _FRESHNESS_JSON="$("$_VNX_PY" "$_FRESHNESS_PY" --state-dir "$_VNX_STATE_DIR" --json 2>/dev/null || true)"
       if [ -n "$_FRESHNESS_JSON" ] && command -v jq &>/dev/null; then
@@ -300,16 +329,25 @@ $_PF_LINES"
         if [ "$_FRESHNESS_PARSE_OK" = "yes" ]; then
           _FRESHNESS_THRESHOLD=$(echo "$_FRESHNESS_JSON" | jq -r '.threshold_hours')
           _FRESHNESS_ANY_STALE=$(echo "$_FRESHNESS_JSON" | jq -r '.any_stale')
+          _FRESHNESS_ANY_PARKED=$(echo "$_FRESHNESS_JSON" | jq -r '.any_parked // false')
+          # "parked" = the artifact's producer is parked by operator decision
+          # (beacon_register.PARKED_ARTIFACTS). It is not hidden: the age (or
+          # "not found") and the reason stay on the line, so the reader sees how
+          # old it is and why that is allowed. It does not count toward BLOCKED.
           _FRESHNESS_LINES=$(echo "$_FRESHNESS_JSON" | jq -r '
             .artifacts | to_entries | sort_by(.key)[] |
             if .value.status == "missing" then "  - [missing] \(.key): not found"
             elif .value.status == "unknown" then "  - [unknown] \(.key): timestamp unreadable"
+            elif .value.status == "parked" then "  - [PARKED] \(.key): \(if .value.age_human then "age \(.value.age_human)" else "not found" end) — \(.value.reason)"
             elif .value.status == "stale" then "  - [STALE] \(.key): age \(.value.age_human) (source: \(.value.source))"
             else "  - [fresh] \(.key): age \(.value.age_human) (source: \(.value.source))"
             end
           ')
           if [ "$_FRESHNESS_ANY_STALE" = "true" ]; then
             FRESHNESS_SECTION="STATE FRESHNESS: BLOCKED — one or more session-start artifacts are older than ${_FRESHNESS_THRESHOLD}h (one working session; see scripts/lib/session_state_freshness.py for the measured commit-cadence this threshold is based on). DO NOT dispatch, merge, or close deliverables on the strength of this state — refresh it, or independently re-verify the specific facts it claims, before acting on it.
+$_FRESHNESS_LINES"
+          elif [ "$_FRESHNESS_ANY_PARKED" = "true" ]; then
+            FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than ${_FRESHNESS_THRESHOLD}h, except the PARKED ones below (an operator decision, each with its reason)
 $_FRESHNESS_LINES"
           else
             FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than ${_FRESHNESS_THRESHOLD}h
@@ -324,6 +362,48 @@ $_FRESHNESS_LINES"
     else
       FRESHNESS_SECTION="STATE FRESHNESS UNAVAILABLE this session (UNMEASURED, not zero) — state dir unresolved or scripts/lib/session_state_freshness.py missing."
     fi
+
+    # ── Role-loaded alarm (a T0 without its role must say so at the top) ──
+    # The canonical T0 role (role-orchestrator.md) reaches a Claude session only
+    # through an `@role-orchestrator.md` import in this directory's CLAUDE.md.
+    # Found 24-09 (operator): SEOcrawler_v2 ran T0 sessions without that import
+    # from 16-07 (an uncommitted edit had dropped the line) and every rule the
+    # role carries, "no subagents" included, was simply absent. Nothing said so
+    # until the six-hourly scripts/fleet_role_drift.py sweep, and that only as a
+    # beacon.
+    #
+    # The measurement is fleet_role_drift's own reach axis (--reach), not a second
+    # copy of it. The engine is looked up under $_VNX_SCRIPTS_ROOT, the one scripts
+    # root this hook resolves above (hook-relative, then $VNX_HOME, then the
+    # installed fabric). This file is COPIED into <project>/.claude/hooks/ by
+    # bootstrap_hooks, so a lookup anchored on the hook alone would be dead in
+    # exactly the projects that need the alarm; the shared root is not, and it
+    # keeps this hook on a single locator.
+    #
+    # A warning, never a block: the session runs on. A check that cannot be run
+    # says so instead of passing (UNMEASURED, not zero), like every block above.
+    ROLE_ALARM=""
+    _ROLE_DRIFT_PY="$_VNX_SCRIPTS_ROOT/fleet_role_drift.py"
+    _ROLE_REACH_JSON=""
+    if [ -n "$_VNX_PY" ] && [ -f "$_ROLE_DRIFT_PY" ]; then
+      _ROLE_REACH_JSON="$("$_VNX_PY" "$_ROLE_DRIFT_PY" --reach "$PWD" 2>/dev/null || true)"
+    fi
+    case "$_ROLE_REACH_JSON" in
+      *'"ok": true'*)
+        ;;
+      *'"ok": false'*)
+        _ROLE_REASON=""
+        if command -v jq &>/dev/null; then
+          _ROLE_REASON="$(echo "$_ROLE_REACH_JSON" | jq -r '.reason // empty' 2>/dev/null || true)"
+        fi
+        ROLE_ALARM="ROLE NOT LOADED: deze T0 draait zonder de canonieke rol.
+${_ROLE_REASON:+$_ROLE_REASON
+}De rol staat in role-orchestrator.md en komt alleen in je context via de regel @role-orchestrator.md in ${PWD}/CLAUDE.md. Zonder die regel geldt geen enkele regel uit de rol. Zet de regel terug bovenaan CLAUDE.md (vnx role sync doet dat niet: het ververst alleen het bestand). Meld dit in je eerste antwoord aan de operator. Dit is een waarschuwing, de sessie loopt door."
+        ;;
+      *)
+        ROLE_ALARM="ROLE CHECK UNAVAILABLE this session (UNMEASURED, not zero). fleet_role_drift.py was not reachable from this hook or returned no verdict. Whether this T0 loads the canonical role is unknown: check that ${PWD}/CLAUDE.md contains the line @role-orchestrator.md."
+        ;;
+    esac
 
     # ── T0 Orchestrator playbook body (in-context injection) ────────────
     # t0-orchestrator is intentionally not model-invocable
@@ -346,7 +426,9 @@ $_FRESHNESS_LINES"
       fi
     fi
 
-    ADDITIONAL_CONTEXT="T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
+    ADDITIONAL_CONTEXT="${ROLE_ALARM:+$ROLE_ALARM
+
+}T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}
 Model-invocable skills: @horizon @planner @panel @fabric-reference
 Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)

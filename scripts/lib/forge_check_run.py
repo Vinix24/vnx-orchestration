@@ -178,7 +178,7 @@ def _refuse_test_post_without_opt_in(name: str, head_sha: str) -> None:
     """Fail-closed achtervang: weiger door te gaan onder pytest tenzij
     ``VNX_FORGE_ALLOW_TEST_POST=1`` staat (OI-1675).
 
-    Detectie spiegelt ``vnx_paths.refuse_real_central_store_write_under_pytest``
+    Detectie spiegelt ``vnx_paths.refuse_real_central_store_write_under_test_runner``
     — het signaal dat dit repo al overal gebruikt om "draait dit onder
     pytest" te herkennen: ``PYTEST_CURRENT_TEST`` (een test draait) OF
     ``"pytest" in sys.modules`` (waar vanaf collection, vóór de eerste test).

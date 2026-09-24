@@ -379,18 +379,75 @@ def test_measuring_writes_nothing_without_write_state(tmp_path):
 
 
 def test_write_state_is_opt_in_and_lands(tmp_path):
+    """The beacon belongs in ``<data_dir>/health/``: every reader (t0_state,
+    health_check, the dashboard, the SessionStart digest) looks there, and the
+    data dir is the parent of the state dir. Writing it beside the state dir was
+    the same defect #1736 fixed for report_to_receipt_converter."""
     clean = _make_repo(tmp_path / "clean", hook=WIRED_HOOK, settings=WIRED_SETTINGS)
-    state = tmp_path / "state"
-    state.mkdir()
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
 
     frd.main([*_canon_arg(tmp_path), "--project-dir", str(clean),
               "--state-dir", str(state), "--write-state"])
 
-    beacon = state / "health" / "fleet_role_drift.json"
+    beacon = data_dir / "health" / "fleet_role_drift.json"
     assert beacon.exists()
+    assert not (state / "health").exists(), "no beacon may land under <data_dir>/state/health/"
     payload = json.loads(beacon.read_text(encoding="utf-8"))
     assert payload["status"] == "ok"
     assert payload["details"]["projects_behind"] == 0
+
+
+def test_write_state_beacon_is_found_by_the_reader(tmp_path):
+    """A beacon nobody reads is the failure this track closes: the beacon the
+    meter writes must show up in the reader's map, not as ``absent``."""
+    from health_beacon import all_beacons
+
+    clean = _make_repo(tmp_path / "clean", hook=WIRED_HOOK, settings=WIRED_SETTINGS)
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
+
+    frd.main([*_canon_arg(tmp_path), "--project-dir", str(clean),
+              "--state-dir", str(state), "--write-state"])
+
+    beacons = all_beacons(data_dir, expected=["fleet_role_drift"])
+    assert beacons["fleet_role_drift"]["health"] == "ok"
+
+
+def test_write_state_without_state_dir_uses_the_resolved_store(tmp_path, monkeypatch):
+    """The default branch resolves VNX_STATE_DIR and puts the beacon beside it,
+    in the data dir, the same way ``--state-dir`` does."""
+    import vnx_paths
+
+    clean = _make_repo(tmp_path / "clean", hook=WIRED_HOOK, settings=WIRED_SETTINGS)
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
+    monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {"VNX_STATE_DIR": str(state)})
+
+    frd.main([*_canon_arg(tmp_path), "--project-dir", str(clean), "--write-state"])
+
+    assert (data_dir / "health" / "fleet_role_drift.json").exists()
+    assert not (state / "health").exists()
+
+
+def test_write_state_records_a_fail_status_when_the_fleet_is_behind(tmp_path):
+    stale = _make_repo(tmp_path / "stale", role=STALE_ROLE)
+    data_dir = tmp_path / "data"
+    state = data_dir / "state"
+    state.mkdir(parents=True)
+
+    rc = frd.main([*_canon_arg(tmp_path), "--project-dir", str(stale),
+                   "--state-dir", str(state), "--write-state"])
+
+    assert rc == 1
+    beacon = data_dir / "health" / "fleet_role_drift.json"
+    assert beacon.exists()
+    payload = json.loads(beacon.read_text(encoding="utf-8"))
+    assert payload["status"] == "fail"
+    assert payload["details"]["behind"] == ["stale"]
 
 
 def test_json_output_is_machine_readable(tmp_path, capsys):
@@ -401,3 +458,81 @@ def test_json_output_is_machine_readable(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["summary"]["projects_behind"] == 1
     assert report["summary"]["behind"] == ["stale"]
+
+
+# ---------------------------------------------------------------------------
+# 6. --reach: the reach axis for ONE T0 dir, used by hooks/sessionstart.sh
+#    (dispatch 20260924-t0-geen-subagents-en-rol-alarm)
+# ---------------------------------------------------------------------------
+# A T0 session that would not load the role used to be found only by the
+# six-hourly fleet sweep. SessionStart now asks the same axis at the start of
+# every T0 session. These tests pin that it IS the same axis, not a second copy
+# of it, and that it needs neither a canon nor a registry.
+
+def _reach_cli(t0_dir, capsys):
+    rc = frd.main(["--reach", str(t0_dir)])
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_reach_flag_says_ok_when_the_role_is_imported(tmp_path, capsys):
+    repo = _make_repo(tmp_path / "consumer")
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 0
+    assert out["ok"] is True
+
+
+def test_reach_flag_says_not_ok_when_the_import_was_removed(tmp_path, capsys):
+    """The 24-09 incident: an edit dropped the @-line and nothing said so."""
+    repo = _make_repo(tmp_path / "consumer", claude_md="# project context, the import is gone\n")
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 1
+    assert out["ok"] is False
+    assert "OI-1480" in out["reason"]
+
+
+def test_reach_flag_says_not_ok_without_a_claude_md(tmp_path, capsys):
+    repo = _make_repo(tmp_path / "consumer", claude_md=None)
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 1
+    assert out["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "claude_md",
+    ["@role-orchestrator.md\n", "# notes\n", "<!-- @role-orchestrator.md -->\n", None],
+    ids=["imported", "no-import", "import-inside-a-comment", "no-claude-md"],
+)
+def test_reach_flag_is_the_fleet_reach_axis_not_a_second_measurement(tmp_path, capsys, claude_md):
+    repo = _make_repo(tmp_path / "consumer", claude_md=claude_md)
+    t0_dir = repo / ".claude" / "terminals" / "T0"
+
+    _, out = _reach_cli(t0_dir, capsys)
+
+    assert out == frd.measure_project(repo, CANON)["reach"]
+
+
+def test_reach_flag_needs_neither_a_canon_nor_a_registry(tmp_path, capsys, monkeypatch):
+    """With the registry and the canon both unreadable the fleet run exits 2.
+    The reach probe must not depend on either."""
+    monkeypatch.setattr(frd, "DEFAULT_REGISTRY", tmp_path / "no-registry.json")
+    monkeypatch.setenv("VNX_HOME", str(tmp_path / "no-engine"))
+    repo = _make_repo(tmp_path / "consumer")
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 0 and out["ok"] is True
+
+
+def test_reach_flag_writes_nothing(tmp_path, capsys):
+    repo = _make_repo(tmp_path / "consumer")
+    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+
+    _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before

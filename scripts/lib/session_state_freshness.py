@@ -37,7 +37,7 @@ incident is nowhere near this boundary), while comfortably covering a single
 long-running autonomous session (T0's own "F60 / overnight feature work"
 policy, bounded to one night, not multiple days).
 
-Three outcomes per artifact, not two ("nul telling is eerst een meetfout" /
+Five outcomes per artifact, not two ("nul telling is eerst een meetfout" /
 "niet-gemeten is een derde tak, geen derde waarde" — the same discipline
 applies to a missing FILE, not just a missing field):
 
@@ -48,6 +48,13 @@ applies to a missing FILE, not just a missing field):
   - "unknown"  — the file exists but no timestamp could be read from its
     declared field OR its mtime (corrupt/unreadable) — reported distinctly
     so it is never silently counted as fresh.
+  - "parked"   — the artifact would read "stale" or "missing", but its producer
+    is parked by operator decision (``beacon_register.PARKED_ARTIFACTS``, one
+    reason string per artifact). The age stays visible and the reason travels
+    with it: the silence is a decision, not a fault, and it does not count
+    toward ``any_stale`` (so it does not put SessionStart on BLOCKED). Parking
+    covers absence only: a parked artifact that is fresh reads "fresh", and one
+    whose timestamp cannot be read stays "unknown".
 
 Age source per artifact: the file's own declared timestamp field when
 present (verified against this dev store below), falling back to mtime —
@@ -77,6 +84,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+from beacon_register import parked_artifact_reason
 
 # One calendar day. See module docstring for the measurement behind this
 # number — do not change it without re-measuring the commit-gap cadence it
@@ -155,9 +164,11 @@ def assess_artifact_freshness(
     """Assess every artifact in :data:`ARTIFACTS` under ``state_dir``.
 
     Returns a dict with ``threshold_hours``, one entry per artifact under
-    ``artifacts`` (``status`` in ``missing``/``stale``/``fresh``/``unknown``,
-    plus ``age_hours``/``age_human``/``source``), and the summary flags
-    ``any_stale`` / ``any_missing`` / ``any_unknown``.
+    ``artifacts`` (``status`` in ``missing``/``stale``/``fresh``/``unknown``/
+    ``parked``, plus ``age_hours``/``age_human``/``source``, plus ``reason`` on
+    a parked entry), and the summary flags ``any_stale`` / ``any_missing`` /
+    ``any_unknown`` / ``any_parked``. A parked artifact counts toward
+    ``any_parked`` only, never toward ``any_stale`` or ``any_missing``.
     """
     now = now if now is not None else datetime.now(timezone.utc)
     state_dir = Path(state_dir)
@@ -165,10 +176,22 @@ def assess_artifact_freshness(
     any_stale = False
     any_missing = False
     any_unknown = False
+    any_parked = False
 
     for name, (filename, field) in ARTIFACTS.items():
         path = state_dir / filename
+        parked_reason = parked_artifact_reason(name)
         if not path.exists():
+            if parked_reason is not None:
+                artifacts[name] = {
+                    "status": "parked",
+                    "age_hours": None,
+                    "age_human": None,
+                    "source": None,
+                    "reason": parked_reason,
+                }
+                any_parked = True
+                continue
             artifacts[name] = {
                 "status": "missing",
                 "age_hours": None,
@@ -191,14 +214,18 @@ def assess_artifact_freshness(
 
         age_hours = max(0.0, (now - ts).total_seconds() / 3600.0)
         status = "stale" if age_hours > threshold_hours else "fresh"
-        if status == "stale":
-            any_stale = True
-        artifacts[name] = {
-            "status": status,
+        entry: Dict[str, Any] = {
             "age_hours": round(age_hours, 2),
             "age_human": _human_age(age_hours),
             "source": source,
         }
+        if status == "stale" and parked_reason is not None:
+            status = "parked"
+            entry["reason"] = parked_reason
+            any_parked = True
+        elif status == "stale":
+            any_stale = True
+        artifacts[name] = {"status": status, **entry}
 
     return {
         "threshold_hours": threshold_hours,
@@ -206,6 +233,7 @@ def assess_artifact_freshness(
         "any_stale": any_stale,
         "any_missing": any_missing,
         "any_unknown": any_unknown,
+        "any_parked": any_parked,
     }
 
 
@@ -227,6 +255,9 @@ def main(argv: Optional[list] = None) -> int:
                 print(f"  [missing] {name}: not found")
             elif status == "unknown":
                 print(f"  [unknown] {name}: timestamp unreadable")
+            elif status == "parked":
+                age = f"age {info['age_human']}" if info["age_human"] else "not found"
+                print(f"  [PARKED] {name}: {age} — {info['reason']}")
             else:
                 marker = "STALE" if status == "stale" else "fresh"
                 print(f"  [{marker}] {name}: age {info['age_human']} (source: {info['source']})")

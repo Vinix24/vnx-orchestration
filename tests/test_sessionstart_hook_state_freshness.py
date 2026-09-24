@@ -204,5 +204,71 @@ class TestStateFreshnessDigestSurfacesAge:
         assert result.returncode == 0, result.stderr
 
 
+class TestParkedArtifactIsShownNotHiddenAndNotBlocking:
+    """absence-is-loud, punt 2: t0_recommendations.json is produced by the
+    intelligence layer the operator PARKED on 2026-09-09, so its age is a
+    decision. It must read as a PARKED line (age and reason both visible), not
+    as STALE, and it must not put SessionStart on BLOCKED."""
+
+    def _fresh_state(self, state_dir: Path) -> None:
+        now_ts = datetime.now(timezone.utc) - timedelta(minutes=5)
+        _write_json(state_dir / "t0_state.json", {"generated_at": _iso(now_ts)})
+        _write_json(state_dir / "open_items.json", {"last_updated": _iso(now_ts).replace("Z", "")})
+        _write_json(state_dir / "dashboard_status.json", {"timestamp": _iso(now_ts)})
+        _write_json(state_dir / "terminal_state.json", {"terminals": {}})
+
+    def test_old_parked_artifact_reads_parked_with_age_and_reason_and_does_not_block(self, tmp_path, monkeypatch):
+        _clean_env(monkeypatch)
+        t0_dir = _make_terminal_project(tmp_path)
+        state_dir = _state_dir(tmp_path, monkeypatch)
+        self._fresh_state(state_dir)
+        old_ts = datetime.now(timezone.utc) - timedelta(days=98)
+        _write_json(state_dir / "t0_recommendations.json", {"timestamp": _iso(old_ts)})
+
+        ctx = _run_hook(t0_dir, dict(os.environ))["hookSpecificOutput"]["additionalContext"]
+
+        assert "[PARKED] t0_recommendations: age 98 days — " in ctx, ctx
+        assert "nightly intelligence pipeline" in ctx, ctx
+        assert "[STALE] t0_recommendations" not in ctx, ctx
+        assert "BLOCKED" not in ctx, ctx
+        header = next(line for line in ctx.splitlines() if line.startswith("STATE FRESHNESS"))
+        assert header.startswith("STATE FRESHNESS: ok"), header
+        assert "PARKED" in header, "the ok header must say parked artifacts are excluded, not claim nothing is old"
+
+    def test_missing_parked_artifact_reads_parked_not_missing(self, tmp_path, monkeypatch):
+        _clean_env(monkeypatch)
+        t0_dir = _make_terminal_project(tmp_path)
+        state_dir = _state_dir(tmp_path, monkeypatch)
+        self._fresh_state(state_dir)
+
+        ctx = _run_hook(t0_dir, dict(os.environ))["hookSpecificOutput"]["additionalContext"]
+
+        assert "[PARKED] t0_recommendations: not found — " in ctx, ctx
+        assert "[missing] t0_recommendations" not in ctx, ctx
+        assert "BLOCKED" not in ctx, ctx
+
+    def test_parked_does_not_hide_a_real_stale_artifact(self, tmp_path, monkeypatch):
+        """dashboard_status.json is NOT parked: 88 days old must still be STALE
+        and must still block, with the parked line shown beside it."""
+        _clean_env(monkeypatch)
+        t0_dir = _make_terminal_project(tmp_path)
+        state_dir = _state_dir(tmp_path, monkeypatch)
+        self._fresh_state(state_dir)
+        _write_json(
+            state_dir / "dashboard_status.json",
+            {"timestamp": _iso(datetime.now(timezone.utc) - timedelta(days=88))},
+        )
+        _write_json(
+            state_dir / "t0_recommendations.json",
+            {"timestamp": _iso(datetime.now(timezone.utc) - timedelta(days=98))},
+        )
+
+        ctx = _run_hook(t0_dir, dict(os.environ))["hookSpecificOutput"]["additionalContext"]
+
+        assert "STATE FRESHNESS: BLOCKED" in ctx, ctx
+        assert "[STALE] dashboard_status: age 88 days" in ctx, ctx
+        assert "[PARKED] t0_recommendations: age 98 days" in ctx, ctx
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

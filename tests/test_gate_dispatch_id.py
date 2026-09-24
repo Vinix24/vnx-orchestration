@@ -20,6 +20,12 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 import gate_artifacts
 from gate_artifacts import materialize_artifacts
 
+# A real codex_gate run (PR 1869) that ends in a bare verdict: codex_gate is
+# refused when it wrote none (OI-1770), and this test is about the dispatch-id.
+CODEX_VERDICT_STREAM = (
+    VNX_ROOT / "tests" / "fixtures" / "gate_verdict" / "pr-1869-codex_gate-bare-verdict.ndjson"
+).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -134,7 +140,7 @@ class TestMaterializeArtifactsDispatchId:
             pr_number=99,
             dispatch_id="20260423-150000-codex-dispatch-C",
         )
-        result = self._run_materialize(artifact_env, payload)
+        result = self._run_materialize(artifact_env, payload, stdout=CODEX_VERDICT_STREAM)
 
         assert result["dispatch_id"] == "20260423-150000-codex-dispatch-C"
         sidecar_dir = artifact_env["reports_dir"].parent / "state" / "report_pipeline"

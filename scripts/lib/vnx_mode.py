@@ -212,7 +212,7 @@ def _guard_mode_write_target(target_dir: Path) -> None:
         return  # repo-local / scratch — not a central-store path
 
     from project_root import resolve_project_id
-    from vnx_paths import refuse_real_central_store_write_under_pytest
+    from vnx_paths import refuse_real_central_store_write_under_test_runner
     try:
         pid = resolve_project_id()
     except RuntimeError:
@@ -221,11 +221,11 @@ def _guard_mode_write_target(target_dir: Path) -> None:
         # subprocess with a cleaned env is exactly the scenario where
         # resolve_project_id() fails, and exactly the scenario this guard
         # exists for (w22/PR#1333). Run it before allowing the write.
-        refuse_real_central_store_write_under_pytest(target)
+        refuse_real_central_store_write_under_test_runner(target)
         return
     pid = pid.strip()
     if not pid:
-        refuse_real_central_store_write_under_pytest(target)
+        refuse_real_central_store_write_under_test_runner(target)
         return
     expected = home_vnx / pid
     if target == expected or str(target).startswith(str(expected) + os.sep):
@@ -235,7 +235,7 @@ def _guard_mode_write_target(target_dir: Path) -> None:
         # real ~/.vnx-data/vnx-dev is exactly the gap those two checks can't
         # see, since there is neither a divergence nor a project mismatch to
         # catch.
-        refuse_real_central_store_write_under_pytest(target)
+        refuse_real_central_store_write_under_test_runner(target)
         return
     raise RuntimeError(
         f"mode.json write target {target} is {rel.parts[0]!r}'s central store, "

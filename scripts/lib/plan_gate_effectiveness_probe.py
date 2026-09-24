@@ -49,7 +49,11 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import project_root  # noqa: E402
-from effectiveness_probe import EffectivenessProbe, register_probe  # noqa: E402
+from effectiveness_probe import (  # noqa: E402
+    EffectivenessProbe,
+    register_probe,
+    resolve_probe_state_dir,
+)
 from ndjson_hash_chain import walk_chain  # noqa: E402
 
 LEDGER_RELPATH = ".vnx-attest/plan-gates.ndjson"
@@ -88,7 +92,7 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
 
     def __init__(self, repo_root: Optional[Path] = None, state_dir: Optional[Path] = None) -> None:
         self._repo_root = Path(repo_root) if repo_root else project_root.resolve_project_root(__file__)
-        self._state_dir = Path(state_dir) if state_dir else project_root.resolve_state_dir(__file__)
+        self._state_dir = resolve_probe_state_dir(state_dir)
 
     def _ledger_path(self) -> Path:
         return self._repo_root / LEDGER_RELPATH

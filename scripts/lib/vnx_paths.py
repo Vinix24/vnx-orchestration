@@ -322,7 +322,7 @@ def _project_id_from_git_remote(project_root: Path) -> Optional[str]:
 
 
 class TestIsolationGuardError(RuntimeError):
-    """Raised when a write targets the real central store while under pytest.
+    """Raised when a write targets the real central store while under a test runner.
 
     Distinct RuntimeError subclass so best-effort write wrappers — the
     central-mirror drain in append_receipt_internals.payload,
@@ -333,9 +333,66 @@ class TestIsolationGuardError(RuntimeError):
     """
 
 
-def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
+# Modules whose frames exist only while a unittest suite is being loaded or
+# run. ``unittest.mock`` is deliberately absent: production code may import
+# and use it, and a frame in it says nothing about a test run.
+_UNITTEST_RUNNER_MODULES = frozenset({
+    "unittest.case",
+    "unittest.suite",
+    "unittest.loader",
+    "unittest.runner",
+    "unittest.main",
+    "unittest.async_case",
+})
+
+
+def _unittest_run_in_progress() -> bool:
+    """True when some thread of this process is inside a unittest run.
+
+    Every unittest entry point (``python -m unittest``, ``unittest.main()`` in
+    a script, a custom ``TextTestRunner``, an xmlrunner) reaches a test through
+    ``unittest.case.TestCase.run`` and its suite/loader callers, so a frame
+    from one of ``_UNITTEST_RUNNER_MODULES`` on any thread's stack is the
+    signal. All threads are walked, not only the caller's: a heartbeat or
+    writer thread started by a test has a stack of its own that never touches
+    unittest, while the main thread sits inside ``TestCase.run``.
+    """
+    for frame in _sys._current_frames().values():
+        while frame is not None:
+            if frame.f_globals.get("__name__") in _UNITTEST_RUNNER_MODULES:
+                return True
+            frame = frame.f_back
+    return False
+
+
+def running_under_test_runner() -> bool:
+    """True when this process is executing a pytest or a unittest run.
+
+    Why these signals and not an environment variable: ``PYTEST_CURRENT_TEST``
+    is set by pytest only, and ``VNX_DATA_DIR`` is pinned only by
+    ``tests/conftest.py``, which loads only under pytest — precisely what is
+    missing when a test file is run with ``python -m unittest``. ``unittest``
+    sets no marker at all, and ``import unittest`` proves nothing (the stdlib
+    and ``unittest.mock`` are imported by ordinary production code), so for
+    unittest the evidence is the live call stack: a frame of the runner
+    itself, present only while a suite is loading or running.
+
+    * pytest: ``PYTEST_CURRENT_TEST`` (a test is running) or ``"pytest" in
+      sys.modules`` (true from collection on, before the first test).
+    * unittest: ``_unittest_run_in_progress()``.
+
+    A production process that merely imports ``unittest`` or
+    ``unittest.mock`` has no runner frame on any stack and is not affected.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") is not None or "pytest" in _sys.modules:
+        return True
+    return _unittest_run_in_progress()
+
+
+def refuse_real_central_store_write_under_test_runner(resolved: Path) -> None:
     """Fail loud when code is ABOUT TO WRITE under the real central store
-    while running under pytest (w19c / test-store-isolation class guard).
+    while running under a test runner, pytest or unittest (w19c /
+    test-store-isolation class guard).
 
     Call this from write surfaces — a manager class's ``__init__``, a
     ``write_*`` function — right before any file/dir gets created, NOT from
@@ -370,10 +427,11 @@ def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
     flag itself is not the invariant. Landing a WRITE in the real
     ``~/.vnx-data`` is.
 
-    Production is unaffected: pytest is never in ``sys.modules`` outside a
-    test run.
+    Production is unaffected: ``running_under_test_runner()`` is False in any
+    process that is not executing a pytest or unittest run, including one
+    that only imports ``unittest``.
     """
-    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in _sys.modules:
+    if not running_under_test_runner():
         return
     real_home_vnx_data = (Path(os.path.expanduser("~")) / ".vnx-data").resolve()
     resolved = resolved.resolve()
@@ -383,33 +441,35 @@ def refuse_real_central_store_write_under_pytest(resolved: Path) -> None:
     ):
         raise TestIsolationGuardError(
             f"[TEST ISOLATION GUARD] about to write under the real central "
-            f"store '{resolved}' while running under pytest. A test lost its "
-            "isolation. Set VNX_DATA_DIR_EXPLICIT=1 with a tmp_path-based "
-            "VNX_DATA_DIR before this code runs, or ensure the "
-            "tests/conftest.py _vnx_data_dir_isolation autouse fixture is "
-            "active for this test."
+            f"store '{resolved}' while running under a test runner (pytest or "
+            "unittest). A test lost its isolation. Set VNX_DATA_DIR_EXPLICIT=1 "
+            "with a tmp-based VNX_DATA_DIR (and VNX_STATE_DIR) before this "
+            "code runs, or ensure the tests/conftest.py "
+            "_vnx_data_dir_isolation autouse fixture is active for this test. "
+            "Outside pytest nothing pins the store for you: a unittest run "
+            "must pin it itself."
         )
 
 
-def refuse_real_launch_agents_write_under_pytest(dest_dir: Path) -> None:
+def refuse_real_launch_agents_write_under_test_runner(dest_dir: Path) -> None:
     """Fail loud when code is ABOUT TO WRITE under the real
-    ``~/Library/LaunchAgents`` while running under pytest
-    (OI-1117 / launchd-test-isolation class guard).
+    ``~/Library/LaunchAgents`` while running under a test runner, pytest or
+    unittest (OI-1117 / launchd-test-isolation class guard).
 
     Call this from write surfaces right before any plist or file gets
     created in ``~/Library/LaunchAgents``. The guard is placed at the write
     surface, not inside a generic path resolver: the LaunchAgents dir is a
     legitimate production write target outside of tests; only an imminent
-    WRITE to it during pytest is the isolation hazard.
+    WRITE to it during a test run is the isolation hazard.
 
-    Production is unaffected: pytest is never in ``sys.modules`` outside a
-    test run.
+    Production is unaffected: ``running_under_test_runner()`` is False in any
+    process that is not executing a pytest or unittest run.
 
-    Pattern mirrors ``refuse_real_central_store_write_under_pytest`` — the
-    two guards share the same shape so the class of test-isolation guard is
-    recognisable as a single idiom across the codebase.
+    Pattern mirrors ``refuse_real_central_store_write_under_test_runner`` — the
+    two guards share the same shape and the same detector so the class of
+    test-isolation guard is recognisable as a single idiom across the codebase.
     """
-    if os.environ.get("PYTEST_CURRENT_TEST") is None and "pytest" not in _sys.modules:
+    if not running_under_test_runner():
         return
     real_la = (
         Path(os.path.expanduser("~")) / "Library" / "LaunchAgents"
@@ -421,7 +481,7 @@ def refuse_real_launch_agents_write_under_pytest(dest_dir: Path) -> None:
     ):
         raise TestIsolationGuardError(
             f"[TEST ISOLATION GUARD] about to write under the real "
-            f"LaunchAgents dir '{resolved}' while running under pytest. "
+            f"LaunchAgents dir '{resolved}' while running under a test runner. "
             "A test lost its isolation. Mock Path.home to a tmp_path-based "
             "fake home before calling code that installs launchd plists, "
             "or monkeypatch subprocess.run to intercept launchctl calls."

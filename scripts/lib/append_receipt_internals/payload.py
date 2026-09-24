@@ -5,9 +5,11 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from .common import (
     AppendReceiptError,
@@ -57,23 +59,38 @@ def _maybe_reroute_to_gate_stream(receipt: Dict[str, Any], receipts_file: Option
         return receipts_file
 
 
-def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
+def _run_post_append_hooks(
+    receipt: Dict[str, Any], *, state_dir: Optional[Path] = None, advisory: bool = True,
+) -> None:
     """Best-effort hooks fired after a receipt is successfully appended.
 
     Each hook is isolated: a failure in one does not prevent the others from
     running, and no exception is propagated to the caller. The NDJSON record
     is already durable at this point.
+
+    Two groups, because they answer to different callers:
+
+    * ``advisory`` hooks (open-item registration, state rebuild, receipt
+      classifier) belong to the enrichment the caller may opt out of with
+      ``skip_enrichment``.
+    * The confidence update is an OUTCOME hook. It reads only ``event_type``,
+      ``status``, ``dispatch_id`` and ``terminal``, never anything enrichment
+      adds, so it always runs. It writes to ``state_dir``: the store this very
+      receipt was appended to, not one derived from this file's checkout.
     """
+    if advisory:
+        try:
+            facade._register_quality_open_items(receipt)
+        except Exception as exc:
+            _emit("WARN", "oi_registration_post_hook_failed",
+                  dispatch_id=str(receipt.get("dispatch_id") or ""),
+                  error=str(exc))
     try:
-        facade._register_quality_open_items(receipt)
-    except Exception as exc:
-        _emit("WARN", "oi_registration_post_hook_failed",
-              dispatch_id=str(receipt.get("dispatch_id") or ""),
-              error=str(exc))
-    try:
-        facade._update_confidence_from_receipt(receipt)
+        facade._update_confidence_from_receipt(receipt, state_dir=state_dir)
     except Exception as exc:
         _emit("WARN", "confidence_post_hook_failed", error=str(exc))
+    if not advisory:
+        return
     try:
         facade._maybe_trigger_state_rebuild(receipt)
     except Exception as exc:
@@ -148,11 +165,12 @@ def _isolation_guard_error_class():
     return TestIsolationGuardError
 
 
-def _refuse_real_store_write_under_pytest(target: Path) -> None:
+def _refuse_real_store_write_under_test_runner(target: Path) -> None:
     """OI-1043 guard seam: refuse an imminent WRITE into the real central
-    store (~/.vnx-data) while running under pytest. No-op outside pytest."""
+    store (~/.vnx-data) while running under a test runner (pytest or unittest).
+    No-op in any other process."""
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
-    from vnx_paths import refuse_real_central_store_write_under_pytest as _refuse
+    from vnx_paths import refuse_real_central_store_write_under_test_runner as _refuse
     _refuse(target)
 
 
@@ -195,14 +213,14 @@ def _mirror_receipt_to_central_or_raise(receipt: Dict[str, Any], primary_path: P
     pending-mirror queue can retain the record for a later flush.
 
     OI-1043: raises ``TestIsolationGuardError`` when the resolved central
-    target is the real central store and the process runs under pytest —
+    target is the real central store and the process runs under a test runner —
     that is an isolation violation, not retryable mirror debt, and callers
     must re-raise it rather than queue the record.
     """
     central_receipts = _resolve_central_receipts_path(receipt, primary_path)
     if central_receipts is None:
         return False
-    _refuse_real_store_write_under_pytest(central_receipts)
+    _refuse_real_store_write_under_test_runner(central_receipts)
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from dual_writer import append_record_locked
@@ -489,8 +507,8 @@ def append_receipt_payload(
     # straight into the real central store (the #1333 guard did not cover
     # the receipt append surfaces — the suite leaked 684+ lines through the
     # mirror, and an explicit receipts_file under ~/.vnx-data wrote through
-    # unguarded). No-op outside pytest.
-    _refuse_real_store_write_under_pytest(receipt_path)
+    # unguarded). No-op outside a pytest or unittest run.
+    _refuse_real_store_write_under_test_runner(receipt_path)
 
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_file_for(receipt_path)
@@ -548,13 +566,89 @@ def append_receipt_payload(
             raise
         except Exception as exc:  # noqa: BLE001
             log.warning("payload: central mirror drain failed (best-effort, ignoring): %s", exc)
-        if not skip_enrichment:
-            _run_post_append_hooks(receipt)
+        _run_post_append_hooks(
+            receipt, state_dir=receipt_path.parent, advisory=not skip_enrichment,
+        )
 
     return result
 
 
-def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
+@contextmanager
+def _confidence_update_lock(state_dir: Path) -> Iterator[None]:
+    """Serialize receipt-driven confidence updates on one store.
+
+    The lane, the report parser and the report converter can each book a
+    receipt for the same dispatch, and each reaches the confidence hook. The
+    recorded-check and the update must not interleave between two processes, or
+    both would find nothing recorded and both would count the outcome.
+    Fail-open: a store directory that cannot hold a lock file (it does not
+    exist) gets no lock, the same posture as the rest of the best-effort hooks.
+    """
+    try:
+        handle = (Path(state_dir) / "confidence_update.lock").open("a+", encoding="utf-8")
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
+def _confidence_event_recorded(db_path: Path, dispatch_id: str, outcome: str) -> bool:
+    """True when confidence_events already holds this dispatch's outcome.
+
+    One dispatch outcome counts once. ``update_confidence_from_outcome`` has no
+    memory of its own (each call is one more observation, which its streak
+    semantics rely on), so the receipt-driven caller asks first. Scoped to the
+    project when the table carries ``project_id`` (ADR-007). An unreadable
+    store or a store without the table has recorded nothing.
+    """
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        from project_scope import current_project_id
+        conn = sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(confidence_events)")}
+            if not columns:
+                return False
+            sql = "SELECT 1 FROM confidence_events WHERE dispatch_id = ? AND outcome = ?"
+            params: List[Any] = [dispatch_id, outcome]
+            if "project_id" in columns:
+                sql += " AND project_id = ?"
+                params.append(current_project_id())
+            return conn.execute(sql + " LIMIT 1", params).fetchone() is not None
+        finally:
+            conn.close()
+    except (sqlite3.Error, ValueError):
+        return False
+
+
+# Failure classes (failure_classification.FAILURE_CLASSES) that say something
+# about the dispatch's WORK. `completion_without_execution` is the model
+# claiming tool calls that left no change; `unknown` is unclassified and is not
+# proven to be infrastructure. Every other class (auth_rejected,
+# empty_completion, credit_exhausted, model_error, no_verdict, tool_missing,
+# timeout) is the lane or the provider failing. Derived as a complement so a
+# class added later defaults to "no outcome signal" instead of decaying
+# patterns on a fault they had nothing to do with.
+_WORK_FAILURE_CLASSES = frozenset({"completion_without_execution", "unknown"})
+
+
+def _is_infrastructure_failure(receipt: Dict[str, Any]) -> bool:
+    """True when the receipt's failure_class names a lane/provider fault."""
+    failure_class = str(receipt.get("failure_class") or "").strip().lower()
+    if not failure_class:
+        return False
+    sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+    from failure_classification import FAILURE_CLASSES
+    return failure_class in FAILURE_CLASSES and failure_class not in _WORK_FAILURE_CLASSES
+
+
+def _update_confidence_from_receipt(
+    receipt: Dict[str, Any], state_dir: Optional[Path] = None,
+) -> None:
     """Wire dispatch outcome into pattern confidence scores (best-effort).
 
     OI-1148: the event_type + status -> outcome vocabulary used to be
@@ -568,7 +662,16 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
     from the failure vocabulary here — task_timeout events never reach this
     function's outcome branch at all (pre-existing behaviour, kept
     deliberately; confidence scoring treats a timeout as "no outcome signal",
-    not as a failure).
+    not as a failure). A failure whose ``failure_class`` names the lane or the
+    provider (see ``_WORK_FAILURE_CLASSES``) is the same kind of non-signal:
+    the patterns offered to a dispatch that never ran did not fail.
+
+    ``state_dir`` is the store the receipt was appended to; the caller passes
+    ``receipt_path.parent``. Without it the store resolves the way the receipt
+    writer itself resolves it (``VNX_STATE_DIR``, else the central per-project
+    store, ADR-026). It is never derived from this file's own git checkout:
+    that landed in ``<checkout>/.vnx-data/state``, a store without the
+    intelligence tables, so every update was a silent no-op.
     """
     try:
         sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
@@ -589,20 +692,29 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
         else:
             return
 
+        if outcome == "failure" and _is_infrastructure_failure(receipt):
+            return
+
         dispatch_id = str(receipt.get("dispatch_id") or "")
-        terminal = str(receipt.get("terminal") or "")
+        # Path-1 lane receipts (ReceiptV2) carry ``terminal_id``, the
+        # report-derived ones ``terminal``.
+        terminal = str(receipt.get("terminal") or receipt.get("terminal_id") or "")
         if not dispatch_id:
             return
 
-        state_dir = facade.resolve_state_dir(__file__)
+        if state_dir is None:
+            state_dir = _resolve_state_dir_env_first()
 
-        db_path = state_dir / "quality_intelligence.db"
+        db_path = Path(state_dir) / "quality_intelligence.db"
         if not db_path.exists():
             return
 
         sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
         from intelligence_persist import update_confidence_from_outcome
-        update_confidence_from_outcome(db_path, dispatch_id, terminal, outcome)
+        with _confidence_update_lock(db_path.parent):
+            if _confidence_event_recorded(db_path, dispatch_id, outcome):
+                return
+            update_confidence_from_outcome(db_path, dispatch_id, terminal, outcome)
     except Exception as exc:
         _emit("WARN", "confidence_update_failed", error=str(exc))
 

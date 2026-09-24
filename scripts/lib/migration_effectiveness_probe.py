@@ -23,9 +23,12 @@ _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
-import project_root  # noqa: E402
 import schema_manifest  # noqa: E402
-from effectiveness_probe import EffectivenessProbe, register_probe  # noqa: E402
+from effectiveness_probe import (  # noqa: E402
+    EffectivenessProbe,
+    register_probe,
+    resolve_probe_state_dir,
+)
 
 COORDINATION_DB_FILENAME = "runtime_coordination.db"
 
@@ -39,7 +42,7 @@ class MigrationEffectivenessProbe(EffectivenessProbe):
     subsystem = "migration-mechanisms"
 
     def __init__(self, state_dir: Optional[Path] = None) -> None:
-        self._state_dir = Path(state_dir) if state_dir else project_root.resolve_state_dir(__file__)
+        self._state_dir = resolve_probe_state_dir(state_dir)
 
     def _db_path(self) -> Path:
         return self._state_dir / COORDINATION_DB_FILENAME

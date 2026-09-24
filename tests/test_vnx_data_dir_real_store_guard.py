@@ -19,7 +19,7 @@ tests/test_path_resolution_regression.py asserting on resolution shape with
 a deliberately clean env) that must keep resolving to wherever production
 would — including the real ``~/.vnx-data/vnx-dev`` — without failing. Only an
 imminent WRITE into that path is the actual hazard; see
-``vnx_paths.refuse_real_central_store_write_under_pytest``.
+``vnx_paths.refuse_real_central_store_write_under_test_runner``.
 
 Before this fix, neither write surface refused a completely clean-env
 resolution that happened to land on the real central store (OI-911's
@@ -74,13 +74,13 @@ class TestRefuseRealCentralStoreWriteUnderPytest:
         monkeypatch.setenv("HOME", str(fake_home))
 
         with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
-            vnx_paths.refuse_real_central_store_write_under_pytest(target)
+            vnx_paths.refuse_real_central_store_write_under_test_runner(target)
 
     def test_allows_write_under_tmp_path(self, tmp_path, monkeypatch):
         target = tmp_path / "isolated" / "some-project"
         target.mkdir(parents=True)
         # Must not raise.
-        vnx_paths.refuse_real_central_store_write_under_pytest(target)
+        vnx_paths.refuse_real_central_store_write_under_test_runner(target)
 
     def test_read_only_resolution_is_unaffected(self, tmp_path, monkeypatch):
         """resolve_paths()/_resolve_state_root() must keep resolving to the
@@ -164,7 +164,7 @@ class TestWriteModeGuard:
 class TestRefuseRealLaunchAgentsWriteUnderPytest:
     """OI-1117: the launchd-test-isolation guard refuses writes to the real
     ``~/Library/LaunchAgents`` while running under pytest, following the
-    same pattern as ``refuse_real_central_store_write_under_pytest``."""
+    same pattern as ``refuse_real_central_store_write_under_test_runner``."""
 
     def test_refuses_write_under_launch_agents(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
@@ -173,7 +173,7 @@ class TestRefuseRealLaunchAgentsWriteUnderPytest:
         monkeypatch.setenv("HOME", str(fake_home))
 
         with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
-            vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+            vnx_paths.refuse_real_launch_agents_write_under_test_runner(target)
 
     def test_refuses_write_directly_in_launch_agents(self, tmp_path, monkeypatch):
         """The guard must also fire when the target IS the LaunchAgents dir
@@ -184,14 +184,14 @@ class TestRefuseRealLaunchAgentsWriteUnderPytest:
         monkeypatch.setenv("HOME", str(fake_home))
 
         with pytest.raises(RuntimeError, match="TEST ISOLATION GUARD"):
-            vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+            vnx_paths.refuse_real_launch_agents_write_under_test_runner(target)
 
     def test_allows_write_under_tmp_path(self, tmp_path, monkeypatch):
         """A target outside ~/Library/LaunchAgents must not trigger the guard."""
         target = tmp_path / "isolated" / "LaunchAgents"
         target.mkdir(parents=True)
         # Must not raise.
-        vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+        vnx_paths.refuse_real_launch_agents_write_under_test_runner(target)
 
     def test_allows_write_to_other_home_subdir(self, tmp_path, monkeypatch):
         """A target elsewhere under HOME (e.g. ~/Documents) must not trigger
@@ -201,7 +201,7 @@ class TestRefuseRealLaunchAgentsWriteUnderPytest:
         target.mkdir(parents=True)
         monkeypatch.setenv("HOME", str(fake_home))
         # Must not raise.
-        vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+        vnx_paths.refuse_real_launch_agents_write_under_test_runner(target)
 
     def test_guard_noop_outside_pytest(self, tmp_path, monkeypatch):
         """Outside pytest the guard is a no-op: the write surface check
@@ -219,7 +219,7 @@ class TestRefuseRealLaunchAgentsWriteUnderPytest:
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         try:
             # Must NOT raise — the guard thinks we are not under pytest.
-            vnx_paths.refuse_real_launch_agents_write_under_pytest(target)
+            vnx_paths.refuse_real_launch_agents_write_under_test_runner(target)
         finally:
             if saved is not None:
                 sys.modules["pytest"] = saved

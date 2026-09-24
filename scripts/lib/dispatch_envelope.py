@@ -440,10 +440,30 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
     # INTEGRITY — persist the enriched final prompt + verify raw+injections reconstruct it
     integrity = _record_integrity(enriched_spec, enriched_instruction, spec.instruction)
 
-    # EXECUTE
+    # EXECUTE — OI-1743: an exception in adapter.run must not skip GOVERN.
+    # Before this, a raised exception here propagated straight past the
+    # `_govern` call below it, so no report and no receipt were emitted for a
+    # dispatch that died mid-spawn. Catch it, build a failure result, and fall
+    # through to GOVERN so the dispatch still gets a receipt. Same rationale as
+    # the work block in run_envelope_headless_plan / run_envelope_plan.
     start_time = datetime.now(timezone.utc)
-    adapter_result = adapter.run(enriched_spec)
-    end_time = datetime.now(timezone.utc)
+    end_time = start_time
+    adapter_result: "_AdapterResult"
+    try:
+        adapter_result = adapter.run(enriched_spec)
+        end_time = datetime.now(timezone.utc)
+    except Exception as _work_exc:  # noqa: BLE001 — never let a spawn error skip GOVERN
+        logger.exception(
+            "envelope: adapter.run raised dispatch=%s — building failure result so "
+            "_govern still emits a report+receipt (OI-1743)",
+            spec.dispatch_id,
+        )
+        adapter_result = _AdapterResult(
+            returncode=1,
+            completion_text="",
+            status="failure",
+            error=f"adapter.run raised: {_work_exc!r} (OI-1743)",
+        )
 
     # GOVERN (fail-closed on receipt)
     report_path, receipt_path = _govern(
@@ -680,10 +700,22 @@ def run_envelope_plan(
     # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
     _skip_pr = is_dispatch_branch_ref(_base_ref)
 
+    # OI-1743: a successful dispatch must write its OWN completion receipt on
+    # the success path. Before this, the worker run + _enforce_push_pr lived in
+    # a `try` with only a `finally` (worktree teardown) and NO `except`. Any
+    # exception raised inside that block propagated past the `_govern` call
+    # below it, so NO report and NO receipt were emitted — the exact gap the
+    # background converter only papered over (and which sat silent for three
+    # weeks). See run_envelope_headless_plan for the full rationale. The fix
+    # mirrors that lane: catch the exception, build a failure _AdapterResult
+    # preserving whatever the worker produced, and fall through to _govern.
     _phantom_diff: Optional[str] = None
+    _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
+    start = datetime.now(timezone.utc)
+    end = start
     try:
-        start = datetime.now(timezone.utc)
         result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path, role=role)
+        _prior_result = result
         end = datetime.now(timezone.utc)
         # F1 (codex): capture the worker's diff BEFORE the teardown below —
         # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id>
@@ -718,6 +750,27 @@ def run_envelope_plan(
                 target_remote_head=_target_remote_head,
                 skip_pr=_skip_pr,
             )
+    except Exception as _work_exc:  # noqa: BLE001 — never let a close-out error skip GOVERN
+        logger.exception(
+            "envelope: provider work block raised dispatch=%s — building failure "
+            "result so _govern still emits a report+receipt (OI-1743)",
+            plan.dispatch_id,
+        )
+        result = _AdapterResult(
+            returncode=_prior_result.returncode if _prior_result is not None else 1,
+            completion_text=_prior_result.completion_text if _prior_result is not None else "",
+            status="failure",
+            token_usage=_prior_result.token_usage if _prior_result is not None else {},
+            error=(
+                f"provider dispatch close-out raised: {_work_exc!r} — "
+                f"worker status was "
+                f"{_prior_result.status!r} before the failure (OI-1743)"
+                if _prior_result is not None
+                else f"provider dispatch raised before any worker result: {_work_exc!r} (OI-1743)"
+            ),
+            session_id=_prior_result.session_id if _prior_result is not None else None,
+            model=_prior_result.model if _prior_result is not None else None,
+        )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
@@ -926,10 +979,29 @@ def run_envelope_headless_plan(
     # ── OI-1115: skip auto-PR when the dispatch works on an existing branch ──
     _skip_pr = is_dispatch_branch_ref(_base_ref)
 
+    # OI-1743: a successful dispatch must write its OWN completion receipt on
+    # the success path — not rely on the background converter's safety net.
+    # Before this, the worker run + _enforce_push_pr lived in a `try` with only
+    # a `finally` (worktree teardown) and NO `except`. Any exception raised
+    # inside that block (an unguarded spawn error, a push/PR-enforcement
+    # import, anything after the worker already reported success) propagated
+    # straight past the `_govern` call below it, so NO report and NO receipt
+    # were emitted. A fast FAILURE reached _govern (the failure path skips
+    # _enforce_push_pr), but a SUCCESS that then stumbled did not — the exact
+    # inversion this dispatch closes. The fix wraps the work block so an
+    # exception is caught, turned into a failure _AdapterResult that preserves
+    # whatever the worker already produced, and execution falls through to
+    # _govern regardless. A receipt that says "the worker succeeded, the
+    # close-out failed" is better than no receipt: silence is the failure
+    # mode we remove here. The net (vangnet) stays the second line, not the
+    # first.
     _phantom_diff: Optional[str] = None
+    _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
+    start = datetime.now(timezone.utc)
+    end = start
     try:
-        start = datetime.now(timezone.utc)
         result = ClaudeSubprocessAdapter().run(enriched_spec, cwd=wt_path)
+        _prior_result = result
         end = datetime.now(timezone.utc)
         try:
             _phantom_diff = _resolve_phantom_diff(
@@ -956,6 +1028,31 @@ def run_envelope_headless_plan(
                 target_remote_head=_target_remote_head,
                 skip_pr=_skip_pr,
             )
+    except Exception as _work_exc:  # noqa: BLE001 — never let a close-out error skip GOVERN
+        logger.exception(
+            "envelope: headless work block raised dispatch=%s — building failure "
+            "result so _govern still emits a report+receipt (OI-1743)",
+            plan.dispatch_id,
+        )
+        # Preserve whatever the worker produced before the stumble (a real
+        # success completion_text + tokens is still the worker's truth), but
+        # mark the dispatch a failure so the governed receipt never reads as a
+        # clean pass. If the worker never returned a result at all, build one.
+        result = _AdapterResult(
+            returncode=_prior_result.returncode if _prior_result is not None else 1,
+            completion_text=_prior_result.completion_text if _prior_result is not None else "",
+            status="failure",
+            token_usage=_prior_result.token_usage if _prior_result is not None else {},
+            error=(
+                f"headless dispatch close-out raised: {_work_exc!r} — "
+                f"worker status was "
+                f"{_prior_result.status!r} before the failure (OI-1743)"
+                if _prior_result is not None
+                else f"headless dispatch raised before any worker result: {_work_exc!r} (OI-1743)"
+            ),
+            session_id=_prior_result.session_id if _prior_result is not None else None,
+            model=_prior_result.model if _prior_result is not None else None,
+        )
     finally:
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
