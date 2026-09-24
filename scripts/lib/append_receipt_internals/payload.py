@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import os
 import sqlite3
@@ -30,7 +31,7 @@ from .idempotency import (
     _resolve_state_dir_env_first,
     _write_receipt_under_lock,
 )
-from .receipt_finalize import classify_receipt_v2_warnings, commit_receipt_v2_fields
+from .receipt_finalize import classify_receipt_v2_warnings, commit_receipt_v2_fields, counter_path_beside
 from .validation import _validate_receipt
 
 # Sibling scripts/lib module (scripts/lib is on sys.path whenever this package
@@ -494,7 +495,11 @@ def append_receipt_payload(
     # side-effect commit (commit_receipt_v2_fields) runs only once
     # _write_receipt_under_lock confirms this receipt is not a duplicate and
     # will actually be written — see that function's pre_write_hook.
-    classify_receipt_v2_warnings(receipt)
+    #
+    # OI-1788: the recurrence counter is kept beside the ledger this receipt is
+    # appended to, not at a path derived from this module's own location.
+    counter_path = counter_path_beside(receipt_path)
+    classify_receipt_v2_warnings(receipt, counter_path=counter_path)
 
     event_name = _validate_receipt(receipt)
     idempotency_key = _compute_idempotency_key(receipt, event_name)
@@ -519,7 +524,7 @@ def append_receipt_payload(
         cache_path,
         idempotency_key,
         cache_window_seconds,
-        pre_write_hook=commit_receipt_v2_fields,
+        pre_write_hook=functools.partial(commit_receipt_v2_fields, counter_path=counter_path),
     )
 
     # OI-948: _write_receipt_under_lock is annotated -> AppendResult and

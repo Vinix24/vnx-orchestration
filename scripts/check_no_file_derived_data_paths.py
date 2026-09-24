@@ -213,9 +213,16 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 #     store without the intelligence tables (every update a silent no-op). It now
 #     writes to the store the receipt itself was appended to. Dropped from the
 #     list, as the gate requires of a migrated site.
-#   - append_receipt_internals (session_resolver/warning_destination):
-#     receipt-provenance side paths; read-mostly, env-overridable, and outside
-#     this dispatch's blast radius.
+#   - append_receipt_internals/session_resolver + warning_destination: MIGRATED
+#     (OI-1788). warning_destination's recurrence counter took its path from
+#     resolve_state_dir(__file__), which inside a central install is the
+#     read-only version directory: the counter's mkdir raised PermissionError
+#     and every dispatch whose receipt carried a ``counted`` warning was booked
+#     as failed (75 rows on mission-control v1.6.3). Both receipt writers now
+#     keep the counter beside the ledger they append to
+#     (warning_destination.counter_path_beside); the no-ledger default and
+#     session_resolver's fallback use vnx_paths.resolve_state_dir(). Dropped
+#     from the list, as the gate requires of a migrated site.
 #   - subsystem_health, plan_gate_/migration_effectiveness_probe and the two
 #     READ classes of injection_effectiveness_probe: MIGRATED (absence-is-loud,
 #     punt 1). Without an env pin they resolved the checkout-local
@@ -238,12 +245,6 @@ GRANDFATHERED_RESOLVER_ANCHORS: Dict[str, Set[str]] = {
         "resolve_state_dir(caller_file=__file__)",
     },
     "scripts/lib/lease_sweep.py": {
-        "resolve_state_dir(__file__)",
-    },
-    "scripts/lib/append_receipt_internals/session_resolver.py": {
-        "facade.resolve_state_dir(__file__)",
-    },
-    "scripts/lib/append_receipt_internals/warning_destination.py": {
         "resolve_state_dir(__file__)",
     },
     "scripts/lib/injection_effectiveness_probe.py": {

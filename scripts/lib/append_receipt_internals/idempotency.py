@@ -325,7 +325,20 @@ def _write_receipt_under_lock(
                         receipt["supersedes"] = outcome_booking.supersedes
 
             if pre_write_hook is not None:
-                pre_write_hook(receipt)
+                try:
+                    pre_write_hook(receipt)
+                except OSError as exc:
+                    # The hook's own side effects (recurrence counter, open-items
+                    # store) do their own filesystem I/O. An OSError from there
+                    # must not fall through to the handler below, which reports
+                    # every OSError as "Failed to acquire append lock": that label
+                    # sent the OI-1788 diagnosis after the lock path while the
+                    # lock was held and the failing mkdir was the counter's.
+                    raise AppendReceiptError(
+                        "pre_write_hook_failed",
+                        EXIT_IO_ERROR,
+                        f"Receipt pre-write hook failed (lock was held): {exc}",
+                    ) from exc
 
             # Hash-chain stamping (flag-gated). The read-tail + stamp happens
             # here, INSIDE the LOCK_EX block and BEFORE the receipt write, so
