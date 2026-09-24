@@ -100,18 +100,21 @@ REFUSED merge left no record at all — the five ``return EXIT_ERROR`` branches
 in ``main()`` wrote nothing. Both branches now carry the same field,
 ``preflight_gates``: one record per gate in ``PREFLIGHT_ORDER``, each
 ``{"gate", "verdict", "message", "head_sha", "overridden",
-"override_unnecessary", "override_not_applicable", "reason_code"}``.
+"override_unnecessary", "override_not_applicable", "reason_code", "mode"}``.
 
 ``reason_code`` is the machine-readable cause the gate decided on, next to the
 Dutch ``message`` (golf Bx, D4 / OI-1666). D3 landed this ledger an hour before
 D4 landed those codes and the two never met: the door decided on a code and
 recorded only prose, so telling three distinguishable refusals apart afterwards
 was back to matching Dutch text — the exact failure class D4 removed inside the
-door, reintroduced in the record it writes. Today only the contract_invalid
+door, reintroduced in the record it writes. Today the contract_invalid
 preflight publishes a code vocabulary
 (``contract_invalid_ledger.ACCEPTANCE_CODES`` plus ``REASON_CODE_GATE_SKIPPED``
-for its own skip); the other four carry ``""``, and the key is written on every
-record either way.
+for its own skip) and the branch-protection preflight three codes of its own
+(``REASON_PROTECTION_*``, OI-1849); the other three carry ``""``, and the key is
+written on every record either way. ``mode`` is the branch-protection
+preflight's strictness for the project (``enforce``, ``warn`` or ``off``) and
+``""`` on the rest.
 
 The door SHORT-CIRCUITS on the first NO-GO (each preflight returns
 EXIT_ERROR on its own, before the next one runs) and that stays exactly as
@@ -148,16 +151,31 @@ Register event written to dispatch_register.ndjson:
     terminal    : "T0"
 
 Branch-protection preflight (Golf B, B1): a fourth fail-closed gate after
-contract_invalid — live branch protection on main must match
-``scripts/forge/branch_protection.yaml`` as committed on main, and this PR's
-own copy of that YAML must not weaken main's (see
-``_run_branch_protection_gate`` and ``scripts/lib/forge_protection_drift.py``
-for the full four-step check). A 404 on that exact path when reading main's
-YAML is the bootstrap case (no PR has ever applied one yet) and is a loud
-no-op, not a refusal. The only override is ``--allow-weaken "<reason>"``,
-which accepts ONLY a weakening the PR's own YAML edit introduces relative to
-main — a drift between live state and main's own declared YAML has no
-override at all (run ``apply_branch_protection.py`` first).
+contract_invalid — live branch protection on main must match the project's
+``branch_protection.yaml`` as committed on main, and this PR's own copy of that
+YAML must not weaken main's (see ``_run_branch_protection_gate`` and
+``scripts/lib/forge_protection_drift.py`` for the full four-step check). The
+only override is ``--allow-weaken "<reason>"``, which accepts ONLY a weakening
+the PR's own YAML edit introduces relative to main — under ``enforce`` a drift
+between live state and main's own declared YAML has no override at all (run
+``apply_branch_protection.py`` first).
+
+Target repo (OI-1849): the door merges into the PROJECT it is run for, not the
+repo it is installed from. ``VNX_PROJECT_ROOT`` if set, else the git toplevel of
+the cwd (``vnx_paths``, see ``scripts/lib/merge_target.py``) decides which repo
+the CI run, the ADR numbers, the branch protection and the ``gh pr merge`` itself
+go to, and ``doelrepo: owner/name`` is the first line of the output. The door's
+own integrity is proven against the fabric (main for a checkout, the release tag
+for an install), never against the target.
+
+Strictness per project (OI-1849): ``enforcement: enforce | warn | off`` in the
+project's ``.vnx/branch_protection.yaml`` (or ``scripts/forge/branch_protection.yaml``)
+sets what the branch-protection preflight does. ``enforce`` is the default of a
+file that does not say and blocks on drift. ``warn`` reports drift, in the output
+and in the preflight record, and merges. ``off`` does not check, and the record
+says so. A project with no such file at all is treated as ``warn``, loudly. The
+CI gate is not softened by any of it. ``ci_workflow: "<name>"`` in the same file
+names the workflow the CI gate looks for.
 
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
@@ -171,7 +189,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -179,6 +198,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
 sys.path.insert(0, str(SCRIPT_DIR))
+
+#: The root of the RUNNING door: a fabric checkout, or an install
+#: (``~/.vnx-system/versions/<v>``). Distinct from the merge target, which is the
+#: project whose PR is being merged (OI-1849, see ``merge_target``). What proves
+#: the door itself unedited (``_door_blob_hash_gate``) is judged here; what the
+#: door judges the merge on is judged in ``_target_root()``.
+ENGINE_ROOT = SCRIPT_DIR.parent
 
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
@@ -189,14 +215,24 @@ from contract_invalid_ledger import (
     evaluate_deliverable_acceptance,
 )
 from forge_protection_drift import (
-    PROTECTION_YAML_RELATIVE_PATH,
+    ENFORCEMENT_OFF,
+    ENFORCEMENT_WARN,
+    MISSING_FILE_ENFORCEMENT,
+    PROTECTION_YAML_SEARCH_PATHS,
     ProtectionConfigError,
+    YamlFetchResult,
     compare as compare_protection_state,
     fetch_live_protection,
     fetch_yaml_from_ref,
     is_weakening as protection_is_weakening,
     parse_protection_config,
     to_normalized_dict as protection_to_normalized_dict,
+)
+from merge_target import (
+    MergeTarget,
+    MergeTargetError,
+    door_reference,
+    resolve_merge_target,
 )
 
 EXIT_OK = 0
@@ -284,9 +320,16 @@ def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Di
     the first field that attempt and "no flag was passed at all" produce an
     identical record.
 
-    Every key is written on every record, including for the four gates that
-    publish no code at all — they decide on their own logic and their record
-    carries ``reason_code: ""``. That is the same rule ``VERDICT_NOT_EVALUATED``
+    ``mode`` (OI-1849) is the strictness the gate ran under: ``enforce``,
+    ``warn`` or ``off``. Only the branch-protection preflight has one, because
+    it is the only gate a project can soften (``enforcement`` in its
+    ``branch_protection.yaml``); every other record carries ``""``. Without it a
+    GO from a gate that was switched off reads exactly like a GO from one that
+    checked and found nothing.
+
+    Every key is written on every record, including for the gates that
+    publish no code or no mode at all — they decide on their own logic and their
+    record carries ``reason_code: ""``. That is the same rule ``VERDICT_NOT_EVALUATED``
     exists for: a key that is present on some records and absent on others
     forces its first reader to guess, and the natural repair for the resulting
     KeyError is a permissive default.
@@ -300,6 +343,7 @@ def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Di
         "override_unnecessary": bool(gate.get("override_unnecessary")),
         "override_not_applicable": bool(gate.get("override_not_applicable")),
         "reason_code": str(gate.get("reason_code") or ""),
+        "mode": str(gate.get("mode") or ""),
     }
 
 
@@ -374,14 +418,48 @@ def _lookup_dispatch_id_by_pr_number(pr_number: int) -> str:
     return ""
 
 
-def _gh(args: list[str], *, check: bool = False, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    """Run a gh command and return the CompletedProcess."""
+#: The project the running merge goes into (OI-1849). Set by ``main()`` for the
+#: length of one merge and reset after it. Ambient rather than threaded through
+#: every helper because the helpers are the ones the suite (and the rest of the
+#: door) already calls with fixed signatures; what matters is that there is ONE
+#: value, decided once, and that ``_gh`` and every gate read it from here.
+_ACTIVE_TARGET: Optional[MergeTarget] = None
+
+
+def _target_root() -> Path:
+    """Where every git/gh call that judges or performs this merge runs.
+
+    The active target's project root during ``main()``. Outside it (a gate
+    called on its own) the running door's own root: the pre-OI-1849 behavior,
+    which for a fabric checkout is also the right answer.
+    """
+    return _ACTIVE_TARGET.project_root if _ACTIVE_TARGET is not None else ENGINE_ROOT
+
+
+def _target_label() -> str:
+    """``owner/name`` of the active target, for messages; its root outside ``main()``."""
+    return _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else str(ENGINE_ROOT)
+
+
+def _gh(
+    args: list[str], *, check: bool = False, timeout: int = 30, cwd: Optional[Path] = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a gh command and return the CompletedProcess.
+
+    Runs in the merge target's project root unless ``cwd`` says otherwise, so
+    ``gh pr view``/``gh pr merge`` and the ``{owner}/{repo}`` placeholder of
+    every ``gh api`` call resolve to the repo being merged into, not to
+    whatever directory the caller happened to be standing in (OI-1849). The
+    one caller that passes ``cwd`` is the door-integrity check, which talks
+    about the fabric's repo.
+    """
     return subprocess.run(
         ["gh"] + args,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=check,
+        cwd=str(cwd if cwd is not None else _target_root()),
     )
 
 
@@ -399,20 +477,67 @@ def _query_pr(pr_number: int) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _fetch_protection_yaml(project_root: Path, ref: str) -> Tuple[str, YamlFetchResult]:
+    """The project's ``branch_protection.yaml`` at ``ref``, walking the reading order.
+
+    Returns ``(path, result)`` for the first path that is not a confirmed 404 —
+    a found file, or an error, which stops the walk (an unreadable first
+    candidate must not fall through to a second one that says something else).
+    When every candidate is a confirmed 404 the result is ``not_found`` with an
+    empty path: the project has no such file at this ref.
+    """
+    for path in PROTECTION_YAML_SEARCH_PATHS:
+        fetched = fetch_yaml_from_ref(project_root, ref, path)
+        if not fetched.not_found:
+            return path, fetched
+    return "", YamlFetchResult(text=None, not_found=True, error=None)
+
+
+def _project_ci_workflow(override_reason: Optional[str]) -> Tuple[Optional[str], str]:
+    """The CI workflow name the project declares on main, as ``(name, error)``.
+
+    ``ci_workflow`` in ``branch_protection.yaml`` on main (never a local copy:
+    the checkout the door runs beside may be on any branch, including the PR's).
+    ``(None, "")`` means "the project declares none", and the workflow name then
+    falls to ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists
+    but cannot be read or parsed is an error: guessing a workflow name would put
+    the CI gate on a workflow the project never named.
+
+    Not read at all when the gate is being overridden: the reason alone decides
+    that gate then, and the workflow name is not consulted.
+    """
+    if _resolve_override_reason(override_reason) is not None:
+        return None, ""
+    path, fetched = _fetch_protection_yaml(_target_root(), "main")
+    if fetched.error:
+        return None, f"branch-protection-YAML op main niet leesbaar: {fetched.error}"
+    if fetched.not_found:
+        return None, ""
+    try:
+        return parse_protection_config(fetched.text or "").ci_workflow, ""
+    except ProtectionConfigError as exc:
+        return None, f"branch-protection-YAML ({path}) op main ongeldig: {exc}"
+
+
 def _run_ci_gate(
     pr_number: int,
     *,
     override_reason: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    """Fail-closed merge gate: VNX CI must have conclusion=success for the PR head.
+    """Fail-closed merge gate: the project's CI workflow must have conclusion=success
+    for the PR head.
 
     Resolves the PR head (sha + branch) via ``gh pr view`` and delegates the
     workflow-conclusion check to
-    ``merge_preflight_ci_check.check_ci_run_for_head``. Returns ``(gate,
-    pr_data)``; the caller merges only when ``gate["verdict"] == "GO"``.
+    ``merge_preflight_ci_check.check_ci_run_for_head``, run in the merge
+    target's project root. The workflow it looks for is ``ci_workflow`` from the
+    project's YAML on main, else ``VNX_CI_WORKFLOW_NAME``, else ``VNX CI``.
+    Returns ``(gate, pr_data)``; the caller merges only when
+    ``gate["verdict"] == "GO"``.
 
     A failed/empty PR query (no head sha or branch) is a NO-GO — the GitHub API
-    not answering is a refusal with a message, never a silent pass.
+    not answering is a refusal with a message, never a silent pass. So is a
+    project YAML that names a workflow but cannot be read.
     """
     pr_data = _query_pr(pr_number)
     head_sha = (pr_data or {}).get("headRefOid") or ""
@@ -427,11 +552,23 @@ def _run_ci_gate(
             "overridden": False,
             "override_reason": None,
         }, pr_data
+    project_workflow, workflow_error = _project_ci_workflow(override_reason)
+    if workflow_error:
+        return {
+            "verdict": "NO-GO",
+            "message": f"CI-workflow van het project kon niet worden bepaald: {workflow_error}",
+            "overridden": False,
+            "override_reason": None,
+        }, pr_data
+    # Passed only when the project declares one, so a project that does not
+    # sees exactly the call it always saw.
+    workflow_kwargs = {"project_workflow": project_workflow} if project_workflow else {}
     gate = check_ci_run_for_head(
-        SCRIPT_DIR.parent,
+        _target_root(),
         branch=branch,
         head_sha=head_sha,
         override_reason=override_reason,
+        **workflow_kwargs,
     )
     return gate, pr_data
 
@@ -612,7 +749,7 @@ def _run_adr_gate(pr_number: int, *, pr_data: Optional[Dict[str, Any]] = None) -
             "main_file": None,
         }
     base_ref = (pr_data or {}).get("baseRefName") or "main"
-    return check_adr_numbers_for_pr(pr_number, project_root=SCRIPT_DIR.parent, base_ref=base_ref)
+    return check_adr_numbers_for_pr(pr_number, project_root=_target_root(), base_ref=base_ref)
 
 
 def _run_contract_invalid_gate(
@@ -792,8 +929,22 @@ def _run_contract_invalid_gate(
     return result
 
 
-def _no_go_protection(message: str) -> Dict[str, Any]:
-    return {"verdict": "NO-GO", "message": message, "overridden": False, "override_reason": None}
+#: ``reason_code`` values the branch-protection preflight publishes (OI-1849), next
+#: to its ``mode``. A clean run under ``enforce`` carries ``""``, like the other
+#: gates that decide on their own logic. These three exist because a GO is no
+#: longer one thing: it can mean "checked and clean", "not checked at all", or
+#: "checked and merged past a finding", and a reader of the ledger must not have
+#: to match Dutch prose to tell them apart.
+REASON_PROTECTION_OFF = "enforcement_off"
+REASON_PROTECTION_FILE_MISSING = "protection_file_missing"
+REASON_PROTECTION_WARNED = "enforcement_warn_findings"
+
+
+def _no_go_protection(message: str, mode: str = "") -> Dict[str, Any]:
+    return {
+        "verdict": "NO-GO", "message": message, "overridden": False, "override_reason": None,
+        "mode": mode,
+    }
 
 
 #: Every file whose CONTENT decides what this door refuses. Hashing only the
@@ -802,34 +953,50 @@ def _no_go_protection(message: str) -> Dict[str, Any]:
 #: branch-protection preflight while ``scripts/pr_merge.py`` stays
 #: byte-identical to main and the integrity check reports GO (measured by the
 #: B1 read-seat on 2026-09-07 — that exact mutation passed unseen while 14
-#: tests went red on it).
+#: tests went red on it). ``merge_target.py`` joined with OI-1849: it decides
+#: which repo every other check is pointed at.
 _DOOR_INTEGRITY_PATHS = (
     "scripts/pr_merge.py",
     "scripts/lib/forge_protection_drift.py",
     "scripts/lib/merge_preflight_adr_check.py",
     "scripts/lib/merge_preflight_ci_check.py",
     "scripts/lib/contract_invalid_ledger.py",
+    "scripts/lib/merge_target.py",
 )
 
 
-def _door_blob_hash_gate(project_root: Path) -> Dict[str, Any]:
-    """Golf B, B1: the merge door only runs its preflight checks from the
-    checkout ON main — a fix-forward pushed straight to a feature branch
-    (bypassing review of the door's own code) must not be able to weaken
-    what this door enforces just by running from a stale or edited local
+def _door_blob_hash_gate(engine_root: Path) -> Dict[str, Any]:
+    """Golf B, B1: the merge door only runs its preflight checks from a door that
+    is byte-identical to the published one — a fix-forward pushed straight to a
+    feature branch (bypassing review of the door's own code) must not be able to
+    weaken what this door enforces just by running from a stale or edited local
     checkout. Compares the git blob hash of every file in
-    ``_DOOR_INTEGRITY_PATHS`` (``git hash-object``, computed locally) against
-    the sha GitHub reports for that same path on ``main`` (the contents API's
-    ``sha`` field IS a git blob hash — measured equal on this repo's own
-    ``scripts/pr_merge.py`` on 2026-09-07). Any mismatch refuses, naming the
-    files that differ; an unreadable local or remote hash refuses too
-    (fail-closed).
+    ``_DOOR_INTEGRITY_PATHS`` (``git hash-object``, computed locally in
+    ``engine_root``) against the sha GitHub reports for that same path in the
+    fabric's repo (the contents API's ``sha`` field IS a git blob hash —
+    measured equal on this repo's own ``scripts/pr_merge.py`` on 2026-09-07).
+    Any mismatch refuses, naming the files that differ; an unreadable local or
+    remote hash refuses too (fail-closed).
+
+    ``engine_root`` is the root of the RUNNING door, and the remote read runs in
+    it too, so it names the fabric's repo — never the merge target's (OI-1849).
+    What it is compared to depends on what it is (``merge_target.door_reference``):
+    a dev checkout to ``main``; a central install to the tag it says it is
+    (``v<VERSION>``), because main moves on after a release is cut and a
+    comparison to main would refuse every install that is not on the latest
+    commit.
     """
+    try:
+        ref, label = door_reference(engine_root)
+    except MergeTargetError as exc:
+        return _no_go_protection(f"deur-integriteit niet toetsbaar: {exc}")
+    encoded_ref = quote(ref, safe="")
+
     mismatched: list[str] = []
     for path in _DOOR_INTEGRITY_PATHS:
         local = subprocess.run(
             ["git", "hash-object", path],
-            cwd=str(project_root), capture_output=True, text=True, timeout=15,
+            cwd=str(engine_root), capture_output=True, text=True, timeout=15,
         )
         if local.returncode != 0:
             return _no_go_protection(
@@ -839,11 +1006,11 @@ def _door_blob_hash_gate(project_root: Path) -> Dict[str, Any]:
         local_hash = (local.stdout or "").strip()
 
         remote = _gh([
-            "api", f"repos/{{owner}}/{{repo}}/contents/{path}?ref=main", "--jq", ".sha",
-        ])
+            "api", f"repos/{{owner}}/{{repo}}/contents/{path}?ref={encoded_ref}", "--jq", ".sha",
+        ], cwd=engine_root)
         if remote.returncode != 0:
             return _no_go_protection(
-                f"sha van {path} op main kon niet worden opgevraagd: deur-integriteit "
+                f"sha van {path} op {ref} kon niet worden opgevraagd: deur-integriteit "
                 f"niet toetsbaar ({(remote.stderr or '').strip()[:200]})"
             )
         remote_hash = (remote.stdout or "").strip()
@@ -851,13 +1018,18 @@ def _door_blob_hash_gate(project_root: Path) -> Dict[str, Any]:
             mismatched.append(path)
 
     if mismatched:
+        if ref == "main":
+            return _no_go_protection(
+                "de draaiende deur wijkt af van de versie op main (" + ", ".join(mismatched)
+                + "): de deur draait alleen uit de hoofd-checkout op main"
+            )
         return _no_go_protection(
-            "de draaiende deur wijkt af van de versie op main (" + ", ".join(mismatched)
-            + "): de deur draait alleen uit de hoofd-checkout op main"
+            f"de draaiende deur wijkt af van {label} (" + ", ".join(mismatched)
+            + "): een installatie moet byte-identiek zijn aan zijn eigen release"
         )
     return {
         "verdict": "GO",
-        "message": f"deur-integriteit: {len(_DOOR_INTEGRITY_PATHS)} deurbestanden identiek aan main",
+        "message": f"deur-integriteit: {len(_DOOR_INTEGRITY_PATHS)} deurbestanden identiek aan {label}",
         "overridden": False, "override_reason": None,
     }
 
@@ -869,39 +1041,54 @@ def _run_branch_protection_gate(
     allow_weaken_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fail-closed merge gate (Golf B, B1): live branch protection on main
-    must match ``scripts/forge/branch_protection.yaml`` as committed on
+    must match the project's ``branch_protection.yaml`` as committed on
     main, and this PR's own copy of that YAML must not weaken main's.
+
+    Everything the gate reads — the YAML at main, the YAML at the PR head, live
+    protection — is read from the merge TARGET's repo (``_target_root()``), the
+    same repo ``gh pr merge`` and the CI gate go to (OI-1849). The file is
+    ``.vnx/branch_protection.yaml`` if the project has one, else
+    ``scripts/forge/branch_protection.yaml`` (``PROTECTION_YAML_SEARCH_PATHS``).
 
     Four checks, in order, each a refusal on its own:
 
-    (a) The RUNNING door must be byte-identical to main's copy
-        (``_door_blob_hash_gate`` over ``_DOOR_INTEGRITY_PATHS``) — the door
-        only runs any of the checks below from the main checkout. FIRST, not
-        last: every step after this one has a branch that returns early, and
-        a check that proves the door is unedited is worthless when the
-        edited door can route around it. The bootstrap no-op in (b) did
-        exactly that.
+    (a) The RUNNING door must be byte-identical to its published copy
+        (``_door_blob_hash_gate`` over ``_DOOR_INTEGRITY_PATHS``: main for a
+        checkout, its own release tag for an install) — the door only runs any
+        of the checks below from an unedited door. FIRST, not last: every step
+        after this one has a branch that returns early, and a check that proves
+        the door is unedited is worthless when the edited door can route around
+        it. The missing-file no-op in (b) did exactly that, as the bootstrap
+        no-op before it.
     (b) Read main's YAML via the contents API (never a local ref — the door
-        never fetches). A 404 on EXACTLY that path, at a ref confirmed to
-        exist, is the bootstrap case (no PR has ever applied a
-        branch_protection.yaml to main yet): a no-op GO, loudly. Any other
-        read/parse failure blocks — including a 404 whose ref cannot be
-        confirmed, which is indistinguishable from an unknown ref or an
-        unresolvable repo (see ``forge_protection_drift._confirm_ref_exists``).
-    (c) Live protection on main must match main's own declared YAML — any
-        drift blocks, with the differing fields named. No override: a drift
-        here means ``apply_branch_protection.py`` must be run first, not
-        that this merge should be waved through.
+        never fetches). A confirmed 404 on every candidate path, at a ref
+        confirmed to exist, means the project has no such file: a loud ``warn``
+        GO (nothing to check against, nothing blocked). Any other read/parse
+        failure blocks — including a 404 whose ref cannot be confirmed, which is
+        indistinguishable from an unknown ref or an unresolvable repo (see
+        ``forge_protection_drift._confirm_ref_exists``). The file's
+        ``enforcement`` (``enforce``, ``warn`` or ``off``; absent means
+        ``enforce``) is the door's strictness for this project: ``off`` stops
+        here, GO, and the preflight record says the gate was off.
+    (c) Live protection on main must match main's own declared YAML — under
+        ``enforce`` any drift blocks, with the differing fields named. No
+        override: a drift here means ``apply_branch_protection.py`` must be run
+        first, not that this merge should be waved through. Under ``warn`` the
+        same drift (and a live state that cannot be read at all, which is what
+        a repo without protection answers) is reported and the merge goes on.
     (d) This PR's own version of the YAML (read at the PR's head sha, same
         contents API) must not weaken main's version
-        (``forge_protection_drift.is_weakening``). Deleting the file counts
-        as the ultimate weakening. Blocks without ``--allow-weaken
-        "<reason>"`` (empty reason refused, no silent bypass).
+        (``forge_protection_drift.is_weakening``, which includes lowering
+        ``enforcement``). Deleting the file counts as the ultimate weakening.
+        Blocks without ``--allow-weaken "<reason>"`` (empty reason refused, no
+        silent bypass) under ``enforce`` and ``warn`` alike: ``warn`` softens
+        what the door does about DRIFT, never what it lets a PR do to the
+        declaration.
 
         Reader-for-field contract: the parser used here (``parse_protection_config``)
         is the LOCAL checkout's code, which step (a) has just proven
-        byte-identical to main — never the PR's own copy. A PR that adds a
-        new schema field to ``branch_protection.yaml`` AND teaches the
+        byte-identical to its published copy — never the PR's own copy. A PR that
+        adds a new schema field to ``branch_protection.yaml`` AND teaches the
         reader that field in the same PR can therefore never pass this
         step: main's reader, the only one running, does not know the field
         yet. Extending the schema is always two PRs, reader first, field
@@ -909,21 +1096,33 @@ def _run_branch_protection_gate(
         branch_protection.yaml uitbreiden gaat in twee PR's (OI-1672)" for
         the measured cases and the exact refusal text.
 
-    No override besides ``--allow-weaken`` — a drift found in (c) or an
-    unreadable/unparseable state anywhere has no escape hatch.
-    """
-    project_root = SCRIPT_DIR.parent
+    No override besides ``--allow-weaken`` — a drift found in (c) under
+    ``enforce`` or an unreadable/unparseable state anywhere else has no escape
+    hatch.
 
-    door_check = _door_blob_hash_gate(project_root)
+    The result carries ``mode`` (``enforce``/``warn``/``off``, ``""`` when the
+    gate never got as far as reading it) and, under ``warn``, the ``warnings``
+    it merged past; both land in the preflight record.
+    """
+    target_root = _target_root()
+
+    door_check = _door_blob_hash_gate(ENGINE_ROOT)
     if door_check["verdict"] != "GO":
         return door_check
 
-    main_yaml = fetch_yaml_from_ref(project_root, "main", PROTECTION_YAML_RELATIVE_PATH)
+    main_path, main_yaml = _fetch_protection_yaml(target_root, "main")
     if main_yaml.not_found:
+        searched = ", ".join(PROTECTION_YAML_SEARCH_PATHS)
+        message = (
+            f"geen branch_protection.yaml in {_target_label()}, niets te toetsen "
+            f"(gezocht op main: {searched}): de merge gaat door zonder dat er iets is gecontroleerd"
+        )
         return {
             "verdict": "GO",
-            "message": "branch-protection-drift: geen YAML op main, preflight overgeslagen",
-            "bootstrap": True,
+            "message": message,
+            "mode": MISSING_FILE_ENFORCEMENT,
+            "reason_code": REASON_PROTECTION_FILE_MISSING,
+            "warnings": [message],
             "overridden": False,
             "override_reason": None,
         }
@@ -934,35 +1133,60 @@ def _run_branch_protection_gate(
     except ProtectionConfigError as exc:
         return _no_go_protection(f"branch-protection-YAML op main ongeldig: {exc}")
     main_norm = protection_to_normalized_dict(main_config)
+    mode = main_config.enforcement
+
+    if mode == ENFORCEMENT_OFF:
+        return {
+            "verdict": "GO",
+            "message": (
+                f"branch-protection-toetsing staat uit (enforcement: off in {main_path} op main): "
+                "niets getoetst"
+            ),
+            "mode": mode,
+            "reason_code": REASON_PROTECTION_OFF,
+            "overridden": False,
+            "override_reason": None,
+        }
+    warn_only = mode == ENFORCEMENT_WARN
+    warnings: List[str] = []
 
     try:
-        live_norm = fetch_live_protection(project_root, branch="main")
-    except Exception as exc:  # noqa: BLE001 — any unreadable live state blocks
-        return _no_go_protection(f"live branch-protection niet leesbaar: {exc}")
-    diffs = compare_protection_state(main_norm, live_norm)
-    if diffs:
-        fields = ", ".join(sorted({d["field"] for d in diffs}))
-        return _no_go_protection(
-            f"branch-protection wijkt af van scripts/forge/branch_protection.yaml op main: {fields}"
-        )
+        live_norm = fetch_live_protection(target_root, branch="main")
+    except Exception as exc:
+        # Broad by intent: whatever made live state unreadable blocks under
+        # enforce, and is reported under warn.
+        if not warn_only:
+            return _no_go_protection(f"live branch-protection niet leesbaar: {exc}", mode)
+        warnings.append(f"live branch-protection niet leesbaar, drift niet getoetst: {exc}")
+    else:
+        diffs = compare_protection_state(main_norm, live_norm)
+        if diffs:
+            fields = ", ".join(sorted({d["field"] for d in diffs}))
+            drift = f"branch-protection wijkt af van {main_path} op main: {fields}"
+            if not warn_only:
+                return _no_go_protection(drift, mode)
+            warnings.append(drift)
 
     head_sha = (pr_data or {}).get("headRefOid") or ""
     if not head_sha:
         return _no_go_protection(
-            f"PR-head kon niet worden bepaald voor #{pr_number}: branch-protection-preflight niet toetsbaar"
+            f"PR-head kon niet worden bepaald voor #{pr_number}: branch-protection-preflight niet toetsbaar",
+            mode,
         )
-    pr_yaml = fetch_yaml_from_ref(project_root, head_sha, PROTECTION_YAML_RELATIVE_PATH)
+    _, pr_yaml = _fetch_protection_yaml(target_root, head_sha)
     if pr_yaml.not_found:
         return _no_go_protection(
-            f"deze PR verwijdert {PROTECTION_YAML_RELATIVE_PATH}: branch-protection kan niet "
-            "meer worden gehandhaafd"
+            f"deze PR verwijdert de branch-protection-YAML ({', '.join(PROTECTION_YAML_SEARCH_PATHS)}): "
+            "branch-protection kan niet meer worden gehandhaafd "
+            "(wil je de toetsing bewust uitzetten: enforcement: off, met --allow-weaken)",
+            mode,
         )
     if pr_yaml.error:
-        return _no_go_protection(f"branch-protection-YAML op de PR-head niet leesbaar: {pr_yaml.error}")
+        return _no_go_protection(f"branch-protection-YAML op de PR-head niet leesbaar: {pr_yaml.error}", mode)
     try:
         pr_config = parse_protection_config(pr_yaml.text or "")
     except ProtectionConfigError as exc:
-        return _no_go_protection(f"branch-protection-YAML op de PR-head ongeldig: {exc}")
+        return _no_go_protection(f"branch-protection-YAML op de PR-head ongeldig: {exc}", mode)
     pr_norm = protection_to_normalized_dict(pr_config)
 
     weakening, weak_fields = protection_is_weakening(main_norm, pr_norm)
@@ -972,7 +1196,8 @@ def _run_branch_protection_gate(
         if allow_weaken_reason is None:
             return _no_go_protection(
                 "deze PR verzwakt branch-protection t.o.v. main zonder --allow-weaken: "
-                + ", ".join(weak_fields)
+                + ", ".join(weak_fields),
+                mode,
             )
         if not reason:
             return {
@@ -980,24 +1205,29 @@ def _run_branch_protection_gate(
                 "message": "override zonder reden geweigerd: --allow-weaken vereist een niet-lege reden",
                 "overridden": True,
                 "override_reason": reason,
+                "mode": mode,
             }
 
-    if weakening:
-        return {
-            "verdict": "GO",
-            "message": (
-                f"OVERRIDE: branch-protection-verzwakking geaccepteerd ({reason}): "
-                + ", ".join(weak_fields)
-            ),
-            "overridden": True,
-            "override_reason": reason,
-        }
-    return {
-        "verdict": "GO",
-        "message": "branch-protection: geen drift, PR verzwakt niets",
-        "overridden": False,
-        "override_reason": None,
+    result: Dict[str, Any] = {
+        "verdict": "GO", "mode": mode, "overridden": False, "override_reason": None,
     }
+    if weakening:
+        message = (
+            f"OVERRIDE: branch-protection-verzwakking geaccepteerd ({reason}): "
+            + ", ".join(weak_fields)
+        )
+        result["overridden"] = True
+        result["override_reason"] = reason
+    elif warn_only:
+        message = "branch-protection (enforcement: warn): geen drift, PR verzwakt niets"
+    else:
+        message = "branch-protection: geen drift, PR verzwakt niets"
+    if warnings:
+        message = f"{message}; WARN (enforcement: warn, merge gaat door): " + "; ".join(warnings)
+        result["warnings"] = warnings
+        result["reason_code"] = REASON_PROTECTION_WARNED
+    result["message"] = message
+    return result
 
 
 _HEAD_MOVED_MARKERS = (
@@ -1325,6 +1555,7 @@ def _refuse_merge(
             "refused_by": gate_name,
             "preflight_gates": ledger,
             "refusal_receipt_status": receipt_status,
+            "target_repo": _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else "",
         }, indent=2))
     else:
         print(f"NO-GO: {gate['message']}", file=sys.stderr)
@@ -1428,7 +1659,7 @@ def merge_pr(
     if result["branch"]:
         try:
             from file_scope_overlap import warn_overlaps  # noqa: PLC0415
-            result["overlaps"] = warn_overlaps(result["branch"], repo=SCRIPT_DIR.parent)
+            result["overlaps"] = warn_overlaps(result["branch"], repo=_target_root())
         except Exception as exc:  # noqa: BLE001 — an overlap check must never block a merge
             log.warning("file-scope overlap check failed for PR #%s: %s", pr_number, exc)
 
@@ -1535,13 +1766,60 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--allow-weaken", default=None,
-        help="Escape hatch (golf B, B1): accept a PR that weakens "
-             "scripts/forge/branch_protection.yaml relative to main, with this required "
-             "reason (empty is refused). No other override applies to this gate.",
+        help="Escape hatch (golf B, B1): accept a PR that weakens the project's "
+             "branch_protection.yaml relative to main (a lowered check, or a lowered "
+             "enforcement), with this required reason (empty is refused). No other "
+             "override applies to this gate.",
     )
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
     args = parser.parse_args(argv)
+    return _run_with_target(args)
 
+
+def _run_with_target(args: argparse.Namespace) -> int:
+    """Decide the merge target once, run the door against it, then let it go.
+
+    The target is the project the merge is FOR (``merge_target``); it is decided
+    here, before any gate runs, so the CI gate, the ADR gate, the branch-protection
+    gate and the ``gh pr merge`` all read the same one, and named on the first
+    line of the output. A target that cannot be established is a refusal recorded
+    against the first preflight: a door that cannot say which repo it is judging
+    must not judge.
+    """
+    global _ACTIVE_TARGET
+    try:
+        target = resolve_merge_target(ENGINE_ROOT)
+    except MergeTargetError as exc:
+        gate = {
+            "verdict": "NO-GO",
+            "message": f"doelrepo kon niet worden bepaald: {exc}: deze merge is niet toetsbaar",
+            "overridden": False,
+            "override_reason": None,
+        }
+        return _refuse_merge(
+            pr_number=args.pr,
+            dispatch_id=args.dispatch_id or "",
+            gate_name="ci",
+            gate=gate,
+            evaluated=[_preflight_record("ci", gate)],
+            head_sha="",
+            json_output=args.json,
+            json_key="ci_gate",
+            dry_run=args.dry_run,
+        )
+    _ACTIVE_TARGET = target
+    try:
+        # On stderr under --json: a refusal at the first gate leaves stdout as
+        # nothing but the JSON object, and consumers parse it that way. The
+        # repo is in that object as ``target_repo`` either way.
+        print(f"doelrepo: {target.repo}", file=sys.stderr if args.json else sys.stdout)
+        return _run_door(args)
+    finally:
+        _ACTIVE_TARGET = None
+
+
+def _run_door(args: argparse.Namespace) -> int:
+    """The five preflights, then the merge, against the active target."""
     method = args.merge_method or "squash"
 
     # Golf Bx, D3: every preflight's own verdict, appended as it is decided.
@@ -1625,6 +1903,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"OVERRIDE: {protection_gate['message']}")
     else:
         print(f"Branch-protection gate: {protection_gate['message']}")
+    # A warn GO merged past something: say so where a person reading only the
+    # error stream still sees it. The same text is in the preflight record.
+    for warning in protection_gate.get("warnings") or []:
+        print(f"WARN: {warning}", file=sys.stderr)
 
     # All five ran and approved: the ledger pads nothing here.
     preflight_gates = _preflight_ledger(evaluated)
@@ -1644,6 +1926,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         contract_invalid_override=contract_invalid_override,
         preflight_gates=preflight_gates,
     )
+
+    result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""
 
     if args.json:
         print(json.dumps(result, indent=2))

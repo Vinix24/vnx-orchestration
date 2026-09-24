@@ -49,6 +49,7 @@ from quality_advisory import (
 from cqs_calculator import calculate_cqs
 from gate_findings_bridge import record_gate_finding, resolve_gate_finding
 from required_contexts_gate import check_required_contexts
+from forge_protection_drift import ProtectionConfigError, load_local_ci_workflow
 
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
@@ -69,7 +70,8 @@ NET_LINE_DELETION_HOLD = 500
 PYTEST_TIMEOUT = 120
 
 # CI workflow name queried via `gh run list --workflow`. Overridable per-repo
-# via the VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag —
+# via `ci_workflow` in the project's branch_protection.yaml, the
+# VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag —
 # see _resolve_ci_workflow_name() for why this isn't auto-detected instead.
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
 CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
@@ -848,13 +850,17 @@ def check_net_deletion(project_root: Path, head_ref: str = "HEAD") -> Dict[str, 
     }
 
 
-def _resolve_ci_workflow_name(workflow_name: Optional[str]) -> str:
+def _resolve_ci_workflow_name(workflow_name: Optional[str], project_workflow: Optional[str] = None) -> str:
     """Resolve the workflow name to query via ``gh run list --workflow``.
 
     Resolution order: explicit ``workflow_name`` argument (CLI
-    ``--ci-workflow-name`` or a programmatic caller) > ``VNX_CI_WORKFLOW_NAME``
+    ``--ci-workflow-name`` or a programmatic caller) > ``ci_workflow`` from the
+    project's ``branch_protection.yaml`` (OI-1849) > ``VNX_CI_WORKFLOW_NAME``
     env var (per-repo operator override) > this fabric's own default,
     "VNX CI".
+
+    Mirrors ``merge_preflight_ci_check._resolve_workflow_name`` — keep the two
+    in sync (tests/test_ci_workflow_resolution_parity.py holds them to it).
 
     Auto-detecting "the" CI workflow from ``.github/workflows/*.yml`` was
     considered and rejected: this repo alone ships seven workflow files
@@ -867,6 +873,8 @@ def _resolve_ci_workflow_name(workflow_name: Optional[str]) -> str:
     """
     if workflow_name:
         return workflow_name
+    if project_workflow:
+        return project_workflow
     env_name = os.environ.get(CI_WORKFLOW_NAME_ENV_VAR)
     if env_name:
         return env_name
@@ -907,7 +915,20 @@ def check_ci_workflow(
     workflow never ran.  This check reads the workflow conclusion directly —
     never the check-names — so the three verified states are distinguishable.
     """
-    resolved_workflow_name = _resolve_ci_workflow_name(workflow_name)
+    try:
+        project_workflow = load_local_ci_workflow(project_root)
+    except (ProtectionConfigError, OSError) as exc:
+        return {
+            "check": "ci_workflow",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": (
+                f"could not read the project's branch_protection.yaml ({exc}) — "
+                "CI workflow could not be verified"
+            ),
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
+    resolved_workflow_name = _resolve_ci_workflow_name(workflow_name, project_workflow)
 
     # ── Resolve head SHA ──────────────────────────────────────────────────
     if head_sha is None:

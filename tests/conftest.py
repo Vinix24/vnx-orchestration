@@ -328,6 +328,35 @@ def _stub_adr_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OI-1849: ``pr_merge.main()`` decides its merge target (project root plus
+    the ``owner/name`` behind it) before any gate runs, and that decision is a
+    ``gh repo view`` in the project root. Every test that drives ``main()``
+    through stubbed gates would otherwise make that call for real, and in CI
+    (no ``GH_TOKEN``) refuse before it reached the gate it is about.
+
+    Stubbed at ``pr_merge.resolve_merge_target``, the name ``main()`` calls, to
+    the checkout the suite runs in. Tests that exercise the resolution itself
+    (tests/test_pr_merge_target_repo.py, tests/test_merge_target.py) put the real
+    function back or run it against a stub ``gh`` on PATH: same function-scoped
+    ``monkeypatch`` instance, later call wins.
+    """
+    try:
+        import pr_merge
+    except ImportError:
+        # Same reason as the two stubs beside this one: pr_merge is only
+        # importable once a pr_merge test module has put scripts/ on sys.path.
+        return
+    from merge_target import MergeTarget
+
+    monkeypatch.setattr(
+        pr_merge,
+        "resolve_merge_target",
+        lambda engine_root, **_kwargs: MergeTarget(project_root=Path(engine_root), repo="vnx-test/target"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     """Golf B, B1: keep pr_merge's branch-protection preflight offline + a
     no-op by default for every test that doesn't specifically exercise it.

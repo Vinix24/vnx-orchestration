@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Apply scripts/forge/branch_protection.yaml to a branch's live protection
+"""Apply a project's branch_protection.yaml to a branch's live protection
 (Golf B, B1).
 
-Reads the local YAML (default ``scripts/forge/branch_protection.yaml``),
-fetches live state via ``forge_protection_drift.fetch_live_protection``, and
-writes only what differs:
+Reads the project's YAML, fetches live state via
+``forge_protection_drift.fetch_live_protection``, and writes only what differs.
+The project is the one the merge door would merge into (OI-1849): its root comes
+from ``vnx_paths`` (``VNX_PROJECT_ROOT`` if set, else the git toplevel of the cwd
+for a central install), and the file is ``.vnx/branch_protection.yaml`` in it, or
+``scripts/forge/branch_protection.yaml`` (``PROTECTION_YAML_SEARCH_PATHS``) — the
+same root and the same reading order the door and ``vnx doctor`` use. Run from a
+central install without those defaults, this used to apply the FABRIC's YAML to
+whichever repo the install's git remote named. ``--yaml-path`` and
+``--project-root`` still override each.
 
   - any diff among the fields the branch-protection PUT endpoint owns ->
     a single PUT with the FULL object built from the YAML (see
@@ -59,20 +66,23 @@ sys.path.insert(0, str(LIB_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from forge_protection_drift import (  # noqa: E402
+    PROTECTION_YAML_SEARCH_PATHS,
     ProtectionConfig,
     ProtectionConfigError,
     ProtectionDriftError,
     bypass_allowances_to_api_object,
     compare,
     fetch_live_protection,
+    find_local_protection_yaml,
     is_weakening,
     load_protection_config,
     to_normalized_dict,
 )
 from governance_receipts import emit_governance_receipt  # noqa: E402
+from merge_target import MergeTargetError, resolve_target_repo
+from vnx_paths import resolve_paths
 
 DEFAULT_BRANCH = "main"
-DEFAULT_YAML_PATH = SCRIPT_DIR / "branch_protection.yaml"
 
 
 def build_put_payload(config: ProtectionConfig) -> Dict[str, Any]:
@@ -334,10 +344,18 @@ def run_apply(
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="apply_branch_protection",
-        description="Apply scripts/forge/branch_protection.yaml to a branch's live protection",
+        description="Apply a project's branch_protection.yaml to a branch's live protection",
     )
-    parser.add_argument("--yaml-path", default=str(DEFAULT_YAML_PATH))
-    parser.add_argument("--project-root", default=str(SCRIPTS_DIR.parent))
+    parser.add_argument(
+        "--yaml-path", default=None,
+        help="The YAML to apply (default: .vnx/branch_protection.yaml, else "
+             "scripts/forge/branch_protection.yaml, in the project root)",
+    )
+    parser.add_argument(
+        "--project-root", default=None,
+        help="The project whose repo is changed (default: the resolved project root, "
+             "the same one the merge door merges into)",
+    )
     parser.add_argument("--branch", default=DEFAULT_BRANCH)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
@@ -349,10 +367,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    project_root = Path(args.project_root) if args.project_root else Path(resolve_paths()["PROJECT_ROOT"])
+    yaml_path = Path(args.yaml_path) if args.yaml_path else find_local_protection_yaml(project_root)
+    if yaml_path is None:
+        print(
+            f"FOUT: geen branch_protection.yaml in {project_root} "
+            f"(gezocht: {', '.join(PROTECTION_YAML_SEARCH_PATHS)})",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.dry_run:
+        # A write names the repo it is about to change. Refused when it cannot:
+        # the {owner}/{repo} of every call below is whatever gh resolves here.
+        try:
+            print(f"doelrepo: {resolve_target_repo(project_root, gh_bin=args.gh_bin)}", file=sys.stderr)
+        except MergeTargetError as exc:
+            print(f"FOUT: doelrepo kon niet worden bepaald: {exc}", file=sys.stderr)
+            return 1
+
     try:
         result = run_apply(
-            yaml_path=Path(args.yaml_path),
-            project_root=Path(args.project_root),
+            yaml_path=yaml_path,
+            project_root=project_root,
             branch=args.branch,
             dry_run=args.dry_run,
             allow_weaken_reason=args.allow_weaken,

@@ -4,8 +4,8 @@
 
 ``_run_branch_protection_gate`` runs four checks in order: (a) every file
 the door's verdict depends on must hash-match main's copy, (b) read main's
-own YAML (a 404 on that exact path, at a confirmed ref, is the bootstrap
-no-op), (c) live vs main's YAML drift (no override), (d) the PR's own YAML
+own YAML (a 404 on every candidate path, at a confirmed ref, is a loud
+``warn`` GO: the project has no file), (c) live vs main's YAML drift (no override), (d) the PR's own YAML
 must not weaken main's (``--allow-weaken`` is the only override). Only the
 two network primitives (``fetch_yaml_from_ref``, ``fetch_live_protection``)
 and the door hash-check are mocked per test — ``compare``/``is_weakening``
@@ -129,6 +129,7 @@ class TestDoorBlobHashCoversTheWholeDoor:
         "scripts/lib/merge_preflight_adr_check.py",
         "scripts/lib/merge_preflight_ci_check.py",
         "scripts/lib/contract_invalid_ledger.py",
+        "scripts/lib/merge_target.py",
     )
 
     def _fake_run(self, *, local_overrides: Optional[Dict[str, str]] = None,
@@ -166,6 +167,7 @@ class TestDoorBlobHashCoversTheWholeDoor:
         "scripts/lib/merge_preflight_adr_check.py",
         "scripts/lib/merge_preflight_ci_check.py",
         "scripts/lib/contract_invalid_ledger.py",
+        "scripts/lib/merge_target.py",
     ])
     def test_a_mutated_library_file_refuses_and_is_named(self, monkeypatch, mutated):
         monkeypatch.setattr(
@@ -204,12 +206,14 @@ class TestRunBranchProtectionGate:
         (same monkeypatch instance, later call wins)."""
         monkeypatch.setattr(pr_merge, "_door_blob_hash_gate", lambda project_root: _go())
 
-    def test_bootstrap_noop_when_main_has_no_yaml(self, monkeypatch):
-        """(i) 404 on exactly the YAML path: no-op with the loud bootstrap message."""
-        calls: List[str] = []
+    def test_missing_yaml_on_main_is_a_loud_warn_go(self, monkeypatch):
+        """(i) a confirmed 404 on every candidate path: the project has no file to
+        hold it to. That is a GO in ``warn`` mode with the loud message, not a
+        refusal, and not a silent pass (OI-1849 replaced the bootstrap no-op)."""
+        calls: List[Any] = []
 
         def fake_fetch(project_root, ref, *a, **k):
-            calls.append(ref)
+            calls.append((ref, *a))
             return _not_found()
 
         monkeypatch.setattr(pr_merge, "fetch_yaml_from_ref", fake_fetch)
@@ -221,10 +225,16 @@ class TestRunBranchProtectionGate:
         result = pr_merge._run_branch_protection_gate(1, pr_data=PR_DATA)
 
         assert result["verdict"] == "GO"
-        assert result["bootstrap"] is True
-        assert "geen YAML op main" in result["message"]
-        assert calls == ["main"]
-        assert not live_calls, "the bootstrap no-op must not go on to read live state"
+        assert result["mode"] == "warn"
+        assert result["reason_code"] == pr_merge.REASON_PROTECTION_FILE_MISSING
+        assert "geen branch_protection.yaml in" in result["message"]
+        assert "niets te toetsen" in result["message"]
+        assert result["warnings"] == [result["message"]]
+        assert calls == [
+            ("main", ".vnx/branch_protection.yaml"),
+            ("main", "scripts/forge/branch_protection.yaml"),
+        ]
+        assert not live_calls, "with no file there is nothing to compare live state to"
 
     def test_the_door_hash_check_also_guards_the_bootstrap_branch(self, monkeypatch):
         """Fix-forward punt 2: the bootstrap no-op returned GO while skipping
