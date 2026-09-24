@@ -22,6 +22,13 @@ import yaml
 # closed set, never a new variant name.
 from observability_tier import GOVERNANCE_MIN_TIERS
 
+# The gate-name registry and the config error live in dispatch_spec, a leaf
+# module: the door has to catch ReviewGateConfigError even when this module
+# cannot be imported, and the legal-name set must be the ONE the door's Rule 16,
+# the staging bridge and the takeover-chain parser read. Re-exported here as
+# ``smart_router.ReviewGateConfigError`` for the callers that already use it.
+from dispatch_spec import REGISTERED_GATE_NAMES, ReviewGateConfigError
+
 _RECOMMENDATIONS_PATH = Path(__file__).parent / "providers" / "routing_recommendations.yaml"
 
 
@@ -49,6 +56,20 @@ class RouteDecision:
     reason: str
     constraints_applied: List[str] = field(default_factory=list)
     cost_estimate: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class VariantDerivation:
+    """The variant half of a derivation: what the change IS, no gate attached.
+
+    Carries no review gate, so producing it never reads project configuration.
+    A caller that sizes something from the variant alone (the plan-gate panel)
+    uses this and cannot be broken by an unreadable VNX_DEFAULT_REVIEW_STACK it
+    never asked about.
+    """
+    variant: str       # one of GOVERNANCE_MIN_TIERS keys
+    reason: str        # why this variant was chosen (deterministic rule fired)
+    is_new_feature: bool  # task_class is 01_code_generation (independent axis)
 
 
 @dataclass(frozen=True)
@@ -719,19 +740,6 @@ if _UNKNOWN_VARIANTS:
     )
 
 
-class ReviewGateConfigError(RuntimeError):
-    """VNX_DEFAULT_REVIEW_STACK could not be read, or names no gate that exists.
-
-    Raised instead of falling back to a hardcoded gate. A silent fallback is
-    exactly what produced the 2026-09-19 mismatch: mission-control had
-    ``VNX_DEFAULT_REVIEW_STACK=glm_gate,claude_github_optional`` in its project
-    config while every new obligation declared ``codex_gate``, so five PRs sat
-    blocked for hours on codex quota behind a gate the operator never asked for.
-    An unreadable stack is amber, never green: the door refuses the dispatch and
-    names the key, the value and the underlying error.
-    """
-
-
 # The operator-facing key naming a project's review stack. The SAME key
 # review_gate_manager._build_default_review_stack reads to decide which seats
 # actually run — that is the whole point: one key, so the declared obligation
@@ -759,8 +767,6 @@ def _primary_review_gate() -> str:
     never overrode the stack sees no change at all, and only a project that
     actually re-pointed its review (mission-control -> glm_gate) moves.
     """
-    from dispatch_spec import Gate  # noqa: PLC0415  (lib-local, mirrors the test import)
-
     try:
         import config_runtime  # noqa: PLC0415  (lazy: keeps the module import-light)
     except Exception as exc:  # pragma: no cover - import failure is environmental
@@ -791,12 +797,11 @@ def _primary_review_gate() -> str:
             "Set the project's review stack and refire."
         )
 
-    legal = {g.value for g in Gate}
-    known = [name for name in names if name in legal]
+    known = [name for name in names if name in REGISTERED_GATE_NAMES]
     if not known:
         raise ReviewGateConfigError(
             f"{DEFAULT_REVIEW_STACK_KEY} names no gate that exists "
-            f"(value={raw!r}); legal gates: {', '.join(sorted(legal))}. "
+            f"(value={raw!r}); legal gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}. "
             "The stack must name a real review gate, not a private label — "
             "refusing to guess one."
         )
@@ -993,12 +998,12 @@ def _gate_for_variant(variant: str) -> str:
     return gate
 
 
-def derive_governance_variant(
+def derive_variant(
     dispatch_paths: Optional[Sequence[str]] = None,
     *,
     task_class: Optional[str] = None,
     irreversible: bool = False,
-) -> GovernanceVariantResult:
+) -> VariantDerivation:
     """Derive a governance variant from the signals the router already has.
 
     Deterministic rule, first-match wins. Paths are the primary signal (they say
@@ -1015,6 +1020,9 @@ def derive_governance_variant(
     is an INDEPENDENT axis (task_class == 01_code_generation) carried on the
     result so the plan-gate can size its panel to the full seat set for a new
     feature regardless of the path-derived variant.
+
+    Reads no configuration and resolves no gate: see ``derive_governance_variant``
+    for the variant plus the gate it maps to in this project.
     """
     is_new_feature = task_class == "01_code_generation"
     paths = [p for p in (dispatch_paths or []) if p and str(p).strip()]
@@ -1032,14 +1040,8 @@ def derive_governance_variant(
                 reason += f"; also path-derived {irreversible_hit}"
         else:
             reason = f"irreversible path category={irreversible_hit!r}"
-        variant = "coding-strict"
-        gate = _gate_for_variant(variant)
-        return GovernanceVariantResult(
-            variant=variant,
-            reason=reason,
-            gate=gate,
-            direction=_direction_for(gate),
-            is_new_feature=is_new_feature,
+        return VariantDerivation(
+            variant="coding-strict", reason=reason, is_new_feature=is_new_feature,
         )
 
     if paths:
@@ -1054,14 +1056,36 @@ def derive_governance_variant(
         category = _category_from_task_class(task_class)
         reason = f"no dispatch paths; task_class={task_class or 'none'} -> {category!r}"
 
-    variant = _CATEGORY_TO_VARIANT[category]
-    gate = _gate_for_variant(variant)
-    return GovernanceVariantResult(
-        variant=variant,
+    return VariantDerivation(
+        variant=_CATEGORY_TO_VARIANT[category],
         reason=reason,
+        is_new_feature=is_new_feature,
+    )
+
+
+def derive_governance_variant(
+    dispatch_paths: Optional[Sequence[str]] = None,
+    *,
+    task_class: Optional[str] = None,
+    irreversible: bool = False,
+) -> GovernanceVariantResult:
+    """``derive_variant`` plus the review gate that variant resolves to here.
+
+    The gate of a heavy variant is this project's operator choice
+    (VNX_DEFAULT_REVIEW_STACK, see ``_primary_review_gate``), so this function
+    reads project configuration and raises ReviewGateConfigError when that
+    cannot be read. Callers that need only the variant call ``derive_variant``.
+    """
+    derived = derive_variant(
+        dispatch_paths, task_class=task_class, irreversible=irreversible,
+    )
+    gate = _gate_for_variant(derived.variant)
+    return GovernanceVariantResult(
+        variant=derived.variant,
+        reason=derived.reason,
         gate=gate,
         direction=_direction_for(gate),
-        is_new_feature=is_new_feature,
+        is_new_feature=derived.is_new_feature,
     )
 
 

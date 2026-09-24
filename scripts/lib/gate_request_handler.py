@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
+from dispatch_spec import REGISTERED_GATE_NAMES
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
 from gate_recorder import gate_is_available, get_pr_head_sha, result_is_for_head, write_result_guarded
@@ -70,20 +71,6 @@ class ReviewGateTakeoverConfigError(ValueError):
 _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,glm_gate,deepseek_gate"
 
 
-def _known_takeover_gate_names() -> "frozenset[str]":
-    """Gate names the takeover-chain CONFIG may legally name: the closed
-    ``Gate`` enum (dispatch_spec.py) PLUS ``deepseek_gate`` -- a real,
-    already-shipped harness-lane gate (OI-1714/OI-1838) that is deliberately
-    NOT added to the Gate enum here. Adding it there without a matching
-    gate_request_handler dispatch branch AND closure_verifier._GATE_HANDLERS
-    entry would trip test_closure_verifier_gate_enum_drift.py (OI-1094) --
-    this local addition is the narrower, correct scope, and stays that way
-    regardless of whether deepseek_gate ever joins the enum.
-    """
-    from dispatch_spec import Gate
-    return frozenset(Gate._value2member_map_) | {"deepseek_gate"}
-
-
 def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
     """Parse a comma-separated ORDERED gate list into a {gate: next_gate}
     successor map. An empty (post-strip) ``raw`` means NO takeover chain at
@@ -99,13 +86,13 @@ def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
     names = [item.strip() for item in raw.split(",") if item.strip()]
     if not names:
         return {}
-    known = _known_takeover_gate_names()
     seen: "set[str]" = set()
     for name in names:
-        if name not in known:
+        if name not in REGISTERED_GATE_NAMES:
             raise ReviewGateTakeoverConfigError(
                 f"VNX_REVIEW_GATE_TAKEOVER_CHAIN names an unknown gate {name!r} "
-                f"(full chain: {raw!r}); known gates: {', '.join(sorted(known))}"
+                f"(full chain: {raw!r}); known gates: "
+                f"{', '.join(sorted(REGISTERED_GATE_NAMES))}"
             )
         if name in seen:
             raise ReviewGateTakeoverConfigError(
@@ -1567,9 +1554,11 @@ class GateRequestHandlerMixin:
         lane rather than a repo script, so its availability is decided by
         REGISTRATION alone (gate_recorder.gate_is_available) and it is
         requestable with no runner file on disk. It is deliberately NOT a
-        ``dispatch_spec.Gate`` enum member yet (see
-        ``_known_takeover_gate_names``) but IS a legal
-        review-gate-takeover-CHAIN link (BETA3-E1, 26-08 operator decision).
+        ``dispatch_spec.Gate`` enum member yet (it lives in
+        ``dispatch_spec.GATES_OUTSIDE_ENUM``) but IS a registered gate name
+        (``REGISTERED_GATE_NAMES``): a legal review-gate-takeover-CHAIN link
+        (BETA3-E1, 26-08 operator decision), a legal spec/staging gate and a
+        legal ``VNX_DEFAULT_REVIEW_STACK`` entry.
         """
         from review_gate_manager import _utc_now
 

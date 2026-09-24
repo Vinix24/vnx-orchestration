@@ -35,6 +35,7 @@ from dispatch_spec import (  # noqa: E402
     PathAccess,
     Provider,
     Reject,
+    ReviewGateConfigError,
     ValidatedSpec,
     validate,
     write_paths,
@@ -1776,11 +1777,11 @@ def _resolve_gate_via_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Opti
     if (spec.gate or "").strip():
         return vspec, None
 
-    # Imported in its own guarded block: a failed import leaves
-    # ReviewGateConfigError unbound, and an ``except ReviewGateConfigError``
-    # below would then raise NameError instead of reporting the import failure.
+    # ReviewGateConfigError is imported at module top from dispatch_spec, not
+    # from smart_router: the except clause below and the caller's both need it
+    # bound even when this import fails, and a failed import must fail open.
     try:
-        from smart_router import ReviewGateConfigError, resolve_gate  # noqa: PLC0415
+        from smart_router import resolve_gate  # noqa: PLC0415
     except Exception as exc:
         logger.warning(
             "smart-router import failed, gate left empty (fail-open): %s",
@@ -3233,8 +3234,6 @@ def run_dispatch(
     # the spec is silent. The gate reason is merged into door_route_reason so the
     # chosen variant + reason are visible in the dry-run output and carried on
     # the plan (route_reason), never a silent lighter gate.
-    from smart_router import ReviewGateConfigError  # noqa: PLC0415
-
     # An unreadable VNX_DEFAULT_REVIEW_STACK refuses the dispatch BY NAME rather
     # than falling back to a hardcoded gate (see _primary_review_gate). The
     # fallback is what made every obligation declare codex_gate for a project

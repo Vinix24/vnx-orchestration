@@ -43,6 +43,12 @@ OPERATOR_CHOICES = [
     "claude_github_optional,codex_gate",
     "codex_gate",
     "glm_gate",
+    # deepseek_gate is a registered gate (dispatch_spec.REGISTERED_GATE_NAMES)
+    # even though it is not a Gate enum member. Both stacks were refused or
+    # silently downgraded while the legal set was built from the bare enum.
+    "deepseek_gate",
+    "deepseek_gate,claude_github_optional",
+    "claude_github_optional,deepseek_gate",
 ]
 
 
@@ -273,6 +279,42 @@ def test_stack_naming_only_unknown_gates_refuses_and_names_them(
     assert "mijn_eigen_poort" in message, "the refusal must name the offending value"
     assert DEFAULT_REVIEW_STACK_KEY in message
     assert not (tmp_path / "review_gates" / "obligations").exists()
+
+
+def test_a_stack_naming_only_deepseek_gate_declares_deepseek_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """deepseek_gate is a real gate: naming it must not read as "no gate exists".
+
+    The legal set used to come from the bare Gate enum, which does not contain
+    deepseek_gate, so this stack raised ReviewGateConfigError ("names no gate
+    that exists") while ``vnx gate --only deepseek_gate`` ran the gate.
+    """
+    _set_stack(monkeypatch, "deepseek_gate")
+    record = _declare(tmp_path, "D-stackdeepseek01")
+
+    assert record["gate"] == "deepseek_gate"
+
+
+@pytest.mark.parametrize(
+    "stack",
+    ["deepseek_gate,claude_github_optional", "claude_github_optional,deepseek_gate"],
+)
+def test_deepseek_gate_beside_a_lighter_seat_is_not_silently_downgraded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stack: str,
+) -> None:
+    """The obligation must name the gate the executor will request, in either order.
+
+    With deepseek_gate missing from the legal set the router saw only
+    ``claude_github_optional`` (weight 1) and declared it, while the executor
+    requested deepseek_gate (weight 3): a silent downgrade of the review the
+    operator asked for.
+    """
+    _set_stack(monkeypatch, stack)
+    record = _declare(tmp_path, "D-stackdeepseek02")
+
+    assert record["gate"] == "deepseek_gate"
+    assert record["gate"] != "claude_github_optional"
 
 
 def test_an_unknown_name_beside_a_real_gate_does_not_hide_the_real_gate(
