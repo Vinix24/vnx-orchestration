@@ -35,7 +35,7 @@ De regel per module: draagt minstens één functie een providertak voor kimi, co
 
 ### 1.2 Hoe ik regels tel
 
-Een plak geeft `+` (toegevoegde regels in de diff) en `-` (verwijderde regels). De grens van 150 tot 300 geldt voor `+`. Verwijderplakken hebben een grote `-`. Die beoordeel je op bewijs dat er geen aanroeper is en niet op de leesbaarheid van de diff. Elke plak noemt het aanroeperbewijs als commando dat je kunt draaien.
+Een plak geeft `+` (toegevoegde regels in de diff) en `-` (verwijderde regels). De richtlijn van 150 tot 300 pas ik toe op `+`, omdat een verwijdering van 1.000 regels anders nooit in één PR past. Geen plak komt boven 300 uit. Vier plakken vallen erbinnen (P01, P05, P07 en P16). De overige negentien blijven eronder. Vijftien daarvan zijn verwijderplakken met een kleine `+`. Vier zijn kleine wijzigingen (P06, P21, P22 en P23). Dat is een bewuste afwijking van de richtlijn: elke plak heeft een eigen thema en een eigen terugdraaipunt. Wil je minder PR's, dan zijn de natuurlijke samenvoegingen P12 met P16 (dezelfde `_SESSION_RE`-afhankelijkheid, H14) en P21 met P22 (documentatie en labels). Een verwijderplak beoordeel je op bewijs dat er geen aanroeper is en niet op de leesbaarheid van de diff. Elke plak noemt dat bewijs als commando dat je kunt draaien.
 
 Basis per getal: **gemeten** is de som van bestandsgroottes of functiegrenzen op main 11df8ff8. **Schatting** is mijn inschatting voor testaanpassingen en randgevallen. Elke plak noemt de tests die groen moeten blijven, met bestandsnaam.
 
@@ -176,7 +176,7 @@ De eerste vier komen uit de opdracht. De rest vond ik bij het lezen van de code.
 | H5 | `daemon_register.read_daemon_register()` leest `start_all()` uit `vnx_supervisor_simple.sh`. | `daemon_register.py:108-190`, `tests/test_daemon_register.py:157` | P01 |
 | H6 | `dispatcher_minimal.sh` host 15 functies waar libs van afhangen. Twee zijn (b): `get_terminal_provider` (`:171`) en `get_context_reset_command` (`:192`). | eigen scan van alle `scripts/lib/*.sh` | P05 |
 | H7 | De skill-prefix per provider (`$skill` voor codex, `@skill` voor gemini, `/skill` voor de rest) staat in `dispatch_create.sh`, dat met de dispatcher verdwijnt. | `dispatch_create.sh:455-480` | P05 |
-| H8 | Andere starters van dezelfde scripts: `vnx restart`, dashboard-restart en de kill-lijst. Twee namen in de dashboardtabel wijzen al naar niet-bestaande bestanden. | `vnx_process_ux.py:42-53`, `serve_dashboard.py:63-73`, `bin/vnx:927-960` | P13, P14, P17 |
+| H8 | Andere starters van dezelfde scripts: `vnx restart`, dashboard-restart en de kill-lijst. Twee namen in de dashboardtabel (`ack_dispatcher`, `receipt_notifier`) wijzen al naar niet-bestaande bestanden. Gemeten. B noemt op één plek drie. | `vnx_process_ux.py:42-53`, `serve_dashboard.py:63-73`, `bin/vnx:927-960` | P13, P14, P17 |
 | H9 | De legacy `.md`-stroom staat nog in de canonieke T0-rol. `VNX_QUEUE_POPUP_ENABLED=0` promoveert direct naar `pending/` zonder menselijke poort. | `role-orchestrator.md:195-209`, `pr_queue_manager.py:1119` | P20 |
 | H10 | `pool_manager.py` en `pool_reaper.py` roepen tmux rechtstreeks aan en breken de freeze-test. | `test_tmux_adapter_interface.py` (gemeten) | P11 |
 | H11 | De SessionStart-hook draait `list_escalations` en bouwt terminals, dat via `allow_tmux_probe=True` een `tmux list-panes -a` kan starten. | `build_t0_state.py:938,445-449`, B §4.1 | P12 en P15 |
@@ -315,7 +315,7 @@ Titels van de PR's staan onderaan (paragraaf 11). Elke plak noemt: bestanden, re
 - **Bestanden:** `terminal_state_reconciler.py::_probe_tmux` (74), `terminal_snapshot.py::get_terminal_state_from_tmux` (56, fallback `:233-239`), `canonical_state_views.py` (parameter `allow_tmux_probe`, aanroepers `:500` en `:540`), `worker_heartbeat.py::build_process_gone_failure_report` (58, alleen een test roept hem aan), `tests/test_model_canonicity.py`.
 - **Regels:** +30 / -230 [gemeten 188, rest schatting].
 - **Check vooraf:** M-2. Bevestig met een trace dat de SessionStart-hook nog `tmux list-panes -a` draait (B §4.1 leidde dit alleen af).
-- **Tests groen:** `tests/test_terminal_state_reconciler*.py`, `tests/test_canonical_state_views*.py`, `tests/test_model_canonicity.py`.
+- **Tests groen:** `tests/test_terminal_state_reconciler.py`, `tests/test_terminal_state_shadow.py`, `tests/test_dashboard_feature.py`, `tests/test_generate_t0_brief_error_contracts.py`, `tests/test_receipt_notifier_enrichment.py`, `tests/test_model_canonicity.py`. `canonical_state_views.py` heeft geen eigen testbestand. Ik vond de aanroepers in de vier eerstgenoemde met een grep op `canonical_state_views|build_terminal_snapshot|allow_tmux_probe`.
 - **Afhankelijk van:** P14, M-2. **(b):** nee. Het is een statusbord voor T0 tot T3. Injectiegereedheid komt uit `input_mode_guard.sh`.
 
 #### P16. `orphan_sweep`: tmux-soorten eruit, `cleanup_stale_vnx_sessions.sh` weg
@@ -345,7 +345,7 @@ Titels van de PR's staan onderaan (paragraaf 11). Elke plak noemt: bestanden, re
 - **Bestanden:** `commands/start.sh` (636), `stop.sh` (28), `jump.sh` (170), `lib/tmux_session_profile.py` (676), `pane_config.sh` (66), `lib/tmux_conversation_normalizer.py` (199), `vnx_recovery_phases._phase_tmux_reconciliation` (97), `vnx_doctor_checks.check_tmux_profile` (92, aangeroepen op `vnx_doctor_runtime.py:115`), `commands/recover.sh`, tests `test_tmux_session_profile.py` (612), `test_tmux_conversation_normalizer.py`.
 - **Twee uitkomsten, O-2 beslist:** (A) `vnx start` verdwijnt volledig. `vnx_start_runtime.py` blijft voor de launchcommando's van (b). Regels +30 / -2100 [gemeten 1964 productiecode]. (B) `vnx start` wordt een T0-launcher zonder daemons, popup en `panes.json`. `start.sh` krimpt dan van 636 naar circa 150. Regels +60 / -1500 [schatting].
 - **Opinion:** kies (A) tenzij O-1 voor `vnx start` een rol als launcher van interactieve niet-claude panes kiest. Reden: geen `vnx-*`-sessie, alle daemon-logs eindigen op 2026-06-27 (B §4.2) en de operator-T0's draaien in eigen wrapper-sessies.
-- **Tests groen:** `tests/test_vnx_start_runtime.py` (uit P07) en `tests/test_recover*.py`.
+- **Tests groen:** `tests/test_vnx_start_runtime.py` (uit P07), `tests/test_vnx_recover_runtime.py`, `tests/test_vnx_doctor_runtime.py` en `tests/test_headless_smoke.py`.
 - **Afhankelijk van:** P17, O-2. **(b):** `start.sh` en `tmux_session_profile.py` zijn ONBEPAALD (paragraaf 2.2). Geen van beide verdwijnt vóór O-2. `pane_manager.sh` ontdekt panes op titel of pad en heeft `panes.json` niet nodig.
 
 #### P20. Legacy `.md`-stroom sluiten
@@ -467,6 +467,13 @@ De registerbron verandert van `start_all()` naar een expliciete tabel met launch
 | O-6 | `pretooluse_worker_scope_enforce.py`: herbedraden op de headless lane of weg? | Herbedraden onderzoeken. `WORKER_PERMISSIONS.md` zegt dat hij bedraad is, de code niet. |
 | O-7 | Kimi interactief: valt de REPL onder de generieke tak (skill via send-keys, paste, `/clear`)? | Meet het met één echte kimi-pane vóór P07 de generieke tak als contract vastlegt. |
 
+**Aanbevolen prioriteit**
+
+1. Start P01, P02 en P08 nu. Ze zijn onafhankelijk en raken (b) niet.
+2. Draai M-5, M-7 en O-7 vroeg. Ze zijn klein en bepalen of P07 en P03 kunnen starten.
+3. Beslis O-1 vóór P17 start. P17 haalt de laatste runtime-aanroeper van (b)-injectie weg.
+4. Begin P17 tot P19 pas na M-1. Zonder die meting kan `vnx start` in een ander project draaien.
+
 **Metingen**
 
 | # | Meting | Nodig voor |
@@ -489,6 +496,7 @@ De registerbron verandert van `start_all()` naar een expliciete tabel met launch
 6. **Uncertain: wie de twee geparkeerde daemons start bij het uit parkeren.** De supervisor was hun enige automatische starter. Na P17 blijven `vnx restart` en de dashboard-restarttabel over. Een launchd-sjabloon zoals `com.vnx.nightly-intelligence-pipeline.plist` bestaat voor hen niet.
 7. **Conflicting evidence: `WORKER_PERMISSIONS.md:93,133,207` beschrijft de worker-scope-hook als bedraad, de code niet** (B §4.3). Ik volg de code.
 8. **Conflicting evidence: de datum van de lane-verwijdering.** `CLAUDE.md` zegt 2026-09-18, commit 496e0fe5 is van 2026-09-19 (B §7).
+   **Conflicting evidence: B is intern tegenstrijdig over de dashboard-restarttabel.** §3.2 noemt drie namen zonder bestand en §6.1 twee. Ik mat `PROCESS_COMMANDS` in `serve_dashboard.py:63-73`: twee (`dispatch_ack_watcher.sh` en `receipt_notifier.sh` bestaan niet).
 9. **Gap: ik voerde geen van de plakken uit.** De voorwaarde-checks zijn commando's die de uitvoerende worker draait. Ik draaide alleen de drie (b)-testbestanden solo, die alle drie de meting in paragraaf 1.3 opleverden.
 10. **Gap: de inventarissen zelf.** A en B corrigeerden allebei de opdracht (106 en 71 bestanden in plaats van 99 en 78). Ik nam hun 177 als geheel en controleerde de dekking, maar telde de scope niet opnieuw.
 
@@ -543,6 +551,6 @@ Secundaire bronnen:
 - scope: 177 modules uit inventaris A en B, main 11df8ff8, plus de 9 daemons; alleen een plan
 - depth: deep
 - source_count: 8
-- uncertainty_flags: 10
+- uncertainty_flags: 11
 - quality_self_assessment: alle 177 modules hebben een (b)-oordeel met dekkingscontrole en elke plak noemt een uitvoerbare voorwaarde-check; productieregels zijn gemeten en testregels geschat, en of het (b)-pad tegen een echte kimi-, codex- of gemini-pane werkt is niet gemeten.
 - open_items: ["O-1 waar (b) landt", "O-2 lot van vnx start", "O-3 rotatiehooks", "O-4 lease_sweep en runtime_supervise", "O-5 legacy md-stroom", "O-6 worker-scope-hook", "O-7 kimi interactief", "M-1 tot M-7"]
