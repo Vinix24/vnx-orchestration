@@ -54,6 +54,23 @@ glm-5.3.
   again on every run. The role-scoped worker `--mcp-config` keeps `env` and
   `headers` only as `${VAR}` references, so no literal reaches the process
   list. The dead `scripts/mcp_profile_manager.sh` is removed.
+- **What the operator parked no longer reports as broken.** The
+  intelligence layer was parked on 2026-09-09, but only the beacon reader
+  knew. `beacon_register` now holds one register, with a reason per item,
+  for state artifacts and launchd jobs next to `PARKED_COMPONENTS`.
+  SessionStart reads a parked `t0_recommendations.json` as
+  `[PARKED] <name>: age N days` plus the reason instead of STALE and
+  BLOCKED. `launchd_liveness` reads the three never-installed jobs
+  (nightly intelligence pipeline, receipt classifier batch, F41 headless
+  trigger) as `parked` and no longer pins `overall` on fail. Parking
+  covers absence only: a fresh artifact reads fresh, and a parked job
+  that is loaded and exiting non-zero stays `loaded` with its exit status.
+- **Two producers get a driver.** `com.vnx.dashboard-generator` keeps
+  `generate_valid_dashboard.sh` running (it only ever ran as a child of
+  `vnx start`, so `dashboard_status.json` was 88 days old) and
+  `com.vnx.fleet-role-drift` runs `fleet_role_drift.py --write-state` every
+  6 hours so its beacon exists. Both are templates under `scripts/launchd/`
+  and are installed by hand with `reload_plist.sh`.
 - **A test run outside pytest could write the real central store.** The #1333
   guard only recognised pytest, and `tests/conftest.py` pins a tmp store only
   under pytest. So `python -m unittest test_auto_commit_stash_isolation` put a

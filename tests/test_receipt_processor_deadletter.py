@@ -98,6 +98,34 @@ echo "rc=$rc1,$rc2,$rc3 in_place=$in_place_1,$in_place_2,$in_place_3"
         assert rejections.endswith(" 3"), f"rejection count must reach threshold: {rejections}"
 
 
+def test_invalid_model_shape_is_deterministic_and_deadlettered_like_missing_model():
+    """invalid_model_shape (a value that is not a model name) is, like
+    missing_model, a pure function of the report bytes. The Python converter
+    quarantines it on the first refusal; this lane must not keep retrying it
+    every poll cycle just because its code is not on the deterministic list."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        dirs = _make_dirs(tmp)
+        report = dirs["unified"] / "20260808-120003-A-glued-model.md"
+        report.write_text("# report with a model line that is not a model\n")
+
+        body = f"""
+rc1=0; record_rejection_and_maybe_deadletter "{report}" "$(basename "{report}")" invalid_model_shape || rc1=$?
+rc2=0; record_rejection_and_maybe_deadletter "{report}" "$(basename "{report}")" invalid_model_shape || rc2=$?
+rc3=0; record_rejection_and_maybe_deadletter "{report}" "$(basename "{report}")" invalid_model_shape || rc3=$?
+[ -f "{report}" ] && in_place=yes || in_place=no
+echo "rc=$rc1,$rc2,$rc3 in_place=$in_place"
+"""
+        result = _run_bash(dirs, body)
+        assert result.returncode == 0, f"harness failed: {result.stderr}"
+        assert "rc=1,1,0 in_place=no" in result.stdout, result.stdout
+
+        deadletter = dirs["state"] / "receipt_deadletter"
+        assert (deadletter / report.name).is_file()
+        index_fields = (deadletter / "INDEX.txt").read_text().split()
+        assert index_fields[2:] == ["invalid_model_shape", report.name], index_fields
+
+
 def test_transient_code_is_never_counted():
     """unexpected_error (crash/IO) is transient: not counted, never dead-lettered."""
     with tempfile.TemporaryDirectory() as tmpdir:

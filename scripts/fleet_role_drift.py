@@ -408,7 +408,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--write-state", action="store_true",
                     help="also write a health beacon (opt-in: a measurement that writes is a write)")
     ap.add_argument("--state-dir", type=Path, default=None,
-                    help="explicit state dir for --write-state (default: resolved VNX_STATE_DIR)")
+                    help="explicit state dir for --write-state (default: resolved VNX_STATE_DIR); "
+                         "the beacon lands in its parent, <data_dir>/health/")
     args = ap.parse_args(argv)
 
     canon_path = args.canon or _resolve_canon_path()
@@ -461,7 +462,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             if state_dir is None:
                 from vnx_paths import resolve_paths  # noqa: PLC0415
                 state_dir = Path(resolve_paths()["VNX_STATE_DIR"])
-            HealthBeacon(state_dir, "fleet_role_drift", expected_interval_seconds=86400).heartbeat(
+            # Beacons live under <data_dir>/health/, one level above the state
+            # dir: that is where t0_state, health_check, the dashboard and the
+            # SessionStart digest all look. Passing the state dir itself wrote
+            # the file where nothing reads it (the defect #1736 fixed for
+            # report_to_receipt_converter).
+            HealthBeacon(state_dir.parent, "fleet_role_drift", expected_interval_seconds=86400).heartbeat(
                 status="ok" if not behind and freshness["ok"] is not False else "fail",
                 details=report["summary"],
             )

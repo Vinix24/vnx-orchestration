@@ -181,7 +181,10 @@ def all_beacons(
         directly; any unrecognized status falls to ``"fail"``, never ``"ok"``)
 
     ``expected`` (D3a gap 2, optional): component names that MUST have a
-    beacon — see ``beacon_register.expected_component_names()``. Any name in
+    beacon — see ``beacon_register.expected_component_names()``, which leaves
+    out event-driven components (``expected_interval_seconds=None``: they owe
+    no beacon between two events, so their silence is not ``absent``; a beacon
+    they DID write is still read below and keeps its own ``fail``). Any name in
     ``expected`` with no beacon found on disk at all gets a synthetic entry
     with ``health = "absent"``. Mirrors the existing fabric convention (see
     ``worker_permissions.resolve_dispatch_write_scope``): ``None`` means "no

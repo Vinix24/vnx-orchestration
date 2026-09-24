@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.dashboard-generator.${VNX_PROJECT_ID}</string>
+  <!--
+    absence-is-loud, punt 3: generate_valid_dashboard.sh is the producer of
+    state/dashboard_status.json and had no driver that survives a restart.
+    Measured 2026-09-23: the artifact was 88 days old. The script works (a
+    manual run the same day wrote a fresh file), but it only ever ran as a
+    nohup child of `vnx start` (scripts/commands/start.sh) or of the tmux
+    supervisor (vnx_supervisor_simple.sh, start_process "dashboard"). Neither
+    outlives a reboot or a logout, so after the first one nothing rewrote the
+    file and SessionStart read it as STALE. This job is the driver, nothing
+    else: it starts the script and keeps it running.
+
+    The script is an endless loop: it rewrites dashboard_status.json every
+    2 seconds (tmp file plus mv, so a reader never sees a half-written file).
+    That is why this is a KeepAlive job and not a StartInterval job.
+
+    No double start with `vnx start` or the tmux supervisor. The script calls
+    enforce_singleton "dashboard" (scripts/singleton_enforcer.sh) before its
+    loop: a non-blocking, exclusive kernel flock(2) on
+    VNX_LOCKS_DIR/dashboard.lock. Verified by running the real script twice
+    against an isolated store: the second instance prints "[SINGLETON] Another
+    instance of dashboard is already running (PID: n)" and exits 0, and the
+    holder keeps running untouched. When the holder dies, kill -9 included,
+    the kernel releases the lock and the next start acquires it, so a stale
+    lock never locks the dashboard out. Whichever of this job, `vnx start`
+    and the supervisor gets there first is the one instance.
+
+    KeepAlive only on a NON-zero exit, same as com.vnx.receipt-processor: the
+    duplicate that loses the lock exits 0, and SuccessfulExit=false leaves
+    that clean exit alone instead of respawning into a tight loop. A crash
+    (non-zero exit, or a signal) is restarted. Two consequences to know.
+    First, when `vnx start` already holds the lock at the moment this job
+    loads, this job's instance exits 0 and idles; RunAtLoad starts it for
+    real at the next login when nothing holds the lock, and the supervisor's
+    own monitor loop covers a crash of the other instance in the meantime.
+    Second, a `vnx stop` that kills the running instance is followed by a
+    launchd restart of it. The generator only renders state and dispatches
+    nothing, so that is harmless. To stop it for good, unload the job.
+
+    Per-project: the Label carries the project id placeholder, matching
+    com.vnx.receipt-processor, so a second project installing this template
+    never collides with the first project's job. The store is NOT pinned by
+    path: scripts/lib/vnx_paths.sh derives the state, lock and pid
+    directories from VNX_PROJECT_ID, so a copied template writes the
+    dashboard of the project it was installed for and not of the original
+    one. vnx init is not wired to install this job. Install it manually:
+      bash scripts/launchd/reload_plist.sh com.vnx.dashboard-generator
+    reload_plist.sh substitutes the project id placeholder from its second
+    argument, then VNX_PROJECT_ID, then the .vnx-project-id marker.
+
+    Requires flock(1) on PATH (enforce_singleton refuses to run without it);
+    the PATH below carries /opt/homebrew/bin, where it lives on this Mac.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd ${VNX_HOME} &amp;&amp; exec bash scripts/generate_valid_dashboard.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/vnx-dashboard-generator-${VNX_PROJECT_ID}.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-dashboard-generator-${VNX_PROJECT_ID}.err</string>
+  <key>WorkingDirectory</key><string>${VNX_HOME}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>VNX_PROJECT_ID</key>
+    <string>${VNX_PROJECT_ID}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

@@ -58,6 +58,15 @@ or ``receipt_pull_cursor.json`` — that answers three questions:
       not a read failure, so it reports ``STATUS_OK`` rather than
       ``SKIPPED_UNVERIFIED``.
 
+A gap that has been investigated and explained is recorded, not deleted:
+``python3 scripts/ledger_health.py acknowledge --dispatch-id ID --reason "..."``
+appends one line to ``<state_dir>/ledger_coverage_acknowledged.ndjson``.
+``receipt_coverage`` subtracts acknowledged ids from ``missing`` and reports
+them (``acknowledged_gaps``, with their reason) next to it, so the erkenning
+stays visible and a NEW gap still turns the check red. The register itself is
+append-only, so a testfixture that leaked into it can never be removed: this is
+the only way to make the check green again without losing the alarm.
+
 Exit codes: 0 all healthy, 1 findings, 2 cannot measure (a required file is
 missing or unreadable) — mirrors ``pre_merge_gate.py``'s ``SKIPPED_UNVERIFIED``
 (#1468): an unmeasurable state is never conflated with a pass, and outranks a
@@ -65,8 +74,10 @@ finding in the overall rollup.
 
 Out of scope (by dispatch instruction, not an oversight): does not enable
 ``VNX_CHAIN_RECEIPTS``, does not run the pull cadence automatically, does not
-write receipts. Read-only on state; the only write this module performs is
-its own atomic health beacon under ``<data_dir>/health/ledger_health.json``.
+write receipts. Read-only on state; the only writes this module performs are
+its own atomic health beacon under ``<data_dir>/health/ledger_health.json``
+and, for the ``acknowledge`` subcommand alone, one appended line in
+``ledger_coverage_acknowledged.ndjson``.
 """
 from __future__ import annotations
 
@@ -76,6 +87,7 @@ import os
 import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -92,6 +104,7 @@ from migrations.auto_apply import _DEFAULT_MIGRATIONS_DIR as _AUTO_APPLY_MIGRATI
 
 REGISTER_NAME = "dispatch_register.ndjson"
 LEDGER_NAME = "t0_receipts.ndjson"
+ACKNOWLEDGED_NAME = "ledger_coverage_acknowledged.ndjson"
 RUNTIME_DB_NAME = "runtime_coordination.db"
 COMPONENT_NAME = "ledger_health"
 
@@ -111,6 +124,12 @@ DEFAULT_CURSOR_STALE_HOURS = 24.0
 # forever (health_beacon.all_beacons semantics).
 BEACON_EXPECTED_INTERVAL_SECONDS = 86400
 
+# Of the 13 event types in the real registers (23-09), only these two put a non-dispatch in
+# dispatch_id by design (a lane label, or a dispatch the door refused to fire): neither can land a receipt.
+NON_DISPATCH_REGISTER_EVENTS = frozenset({"provider_lane_exhausted", "provider_lane_reopened"})
+
+DEFAULT_ACKNOWLEDGE_ACTOR = "operator"
+
 STATUS_OK = "ok"
 STATUS_FINDING = "finding"
 # Mirrors pre_merge_gate.py's SKIPPED_UNVERIFIED (#1468, OI-1140): a check
@@ -120,6 +139,10 @@ SKIPPED_UNVERIFIED = "SKIPPED_UNVERIFIED"
 EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_UNMEASURABLE = 2
+# ``acknowledge`` exit codes: a refused input is 2 (the code argparse gives a usage error), a
+# write that failed is 1. Neither can be mistaken for the health run's 0.
+EXIT_ACK_FAILED = 1
+EXIT_ACK_REFUSED = 2
 
 
 def _chain_receipts_configured() -> bool:
@@ -131,13 +154,23 @@ def _chain_receipts_configured() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _read_unique_dispatch_ids(path: Path, *, include_cmd_id: bool = False) -> Tuple[Set[str], int, int]:
+def _read_unique_dispatch_ids(
+    path: Path,
+    *,
+    include_cmd_id: bool = False,
+    exclude_events: frozenset = frozenset(),
+) -> Tuple[Set[str], int, int]:
     """Collect the set of distinct ``dispatch_id`` values from an NDJSON file.
 
     Field match only — never a substring/text search. When ``include_cmd_id``
     is set, a line missing ``dispatch_id`` but carrying ``cmd_id`` counts under
     ``cmd_id`` too (the same fallback ``receipt_provenance.
     find_receipts_by_dispatch`` applies to legacy receipts).
+
+    A line whose ``event`` field is in ``exclude_events`` is skipped (still
+    counted in ``total_lines``). The match is on that field alone — never on
+    the shape of the id — and a line with no ``event``, or one nobody
+    classified, is NOT skipped: an unknown line stays visible.
 
     Returns ``(ids, total_lines, parse_errors)``. Raises ``OSError`` if the
     file cannot be opened/read (caller maps that to ``SKIPPED_UNVERIFIED`` —
@@ -160,6 +193,9 @@ def _read_unique_dispatch_ids(path: Path, *, include_cmd_id: bool = False) -> Tu
             if not isinstance(rec, dict):
                 errors += 1
                 continue
+            event = rec.get("event")
+            if isinstance(event, str) and event in exclude_events:
+                continue
             did = rec.get("dispatch_id")
             if not did and include_cmd_id:
                 did = rec.get("cmd_id")
@@ -168,10 +204,65 @@ def _read_unique_dispatch_ids(path: Path, *, include_cmd_id: bool = False) -> Tu
     return ids, total, errors
 
 
+def _read_acknowledgements(path: Path) -> Tuple[Dict[str, Dict[str, Any]], int]:
+    """Read ``ledger_coverage_acknowledged.ndjson`` into ``{dispatch_id: record}``.
+
+    A missing file is "nothing acknowledged yet", not an error. A record only
+    counts as an acknowledgement when it carries a non-blank ``dispatch_id`` AND
+    a non-blank ``reason``: the file may be edited by hand, and a line without a
+    reason must never silence a gap, so it is counted as unreadable instead.
+    When one id is acknowledged more than once the latest line wins (the file
+    stays append-only, the reason is the current one).
+
+    Returns ``(by_id, unreadable_lines)``. Raises ``OSError`` when the file
+    exists but cannot be read (caller maps that to ``SKIPPED_UNVERIFIED``).
+    """
+    by_id: Dict[str, Dict[str, Any]] = {}
+    errors = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    errors += 1
+                    continue
+                if not isinstance(rec, dict):
+                    errors += 1
+                    continue
+                dispatch_id = rec.get("dispatch_id")
+                reason = rec.get("reason")
+                if not (
+                    isinstance(dispatch_id, str) and dispatch_id.strip()
+                    and isinstance(reason, str) and reason.strip()
+                ):
+                    errors += 1
+                    continue
+                by_id[dispatch_id.strip()] = {
+                    "dispatch_id": dispatch_id.strip(),
+                    "reason": reason.strip(),
+                    "acknowledged_at": rec.get("acknowledged_at"),
+                    "actor": rec.get("actor"),
+                }
+    except FileNotFoundError:
+        return {}, 0
+    return by_id, errors
+
+
 def check_receipt_coverage(state_dir: Path) -> Dict[str, Any]:
-    """Every dispatch_id the register knows about must have a matching receipt."""
+    """Every dispatch_id the register knows about must have a matching receipt.
+
+    Ids in ``ledger_coverage_acknowledged.ndjson`` are subtracted from
+    ``missing``: the status is ``finding`` only when an UNacknowledged gap
+    remains. Acknowledged gaps are reported with their reason, and an
+    acknowledgement that no longer covers a gap is counted apart.
+    """
     register_path = state_dir / REGISTER_NAME
     ledger_path = state_dir / LEDGER_NAME
+    acknowledged_path = state_dir / ACKNOWLEDGED_NAME
 
     if not register_path.exists():
         return {"status": SKIPPED_UNVERIFIED, "reason": f"register not found: {register_path}"}
@@ -179,15 +270,28 @@ def check_receipt_coverage(state_dir: Path) -> Dict[str, Any]:
         return {"status": SKIPPED_UNVERIFIED, "reason": f"receipts ledger not found: {ledger_path}"}
 
     try:
-        register_ids, register_lines, register_errors = _read_unique_dispatch_ids(register_path)
+        register_ids, register_lines, register_errors = _read_unique_dispatch_ids(
+            register_path, exclude_events=NON_DISPATCH_REGISTER_EVENTS
+        )
         receipt_ids, receipt_lines, receipt_errors = _read_unique_dispatch_ids(
             ledger_path, include_cmd_id=True
         )
     except OSError as exc:
         return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read ledger/register: {exc}"}
 
-    missing = sorted(register_ids - receipt_ids)
-    parse_errors = register_errors + receipt_errors
+    try:
+        acknowledged, acknowledged_errors = _read_acknowledgements(acknowledged_path)
+    except OSError as exc:
+        return {
+            "status": SKIPPED_UNVERIFIED,
+            "reason": f"could not read acknowledgements {acknowledged_path}: {exc}",
+        }
+
+    raw_missing = register_ids - receipt_ids
+    missing = sorted(raw_missing - acknowledged.keys())
+    acknowledged_gaps = [acknowledged[did] for did in sorted(raw_missing & acknowledged.keys())]
+    acknowledged_not_missing = sorted(acknowledged.keys() - raw_missing)
+    parse_errors = register_errors + receipt_errors + acknowledged_errors
 
     result: Dict[str, Any] = {
         "status": STATUS_FINDING if missing else STATUS_OK,
@@ -195,6 +299,11 @@ def check_receipt_coverage(state_dir: Path) -> Dict[str, Any]:
         "receipted_dispatch_count": len(receipt_ids),
         "missing_receipt_count": len(missing),
         "missing_receipt_dispatch_ids": missing,
+        "acknowledged_count": len(acknowledged_gaps),
+        "acknowledged_gaps": acknowledged_gaps,
+        "acknowledged_not_missing_count": len(acknowledged_not_missing),
+        "acknowledged_not_missing_dispatch_ids": acknowledged_not_missing,
+        "acknowledged_parse_errors": acknowledged_errors,
         "register_lines": register_lines,
         "register_parse_errors": register_errors,
         "receipt_lines": receipt_lines,
@@ -213,11 +322,22 @@ def check_receipt_coverage(state_dir: Path) -> Dict[str, Any]:
         # unlike a clean-parse `missing` list, which is exact. This mirrors
         # the OSError branch above: a read that didn't fully succeed is
         # "cannot measure", never "measured and fine" — status is
-        # overridden even when `missing` is empty.
+        # overridden even when `missing` is empty. The acknowledgement file
+        # follows the same rule: an unreadable line is a verdict we could not
+        # read, and a record without a reason is not a verdict at all (it is
+        # never subtracted from `missing`), so neither certifies coverage.
+        problems = []
+        if register_errors or receipt_errors:
+            problems.append(f"{register_errors} register + {receipt_errors} receipt parse error(s)")
+        if acknowledged_errors:
+            problems.append(
+                f"{acknowledged_errors} unreadable line(s) in {ACKNOWLEDGED_NAME} "
+                "(invalid JSON, or no dispatch_id/reason)"
+            )
         result["status"] = SKIPPED_UNVERIFIED
         result["reason"] = (
-            f"{register_errors} register + {receipt_errors} receipt parse error(s) — "
-            "coverage cannot be certified from a partially-unreadable ledger/register"
+            "; ".join(problems)
+            + " — coverage cannot be certified from a partially-unreadable ledger/register/acknowledgements"
         )
 
     return result
@@ -597,14 +717,74 @@ def _format_human(result: Dict[str, Any]) -> str:
         if name == "receipt_coverage" and check.get("missing_receipt_count"):
             for did in check["missing_receipt_dispatch_ids"]:
                 lines.append(f"    - {did}")
+        if name == "receipt_coverage":
+            for gap in check.get("acknowledged_gaps") or []:
+                lines.append(
+                    f"    ~ {gap['dispatch_id']} (acknowledged by {gap.get('actor')}): {gap['reason']}"
+                )
+            for did in check.get("acknowledged_not_missing_dispatch_ids") or []:
+                lines.append(f"    ? {did} (acknowledged, but no longer a gap)")
     return "\n".join(lines)
+
+
+def acknowledge_gap(state_dir: Path, dispatch_id: str, reason: str, actor: str) -> Dict[str, Any]:
+    """Append one acknowledgement to ``<state_dir>/ledger_coverage_acknowledged.ndjson``.
+
+    Uses ``state_writer.append_locked`` — the repo's flock + fsync NDJSON
+    append, the same one the register and receipt writers go through — so two
+    concurrent acknowledgements never interleave and a returned record is on
+    disk. Refuses (``ValueError``) a blank id or a blank/whitespace-only
+    reason: an acknowledgement without a reason is a silenced alarm.
+    """
+    dispatch_id = (dispatch_id or "").strip()
+    reason = (reason or "").strip()
+    if not dispatch_id:
+        raise ValueError("--dispatch-id must not be empty")
+    if not reason:
+        raise ValueError(
+            "--reason must not be empty or whitespace: an acknowledgement without a reason "
+            "is a silenced alarm"
+        )
+    from state_writer import append_locked
+
+    record = {
+        "dispatch_id": dispatch_id,
+        "reason": reason,
+        "acknowledged_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "actor": actor,
+    }
+    append_locked(state_dir / ACKNOWLEDGED_NAME, record)
+    return record
+
+
+def _run_acknowledge(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir) if args.state_dir else _resolve_default_dirs()[1]
+    if not state_dir.is_dir():
+        # A mistyped --state-dir must not silently create a directory nobody reads:
+        # the acknowledgement would cover nothing and stay invisible.
+        print(f"ledger_health acknowledge: state dir not found: {state_dir}", file=sys.stderr)
+        return EXIT_ACK_REFUSED
+
+    actor = args.actor or os.environ.get("VNX_ACTOR", "").strip() or DEFAULT_ACKNOWLEDGE_ACTOR
+    try:
+        record = acknowledge_gap(state_dir, args.dispatch_id, args.reason, actor)
+    except ValueError as exc:
+        print(f"ledger_health acknowledge: {exc}", file=sys.stderr)
+        return EXIT_ACK_REFUSED
+    except OSError as exc:
+        print(f"ledger_health acknowledge: could not write {state_dir / ACKNOWLEDGED_NAME}: {exc}", file=sys.stderr)
+        return EXIT_ACK_FAILED
+
+    print(f"acknowledged {record['dispatch_id']} ({record['actor']}): {record['reason']}")
+    return EXIT_OK
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Reconcile dispatch_register.ndjson against t0_receipts.ndjson "
                      "(coverage, pull-cursor freshness, chain status, migration staleness). "
-                     "Read-only on state.",
+                     "Read-only on state. The `acknowledge` subcommand records a gap that has "
+                     "been investigated and explained.",
     )
     parser.add_argument("--data-dir", default=None, help="override VNX_DATA_DIR (default: ambient resolution)")
     parser.add_argument("--state-dir", default=None, help="override VNX_STATE_DIR (default: ambient resolution)")
@@ -617,7 +797,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--no-write", action="store_true",
         help="do not write the health/ledger_health.json beacon (measure + print only)",
     )
+    subparsers = parser.add_subparsers(dest="command")
+    ack = subparsers.add_parser(
+        "acknowledge",
+        help="record an investigated, explained receipt-coverage gap (append-only, with a reason)",
+        description=f"Append {{dispatch_id, reason, acknowledged_at, actor}} to <state_dir>/{ACKNOWLEDGED_NAME}. "
+                     "receipt_coverage then stops counting that id as a finding but keeps reporting it, "
+                     "with its reason. Writes nothing to the register or the receipts ledger.",
+    )
+    ack.add_argument("--dispatch-id", required=True, help="the dispatch_id whose missing receipt is explained")
+    ack.add_argument("--reason", required=True, help="why the gap is understood (must not be blank)")
+    ack.add_argument(
+        "--actor", default=None,
+        help=f"who acknowledges (default: $VNX_ACTOR, else '{DEFAULT_ACKNOWLEDGE_ACTOR}')",
+    )
+    # SUPPRESS: a --state-dir given BEFORE the subcommand must survive the subparser's own default.
+    ack.add_argument(
+        "--state-dir", default=argparse.SUPPRESS,
+        help="override VNX_STATE_DIR (default: ambient resolution)",
+    )
     args = parser.parse_args(argv)
+
+    if args.command == "acknowledge":
+        return _run_acknowledge(args)
 
     default_data_dir, default_state_dir = (None, None)
     if args.data_dir is None or args.state_dir is None:

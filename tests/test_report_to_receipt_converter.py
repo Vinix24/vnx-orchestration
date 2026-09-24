@@ -21,6 +21,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1186,16 +1187,18 @@ class TestRejectionVisibility:
             for r in caplog.records
         )
 
-    def test_rejected_report_retried_on_next_scan_not_watermarked(self, reports_dir, state_dir):
-        """A rejected report must NOT be marked processed — it is retried
-        every scan until the cause (missing Model) is fixed."""
-        _write_report_without_model(reports_dir / "20260601-retry-me.md", "20260601-retry-me")
+    def test_rejected_report_is_not_marked_processed_in_the_converter_watermark(
+        self, reports_dir, state_dir
+    ):
+        """A rejected report is quarantined, not accepted: the converter's own
+        watermark (which means "this report has a receipt") must not carry it.
+        The quarantine leaves its hash only in the Bash watermark."""
+        report = _write_report_without_model(reports_dir / "20260601-not-marked.md", "20260601-not-marked")
+        file_hash = _compute_sha256(report)
 
-        stats1 = scan_and_convert([reports_dir], state_dir)
-        stats2 = scan_and_convert([reports_dir], state_dir)
+        scan_and_convert([reports_dir], state_dir)
 
-        assert stats1.rejected_count == 1
-        assert stats2.rejected_count == 1  # retried, not silently watermarked away
+        assert file_hash not in _load_watermark(state_dir / _WATERMARK_FILENAME)
 
     def test_convert_report_to_receipt_returns_none_for_rejected(
         self, tmp_path, state_dir, caplog
@@ -1237,9 +1240,14 @@ class TestRejectionVisibility:
         assert beacon["details"]["rejected_count"] == 1
         assert beacon["details"]["new_count"] == 0
 
-    def test_scan_with_at_least_one_success_keeps_beacon_ok(self, reports_dir, state_dir):
-        """A rejection alongside a successful receipt is normal, expected,
-        contract-driven behavior — it must NOT flip the whole scan unhealthy."""
+    def test_valid_report_next_to_an_invalid_one_books_and_the_invalid_one_is_quarantined(
+        self, reports_dir, state_dir
+    ):
+        """One scan, two reports: the valid one gets its receipt, the one
+        without a model goes to quarantine. The refusal still raises the
+        beacon: a quarantined report is out of every later scan, so a beacon
+        that stayed ok because a sibling succeeded would let the refusal
+        vanish unread (this test used to assert ``ok`` here)."""
         _write_report_without_model(reports_dir / "20260601-no-model-3.md", "20260601-no-model-3")
         _write_frontmatter_report(reports_dir / "20260601-healthy-c.md", "20260601-healthy-c")
 
@@ -1247,9 +1255,409 @@ class TestRejectionVisibility:
         assert stats.new_count == 1
         assert stats.rejected_count == 1
 
+        receipts = _receipts(state_dir)
+        assert [r["dispatch_id"] for r in receipts] == ["20260601-healthy-c"]
+        assert not (reports_dir / "20260601-no-model-3.md").exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-no-model-3.md").is_file()
+        assert (reports_dir / "20260601-healthy-c.md").is_file()
+
         beacon_path = state_dir.parent / "health" / "report_to_receipt_converter.json"
         beacon = json.loads(beacon_path.read_text(encoding="utf-8"))
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["new_count"] == 1
+        assert beacon["details"]["recent_rejected_count"] == 1
+
+
+def _quarantine_index_lines(state_dir: Path) -> list:
+    index = state_dir / "receipt_deadletter" / "INDEX.txt"
+    return index.read_text(encoding="utf-8").splitlines() if index.is_file() else []
+
+
+def _converter_beacon(state_dir: Path) -> dict:
+    return json.loads(
+        (state_dir.parent / "health" / "report_to_receipt_converter.json").read_text(encoding="utf-8")
+    )
+
+
+def _seed_rejected_history(state_dir: Path, *hours_old: float) -> None:
+    """Write a converter beacon whose history holds one rejection per age,
+    through the real HealthBeacon writer, as a scan some hours ago left it."""
+    from health_beacon import HealthBeacon
+
+    now = time.time()
+    entries = [
+        {
+            "dispatch_id": f"20260601-seeded-{i}",
+            "file": f"20260601-seeded-{i}.md",
+            "reason": "missing model",
+            "rejected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - hours * 3600)),
+        }
+        for i, hours in enumerate(hours_old)
+    ]
+    HealthBeacon(
+        state_dir.parent, "report_to_receipt_converter", expected_interval_seconds=3600,
+    ).heartbeat(status="fail", details={"rejected": entries})
+
+
+class TestMissingModelQuarantine:
+    """Absence-is-loud: a report that can never gain a model must leave the
+    scanned directory on its first refusal, or the converter beacon re-fails
+    on the same file every hour and the next NEW refusal hides behind an
+    alarm that is already on (15 reports, 07-09 to 08-09, measured on main
+    264e9460)."""
+
+    def test_refused_report_is_quarantined_with_an_index_line_and_not_retried(
+        self, reports_dir, state_dir
+    ):
+        report = _write_report_without_model(reports_dir / "20260601-quarantine-me.md", "20260601-quarantine-me")
+        file_hash = _compute_sha256(report)
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats1.rejected_count == 1
+        assert not report.exists()
+        moved = state_dir / "receipt_deadletter" / "20260601-quarantine-me.md"
+        assert moved.is_file()
+        index_lines = _quarantine_index_lines(state_dir)
+        assert len(index_lines) == 1
+        _ts, indexed_hash, reason_code, indexed_name = index_lines[0].split(" ")
+        assert reason_code == "missing_model"
+        assert indexed_name == "20260601-quarantine-me.md"
+        assert indexed_hash == file_hash
+        # The Bash processor must skip it too: same shared watermark entry
+        # the unknown_dispatch quarantine leaves.
+        assert file_hash in _load_watermark(state_dir / "processed_receipts.txt")
+
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats2.attempted_count == 0
+        assert stats2.rejected_count == 0
+        assert len(_quarantine_index_lines(state_dir)) == 1  # not quarantined twice
+
+    def test_quarantined_report_stays_skipped_when_restored_unchanged(self, reports_dir, state_dir):
+        """Putting the same bytes back does not re-open the case: the hash is
+        in the shared watermark, so no scan retries it."""
+        report = _write_report_without_model(reports_dir / "20260601-restore-same.md", "20260601-restore-same")
+        scan_and_convert([reports_dir], state_dir)
+        shutil.copy2(state_dir / "receipt_deadletter" / report.name, report)
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.attempted_count == 0
+        assert _count_receipts(state_dir) == 0
+
+    def test_quarantined_report_books_once_a_model_is_added_and_it_is_put_back(
+        self, reports_dir, state_dir
+    ):
+        """The way back the quarantine promises: edit the model in, copy it
+        back to the scanned directory. New bytes, new hash, normal booking."""
+        report = _write_report_without_model(reports_dir / "20260601-restore-fixed.md", "20260601-restore-fixed")
+        scan_and_convert([reports_dir], state_dir)
+        text = (state_dir / "receipt_deadletter" / report.name).read_text(encoding="utf-8")
+        report.write_text(text.replace("provider: claude\n", "provider: claude\nmodel: claude-sonnet-4-6\n"), encoding="utf-8")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.new_count == 1
+        assert [r["dispatch_id"] for r in _receipts(state_dir)] == ["20260601-restore-fixed"]
+
+    def test_beacon_fails_on_the_scan_that_refuses_and_on_the_next_one_within_a_day(
+        self, reports_dir, state_dir
+    ):
+        _write_report_without_model(reports_dir / "20260601-loud-a.md", "20260601-loud-a")
+
+        scan_and_convert([reports_dir], state_dir)
+        assert _converter_beacon(state_dir)["status"] == "fail"
+
+        stats2 = scan_and_convert([reports_dir], state_dir)  # nothing left to scan
+        assert stats2.attempted_count == 0
+        beacon = _converter_beacon(state_dir)
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["rejected_count"] == 0
+        assert beacon["details"]["recent_rejected_count"] == 1
+        assert [e["dispatch_id"] for e in beacon["details"]["rejected"]] == ["20260601-loud-a"]
+
+    def test_beacon_is_ok_again_once_every_refusal_is_older_than_the_window(self, reports_dir, state_dir):
+        _seed_rejected_history(state_dir, 25, 48)
+
+        stats = scan_and_convert([reports_dir], state_dir)  # empty directory
+
+        assert stats.attempted_count == 0
+        beacon = _converter_beacon(state_dir)
         assert beacon["status"] == "ok"
+        assert beacon["details"]["recent_rejected_count"] == 0
+        assert len(beacon["details"]["rejected"]) == 2  # the history stays readable
+
+    def test_one_refusal_inside_the_window_holds_the_beacon_at_fail(self, reports_dir, state_dir):
+        _seed_rejected_history(state_dir, 48, 23)
+
+        scan_and_convert([reports_dir], state_dir)
+
+        beacon = _converter_beacon(state_dir)
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["recent_rejected_count"] == 1
+
+    def test_dry_run_moves_nothing(self, reports_dir, state_dir):
+        report = _write_report_without_model(reports_dir / "20260601-dry-keep.md", "20260601-dry-keep")
+        before = report.read_bytes()
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.rejected_count == 1
+        assert report.read_bytes() == before
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert not (state_dir / "processed_receipts.txt").exists()
+        assert not (state_dir.parent / "health" / "report_to_receipt_converter.json").exists()
+
+    def test_targeted_dispatch_id_run_quarantines_the_same_way(self, reports_dir, state_dir):
+        report = _write_report_without_model(reports_dir / "20260601-targeted.md", "20260601-targeted")
+
+        stats = convert_dispatch_ids(["20260601-targeted"], state_dir)
+
+        assert stats.rejected_count == 1
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-targeted.md").is_file()
+
+    def test_a_failed_quarantine_keeps_the_report_and_the_refusal_stays_loud(self, reports_dir, state_dir):
+        """If the move cannot happen (here: the dead-letter path is a file),
+        the report stays where it is and every scan refuses it again, so the
+        beacon keeps failing. A quarantine that cannot quarantine must never
+        turn into silence."""
+        (state_dir / "receipt_deadletter").write_text("in the way", encoding="utf-8")
+        report = _write_report_without_model(reports_dir / "20260601-stuck.md", "20260601-stuck")
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert report.is_file()
+        assert stats1.rejected_count == 1
+        assert stats2.rejected_count == 1
+        assert _converter_beacon(state_dir)["status"] == "fail"
+
+    def test_a_caller_without_a_state_dir_leaves_the_report_for_the_scan(self, tmp_path):
+        """convert_report_to_receipt() without receipts_file has no state dir
+        to quarantine into (the same guard the unknown_dispatch dead-letter
+        has): the report stays and the next directory scan quarantines it."""
+        report = _write_report_without_model(tmp_path / "20260601-no-state.md", "20260601-no-state")
+
+        result = convert_report_to_receipt(report)
+
+        assert result is None
+        assert report.is_file()
+
+
+# The report that made the converter beacon fail for an hour-by-hour retry
+# (20260830-provider-agnostic-review-lane-glm-5-2-harness-plan-review_report.md,
+# measured 2026-09-23 19:48Z): Model and Provider on ONE line. The bold-field
+# parser reads everything after `**Model:**` as the value.
+_GLUED_MODEL = "glm-5.2 · **Provider:** claude"
+
+
+def _write_report_with_glued_model_line(path: Path, dispatch_id: str) -> Path:
+    path.write_text(
+        "# Plan Review\n\n"
+        f"**Dispatch-ID:** {dispatch_id}\n"
+        f"**Model:** {_GLUED_MODEL}\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _append_receipt_facade():
+    """The ``append_receipt`` facade the converter itself imports (the converter
+    puts scripts/ on sys.path lazily, so a test that patches it must do the
+    same instead of depending on test order)."""
+    sys.path.insert(0, str(SCRIPTS_LIB.parent))
+    sys.path.insert(0, str(SCRIPTS_LIB))
+    import append_receipt
+
+    return append_receipt
+
+
+class TestInvalidModelShapeQuarantine:
+    """The fail-closed model check refuses with two codes: ``missing_model``
+    (no model at all) and ``invalid_model_shape`` (a value that is not a model
+    name). Both are a verdict on the report's bytes, so both take the same
+    path: counted as rejected, named in the rejection history, quarantined.
+    Before this, ``invalid_model_shape`` fell into the generic error branch:
+    retried every scan, and ``attempted > 0`` with nothing booked held the
+    converter beacon at fail for good."""
+
+    def test_the_fixture_is_the_shape_the_parser_really_produces(self, reports_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-shape.md", "20260601-shape")
+
+        body = _extract_body_fields(report.read_text(encoding="utf-8"))
+
+        assert body["model"] == _GLUED_MODEL
+
+    def test_refused_report_is_quarantined_with_its_code_and_not_retried(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-glued.md", "20260601-glued")
+        file_hash = _compute_sha256(report)
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats1.rejected_count == 1
+        assert stats1.error_count == 0
+        assert stats1.new_count == 0
+        assert _count_receipts(state_dir) == 0
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-glued.md").is_file()
+        index_lines = _quarantine_index_lines(state_dir)
+        assert len(index_lines) == 1
+        _ts, indexed_hash, reason_code, indexed_name = index_lines[0].split(" ")
+        assert reason_code == "invalid_model_shape"
+        assert indexed_name == "20260601-glued.md"
+        assert indexed_hash == file_hash
+        assert file_hash in _load_watermark(state_dir / "processed_receipts.txt")
+
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert stats2.attempted_count == 0
+        assert stats2.rejected_count == 0
+        assert stats2.error_count == 0
+        assert len(_quarantine_index_lines(state_dir)) == 1
+
+    def test_refusal_lands_in_the_history_with_a_timestamp_and_holds_the_beacon_at_fail(
+        self, reports_dir, state_dir
+    ):
+        _write_report_with_glued_model_line(reports_dir / "20260601-history.md", "20260601-history")
+
+        scan_and_convert([reports_dir], state_dir)
+        scan_and_convert([reports_dir], state_dir)  # nothing left to scan
+
+        beacon = _converter_beacon(state_dir)
+        assert beacon["status"] == "fail"
+        assert beacon["details"]["rejected_count"] == 0
+        assert beacon["details"]["error_count"] == 0
+        assert beacon["details"]["recent_rejected_count"] == 1
+        [entry] = beacon["details"]["rejected"]
+        assert entry["dispatch_id"] == "20260601-history"
+        assert entry["file"] == "20260601-history.md"
+        assert _GLUED_MODEL in entry["reason"]
+        assert entry["rejected_at"]
+
+    def test_refusal_is_logged_on_the_line_the_rejection_beacon_parses(
+        self, reports_dir, state_dir, caplog
+    ):
+        from receipt_conversion_rejection_beacon import parse_rejections
+
+        _write_report_with_glued_model_line(reports_dir / "20260601-logline.md", "20260601-logline")
+
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            scan_and_convert([reports_dir], state_dir)
+
+        stderr = "\n".join(f"WARNING report_to_receipt_converter: {r.getMessage()}" for r in caplog.records)
+        [rejection] = parse_rejections(stderr)
+        assert rejection["dispatch_id"] == "20260601-logline"
+        assert rejection["file"] == "20260601-logline.md"
+        assert _GLUED_MODEL in rejection["reason"]
+
+    def test_dry_run_counts_it_as_rejected_and_moves_nothing(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-dry-glued.md", "20260601-dry-glued")
+        before = report.read_bytes()
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert stats.rejected_count == 1
+        assert stats.error_count == 0
+        assert stats.would_append_count == 0
+        [detail] = stats.rejected
+        assert detail["dispatch_id"] == "20260601-dry-glued"
+        assert detail["rejected_at"]
+        assert report.read_bytes() == before
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert not (state_dir.parent / "health" / "report_to_receipt_converter.json").exists()
+
+    def test_targeted_dispatch_id_run_quarantines_the_same_way(self, reports_dir, state_dir):
+        report = _write_report_with_glued_model_line(reports_dir / "20260601-targeted-glued.md", "20260601-targeted-glued")
+
+        stats = convert_dispatch_ids(["20260601-targeted-glued"], state_dir)
+
+        assert stats.rejected_count == 1
+        assert stats.error_count == 0
+        assert not report.exists()
+        assert _quarantine_index_lines(state_dir)[0].split(" ")[2] == "invalid_model_shape"
+
+    def test_a_valid_report_next_to_it_still_books(self, reports_dir, state_dir):
+        _write_report_with_glued_model_line(reports_dir / "20260601-glued-sibling.md", "20260601-glued-sibling")
+        _write_frontmatter_report(reports_dir / "20260601-fine-sibling.md", "20260601-fine-sibling")
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats.new_count, stats.rejected_count, stats.error_count) == (1, 1, 0)
+        assert [r["dispatch_id"] for r in _receipts(state_dir)] == ["20260601-fine-sibling"]
+
+    def test_missing_model_keeps_its_own_code_in_the_index(self, reports_dir, state_dir):
+        _write_report_without_model(reports_dir / "20260601-still-missing.md", "20260601-still-missing")
+
+        scan_and_convert([reports_dir], state_dir)
+
+        assert _quarantine_index_lines(state_dir)[0].split(" ")[2] == "missing_model"
+
+    def test_the_refusal_set_covers_every_code_the_model_check_raises(self):
+        """The set the converter quarantines on is the set of codes
+        ``_validate_model_present`` can raise. A third code added there without
+        being added here would fall back into the retry-forever branch."""
+        from append_receipt_internals.validation import _validate_model_present
+        from report_to_receipt_converter import MODEL_REFUSAL_CODES
+
+        raised = set()
+        for model in (None, "unknown", "the real model that ran this dispatch", "`sonnet`", "x" * 100):
+            receipt = {"receipt_kind": "dispatch", "source": "worker", "model": model}
+            with pytest.raises(_append_receipt_facade().AppendReceiptError) as excinfo:
+                _validate_model_present(receipt)
+            raised.add(excinfo.value.code)
+
+        assert raised == {"missing_model", "invalid_model_shape"}
+        assert MODEL_REFUSAL_CODES == frozenset(raised)
+
+    def test_a_non_model_append_error_stays_an_error_and_is_not_quarantined(
+        self, reports_dir, state_dir, monkeypatch
+    ):
+        """Only the model refusals are verdicts on the report's bytes. Any
+        other refusal (here ``missing_status``) may be a transient or a
+        writer bug: it stays an error, stays in place, is retried."""
+        facade = _append_receipt_facade()
+        from append_receipt_internals.common import EXIT_VALIDATION_ERROR
+
+        def _refuse(*args, **kwargs):
+            raise facade.AppendReceiptError(
+                "missing_status", EXIT_VALIDATION_ERROR, "receipt carries no status at all",
+            )
+
+        monkeypatch.setattr(facade, "append_receipt_payload", _refuse)
+        report = _write_frontmatter_report(reports_dir / "20260601-other-refusal.md", "20260601-other-refusal")
+
+        stats1 = scan_and_convert([reports_dir], state_dir)
+        stats2 = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats1.error_count, stats1.rejected_count) == (1, 0)
+        assert (stats2.error_count, stats2.rejected_count) == (1, 0)
+        assert report.is_file()
+        assert not (state_dir / "receipt_deadletter").exists()
+        assert _converter_beacon(state_dir)["details"]["rejected"] == []
+
+    def test_a_non_model_error_stays_an_error_in_a_dry_run_too(self, reports_dir, state_dir, monkeypatch):
+        facade = _append_receipt_facade()
+        from append_receipt_internals import validation
+        from append_receipt_internals.common import EXIT_VALIDATION_ERROR
+
+        def _refuse(receipt):
+            raise facade.AppendReceiptError(
+                "missing_status", EXIT_VALIDATION_ERROR, "receipt carries no status at all",
+            )
+
+        monkeypatch.setattr(validation, "_validate_receipt", _refuse)
+        _write_frontmatter_report(reports_dir / "20260601-dry-other.md", "20260601-dry-other")
+
+        stats = scan_and_convert([reports_dir], state_dir, dry_run=True)
+
+        assert (stats.error_count, stats.rejected_count, stats.would_append_count) == (1, 0, 0)
 
 
 class TestRejectedDetailHistory:
@@ -1292,9 +1700,10 @@ class TestRejectedDetailHistory:
         )
         scan_and_convert([reports_dir], state_dir)
 
-        # Scan 1's offending report is now "fixed" (removed) — a scan that
-        # only reflects the CURRENT cycle would show zero rejections here.
-        (reports_dir / "20260906-stranded-a.md").unlink()
+        # Scan 1's offending report is out of the scanned directory (the
+        # converter quarantined it). A scan that only reflects the CURRENT
+        # cycle would show zero rejections here.
+        assert not (reports_dir / "20260906-stranded-a.md").exists()
         _write_report_without_model(
             reports_dir / "20260906-stranded-b.md", "20260906-stranded-b"
         )
@@ -1316,7 +1725,7 @@ class TestRejectedDetailHistory:
             report = reports_dir / f"{name}.md"
             _write_report_without_model(report, name)
             scan_and_convert([reports_dir], state_dir)
-            report.unlink()
+            assert not report.exists()  # quarantined by the scan
 
         entries = self._rejected_entries(state_dir)
         assert len(entries) == _HEALTH_REJECTED_HISTORY_MAX

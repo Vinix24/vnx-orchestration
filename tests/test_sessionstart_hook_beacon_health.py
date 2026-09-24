@@ -271,6 +271,37 @@ class TestBeaconHealthDigestExpectedAndParked:
         ctx = out["hookSpecificOutput"]["additionalContext"]
         assert "[absent] fleet_role_drift" in ctx, ctx
 
+    def test_event_driven_component_that_never_wrote_is_not_absent(self, tmp_path, monkeypatch):
+        """cleanup_worker_exit passes ``expected_interval_seconds=None``: it
+        writes when a worker exits, so no beacon yet is not a finding. The
+        periodic fleet_role_drift next to it stays absent."""
+        _clean_env(monkeypatch)
+        real_t0_dir = REPO / ".claude" / "terminals" / "T0"
+        monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "vnx-data-home"))
+        env = dict(os.environ)
+
+        out = _run_hook(real_t0_dir, env)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "[absent] cleanup_worker_exit" not in ctx, ctx
+        assert "[absent] fleet_role_drift" in ctx, ctx
+
+    def test_event_driven_component_with_a_failing_beacon_still_surfaces(self, tmp_path, monkeypatch):
+        """Only the silence stops being an alarm; a real failure stays loud."""
+        _clean_env(monkeypatch)
+        real_t0_dir = REPO / ".claude" / "terminals" / "T0"
+        monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "vnx-data-home"))
+        env = dict(os.environ)
+
+        data_dir = Path(vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+        _write_beacon(
+            data_dir, "cleanup_worker_exit", status="fail", age_seconds=60,
+            expected_interval_seconds=None,
+        )
+
+        out = _run_hook(real_t0_dir, env)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "[fail] cleanup_worker_exit" in ctx, ctx
+
 
 _CALL_SITE_TARGETS = frozenset({"all_beacons", "beacon_summary"})
 _CALL_SITE_EXCLUDE_DIRS = frozenset({"tests"})

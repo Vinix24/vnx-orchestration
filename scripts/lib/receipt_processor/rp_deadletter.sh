@@ -33,7 +33,7 @@ REJECTIONS_FILE="${VNX_RECEIPT_REJECTIONS_FILE:-$STATE_DIR/receipt_rejections.tx
 # retry-next-cycle behaviour so a real transient fault is never quarantined.
 _is_deterministic_rejection_code() {
     case "$1" in
-        missing_model|missing_required_key|invalid_json|invalid_receipt_type|empty_input)
+        missing_model|invalid_model_shape|missing_required_key|invalid_json|invalid_receipt_type|empty_input)
             return 0
             ;;
         *)
