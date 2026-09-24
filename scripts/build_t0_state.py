@@ -1880,7 +1880,11 @@ def _build_git_context() -> Dict[str, Any]:
 #
 # Same tri-state discipline as daemon_register.py, never collapsed to two
 # values: "loaded" (measured, now) / "not_loaded" (measured absence, a real
-# finding) / "unknown" (launchctl itself could not be queried). "since when"
+# finding) / "unknown" (launchctl itself could not be queried). A fourth state,
+# "parked", is a measured absence that an operator decision explains
+# (beacon_register.PARKED_LAUNCHD_JOBS, with a reason): it is not a finding and
+# does not count toward overall. Parking covers the absence only; a parked job
+# that IS loaded reads "loaded", with its live exit status. "since when"
 # is a SEPARATE fact -- launchctl list carries no timestamp, so it comes from
 # the most recent matching record in job_exits.ndjson's existing launchd-
 # harvest stream (scripts/lib/job_exit_capture.py) when one exists, and is
@@ -2125,11 +2129,16 @@ def _measure_launchd_liveness(
 
     ``overall`` is ``"fail"`` ONLY when a label was actually measured
     (launchctl ran, on a platform where it applies) and found not loaded --
-    a real, actionable finding. Everything else this module could not
-    establish -- launchctl not applicable on this platform, launchctl
-    applicable but this invocation failed, OR a plist that failed to parse
-    and so names a producer this module cannot even identify -- folds into
-    ``"unknown"``. This is a deliberate correction (PR #1755 CI failure):
+    a real, actionable finding. A label that is not loaded but is registered
+    as parked (``beacon_register.PARKED_LAUNCHD_JOBS``) reads ``state:
+    "parked"`` with its ``reason`` and is NOT such a finding: an operator
+    decision explains the absence. Parking covers absence only: a parked job
+    that IS loaded reads ``"loaded"`` and carries the live ``last_exit_status``
+    launchctl reports, so a failing job is never laundered into a decision.
+    Everything else this module could not establish -- launchctl not
+    applicable on this platform, launchctl applicable but this invocation
+    failed, OR a plist that failed to parse and so names a producer this
+    module cannot even identify -- folds into ``"unknown"``. This is a deliberate correction (PR #1755 CI failure):
     an unparseable plist used to force ``"fail"`` unconditionally, which
     made ONE broken, cross-platform, this-module-cannot-fix-it plist a
     permanent, unfalsifiable "everything is unhealthy" signal on every
@@ -2156,6 +2165,8 @@ def _measure_launchd_liveness(
     job to expect, which is a "we don't know", never a fabricated "not
     loaded".
     """
+    from beacon_register import parked_launchd_reason
+
     resolved_project_id = project_id if project_id is not None else project_id_from_state_dir(state_dir)
     labels, unparseable = _scan_launchd_dir(launchd_dir, project_id=resolved_project_id)
     if not labels and not unparseable:
@@ -2180,8 +2191,16 @@ def _measure_launchd_liveness(
         # when launchctl was never even queried, whether we could resolve
         # a per-project label is moot. The placeholder only matters once we
         # actually HAVE live launchctl data to compare it against.
+        parked_reason = parked_launchd_reason(label)
         if now_result["measured"]:
-            state = "unknown" if unresolved_placeholder else ("loaded" if label in now_result["jobs"] else "not_loaded")
+            if unresolved_placeholder:
+                state = "unknown"
+            elif label in now_result["jobs"]:
+                state = "loaded"
+            elif parked_reason is not None:
+                state = "parked"
+            else:
+                state = "not_loaded"
         elif not now_result.get("applicable", True):
             state = "not_applicable"
         else:
@@ -2193,7 +2212,11 @@ def _measure_launchd_liveness(
             "since_measured": since is not None,
             "last_exit_code": history.get("exit_code") if history else None,
         }
-        if now_result["measured"] and not unresolved_placeholder and label not in now_result["jobs"]:
+        if state == "loaded":
+            jobs[label]["last_exit_status"] = now_result["jobs"][label]["last_exit_status"]
+        elif state == "parked":
+            jobs[label]["reason"] = parked_reason
+        if state == "not_loaded":
             any_not_loaded = True
         if now_result["measured"] and unresolved_placeholder:
             any_unresolved_placeholder = True
