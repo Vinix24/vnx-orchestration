@@ -195,7 +195,7 @@ class TestTargetRepo:
         rc = door.run()
         out = capsys.readouterr()
 
-        assert out.out.splitlines()[0] == f"doelrepo: {CONSUMER_REPO}"
+        assert out.out.startswith(f"doelrepo: {CONSUMER_REPO}\n"), out
         for needle in (
             f"contents/{MAIN_YAML_PATH}?ref=main",
             f"contents/{MAIN_YAML_PATH}?ref={HEAD_SHA}",
