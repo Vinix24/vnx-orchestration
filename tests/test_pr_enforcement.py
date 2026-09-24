@@ -491,8 +491,9 @@ def test_skip_pr_pushes_but_creates_no_pr(monkeypatch):
     import pr_enforcement as _mod
     push_calls = {"n": 0}
 
-    def _fake_push(*, branch, repo_root):
+    def _fake_push(*, branch, cwd):
         push_calls["n"] += 1
+        assert cwd == Path("/repo"), "no wt_path: the push runs from repo_root (OI-1846)"
         return _mod._PushOutcome(ok=True)
 
     monkeypatch.setattr(_mod, "_push_branch", _fake_push)

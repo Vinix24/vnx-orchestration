@@ -294,6 +294,7 @@ def classify_path(
     branch: str,
     dispatch_id: str,
     base_sha: "str | None" = None,
+    ignore_working_tree: bool = False,
 ) -> Literal["clean", "committed", "pushed", "dirty"]:
     """Classify a dispatch worktree's git state from a path alone.
 
@@ -319,6 +320,16 @@ def classify_path(
     - ``clean``     : no new commits (HEAD == base), or base unresolvable and clean.
     - ``committed`` : new local commits, not yet on origin (or origin unknown).
     - ``pushed``    : new commits and the remote dispatch branch matches HEAD.
+
+    ``ignore_working_tree`` (OI-1846): skip the ``git status`` verdict and
+    classify from the COMMITS alone (HEAD against the base, and the remote
+    branch against HEAD). ``dirty`` wins over ``committed``/``pushed`` above,
+    so a worker that had already pushed reads as ``dirty`` the moment anything
+    in the tree changes — a regenerated FEATURE_PLAN.md is enough. The caller
+    that has established the tree's only changes are not worker work
+    (pr_enforcement, for generated artifacts) asks again with this flag to see
+    what the dirt was hiding. The OI-1124 identity-drift check still runs: a
+    tree on another dispatch's branch is ``dirty`` whatever the flag says.
     """
     # ── OI-1124: cross-dispatch branch-identity drift ──────────────────────
     # Measured 2026-08-10: a worker that received a crossed instruction (the
@@ -354,14 +365,15 @@ def classify_path(
         )
         return "dirty"
 
-    status_result = _run(
-        [
-            "git", "-c", "core.fileMode=false", "-c", "core.autocrlf=input",
-            "-C", str(wt), "status", "--porcelain",
-        ]
-    )
-    if status_result.returncode == 0 and status_result.stdout.strip():
-        return "dirty"
+    if not ignore_working_tree:
+        status_result = _run(
+            [
+                "git", "-c", "core.fileMode=false", "-c", "core.autocrlf=input",
+                "-C", str(wt), "status", "--porcelain",
+            ]
+        )
+        if status_result.returncode == 0 and status_result.stdout.strip():
+            return "dirty"
 
     local_sha_result = _run(["git", "-C", str(wt), "rev-parse", "HEAD"])
     if local_sha_result.returncode != 0:
