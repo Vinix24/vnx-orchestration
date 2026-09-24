@@ -50,6 +50,15 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec python3 \"{{ engine_root }}/scripts/hooks/pretooluse_t0_no_subagents.py\"'"
+          }
+        ]
       }
     ],
     "SessionStart": [

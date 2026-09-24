@@ -458,3 +458,81 @@ def test_json_output_is_machine_readable(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["summary"]["projects_behind"] == 1
     assert report["summary"]["behind"] == ["stale"]
+
+
+# ---------------------------------------------------------------------------
+# 6. --reach: the reach axis for ONE T0 dir, used by hooks/sessionstart.sh
+#    (dispatch 20260924-t0-geen-subagents-en-rol-alarm)
+# ---------------------------------------------------------------------------
+# A T0 session that would not load the role used to be found only by the
+# six-hourly fleet sweep. SessionStart now asks the same axis at the start of
+# every T0 session. These tests pin that it IS the same axis, not a second copy
+# of it, and that it needs neither a canon nor a registry.
+
+def _reach_cli(t0_dir, capsys):
+    rc = frd.main(["--reach", str(t0_dir)])
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_reach_flag_says_ok_when_the_role_is_imported(tmp_path, capsys):
+    repo = _make_repo(tmp_path / "consumer")
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 0
+    assert out["ok"] is True
+
+
+def test_reach_flag_says_not_ok_when_the_import_was_removed(tmp_path, capsys):
+    """The 24-09 incident: an edit dropped the @-line and nothing said so."""
+    repo = _make_repo(tmp_path / "consumer", claude_md="# project context, the import is gone\n")
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 1
+    assert out["ok"] is False
+    assert "OI-1480" in out["reason"]
+
+
+def test_reach_flag_says_not_ok_without_a_claude_md(tmp_path, capsys):
+    repo = _make_repo(tmp_path / "consumer", claude_md=None)
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 1
+    assert out["ok"] is False
+
+
+@pytest.mark.parametrize(
+    "claude_md",
+    ["@role-orchestrator.md\n", "# notes\n", "<!-- @role-orchestrator.md -->\n", None],
+    ids=["imported", "no-import", "import-inside-a-comment", "no-claude-md"],
+)
+def test_reach_flag_is_the_fleet_reach_axis_not_a_second_measurement(tmp_path, capsys, claude_md):
+    repo = _make_repo(tmp_path / "consumer", claude_md=claude_md)
+    t0_dir = repo / ".claude" / "terminals" / "T0"
+
+    _, out = _reach_cli(t0_dir, capsys)
+
+    assert out == frd.measure_project(repo, CANON)["reach"]
+
+
+def test_reach_flag_needs_neither_a_canon_nor_a_registry(tmp_path, capsys, monkeypatch):
+    """With the registry and the canon both unreadable the fleet run exits 2.
+    The reach probe must not depend on either."""
+    monkeypatch.setattr(frd, "DEFAULT_REGISTRY", tmp_path / "no-registry.json")
+    monkeypatch.setenv("VNX_HOME", str(tmp_path / "no-engine"))
+    repo = _make_repo(tmp_path / "consumer")
+
+    rc, out = _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert rc == 0 and out["ok"] is True
+
+
+def test_reach_flag_writes_nothing(tmp_path, capsys):
+    repo = _make_repo(tmp_path / "consumer")
+    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+
+    _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
+
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before

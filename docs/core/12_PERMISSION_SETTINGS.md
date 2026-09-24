@@ -129,6 +129,21 @@ The `_vnx_meta` key in settings.json records which keys VNX manages:
 }
 ```
 
+### T0 Guard Hooks
+
+Two hooks keep a T0 session honest. Both ship through the same three templates as the rest of `hooks` (`templates/settings_vnx_keys.json.tmpl`, `templates/init/default/settings.json.j2`, `templates/init/minimal/settings.json.j2`), so `vnx regen-settings --merge` and `vnx init` deliver them.
+
+**No subagents in T0** (`scripts/hooks/pretooluse_t0_no_subagents.py`, PreToolUse, matcher `Agent|Task`). T0 orchestrates through dispatches. A subagent started from T0 leaves no dispatch, report or receipt. The hook denies `Agent` and `Task` with "T0 gebruikt geen subagents: stage een dispatch via `vnx dispatch`".
+
+- Project settings apply to every session in the repo, headless workers included, so the hook decides per session. A session is T0 when its `cwd` is `.claude/terminals/T0` (or below), or when its `transcript_path` sits in the Claude project directory of that launch directory (name ends in `--claude-terminals-T0`). The second signal exists because the `cwd` drifts: 3 of 143 measured T0 sessions also carry the home directory as `cwd`. Workers run in a worktree root and are not touched. Neither is any other tool.
+- The deny uses `hookSpecificOutput.permissionDecision`. Measured in real T0 transcripts, that form is what Claude Code honours on PreToolUse. A flat `{"decision":"block"}` or exit code 1 lets the call through.
+- The subagent tool is called `Agent` in current Claude Code and `Task` in older versions. Guarding one name guards nothing.
+- There is no override marker. The older `pretooluse_block_subagent.sh` (OI-1643, `Task` only, every session, operator override) is a different mechanism and is not replaced.
+
+**Role-loaded alarm** (`hooks/sessionstart.sh`, T0 only). The canonical role (`role-orchestrator.md`) reaches a session only through an `@role-orchestrator.md` line in the T0 `CLAUDE.md`. When that line is missing the injection opens with `ROLE NOT LOADED: deze T0 draait zonder de canonieke rol`. It is a warning: the rest of the injection is still delivered. The measurement is the reach axis of `scripts/fleet_role_drift.py` (`--reach <t0-dir>`), not a second implementation. The hook is copied into each project by `bootstrap_hooks`, so it finds the engine through `VNX_HOME`, `~/.vnx-system/current`, `<project>/.vnx` or `<project>/.claude/vnx-system`. If none is reachable the injection opens with `ROLE CHECK UNAVAILABLE` instead of passing silently. `vnx role sync` does not restore a missing import: it refreshes the file the import points at.
+
+`hooks` is replaced entirely on a merge. A project that keeps its own hooks in `settings.json` loses them on `vnx regen-settings --merge`. Move them to `settings.local.json` first.
+
 ## Future Improvements
 
 Currently, Claude Code doesn't support `additionalDirectories` in project-specific settings files (feature request #3146). When this feature is added, we could have more granular control per terminal.
