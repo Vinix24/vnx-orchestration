@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
+from failure_classification import GATE_QUOTA_REFUSAL_REASON
+from governance_emit import _classify_lane_log_text  # the fabric's single quota-marker list — never a second scan
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
 
@@ -216,6 +218,13 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     raise UnknownGateProvider(
         f"{gate} has an unknown provider kind {kind!r} — cannot determine availability"
     )
+# The reason a quota/credit refusal is booked under. Re-exported from
+# failure_classification, which owns it so stop_conditions can reach the same
+# value without importing this module (see that constant's own docstring). The
+# full measurement and the reasoning behind classifying at write time live at
+# is_quota_refusal_text below.
+QUOTA_REFUSAL_REASON = GATE_QUOTA_REFUSAL_REASON
+
 # Infrastructure/execution failures — NOT semantic gate verdicts.
 # gate_failed means "gate completed with blocking findings"; only emit it for reasons
 # that represent a completed gate run with actual blocking findings. Anything else
@@ -266,7 +275,122 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     # `unavailable` exactly like its sibling — never `failed` and never a
     # completed verdict.
     "harness_lane_exit_nonzero",
+    # The provider refused the run because its quota/credit is spent — a
+    # billing state, not a defect in the gate or the PR. Booked `unavailable`
+    # like every other non-execution: the PR was never reviewed. See
+    # QUOTA_REFUSAL_REASON for why this reason is DERIVED at write time
+    # rather than passed in by a caller.
+    QUOTA_REFUSAL_REASON,
 })
+
+
+# ---------------------------------------------------------------------------
+# Quota refusal — classified at WRITE time, not re-derived by every reader
+# ---------------------------------------------------------------------------
+#
+# Measured 2026-09-17 on the live mission-control store
+# (dispatch D-gate-quota-105245). codex hit its ChatGPT weekly limit on three
+# consecutive PRs; all three records were booked identically:
+#
+#     status = unavailable | reason = exit_nonzero
+#     reason_detail = "Subprocess exited with code 1: You've hit your usage
+#                      limit. Upgrade to Pro ... try again at Sep 19th ..."
+#
+# The provider named its own cause, in full, in the text. The `reason` ENUM
+# recorded only the mechanics: the process exited non-zero — indistinguishable
+# from a crash, a malformed prompt, or a segfault.
+#
+# Which reader survives that, and which does not, is decided purely by whether
+# the reader happens to carry its own text scan on top:
+#
+#   - The review-gate takeover walk survives. `_classify_review_seat_failure`
+#     falls through to `_scan_seat_failure_text`, which re-reads the prose in
+#     `reason_detail`/`summary` and recovers `lane_exhausted`. Verified on
+#     those exact three records. That fallback is not free: it was built in
+#     layers (#1683 lane log, BETA3-E1 report text, OI-1477 derived report
+#     path) precisely because the reason field never carried the answer.
+#   - `stop_conditions._gate_result_cause` does NOT survive. It reads `reason`
+#     and nothing else, so it saw `reason:exit_nonzero` three times, concluded
+#     "same cause three times, therefore systemic", and tripped E6 — which
+#     blocked every dispatch in mission-control on 2026-09-17. E6 was right
+#     about what it saw. It was shown the wrong thing.
+#
+# So the classification belongs HERE, at the single choke point every gate
+# failure record flows through, and not in each reader. A reader that has to
+# reconstruct the cause from prose is a reader that can forget to.
+#
+# The reason value itself (:data:`QUOTA_REFUSAL_REASON`) is defined above,
+# next to EXECUTION_FAILURE_REASONS which needs it. It deliberately reuses
+# `lane_exhausted` — the word the fabric ALREADY uses for this state in
+# `_classify_lane_log_text`, `_LANE_EXHAUSTED_MARKERS`,
+# `_lane_exhausted_or_expired` and the takeover chain — rather than coining a
+# synonym. A second word for one state is a vocabulary that overlaps only by
+# agreement, and that fails open the first time a reader knows one word and
+# the writer uses the other.
+
+# Reasons that name only the MECHANICS of a failure and no cause at all — the
+# process exited, the lane errored — so the provider's own words in
+# `reason_detail` are the only statement of cause that exists. Only these may
+# be re-booked as a quota refusal.
+#
+# Deliberately narrow, and the exclusions are the point:
+#   - `timeout`/`stall`: a different mechanism. The process never terminated
+#     on its own, so whatever text it had emitted before being killed does not
+#     describe why it ended.
+#   - `gate_runner_missing`, `gate_not_subprocess_routable`,
+#     `unsupported_gate_type`, `provider_not_installed`, `provider_disabled`:
+#     runner refusals that already name their own cause. Rewriting one of
+#     these would claim a provider refused a run it was never asked to do.
+#   - `auth_error`, `network_error`, `validation_failed`, ...: already carry a
+#     cause; a second, text-derived one would overwrite a measurement with a
+#     guess.
+_CAUSE_AGNOSTIC_FAILURE_REASONS: frozenset = frozenset({
+    "exit_nonzero",
+    "subprocess_error",
+    "subprocess_failed",
+    "harness_lane_dispatch_error",
+    "harness_lane_no_model_response",
+    "harness_lane_exit_nonzero",
+})
+
+
+def is_quota_refusal_text(reason: str, reason_detail: str) -> bool:
+    """Does this failure record's OWN text carry a provider quota marker?
+
+    Classification runs through ``governance_emit._classify_lane_log_text`` —
+    the single marker list the fabric already owns
+    (``_LANE_EXHAUSTED_MARKERS``), never a second hand-rolled scan here. A
+    marker added there for one reader must reach every reader; two lists drift
+    the moment one of them is updated.
+
+    ONLY ``reason_detail`` is scanned — never ``failure_reason``, and never
+    ``summary``. ``failure_reason`` on a gate result is the TAKEOVER
+    ANNOTATION: it carries the text of the gate this seat was handed over
+    FROM, not this gate's own failure. Measured on the live
+    ``pr-1127-deepseek_gate.json``, which is exactly that trap:
+
+        reason        = gate_runner_missing
+        reason_detail = "scripts/deepseek_gate.py does not exist yet"
+        failure_reason= "codex_gate unavailable (exit_nonzero): ... You've hit
+                         your usage limit ..."
+
+    Scanning ``failure_reason`` there would rebrand "this gate was never
+    built" as "this provider is out of quota" — attributing codex's billing
+    state to deepseek. ``reason_detail`` is the only field that is always a
+    statement about THIS gate's own run.
+
+    Returns False for any reason outside
+    :data:`_CAUSE_AGNOSTIC_FAILURE_REASONS`, whatever the text says: a reason
+    that already names a cause is a measurement, and this function does not
+    get to overrule it.
+    """
+    if reason not in _CAUSE_AGNOSTIC_FAILURE_REASONS:
+        return False
+    text = (reason_detail or "").strip()
+    if not text:
+        return False
+    state, _snippet = _classify_lane_log_text(text)
+    return state == "lane_exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -1701,6 +1825,24 @@ def record_failure(
     now = utc_now_iso()
     reason = result["reason"]
     reason_detail = result["reason_detail"]
+
+    # A quota refusal is booked as a quota refusal (see is_quota_refusal_text).
+    # The caller's reason named the mechanics only; the provider named the
+    # cause in the text, and a cause outranks a mechanism. The original reason
+    # is PRESERVED on the record — this reclassifies, it never destroys: the
+    # exit code stays readable both in `reason_before_classification` and
+    # verbatim at the head of `reason_detail`.
+    reason_before_classification = ""
+    if is_quota_refusal_text(reason, reason_detail):
+        logger.info(
+            "gate_recorder: gate=%s pr=%s booking reason=%r instead of %r — the "
+            "failure text carries a provider quota marker, so this is a billing "
+            "state and not a defect in the gate or the PR",
+            gate, pr_id or pr_number, QUOTA_REFUSAL_REASON, reason,
+        )
+        reason_before_classification = reason
+        reason = QUOTA_REFUSAL_REASON
+
     is_execution_failure = reason in EXECUTION_FAILURE_REASONS
     status = "unavailable" if is_execution_failure else "failed"
 
@@ -1732,6 +1874,8 @@ def record_failure(
         "residual_risk": f"Gate {reason}. Re-run required.",
         "recorded_at": now,
     }
+    if reason_before_classification:
+        failure_payload["reason_before_classification"] = reason_before_classification
     if extra:
         # Identity and verdict are the record's own. So is the evidence trio:
         # `report_path`, `contract_hash` and `required_reruns` are what
@@ -1744,6 +1888,10 @@ def record_failure(
         reserved = {
             "status", "reason", "reason_detail", "gate", "pr_id", "pr_number",
             "report_path", "contract_hash", "required_reruns",
+            # Derived here from the reason the caller actually passed. A
+            # caller able to set it could claim a reclassification that never
+            # happened — or hide one that did.
+            "reason_before_classification",
         }
         failure_payload.update(
             {k: v for k, v in extra.items() if k not in reserved}

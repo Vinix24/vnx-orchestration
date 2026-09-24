@@ -87,6 +87,27 @@ FAILURE_CLASSES = frozenset({
     "unknown",
 })
 
+# The `reason` a REVIEW-GATE result record is booked under when the provider
+# refused the run because its quota/credit is spent. The gate-result store has
+# its own reason vocabulary (gate_recorder.EXECUTION_FAILURE_REASONS), separate
+# from the receipt-facing FAILURE_CLASSES above — this is that store's word for
+# the same underlying state `credit_exhausted` names here.
+#
+# It lives in THIS module, not in gate_recorder where it is written, because
+# both ends of the contract have to reach it: gate_recorder (which imports the
+# whole receipt stack) and stop_conditions (which documents itself as
+# self-contained and importable on its own — importing gate_recorder from it
+# breaks that, measured). This module is stdlib-only, so it is the one place
+# both can import from cheaply.
+#
+# The value deliberately reuses `lane_exhausted`, the word the fabric already
+# uses for this state in governance_emit._LANE_EXHAUSTED_MARKERS,
+# gate_request_handler._lane_exhausted_or_expired and the takeover chain. A
+# synonym would be a vocabulary that overlaps only by agreement, and that
+# fails open the first time a reader knows one word and the writer uses the
+# other.
+GATE_QUOTA_REFUSAL_REASON = "lane_exhausted"
+
 # Credit/balance exhaustion — matched on phrases actually observed in the
 # ledger (measured 2026-08-16, dispatch 20260816-p9p10-failure-reason-root):
 # deepseek-harness prints a direct "API Error: 402 Insufficient Balance";
