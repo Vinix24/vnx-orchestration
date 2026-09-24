@@ -71,6 +71,16 @@ glm-5.3.
   `com.vnx.fleet-role-drift` runs `fleet_role_drift.py --write-state` every
   6 hours so its beacon exists. Both are templates under `scripts/launchd/`
   and are installed by hand with `reload_plist.sh`.
+- **The two subsystem beacons get a driver.** `governance-enforcement-stack`
+  and `plan-gate-panel` read stale in t0_state from 12 July to 24 September.
+  `subsystem_health.aggregate()` only ran when someone typed
+  `vnx subsystems --probe`, and the beacons it writes carry a 24-hour window.
+  `com.vnx.subsystem-probe` runs `python3 -m vnx_cli.main subsystems --probe`
+  (the entry `vnx subsystems` wraps) every 6 hours and once on install, and
+  the beacons land in `<data_dir>/health/`. It is installed by hand with
+  `reload_plist.sh`, from the primary checkout: the probes read the
+  git-ignored `.vnx-attest/` ledger of the checkout they run from, so a
+  worktree measures nothing and writes no beacon.
 - **A test run outside pytest could write the real central store.** The #1333
   guard only recognised pytest, and `tests/conftest.py` pins a tmp store only
   under pytest. So `python -m unittest test_auto_commit_stash_isolation` put a
