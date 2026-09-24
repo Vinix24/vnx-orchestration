@@ -21,8 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 
 from smart_router import (
     GOVERNANCE_VARIANT_GATE,
+    PRIMARY_REVIEW_SEAT,
     _GATE_WEIGHT,
     _GATE_BASELINE,
+    _primary_review_gate,
     derive_governance_variant,
     resolve_gate,
 )
@@ -208,9 +210,27 @@ class TestVocabularyGuard:
         assert unknown == set(), f"gate map declares unknown variants: {sorted(unknown)}"
 
     def test_every_mapped_gate_is_a_legal_gate_enum(self):
+        """Every gate the table can PUT ON A DISPATCH is a legal Gate member.
+
+        The heavy variants carry PRIMARY_REVIEW_SEAT instead of a literal, so
+        the table's own value is a placeholder by design; the property is about
+        what it RESOLVES to, which is what reaches the spec and the obligation.
+        """
         legal = {g.value for g in Gate}
         for variant, gate in GOVERNANCE_VARIANT_GATE.items():
-            assert gate in legal, f"variant {variant!r} maps to illegal gate {gate!r}"
+            resolved = _primary_review_gate() if gate == PRIMARY_REVIEW_SEAT else gate
+            assert resolved in legal, (
+                f"variant {variant!r} resolves to illegal gate {resolved!r}"
+            )
+
+    def test_light_variants_keep_a_literal_gate(self):
+        """Only the heavy variants are operator-routed; the light rungs stay
+        literal, or "minimal" for docs would silently become a full diff review."""
+        assert GOVERNANCE_VARIANT_GATE["minimal"] == "ci_gate"
+        assert GOVERNANCE_VARIANT_GATE["light"] == "claude_github_optional"
+        assert GOVERNANCE_VARIANT_GATE["business-light"] == "claude_github_optional"
+        assert GOVERNANCE_VARIANT_GATE["coding-strict"] == PRIMARY_REVIEW_SEAT
+        assert GOVERNANCE_VARIANT_GATE["default"] == PRIMARY_REVIEW_SEAT
 
     def test_baseline_gate_is_the_heaviest(self):
         assert _GATE_BASELINE == "codex_gate"

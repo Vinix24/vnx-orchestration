@@ -35,6 +35,7 @@ from dispatch_spec import (  # noqa: E402
     PathAccess,
     Provider,
     Reject,
+    ReviewGateConfigError,
     ValidatedSpec,
     validate,
     write_paths,
@@ -1765,22 +1766,39 @@ def _resolve_gate_via_router(vspec: ValidatedSpec) -> "tuple[ValidatedSpec, Opti
     Returns (vspec, gate_reason): a rebuilt ValidatedSpec carrying the filled
     gate (or the original when the spec already declared one), and a trace
     string for the dry-run output / receipt; never a bare None when the router
-    ran. Fail-open: a broken derivation returns the original vspec unchanged
-    with the gate left empty (today's baseline), logged at WARNING.
+    ran. Fail-open for an ordinary derivation bug: the original vspec is
+    returned unchanged with the gate left empty (today's baseline), logged at
+    WARNING. NOT fail-open for ReviewGateConfigError: an unreadable
+    VNX_DEFAULT_REVIEW_STACK is re-raised so the caller refuses the dispatch by
+    name (see _primary_review_gate) — a broken config must never be answered
+    with a hardcoded gate, which is the mismatch this guards against.
     """
     spec = vspec.spec
     if (spec.gate or "").strip():
         return vspec, None
 
+    # ReviewGateConfigError is imported at module top from dispatch_spec, not
+    # from smart_router: the except clause below and the caller's both need it
+    # bound even when this import fails, and a failed import must fail open.
     try:
         from smart_router import resolve_gate  # noqa: PLC0415
+    except Exception as exc:
+        logger.warning(
+            "smart-router import failed, gate left empty (fail-open): %s",
+            exc,
+            exc_info=True,
+        )
+        return vspec, None
 
+    try:
         resolution = resolve_gate(
             explicit_gate=spec.gate,
             dispatch_paths=[str(dp.path) for dp in spec.dispatch_paths],
             task_class=spec.task_class,
             irreversible=spec.irreversible,
         )
+    except ReviewGateConfigError:
+        raise
     except Exception as exc:
         logger.warning(
             "smart-router gate resolution failed, gate left empty (fail-open): %s",
@@ -3216,7 +3234,15 @@ def run_dispatch(
     # the spec is silent. The gate reason is merged into door_route_reason so the
     # chosen variant + reason are visible in the dry-run output and carried on
     # the plan (route_reason), never a silent lighter gate.
-    vspec, gate_reason = _resolve_gate_via_router(vspec)
+    # An unreadable VNX_DEFAULT_REVIEW_STACK refuses the dispatch BY NAME rather
+    # than falling back to a hardcoded gate (see _primary_review_gate). The
+    # fallback is what made every obligation declare codex_gate for a project
+    # whose operator had routed review to glm_gate (2026-09-19, mission-control).
+    try:
+        vspec, gate_reason = _resolve_gate_via_router(vspec)
+    except ReviewGateConfigError as exc:
+        _emit_reject(Reject("gate-config-unreadable", str(exc)))
+        return 1
     if gate_reason:
         door_route_reason = (
             f"{door_route_reason};{gate_reason}" if door_route_reason else gate_reason

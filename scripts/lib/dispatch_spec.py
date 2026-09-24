@@ -36,7 +36,11 @@ class Provider(str, Enum):
 
 
 class Gate(str, Enum):
-    """CLOSED set — the ONLY legal review-gate names (OI-845).
+    """CLOSED set of the review-gate names the closure verifier reasons about (OI-845).
+
+    The full set of LEGAL gate names is ``REGISTERED_GATE_NAMES`` below: this
+    enum plus ``GATES_OUTSIDE_ENUM``. Read that, not this enum, to decide
+    whether a name may be declared.
 
     Mirrors the gate names ``gate_recorder.py``/``gate_request_handler.py`` already
     dispatch on; this is the canonical enum they lacked. An empty string means
@@ -57,6 +61,45 @@ class Gate(str, Enum):
     WIRING_GATE             = "wiring_gate"
     KIMI_GATE               = "kimi_gate"
     GLM_GATE                = "glm_gate"
+
+
+# Review gates that are registered and runnable but deliberately NOT members of
+# the closed ``Gate`` enum. deepseek_gate is a config-based harness-lane gate
+# (gate_recorder.GATE_PROVIDERS, OI-1714/OI-1838) with a request branch in
+# gate_request_handler, yet it has no closure_verifier._GATE_HANDLERS entry, and
+# adding an enum member without one trips test_closure_verifier_gate_enum_drift
+# (OI-1094). Membership here says "this name exists and may be declared, staged
+# and requested"; it does NOT claim the closure verifier can attest it.
+GATES_OUTSIDE_ENUM = frozenset({"deepseek_gate"})
+
+# THE answer to "which gate names exist". Every reader that has to decide
+# whether a gate name is legal reads this one set: dispatch_spec.validate()
+# Rule 16, dispatch_bridge._canonical_gate, the takeover-chain parser in
+# gate_request_handler and smart_router._primary_review_gate. Each of them used
+# to build its own copy from the bare enum, and the copies disagreed: a stack
+# naming deepseek_gate was refused by the router and by the staging bridge while
+# ``vnx gate --only deepseek_gate`` ran it. A gate is added HERE (or to the enum)
+# once, and test_gate_name_registry pins the set against the runnable registry
+# (gate_recorder.GATE_PROVIDERS) so it cannot drift from what actually runs.
+REGISTERED_GATE_NAMES = frozenset(g.value for g in Gate) | GATES_OUTSIDE_ENUM
+
+
+class ReviewGateConfigError(RuntimeError):
+    """VNX_DEFAULT_REVIEW_STACK could not be read, or names no gate that exists.
+
+    Raised instead of falling back to a hardcoded gate. A silent fallback is
+    exactly what produced the 2026-09-19 mismatch: mission-control had
+    ``VNX_DEFAULT_REVIEW_STACK=glm_gate,claude_github_optional`` in its project
+    config while every new obligation declared ``codex_gate``, so five PRs sat
+    blocked for hours on codex quota behind a gate the operator never asked for.
+    An unreadable stack is amber, never green: the door refuses the dispatch and
+    names the key, the value and the underlying error.
+
+    Defined here, next to the gate-name registry, and not in smart_router: the
+    door has to catch it, and it must be able to do so even when smart_router
+    cannot be imported (that import failure is fail-open, see
+    dispatch_cli._resolve_gate_via_router). smart_router re-exports the name.
+    """
 
 
 # Legacy lifecycle PHASE names that leak into the spec ``gate`` field but are not
@@ -483,9 +526,9 @@ def validate(
                 f"work_ref {spec.work_ref!r} is not a valid branch name ({_err})",
             )
 
-    # Rule 16 — review gate must be a known Gate enum member (OI-845 / fix-1588
+    # Rule 16 — review gate must be a registered gate name (OI-845 / fix-1588
     # advisory). Empty means "no gate assigned" (the smart router derives one
-    # later); any non-empty value outside the closed enum is a typo (e.g.
+    # later); any non-empty value outside REGISTERED_GATE_NAMES is a typo (e.g.
     # "codex_gat") and must be refused at the door, not discovered later as a
     # silently-unknown gate that passes on file presence alone. Legacy lifecycle
     # phase names (LEGACY_GATE_SENTINELS) are admitted as the no-gate sentinel,
@@ -493,13 +536,13 @@ def validate(
     _gate_name = (spec.gate or "").strip()
     if (
         _gate_name
-        and _gate_name not in Gate._value2member_map_
+        and _gate_name not in REGISTERED_GATE_NAMES
         and _gate_name.lower() not in LEGACY_GATE_SENTINELS
     ):
         return Reject(
             "bad-gate",
             f"gate {spec.gate!r} is not a known review gate; "
-            f"valid gates: {', '.join(sorted(Gate._value2member_map_))}",
+            f"valid gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}",
         )
 
     return ValidatedSpec(
