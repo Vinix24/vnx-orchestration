@@ -80,7 +80,10 @@ def _resolve_session_id(receipt: Dict[str, Any], state_dir: Optional[Path] = Non
     Args:
         receipt: Receipt payload.
         state_dir: Resolved state directory (caller should supply to avoid
-                   double-resolution). Falls back to resolve_state_dir(__file__).
+                   double-resolution). Falls back to the canonical per-project
+                   store (``vnx_paths.resolve_state_dir()``), never a path
+                   derived from this module's own location: inside a central
+                   install that is the read-only version directory (OI-1788).
     """
     metadata = receipt.get("metadata") if isinstance(receipt.get("metadata"), dict) else {}
     terminal = str(receipt.get("terminal") or "unknown").strip()
@@ -91,7 +94,9 @@ def _resolve_session_id(receipt: Dict[str, Any], state_dir: Optional[Path] = Non
             return value
 
     if state_dir is None:
-        state_dir = facade.resolve_state_dir(__file__)
+        import vnx_paths
+
+        state_dir = vnx_paths.resolve_state_dir()
     current_session_file = state_dir / f"current_session_{terminal}"
     if current_session_file.exists():
         try:
