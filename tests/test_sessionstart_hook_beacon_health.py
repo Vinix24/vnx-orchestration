@@ -258,6 +258,50 @@ class TestBeaconHealthDigestExpectedAndParked:
             "parked is excluded from the bad-list entirely, not relisted under a new label: " + ctx
         )
 
+    def test_self_learning_loop_subsystem_beacon_is_excluded_from_the_not_ok_list(
+        self, tmp_path, monkeypatch,
+    ):
+        """Operator decision 2026-09-24: intelligence-self-learning-loop (the
+        subsystem beacon subsystem_health.aggregate() writes since #1903) measures
+        the learning loop parked on 2026-09-09. Older than its one-day interval it
+        must not surface as [stale]."""
+        _clean_env(monkeypatch)
+        real_t0_dir = REPO / ".claude" / "terminals" / "T0"
+        monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "vnx-data-home"))
+        env = dict(os.environ)
+
+        data_dir = Path(vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+        _write_beacon(
+            data_dir, "intelligence-self-learning-loop", status="ok",
+            age_seconds=2 * 86400, expected_interval_seconds=86400,
+        )
+
+        out = _run_hook(real_t0_dir, env)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "[stale] intelligence-self-learning-loop" not in ctx, ctx
+        assert "intelligence-self-learning-loop" not in ctx, (
+            "parked is excluded from the bad-list entirely, not relisted under a new label: " + ctx
+        )
+
+    def test_self_learning_loop_subsystem_beacon_that_fails_still_surfaces(
+        self, tmp_path, monkeypatch,
+    ):
+        """Parking suppresses silence, not a defect: a fresh status=fail stays loud."""
+        _clean_env(monkeypatch)
+        real_t0_dir = REPO / ".claude" / "terminals" / "T0"
+        monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "vnx-data-home"))
+        env = dict(os.environ)
+
+        data_dir = Path(vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+        _write_beacon(
+            data_dir, "intelligence-self-learning-loop", status="fail",
+            age_seconds=60, expected_interval_seconds=86400,
+        )
+
+        out = _run_hook(real_t0_dir, env)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "[fail] intelligence-self-learning-loop" in ctx, ctx
+
     def test_expected_component_that_never_wrote_surfaces_as_absent(self, tmp_path, monkeypatch):
         """fleet_role_drift's real shape: an ast-registered writer that has
         never once produced a beacon file -- invisible before this PR's

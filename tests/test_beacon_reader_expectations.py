@@ -145,6 +145,88 @@ class TestT0StateHonoursParkedComponents:
 
 
 # ---------------------------------------------------------------------------
+# A2. the self-learning-loop subsystem beacon is parked with the layer it measures
+# ---------------------------------------------------------------------------
+
+_LOOP_BEACON = "intelligence-self-learning-loop"
+
+
+class TestSelfLearningLoopBeaconIsParked:
+    """Operator decision 2026-09-24 (absence-is-loud, punt 1). Since #1903 the
+    subsystem probes read the central store, so ``subsystem_health.aggregate()``
+    writes ``intelligence-self-learning-loop`` (subsystem beacons default to a
+    one-day interval) and it read ``stale`` in t0_state. It measures the learning
+    loop the operator parked on 2026-09-09, so it reads ``parked`` like the two
+    writers parked then. Parking covers silence only: a ``fail`` stays ``fail``."""
+
+    def test_beacon_older_than_its_interval_reads_parked_in_t0_state(self, tmp_path: Path) -> None:
+        data_dir = _data_dir(tmp_path)
+        _write_beacon(data_dir, _LOOP_BEACON, status="ok", age_seconds=2 * _DAY, interval=_DAY)
+
+        bh = _t0_beacons(data_dir, expected_beacon_components=())
+
+        assert bh["beacons"][_LOOP_BEACON]["health"] == "parked"
+        assert bh["counts"]["parked"] == 1
+        assert bh["counts"]["stale"] == 0
+        assert bh["overall"] == "ok"
+
+    def test_fresh_degraded_beacon_reads_parked_in_t0_state(self, tmp_path: Path) -> None:
+        """What the probe writes at ignore_rate 0.868: PROBE_TO_BEACON maps
+        ``degraded`` to a self-reported ``stale``, however fresh the write is."""
+        data_dir = _data_dir(tmp_path)
+        _write_beacon(data_dir, _LOOP_BEACON, status="stale", age_seconds=60, interval=_DAY)
+
+        bh = _t0_beacons(data_dir, expected_beacon_components=())
+
+        assert bh["beacons"][_LOOP_BEACON]["health"] == "parked"
+
+    def test_fail_beacon_stays_fail_in_t0_state(self, tmp_path: Path) -> None:
+        data_dir = _data_dir(tmp_path)
+        _write_beacon(data_dir, _LOOP_BEACON, status="fail", age_seconds=60, interval=_DAY)
+
+        bh = _t0_beacons(data_dir, expected_beacon_components=())
+
+        assert bh["beacons"][_LOOP_BEACON]["health"] == "fail"
+        assert bh["overall"] == "fail"
+
+    def test_beacon_older_than_its_interval_reads_parked_in_the_sessionstart_reader(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        data_dir = _data_dir(tmp_path)
+        _write_beacon(data_dir, _LOOP_BEACON, status="ok", age_seconds=2 * _DAY, interval=_DAY)
+
+        assert _health_check_verdicts(data_dir, capsys)[_LOOP_BEACON] == "parked"
+
+    def test_fail_beacon_stays_fail_in_the_sessionstart_reader(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        data_dir = _data_dir(tmp_path)
+        _write_beacon(data_dir, _LOOP_BEACON, status="fail", age_seconds=60, interval=_DAY)
+
+        assert _health_check_verdicts(data_dir, capsys)[_LOOP_BEACON] == "fail"
+
+    def test_the_beacon_is_not_invented_when_no_probe_ever_wrote_it(self, tmp_path: Path) -> None:
+        """Parking changes how a beacon that exists is classified. It is not an
+        expectation, so nothing appears for a subsystem that never wrote one."""
+        data_dir = _data_dir(tmp_path)
+
+        bh = _t0_beacons(data_dir)
+
+        assert _LOOP_BEACON not in bh["beacons"]
+
+    def test_a_neighbouring_subsystem_beacon_is_not_parked(self, tmp_path: Path) -> None:
+        """Parking is per name: another cockpit subsystem that has gone stale is
+        still a finding."""
+        data_dir = _data_dir(tmp_path)
+        _write_beacon(data_dir, "plan-gate-panel", status="ok", age_seconds=2 * _DAY, interval=_DAY)
+
+        bh = _t0_beacons(data_dir, expected_beacon_components=())
+
+        assert bh["beacons"]["plan-gate-panel"]["health"] == "stale"
+        assert bh["overall"] == "stale"
+
+
+# ---------------------------------------------------------------------------
 # B. an event-driven writer's silence is not a finding
 # ---------------------------------------------------------------------------
 
@@ -250,6 +332,7 @@ class TestReadersAgree:
         data_dir = _data_dir(tmp_path)
         _write_beacon(data_dir, "learning_loop", age_seconds=90 * _DAY, interval=_DAY)
         _write_beacon(data_dir, "intelligence_daemon", age_seconds=90 * _DAY, interval=300)
+        _write_beacon(data_dir, _LOOP_BEACON, age_seconds=2 * _DAY, interval=_DAY)
         _write_beacon(data_dir, "t0_state_builder", age_seconds=30, interval=1800)
         _write_beacon(data_dir, "ledger_health", status="fail", age_seconds=30, interval=_DAY)
         # cleanup_worker_exit: never wrote. fleet_role_drift: never wrote.
@@ -262,5 +345,6 @@ class TestReadersAgree:
         assert t0_state == sessionstart
         assert t0_state["learning_loop"] == "parked"
         assert t0_state["intelligence_daemon"] == "parked"
+        assert t0_state[_LOOP_BEACON] == "parked"
         assert t0_state["fleet_role_drift"] == "absent"
         assert t0_state.get("cleanup_worker_exit") != "absent"

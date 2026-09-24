@@ -35,12 +35,27 @@ def _template_labels() -> "set[str]":
     return labels
 
 
-class TestParkedComponentsIsUntouched:
-    def test_the_existing_parked_set_is_unchanged(self):
-        assert beacon_register.PARKED_COMPONENTS == frozenset({"learning_loop", "intelligence_daemon"})
+class TestParkedComponents:
+    def test_the_two_original_writers_are_still_parked(self):
+        assert {"learning_loop", "intelligence_daemon"} <= beacon_register.PARKED_COMPONENTS
 
-    def test_parked_component_names_still_reads_it(self):
-        assert beacon_register.parked_component_names() == ("intelligence_daemon", "learning_loop")
+    def test_the_self_learning_loop_subsystem_beacon_is_parked_with_them(self):
+        """Operator decision 2026-09-24: the same intelligence layer, so the same parking."""
+        assert "intelligence-self-learning-loop" in beacon_register.PARKED_COMPONENTS
+
+    def test_exactly_the_three_components_the_operator_parked(self):
+        assert beacon_register.PARKED_COMPONENTS == frozenset({
+            "learning_loop", "intelligence_daemon", "intelligence-self-learning-loop",
+        })
+
+    def test_parked_component_names_reads_all_three_sorted(self):
+        assert beacon_register.parked_component_names() == (
+            "intelligence-self-learning-loop", "intelligence_daemon", "learning_loop",
+        )
+
+    def test_a_component_nobody_parked_is_not_in_the_set(self):
+        assert "t0_state_builder" not in beacon_register.PARKED_COMPONENTS
+        assert "governance-enforcement-stack" not in beacon_register.PARKED_COMPONENTS
 
 
 class TestParkedArtifacts:
