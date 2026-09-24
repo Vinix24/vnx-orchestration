@@ -71,6 +71,22 @@ glm-5.3.
   `com.vnx.fleet-role-drift` runs `fleet_role_drift.py --write-state` every
   6 hours so its beacon exists. Both are templates under `scripts/launchd/`
   and are installed by hand with `reload_plist.sh`.
+- **A test run outside pytest could write the real central store.** The #1333
+  guard only recognised pytest, and `tests/conftest.py` pins a tmp store only
+  under pytest. So `python -m unittest test_auto_commit_stash_isolation` put a
+  `fail` beacon, register events and a `runtime_coordination.db` for
+  `dispatch-fwd-01` into `~/.vnx-data/vnx-dev`. The guard is now
+  `vnx_paths.refuse_real_central_store_write_under_test_runner` (the pytest-only
+  name is gone, no alias) and reads the runner itself: a `unittest` frame on any
+  thread's call stack, via `running_under_test_runner()`. It is not an
+  environment variable and not `import unittest`, so a production process that
+  imports `unittest` or `unittest.mock` is untouched. It sits on
+  `state_writer` (every state NDJSON append, the dispatch register included),
+  `HealthBeacon`, `cleanup_worker_exit` and the four writers of
+  `intelligence_usage.ndjson`, next to the receipt append that already had it.
+  The test itself is hermetic now: it patched `subprocess_dispatch.SubprocessAdapter`,
+  but `claude_spawn` imports its own, so each delivery test spawned a real
+  `claude -p`, bounded only by the 900 s `total_deadline`.
 
 ## [1.6.2] — 2026-09-12
 

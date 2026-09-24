@@ -165,11 +165,12 @@ def _isolation_guard_error_class():
     return TestIsolationGuardError
 
 
-def _refuse_real_store_write_under_pytest(target: Path) -> None:
+def _refuse_real_store_write_under_test_runner(target: Path) -> None:
     """OI-1043 guard seam: refuse an imminent WRITE into the real central
-    store (~/.vnx-data) while running under pytest. No-op outside pytest."""
+    store (~/.vnx-data) while running under a test runner (pytest or unittest).
+    No-op in any other process."""
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
-    from vnx_paths import refuse_real_central_store_write_under_pytest as _refuse
+    from vnx_paths import refuse_real_central_store_write_under_test_runner as _refuse
     _refuse(target)
 
 
@@ -212,14 +213,14 @@ def _mirror_receipt_to_central_or_raise(receipt: Dict[str, Any], primary_path: P
     pending-mirror queue can retain the record for a later flush.
 
     OI-1043: raises ``TestIsolationGuardError`` when the resolved central
-    target is the real central store and the process runs under pytest —
+    target is the real central store and the process runs under a test runner —
     that is an isolation violation, not retryable mirror debt, and callers
     must re-raise it rather than queue the record.
     """
     central_receipts = _resolve_central_receipts_path(receipt, primary_path)
     if central_receipts is None:
         return False
-    _refuse_real_store_write_under_pytest(central_receipts)
+    _refuse_real_store_write_under_test_runner(central_receipts)
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from dual_writer import append_record_locked
@@ -506,8 +507,8 @@ def append_receipt_payload(
     # straight into the real central store (the #1333 guard did not cover
     # the receipt append surfaces — the suite leaked 684+ lines through the
     # mirror, and an explicit receipts_file under ~/.vnx-data wrote through
-    # unguarded). No-op outside pytest.
-    _refuse_real_store_write_under_pytest(receipt_path)
+    # unguarded). No-op outside a pytest or unittest run.
+    _refuse_real_store_write_under_test_runner(receipt_path)
 
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_file_for(receipt_path)

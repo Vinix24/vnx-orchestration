@@ -83,24 +83,20 @@ def _make_stub_converter(tmp: Path, *, exit_code: int = 0) -> Path:
         encoding="utf-8",
     )
     converter.chmod(0o755)
-    # The real beacon writer lives alongside the converter under lib/ — copy
-    # it into the stub tree so _run_receipt_converter_scan's second stage
-    # (piping stderr into receipt_conversion_rejection_beacon.py) resolves
-    # against the SAME "$SCRIPTS_DIR/lib/..." path the production script
-    # uses, exactly like the real deployment layout.
-    real_beacon_writer = (
-        Path(__file__).resolve().parent.parent
-        / "scripts" / "lib" / "receipt_conversion_rejection_beacon.py"
-    )
-    (stub_lib / "receipt_conversion_rejection_beacon.py").write_text(
-        real_beacon_writer.read_text(encoding="utf-8"), encoding="utf-8",
-    )
-    real_health_beacon = (
-        Path(__file__).resolve().parent.parent / "scripts" / "lib" / "health_beacon.py"
-    )
-    (stub_lib / "health_beacon.py").write_text(
-        real_health_beacon.read_text(encoding="utf-8"), encoding="utf-8",
-    )
+    # The stub tree is the REAL lib/ with only the converter replaced.
+    # _run_receipt_converter_scan's second stage (piping stderr into
+    # receipt_conversion_rejection_beacon.py) then resolves against the SAME
+    # "$SCRIPTS_DIR/lib/..." path the production script uses, and the beacon
+    # writer finds its whole import chain beside it as it does in a real
+    # deployment (health_beacon -> vnx_paths -> data_dir_guard, project_root,
+    # vnx_ids). Hand-copying just the beacon writer and health_beacon.py broke
+    # the moment health_beacon gained a sibling import: the writer died on
+    # ModuleNotFoundError and no beacon was written.
+    real_lib = Path(__file__).resolve().parent.parent / "scripts" / "lib"
+    for entry in real_lib.iterdir():
+        if entry.name in (converter.name, "__pycache__"):
+            continue
+        (stub_lib / entry.name).symlink_to(entry)
     return stub_scripts
 
 
