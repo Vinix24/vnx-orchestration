@@ -75,17 +75,46 @@ case "$TERMINAL" in
     # lockstep with the runtime — never a second hand-rolled resolver.
     # Anchored on this hook's OWN file location (not $PWD), so resolution
     # doesn't depend on which terminal directory happened to be current.
+    #
+    # The scripts root is found ONCE, below, and every script call in this hook
+    # uses it. It used to be "$_HOOK_DIR/../scripts" everywhere, which only holds
+    # in the fabric repo (hook in hooks/, ../scripts = the repo's scripts/). A
+    # consumer's deployed hook sits in <project>/.claude/hooks/, so ../scripts is
+    # <project>/.claude/scripts, which does not exist: v1.6.2 reported "STATE
+    # STORE NOT FOUND" and every section below it as UNMEASURED in every consumer
+    # (measured in sales-copilot, mission-control and SEOcrawler_v2). The
+    # resolver is still vnx_paths.resolve_paths() and nothing else; this only
+    # decides which copy of it to run.
     _VNX_STATE_DIR=""
     _VNX_DATA_DIR=""
     _VNX_PY=""
+    _VNX_SCRIPTS_ROOT=""
+    _VNX_SCRIPTS_TRIED=""
     _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || _HOOK_DIR=""
-    if [ -n "$_HOOK_DIR" ] && [ -f "$_HOOK_DIR/../scripts/lib/vnx_paths.py" ]; then
-      _VNX_PY="$_HOOK_DIR/../.venv/bin/python"
+    # $1 = label for the "tried" list, $2 = candidate root ('' when its source
+    # is unset). The first candidate that carries lib/vnx_paths.py wins.
+    _vnx_try_scripts_root() {
+      _VNX_SCRIPTS_TRIED="${_VNX_SCRIPTS_TRIED:+$_VNX_SCRIPTS_TRIED; }$1 ${2:-not set}"
+      if [ -z "$_VNX_SCRIPTS_ROOT" ] && [ -n "$2" ] && [ -f "$2/lib/vnx_paths.py" ]; then
+        _VNX_SCRIPTS_ROOT="$2"
+      fi
+      return 0
+    }
+    _vnx_try_scripts_root "(a) hook-relative:" "${_HOOK_DIR:+$_HOOK_DIR/../scripts}"
+    _vnx_try_scripts_root "(b) \$VNX_HOME/scripts:" "${VNX_HOME:+$VNX_HOME/scripts}"
+    _vnx_try_scripts_root "(c) installed fabric:" "${HOME:+$HOME/.vnx-system/current/scripts}"
+    if [ -z "$_VNX_SCRIPTS_ROOT" ]; then
+      _VNX_RESOLVE_WHY="no scripts root with lib/vnx_paths.py found. Tried ${_VNX_SCRIPTS_TRIED}"
+    else
+      _VNX_RESOLVE_WHY="vnx_paths.resolve_paths() ran from ${_VNX_SCRIPTS_ROOT} and returned no state dir"
+    fi
+    if [ -n "$_VNX_SCRIPTS_ROOT" ]; then
+      _VNX_PY="$_VNX_SCRIPTS_ROOT/../.venv/bin/python"
       [ -x "$_VNX_PY" ] || _VNX_PY="/opt/homebrew/opt/python@3.12/bin/python3.12"
       [ -x "$_VNX_PY" ] || _VNX_PY="python3"
       _VNX_PATHS_OUT="$("$_VNX_PY" -c "
 import sys
-sys.path.insert(0, '$_HOOK_DIR/../scripts/lib')
+sys.path.insert(0, '$_VNX_SCRIPTS_ROOT/lib')
 from vnx_paths import resolve_paths
 p = resolve_paths()
 print(p['VNX_STATE_DIR'])
@@ -167,7 +196,7 @@ ${T0_CONTRACT_INVALID}"
       # "No open items data" default that would read as an ordinary quiet
       # project instead of an unresolved store — the exact fail-open this
       # fix closes.
-      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: vnx_paths.py unreachable from here>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
+      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: ${_VNX_RESOLVE_WHY}>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
     fi
 
     # ── Beacon health digest (component heartbeats, D3b absence-is-loud) ──
@@ -187,7 +216,7 @@ ${T0_CONTRACT_INVALID}"
     # on VNX_HOME (D1 poort B, unmerged as of this PR) — a live read here
     # cannot inherit that staleness.
     BEACON_SECTION=""
-    _HEALTH_CHECK_PY="$_HOOK_DIR/../scripts/health_check.py"
+    _HEALTH_CHECK_PY="$_VNX_SCRIPTS_ROOT/health_check.py"
     if [ -n "$_VNX_DATA_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_HEALTH_CHECK_PY" ]; then
       _HEALTH_CHECK_ARGS=(--state-dir "$_VNX_DATA_DIR" --json)
       [ -n "${_VNX_EXPECTED_BEACONS:-}" ] && _HEALTH_CHECK_ARGS+=(--expected "$_VNX_EXPECTED_BEACONS")
@@ -247,7 +276,7 @@ $_BEACON_BAD"
     # enough for this hot path, unlike a full sweep (directory globs, sqlite
     # queries, a launchd harvest) which stays a scheduled batch job.
     PRODUCER_FINDINGS_SECTION=""
-    _PF_MONITOR_PY="$_HOOK_DIR/../scripts/producer_freshness_monitor.py"
+    _PF_MONITOR_PY="$_VNX_SCRIPTS_ROOT/producer_freshness_monitor.py"
     if [ -n "$_VNX_STATE_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_PF_MONITOR_PY" ]; then
       _PF_JSON="$("$_VNX_PY" "$_PF_MONITOR_PY" --state-dir "$_VNX_STATE_DIR" --latest-findings 2>/dev/null || true)"
       if [ -n "$_PF_JSON" ] && command -v jq &>/dev/null; then
@@ -292,7 +321,7 @@ $_PF_LINES"
     # branches, never conflating "never populated" with "went stale". Reused here via
     # subprocess exactly like health_check.py above, not reimplemented inline.
     FRESHNESS_SECTION=""
-    _FRESHNESS_PY="$_HOOK_DIR/../scripts/lib/session_state_freshness.py"
+    _FRESHNESS_PY="$_VNX_SCRIPTS_ROOT/lib/session_state_freshness.py"
     if [ -n "$_VNX_STATE_DIR" ] && [ -n "$_VNX_PY" ] && [ -f "$_FRESHNESS_PY" ]; then
       _FRESHNESS_JSON="$("$_VNX_PY" "$_FRESHNESS_PY" --state-dir "$_VNX_STATE_DIR" --json 2>/dev/null || true)"
       if [ -n "$_FRESHNESS_JSON" ] && command -v jq &>/dev/null; then

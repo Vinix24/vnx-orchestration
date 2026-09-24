@@ -32,6 +32,18 @@ glm-5.3.
 
 ### Fixed
 
+- **The SessionStart hook finds the central store from a consumer project** —
+  the v1.6.2 hook located `vnx_paths.py` at `$_HOOK_DIR/../scripts`, which is
+  the repo's own `scripts/` only in the fabric repo. A consumer's deployed hook
+  sits in `<project>/.claude/hooks/`, so it looked in a `.claude/scripts/` that
+  does not exist and reported "VNX STATE STORE NOT FOUND" with terminal states,
+  open items, receipts, beacon health, producer freshness and state freshness
+  all UNMEASURED. The hook now picks one scripts root, once: `../scripts` when
+  it holds `lib/vnx_paths.py`, else `$VNX_HOME/scripts`, else
+  `~/.vnx-system/current/scripts`. `resolve_paths()` stays the only resolver.
+  When no root exists the UNMEASURED line names the three places tried. The
+  fix reaches a consumer when its hook is redeployed (`bootstrap_hooks`).
+
 - **Harness-lane failure honesty (#1857, #1858, #1864, #1871, #1874,
   #1875)** — a spawn-failure report is refused as `completed`; API-error
   failures with no `failure_reason` are caught; a verdict-block that was
