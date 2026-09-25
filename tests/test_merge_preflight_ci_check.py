@@ -527,6 +527,18 @@ class TestOverrideEscapeHatch:
 
 
 class TestCLI:
+    @pytest.fixture(autouse=True)
+    def _no_declaration_on_main(self, monkeypatch):
+        """The CLI reads the project's declared workflow from main over the contents API, a
+        ``subprocess.run`` call the mocked sequences below do not carry. No declaration, so the
+        name falls to the environment and the default; the read itself is covered against a stub
+        ``gh`` in tests/test_ci_workflow_resolution_parity.py."""
+        import forge_protection_drift
+
+        monkeypatch.setattr(
+            forge_protection_drift, "fetch_ci_workflow_from_main", lambda project_root, **kw: (None, ""),
+        )
+
     def test_cli_override_reason_flag_go(self, tmp_path, capsys):
         """--override-reason with a reason exits 0 and reports overridden."""
         with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \

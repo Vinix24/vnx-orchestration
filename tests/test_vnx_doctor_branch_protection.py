@@ -31,7 +31,9 @@ def _real_norm() -> Dict[str, Any]:
 
 
 def _paths(vnx_home: Path) -> Dict[str, str]:
-    return {"VNX_HOME": str(vnx_home)}
+    """The doctor reads the project from PROJECT_ROOT (OI-1849); in a fabric
+    checkout, which is what these tests stand in for, it is VNX_HOME."""
+    return {"VNX_HOME": str(vnx_home), "PROJECT_ROOT": str(vnx_home)}
 
 
 class TestCheckBranchProtectionDrift:

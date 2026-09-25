@@ -25,6 +25,7 @@ import pr_merge
 
 
 SHA = "a" * 40
+_PR_DATA = {"number": 5, "headRefOid": SHA, "headRefName": "feature/x"}
 
 
 def _go_gate(**kw):
@@ -163,7 +164,10 @@ class TestMainGateWiring:
     def test_go_proceeds_to_merge(self, monkeypatch, capsys):
         """A GO gate proceeds to merge_pr and prints the basis of the verdict."""
         merge_called = []
-        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (_go_gate(), None))
+        # A CI GO always carries the PR data it judged: _run_ci_gate refuses before
+        # anything else when the head sha is unknown, override or not. The
+        # branch-protection gate reads that head for the CI floor (OI-1849).
+        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (_go_gate(), dict(_PR_DATA)))
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (_go_gate(), None))
         monkeypatch.setattr(
             pr_merge, "merge_pr",
@@ -183,7 +187,7 @@ class TestMainGateWiring:
             lambda pr, **k: (
                 _go_gate(overridden=True, override_reason="r",
                          message="OVERRIDE: VNX CI-check overgeslagen (r)"),
-                None,
+                dict(_PR_DATA),
             ),
         )
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (_go_gate(), None))

@@ -688,7 +688,10 @@ class TestPrMergeAdrGateWiring:
         import pr_merge
 
         merge_called = []
-        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (self._go_gate(), None))
+        # A CI GO always carries the PR data it judged (_run_ci_gate refuses without
+        # a head sha); the branch-protection gate reads that head for the CI floor.
+        pr_data = {"number": 1790, "headRefOid": "e" * 40, "headRefName": "feature/x"}
+        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (self._go_gate(), dict(pr_data)))
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (self._go_gate(), None))
         monkeypatch.setattr(pr_merge, "_run_adr_gate", lambda pr, **k: self._go_adr())
         monkeypatch.setattr(
