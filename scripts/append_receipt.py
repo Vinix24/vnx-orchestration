@@ -165,7 +165,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--receipt-file", help="Path to file containing a single receipt JSON payload", default=None)
     parser.add_argument("--receipts-file", help="Override canonical receipts file path", default=None)
     parser.add_argument("--cache-window-seconds", type=int, default=300, help="Recent idempotency window in seconds")
-    parser.add_argument("--skip-enrichment", action="store_true", default=False, help="Skip quality advisory and provenance enrichment (for state-mutation events)")
+    parser.add_argument("--skip-enrichment", action="store_true", default=False, help="Skip quality advisory and provenance enrichment (for state-mutation events); the outcome hook (pattern confidence) still runs for outcome receipts")
     parser.add_argument(
         "--rebuild-outcome-index",
         action="store_true",

@@ -288,9 +288,10 @@ def _isolation_guard_error_class():
     return TestIsolationGuardError
 
 
-def _refuse_real_store_write_under_pytest(target: Path) -> None:
+def _refuse_real_store_write_under_test_runner(target: Path) -> None:
     """OI-1079 guard seam: refuse an imminent WRITE into the real central
-    store (~/.vnx-data) while running under pytest. No-op outside pytest.
+    store (~/.vnx-data) while running under a test runner (pytest or unittest).
+    No-op in any other process.
 
     Same guard the receipt mirror carries (append_receipt_internals.payload,
     shipped with #1397). The register mirror lacked it, so an isolated test
@@ -301,7 +302,7 @@ def _refuse_real_store_write_under_pytest(target: Path) -> None:
     scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
     if scripts_lib not in sys.path:
         sys.path.insert(0, scripts_lib)
-    from vnx_paths import refuse_real_central_store_write_under_pytest as _refuse
+    from vnx_paths import refuse_real_central_store_write_under_test_runner as _refuse
     _refuse(target)
 
 
@@ -316,7 +317,7 @@ def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) 
     P5 cutover guard: skips when primary_path resolves to the central file.
 
     OI-1079: raises ``TestIsolationGuardError`` when the resolved central
-    target is the real central store and the process runs under pytest —
+    target is the real central store and the process runs under a test runner —
     that is an isolation violation, not a routine mirror failure, so the
     caller (append_event) must re-raise it rather than swallow it as the
     generic best-effort ``except`` otherwise would. Mirrors the receipt
@@ -327,7 +328,7 @@ def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) 
         central_path = central_base / "state" / "dispatch_register.ndjson"
         if central_path.resolve() == primary_path.resolve():
             return
-        _refuse_real_store_write_under_pytest(central_path)
+        _refuse_real_store_write_under_test_runner(central_path)
         try:
             from dual_writer import append_record_locked
             append_record_locked(central_path, record)

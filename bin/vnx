@@ -1837,49 +1837,19 @@ EOF
   done
 
   # ── Generate .mcp.json per terminal ──────────────────────────────────
-  # Write an empty .mcp.json for each terminal. If the user has global MCP
-  # servers in ~/.claude.json, explicitly disable them so they don't leak
-  # into project terminals. This ensures predictable behaviour regardless
-  # of the user's global Claude Code configuration.
-  local global_claude_json="$HOME/.claude.json"
-  if command -v "$VNX_PYTHON" >/dev/null 2>&1 && [ -f "$global_claude_json" ]; then
-    "$VNX_PYTHON" - "$terminals_dir" "$terminal_ids" "$force" <<'PYEOF'
-import json, os, sys
-
-terminals_dir = sys.argv[1]
-terminal_ids  = sys.argv[2].split()
-force         = sys.argv[3] == "1"
-
-# Read global MCP server definitions
-with open(os.path.expanduser("~/.claude.json")) as fh:
-    global_mcps = json.load(fh).get("mcpServers", {})
-
-if not global_mcps:
-    print("[bootstrap-terminals] No global MCPs detected — skipping .mcp.json generation")
-    sys.exit(0)
-
-# Build a config that disables every global MCP server
-disable_all = {}
-for name, cfg in global_mcps.items():
-    entry = dict(cfg)
-    entry["disabled"] = True
-    disable_all[name] = entry
-
-mcp_config = {"mcpServers": disable_all}
-
-for tid in terminal_ids:
-    target = os.path.join(terminals_dir, tid, ".mcp.json")
-    if os.path.exists(target) and not force:
-        print(f"[bootstrap-terminals] Keeping existing: {target}")
-        continue
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "w") as fh:
-        json.dump(mcp_config, fh, indent=2)
-        fh.write("\n")
-    print(f"[bootstrap-terminals] Wrote .mcp.json (all globals disabled): {target}")
-PYEOF
+  # Every global MCP server in ~/.claude.json is masked BY NAME so it does not leak
+  # into a project terminal: the entry carries no env, headers, args or url, so no
+  # credential is frozen into the file, and the file is derived again on every run.
+  # One implementation shared with `vnx init` (scripts/lib/mcp_server_config.py); that
+  # module records what Claude Code was measured to accept. Python is required to read
+  # the global config: without it the fallback writes an empty server table.
+  if command -v "$VNX_PYTHON" >/dev/null 2>&1; then
+    local mcp_gen_args=(--terminals-dir "$terminals_dir" --terminals "$terminal_ids")
+    if [ "$force" -eq 1 ]; then
+      mcp_gen_args+=(--force)
+    fi
+    "$VNX_PYTHON" "$VNX_HOME/scripts/lib/mcp_server_config.py" "${mcp_gen_args[@]}"
   else
-    # Fallback: write minimal empty config
     for terminal_id in $terminal_ids; do
       local mcp_file="$terminals_dir/$terminal_id/.mcp.json"
       if [ ! -f "$mcp_file" ] || [ "$force" -eq 1 ]; then

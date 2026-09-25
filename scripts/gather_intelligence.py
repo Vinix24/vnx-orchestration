@@ -414,11 +414,32 @@ class T0IntelligenceGatherer:
             return []
 
     def _usage_log_path(self) -> Path:
-        """Return path to intelligence_usage.ndjson (canonical audit log)."""
+        """Return path to intelligence_usage.ndjson (canonical audit log).
+
+        Pure resolution: readers call this too. The writer
+        (``_append_usage_event``) creates the directory after its test-runner
+        guard.
+        """
         from vnx_paths import ensure_env
         state_dir = Path(ensure_env()["VNX_STATE_DIR"])
-        state_dir.mkdir(parents=True, exist_ok=True)
         return state_dir / "intelligence_usage.ndjson"
+
+    def _append_usage_event(self, event: Dict[str, Any]) -> None:
+        """Append one event to intelligence_usage.ndjson (G-L7 audit trail).
+
+        I/O failures are swallowed (telemetry). A pytest or unittest run about
+        to write the real central store is refused with
+        ``TestIsolationGuardError``, which is not an OSError and propagates.
+        """
+        from vnx_paths import refuse_real_central_store_write_under_test_runner
+        try:
+            usage_log = self._usage_log_path()
+            refuse_real_central_store_write_under_test_runner(usage_log)
+            usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(usage_log, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
 
     def record_pattern_offer(self, pattern_id: str, terminal: str, dispatch_id: str,
                               file_path: str = "", title: str = "", content: str = "") -> None:
@@ -438,11 +459,7 @@ class T0IntelligenceGatherer:
             "title": title,
             "content": content,
         }
-        try:
-            with open(self._usage_log_path(), "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
-        except OSError:
-            pass
+        self._append_usage_event(event)
 
     def record_pattern_adoption(self, pattern_id: str, terminal: str, dispatch_id: str) -> None:
         """Record that an agent adopted a pattern (edited a file the pattern references).
@@ -456,11 +473,7 @@ class T0IntelligenceGatherer:
             "terminal": terminal,
             "dispatch_id": dispatch_id or "",
         }
-        try:
-            with open(self._usage_log_path(), "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
-        except OSError:
-            pass
+        self._append_usage_event(event)
 
         if not self.quality_db:
             return

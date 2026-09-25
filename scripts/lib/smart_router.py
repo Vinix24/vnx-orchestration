@@ -22,6 +22,13 @@ import yaml
 # closed set, never a new variant name.
 from observability_tier import GOVERNANCE_MIN_TIERS
 
+# The gate-name registry and the config error live in dispatch_spec, a leaf
+# module: the door has to catch ReviewGateConfigError even when this module
+# cannot be imported, and the legal-name set must be the ONE the door's Rule 16,
+# the staging bridge and the takeover-chain parser read. Re-exported here as
+# ``smart_router.ReviewGateConfigError`` for the callers that already use it.
+from dispatch_spec import REGISTERED_GATE_NAMES, ReviewGateConfigError
+
 _RECOMMENDATIONS_PATH = Path(__file__).parent / "providers" / "routing_recommendations.yaml"
 
 
@@ -52,12 +59,26 @@ class RouteDecision:
 
 
 @dataclass(frozen=True)
+class VariantDerivation:
+    """The variant half of a derivation: what the change IS, no gate attached.
+
+    Carries no review gate, so producing it never reads project configuration.
+    A caller that sizes something from the variant alone (the plan-gate panel)
+    uses this and cannot be broken by an unreadable VNX_DEFAULT_REVIEW_STACK it
+    never asked about.
+    """
+    variant: str       # one of GOVERNANCE_MIN_TIERS keys
+    reason: str        # why this variant was chosen (deterministic rule fired)
+    is_new_feature: bool  # task_class is 01_code_generation (independent axis)
+
+
+@dataclass(frozen=True)
 class GovernanceVariantResult:
     """Derived governance variant plus the reasoning for the trace."""
     variant: str       # one of GOVERNANCE_MIN_TIERS keys
     reason: str        # why this variant was chosen (deterministic rule fired)
     gate: str          # the review-gate weight this variant resolves to
-    direction: str     # "up" | "unchanged" | "down" vs the codex_gate baseline
+    direction: str     # "up" | "unchanged" | "down" vs the full-diff review rung
     # Independent axis (plan-gate weight ladder): True when task_class is
     # 01_code_generation. A new feature runs the full panel regardless of the
     # path-derived variant, so the plan-gate needs this carried alongside.
@@ -654,16 +675,29 @@ def parse_route_model_id(model_id: str) -> tuple[str, str]:
 # judge, so a model adds nothing here. It would only make the gate weight
 # non-reproducible and its receipt unfalsifiable.
 
-# The gate a plain code dispatch gets by convention today (the author writes
-# ``gate=codex_gate``). Used as the up/down reference so a derivation that lands
-# on a LIGHTER gate than this is never silent: "only upward, never silently
-# downward"; a lighter gate must carry an explicit reason in the trace.
+# The full-diff review rung of the ladder below, named for the gate that has
+# conventionally held it. It is the up/down REFERENCE RUNG, not the gate every
+# project gets: the gate that actually fills the heavy tier is an operator
+# choice (see PRIMARY_REVIEW_SEAT / _primary_review_gate). A derivation that
+# lands on a LIGHTER gate than this rung is never silent: "only upward, never
+# silently downward"; a lighter gate must carry an explicit reason in the trace.
 _GATE_BASELINE = "codex_gate"
 
 # Heaviness ladder over the closed Gate enum (scripts/lib/dispatch_spec.py).
 # Only the relative order matters, for the up/down direction in the trace.
+#
+# The four full-diff review seats share the top rung because the takeover chain
+# (VNX_REVIEW_GATE_TAKEOVER_CHAIN, default codex_gate,kimi_gate,glm_gate,
+# deepseek_gate) declares them interchangeable: any one of them may read a PR
+# in place of any other. Giving them different weights would make "heavier/
+# lighter" depend on which seat happened to be free. deepseek_gate is on the
+# same rung even though its own runner is not shipped yet — the rung describes
+# the review the seat stands for, and the chain already treats it as an end-link.
 _GATE_WEIGHT: dict[str, int] = {
     "codex_gate": 3,
+    "kimi_gate": 3,
+    "glm_gate": 3,
+    "deepseek_gate": 3,
     "gemini_review": 2,
     "claude_github_optional": 1,
     "ci_gate": 0,
@@ -673,9 +707,22 @@ _GATE_WEIGHT: dict[str, int] = {
 # Governance variant -> review-gate weight. Strictest governance (min tier 1)
 # gets the heaviest single gate; lightest governance (min tier 3) gets the
 # lightest. Keys are exactly the GOVERNANCE_MIN_TIERS vocabulary, no new names.
+#
+# PRIMARY_REVIEW_SEAT marks the entries that mean "a full code diff review by
+# whichever gate this PROJECT routes its review to". That seat is the operator's
+# choice, not a constant: hardcoding codex_gate there made a project that routed
+# its review to glm_gate still declare a codex_gate obligation, so every merge
+# stalled on a gate the operator had not asked for (measured 2026-09-19 in
+# mission-control: five PRs blocked for hours on codex quota while the glm seat
+# the project HAD configured had already passed all five). _primary_review_gate
+# resolves the sentinel from VNX_DEFAULT_REVIEW_STACK — the same key
+# review_gate_manager uses to pick the seats that actually run, so the obligation
+# the door declares and the seats the executor requests can no longer disagree.
+PRIMARY_REVIEW_SEAT = "__primary_review_seat__"
+
 GOVERNANCE_VARIANT_GATE: dict[str, str] = {
-    "coding-strict": "codex_gate",               # strictest: full codex diff review
-    "default": "codex_gate",                     # code baseline: codex diff review
+    "coding-strict": PRIMARY_REVIEW_SEAT,        # strictest: full code diff review
+    "default": PRIMARY_REVIEW_SEAT,              # code baseline: full code diff review
     "business-light": "claude_github_optional",  # non-code deliverable: optional review
     "light": "claude_github_optional",           # light: optional review
     "minimal": "ci_gate",                        # docs/content: CI checks only
@@ -691,6 +738,76 @@ if _UNKNOWN_VARIANTS:
         f"{sorted(_UNKNOWN_VARIANTS)}; the gate weight must use the closed "
         f"observability-tier vocabulary (no new variant names)."
     )
+
+
+# The operator-facing key naming a project's review stack. The SAME key
+# review_gate_manager._build_default_review_stack reads to decide which seats
+# actually run — that is the whole point: one key, so the declared obligation
+# and the executed seats cannot drift apart.
+DEFAULT_REVIEW_STACK_KEY = "VNX_DEFAULT_REVIEW_STACK"
+
+
+def _primary_review_gate() -> str:
+    """The gate that fills this project's primary (full-diff) review seat.
+
+    Reads ``VNX_DEFAULT_REVIEW_STACK`` through ``config_runtime`` — the same
+    canonical resolver + project-config override precedence the review-gate
+    executor itself uses. The stack is an OPERATOR instruction, so this function
+    never substitutes a default for a value it could not read: it raises
+    ReviewGateConfigError naming the key, the value and the error.
+
+    Which stack entry fills the seat: the heaviest one (``_GATE_WEIGHT``), ties
+    broken by stack order. "Heaviest" and not "first" because the stack is
+    documented as an unordered set of seats to run (``ci_gate`` is appended
+    separately, order carries no meaning), while ``_GATE_BASELINE``'s whole
+    reason for existing is that review seats sit on a heaviness ladder. Picking
+    the heaviest keeps the registry default
+    ``gemini_review,codex_gate,claude_github_optional`` resolving to
+    ``codex_gate`` — the rung that table has always named — so a project that
+    never overrode the stack sees no change at all, and only a project that
+    actually re-pointed its review (mission-control -> glm_gate) moves.
+    """
+    try:
+        import config_runtime  # noqa: PLC0415  (lazy: keeps the module import-light)
+    except Exception as exc:  # pragma: no cover - import failure is environmental
+        raise ReviewGateConfigError(
+            f"{DEFAULT_REVIEW_STACK_KEY} cannot be read: the config runtime "
+            f"({type(exc).__name__}: {exc}) is unavailable, so this project's "
+            "review stack is unknown and no gate can be declared for it. "
+            "Refusing to fall back to a hardcoded gate — that fallback is what "
+            "made the door declare codex_gate for a project routed to glm_gate."
+        ) from exc
+
+    try:
+        raw = config_runtime.get(DEFAULT_REVIEW_STACK_KEY)
+    except Exception as exc:
+        raise ReviewGateConfigError(
+            f"{DEFAULT_REVIEW_STACK_KEY} could not be resolved "
+            f"({type(exc).__name__}: {exc}); this project's review stack is "
+            "unknown, so no review-gate obligation can be declared for it. "
+            "Fix the config store and refire."
+        ) from exc
+
+    names = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    if not names:
+        raise ReviewGateConfigError(
+            f"{DEFAULT_REVIEW_STACK_KEY} resolved to an empty value ({raw!r}) for "
+            "this project; a writing dispatch must declare a review gate that "
+            "follows operator configuration, and an empty stack names none. "
+            "Set the project's review stack and refire."
+        )
+
+    known = [name for name in names if name in REGISTERED_GATE_NAMES]
+    if not known:
+        raise ReviewGateConfigError(
+            f"{DEFAULT_REVIEW_STACK_KEY} names no gate that exists "
+            f"(value={raw!r}); legal gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}. "
+            "The stack must name a real review gate, not a private label — "
+            "refusing to guess one."
+        )
+
+    return max(known, key=lambda name: _GATE_WEIGHT.get(name, 0))
+
 
 # A change here can alter the dispatch door, the router, the receipt trail, or
 # the gates themselves: the highest risk class (coding-strict). Matched by path
@@ -851,7 +968,7 @@ def _category_from_task_class(task_class: Optional[str]) -> str:
 
 
 def _direction_for(gate: str) -> str:
-    """Direction of the gate weight vs the codex_gate baseline.
+    """Direction of the gate weight vs the full-diff review rung.
 
     'down' marks a lighter-than-baseline gate so the trace can never hide it.
     """
@@ -866,12 +983,27 @@ def _direction_for(gate: str) -> str:
     return "unchanged"
 
 
-def derive_governance_variant(
+def _gate_for_variant(variant: str) -> str:
+    """The gate a governance variant resolves to.
+
+    Light variants name their gate outright: "minimal" for docs/content really
+    is CI-checks-only, "light"/"business-light" really is optional review, in
+    every project. The two heavy variants mean "a full diff review", and WHICH
+    gate provides that is this project's operator choice — resolved here from
+    VNX_DEFAULT_REVIEW_STACK, never from a literal in the table above.
+    """
+    gate = GOVERNANCE_VARIANT_GATE[variant]
+    if gate == PRIMARY_REVIEW_SEAT:
+        return _primary_review_gate()
+    return gate
+
+
+def derive_variant(
     dispatch_paths: Optional[Sequence[str]] = None,
     *,
     task_class: Optional[str] = None,
     irreversible: bool = False,
-) -> GovernanceVariantResult:
+) -> VariantDerivation:
     """Derive a governance variant from the signals the router already has.
 
     Deterministic rule, first-match wins. Paths are the primary signal (they say
@@ -888,6 +1020,9 @@ def derive_governance_variant(
     is an INDEPENDENT axis (task_class == 01_code_generation) carried on the
     result so the plan-gate can size its panel to the full seat set for a new
     feature regardless of the path-derived variant.
+
+    Reads no configuration and resolves no gate: see ``derive_governance_variant``
+    for the variant plus the gate it maps to in this project.
     """
     is_new_feature = task_class == "01_code_generation"
     paths = [p for p in (dispatch_paths or []) if p and str(p).strip()]
@@ -905,14 +1040,8 @@ def derive_governance_variant(
                 reason += f"; also path-derived {irreversible_hit}"
         else:
             reason = f"irreversible path category={irreversible_hit!r}"
-        variant = "coding-strict"
-        gate = GOVERNANCE_VARIANT_GATE[variant]
-        return GovernanceVariantResult(
-            variant=variant,
-            reason=reason,
-            gate=gate,
-            direction=_direction_for(gate),
-            is_new_feature=is_new_feature,
+        return VariantDerivation(
+            variant="coding-strict", reason=reason, is_new_feature=is_new_feature,
         )
 
     if paths:
@@ -927,14 +1056,36 @@ def derive_governance_variant(
         category = _category_from_task_class(task_class)
         reason = f"no dispatch paths; task_class={task_class or 'none'} -> {category!r}"
 
-    variant = _CATEGORY_TO_VARIANT[category]
-    gate = GOVERNANCE_VARIANT_GATE[variant]
-    return GovernanceVariantResult(
-        variant=variant,
+    return VariantDerivation(
+        variant=_CATEGORY_TO_VARIANT[category],
         reason=reason,
+        is_new_feature=is_new_feature,
+    )
+
+
+def derive_governance_variant(
+    dispatch_paths: Optional[Sequence[str]] = None,
+    *,
+    task_class: Optional[str] = None,
+    irreversible: bool = False,
+) -> GovernanceVariantResult:
+    """``derive_variant`` plus the review gate that variant resolves to here.
+
+    The gate of a heavy variant is this project's operator choice
+    (VNX_DEFAULT_REVIEW_STACK, see ``_primary_review_gate``), so this function
+    reads project configuration and raises ReviewGateConfigError when that
+    cannot be read. Callers that need only the variant call ``derive_variant``.
+    """
+    derived = derive_variant(
+        dispatch_paths, task_class=task_class, irreversible=irreversible,
+    )
+    gate = _gate_for_variant(derived.variant)
+    return GovernanceVariantResult(
+        variant=derived.variant,
+        reason=derived.reason,
         gate=gate,
         direction=_direction_for(gate),
-        is_new_feature=is_new_feature,
+        is_new_feature=derived.is_new_feature,
     )
 
 

@@ -56,6 +56,7 @@ from .warning_destination import (  # noqa: E402
     DEFAULT_RECURRENCE_THRESHOLD,
     classify_destination,
     commit_destination,
+    counter_path_beside,
     derive_open_items_created,
 )
 

@@ -22,8 +22,12 @@ detects tampering must classify as ``produces_crap`` (-> beacon ``fail``) and re
 from __future__ import annotations
 
 import abc
+import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Type
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Type
+
+import vnx_paths
 
 # The only status values a probe may report. A total vocabulary — every concrete
 # probe's health() must return exactly one of these for every possible input.
@@ -59,6 +63,10 @@ class EffectivenessProbe(abc.ABC):
     ``run()`` is the concrete orchestrator: it calls the three in order and
     returns a ``ProbeResult``. Callers (``subsystem_health.aggregate()``) use
     ``run()``, not the individual hooks, so every probe is exercised the same way.
+
+    A probe that reads a state dir takes it as a ``state_dir`` constructor
+    keyword and resolves a missing one with ``resolve_probe_state_dir``.
+    ``build_probe`` hands the aggregator's state dir to exactly those probes.
     """
 
     subsystem: str = ""
@@ -82,6 +90,34 @@ class EffectivenessProbe(abc.ABC):
         """Run probe() -> health()/signal() -> ProbeResult, in that fixed order."""
         raw = self.probe()
         return ProbeResult(status=self.health(raw), signal=self.signal(raw), detail=raw)
+
+
+def resolve_probe_state_dir(state_dir: Optional[Path] = None) -> Path:
+    """The state dir a probe reads: ``state_dir`` when given, else the canonical
+    per-project store (ADR-026, ``vnx_paths.resolve_paths()``), which for a
+    governed project is the central ``~/.vnx-data/<project_id>/state``.
+
+    Not ``project_root.resolve_state_dir(__file__)``: without an env pin that
+    resolves the checkout-local ``.vnx-data/state``, a stale copy of the store.
+    Measured 24-09: the checkout DB dated from 15-08 and had no
+    ``track_open_items`` table, so every ``oi_plan_*`` counter read 0 and the
+    ``plan-gate-panel`` beacon said ``ok`` over 90 unresolved blockers.
+    """
+    if state_dir is not None:
+        return Path(state_dir)
+    return vnx_paths.resolve_state_dir()
+
+
+def build_probe(probe_cls: Type["EffectivenessProbe"], state_dir: Path) -> "EffectivenessProbe":
+    """Instantiate ``probe_cls`` on ``state_dir`` when it reads one.
+
+    A probe declares that by taking a ``state_dir`` constructor keyword
+    (plan-gate, migration, injection). A probe that reads only the repo
+    (governance) or nothing at all is built without it.
+    """
+    if "state_dir" in inspect.signature(probe_cls).parameters:
+        return probe_cls(state_dir=state_dir)
+    return probe_cls()
 
 
 # subsystem name -> probe class. Concrete probes register themselves here, either
@@ -126,4 +162,6 @@ __all__ = [
     "EFFECTIVENESS_PROBES",
     "register_probe",
     "PROBE_TO_BEACON",
+    "resolve_probe_state_dir",
+    "build_probe",
 ]

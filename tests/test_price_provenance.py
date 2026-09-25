@@ -237,6 +237,10 @@ _PINNED_PRICES: dict[tuple[str, str], tuple[float, float]] = {
     ("anthropic", "haiku"): (1.0, 5.0),
     ("anthropic", "sonnet-5"): (2.0, 10.0),
     ("anthropic", "opus-5"): (5.0, 25.0),
+    # dispatch-20260923-model-defaults-sonnet-opus55: operator decision
+    # 2026-09-23, "we gaan over op Opus 5.5". Source: official Anthropic
+    # model table (cache 2026-06-24). $4 input / $20 output per Mtok.
+    ("anthropic", "opus-5-5"): (4.0, 20.0),
     ("anthropic", "fable-5"): (10.0, 50.0),
     ("openai", "gpt-5.5"): (5.0, 30.0),
     ("openai", "gpt-5.4"): (1.25, 10.0),
@@ -290,6 +294,7 @@ _VERIFIED: set[tuple[str, str]] = {
     ("anthropic", "opus-4-8"),
     ("anthropic", "opus-4-6"),
     ("anthropic", "sonnet-5"),
+    ("anthropic", "opus-5-5"),
     ("openai", "gpt-5.5"),
     ("openai", "gpt-6-astra"),
     ("kimi_cli", "kimi-k3"),

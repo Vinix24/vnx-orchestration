@@ -71,6 +71,14 @@ Exit codes:
     0  every measured project is current on every axis
     1  at least one project is behind on at least one axis
     2  the meter could not measure (canon absent, registry unreadable)
+
+``--reach T0_DIR`` is the same reach axis for ONE T0 directory, with no canon
+and no registry. ``hooks/sessionstart.sh`` calls it at the start of every T0
+session, so a T0 that would not load the role says so before its first prompt
+instead of being found by the six-hourly fleet sweep. It prints the axis as one
+JSON object (``{"ok": ..., "reason": ...}``) and exits 0 when the role is
+imported, 1 when it is not. There is deliberately no second implementation of
+the axis: the hook reads what ``_measure_reach`` says.
 """
 from __future__ import annotations
 
@@ -405,11 +413,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--project-dir", type=Path, action="append", default=[],
                     help="measure this repo instead of the registry (repeatable)")
     ap.add_argument("--json", action="store_true", help="emit the full report as JSON")
+    ap.add_argument("--reach", type=Path, default=None, metavar="T0_DIR",
+                    help="measure only the reach axis for this T0 terminal directory, print it as "
+                         "JSON and exit (0 = role imported, 1 = not); needs no canon and no registry")
     ap.add_argument("--write-state", action="store_true",
                     help="also write a health beacon (opt-in: a measurement that writes is a write)")
     ap.add_argument("--state-dir", type=Path, default=None,
-                    help="explicit state dir for --write-state (default: resolved VNX_STATE_DIR)")
+                    help="explicit state dir for --write-state (default: resolved VNX_STATE_DIR); "
+                         "the beacon lands in its parent, <data_dir>/health/")
     args = ap.parse_args(argv)
+
+    if args.reach is not None:
+        reach = _measure_reach(args.reach)
+        print(json.dumps(reach))
+        return 0 if reach["ok"] else 1
 
     canon_path = args.canon or _resolve_canon_path()
     canon = _read(canon_path)
@@ -461,7 +478,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             if state_dir is None:
                 from vnx_paths import resolve_paths  # noqa: PLC0415
                 state_dir = Path(resolve_paths()["VNX_STATE_DIR"])
-            HealthBeacon(state_dir, "fleet_role_drift", expected_interval_seconds=86400).heartbeat(
+            # Beacons live under <data_dir>/health/, one level above the state
+            # dir: that is where t0_state, health_check, the dashboard and the
+            # SessionStart digest all look. Passing the state dir itself wrote
+            # the file where nothing reads it (the defect #1736 fixed for
+            # report_to_receipt_converter).
+            HealthBeacon(state_dir.parent, "fleet_role_drift", expected_interval_seconds=86400).heartbeat(
                 status="ok" if not behind and freshness["ok"] is not False else "fail",
                 details=report["summary"],
             )

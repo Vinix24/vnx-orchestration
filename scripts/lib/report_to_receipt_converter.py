@@ -50,10 +50,26 @@ from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel 
 # no longer carries its own hand-copied terminal-status sets; it resolves every
 # declared status through resolve_status_category() below.
 from event_outcome_semantics import UnknownStatusError, resolve_status_category
+# Identity-block windows, value cleaning and the undeclared-status rule live
+# with the report body contract so the converter and report_parser.py share one
+# definition of each.
+from report_body_contract import (
+    DERIVED_STATUS_SOURCE,
+    clean_identity_value,
+    identity_windows,
+    resolve_undeclared_status,
+)
 # Closed provider vocabulary (golf1a-provider-enum). _normalise_provider below
 # is a thin wrapper around normalize_provider() — see provider_identity.py for
 # the full reconciliation with governance_emit._PROVIDER_RE.
 from provider_identity import ProviderIdentity, UnrecognizedProviderError, normalize_provider
+# The rejection-alarm rule this beacon shares with receipt_conversion_rejections:
+# both beacons judge the same accumulated history by the same window.
+from receipt_conversion_rejection_beacon import (
+    REJECTION_ALARM_WINDOW_SECONDS,
+    load_rejected_history,
+    recent_rejections,
+)
 
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent  # scripts/ — append_receipt.py lives here
@@ -399,14 +415,21 @@ def parse_frontmatter(text: str) -> Dict[str, Any]:
     return fm
 
 
-def _extract_body_fields(text: str) -> Dict[str, Any]:
-    """Extract **Key**: value fields + plain-text Dispatch-ID fallback from body."""
-    fields: Dict[str, Any] = {}
-    for m in _BOLD_KV_RE.finditer(text[:3000]):
+# The keys of a report's identity block. Only these are looked for outside the
+# head of the report; every other body field stays head-only.
+_IDENTITY_KEYS = ("dispatch_id", "model", "provider")
+
+
+def _bold_fields(window: str, *, only: Optional[Tuple[str, ...]] = None) -> Dict[str, str]:
+    """``**Key**: value`` / ``**Key:** value`` fields of ``window``, first one per key."""
+    fields: Dict[str, str] = {}
+    for m in _BOLD_KV_RE.finditer(window):
         raw_key, raw_val = (
             (m.group(1), m.group(2)) if m.group(1) is not None else (m.group(3), m.group(4))
         )
         key = raw_key.strip().lower().replace("-", "_").replace(" ", "_")
+        if only is not None and key not in only:
+            continue
         # A bold key whose value is whitespace-only (e.g. truncated at the
         # text[:3000] scan boundary, or genuinely empty in the source report)
         # strips down to "" — splitlines() on "" is [], so index [0] would
@@ -415,14 +438,50 @@ def _extract_body_fields(text: str) -> Dict[str, Any]:
         val = value_lines[0].strip() if value_lines else ""
         if key and val:
             fields.setdefault(key, val)
-    if "dispatch_id" not in fields:
-        m = _DISPATCH_PLAIN_RE.search(text[:3000])
+    return fields
+
+
+def _plain_dispatch_id(window: str) -> Optional[str]:
+    """``Dispatch-ID: x`` / ``dispatch_id: x`` plain-text stamp in ``window``."""
+    for pattern in (_DISPATCH_PLAIN_RE, _DISPATCH_ID_KEY_RE):
+        m = pattern.search(window)
         if m:
-            fields["dispatch_id"] = m.group(1).strip()
+            return m.group(1).strip()
+    return None
+
+
+def _extract_body_fields(text: str) -> Dict[str, Any]:
+    """Extract **Key**: value fields + plain-text Dispatch-ID fallback from body.
+
+    Every field is read from the head of the report (first 3000 characters).
+    The identity block (Dispatch-ID, Model, Provider) is also looked for at the
+    tail, but only for a key the head did not carry, so a report that stamps its
+    identity on top resolves exactly as before. Before the tail was searched a
+    report that closed with its identity block read as having none and was
+    booked ``report_contract_invalid`` (``missing_content_dispatch_id``).
+
+    Identity values come back without the markdown around them:
+    ``Dispatch-ID: **x**`` and ``**Dispatch-ID:** x`` both yield ``x``.
+    """
+    fields: Dict[str, Any] = dict(_bold_fields(text[:3000]))
     if "dispatch_id" not in fields:
-        m = _DISPATCH_ID_KEY_RE.search(text[:3000])
-        if m:
-            fields["dispatch_id"] = m.group(1).strip()
+        plain = _plain_dispatch_id(text[:3000])
+        if plain:
+            fields["dispatch_id"] = plain
+    for window in identity_windows(text)[1:]:
+        for key, val in _bold_fields(window, only=_IDENTITY_KEYS).items():
+            fields.setdefault(key, val)
+        if "dispatch_id" not in fields:
+            plain = _plain_dispatch_id(window)
+            if plain:
+                fields["dispatch_id"] = plain
+    for key in _IDENTITY_KEYS:
+        if key in fields:
+            cleaned = clean_identity_value(fields[key])
+            if cleaned:
+                fields[key] = cleaned
+            else:
+                del fields[key]
     return fields
 
 
@@ -438,10 +497,23 @@ def _dispatch_id_from_filename(path: Path) -> Optional[str]:
 
 
 def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str, Any]]:
-    """Load per-dispatch route decision JSON written by smart_router.write_route_decision().
+    """Load per-dispatch route decision JSON.
 
-    Returns the parsed dict (with strategy/task_class/selected_model) or None when
-    the file does not exist or cannot be parsed.
+    Two writers, two shapes, live in the same directory:
+
+    1. ``dispatch_cli._persist_route_decision`` (the door — the dominant shape):
+       ``{"decision": {"provider": ..., "model": ..., ...}, "dispatch_id": ...}``.
+       Measured 2026-09-22 on the vnx-dev store: 764 of 765 files carry this
+       shape. ``decision.provider`` and ``decision.model`` are the lane's OWN
+       canonical values (already the short lane form, e.g. ``glm-harness`` /
+       ``glm-5.2``), so they need NO ``parse_route_model_id`` round-trip.
+    2. ``smart_router.write_route_decision`` (the legacy smart-router writer):
+       ``{"strategy": "smart_router", "selected_model": <model_id>, ...}``.
+       1 of 765 files. ``selected_model`` is a routing-recommendation model_id
+       that MUST go through ``parse_route_model_id`` to split provider/model.
+
+    Returns the parsed dict (either shape) or None when the file does not
+    exist or cannot be parsed.
     """
     path = state_dir / "route_decisions" / f"{dispatch_id}.json"
     if not path.exists():
@@ -454,6 +526,117 @@ def _load_route_decision(dispatch_id: str, state_dir: Path) -> Optional[Dict[str
             dispatch_id, type(exc).__name__, exc,
         )
         return None
+
+
+# ---------------------------------------------------------------------------
+# Route-decision identity extraction (OI-1546 / OI-1547)
+# ---------------------------------------------------------------------------
+#
+# Three explicit outcomes, NOT a silent fall-through to the report body:
+#
+#   ("lane", provider, model)   — the route decision is the authoritative
+#                                 identity (the lane's own record of what ran).
+#   ("body", None, None)         — no usable route decision; the report body is
+#                                 the ONLY source left (OI-1547: this used to be
+#                                 a silent fall-through indistinguishable from
+#                                 "no route-decision file at all", so a decision
+#                                 that existed but carried no identity read as
+#                                 "the lane said nothing" — letting the body's
+#                                 false self-declaration win by default).
+#   ("legacy", provider, model)  — the legacy ``selected_model`` shape (1 of 765);
+#                                 the model_id needs ``parse_route_model_id``.
+#
+# The "geen bruikbaar route-besluit" case is the THIRD branch, made explicit so
+# a caller can tell "the lane left no record" apart from "the lane left a
+# record with no identity" (OI-1547). Before this, both fell through to the body
+# the same way, so the body's self-declaration — which on a harness lane is a
+# LIE the worker cannot know is wrong (it introspects as sonnet/claude while
+# the lane runs glm-5.2) — won by default for 764 of 765 dispatches.
+_ROUTE_SOURCE_LANE = "lane"
+_ROUTE_SOURCE_LEGACY = "legacy"
+_ROUTE_SOURCE_BODY = "body"
+
+
+def _extract_route_identity(
+    route_dec: Optional[Dict[str, Any]],
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Split a route-decision dict into (source, provider, model).
+
+    Returns one of the three ``_ROUTE_SOURCE_*`` outcomes above. Never raises:
+    a malformed/empty route decision returns ``("body", None, None)`` so the
+    caller falls back to the report body — but EXPLICITLY, not silently.
+
+    Shape A (764 of 765, the door's ``_persist_route_decision``):
+        ``decision.provider`` + ``decision.model`` are already canonical lane
+        values (``glm-harness`` / ``glm-5.2``). Provider is normalised through
+        the closed vocabulary; model passes through verbatim. A provider the
+        vocabulary does not recognise demotes this branch to ``("body", ...)``
+        — a stale/malformed decision is an auxiliary hint, not the sole source
+        of truth (mirrors the legacy-shape contract one branch down).
+    Shape B (1 of 765, the legacy ``smart_router.write_route_decision``):
+        ``selected_model`` is a routing-recommendation model_id, split into
+        (provider, model) via ``parse_route_model_id``.
+    """
+    if not isinstance(route_dec, dict):
+        return _ROUTE_SOURCE_BODY, None, None
+
+    # Shape A: the door's per-dispatch record (764 of 765).
+    decision = route_dec.get("decision")
+    if isinstance(decision, dict):
+        lane_provider_raw = decision.get("provider")
+        lane_model = decision.get("model")
+        if lane_provider_raw and lane_model:
+            try:
+                lane_provider = _normalise_provider(str(lane_provider_raw))
+            except UnrecognizedProviderError as exc:
+                logger.warning(
+                    "report_to_receipt_converter: route decision carries "
+                    "unrecognized provider %r (%s) -- falling back to the "
+                    "report body",
+                    lane_provider_raw, exc,
+                )
+                return _ROUTE_SOURCE_BODY, None, None
+            return _ROUTE_SOURCE_LANE, lane_provider, str(lane_model)
+        # decision block present but missing provider/model -> explicit body
+        # fallback (OI-1547), NOT a silent pass-through.
+        if lane_provider_raw is not None or lane_model is not None:
+            logger.warning(
+                "report_to_receipt_converter: route decision present but "
+                "incomplete (provider=%r, model=%r) -- explicit body fallback",
+                lane_provider_raw, lane_model,
+            )
+            return _ROUTE_SOURCE_BODY, None, None
+
+    # Shape B: the legacy smart-router record (1 of 765).
+    selected_model = route_dec.get("selected_model")
+    if selected_model:
+        model_id = str(selected_model)
+        try:
+            from smart_router import parse_route_model_id  # noqa: PLC0415
+            lane_provider_raw, lane_model = parse_route_model_id(model_id)
+        except Exception:
+            logger.debug(
+                "report_to_receipt_converter: legacy selected_model lane "
+                "resolution failed for model_id=%s",
+                model_id,
+                exc_info=True,
+            )
+            return _ROUTE_SOURCE_BODY, None, None
+        if lane_provider_raw:
+            try:
+                lane_provider = _normalise_provider(lane_provider_raw)
+            except UnrecognizedProviderError as exc:
+                logger.warning(
+                    "report_to_receipt_converter: legacy route decision carries "
+                    "unrecognized provider %r (%s) -- falling back to the "
+                    "report body",
+                    lane_provider_raw, exc,
+                )
+                return _ROUTE_SOURCE_BODY, None, None
+            return _ROUTE_SOURCE_LEGACY, lane_provider, lane_model
+
+    # No usable identity in either shape — the explicit third branch (OI-1547).
+    return _ROUTE_SOURCE_BODY, None, None
 
 
 def _resolve_report_role(
@@ -535,57 +718,59 @@ def _resolve_report_provider_model(
     ``_resolve_report_role``, where the body wins because the author's own
     role stamp is the authoritative source.
 
-    Resolution order:
+    Resolution order (OI-1546):
       1. Route decision JSON (``state_dir/route_decisions/<dispatch_id>.json``)
-         — the lane's own record of which model was selected.
-      2. Report body/frontmatter fields — fallback when no route decision
-         exists (e.g. plan-gate seats that do not go through the smart router).
+         — the lane's own record of which model was selected. Read in BOTH
+         shapes: ``decision.provider``/``decision.model`` (the door's record,
+         764 of 765) and the legacy ``selected_model`` (smart_router, 1 of 765).
+         ``_extract_route_identity`` returns an explicit THIRD outcome
+         (``_ROUTE_SOURCE_BODY``) when a decision file exists but carries no
+         usable identity, so that case no longer reads as "the lane was silent"
+         (OI-1547).
+      2. Report body/frontmatter fields — fallback when the route decision
+         yielded no identity (e.g. plan-gate seats that do not go through the
+         smart router, or a decision file that exists but is incomplete).
 
     Raises:
         UnrecognizedProviderError: propagated from the body-fallback call to
         ``_normalise_provider`` (step 2) when NEITHER the lane nor the body
         yields a recognisable provider. A lane-side normalisation failure
-        (step 1) is caught here and demoted to a WARNING + fall-through to
-        the body — a stale/malformed route-decision file is an auxiliary
-        hint, not the sole source of truth, so it must not by itself refuse
-        the receipt. Only exhausting BOTH sources raises.
+        (step 1) is caught inside ``_extract_route_identity`` and demoted to a
+        WARNING + explicit body fallback — a stale/malformed route-decision
+        file is an auxiliary hint, not the sole source of truth, so it must
+        not by itself refuse the receipt. Only exhausting BOTH sources raises.
     """
     provider: Optional[str] = None
     model: Optional[str] = None
+    route_source: str = _ROUTE_SOURCE_BODY
 
-    # Lane identity first: the route decision knows which model ran.
+    # Lane identity first: the route decision knows which model ran. Read it
+    # in BOTH shapes (OI-1546) — the door's ``decision`` block (764 of 765)
+    # AND the legacy ``selected_model`` (1 of 765). The old code only checked
+    # ``selected_model``, so for 764 of 765 dispatches the lane never fired and
+    # the converter silently fell back to the body's self-declaration — which
+    # on a harness lane is a LIE the worker cannot know is wrong.
     if state_dir and dispatch_id:
         route_dec = _load_route_decision(dispatch_id, state_dir)
-        if route_dec and route_dec.get("selected_model"):
-            model_id = route_dec["selected_model"]
-            lane_provider: Optional[str] = None
-            lane_model: Optional[str] = None
-            try:
-                from smart_router import parse_route_model_id  # noqa: PLC0415
-                lane_provider, lane_model = parse_route_model_id(model_id)
-            except Exception:
-                logger.debug(
-                    "report_to_receipt_converter: provider/model lane resolution "
-                    "failed for dispatch=%s model_id=%s",
-                    dispatch_id, model_id,
-                    exc_info=True,
-                )
-            if lane_provider:
-                try:
-                    provider = _normalise_provider(lane_provider)
-                    model = lane_model
-                except UnrecognizedProviderError as exc:
-                    logger.warning(
-                        "report_to_receipt_converter: route decision for "
-                        "dispatch=%s carries unrecognized provider %r (%s) "
-                        "-- falling back to the report body",
-                        dispatch_id, lane_provider, exc,
-                    )
+        route_source, lane_provider, lane_model = _extract_route_identity(route_dec)
+        if route_source in (_ROUTE_SOURCE_LANE, _ROUTE_SOURCE_LEGACY) and lane_provider:
+            provider = lane_provider
+            model = lane_model
+            logger.info(
+                "report_to_receipt_converter: lane identity from route decision "
+                "(source=%s) dispatch=%s provider=%s model=%s",
+                route_source, dispatch_id, provider, model,
+            )
 
     # Body fallback: only used when lane resolution produced nothing. Left
     # UNPROTECTED by design — an UnrecognizedProviderError here means both
     # sources are exhausted and must propagate (see docstring).
     if not provider:
+        logger.info(
+            "report_to_receipt_converter: no usable lane identity "
+            "(route_source=%s) dispatch=%s -- using report body",
+            route_source, dispatch_id,
+        )
         provider = _normalise_provider(merged.get("provider", "unknown"))
     if not model:
         model = (merged.get("model") or "").strip()
@@ -608,10 +793,14 @@ def _resolve_report_provider_model(
 #
 # OI-1408: an absent status is resolved BEFORE the categorization above by
 # falling back to the report's exit_code (required by schemas/unified_report_v1.
-# json, unlike status) — exit_code==0 -> "success", nonzero -> "failed". Only
-# when exit_code is ALSO absent/unparseable does a report fall through to
-# "no_signal". This derives the input to the one canonical mapping; it is not
-# a second mapping.
+# json, unlike status): exit_code==0 -> "success", nonzero -> "failed". When
+# exit_code is ALSO absent/unparseable, a report that satisfies the body
+# contract is derived as "done" (report_body_contract.resolve_undeclared_status,
+# the definition dispatch_govern applies too) and marked ``status_source:
+# report_contract``. Only a report the contract gives no evidence for falls
+# through to "no_signal" (in practice one that fails the contract lands as
+# report_contract_invalid first). This derives the input to the one canonical
+# mapping; it is not a second mapping.
 
 
 def _check_branch_on_origin(dispatch_id: str) -> bool:
@@ -954,6 +1143,7 @@ def _build_receipt_from_report_core(
     # "contract_invalid" bucket (which received 96 hits in 7 days and is
     # invisible to any alarm).
     status_raw = (merged.get("status") or "").strip().lower()
+    status_derived = False
     if not status_raw:
         # OI-1408: schemas/unified_report_v1.json REQUIRES exit_code but never
         # required status — a schema-valid v1 report can carry no status field
@@ -976,6 +1166,24 @@ def _build_receipt_from_report_core(
                     "derived status=%r from exit_code=%d",
                     dispatch_id, status_raw, exit_code,
                 )
+    if not status_raw:
+        # No status and no usable exit_code. The report still says something:
+        # one that satisfies the body contract and declares no failure
+        # delivered its deliverable (the definition dispatch_govern already
+        # applies, OI-1202). Before this step such a report landed as
+        # ``no_signal`` beside a same-shaped report that happened to carry an
+        # exit_code, and the quality score excluded it. Derived, not declared:
+        # the receipt says so (``status_source``). A DECLARED status, the
+        # literal ``unknown`` included, is a claim and is never re-derived.
+        derived = resolve_undeclared_status(status_raw, body_valid=body_result.valid)
+        if derived is not None:
+            status_raw = derived
+            status_derived = True
+            logger.info(
+                "report_to_receipt_converter: dispatch=%s no status and no "
+                "exit_code, derived status=%r from the report contract",
+                dispatch_id, status_raw,
+            )
     try:
         status_category = resolve_status_category(status_raw)
     except UnknownStatusError:
@@ -1002,9 +1210,13 @@ def _build_receipt_from_report_core(
             ] if resolved is not None else []
         return receipt_out
 
-    is_terminal_success = status_category == "success"
+    is_terminal_success = status_category == "success" and not status_derived
 
     if is_terminal_success:
+        # A derived status is not a success CLAIM, so the claim checks (a
+        # verified PR, a branch on origin) do not apply to it: the report
+        # made no assertion for them to refute. Delivery stays the merge
+        # gate's evidence.
         fail_closed_violations = _run_fail_closed_checks(
             text, dispatch_id, body_result, merged=merged,
         )
@@ -1082,6 +1294,8 @@ def _build_receipt_from_report_core(
         "event_type": "task_complete",
         "status": status_raw or "no_signal",
     }
+    if status_derived:
+        receipt["status_source"] = DERIVED_STATUS_SOURCE
     if ambiguous_report:
         receipt["ambiguous_report_path"] = True
         receipt["report_path_candidates"] = [
@@ -1245,11 +1459,13 @@ def build_receipt_from_report(
 # scan_and_convert() for per-scan counting (OI-998):
 #   "appended"  — new receipt written.
 #   "duplicate" — idempotent re-send, no new receipt.
-#   "rejected"  — fail-closed refusal by append_receipt_payload's own
-#                 validation (e.g. missing Model — see AppendReceiptError
-#                 code "missing_model" in append_receipt_internals/validation.py).
+#   "rejected"  — fail-closed refusal by append_receipt_payload's own model
+#                 validation (see MODEL_REFUSAL_CODES below: a missing Model,
+#                 or a Model value that is not a model name).
 #                 A WARNING is logged here with dispatch_id + reason so the
-#                 refusal is loud, not silent.
+#                 refusal is loud, not silent. The report is quarantined into
+#                 receipt_deadletter/ (reason code = the refusal's own code)
+#                 when the state dir is known, so no later scan retries it.
 #   "malformed" — file unreadable, or no dispatch_id resolvable at all.
 #   "error"     — anything else: a crash while parsing/building the receipt,
 #                 or an append failure other than the fail-closed rejection.
@@ -1264,6 +1480,17 @@ def build_receipt_from_report(
 #                 been appended, but dry_run=True suppressed the actual
 #                 append_receipt_payload() call — nothing was written and no
 #                 watermark entry was made.
+
+# The AppendReceiptError codes _validate_model_present raises
+# (append_receipt_internals/validation.py): ``missing_model`` (no model, or a
+# sentinel such as "unknown") and ``invalid_model_shape`` (a value that is not
+# a model name: spaces, backticks, too long). Both are a verdict on the
+# report's bytes, so both take the "rejected" outcome: counted as rejected,
+# named in the rejection history, quarantined on the first refusal. This is the
+# ONE place that decides which codes take that path; every other refusal stays
+# an "error" and is retried. A test pins this set to what the validator raises.
+MODEL_REFUSAL_CODES = frozenset({"missing_model", "invalid_model_shape"})
+
 
 def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
     """Best-effort: push *text*'s ``## Open Items`` entries into the ledger.
@@ -1464,13 +1691,14 @@ def _convert_one_detailed(
         # (missing_model -> "rejected", any other AppendReceiptError ->
         # "error"), so a dry-run count is a faithful preview, not an
         # overestimate. _validate_receipt writes nothing — it only raises.
+        # (Model refusals are the codes in MODEL_REFUSAL_CODES.)
         try:
             from append_receipt_internals.validation import (  # noqa: PLC0415
                 _validate_receipt,
             )
             _validate_receipt(receipt)
         except AppendReceiptError as exc:
-            if exc.code == "missing_model":
+            if exc.code in MODEL_REFUSAL_CODES:
                 logger.warning(
                     "report_to_receipt_converter: [dry-run] REJECTED (fail-closed) "
                     "dispatch=%s file=%s reason=%s",
@@ -1515,10 +1743,17 @@ def _convert_one_detailed(
             receipt,
             receipts_file=receipts_file,
             cache_window_seconds=cache_window_seconds,
-            skip_enrichment=True,  # converter receipts skip quality advisory
+            # skip_enrichment covers the quality advisory hooks and the
+            # provenance/session/cqs enrichment. The confidence update is an
+            # outcome hook and runs regardless: a converter receipt is the
+            # only outcome record a dispatch gets when the lane wrote none.
+            skip_enrichment=True,
         )
     except AppendReceiptError as exc:
-        if exc.code == "missing_model":
+        if exc.code in MODEL_REFUSAL_CODES:
+            # receipt_conversion_rejection_beacon.parse_rejections keys on the
+            # exact "REJECTED (fail-closed) dispatch=... file=... reason=..."
+            # shape of this line: every model refusal logs it, whatever its code.
             logger.warning(
                 "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
                 receipt.get("dispatch_id"), report_path.name, exc.message,
@@ -1530,6 +1765,21 @@ def _convert_one_detailed(
                     "reason": exc.message,
                     "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 })
+            # A model refusal (no model, or a value that is not a model name)
+            # is a verdict on the report's bytes: no later scan can turn it
+            # into a receipt, so keeping the file in the scanned directory
+            # only re-fails the beacon on every scan and buries the next new
+            # refusal under an alarm that is already on.
+            # Quarantine, not deletion: the report stays readable in
+            # receipt_deadletter/ and an operator can put it back once the
+            # model has been fixed (new bytes, new hash, so the watermark entry
+            # _deadletter_report leaves does not shadow it). The INDEX line
+            # carries the refusal's own code. Only when the state dir is
+            # known, the same guard as the unknown_dispatch quarantine; a
+            # caller without receipts_file leaves the report for the next
+            # directory scan to quarantine.
+            if state_dir_for_route is not None:
+                _deadletter_report(report_path, exc.code, state_dir_for_route)
             return None, "rejected"
         logger.warning(
             "report_to_receipt_converter: append failed for %s: %s",
@@ -1636,7 +1886,7 @@ class ScanStats:
     # dry-run so this count never influences health status either way.
     would_append_count: int = 0
     # F1-3: per-rejection detail ({dispatch_id, file, reason, rejected_at})
-    # for THIS scan's missing-model rejections — see _write_scan_heartbeat,
+    # for THIS scan's model refusals (MODEL_REFUSAL_CODES) — see _write_scan_heartbeat,
     # which merges this into the beacon's accumulated details.rejected
     # history. A tuple (not a list) so the frozen dataclass never exposes a
     # mutable default shared across instances.
@@ -1665,16 +1915,11 @@ def _load_prior_rejected_history(state_dir: Path) -> List[Dict[str, Any]]:
 
     Best-effort: a missing, unreadable, or malformed health file yields an
     empty history rather than raising — a corrupt beacon must never block a
-    scan from completing.
+    scan from completing. The reader itself lives in
+    receipt_conversion_rejection_beacon, which reads this same history to
+    judge its own status.
     """
-    path = state_dir.parent / "health" / f"{_HEALTH_COMPONENT}.json"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    details = payload.get("details") if isinstance(payload, dict) else None
-    prior = details.get("rejected") if isinstance(details, dict) else None
-    return [entry for entry in prior if isinstance(entry, dict)] if isinstance(prior, list) else []
+    return load_rejected_history(state_dir, _HEALTH_COMPONENT)
 
 
 def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
@@ -1698,11 +1943,18 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     at <data_root>/health/. cleanup_worker_exit.py's own call site already
     does the ``.parent`` correctly; this one didn't).
 
-    status="fail" specifically for the case this dispatch closes: reports
-    were scanned this cycle (attempted_count > 0) but NONE resulted in a
-    receipt landing (new_count == duplicate_count == 0) — "zero receipts"
-    while work was actually attempted. A quiet scan with nothing new to do
-    (attempted_count == 0) stays "ok" — that is the healthy, common case.
+    status="fail" in two cases. (1) Reports were scanned this cycle
+    (attempted_count > 0) but NONE resulted in a receipt landing
+    (new_count == duplicate_count == 0): "zero receipts" while work was
+    actually attempted (OI-998). (2) The accumulated rejection history holds a
+    refusal younger than REJECTION_ALARM_WINDOW_SECONDS. A refused report is
+    quarantined on the spot, so the scan after it attempts nothing; without
+    case (2) the alarm would clear one scan later and a refusal nobody has
+    read would vanish, and a refusal next to a successful receipt never
+    raised it at all. Once the newest refusal is older than the window the
+    status is "ok" again and the history stays in ``details.rejected``.
+    A quiet scan with nothing new to do (attempted_count == 0) and no recent
+    refusal stays "ok", the healthy and common case.
     Best-effort: heartbeat write failures never raise into the caller.
     """
     try:
@@ -1725,6 +1977,10 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     if len(rejected_history) > _HEALTH_REJECTED_HISTORY_MAX:
         rejected_history = rejected_history[-_HEALTH_REJECTED_HISTORY_MAX:]
 
+    recent_rejected = recent_rejections(rejected_history)
+    if recent_rejected:
+        status = "fail"
+
     beacon = HealthBeacon(
         state_dir.parent, _HEALTH_COMPONENT, expected_interval_seconds=_HEALTH_EXPECTED_INTERVAL_SECONDS,
     )
@@ -1737,6 +1993,8 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
             "malformed_count": stats.malformed_count,
             "error_count": stats.error_count,
             "skipped_non_dispatch_count": stats.skipped_non_dispatch_count,
+            "recent_rejected_count": len(recent_rejected),
+            "rejection_alarm_window_seconds": REJECTION_ALARM_WINDOW_SECONDS,
             "rejected": rejected_history,
         },
     )
@@ -1761,7 +2019,12 @@ def scan_and_convert(
     _convert_one_detailed()'s outcome tags. Newly-appended, duplicate, and
     skipped_non_dispatch reports are marked processed (the classification
     that produced skipped_non_dispatch is permanent — a panel-*.md report
-    never becomes a dispatch report on a later scan); rejected, malformed,
+    never becomes a dispatch report on a later scan). A rejected report (no
+    real model, or a model value that is not a model name) is moved into
+    ``receipt_deadletter/`` by
+    ``_convert_one_detailed`` and its hash goes into the Bash watermark, so it
+    is not retried; the beacon keeps the refusal visible for
+    REJECTION_ALARM_WINDOW_SECONDS (see ``_write_scan_heartbeat``). Malformed
     and errored reports are NOT marked processed, so they are retried on the
     next scan once their cause is fixed.
 
@@ -1896,8 +2159,10 @@ def scan_and_convert(
                 malformed_count += 1
             else:  # "error"
                 error_count += 1
-            # rejected / malformed / error reports are NOT marked processed:
-            # retried on the next scan once the cause is fixed.
+            # malformed / error reports are NOT marked processed: retried on
+            # the next scan once the cause is fixed. A rejected report is not
+            # marked here either, but it is already out of reports_dir:
+            # _convert_one_detailed quarantined it.
 
     stats = ScanStats(
         new_count=new_count,

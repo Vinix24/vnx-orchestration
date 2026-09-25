@@ -208,10 +208,32 @@ GRANDFATHERED: Dict[str, Set[str]] = {
 #   - worker_permission_relay: last-resort except-branch AFTER vnx_paths.ensure_env()
 #     (the VNX_HOME+marker-aware resolver) failed — mirrors the grandfathered
 #     defensive-fallback pattern above.
-#   - append_receipt_internals (payload/session_resolver/warning_destination),
-#     subsystem_health, the *_effectiveness_probe modules: receipt-provenance /
-#     intelligence side paths; read-mostly, env-overridable, and outside this
-#     dispatch's blast radius.
+#   - append_receipt_internals/payload.py: MIGRATED. Its confidence hook fed
+#     __file__ to the resolver and so wrote to <checkout>/.vnx-data/state, a
+#     store without the intelligence tables (every update a silent no-op). It now
+#     writes to the store the receipt itself was appended to. Dropped from the
+#     list, as the gate requires of a migrated site.
+#   - append_receipt_internals/session_resolver + warning_destination: MIGRATED
+#     (OI-1788). warning_destination's recurrence counter took its path from
+#     resolve_state_dir(__file__), which inside a central install is the
+#     read-only version directory: the counter's mkdir raised PermissionError
+#     and every dispatch whose receipt carried a ``counted`` warning was booked
+#     as failed (75 rows on mission-control v1.6.3). Both receipt writers now
+#     keep the counter beside the ledger they append to
+#     (warning_destination.counter_path_beside); the no-ledger default and
+#     session_resolver's fallback use vnx_paths.resolve_state_dir(). Dropped
+#     from the list, as the gate requires of a migrated site.
+#   - subsystem_health, plan_gate_/migration_effectiveness_probe and the two
+#     READ classes of injection_effectiveness_probe: MIGRATED (absence-is-loud,
+#     punt 1). Without an env pin they resolved the checkout-local
+#     .vnx-data/state, a stale copy with no track_open_items table, so the
+#     plan-gate beacon said ``ok`` over 90 unresolved blockers. They now go
+#     through effectiveness_probe.resolve_probe_state_dir /
+#     vnx_paths.resolve_paths(). Dropped from the list, as the gate requires.
+#     What stays for injection_effectiveness_probe is its WRITE path
+#     (run_reason_evaluator_and_propose's default state dir and the audit
+#     event's events/ dir): they move together or not at all, since the
+#     proposal queue and its audit event must land in the same store.
 # (provider_costs.py was on EVERY provider lane's hot path — emit_provider_cost
 # mkdirs events/ per dispatch — so it was fixed in the same dispatch instead of
 # grandfathered: it now mirrors provider_dispatch._resolve_data_dir.)
@@ -224,24 +246,6 @@ GRANDFATHERED_RESOLVER_ANCHORS: Dict[str, Set[str]] = {
     },
     "scripts/lib/lease_sweep.py": {
         "resolve_state_dir(__file__)",
-    },
-    "scripts/lib/subsystem_health.py": {
-        "project_root.resolve_data_dir(__file__)",
-    },
-    "scripts/lib/append_receipt_internals/payload.py": {
-        "facade.resolve_state_dir(__file__)",
-    },
-    "scripts/lib/append_receipt_internals/session_resolver.py": {
-        "facade.resolve_state_dir(__file__)",
-    },
-    "scripts/lib/append_receipt_internals/warning_destination.py": {
-        "resolve_state_dir(__file__)",
-    },
-    "scripts/lib/plan_gate_effectiveness_probe.py": {
-        "project_root.resolve_state_dir(__file__)",
-    },
-    "scripts/lib/migration_effectiveness_probe.py": {
-        "project_root.resolve_state_dir(__file__)",
     },
     "scripts/lib/injection_effectiveness_probe.py": {
         "project_root.resolve_state_dir(__file__)",

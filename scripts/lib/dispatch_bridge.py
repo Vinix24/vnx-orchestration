@@ -46,9 +46,9 @@ from dispatch_spec import (  # noqa: E402
     _ID_RE,
     DEADLINE_SECONDS_MAX,
     DEADLINE_SECONDS_MIN,
-    Gate,
     LEGACY_GATE_SENTINELS,
     Provider,
+    REGISTERED_GATE_NAMES,
 )
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
@@ -104,29 +104,34 @@ def _canonical_provider(raw: Optional[str]) -> Provider:
 # the closed ``Gate`` enum) so the two validation paths — this bridge and the
 # door's dispatch_spec.validate() Rule 16 — can never drift apart (OI-845).
 def _canonical_gate(raw: Optional[str]) -> str:
-    """Validate a gate name against the closed ``Gate`` enum (OI-845).
+    """Validate a gate name against ``REGISTERED_GATE_NAMES`` (OI-845).
 
     An empty/blank value means "no gate assigned" and passes through as ``""`` —
     the same "unset" convention ``stage_spec_bundle`` already uses for ``gate``.
-    Any non-empty value that is not a legal gate name raises ValueError naming
-    the invalid value and listing the valid ones, instead of silently writing
-    an unenforceable gate into the spec (a dispatch staged with ``gate="codex"``
-    previously wrote that string through unchecked and the gate simply never ran).
+    Any non-empty value that is not a registered gate name raises ValueError
+    naming the invalid value and listing the valid ones, instead of silently
+    writing an unenforceable gate into the spec (a dispatch staged with
+    ``gate="codex"`` previously wrote that string through unchecked and the gate
+    simply never ran).
+
+    The registry is the same one the door's Rule 16 reads, so a gate this bridge
+    stages is a gate the door will accept at fire time. Reading the bare ``Gate``
+    enum here refused ``deepseek_gate`` while ``vnx gate --only deepseek_gate``
+    ran it.
 
     Members of ``LEGACY_GATE_SENTINELS`` are special-cased to the same
     empty-gate sentinel — see that constant's docstring for why they normalise
-    instead of raising or joining the closed ``Gate`` enum.
+    instead of raising or joining the registry.
     """
     key = (raw or "").strip()
     if not key or key.lower() in LEGACY_GATE_SENTINELS:
         return ""
-    try:
-        return Gate(key).value
-    except ValueError:
-        valid = ", ".join(sorted(g.value for g in Gate))
+    if key not in REGISTERED_GATE_NAMES:
+        valid = ", ".join(sorted(REGISTERED_GATE_NAMES))
         raise ValueError(
             f"gate {key!r} is not a recognized gate name; valid gates are: {valid}"
-        ) from None
+        )
+    return key
 
 
 def _data_dir(project_id: "Optional[str]" = None) -> Path:

@@ -7,6 +7,20 @@ a pending-review.json for T0 approval.
 Per ADR-005: NDJSON emit BEFORE any DB write.
 Per ADR-007: project_id required on all DB operations.
 Per ADR-003: kimi via CLI subprocess only, no Anthropic SDK.
+
+Injection-probe gate (PR-17, revised): the injection-effectiveness probe decides
+whether a cycle may run. ``ok`` runs a normal cycle. ``degraded`` runs the cycle
+in proposal-only mode: consolidation is the remedy for the ignored patterns that
+make the probe degraded, so gating it on ``ok`` blocked its own fix (0
+``dream_cycles`` rows across 55 nightly runs, every one ``probe_not_ok``). Any
+other status (``produces_crap``, ``unknown``, or one we do not know) still skips.
+
+Proposal-only changes nothing about approval. The cycle itself never mutates a
+pattern: it writes ``<cycle_id>-pending-review.json`` and a ``dream_cycles`` row
+with ``operator_reviewed=0``. Patterns are archived only in
+``review_gate.approve_cycle``, an operator action. A degraded cycle is marked
+``mode=proposal_only`` and carries ``probe_health`` in the review JSON, the
+started/completed events and the returned dict.
 """
 from __future__ import annotations
 
@@ -27,6 +41,14 @@ _MIN_PATTERN_THRESHOLD: int = 1
 
 # Default kimi subprocess timeout in seconds; override via VNX_DREAM_KIMI_TIMEOUT.
 _DEFAULT_KIMI_TIMEOUT: int = 180
+
+# Probe statuses that let a cycle run. An explicit allow-set, not a deny-set: a
+# new or misspelled status must fail closed rather than pass by not being listed.
+_PROBE_HEALTH_OK: str = "ok"
+_PROBE_HEALTH_DEGRADED: str = "degraded"
+_PROBE_HEALTH_RUNNABLE: frozenset[str] = frozenset(
+    {_PROBE_HEALTH_OK, _PROBE_HEALTH_DEGRADED}
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
@@ -55,8 +77,9 @@ def _injection_probe_health(state_dir: Path) -> str:
     """Run the injection-effectiveness probe (PR-6) and return its health status.
 
     This is the PR-17 activation gate for the dream-cycle executor: read-only,
-    never raises — a probe/import failure degrades to ``"unknown"`` (gated,
-    same as a genuinely unhealthy probe) rather than crashing the cycle.
+    never raises. A probe/import failure degrades to ``"unknown"`` (not in
+    ``_PROBE_HEALTH_RUNNABLE``, so gated like ``produces_crap``) rather than
+    crashing the cycle.
     """
     try:
         from injection_effectiveness_probe import InjectionEffectivenessProbe
@@ -271,6 +294,12 @@ def run_dream_cycle(
     # injection-effectiveness probe (PR-6) health is the gate. scheduler.py only
     # installs the LaunchAgent/crontab — it never runs the cycle — so the gate
     # lives here to hold for both the scheduled and manual (`vnx dream run`) paths.
+    #
+    # Probe health decides the mode, not just go/no-go: `ok` runs a normal cycle,
+    # `degraded` runs it as a proposal (the cycle never mutates patterns; only
+    # review_gate.approve_cycle does). A degraded probe is the very state this
+    # cycle exists to fix, so skipping on it deadlocked the remedy. Everything
+    # outside _PROBE_HEALTH_RUNNABLE (produces_crap, unknown, unrecognised) skips.
     if os.environ.get("VNX_DREAM_SCHEDULER_ENABLED", "0") != "1":
         _emit_dream_event(
             {
@@ -291,7 +320,7 @@ def run_dream_cycle(
         }
 
     probe_health = _injection_probe_health(db_path.parent)
-    if probe_health != "ok":
+    if probe_health not in _PROBE_HEALTH_RUNNABLE:
         _emit_dream_event(
             {
                 "event_type": "dream_cycle_skipped",
@@ -331,11 +360,14 @@ def run_dream_cycle(
             "detail": detail,
         }
 
+    proposal_only = probe_health == _PROBE_HEALTH_DEGRADED
+
     _emit_dream_event(
         {
             "event_type": "dream_cycle_started",
             "cycle_id": cycle_id,
             "project_id": project_id,
+            "probe_health": probe_health,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
         _data_root,
@@ -413,19 +445,17 @@ def run_dream_cycle(
         review_dir = _data_root / "state" / "dream"
         review_dir.mkdir(parents=True, exist_ok=True)
         review_path = review_dir / f"{cycle_id}-pending-review.json"
-        review_path.write_text(
-            json.dumps(
-                {
-                    "cycle_id": cycle_id,
-                    "project_id": project_id,
-                    "input_count": total_input,
-                    "consolidation": consolidation,
-                    "requires_operator_review": True,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        review: dict[str, Any] = {
+            "cycle_id": cycle_id,
+            "project_id": project_id,
+            "input_count": total_input,
+            "probe_health": probe_health,
+            "consolidation": consolidation,
+            "requires_operator_review": True,
+        }
+        if proposal_only:
+            review["mode"] = "proposal_only"
+        review_path.write_text(json.dumps(review, indent=2), encoding="utf-8")
 
         merged_count = len(consolidation.get("merged", []))
         dropped_count = len(consolidation.get("dropped", []))
@@ -437,6 +467,7 @@ def run_dream_cycle(
                 "event_type": "dream_cycle_completed",
                 "cycle_id": cycle_id,
                 "project_id": project_id,
+                "probe_health": probe_health,
                 "input_count": total_input,
                 "merged_count": merged_count,
                 "dropped_count": dropped_count,
@@ -472,6 +503,7 @@ def run_dream_cycle(
 
         return {
             "cycle_id": cycle_id,
+            "probe_health": probe_health,
             "input_count": total_input,
             "merged_count": merged_count,
             "dropped_count": dropped_count,

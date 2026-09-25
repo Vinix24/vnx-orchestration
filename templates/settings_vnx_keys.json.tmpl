@@ -65,6 +65,15 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{VNX_HOME}}/scripts/hooks/pretooluse_t0_no_subagents.py"
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -104,7 +113,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [[ \"$PWD\" == */T0 ]]; then {{VNX_HOME}}/scripts/userpromptsubmit_intelligence_inject.sh; elif [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then {{VNX_HOME}}/scripts/userpromptsubmit_worker_intelligence_inject.sh; else echo '{\"decision\": \"allow\"}'; fi",
+            "command": "if [[ \"$PWD\" == */T0 ]]; then {{VNX_HOME}}/scripts/userpromptsubmit_intelligence_inject.sh; elif [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then {{VNX_HOME}}/scripts/userpromptsubmit_worker_intelligence_inject.sh; else exit 0; fi",
             "timeout": 8000
           }
         ]

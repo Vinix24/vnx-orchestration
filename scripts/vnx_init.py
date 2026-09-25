@@ -32,6 +32,7 @@ from typing import Dict, List, Optional
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+from mcp_server_config import write_terminal_mcp_configs
 from vnx_paths import ensure_env
 from vnx_skills import is_opted_out, iter_skill_dirs
 
@@ -415,7 +416,7 @@ def bootstrap_terminals(paths: Dict[str, str], force: bool = False,
         shutil.copy2(str(template_file), str(target_file))
         written.append(tid)
 
-    # Generate .mcp.json per terminal (disable global MCPs)
+    # Generate .mcp.json per terminal (global MCP servers masked by name)
     _generate_mcp_configs(terminals_dir, terminal_ids, force)
 
     # Pre-trust for Gemini CLI
@@ -433,35 +434,13 @@ def bootstrap_terminals(paths: Dict[str, str], force: bool = False,
 
 
 def _generate_mcp_configs(terminals_dir: Path, terminal_ids: List[str], force: bool) -> None:
-    """Write .mcp.json per terminal, disabling global MCPs."""
-    global_claude = Path.home() / ".claude.json"
-    global_mcps: Dict = {}
+    """Write .mcp.json per terminal: every global MCP server masked by name only.
 
-    if global_claude.exists():
-        try:
-            with open(global_claude) as f:
-                global_mcps = json.load(f).get("mcpServers", {})
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    if global_mcps:
-        disable_all = {}
-        for name, cfg in global_mcps.items():
-            entry = dict(cfg)
-            entry["disabled"] = True
-            disable_all[name] = entry
-        mcp_config = {"mcpServers": disable_all}
-    else:
-        mcp_config = {"mcpServers": {}}
-
-    for tid in terminal_ids:
-        target = terminals_dir / tid / ".mcp.json"
-        if target.exists() and not force:
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "w") as f:
-            json.dump(mcp_config, f, indent=2)
-            f.write("\n")
+    The implementation is shared with `vnx bootstrap-terminals` and lives in
+    scripts/lib/mcp_server_config.py, together with what Claude Code was measured to do
+    with such a file. No definition, env or header is copied out of the global config.
+    """
+    write_terminal_mcp_configs(terminals_dir, terminal_ids, force)
 
 
 def _pretrust_gemini(project_root: Path) -> None:

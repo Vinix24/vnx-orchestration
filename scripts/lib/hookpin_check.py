@@ -58,10 +58,17 @@ STATUS_UNRESOLVED = "unresolved"
 
 _GITROOT_SENTINEL = "\x00GITROOT\x00"
 _GIT_TOPLEVEL_RE = re.compile(r"\$\(git rev-parse --show-toplevel[^)]*\)")
+# An absolute (``/``) or home-relative (``~``) token must start at a token
+# boundary: not preceded by a word character, ``.``, ``-`` or ``/``. Without
+# that, the slash in a relative fragment such as ``scripts/hooks/x.sh`` inside
+# a printf error text matched mid-word and ``/hooks/x.sh`` was reported as a
+# dead absolute pin. A relative fragment cannot be resolved deterministically,
+# so it yields no token at all. The sentinel and ``$VAR`` alternatives carry
+# their own anchor and are unaffected.
 _PATH_TOKEN_RE = re.compile(
     r"(?:"
     + re.escape(_GITROOT_SENTINEL)
-    + r"|\$\{[A-Z_][A-Z0-9_]*\}|\$[A-Z_][A-Z0-9_]*|~|/)"
+    + r"|\$\{[A-Z_][A-Z0-9_]*\}|\$[A-Z_][A-Z0-9_]*|(?<![\w.\-/])[~/])"
     r'[^\s"\'\)]*\.(?:sh|py|mjs|js)'
 )
 _VAR_RE = re.compile(r"^\$\{?([A-Z_][A-Z0-9_]*)\}?(.*)$")

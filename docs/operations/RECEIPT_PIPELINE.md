@@ -175,9 +175,22 @@ As of ADR-035 §5.3 (§9 PR-8), `VNX_RECEIPT_T0_PUSH` defaults to `0` — the tm
 refuses (`AppendReceiptError` code `missing_model` / `invalid_model_shape`)
 any dispatch-lane report whose resolved `model` is absent or a sentinel
 value (`"unknown"`, `"none"`, ...). Unlike a malformed report, this is never
-auto-retried into success: the report sits in `unified_reports/` forever
-once the converter has logged the refusal, because nothing re-derives the
-model on its own.
+auto-retried into success: nothing re-derives the model on its own. The
+verdict depends on the report's bytes only, so the converter does not keep
+the file in the scanned directory: on the first refusal it moves the report
+to `<state_dir>/receipt_deadletter/` (an `INDEX.txt` line with reason code
+`missing_model`, shared with `rp_deadletter.sh`) and records its hash in the
+Bash watermark (`processed_receipts.txt`). Before that, the refused report
+stayed in `unified_reports/`, was refused again on every scan, and held both
+beacons below at `fail` for as long as it lay there (15 reports, 07-09 to
+08-09), which hid the next new refusal behind an alarm that was already on.
+
+Quarantine is not deletion. The report stays readable. To book it, add a
+verified model to the file and copy it back into `unified_reports/`: the new
+bytes have a new hash, so the watermark entry does not shadow it. Copying it
+back unchanged does nothing. `--dry-run` moves nothing. A caller that gives
+the converter no state dir (`convert_report_to_receipt` without
+`receipts_file`) leaves the report where it is for the next directory scan.
 
 The converter's own health beacon (`health/report_to_receipt_converter.json`)
 carries `details.rejected_count` (an integer, per scan) AND, as of F1-3
@@ -185,14 +198,26 @@ carries `details.rejected_count` (an integer, per scan) AND, as of F1-3
 `{dispatch_id, file, reason, rejected_at}` per rejection, accumulated across
 scans and capped at 200 entries (oldest evicted). A bare count with no name
 attached is not actionable; read `details.rejected` first to see WHICH
-reports are stranded before reaching for the recovery tool below.
+reports were refused before reaching for the recovery tool below.
 
 ```bash
 jq '.details.rejected' .vnx-data/health/report_to_receipt_converter.json
 ```
 
-`scripts/restore_stranded_reports.py` recovers these reports — but ONLY when
-a real model can be VERIFIED, never guessed or defaulted:
+Because the refused report is gone from the next scan, the beacon cannot
+derive its status from the scan alone. Both beacons (`report_to_receipt_converter`
+and `receipt_conversion_rejections`) stay at `fail` while the history holds a
+refusal younger than `REJECTION_ALARM_WINDOW_SECONDS` (24 hours,
+`receipt_conversion_rejection_beacon.py`), also when the same scan booked
+another receipt. After that they return to `ok`; the history stays in
+`details.rejected`. `receipt_conversion_rejections` reads the same history
+with the same rule (`details.recent_rejected` names the reports holding the
+alarm), so the two never disagree about the same scan.
+
+`scripts/restore_stranded_reports.py` recovers reports still lying in
+`unified_reports/` (those stranded before the quarantine existed). It does not
+read `receipt_deadletter/`. It restores them ONLY when a real model can be
+VERIFIED, never guessed or defaulted:
 
 ```bash
 # Scan only — lists every stranded report and its candidate source (or

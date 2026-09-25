@@ -3472,7 +3472,10 @@ def _derive_panel_weight(*, panel_seats, dispatch_paths, task_class, irreversibl
     paths = None
     if dispatch_paths:
         paths = [p.strip() for p in dispatch_paths.split(",") if p.strip()]
-    gov = smart_router.derive_governance_variant(
+    # The panel is sized from the variant alone. derive_variant reads no
+    # configuration, so an unreadable VNX_DEFAULT_REVIEW_STACK (a review-gate
+    # setting this path never uses) cannot fail a plan-gate.
+    gov = smart_router.derive_variant(
         dispatch_paths=paths,
         task_class=task_class,
         irreversible=bool(irreversible),

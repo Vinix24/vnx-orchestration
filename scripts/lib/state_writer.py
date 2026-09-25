@@ -10,6 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
+from vnx_paths import refuse_real_central_store_write_under_test_runner
+
 _SENTINEL_REGISTRY = {
     "dispatch_register.ndjson": ".state.lock",
     "receipts.ndjson": "append_receipt.lock",
@@ -43,7 +45,14 @@ def append_locked(
 
     Returns True when the record was appended, False when ``skip_if``
     skipped it. Callers without ``skip_if`` always get True.
+
+    Refuses (``TestIsolationGuardError``) an append into the real central store
+    from a pytest or unittest run, before the directory, sentinel or data file
+    is created. This primitive is the one write every state NDJSON append goes
+    through (dispatch register, gate register, worker-exit audit event), so the
+    guard sits here rather than at each caller.
     """
+    refuse_real_central_store_write_under_test_runner(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     sentinel = _sentinel_path(path)
     payload = (json.dumps(record, separators=(",", ":"), sort_keys=False) + "\n").encode("utf-8")
@@ -63,7 +72,11 @@ def append_locked(
 
 
 def rewrite_locked(path: Path, new_content: bytes | Callable[[bytes], bytes]) -> None:
-    """Rewrite a state file under the shared sentinel and data-file locks."""
+    """Rewrite a state file under the shared sentinel and data-file locks.
+
+    Same test-runner guard as ``append_locked``.
+    """
+    refuse_real_central_store_write_under_test_runner(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     sentinel = _sentinel_path(path)
     with sentinel.open("a+", encoding="utf-8") as sentinel_fh:

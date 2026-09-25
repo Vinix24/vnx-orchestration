@@ -168,7 +168,7 @@ def test_mirror_event_to_central_reraises_isolation_guard(tmp_path):
 
     with patch.object(
         dispatch_register,
-        "_refuse_real_store_write_under_pytest",
+        "_refuse_real_store_write_under_test_runner",
         side_effect=TestIsolationGuardError("test isolation violation"),
     ):
         with pytest.raises(TestIsolationGuardError, match="test isolation violation"):

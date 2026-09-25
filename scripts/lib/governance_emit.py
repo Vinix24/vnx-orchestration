@@ -21,6 +21,7 @@ Hard rules (PRD provider-governance-unification):
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
@@ -41,9 +42,11 @@ from append_receipt_internals.idempotency import (
     _compute_idempotency_key,
     _write_receipt_under_lock,
 )
+from append_receipt_internals.payload import _update_confidence_from_receipt
 from append_receipt_internals.receipt_finalize import (
     classify_receipt_v2_warnings,
     commit_receipt_v2_fields,
+    counter_path_beside,
 )
 from append_receipt_internals.validation import _validate_receipt
 from receipt_schema import ReceiptV2
@@ -327,22 +330,38 @@ def emit_dispatch_receipt(
         # pre_write_hook so it only fires once _write_receipt_under_lock
         # confirms this receipt is not a duplicate and will actually be
         # written.
-        classify_receipt_v2_warnings(receipt)
+        #
+        # OI-1788: the recurrence counter lives beside the ledger this receipt
+        # is appended to (``state_dir``), never at a path derived from this
+        # module's own location — inside a central install that is the
+        # read-only version directory and the counter's mkdir raised.
+        counter_path = counter_path_beside(receipt_path)
+        classify_receipt_v2_warnings(receipt, counter_path=counter_path)
         event_name = _validate_receipt(receipt)
         idempotency_key = _compute_idempotency_key(receipt, event_name)
         cache_path = _cache_file_for(receipt_path)
-        _write_receipt_under_lock(
+        result = _write_receipt_under_lock(
             receipt,
             receipt_path,
             cache_path,
             idempotency_key,
             _RECEIPT_CACHE_WINDOW_SECONDS,
-            pre_write_hook=commit_receipt_v2_fields,
+            pre_write_hook=functools.partial(commit_receipt_v2_fields, counter_path=counter_path),
         )
     except AppendReceiptError as exc:
         raise RuntimeError(
             f"governance_emit: receipt write failed for dispatch={dispatch_id}: {exc}"
         ) from exc
+
+    # This is the path that books the lane's own outcome for a dispatch, the
+    # bulk of the ledger's success/failure receipts. It writes through the
+    # locked primitive directly rather than append_receipt_payload, so none of
+    # payload's post-append hooks ever ran for it and pattern confidence never
+    # learned a lane outcome. Only a receipt that actually landed counts (a
+    # deduped one already had its turn); the update is best-effort and writes to
+    # the store this receipt was appended to.
+    if result.status == "appended":
+        _update_confidence_from_receipt(receipt, state_dir=Path(state_dir))
 
     logger.info(
         "governance_emit: receipt written dispatch=%s provider=%s status=%s",

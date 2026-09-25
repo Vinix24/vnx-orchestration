@@ -787,9 +787,9 @@ def _install_launchd_agent(
     # --- OI-1117: test-isolation guard — refuse write to host LaunchAgents ---
     # vnx_paths is importable because _engine.resolve_data_root() already
     # called ensure_engine_on_path() during _vnx_init_scaffold.
-    from vnx_paths import refuse_real_launch_agents_write_under_pytest
+    from vnx_paths import refuse_real_launch_agents_write_under_test_runner
     dest_dir = Path.home() / "Library" / "LaunchAgents"
-    refuse_real_launch_agents_write_under_pytest(dest_dir)
+    refuse_real_launch_agents_write_under_test_runner(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     content = template.read_text(encoding="utf-8")
