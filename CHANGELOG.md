@@ -9,7 +9,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ### Fixed
 
 - **A worker is told one thing about its report headings, on every lane
-  (OI-1850).** The validator wants `## Summary`, `## Changes`,
+  (OI-1850, #1918).** The validator wants `## Summary`, `## Changes`,
   `## Verification` and `## Open Items`. The fabric prompt
   (`prompts/base_worker.md`) asked for "What changed", commands, test totals
   and "Known limitations", and workers followed the prompt: 175
