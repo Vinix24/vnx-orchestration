@@ -172,12 +172,16 @@ Strictness per project (OI-1849): ``enforcement: enforce | warn | off`` in the
 project's ``.vnx/branch_protection.yaml`` (or ``scripts/forge/branch_protection.yaml``)
 sets what the branch-protection preflight does. ``enforce`` is the default of a
 file that does not say and blocks on drift. ``warn`` reports drift, in the output
-and in the preflight record, and merges. ``off`` does not check, and the record
-says so. A project with no such file at all is treated as ``warn``, loudly. The
-CI gate is not softened by any of it. ``ci_workflow: "<name>"`` in the same file
-names the workflow the CI gate looks for. Because the gate asks main's value of every
-later PR, a PR that changes, adds or removes ``ci_workflow`` is a weakening of the
-declaration and needs ``--allow-weaken "<reason>"`` like any other.
+and in the preflight record, and merges; a live state it cannot read for any
+other reason than "Branch not protected" still refuses. ``off`` checks neither
+drift nor weakening, and the record says so. A project with no such file at all
+is treated as ``warn``, loudly. The CI gate is not softened by any of it.
+``ci_workflow: "<name>"`` in the same file names the workflow the CI gate looks
+for. Because the gate asks main's value of every later PR, a PR that changes,
+adds or removes ``ci_workflow`` needs ``--allow-weaken "<reason>"`` under every
+mode, ``off`` included, and also when main has no file yet: onboarding a project
+is free, but the onboarding PR that names the workflow states why (operator
+decision 2026-09-25).
 
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
@@ -217,12 +221,14 @@ from contract_invalid_ledger import (
     evaluate_deliverable_acceptance,
 )
 from forge_protection_drift import (
+    BranchNotProtectedError,
     ENFORCEMENT_OFF,
     ENFORCEMENT_WARN,
     MISSING_FILE_ENFORCEMENT,
     PROTECTION_YAML_SEARCH_PATHS,
     ProtectionConfigError,
     YamlFetchResult,
+    ci_workflow_change,
     compare as compare_protection_state,
     fetch_ci_workflow_from_main,
     fetch_live_protection,
@@ -945,7 +951,10 @@ def _no_go_protection(message: str, mode: str = "") -> Dict[str, Any]:
 #: byte-identical to main and the integrity check reports GO (measured by the
 #: B1 read-seat on 2026-09-07 — that exact mutation passed unseen while 14
 #: tests went red on it). ``merge_target.py`` joined with OI-1849: it decides
-#: which repo every other check is pointed at.
+#: which repo every other check is pointed at. ``vnx_paths.py`` resolves the
+#: project root (and the state dir) that decision starts from, and
+#: ``ci_contexts.py`` supplies the check identities (``ANY_APP_ID``,
+#: ``RequiredCheck``) the drift comparison judges.
 _DOOR_INTEGRITY_PATHS = (
     "scripts/pr_merge.py",
     "scripts/lib/forge_protection_drift.py",
@@ -953,6 +962,8 @@ _DOOR_INTEGRITY_PATHS = (
     "scripts/lib/merge_preflight_ci_check.py",
     "scripts/lib/contract_invalid_ledger.py",
     "scripts/lib/merge_target.py",
+    "scripts/lib/vnx_paths.py",
+    "scripts/lib/ci_contexts.py",
 )
 
 
@@ -1059,14 +1070,19 @@ def _run_branch_protection_gate(
         indistinguishable from an unknown ref or an unresolvable repo (see
         ``forge_protection_drift._confirm_ref_exists``). The file's
         ``enforcement`` (``enforce``, ``warn`` or ``off``; absent means
-        ``enforce``) is the door's strictness for this project: ``off`` stops
-        here, GO, and the preflight record says the gate was off.
+        ``enforce``) is the door's strictness for this project: ``off`` skips
+        (c) and (d), GO, and the preflight record says the gate was off.
+        Neither the missing-file GO nor ``off`` skips the CI floor: the PR
+        head is read anyway, and a ``ci_workflow`` it changes, adds or removes
+        needs ``--allow-weaken "<reason>"`` (``_judge_ci_workflow_floor``).
     (c) Live protection on main must match main's own declared YAML. Under
         ``enforce`` any drift blocks, with the differing fields named. No
         override: a drift here means ``apply_branch_protection.py`` must be run
         first, not that this merge should be waved through. Under ``warn`` the
-        same drift (and a live state that cannot be read at all, which is what
-        a repo without protection answers) is reported and the merge goes on.
+        same drift (and "Branch not protected", which is what a repo without
+        protection answers) is reported and the merge goes on. Any other
+        failure to read live state (auth, network, rate limit) refuses under
+        ``warn`` too: it says nothing about the repo.
     (d) This PR's own version of the YAML (read at the PR's head sha, same
         contents API) must not weaken main's version
         (``forge_protection_drift.is_weakening``, which includes lowering
@@ -1105,20 +1121,9 @@ def _run_branch_protection_gate(
 
     main_path, main_yaml = _fetch_protection_yaml(target_root, "main")
     if main_yaml.not_found:
-        searched = ", ".join(PROTECTION_YAML_SEARCH_PATHS)
-        message = (
-            f"geen branch_protection.yaml in {_target_label()}, niets te toetsen "
-            f"(gezocht op main: {searched}): de merge gaat door zonder dat er iets is gecontroleerd"
+        return _judge_project_without_protection_file(
+            pr_number, target_root, pr_data=pr_data, allow_weaken_reason=allow_weaken_reason,
         )
-        return {
-            "verdict": "GO",
-            "message": message,
-            "mode": MISSING_FILE_ENFORCEMENT,
-            "reason_code": REASON_PROTECTION_FILE_MISSING,
-            "warnings": [message],
-            "overridden": False,
-            "override_reason": None,
-        }
     if main_yaml.error:
         return _no_go_protection(f"branch-protection-YAML op main niet leesbaar: {main_yaml.error}")
     try:
@@ -1129,28 +1134,26 @@ def _run_branch_protection_gate(
     mode = main_config.enforcement
 
     if mode == ENFORCEMENT_OFF:
-        return {
-            "verdict": "GO",
-            "message": (
-                f"branch-protection-toetsing staat uit (enforcement: off in {main_path} op main): "
-                "niets getoetst"
-            ),
-            "mode": mode,
-            "reason_code": REASON_PROTECTION_OFF,
-            "overridden": False,
-            "override_reason": None,
-        }
+        return _judge_enforcement_off(
+            pr_number, target_root, main_path, main_config.ci_workflow,
+            pr_data=pr_data, allow_weaken_reason=allow_weaken_reason,
+        )
     warn_only = mode == ENFORCEMENT_WARN
     warnings: List[str] = []
 
     try:
         live_norm = fetch_live_protection(target_root, branch="main")
-    except Exception as exc:
-        # Broad by intent: whatever made live state unreadable blocks under
-        # enforce, and is reported under warn.
+    except BranchNotProtectedError as exc:
+        # The one live-read failure that is an answer about the repo: nothing on
+        # main is protected. Blocks under enforce, is reported under warn.
         if not warn_only:
             return _no_go_protection(f"live branch-protection niet leesbaar: {exc}", mode)
         warnings.append(f"live branch-protection niet leesbaar, drift niet getoetst: {exc}")
+    except Exception as exc:
+        # Broad by intent, and a refusal under every mode: auth, network, a
+        # rate limit or an unparseable answer say nothing about the repo, so
+        # warn cannot report it as "no protection" and merge on.
+        return _no_go_protection(f"live branch-protection niet leesbaar: {exc}", mode)
     else:
         diffs = compare_protection_state(main_norm, live_norm)
         if diffs:
@@ -1160,46 +1163,25 @@ def _run_branch_protection_gate(
                 return _no_go_protection(drift, mode)
             warnings.append(drift)
 
-    head_sha = (pr_data or {}).get("headRefOid") or ""
-    if not head_sha:
-        return _no_go_protection(
-            f"PR-head kon niet worden bepaald voor #{pr_number}: branch-protection-preflight niet toetsbaar",
-            mode,
-        )
-    _, pr_yaml = _fetch_protection_yaml(target_root, head_sha)
-    if pr_yaml.not_found:
+    pr_config, head_has_no_file, refusal = _fetch_head_protection(target_root, pr_number, pr_data, mode)
+    if refusal is not None:
+        return refusal
+    if head_has_no_file:
         return _no_go_protection(
             f"deze PR verwijdert de branch-protection-YAML ({', '.join(PROTECTION_YAML_SEARCH_PATHS)}): "
             "branch-protection kan niet meer worden gehandhaafd "
             "(wil je de toetsing bewust uitzetten: enforcement: off, met --allow-weaken)",
             mode,
         )
-    if pr_yaml.error:
-        return _no_go_protection(f"branch-protection-YAML op de PR-head niet leesbaar: {pr_yaml.error}", mode)
-    try:
-        pr_config = parse_protection_config(pr_yaml.text or "")
-    except ProtectionConfigError as exc:
-        return _no_go_protection(f"branch-protection-YAML op de PR-head ongeldig: {exc}", mode)
     pr_norm = protection_to_normalized_dict(pr_config)
 
     weakening, weak_fields = protection_is_weakening(main_norm, pr_norm)
     reason = None
     if weakening:
+        refusal = _refuse_unaccepted_weakening(weak_fields, allow_weaken_reason, mode)
+        if refusal is not None:
+            return refusal
         reason = (allow_weaken_reason or "").strip()
-        if allow_weaken_reason is None:
-            return _no_go_protection(
-                "deze PR verzwakt branch-protection t.o.v. main zonder --allow-weaken: "
-                + ", ".join(weak_fields),
-                mode,
-            )
-        if not reason:
-            return {
-                "verdict": "NO-GO",
-                "message": "override zonder reden geweigerd: --allow-weaken vereist een niet-lege reden",
-                "overridden": True,
-                "override_reason": reason,
-                "mode": mode,
-            }
 
     result: Dict[str, Any] = {
         "verdict": "GO", "mode": mode, "overridden": False, "override_reason": None,
@@ -1221,6 +1203,158 @@ def _run_branch_protection_gate(
         result["reason_code"] = REASON_PROTECTION_WARNED
     result["message"] = message
     return result
+
+
+def _fetch_head_protection(
+    target_root: Path, pr_number: int, pr_data: Optional[Dict[str, Any]], mode: str,
+) -> Tuple[Optional[Any], bool, Optional[Dict[str, Any]]]:
+    """This PR's own ``branch_protection.yaml``, read at its head sha over the
+    contents API in the target repo, in the same path order as main's.
+
+    Returns ``(config, head_has_no_file, refusal)``: the parsed config, or
+    ``head_has_no_file=True`` on a confirmed 404 on every path, or a NO-GO when
+    the head sha is unknown or the file cannot be read or parsed. The caller
+    decides what a missing file means; an unreadable one is never a GO.
+    """
+    head_sha = (pr_data or {}).get("headRefOid") or ""
+    if not head_sha:
+        return None, False, _no_go_protection(
+            f"PR-head kon niet worden bepaald voor #{pr_number}: branch-protection-preflight niet toetsbaar",
+            mode,
+        )
+    _, pr_yaml = _fetch_protection_yaml(target_root, head_sha)
+    if pr_yaml.not_found:
+        return None, True, None
+    if pr_yaml.error:
+        return None, False, _no_go_protection(
+            f"branch-protection-YAML op de PR-head niet leesbaar: {pr_yaml.error}", mode,
+        )
+    try:
+        return parse_protection_config(pr_yaml.text or ""), False, None
+    except ProtectionConfigError as exc:
+        return None, False, _no_go_protection(f"branch-protection-YAML op de PR-head ongeldig: {exc}", mode)
+
+
+def _refuse_unaccepted_weakening(
+    weak_fields: List[str], allow_weaken_reason: Optional[str], mode: str,
+) -> Optional[Dict[str, Any]]:
+    """The refusal for a weakening that ``--allow-weaken`` did not accept, or
+    ``None`` when a non-empty reason accepts it. No flag and an empty reason
+    are both a NO-GO: there is no silent bypass."""
+    if allow_weaken_reason is None:
+        return _no_go_protection(
+            "deze PR verzwakt branch-protection t.o.v. main zonder --allow-weaken: "
+            + ", ".join(weak_fields),
+            mode,
+        )
+    reason = allow_weaken_reason.strip()
+    if not reason:
+        return {
+            "verdict": "NO-GO",
+            "message": "override zonder reden geweigerd: --allow-weaken vereist een niet-lege reden",
+            "overridden": True,
+            "override_reason": reason,
+            "mode": mode,
+        }
+    return None
+
+
+def _judge_ci_workflow_floor(
+    result: Dict[str, Any],
+    main_workflow: Optional[str],
+    head_workflow: Optional[str],
+    allow_weaken_reason: Optional[str],
+) -> Dict[str, Any]:
+    """The CI gate's floor under a GO that did not run the full step (d).
+
+    ``enforcement: off`` and a project with no file on main skip the rest of the
+    weakening check, but main's ``ci_workflow`` is what the CI gate asks of every
+    later PR, so a PR that changes, adds or removes it chooses its own next
+    check. That needs ``--allow-weaken "<reason>"`` whatever the mode
+    (operator decision 2026-09-25, review B1/W1 on #1916). Returns ``result``
+    unchanged, marked as overridden, or replaced by the refusal.
+    """
+    change = ci_workflow_change(main_workflow, head_workflow)
+    if change is None:
+        return result
+    refusal = _refuse_unaccepted_weakening([change], allow_weaken_reason, result["mode"])
+    if refusal is not None:
+        return refusal
+    reason = (allow_weaken_reason or "").strip()
+    return {
+        **result,
+        "message": f"OVERRIDE: CI-workflow-wijziging geaccepteerd ({reason}): {change}; {result['message']}",
+        "overridden": True,
+        "override_reason": reason,
+    }
+
+
+def _judge_enforcement_off(
+    pr_number: int,
+    target_root: Path,
+    main_path: str,
+    main_workflow: Optional[str],
+    *,
+    pr_data: Optional[Dict[str, Any]],
+    allow_weaken_reason: Optional[str],
+) -> Dict[str, Any]:
+    """``enforcement: off`` on main: no drift check and no weakening check, except
+    the CI floor (:func:`_judge_ci_workflow_floor`). The head is read for that
+    alone, and a head that cannot be read refuses: the door cannot say the PR
+    leaves the workflow alone. A head without the file removes ``ci_workflow``."""
+    pr_config, head_has_no_file, refusal = _fetch_head_protection(
+        target_root, pr_number, pr_data, ENFORCEMENT_OFF,
+    )
+    if refusal is not None:
+        return refusal
+    result: Dict[str, Any] = {
+        "verdict": "GO",
+        "message": (
+            f"branch-protection-toetsing staat uit (enforcement: off in {main_path} op main): "
+            "alleen de CI-workflow getoetst"
+        ),
+        "mode": ENFORCEMENT_OFF,
+        "reason_code": REASON_PROTECTION_OFF,
+        "overridden": False,
+        "override_reason": None,
+    }
+    head_workflow = None if head_has_no_file else pr_config.ci_workflow
+    return _judge_ci_workflow_floor(result, main_workflow, head_workflow, allow_weaken_reason)
+
+
+def _judge_project_without_protection_file(
+    pr_number: int,
+    target_root: Path,
+    *,
+    pr_data: Optional[Dict[str, Any]],
+    allow_weaken_reason: Optional[str],
+) -> Dict[str, Any]:
+    """No ``branch_protection.yaml`` on main: a loud ``warn`` GO, nothing to check
+    drift against. Onboarding stays free, with one exception: a PR that
+    declares ``ci_workflow`` picks the check the CI gate asks of every later PR,
+    and that needs ``--allow-weaken "<reason>"`` (the CI floor). The head is
+    read for that, in the same path order; an unreadable head refuses."""
+    searched = ", ".join(PROTECTION_YAML_SEARCH_PATHS)
+    message = (
+        f"geen branch_protection.yaml in {_target_label()}, niets te toetsen "
+        f"(gezocht op main: {searched}): de merge gaat door zonder dat er iets is gecontroleerd"
+    )
+    pr_config, head_has_no_file, refusal = _fetch_head_protection(
+        target_root, pr_number, pr_data, MISSING_FILE_ENFORCEMENT,
+    )
+    if refusal is not None:
+        return refusal
+    result: Dict[str, Any] = {
+        "verdict": "GO",
+        "message": message,
+        "mode": MISSING_FILE_ENFORCEMENT,
+        "reason_code": REASON_PROTECTION_FILE_MISSING,
+        "warnings": [message],
+        "overridden": False,
+        "override_reason": None,
+    }
+    head_workflow = None if head_has_no_file else pr_config.ci_workflow
+    return _judge_ci_workflow_floor(result, None, head_workflow, allow_weaken_reason)
 
 
 _HEAD_MOVED_MARKERS = (

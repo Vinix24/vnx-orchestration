@@ -32,6 +32,7 @@ friendlier repo.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -121,14 +122,51 @@ def ensure_project_is_not_the_install(engine_root: Path, project_root: Path) -> 
         )
 
 
+def _explicit_project_root() -> Path | None:
+    """``VNX_PROJECT_ROOT`` resolved, when the operator set it; else ``None``."""
+    raw = os.environ.get("VNX_PROJECT_ROOT")
+    return Path(raw).expanduser().resolve() if raw else None
+
+
+def resolve_project_root(engine_root: Path) -> Path:
+    """The project a run of ``engine_root``'s code acts on, or a refusal.
+
+    ``vnx_paths`` derives the project root from ``VNX_HOME`` when the
+    environment sets it, not from the code that is running. A ``VNX_HOME`` left
+    pointing at another checkout (a shell that exported it for the fabric,
+    measured in the 2026-09-25 review of #1916) then makes a door run from an
+    install judge and merge in THAT checkout's repo, and the install check below
+    does not fire because the install is not the project. So a ``VNX_HOME`` that
+    is not the running code refuses, unless ``VNX_PROJECT_ROOT`` names the
+    project: that is the explicit way to point a door at a project, and it wins
+    over ``VNX_HOME`` in ``vnx_paths`` too. Refusing rather than re-resolving
+    with ``engine_root`` as the home keeps one resolver: the state dir the door
+    writes its records to comes from the same ``resolve_paths``, and a second
+    resolution would let the two disagree. The ``vnx`` shim unsets
+    ``VNX_HOME`` before it resolves, so it never meets this refusal.
+    """
+    paths = resolve_paths()
+    project_root = Path(paths["PROJECT_ROOT"]).resolve()
+    vnx_home = Path(paths["VNX_HOME"]).resolve()
+    if vnx_home != Path(engine_root).resolve() and _explicit_project_root() != project_root:
+        raise MergeTargetError(
+            f"VNX_HOME wijst naar {vnx_home}, maar de draaiende code staat in "
+            f"{Path(engine_root).resolve()}: het project zou dan uit een andere checkout komen "
+            f"({project_root}). Zet VNX_PROJECT_ROOT op het project, of haal VNX_HOME weg"
+        )
+    ensure_project_is_not_the_install(engine_root, project_root)
+    return project_root
+
+
 def resolve_merge_target(engine_root: Path, *, gh_bin: str = "gh") -> MergeTarget:
     """The project this merge goes into.
 
-    ``engine_root`` is the root of the running door. A central install must not
-    be its own target (:func:`ensure_project_is_not_the_install`).
+    ``engine_root`` is the root of the running door. The project root comes from
+    :func:`resolve_project_root`: ``VNX_HOME`` must be the running door unless
+    ``VNX_PROJECT_ROOT`` names the project, and a central install must not be
+    its own target.
     """
-    project_root = Path(resolve_paths()["PROJECT_ROOT"]).resolve()
-    ensure_project_is_not_the_install(engine_root, project_root)
+    project_root = resolve_project_root(engine_root)
     return MergeTarget(project_root=project_root, repo=resolve_target_repo(project_root, gh_bin=gh_bin))
 
 

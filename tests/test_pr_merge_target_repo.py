@@ -34,12 +34,14 @@ import forge_protection_drift as fpd
 import pr_merge
 from merge_target_helpers import (
     CONSUMER_REPO,
+    FABRIC_ORIGIN,
     FABRIC_REPO,
     HEAD_SHA,
     MAIN_SHA,
     GhStub,
     consumer_yaml,
     contents_response,
+    git_repo,
     github_protection,
     install_gh_stub,
     isolate_project_env,
@@ -147,6 +149,9 @@ class Door:
 
         isolate_project_env(monkeypatch, self.install)
         monkeypatch.chdir(self.consumer)
+        # The door runs from the install, the same code VNX_HOME names: a VNX_HOME that is
+        # not the running door refuses (review W2 on #1916, TestVnxHomeIsTheRunningDoor).
+        monkeypatch.setattr(pr_merge, "ENGINE_ROOT", self.install, raising=False)
         # The real resolver and the real YAML read, past conftest's offline stubs.
         monkeypatch.setattr(pr_merge, "resolve_merge_target", _REAL_RESOLVE_MERGE_TARGET, raising=False)
         monkeypatch.setattr(pr_merge, "fetch_yaml_from_ref", _REAL_FETCH_YAML_FROM_REF)
@@ -339,6 +344,27 @@ class TestEnforcement:
         assert "Branch not protected" in out.err
         assert record["reason_code"] == pr_merge.REASON_PROTECTION_WARNED
 
+    @pytest.mark.parametrize("stderr", [
+        "gh: Bad credentials (HTTP 401)\n",
+        "gh: API rate limit exceeded (HTTP 403)\n",
+        "error connecting to api.github.com\n",
+        "gh: Not Found (HTTP 404)\n",
+    ])
+    def test_warn_refuses_a_live_read_failure_that_is_not_branch_not_protected(self, arrange, capsys, stderr):
+        """Only "Branch not protected" is an answer about the repo. Auth, network, a rate
+        limit or a bare 404 (an unresolvable repo) say nothing, so warn cannot merge past
+        them as "no protection" (review I2 on #1916)."""
+        door = arrange(
+            main_yaml=consumer_yaml(enforcement="warn"),
+            first=[{"match": "branches/main/protection", "rc": 1, "stderr": stderr}],
+        )
+
+        rc = door.run()
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert "live branch-protection niet leesbaar" in capsys.readouterr().err
+        assert door.merge_kwargs == []
+
     def test_enforce_and_a_repo_without_protection_is_no_go(self, arrange, capsys):
         door = arrange(main_yaml=consumer_yaml(enforcement="enforce"), first=[NOT_PROTECTED])
 
@@ -347,7 +373,9 @@ class TestEnforcement:
         assert rc == pr_merge.EXIT_ERROR
         assert "niet leesbaar" in capsys.readouterr().err
 
-    def test_off_does_not_look_and_the_record_says_it_was_off(self, arrange):
+    def test_off_checks_no_drift_and_the_record_says_it_was_off(self, arrange):
+        """Off skips live protection and the weakening check. The head is still read, for
+        ``ci_workflow`` alone: the CI floor holds under every mode."""
         door = arrange(main_yaml=consumer_yaml(enforcement="off"), live=DRIFTED)
 
         rc = door.run()
@@ -356,8 +384,30 @@ class TestEnforcement:
         assert rc == pr_merge.EXIT_OK
         assert (record["verdict"], record["mode"]) == ("GO", "off")
         assert record["reason_code"] == pr_merge.REASON_PROTECTION_OFF
+        assert "alleen de CI-workflow getoetst" in record["message"]
         assert door.gh.calls_with("branches/main/protection") == []
-        assert door.gh.calls_with(f"contents/{MAIN_YAML_PATH}?ref={HEAD_SHA}") == []
+        assert door.gh.repos_of(f"contents/{MAIN_YAML_PATH}?ref={HEAD_SHA}") == {CONSUMER_REPO}
+
+    def test_off_lets_a_pr_lower_everything_but_the_ci_workflow(self, arrange):
+        """Allowing force pushes is not judged under off: that is what off means."""
+        head = consumer_yaml(enforcement="off").replace("allow_force_pushes: false", "allow_force_pushes: true")
+        door = arrange(main_yaml=consumer_yaml(enforcement="off"), head_yaml=head)
+
+        assert door.run() == pr_merge.EXIT_OK
+        assert door.protection_record()["overridden"] is False
+
+    def test_off_and_an_unreadable_head_is_no_go(self, arrange, capsys):
+        """The door cannot say the PR leaves the workflow alone."""
+        door = arrange(main_yaml=consumer_yaml(enforcement="off", ci_workflow="CI"), first=[{
+            "match": f"contents/{MAIN_YAML_PATH}?ref={HEAD_SHA}", "repo": CONSUMER_REPO,
+            "rc": 1, "stderr": "gh: Server Error (HTTP 500)\n",
+        }])
+
+        rc = door.run()
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert "PR-head niet leesbaar" in capsys.readouterr().err
+        assert door.merge_kwargs == []
 
     def test_no_file_at_all_is_a_loud_warn_go_naming_the_repo(self, arrange, capsys):
         door = arrange(main_yaml=None)
@@ -656,24 +706,163 @@ class TestChangingTheCiWorkflowIsAWeakening:
         assert door.run() == pr_merge.EXIT_OK
         assert door.protection_record()["overridden"] is False
 
-    def test_it_is_refused_under_every_enforcement_mode(self, arrange, capsys):
-        """``warn`` softens what the door does about drift, never what a PR does to the
-        declaration."""
+    @pytest.mark.parametrize("mode", ["enforce", "warn", "off"])
+    @pytest.mark.parametrize("main_workflow,head_workflow", [
+        ("CI", "Always Green"), (None, "Always Green"), ("CI", None),
+    ])
+    def test_it_is_refused_under_every_enforcement_mode(
+        self, arrange, capsys, mode, main_workflow, head_workflow,
+    ):
+        """The CI gate is the floor for everyone: ``warn`` softens what the door does about
+        drift and ``off`` skips it, neither lets a PR pick its own next check (operator
+        decision 2026-09-25; probe P5 of the review on #1916 was a GO under off)."""
         door = arrange(
-            main_yaml=consumer_yaml(enforcement="warn", ci_workflow="CI"),
-            head_yaml=consumer_yaml(enforcement="warn", ci_workflow="Always Green"),
+            main_yaml=consumer_yaml(enforcement=mode, ci_workflow=main_workflow),
+            head_yaml=consumer_yaml(enforcement=mode, ci_workflow=head_workflow),
         )
 
         rc = door.run()
 
+        err = capsys.readouterr().err
         assert rc == pr_merge.EXIT_ERROR
-        assert "ci_workflow" in capsys.readouterr().err
+        assert "--allow-weaken" in err and "ci_workflow" in err
+        assert door.merge_kwargs == []
 
-    def test_onboarding_a_project_that_has_no_file_on_main_stays_free(self, arrange):
-        """Nothing on main to lower: the missing-file branch answers before the PR is read."""
-        door = arrange(main_yaml=None, head_yaml=consumer_yaml(ci_workflow="Always Green"))
+    @pytest.mark.parametrize("mode", ["enforce", "warn", "off"])
+    def test_a_reason_lets_it_through_under_every_mode(self, arrange, mode):
+        door = arrange(
+            main_yaml=consumer_yaml(enforcement=mode, ci_workflow="CI"),
+            head_yaml=consumer_yaml(enforcement=mode, ci_workflow="Always Green"),
+        )
 
-        assert door.run() == pr_merge.EXIT_OK
+        rc = door.run("--allow-weaken", "workflow hernoemd")
+
+        record = door.protection_record()
+        assert rc == pr_merge.EXIT_OK
+        assert (record["mode"], record["overridden"]) == (mode, True)
+        assert "workflow hernoemd" in record["message"] and "'Always Green'" in record["message"]
+
+    def test_off_and_an_empty_reason_is_refused(self, arrange, capsys):
+        door = arrange(
+            main_yaml=consumer_yaml(enforcement="off", ci_workflow="CI"),
+            head_yaml=consumer_yaml(enforcement="off", ci_workflow="Always Green"),
+        )
+
+        rc = door.run("--allow-weaken", " ")
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert "niet-lege reden" in capsys.readouterr().err
+
+    def test_off_and_a_pr_that_deletes_the_file_removes_the_workflow(self, arrange, capsys):
+        """No file at the head sends the gate back to the environment and the default."""
+        gone_at_head = [
+            {
+                "match": f"contents/{path}?ref={HEAD_SHA}", "repo": CONSUMER_REPO,
+                "rc": 1, "stderr": "gh: Not Found (HTTP 404)\n",
+            }
+            for path in (MAIN_YAML_PATH, FABRIC_STYLE_YAML_PATH)
+        ]
+        door = arrange(main_yaml=consumer_yaml(enforcement="off", ci_workflow="CI"), first=gone_at_head)
+
+        rc = door.run()
+
+        err = capsys.readouterr().err
+        assert rc == pr_merge.EXIT_ERROR
+        assert "ci_workflow: 'CI' -> niet gedeclareerd" in err
+
+    def test_onboarding_a_project_without_a_ci_workflow_stays_free(self, arrange):
+        """Nothing on main to lower and no workflow picked: a loud warn GO, as before."""
+        door = arrange(main_yaml=None, head_yaml=consumer_yaml(enforcement="warn"))
+
+        rc = door.run()
+
+        record = door.protection_record()
+        assert rc == pr_merge.EXIT_OK
+        assert (record["mode"], record["reason_code"]) == ("warn", pr_merge.REASON_PROTECTION_FILE_MISSING)
+        assert record["overridden"] is False
+        assert door.gh.repos_of(f"contents/{MAIN_YAML_PATH}?ref={HEAD_SHA}") == {CONSUMER_REPO}
+
+    def test_onboarding_that_declares_a_ci_workflow_needs_a_reason(self, arrange, capsys):
+        """The onboarding PR picks the check every later PR is judged on (probe P6 of the
+        review on #1916 was a GO without a flag). Operator decision 2026-09-25, choice A."""
+        door = arrange(main_yaml=None, head_yaml=consumer_yaml(enforcement="off", ci_workflow="Always Green"))
+
+        rc = door.run()
+
+        err = capsys.readouterr().err
+        assert rc == pr_merge.EXIT_ERROR
+        assert "--allow-weaken" in err
+        assert "ci_workflow: niet gedeclareerd -> 'Always Green'" in err
+        assert door.merge_kwargs == []
+
+    def test_onboarding_with_a_ci_workflow_and_a_reason_goes_through_and_says_both(self, arrange):
+        door = arrange(main_yaml=None, head_yaml=consumer_yaml(ci_workflow="CI"))
+
+        rc = door.run("--allow-weaken", "inrichting: workflow heet CI")
+
+        record = door.protection_record()
+        assert rc == pr_merge.EXIT_OK
+        assert record["overridden"] is True
+        assert "inrichting: workflow heet CI" in record["message"]
+        assert record["reason_code"] == pr_merge.REASON_PROTECTION_FILE_MISSING
+        assert "'CI'" in record["message"]
+        assert f"geen branch_protection.yaml in {CONSUMER_REPO}" in record["message"]
+
+    def test_onboarding_and_an_unreadable_head_is_no_go(self, arrange, capsys):
+        door = arrange(main_yaml=None, head_yaml=consumer_yaml(), first=[{
+            "match": f"contents/{MAIN_YAML_PATH}?ref={HEAD_SHA}", "repo": CONSUMER_REPO,
+            "rc": 1, "stderr": "gh: Server Error (HTTP 500)\n",
+        }])
+
+        rc = door.run()
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert "PR-head niet leesbaar" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# VNX_HOME must be the running door
+# ---------------------------------------------------------------------------
+
+class TestVnxHomeIsTheRunningDoor:
+    """``vnx_paths`` derives the project from ``VNX_HOME``. Left pointing at another checkout,
+    a door run from an install would judge and merge in THAT checkout's repo (review W2 on
+    #1916)."""
+
+    def _other_checkout(self, tmp_path, monkeypatch) -> Path:
+        other = git_repo(tmp_path / "fabric-checkout", FABRIC_ORIGIN)
+        monkeypatch.setenv("VNX_HOME", str(other))
+        return other
+
+    def test_a_vnx_home_elsewhere_refuses_before_any_gate(self, tmp_path, monkeypatch, capsys):
+        rules = _rules(
+            main_yaml=consumer_yaml(),
+            first=[
+                {"match": "repo view", "repo": FABRIC_REPO, "stdout": FABRIC_REPO + "\n"},
+                {"match": "pr view", "repo": FABRIC_REPO, "stdout": pr_view_json()},
+            ],
+        )
+        door = Door(tmp_path, monkeypatch, rules)
+        self._other_checkout(tmp_path, monkeypatch)
+
+        rc = door.run()
+
+        err = capsys.readouterr().err
+        assert rc == pr_merge.EXIT_ERROR
+        assert "doelrepo kon niet worden bepaald" in err and "VNX_HOME" in err
+        assert FABRIC_REPO not in {call["repo"] for call in door.gh.calls()}
+        assert door.gh.calls_with("pr view") == []
+        assert door.merge_kwargs == []
+
+    def test_the_project_root_variable_names_the_project_past_a_stray_vnx_home(self, tmp_path, monkeypatch, capsys):
+        door = Door(tmp_path, monkeypatch, _rules(main_yaml=consumer_yaml()))
+        self._other_checkout(tmp_path, monkeypatch)
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(door.consumer))
+
+        rc = door.run()
+
+        assert rc == pr_merge.EXIT_OK, capsys.readouterr().err
+        assert door.gh.repos_of("pr view") == {CONSUMER_REPO}
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,9 @@ import forge_protection_drift as fpd
 import vnx_doctor
 from merge_target_helpers import (
     CONSUMER_REPO,
+    FABRIC_ORIGIN,
     consumer_yaml,
+    git_repo,
     install_gh_stub,
     isolate_project_env,
     make_consumer,
@@ -51,10 +53,12 @@ def _live_matching(text: str) -> Dict[str, Any]:
 
 @pytest.fixture()
 def project(tmp_path, monkeypatch):
-    """A consumer checkout as the resolved project; the install is elsewhere."""
+    """A consumer checkout as the resolved project; the install is elsewhere and is what
+    runs (``VNX_HOME`` and ``ENGINE_ROOT`` agree, as they do for a real install run)."""
     install = make_install(tmp_path)
     consumer = make_consumer(tmp_path)
     isolate_project_env(monkeypatch, install)
+    monkeypatch.setattr(abp, "ENGINE_ROOT", install, raising=False)
     monkeypatch.chdir(consumer)
     return consumer
 
@@ -165,6 +169,24 @@ class TestApplyRefusesTheInstallAsTarget:
 
         assert rc == 0
         assert [call["project_root"] for call in applied] == [consumer]
+
+    def test_a_vnx_home_that_is_not_the_running_script_is_refused(
+        self, inside_the_install, applied, tmp_path, monkeypatch, capsys,
+    ):
+        """Run from a project with ``VNX_HOME`` left on another checkout, the resolver lands on
+        that checkout and would apply its YAML to its repo (review W2 on #1916)."""
+        consumer = make_consumer(tmp_path)
+        _project_yaml(consumer, consumer_yaml())
+        other = git_repo(tmp_path / "fabric-checkout", FABRIC_ORIGIN)
+        _project_yaml(other, consumer_yaml(), "scripts/forge/branch_protection.yaml")
+        monkeypatch.setenv("VNX_HOME", str(other))
+        monkeypatch.chdir(consumer)
+
+        rc = abp.main(["--dry-run"])
+
+        assert rc == 1
+        assert "VNX_HOME" in capsys.readouterr().err
+        assert applied == []
 
     def test_a_fabric_checkout_is_its_own_project(self, tmp_path, monkeypatch, applied):
         """No install marker: the checkout the script runs from is the project."""

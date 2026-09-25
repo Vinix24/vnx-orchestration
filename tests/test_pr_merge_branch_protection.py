@@ -130,6 +130,8 @@ class TestDoorBlobHashCoversTheWholeDoor:
         "scripts/lib/merge_preflight_ci_check.py",
         "scripts/lib/contract_invalid_ledger.py",
         "scripts/lib/merge_target.py",
+        "scripts/lib/vnx_paths.py",
+        "scripts/lib/ci_contexts.py",
     )
 
     def _fake_run(self, *, local_overrides: Optional[Dict[str, str]] = None,
@@ -168,6 +170,8 @@ class TestDoorBlobHashCoversTheWholeDoor:
         "scripts/lib/merge_preflight_ci_check.py",
         "scripts/lib/contract_invalid_ledger.py",
         "scripts/lib/merge_target.py",
+        "scripts/lib/vnx_paths.py",
+        "scripts/lib/ci_contexts.py",
     ])
     def test_a_mutated_library_file_refuses_and_is_named(self, monkeypatch, mutated):
         monkeypatch.setattr(
@@ -209,7 +213,9 @@ class TestRunBranchProtectionGate:
     def test_missing_yaml_on_main_is_a_loud_warn_go(self, monkeypatch):
         """(i) a confirmed 404 on every candidate path: the project has no file to
         hold it to. That is a GO in ``warn`` mode with the loud message, not a
-        refusal, and not a silent pass (OI-1849 replaced the bootstrap no-op)."""
+        refusal, and not a silent pass (OI-1849 replaced the bootstrap no-op).
+        The PR head is read too, in the same path order, for the CI floor: a PR
+        that declares ``ci_workflow`` needs ``--allow-weaken`` (review W1 on #1916)."""
         calls: List[Any] = []
 
         def fake_fetch(project_root, ref, *a, **k):
@@ -233,6 +239,8 @@ class TestRunBranchProtectionGate:
         assert calls == [
             ("main", ".vnx/branch_protection.yaml"),
             ("main", "scripts/forge/branch_protection.yaml"),
+            (PR_DATA["headRefOid"], ".vnx/branch_protection.yaml"),
+            (PR_DATA["headRefOid"], "scripts/forge/branch_protection.yaml"),
         ]
         assert not live_calls, "with no file there is nothing to compare live state to"
 

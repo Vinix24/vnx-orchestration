@@ -414,7 +414,10 @@ class TestMainReviewGateWiring:
     def test_both_gates_go_proceeds_to_merge(self, monkeypatch, capsys):
         merge_called = []
         go = {"verdict": "GO", "message": "ok", "overridden": False, "override_reason": None}
-        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(go), None))
+        # A CI GO always carries the PR data it judged (_run_ci_gate refuses without
+        # a head sha); the branch-protection gate reads that head for the CI floor.
+        pr_data = {"number": 5, "headRefOid": "b" * 40, "headRefName": "feature/x"}
+        monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(go), dict(pr_data)))
         monkeypatch.setattr(pr_merge, "_run_review_gate", lambda pr, **k: (dict(go), None))
         monkeypatch.setattr(pr_merge, "merge_pr", lambda **k: merge_called.append(1) or self._ok_result())
 

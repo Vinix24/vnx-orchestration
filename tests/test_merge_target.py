@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import merge_target as mt
 from merge_target_helpers import (
     CONSUMER_REPO,
+    FABRIC_ORIGIN,
     FABRIC_REPO,
     git_repo,
     install_gh_stub,
@@ -165,3 +166,51 @@ class TestResolveMergeTarget:
 
         with pytest.raises(mt.MergeTargetError, match="HTTP 401"):
             mt.resolve_merge_target(install)
+
+
+class TestVnxHomeMustBeTheRunningDoor:
+    """``vnx_paths`` derives the project from ``VNX_HOME``. A ``VNX_HOME`` left pointing at
+    another checkout made a door run from an install merge in that checkout's repo, and the
+    install check did not fire because the install was not the project (review W2 on #1916)."""
+
+    def _stray_home(self, tmp_path, monkeypatch) -> Path:
+        other = git_repo(tmp_path / "fabric-checkout", FABRIC_ORIGIN)
+        monkeypatch.setenv("VNX_HOME", str(other))
+        return other
+
+    def test_a_vnx_home_elsewhere_is_refused_naming_both(self, tmp_path, monkeypatch):
+        install = make_install(tmp_path)
+        consumer = make_consumer(tmp_path)
+        install_gh_stub(tmp_path, monkeypatch, REPO_VIEW_RULES)
+        isolate_project_env(monkeypatch, install)
+        other = self._stray_home(tmp_path, monkeypatch)
+        monkeypatch.chdir(consumer)
+
+        with pytest.raises(mt.MergeTargetError, match="VNX_HOME") as info:
+            mt.resolve_merge_target(install)
+        assert str(other.resolve()) in str(info.value)
+        assert "VNX_PROJECT_ROOT" in str(info.value)
+
+    def test_vnx_project_root_names_the_project_past_a_stray_vnx_home(self, tmp_path, monkeypatch):
+        install = make_install(tmp_path)
+        consumer = make_consumer(tmp_path)
+        install_gh_stub(tmp_path, monkeypatch, REPO_VIEW_RULES)
+        isolate_project_env(monkeypatch, install)
+        self._stray_home(tmp_path, monkeypatch)
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(consumer))
+        monkeypatch.chdir(tmp_path)
+
+        target = mt.resolve_merge_target(install)
+
+        assert (target.project_root, target.repo) == (consumer, CONSUMER_REPO)
+
+    def test_no_vnx_home_resolves_from_the_running_code(self, tmp_path, monkeypatch):
+        """Unset, ``vnx_paths`` falls back to its own location: the running door. The shim
+        path (``bin/vnx`` unsets ``VNX_HOME``) therefore never meets the refusal."""
+        consumer = make_consumer(tmp_path)
+        install_gh_stub(tmp_path, monkeypatch, REPO_VIEW_RULES)
+        for name in ("VNX_HOME", "VNX_PROJECT_ROOT", "PROJECT_ROOT", "VNX_BIN", "VNX_EXECUTABLE"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.chdir(consumer)
+
+        assert mt.resolve_project_root(VNX_ROOT) == VNX_ROOT.resolve()

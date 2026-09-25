@@ -80,8 +80,12 @@ from forge_protection_drift import (  # noqa: E402
     to_normalized_dict,
 )
 from governance_receipts import emit_governance_receipt  # noqa: E402
-from merge_target import MergeTargetError, ensure_project_is_not_the_install, resolve_target_repo
-from vnx_paths import resolve_paths
+from merge_target import (
+    MergeTargetError,
+    ensure_project_is_not_the_install,
+    resolve_project_root,
+    resolve_target_repo,
+)
 
 DEFAULT_BRANCH = "main"
 
@@ -372,11 +376,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    project_root = Path(args.project_root) if args.project_root else Path(resolve_paths()["PROJECT_ROOT"])
-    # Same test as the merge door's target resolution. Before the YAML is looked for: from
-    # inside a central install the install's own YAML is right there to be found and applied.
+    # Same tests as the merge door's target resolution. Before the YAML is looked for: from
+    # inside a central install the install's own YAML is right there to be found and applied,
+    # and a VNX_HOME left pointing at another checkout would apply that checkout's YAML to
+    # that checkout's repo (resolve_project_root).
     try:
-        ensure_project_is_not_the_install(ENGINE_ROOT, project_root)
+        if args.project_root:
+            project_root = Path(args.project_root)
+            ensure_project_is_not_the_install(ENGINE_ROOT, project_root)
+        else:
+            project_root = resolve_project_root(ENGINE_ROOT)
     except MergeTargetError as exc:
         print(f"FOUT: {exc}", file=sys.stderr)
         return 1

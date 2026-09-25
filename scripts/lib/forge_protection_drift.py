@@ -169,6 +169,13 @@ class ProtectionDriftError(RuntimeError):
     block, not pass as "no drift found"."""
 
 
+class BranchNotProtectedError(ProtectionDriftError):
+    """GitHub answered that the branch has no protection at all ("Branch not
+    protected", HTTP 404). A readable answer about the repo, unlike an auth,
+    network or rate-limit failure: the one live-read failure a caller may treat
+    as "nothing is protected" instead of "the state is unknown"."""
+
+
 # ---------------------------------------------------------------------------
 # Config model
 # ---------------------------------------------------------------------------
@@ -569,6 +576,10 @@ def _gh_json(argv: List[str], project_root: Path, timeout: int) -> Any:
         raise ProtectionDriftError(f"{' '.join(argv)} gaf onparseerbare JSON: {exc}") from exc
 
 
+#: What ``gh`` prints for a branch without any protection, next to "HTTP 404".
+_BRANCH_NOT_PROTECTED_MARKER = "Branch not protected"
+
+
 def fetch_live_protection(
     project_root: Path, *, branch: str = "main", gh_bin: str = "gh", timeout: int = 20,
 ) -> Dict[str, Any]:
@@ -581,11 +592,18 @@ def fetch_live_protection(
     ``apply_branch_protection.py``), the repo object (for
     ``allow_auto_merge``), and the rulesets list. Raises
     :class:`ProtectionDriftError` on any unreadable/unparseable response —
-    never returns a partial or default-filled result.
+    never returns a partial or default-filled result — and its subclass
+    :class:`BranchNotProtectedError` when GitHub says the branch has no
+    protection at all.
     """
-    protection = _gh_json(
-        [gh_bin, "api", f"repos/{{owner}}/{{repo}}/branches/{branch}/protection"], project_root, timeout,
-    )
+    try:
+        protection = _gh_json(
+            [gh_bin, "api", f"repos/{{owner}}/{{repo}}/branches/{branch}/protection"], project_root, timeout,
+        )
+    except ProtectionDriftError as exc:
+        if _BRANCH_NOT_PROTECTED_MARKER in str(exc) and "HTTP 404" in str(exc):
+            raise BranchNotProtectedError(str(exc)) from exc
+        raise
     if not isinstance(protection, dict):
         raise ProtectionDriftError(f"protection-antwoord is {type(protection).__name__}, verwacht een object")
 
@@ -1012,11 +1030,25 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
     # by its name, and adding or removing it hands the gate to the environment
     # and the fabric default. Not a lowering-only rule like ``enforcement``:
     # ``enforcement`` has an order, a workflow name has none.
-    if "ci_workflow" in old and "ci_workflow" in new and old["ci_workflow"] != new["ci_workflow"]:
-        weak_fields.append(
-            f"ci_workflow: {_workflow_label(old['ci_workflow'])} -> {_workflow_label(new['ci_workflow'])}"
-        )
+    if "ci_workflow" in old and "ci_workflow" in new:
+        workflow_change = ci_workflow_change(old["ci_workflow"], new["ci_workflow"])
+        if workflow_change:
+            weak_fields.append(workflow_change)
     return (len(weak_fields) > 0, weak_fields)
+
+
+def ci_workflow_change(old: Optional[str], new: Optional[str]) -> Optional[str]:
+    """The ``ci_workflow`` edit between two declarations, as the weak-field text
+    ``ci_workflow: <old> -> <new>``, or ``None`` when the value is the same.
+
+    ``None`` on either side is "not declared", so this covers a change, an
+    addition and a removal. The merge door also judges it where no full
+    :func:`is_weakening` runs (``enforcement: off``, and a project with no file
+    on main): the CI gate is the floor under every mode.
+    """
+    if old == new:
+        return None
+    return f"ci_workflow: {_workflow_label(old)} -> {_workflow_label(new)}"
 
 
 def _workflow_label(name: Optional[str]) -> str:

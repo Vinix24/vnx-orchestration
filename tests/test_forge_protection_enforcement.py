@@ -198,6 +198,53 @@ class TestChangingTheCiWorkflowIsAWeakening:
         assert any(f.startswith("ci_workflow") for f in fields)
 
 
+class TestCiWorkflowChange:
+    """The comparison the merge door also runs where no full is_weakening does (``off``, and
+    a project with no file on main): the CI floor under every mode."""
+
+    @pytest.mark.parametrize("old,new,expected", [
+        ("CI", "Always Green", "ci_workflow: 'CI' -> 'Always Green'"),
+        (None, "Always Green", "ci_workflow: niet gedeclareerd -> 'Always Green'"),
+        ("CI", None, "ci_workflow: 'CI' -> niet gedeclareerd"),
+    ])
+    def test_a_change_addition_or_removal_is_named(self, old, new, expected):
+        assert fpd.ci_workflow_change(old, new) == expected
+
+    @pytest.mark.parametrize("value", [None, "CI"])
+    def test_the_same_value_is_no_change(self, value):
+        assert fpd.ci_workflow_change(value, value) is None
+
+    def test_is_weakening_reports_exactly_what_it_reports(self):
+        _, fields = fpd.is_weakening(_norm(ci_workflow="CI"), _norm(ci_workflow="Always Green"))
+        assert fields == [fpd.ci_workflow_change("CI", "Always Green")]
+
+
+class TestBranchNotProtectedIsItsOwnError:
+    """Only GitHub's "Branch not protected" is an answer about the repo; everything else that
+    stops the live read is an unknown state (review I2 on #1916)."""
+
+    def _fetch(self, tmp_path, monkeypatch, stderr):
+        project = make_consumer(tmp_path)
+        install_gh_stub(tmp_path, monkeypatch, [
+            {"match": "branches/main/protection", "repo": CONSUMER_REPO, "rc": 1, "stderr": stderr},
+        ])
+        return fpd.fetch_live_protection(project)
+
+    def test_branch_not_protected_raises_the_subclass(self, tmp_path, monkeypatch):
+        with pytest.raises(fpd.BranchNotProtectedError, match="Branch not protected"):
+            self._fetch(tmp_path, monkeypatch, "gh: Branch not protected (HTTP 404)\n")
+
+    @pytest.mark.parametrize("stderr", [
+        "gh: Bad credentials (HTTP 401)\n",
+        "gh: Not Found (HTTP 404)\n",
+        "error connecting to api.github.com\n",
+    ])
+    def test_any_other_failure_is_the_plain_error(self, tmp_path, monkeypatch, stderr):
+        with pytest.raises(fpd.ProtectionDriftError) as info:
+            self._fetch(tmp_path, monkeypatch, stderr)
+        assert not isinstance(info.value, fpd.BranchNotProtectedError)
+
+
 class TestReadingOrder:
     def test_no_file_is_none(self, tmp_path):
         assert fpd.find_local_protection_yaml(tmp_path) is None
