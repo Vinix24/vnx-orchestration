@@ -28,8 +28,10 @@ from codex_final_gate import enforce_codex_gate
 from codex_severity_translator import translate_findings as translate_codex_findings
 from gate_status import (
     FAIL_STATES as _GATE_FAIL_STATES,
+    PARTIAL_REVIEW_STATES as _GATE_PARTIAL_REVIEW_STATES,
     PASS_STATES as _GATE_PASS_STATES,
     UNAVAILABLE_STATES as _GATE_UNAVAILABLE_STATES,
+    review_coverage_gap as gate_review_coverage_gap,
     canonical_status as gate_canonical_status,
     has_complete_evidence as gate_has_complete_evidence,
     is_pass as gate_is_pass,
@@ -703,6 +705,17 @@ def _find_takeover_successor_results(
     return candidates, provenance_notes
 
 
+def _partial_review_message(result: Dict[str, Any], gate_label: str, pr_id: str) -> str:
+    """OI-1851: merge-door text naming the cut size and the way out."""
+    gap = gate_review_coverage_gap(result) or (result.get("reason_detail") or "")
+    return (
+        f"{gate_label} zag maar een deel van de diff van {pr_id} ({gap or 'afgekapte diff'}): "
+        "dat is geen volledige review. Uitweg: een tweede review die de hele diff leest "
+        "(bijvoorbeeld codex_gate op dezelfde head), of de PR opsplitsen tot elk deel "
+        "onder het diff-plafond valt"
+    )
+
+
 def _merge_door_record_verdict(
     result: Dict[str, Any],
     gate_label: str,
@@ -713,12 +726,26 @@ def _merge_door_record_verdict(
     The SAME five invariants for the declared gate's own record and for an
     OI-1576 takeover successor — ``gate_label`` is the record's own gate name,
     so messages always name the evidence actually being judged.
+
+    OI-1851: a review of part of the diff is NO-GO naming the cut size,
+    checked before the evidence check (whose message names another cause).
     """
     if not gate_is_terminal(result):
         status = result.get("status", "unknown")
         return {
             "verdict": "NO-GO",
             "message": f"{gate_label} resultaat is niet terminaal (status={status}): bewijs onvolledig",
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate_label,
+        }
+    if (
+        gate_canonical_status(result) in _GATE_PARTIAL_REVIEW_STATES
+        or gate_review_coverage_gap(result)
+    ):
+        return {
+            "verdict": "NO-GO",
+            "message": _partial_review_message(result, gate_label, pr_id),
             "overridden": False,
             "override_reason": None,
             "gate": gate_label,
@@ -1317,6 +1344,28 @@ def check_review_gate_for_merge(
     )
     if booking_verdict is not None:
         return booking_verdict
+
+    if result is not None and gate_canonical_status(result) in _GATE_PARTIAL_REVIEW_STATES:
+        # OI-1851: no verdict about the whole PR, so the peers that may sign
+        # for an absent gate may sign here: their full pass on this head is
+        # the second review that reads the rest. Else NO-GO with the size.
+        peer_verdict = _consult_peers_for_absence(
+            gate, pr_id, results_dir, gate_canonical_status(result),
+            branch=branch, project_id=project_id, head_sha=head_sha,
+            scope_note=f"; zag maar een deel van de diff: {gate_review_coverage_gap(result)}",
+        )
+        if peer_verdict["verdict"] == "GO":
+            return peer_verdict
+        return {
+            "verdict": "NO-GO",
+            "message": (
+                f"{_partial_review_message(result, gate, pr_id)} — "
+                f"andere poorten: {peer_verdict['message']}"
+            ),
+            "overridden": False,
+            "override_reason": None,
+            "gate": gate,
+        }
 
     if result is not None and _is_absent_without_verdict(result):
         # OI-1624: the declared gate spoke (a record exists, in scope) and

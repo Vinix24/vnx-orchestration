@@ -38,7 +38,7 @@ from gate_recorder import (
 )
 
 _BUILDER_DISPATCH_ID = "20260911-oi1711-publicatiepad-werkt-twee-keer"
-_OK_DEPTH = gate_depth.single_shot_depth(50000, True)
+_OK_DEPTH = gate_depth.single_shot_depth(50000, False)
 
 
 # ---------------------------------------------------------------------------

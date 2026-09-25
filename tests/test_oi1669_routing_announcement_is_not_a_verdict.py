@@ -75,7 +75,7 @@ SHA_B = "30f7396d1b0f2c8f0e2f6a1c9d4b7e35c8a10f42"
 # OI-1618: record_terminal_result requires a depth on every call. This file is
 # about the overwrite guard, so every call passes one non-degenerate depth —
 # just enough to never trip the (unrelated) gate_execution_degenerate branch.
-_OK_DEPTH = gate_depth.single_shot_depth(70151, True)
+_OK_DEPTH = gate_depth.single_shot_depth(70151, False)
 
 
 def _routing_announcement(commit_sha: str = SHA_A) -> dict:

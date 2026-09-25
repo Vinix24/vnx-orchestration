@@ -543,9 +543,12 @@ def main(argv: "list[str] | None" = None) -> int:
         # agentic tool loop to measure. diff_chars is the post-strip length
         # (the single-shot degeneracy floor), diff_truncated mirrors the same
         # MAX_DIFF_CHARS cap gate_prompt.wrap_untrusted_diff applies to the
-        # raw (pre-strip) text.
+        # raw (pre-strip) text. OI-1851: plus the cap and the cut files.
+        coverage = gate_depth.diff_coverage(diff, MAX_DIFF_CHARS)
         execution_depth = gate_depth.single_shot_depth(
-            len(diff.strip()), len(diff) > MAX_DIFF_CHARS,
+            coverage["diff_chars"], coverage["diff_truncated"],
+            diff_limit=coverage["diff_limit"],
+            truncated_files=tuple(coverage["truncated_files"]),
         )
 
         # dispatch_id is already resolved above (shared with the request record).
@@ -916,12 +919,16 @@ def main(argv: "list[str] | None" = None) -> int:
     elif status == "unavailable":
         print(f"VERDICT: UNAVAILABLE  ({reason})")
         print(f"  {residual}")
+    elif status == "partial_review":  # OI-1851: never exit 0
+        print(f"VERDICT: PARTIAL_REVIEW  ({reason})")
+        print(f"  {record.get('reason_detail', '')}")
     else:
         print(f"VERDICT: {status.upper()}  ({len(blocking)} blocking)")
         for f in blocking:
             print(f"  · [{f.get('severity')}] {f.get('message')}")
 
-    # 0 = pass, 2 = a REAL parsed fail/blocked verdict, 1 = unavailable/infra.
+    # 0 = pass, 2 = a REAL parsed fail/blocked verdict, 1 = unavailable/infra
+    # or partial_review (OI-1851).
     if status == "pass":
         return 0
     return 2 if status == "fail" else 1

@@ -218,7 +218,9 @@ def _load_gate_results(state_dir: Path, pr_id: str, gates: Iterable[str]) -> Dic
     return gate_results
 
 
-_DECIDED_ABSENT_STATES = frozenset({"unavailable", "not_executable"})
+# OI-1851: partial_review (the gate saw part of the diff) is no vote either
+# way, the same as the merge door: another gate's full review may sign.
+_DECIDED_ABSENT_STATES = frozenset({"unavailable", "not_executable", "partial_review"})
 _PASS_STATUSES = frozenset({"approve", "pass", "passed"})
 
 
