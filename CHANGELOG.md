@@ -6,6 +6,53 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Fixed
+
+- **The merge door judges the project it merges into, not the repo it is
+  installed from (OI-1849).** Run from a central install with a consumer
+  project as the target, `pr_merge.py` read the YAML on main, the YAML on the PR
+  head, the live branch protection and the ADR numbers from
+  `Vinix24/vnx-orchestration`, while `gh pr merge` and the CI gate went to the
+  directory the caller stood in. A consumer merge got "no drift" about a repo it
+  was not merging into. The target is now decided once before the first gate
+  (`VNX_PROJECT_ROOT`, else the git toplevel of the cwd, through `vnx_paths`),
+  named on the first line of the output (`doelrepo: owner/name`, on stderr under
+  `--json` and as `target_repo` in the object), and every git and gh call of the
+  merge runs in it. A target that cannot be named is a refusal. The running
+  door is proven against the fabric instead: `main` for a checkout, the tag
+  `v<VERSION>` for a central install (`scripts/lib/merge_target.py`, now one of
+  the hashed door files). `apply_branch_protection.py` and `vnx doctor` use the
+  same project root and reading order; a bare `apply_branch_protection.py` from
+  an install no longer applies the fabric's YAML to whichever repo the install's
+  remote names.
+
+- **A PR cannot lower the CI gate through `ci_workflow` (OI-1849).** The CI gate
+  asks main's `ci_workflow` of every later PR, so a PR that changed, added or
+  removed it chose the check it was judged on next time, and the preflight
+  said "PR verzwakt niets". `forge_protection_drift.is_weakening` now judges it
+  and any change needs `--allow-weaken "<reason>"`; the message names the old
+  and the new value. `pre_merge_gate` and the `merge_preflight_ci_check` CLI
+  read it from main of the target repo over the contents API
+  (`fetch_ci_workflow_from_main`, one reader shared with the door), not from the
+  checkout, which at gate time is the PR's own branch. `apply_branch_protection.py`
+  refuses a central install as its project, with the test the door already used
+  (`merge_target.ensure_project_is_not_the_install`).
+
+### Added
+
+- **Strictness per project (OI-1849).** `branch_protection.yaml` accepts
+  `enforcement: enforce | warn | off` (absent means `enforce`) and
+  `ci_workflow: "<name>"`. The file is `.vnx/branch_protection.yaml`, else
+  `scripts/forge/branch_protection.yaml`. `warn` reports drift and merges, `off`
+  does not check, and the preflight record carries `mode` and a `reason_code` so a
+  GO that was not a check reads differently from one that was. A project with no
+  file is treated as `warn`, loudly, replacing the bootstrap GO. Lowering the
+  enforcement is a weakening and needs `--allow-weaken`. The CI gate is not
+  softened by any of it, and looks for the project's own workflow name (both
+  resolvers: explicit argument, project YAML, `VNX_CI_WORKFLOW_NAME`, `VNX CI`).
+  Only the reader lands here: the fabric's own YAML does not carry the fields
+  yet (two-PR contract, `docs/operations/FORGE_GATE.md` §10 and §11).
+
 ## [1.6.4] - 2026-09-24
 
 Patch release (3 commits since v1.6.3). A consumer dispatch no longer books

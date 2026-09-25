@@ -328,19 +328,53 @@ def _stub_adr_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OI-1849: ``pr_merge.main()`` decides its merge target (project root plus
+    the ``owner/name`` behind it) before any gate runs, and that decision is a
+    ``gh repo view`` in the project root. Every test that drives ``main()``
+    through stubbed gates would otherwise make that call for real, and in CI
+    (no ``GH_TOKEN``) refuse before it reached the gate it is about.
+
+    Stubbed at ``pr_merge.resolve_merge_target``, the name ``main()`` calls, to
+    the checkout the suite runs in. Tests that exercise the resolution itself
+    (tests/test_pr_merge_target_repo.py, tests/test_merge_target.py) put the real
+    function back or run it against a stub ``gh`` on PATH: same function-scoped
+    ``monkeypatch`` instance, later call wins.
+    """
+    try:
+        import pr_merge
+    except ImportError:
+        # Same reason as the two stubs beside this one: pr_merge is only
+        # importable once a pr_merge test module has put scripts/ on sys.path.
+        return
+    from merge_target import MergeTarget
+
+    monkeypatch.setattr(
+        pr_merge,
+        "resolve_merge_target",
+        lambda engine_root, **_kwargs: MergeTarget(project_root=Path(engine_root), repo="vnx-test/target"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     """Golf B, B1: keep pr_merge's branch-protection preflight offline + a
     no-op by default for every test that doesn't specifically exercise it.
 
     ``pr_merge.main()`` runs a fourth gate, ``_run_branch_protection_gate``,
-    whose first step is a live ``gh api contents/...`` read of main's
-    ``scripts/forge/branch_protection.yaml``. Stubbing that call to "not
-    found" is not just a convenient offline default: it is the ACTUAL
-    production state as of this dispatch (main has no such file yet — this
-    PR is the one that adds it), which is exactly the gate's own bootstrap
-    no-op. Every other test that drives ``pr_merge.main()`` through the
-    upstream gates would otherwise also hit this live call and, in CI (no
-    ``GH_TOKEN``), fail closed the same way the ADR-gate stub above
+    whose steps read the project's ``branch_protection.yaml`` over ``gh api
+    contents/...``, on main and at the PR head. Every read is stubbed to "not
+    found", on every ref and path: the gate then takes its missing-file
+    branch (OI-1849), a warn GO with ``reason_code: protection_file_missing``
+    that checked nothing. That is NOT the production state: main carries
+    ``scripts/forge/branch_protection.yaml``. It is the verdict the old
+    bootstrap no-op gave, so it masks nothing a test here is about. The
+    missing-file branch reads the head too (for the CI floor: a PR that
+    declares ``ci_workflow`` needs ``--allow-weaken``), which here is the same
+    "not found" and so leaves the verdict at GO, provided the PR data carries a
+    ``headRefOid``. Every other test that drives ``pr_merge.main()`` through
+    the upstream gates would otherwise also hit these live calls and, in CI
+    (no ``GH_TOKEN``), fail closed the same way the ADR-gate stub above
     (``_stub_adr_gate_gh_calls``) was added to prevent.
 
     Stubs the two OFFLINE-BREAKING steps, not the gate function itself —
@@ -349,9 +383,10 @@ def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> No
     - ``pr_merge._door_blob_hash_gate``, the gate's FIRST step since the B1
       fix-forward, which shells out to ``git hash-object`` plus one ``gh api
       contents/...`` read per door file. It used to sit last, behind the
-      bootstrap branch below, so this fixture never had to account for it.
-    - ``pr_merge.fetch_yaml_from_ref``, the contents read of main's
-      ``scripts/forge/branch_protection.yaml``.
+      old bootstrap branch, so this fixture never had to account for it.
+    - ``pr_merge.fetch_yaml_from_ref``, the contents read of the project's
+      YAML on every candidate path (``.vnx/`` then ``scripts/forge/``), on
+      main and at the PR head.
 
     Tests that specifically exercise this gate override these names (or
     ``_run_branch_protection_gate`` wholesale) in the test body — same

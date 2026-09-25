@@ -941,11 +941,17 @@ def check_t0_state_freshness(paths: Dict[str, str]) -> List[CheckResult]:
 # ---------------------------------------------------------------------------
 
 def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
-    """Live branch protection on main must match
-    ``scripts/forge/branch_protection.yaml`` — the same comparison
+    """Live branch protection on main must match the project's
+    ``branch_protection.yaml``, the same comparison
     ``pr_merge.py``'s merge preflight and ``apply_branch_protection.py`` use
     (``forge_protection_drift.compare``), so this can never disagree with
     what the door itself would refuse on.
+
+    The project is the resolved ``PROJECT_ROOT`` (OI-1849), not the install the
+    doctor runs from: the file is looked up there by the same reading order the
+    door and ``apply_branch_protection.py`` use (``.vnx/branch_protection.yaml``,
+    then ``scripts/forge/branch_protection.yaml``) and live state is read from that
+    project's repo. In a fabric checkout the two are the same directory.
 
     Read-only: this check never writes. A missing YAML on disk (not yet
     added, or a repo checked out before this dispatch landed) and an
@@ -953,17 +959,23 @@ def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
     neither is evidence of drift, only of "this check could not run" (a
     fresh clone with no ``gh`` auth must not report a FAIL it never actually
     verified). An invalid YAML, or a genuine diff between live and the YAML,
-    is a FAIL.
+    is a FAIL under ``enforcement: enforce`` (what a file that does not say
+    means); under ``warn`` the same diff is a WARN, and under ``off`` the check
+    reports that it is off and looks at nothing. The door treats the project
+    the same way, so the doctor cannot go red on what the door would let through.
     """
-    vnx_home = Path(paths["VNX_HOME"])
-    yaml_path = vnx_home / "scripts" / "forge" / "branch_protection.yaml"
+    project_root = Path(paths["PROJECT_ROOT"])
 
     try:
         from forge_protection_drift import (
+            ENFORCEMENT_OFF,
+            ENFORCEMENT_WARN,
+            PROTECTION_YAML_SEARCH_PATHS,
             ProtectionConfigError,
             ProtectionDriftError,
             compare as compare_protection_state,
             fetch_live_protection,
+            find_local_protection_yaml,
             load_protection_config,
             to_normalized_dict as protection_to_normalized_dict,
         )
@@ -973,11 +985,14 @@ def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
             f"forge_protection_drift niet importeerbaar: {exc}",
         )]
 
-    if not yaml_path.exists():
+    yaml_path = find_local_protection_yaml(project_root)
+    searched = " of ".join(PROTECTION_YAML_SEARCH_PATHS)
+    if yaml_path is None:
         return [CheckResult(
             "branch_protection_drift", WARN,
-            "scripts/forge/branch_protection.yaml ontbreekt: drift niet toetsbaar",
-            remediation="voeg scripts/forge/branch_protection.yaml toe (golf B, B1)",
+            f"branch_protection.yaml ontbreekt in {project_root} (gezocht: {searched}): "
+            "drift niet toetsbaar",
+            remediation=f"voeg {PROTECTION_YAML_SEARCH_PATHS[0]} toe (zie docs/operations/FORGE_GATE.md)",
         )]
 
     try:
@@ -985,11 +1000,19 @@ def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
     except ProtectionConfigError as exc:
         return [CheckResult(
             "branch_protection_drift", FAIL, f"branch_protection.yaml ongeldig: {exc}",
-            remediation="corrigeer scripts/forge/branch_protection.yaml",
+            remediation=f"corrigeer {yaml_path}",
         )]
 
+    if config.enforcement == ENFORCEMENT_OFF:
+        return [CheckResult(
+            "branch_protection_drift", PASS,
+            f"branch-protection-toetsing staat uit (enforcement: off in {yaml_path.name}): "
+            "niets vergeleken",
+        )]
+    drift_status = WARN if config.enforcement == ENFORCEMENT_WARN else FAIL
+
     try:
-        live_norm = fetch_live_protection(vnx_home, branch="main")
+        live_norm = fetch_live_protection(project_root, branch="main")
     except ProtectionDriftError as exc:
         return [CheckResult(
             "branch_protection_drift", WARN,
@@ -1001,12 +1024,12 @@ def check_branch_protection_drift(paths: Dict[str, str]) -> List[CheckResult]:
     if not diffs:
         return [CheckResult(
             "branch_protection_drift", PASS,
-            "branch-protection op main komt overeen met scripts/forge/branch_protection.yaml",
+            f"branch-protection op main komt overeen met {yaml_path.name}",
         )]
 
     fields = sorted({d["field"] for d in diffs})
     return [CheckResult(
-        "branch_protection_drift", FAIL,
+        "branch_protection_drift", drift_status,
         f"branch-protection wijkt af van de YAML: {', '.join(fields)}",
         remediation="python3 scripts/forge/apply_branch_protection.py (of --dry-run om te bekijken)",
         details=fields,

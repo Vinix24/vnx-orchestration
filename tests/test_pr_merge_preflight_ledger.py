@@ -380,11 +380,13 @@ class TestMergedReceiptCarriesAllFive:
         assert gates["ci"]["overridden"] is True
         assert gates["review"]["overridden"] is False
 
-    def test_bootstrap_branch_protection_go_is_recorded_as_go(
+    def test_missing_yaml_branch_protection_go_is_recorded_as_a_warn_go(
         self, vnx_env, monkeypatch,
     ):
-        """The branch-protection gate's bootstrap no-op is a GO with its own
-        message — the record must carry that message, not an empty verdict."""
+        """A project with no branch_protection.yaml: the gate is a GO that says
+        so in its message AND carries its mode and cause in the record, so a
+        reader of the ledger does not have to tell "checked and clean" from
+        "nothing to check" by matching prose (OI-1849)."""
         _stub_gh_gates(monkeypatch)
         _track_do_merge(monkeypatch)
 
@@ -392,7 +394,10 @@ class TestMergedReceiptCarriesAllFive:
 
         gates = _by_gate(_receipts_of(vnx_env["receipts_path"], "pr_merged")[0]["preflight_gates"])
         assert gates["branch_protection"]["verdict"] == "GO"
-        assert "preflight overgeslagen" in gates["branch_protection"]["message"]
+        assert gates["branch_protection"]["mode"] == "warn"
+        assert gates["branch_protection"]["reason_code"] == "protection_file_missing"
+        assert "geen branch_protection.yaml in" in gates["branch_protection"]["message"]
+        assert gates["ci"]["mode"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +692,7 @@ class TestOneRecordShape:
             assert set(g) == {
                 "gate", "verdict", "message", "head_sha",
                 "overridden", "override_unnecessary", "override_not_applicable",
-                "reason_code",
+                "reason_code", "mode",
             }, g
 
     def test_a_gate_without_a_code_vocabulary_says_so_explicitly(self):
@@ -698,4 +703,5 @@ class TestOneRecordShape:
         record = pr_merge._preflight_record("ci", {"verdict": "GO", "message": "groen"}, "b" * 40)
 
         assert record["reason_code"] == ""
+        assert record["mode"] == ""
         assert record["override_not_applicable"] is False

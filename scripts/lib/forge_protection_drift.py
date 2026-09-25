@@ -32,6 +32,32 @@ Fail-closed throughout: an unreadable/unparseable live-state read raises
 :class:`ProtectionDriftError`, and a YAML that violates the schema raises
 :class:`ProtectionConfigError`. Neither degrades to "nothing required" — a
 caller that cannot read the state must refuse, not pass.
+
+Two optional top-level fields describe the PROJECT rather than the branch
+(OI-1849), so a consumer repo can declare how strictly the merge door treats it:
+
+  ``enforcement``  ``enforce`` | ``warn`` | ``off``: what the door does with
+                   drift between this file and live protection. Absent means
+                   ``enforce``. It is a policy about the door, not something
+                   GitHub holds, so :func:`compare` never reports it and
+                   live state never carries it; :func:`is_weakening` does
+                   judge it, because lowering it is the quietest weakening
+                   there is.
+  ``ci_workflow``  the name of the CI workflow the door's CI gate looks for.
+                   It is not protection state either, and :func:`compare` never
+                   reports it. :func:`is_weakening` judges it, because the gate
+                   asks main's value of every later PR: a PR that changes, adds
+                   or removes it chooses the check it is judged on next time.
+
+The file lives at ``.vnx/branch_protection.yaml`` in a project, or at
+``scripts/forge/branch_protection.yaml`` (what vnx-orchestration itself uses);
+:data:`PROTECTION_YAML_SEARCH_PATHS` is that reading order. A project with no
+file at all is treated as ``warn`` by the door (:data:`MISSING_FILE_ENFORCEMENT`).
+
+Every gate that asks which CI workflow to look for reads ``ci_workflow`` from
+main over the contents API (:func:`fetch_ci_workflow_from_main`), never from a
+checkout: at gate time the checkout is on the PR's branch, so its copy is the
+PR's own.
 """
 
 from __future__ import annotations
@@ -42,7 +68,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import yaml
@@ -57,6 +83,28 @@ from ci_contexts import ANY_APP_ID, RequiredCheck
 #: path and as the path queried through the GitHub contents API.
 PROTECTION_YAML_RELATIVE_PATH = "scripts/forge/branch_protection.yaml"
 
+#: Where a PROJECT keeps its own copy (OI-1849). Read first; the fabric's own
+#: path above stays the fallback so vnx-orchestration needs no move.
+PROJECT_PROTECTION_YAML_PATH = ".vnx/branch_protection.yaml"
+
+#: The reading order for the config inside a project, first hit wins. Local
+#: reads (:func:`find_local_protection_yaml`) and the door's contents-API reads
+#: both walk this same tuple, so the two can never look in different places.
+PROTECTION_YAML_SEARCH_PATHS = (PROJECT_PROTECTION_YAML_PATH, PROTECTION_YAML_RELATIVE_PATH)
+
+ENFORCEMENT_ENFORCE = "enforce"
+ENFORCEMENT_WARN = "warn"
+ENFORCEMENT_OFF = "off"
+
+#: Ascending strictness. A move to a lower index is a weakening.
+ENFORCEMENT_MODES = (ENFORCEMENT_OFF, ENFORCEMENT_WARN, ENFORCEMENT_ENFORCE)
+
+#: A file that exists but does not say: it declared a protection, so it is held to it.
+DEFAULT_ENFORCEMENT = ENFORCEMENT_ENFORCE
+
+#: No file at all: nothing to hold the project to, but never silent either.
+MISSING_FILE_ENFORCEMENT = ENFORCEMENT_WARN
+
 VNX_GATE_PREFIX = "vnx-gate/"
 
 _KNOWN_TOP_LEVEL_FIELDS = frozenset({
@@ -70,14 +118,17 @@ _KNOWN_TOP_LEVEL_FIELDS = frozenset({
 #: requires, so they are parsed past rather than compared. ``app`` (Golf B,
 #: B2a) names the GitHub App that PUBLISHES a check-run — an identity used by
 #: ``forge_check_run.py``, never a protection setting. Deliberately absent
-#: from :class:`ProtectionConfig` and :func:`to_normalized_dict`: a key that
-#: never enters the normalized dict can never register as drift or as a
-#: weakening. This is an allowlist of exactly one key, not an opening of the
-#: schema — an unrecognized top-level key is still refused. Being optional at
-#: the top level only excuses its ABSENCE; when present, its own shape is
-#: still validated (see :func:`_validate_app_block`) — an unknown key inside
-#: ``app:`` is refused exactly like everywhere else in this schema.
-_OPTIONAL_TOP_LEVEL_FIELDS = frozenset({"app"})
+#: from :func:`to_normalized_dict`'s protection fields: a key that never
+#: enters the compared state can never register as drift. ``enforcement`` and
+#: ``ci_workflow`` (OI-1849) are the door's own per-project settings and follow
+#: the same rule; both are carried in the normalized dict, for
+#: :func:`is_weakening` and for nothing else. This is an allowlist of exactly
+#: these keys, not an opening of the schema. An unrecognized top-level key is
+#: still refused. Being optional at the top level only excuses its ABSENCE;
+#: when present, its own shape is still validated (see
+#: :func:`_validate_app_block`, :func:`_parse_enforcement`). An unknown key
+#: inside ``app:`` is refused exactly like everywhere else in this schema.
+_OPTIONAL_TOP_LEVEL_FIELDS = frozenset({"app", "enforcement", "ci_workflow"})
 _KNOWN_APP_FIELDS = frozenset({"slug", "app_id"})
 _KNOWN_RSC_FIELDS = frozenset({"strict", "checks"})
 _KNOWN_CHECK_FIELDS = frozenset({"context", "app_id"})
@@ -118,6 +169,13 @@ class ProtectionDriftError(RuntimeError):
     block, not pass as "no drift found"."""
 
 
+class BranchNotProtectedError(ProtectionDriftError):
+    """GitHub answered that the branch has no protection at all ("Branch not
+    protected", HTTP 404). A readable answer about the repo, unlike an auth,
+    network or rate-limit failure: the one live-read failure a caller may treat
+    as "nothing is protected" instead of "the state is unknown"."""
+
+
 # ---------------------------------------------------------------------------
 # Config model
 # ---------------------------------------------------------------------------
@@ -152,6 +210,10 @@ class ProtectionConfig:
     required_conversation_resolution: bool
     allow_auto_merge: bool
     rulesets: Tuple[str, ...]
+    #: The door's strictness for this project (OI-1849); see the module docstring.
+    enforcement: str = DEFAULT_ENFORCEMENT
+    #: The CI workflow the door's CI gate looks for, or ``None`` for "not declared".
+    ci_workflow: Optional[str] = None
 
 
 def _require_object_fields(
@@ -191,6 +253,42 @@ def _validate_app_block(app: Any) -> None:
     # bool is an int subclass; `app_id: true` is a typo, not an identifier.
     if app_id is not None and (isinstance(app_id, bool) or not isinstance(app_id, int)):
         raise ProtectionConfigError("app.app_id moet een integer of null zijn")
+
+
+def _parse_enforcement(doc: Dict[str, Any]) -> str:
+    """The ``enforcement`` value of a parsed document, defaulting when absent.
+
+    PyYAML reads the bare word ``off`` (and ``no``, ``false``) as the boolean
+    ``False``, so the documented value ``enforcement: off`` arrives here as
+    ``False``. That is accepted as ``off``, because the only way to produce it is to
+    have written one of those words. ``True`` (``on``, ``yes``, ``true``) names
+    no mode and is refused with the quoting hint rather than guessed at.
+    """
+    if "enforcement" not in doc:
+        return DEFAULT_ENFORCEMENT
+    value = doc["enforcement"]
+    if value is False:
+        return ENFORCEMENT_OFF
+    if isinstance(value, str) and value in ENFORCEMENT_MODES:
+        return value
+    hint = " (on/yes/true is geen stand; kies enforce, warn of off)" if value is True else ""
+    raise ProtectionConfigError(
+        f"enforcement moet een van {list(ENFORCEMENT_MODES)} zijn, kreeg {value!r}{hint}"
+    )
+
+
+def _parse_ci_workflow(doc: Dict[str, Any]) -> Optional[str]:
+    if "ci_workflow" not in doc:
+        return None
+    value = doc["ci_workflow"]
+    if not isinstance(value, str) or not value.strip():
+        raise ProtectionConfigError("ci_workflow moet een niet-lege string zijn")
+    return value.strip()
+
+
+def enforcement_rank(mode: str) -> int:
+    """Position of ``mode`` in :data:`ENFORCEMENT_MODES`; higher is stricter."""
+    return ENFORCEMENT_MODES.index(mode)
 
 
 def normalize_bypass_allowances(raw: Any) -> List[str]:
@@ -266,6 +364,8 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
     if "app" in doc:
         _validate_app_block(doc["app"])
     signing_app_id = doc["app"]["app_id"] if isinstance(doc.get("app"), dict) else None
+    enforcement = _parse_enforcement(doc)
+    ci_workflow = _parse_ci_workflow(doc)
 
     if not isinstance(doc["branch"], str) or not doc["branch"]:
         raise ProtectionConfigError("branch moet een niet-lege string zijn")
@@ -388,11 +488,30 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
         required_conversation_resolution=bool_values["required_conversation_resolution"],
         allow_auto_merge=allow_auto_merge,
         rulesets=tuple(rulesets_raw),
+        enforcement=enforcement,
+        ci_workflow=ci_workflow,
     )
 
 
 def load_protection_config(path: Path) -> ProtectionConfig:
     return parse_protection_config(Path(path).read_text(encoding="utf-8"))
+
+
+def find_local_protection_yaml(project_root: Path) -> Optional[Path]:
+    """The config file inside ``project_root``, following
+    :data:`PROTECTION_YAML_SEARCH_PATHS`; ``None`` when the project has none.
+
+    The first file that exists wins, so a project's own ``.vnx/`` copy shadows
+    the fabric-style path. The door reads the same order over the contents API
+    (:func:`fetch_project_yaml_from_ref`); this is the on-disk half of it, for
+    ``apply_branch_protection.py`` and ``vnx doctor``.
+    """
+    root = Path(project_root)
+    for relative in PROTECTION_YAML_SEARCH_PATHS:
+        candidate = root / relative
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def to_normalized_dict(config: ProtectionConfig) -> Dict[str, Any]:
@@ -425,6 +544,11 @@ def to_normalized_dict(config: ProtectionConfig) -> Dict[str, Any]:
         "restrictions": None,
         "repo": {"allow_auto_merge": config.allow_auto_merge},
         "rulesets": sorted(config.rulesets),
+        # Not protection fields: live state has neither key, and compare()
+        # never reads them. They ride here only so is_weakening() can judge a
+        # PR that lowers the enforcement or moves the CI workflow.
+        "enforcement": config.enforcement,
+        "ci_workflow": config.ci_workflow,
     }
 
 
@@ -452,6 +576,10 @@ def _gh_json(argv: List[str], project_root: Path, timeout: int) -> Any:
         raise ProtectionDriftError(f"{' '.join(argv)} gaf onparseerbare JSON: {exc}") from exc
 
 
+#: What ``gh`` prints for a branch without any protection, next to "HTTP 404".
+_BRANCH_NOT_PROTECTED_MARKER = "Branch not protected"
+
+
 def fetch_live_protection(
     project_root: Path, *, branch: str = "main", gh_bin: str = "gh", timeout: int = 20,
 ) -> Dict[str, Any]:
@@ -464,11 +592,18 @@ def fetch_live_protection(
     ``apply_branch_protection.py``), the repo object (for
     ``allow_auto_merge``), and the rulesets list. Raises
     :class:`ProtectionDriftError` on any unreadable/unparseable response —
-    never returns a partial or default-filled result.
+    never returns a partial or default-filled result — and its subclass
+    :class:`BranchNotProtectedError` when GitHub says the branch has no
+    protection at all.
     """
-    protection = _gh_json(
-        [gh_bin, "api", f"repos/{{owner}}/{{repo}}/branches/{branch}/protection"], project_root, timeout,
-    )
+    try:
+        protection = _gh_json(
+            [gh_bin, "api", f"repos/{{owner}}/{{repo}}/branches/{branch}/protection"], project_root, timeout,
+        )
+    except ProtectionDriftError as exc:
+        if _BRANCH_NOT_PROTECTED_MARKER in str(exc) and "HTTP 404" in str(exc):
+            raise BranchNotProtectedError(str(exc)) from exc
+        raise
     if not isinstance(protection, dict):
         raise ProtectionDriftError(f"protection-antwoord is {type(protection).__name__}, verwacht een object")
 
@@ -660,6 +795,65 @@ def fetch_yaml_from_ref(
     return YamlFetchResult(text=text, not_found=False, error=None)
 
 
+def fetch_project_yaml_from_ref(
+    project_root: Path,
+    ref: str,
+    *,
+    gh_bin: str = "gh",
+    fetch: Optional[Callable[[Path, str, str], YamlFetchResult]] = None,
+) -> Tuple[str, YamlFetchResult]:
+    """The project's ``branch_protection.yaml`` at ``ref``, walking
+    :data:`PROTECTION_YAML_SEARCH_PATHS`.
+
+    Returns ``(path, result)`` for the first path that is not a confirmed 404:
+    a found file, or an error, which stops the walk (an unreadable first
+    candidate must not fall through to a second one that says something else).
+    When every candidate is a confirmed 404 the result is ``not_found`` with an
+    empty path: the project has no such file at this ref.
+
+    ``fetch`` replaces :func:`fetch_yaml_from_ref` for a caller that wants its own
+    read of one path (the merge door, whose tests patch that name on ``pr_merge``).
+    """
+    read = fetch or (lambda root, at, path: fetch_yaml_from_ref(root, at, path, gh_bin=gh_bin))
+    for path in PROTECTION_YAML_SEARCH_PATHS:
+        fetched = read(project_root, ref, path)
+        if not fetched.not_found:
+            return path, fetched
+    return "", YamlFetchResult(text=None, not_found=True, error=None)
+
+
+def fetch_ci_workflow_from_main(
+    project_root: Path,
+    *,
+    gh_bin: str = "gh",
+    fetch: Optional[Callable[[Path, str, str], YamlFetchResult]] = None,
+) -> Tuple[Optional[str], str]:
+    """The ``ci_workflow`` the project declares on main, as ``(name, error)``.
+
+    Read over the contents API from the repo ``gh`` resolves in ``project_root``,
+    never from a checkout: the checkout can be on any branch, including the one
+    under review, and a PR must not choose the workflow it is judged on. The
+    merge door and every gate-time caller (``pre_merge_gate``, the
+    ``merge_preflight_ci_check`` CLI) go through this one function, so they can
+    never read it from different places.
+
+    ``(None, "")`` means "the project declares none": no file on main, or a file
+    that does not say. The caller's workflow name then falls to
+    ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists but cannot
+    be read or parsed is an error: guessing a workflow name would put the CI gate
+    on a workflow the project never named.
+    """
+    path, fetched = fetch_project_yaml_from_ref(project_root, "main", gh_bin=gh_bin, fetch=fetch)
+    if fetched.error:
+        return None, f"branch-protection-YAML op main niet leesbaar: {fetched.error}"
+    if fetched.not_found:
+        return None, ""
+    try:
+        return parse_protection_config(fetched.text or "").ci_workflow, ""
+    except ProtectionConfigError as exc:
+        return None, f"branch-protection-YAML ({path}) op main ongeldig: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
@@ -701,6 +895,9 @@ def compare(a: Dict[str, Any], b: Dict[str, Any]) -> List[Dict[str, Any]]:
     weaker or stronger than ``a`` — see :func:`is_weakening` for that
     judgment, built on top of this same diff list (one function, two
     callers: a direct drift check, and ``is_weakening``'s classifier).
+
+    Compares branch protection only. ``enforcement`` is not a protection field
+    (the module docstring says why) and never appears in these diffs.
 
     Each diff is ``{"field": <dotted path>, "a": <value in a>, "b": <value in
     b>}``; a ``required_status_checks.checks[<name>]`` diff additionally
@@ -779,10 +976,13 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
     Built on :func:`compare`'s diff list (old=a, new=b), classified per
     field: a required check present in ``old`` but missing from ``new``, a
     protective boolean flipped off, the required review count lowered, or
-    ``allow_auto_merge`` turned on. Fields outside this vocabulary (e.g.
-    ``rulesets``, which this repo only ever checks and never writes) never
-    trigger a weakening verdict — see the module docstring's list of the
-    exact cases this covers.
+    ``allow_auto_merge`` turned on, ``enforcement`` lowered (``enforce`` ->
+    ``warn`` -> ``off``), or ``ci_workflow`` changed, added or removed (each
+    one moves the CI gate, see the module docstring). Fields outside this
+    vocabulary (e.g. ``rulesets``,
+    which this repo only ever checks and never writes) never trigger a
+    weakening verdict; see the module docstring's list of the exact cases
+    this covers.
     """
     weak_fields: List[str] = []
     for diff in compare(old, new):
@@ -813,7 +1013,47 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
         if field in _FALSE_IS_STRONGER and diff["a"] is False and diff["b"] is True:
             weak_fields.append(field)
             continue
+
+    # ``enforcement`` is deliberately outside compare(): live state never
+    # carries it. It is judged here, and only when BOTH sides declare it: a
+    # live-vs-YAML comparison (apply, doctor) has one side without it and has
+    # no policy to lower. A missing key on the PR side is not read as "lowered":
+    # to_normalized_dict always writes the RESOLVED value, so removing the field
+    # from a YAML resolves to ``enforce`` and can never rank below anything.
+    if "enforcement" in old and "enforcement" in new:
+        if enforcement_rank(new["enforcement"]) < enforcement_rank(old["enforcement"]):
+            weak_fields.append("enforcement")
+
+    # ``ci_workflow`` is judged on the same terms: only when both sides are a
+    # project config. Any change is a weakening, in either direction of the
+    # edit, because the door cannot tell a stricter workflow from a softer one
+    # by its name, and adding or removing it hands the gate to the environment
+    # and the fabric default. Not a lowering-only rule like ``enforcement``:
+    # ``enforcement`` has an order, a workflow name has none.
+    if "ci_workflow" in old and "ci_workflow" in new:
+        workflow_change = ci_workflow_change(old["ci_workflow"], new["ci_workflow"])
+        if workflow_change:
+            weak_fields.append(workflow_change)
     return (len(weak_fields) > 0, weak_fields)
+
+
+def ci_workflow_change(old: Optional[str], new: Optional[str]) -> Optional[str]:
+    """The ``ci_workflow`` edit between two declarations, as the weak-field text
+    ``ci_workflow: <old> -> <new>``, or ``None`` when the value is the same.
+
+    ``None`` on either side is "not declared", so this covers a change, an
+    addition and a removal. The merge door also judges it where no full
+    :func:`is_weakening` runs (``enforcement: off``, and a project with no file
+    on main): the CI gate is the floor under every mode.
+    """
+    if old == new:
+        return None
+    return f"ci_workflow: {_workflow_label(old)} -> {_workflow_label(new)}"
+
+
+def _workflow_label(name: Optional[str]) -> str:
+    """A ``ci_workflow`` value as a message shows it: quoted, or "niet gedeclareerd"."""
+    return repr(name) if name else "niet gedeclareerd"
 
 
 # ---------------------------------------------------------------------------
@@ -821,26 +1061,33 @@ def is_weakening(old: Dict[str, Any], new: Dict[str, Any]) -> Tuple[bool, List[s
 # ---------------------------------------------------------------------------
 
 
-def _default_yaml_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "forge" / "branch_protection.yaml"
-
-
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
         prog="forge_protection_drift",
-        description="Compare live branch protection to scripts/forge/branch_protection.yaml",
+        description="Compare live branch protection to the project's branch_protection.yaml",
     )
-    parser.add_argument("--yaml-path", default=str(_default_yaml_path()))
+    parser.add_argument(
+        "--yaml-path", default=None,
+        help="default: .vnx/branch_protection.yaml, else scripts/forge/branch_protection.yaml, in --project-root",
+    )
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--branch", default="main")
     parser.add_argument("--gh-bin", default="gh")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    yaml_path = Path(args.yaml_path) if args.yaml_path else find_local_protection_yaml(Path(args.project_root))
+    if yaml_path is None:
+        print(
+            f"FOUT: geen branch_protection.yaml in {args.project_root} "
+            f"(gezocht: {', '.join(PROTECTION_YAML_SEARCH_PATHS)})",
+            file=sys.stderr,
+        )
+        return 1
     try:
-        config = load_protection_config(Path(args.yaml_path))
+        config = load_protection_config(yaml_path)
     except (ProtectionConfigError, OSError) as exc:
         print(f"FOUT: {exc}", file=sys.stderr)
         return 1
@@ -855,7 +1102,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.json:
         print(json.dumps(diffs, indent=2, default=str))
     elif not diffs:
-        print(f"geen verschillen: branch-protection op {args.branch} komt overeen met {args.yaml_path}")
+        print(f"geen verschillen: branch-protection op {args.branch} komt overeen met {yaml_path}")
     else:
         for d in diffs:
             print(f"DRIFT {d['field']}: yaml={d['a']!r} live={d['b']!r}")

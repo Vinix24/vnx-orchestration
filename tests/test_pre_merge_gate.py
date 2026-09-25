@@ -1004,7 +1004,19 @@ class TestCheckCIWorkflow:
       3. gh run list ...          → CI workflow runs
 
     Each test provides three MagicMock results matching that order.
+
+    The project's declared workflow is read from main over the contents API, a
+    fourth ``subprocess.run`` call that would land in the middle of that order.
+    It is stubbed away here (no declaration, so the name falls to the environment
+    and the default) and covered against a stub ``gh`` in
+    tests/test_ci_workflow_resolution_parity.py.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_declaration_on_main(self, monkeypatch):
+        monkeypatch.setattr(
+            pre_merge_gate, "fetch_ci_workflow_from_main", lambda project_root, **kw: (None, ""),
+        )
 
     @staticmethod
     def _git_head_mock(sha: str) -> MagicMock:

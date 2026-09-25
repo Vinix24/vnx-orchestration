@@ -59,9 +59,21 @@ visible in the output rather than hidden.
 
 This is the merge-preflight counterpart to ``pre_merge_gate.check_ci_workflow``
 (OI-931), which enforces the same invariant at gate time. The two share the
-same workflow-name resolution order (explicit arg > ``VNX_CI_WORKFLOW_NAME``
-> "VNX CI"); they differ in verdict vocabulary (GO/NO-GO here) and messaging
-(merge-preflight terms).
+same workflow-name resolution order (explicit arg > ``ci_workflow`` from the
+project's ``branch_protection.yaml`` on main > ``VNX_CI_WORKFLOW_NAME`` > "VNX CI");
+they differ in verdict vocabulary (GO/NO-GO here) and messaging (merge-preflight
+terms).
+
+The project tier is OI-1849: a consumer's CI workflow is not called "VNX CI"
+(mission-control and sales-copilot: "CI", SEOcrawler_v2: "CI/CD Pipeline"), and
+an environment variable is a per-shell fix for what is a fact about the project.
+``check_ci_run_for_head`` takes it as ``project_workflow`` from its caller and
+never reads a file itself: the merge door hands it the value read from main's
+YAML over the API, and this module's own CLI reads the same copy the same way
+(``forge_protection_drift.fetch_ci_workflow_from_main``). Neither reads the
+checkout: it can be on the PR's branch, and a PR must not choose the workflow it
+is judged on. Which copy is read is a decision about trust that belongs to the
+caller.
 """
 
 from __future__ import annotations
@@ -97,13 +109,17 @@ GH_RUN_LIST_TIMEOUT = 15
 GIT_TIMEOUT = 10
 
 
-def _resolve_workflow_name(workflow_name: Optional[str]) -> str:
-    """Resolve the workflow name: explicit arg > env var > fabric default.
+def _resolve_workflow_name(workflow_name: Optional[str], project_workflow: Optional[str] = None) -> str:
+    """Resolve the workflow name: explicit arg > the project's ``ci_workflow`` >
+    env var > fabric default.
 
-    Mirrors pre_merge_gate._resolve_ci_workflow_name() — keep the two in sync.
+    Mirrors pre_merge_gate._resolve_ci_workflow_name(). Keep the two in sync
+    (tests/test_ci_workflow_resolution_parity.py holds them to it).
     """
     if workflow_name:
         return workflow_name
+    if project_workflow:
+        return project_workflow
     env_name = os.environ.get(CI_WORKFLOW_NAME_ENV_VAR)
     if env_name:
         return env_name
@@ -204,6 +220,7 @@ def check_ci_run_for_head(
     gh_bin: str = "gh",
     workflow_name: Optional[str] = None,
     override_reason: Optional[str] = None,
+    project_workflow: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Fail-closed check: every VNX CI run for the exact head_sha must be conclusion=success.
 
@@ -218,8 +235,12 @@ def check_ci_run_for_head(
     ``override_reason`` is the escape hatch: a non-empty value skips the check
     with a visible GO (``overridden=True``), an empty/whitespace value is a
     refusal, and None (or an unset env var) runs the normal check.
+
+    ``project_workflow`` is the ``ci_workflow`` the project declares in its
+    ``branch_protection.yaml`` (OI-1849), as read by the caller; it ranks below
+    ``workflow_name`` and above ``VNX_CI_WORKFLOW_NAME``.
     """
-    resolved_workflow = _resolve_workflow_name(workflow_name)
+    resolved_workflow = _resolve_workflow_name(workflow_name, project_workflow)
 
     # ── Escape hatch ──────────────────────────────────────────────────────
     reason = _resolve_override_reason(override_reason)
@@ -442,7 +463,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Accepted for backward compat; NOT used to scope the CI query (OI-1387 — see module docstring)",
     )
     parser.add_argument("--head-sha", help="Exact HEAD SHA (defaults to git rev-parse HEAD)")
-    parser.add_argument("--workflow", help="CI workflow name (default: VNX_CI_WORKFLOW_NAME or 'VNX CI')")
+    parser.add_argument(
+        "--workflow",
+        help="CI workflow name (default: ci_workflow from the project's branch_protection.yaml on main, "
+             "else VNX_CI_WORKFLOW_NAME, else 'VNX CI')",
+    )
     parser.add_argument("--gh-bin", default="gh", help="Path/name of the gh binary")
     parser.add_argument(
         "--override-reason",
@@ -453,6 +478,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     args = parser.parse_args(argv)
 
+    # Imported here, not at the top: check_ci_run_for_head has no dependency on
+    # the protection schema, and only this CLI reads the project's declaration.
+    from forge_protection_drift import fetch_ci_workflow_from_main
+
+    # Not read when the argument or an override decides: the declaration is not consulted then.
+    project_workflow: Optional[str] = None
+    if not args.workflow and _resolve_override_reason(args.override_reason) is None:
+        project_workflow, workflow_error = fetch_ci_workflow_from_main(
+            Path(args.project_root), gh_bin=args.gh_bin,
+        )
+        if workflow_error:
+            print(f"CI-workflow van het project kon niet worden bepaald: {workflow_error}", file=sys.stderr)
+            return 1
+
     result = check_ci_run_for_head(
         Path(args.project_root),
         branch=args.branch,
@@ -460,6 +499,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         gh_bin=args.gh_bin,
         workflow_name=args.workflow,
         override_reason=args.override_reason,
+        project_workflow=project_workflow,
     )
 
     if args.json:
