@@ -9,7 +9,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
-from report_body_contract import BodyResult, build_directive, validate_body
+import logging
+import re
+
+from report_body_contract import (
+    BodyResult,
+    build_directive,
+    divergent_report_headings,
+    validate_body,
+    warn_on_divergent_headings,
+    with_directive,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +282,131 @@ def test_build_directive_pr_ref_request_does_not_add_a_required_heading():
     import re
     headings = set(re.findall(r"^## .+", d, re.MULTILINE))
     assert headings == {"## Report Body Contract"}
+
+
+# ---------------------------------------------------------------------------
+# OI-1850 — identity block, with_directive, and the divergent-role check
+# ---------------------------------------------------------------------------
+
+def test_build_directive_identity_block_carries_known_values():
+    d = build_directive("disp-x", model="sonnet", provider="claude")
+    assert "`**Dispatch-ID**: disp-x`" in d
+    assert "`**Model**: sonnet`" in d
+    assert "`**Provider**: claude`" in d
+
+
+def test_build_directive_identity_block_tells_the_shape_when_values_unknown():
+    d = build_directive("disp-x")
+    assert "`**Model**: <the short id of the model you run as" in d
+    assert "no spaces, no backticks" in d
+    assert "`**Provider**: <the provider you run on" in d
+
+
+def test_build_directive_identity_block_adds_no_required_heading():
+    """The identity block is a request: no heading, so no report is newly invalid."""
+    d = build_directive("disp-x", model="sonnet", provider="claude")
+    assert set(re.findall(r"^## .+", d, re.MULTILINE)) == {"## Report Body Contract"}
+
+
+def test_with_directive_appends_once(monkeypatch):
+    monkeypatch.delenv("VNX_REPORT_CONTRACT_DIRECTIVE", raising=False)
+    once = with_directive("body", "disp-y")
+    twice = with_directive(once, "disp-y")
+    assert once.startswith("body\n\n<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->")
+    assert twice == once
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", " OFF "])
+def test_with_directive_is_a_no_op_when_the_switch_is_off(monkeypatch, value):
+    monkeypatch.setenv("VNX_REPORT_CONTRACT_DIRECTIVE", value)
+    assert with_directive("body", "disp-y") == "body"
+
+
+def test_with_directive_passes_pr_and_identity_values_through(monkeypatch):
+    monkeypatch.delenv("VNX_REPORT_CONTRACT_DIRECTIVE", raising=False)
+    out = with_directive("body", "disp-y", pr_id="PR-3", model="opus", provider="claude")
+    assert "`## PR`" in out
+    assert "`**Model**: opus`" in out
+    assert "`**Provider**: claude`" in out
+
+
+_CONTRACT_LIST = "`## Summary` / `## Changes` / `## Verification` / `## Open Items`"
+
+
+def test_divergent_headings_none_for_the_contract_list():
+    assert divergent_report_headings(f"Report headings: {_CONTRACT_LIST}.") == ([], [])
+
+
+def test_divergent_headings_accepts_the_validator_aliases():
+    text = "Report headings: `## Summary` / `## Files Modified` / `## Tests` / `## Open Items`"
+    assert divergent_report_headings(text) == ([], [])
+
+
+def test_divergent_headings_names_unknown_and_missing_for_the_probe_list():
+    text = (
+        "Your report has: `## What changed` / `## Commands run` / `## Tests` / "
+        "`## Answer` / `## Known limitations` / `## Open Items`"
+    )
+    unknown, missing = divergent_report_headings(text)
+    assert unknown == ["## What changed", "## Commands run", "## Answer", "## Known limitations"]
+    assert missing == ["## Summary", "## Changes"]
+
+
+def test_divergent_headings_reads_bullets_and_report_skeletons():
+    bullets = "The report has:\n- `## What changed`\n- `## Open Items`\n"
+    assert divergent_report_headings(bullets)[0] == ["## What changed"]
+    skeleton = "Use this report skeleton:\n\n```markdown\n## Summary\nx\n## Changes\ny\n## Notes\n```\n"
+    unknown, missing = divergent_report_headings(skeleton)
+    assert unknown == ["## Notes"]
+    assert missing == ["## Verification", "## Open Items"]
+
+
+def test_divergent_headings_is_case_sensitive_like_the_validator():
+    text = "Report headings: `## summary` / `## Changes` / `## Verification` / `## Open Items`"
+    unknown, missing = divergent_report_headings(text)
+    assert unknown == ["## summary"]
+    assert missing == ["## Summary"]
+
+
+def test_divergent_headings_ignores_the_role_files_own_structure_and_unrelated_refs():
+    text = (
+        "# Role\n\n## Capabilities\n- x\n\n## Workflow\n- y\n\n"
+        "The lane appends `## Scope Guard` and `## Completion Protocol` itself.\n"
+    )
+    assert divergent_report_headings(text) == ([], [])
+
+
+def test_divergent_headings_empty_text():
+    assert divergent_report_headings("") == ([], [])
+
+
+def test_warn_on_divergent_headings_logs_source_and_returns_true(caplog):
+    text = "Report headings: `## What changed` / `## Open Items`"
+    with caplog.at_level(logging.WARNING, logger="report_body_contract"):
+        assert warn_on_divergent_headings(text, "agents/x/CLAUDE.md") is True
+    message = caplog.records[-1].getMessage()
+    assert "agents/x/CLAUDE.md" in message
+    assert "## What changed" in message
+
+
+def test_warn_on_divergent_headings_silent_for_the_contract(caplog):
+    with caplog.at_level(logging.WARNING, logger="report_body_contract"):
+        assert warn_on_divergent_headings(_CONTRACT_LIST + " report", "x.md") is False
+    assert caplog.records == []
+
+
+def _shipped_role_texts():
+    root = Path(__file__).resolve().parents[1]
+    files = [root / "scripts" / "lib" / "prompts" / "base_worker.md"]
+    files += sorted((root / "scripts" / "lib" / "prompts" / "roles").glob("*.md"))
+    files += sorted((root / "agents").glob("*/CLAUDE.md"))
+    return files
+
+
+@pytest.mark.parametrize("path", _shipped_role_texts(), ids=lambda p: p.parent.name + "/" + p.name)
+def test_no_shipped_role_text_lists_headings_that_differ_from_the_contract(path):
+    """The fabric prompt and every shipped role file say what the validator says."""
+    assert divergent_report_headings(path.read_text()) == ([], [])
 
 
 # ---------------------------------------------------------------------------

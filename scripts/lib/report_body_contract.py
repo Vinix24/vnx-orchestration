@@ -23,8 +23,12 @@ Report Contract" section, which documents both.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 _DIRECTIVE_SENTINEL = "<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->"
 _REQUIRED_SECTIONS = ("## Summary", "## Changes", "## Verification", "## Open Items")
@@ -144,7 +148,13 @@ def resolve_undeclared_status(declared_status: "str | None", *, body_valid: bool
     return AUTHORED_UNDECLARED_STATUS if body_valid else None
 
 
-def build_directive(dispatch_id: str, *, pr_id: "str | None" = None) -> str:
+def build_directive(
+    dispatch_id: str,
+    *,
+    pr_id: "str | None" = None,
+    model: "str | None" = None,
+    provider: "str | None" = None,
+) -> str:
     """Return a markdown directive enumerating the required report sections.
 
     Workers use the exact headings listed. Validator also accepts common
@@ -160,6 +170,16 @@ def build_directive(dispatch_id: str, *, pr_id: "str | None" = None) -> str:
     ``validate_body()`` checks for, so a report that never produces a PR is
     never marked invalid for omitting it, and no existing report is retroactively
     broken by this change.
+
+    OI-1850: this is the ONE place a worker is told which headings its report
+    carries. It reads ``_REQUIRED_SECTIONS``, the same constant ``validate_body``
+    checks, and every lane appends it through ``with_directive``: the fabric
+    prompt (``prompts/base_worker.md``) names no heading list of its own. The
+    identity block below is a request for the same reason as ``**PR_Ref**``: it
+    adds no heading ``validate_body()`` checks, but a dispatch-lane report
+    without a real ``**Model**`` never becomes a receipt (see the module
+    docstring). ``model``/``provider`` fill the values in when the lane knows
+    them; otherwise the worker is told what shape they take.
     """
     sections = list(_REQUIRED_SECTIONS)
     if pr_id:
@@ -174,6 +194,22 @@ def build_directive(dispatch_id: str, *, pr_id: "str | None" = None) -> str:
         "that did not exist yet when the dispatch was registered. Omit this "
         "field entirely when this dispatch does not produce a PR.\n"
     )
+    model_value = (model or "").strip() or (
+        "<the short id of the model you run as, for example sonnet or opus; "
+        "no spaces, no backticks>"
+    )
+    provider_value = (provider or "").strip() or (
+        "<the provider you run on, for example claude, kimi, glm or deepseek>"
+    )
+    identity_note = (
+        "\nIdentity block: stamp these three bold fields within the first 3000 "
+        "characters of your report (or as frontmatter). A dispatch report that "
+        "names no real model is refused at receipt-write time, so without them "
+        "your work never reaches the audit trail:\n\n"
+        f"- `**Dispatch-ID**: {dispatch_id}`\n"
+        f"- `**Model**: {model_value}`\n"
+        f"- `**Provider**: {provider_value}`\n"
+    )
     return (
         f"{_DIRECTIVE_SENTINEL}\n\n"
         "## Report Body Contract\n\n"
@@ -183,7 +219,169 @@ def build_directive(dispatch_id: str, *, pr_id: "str | None" = None) -> str:
         f"{sections_formatted}\n\n"
         "Each section must be non-empty. `## Open Items` may contain \"None\" explicitly.\n"
         f"{pr_ref_note}"
+        f"{identity_note}"
     )
+
+
+_DIRECTIVE_FLAG = "VNX_REPORT_CONTRACT_DIRECTIVE"
+
+
+def directive_enabled() -> bool:
+    """False only when the operator switched the directive off (default: on)."""
+    return os.environ.get(_DIRECTIVE_FLAG, "1").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+
+
+def with_directive(
+    body: str,
+    dispatch_id: str,
+    *,
+    pr_id: "str | None" = None,
+    model: "str | None" = None,
+    provider: "str | None" = None,
+) -> str:
+    """Return *body* ending in the report directive, exactly once.
+
+    The single door every lane appends the directive through. Idempotent: a body
+    that already carries the directive sentinel is returned unchanged, so a lane
+    that composes on top of another lane's output can never put the directive in
+    one prompt twice.
+    """
+    if not directive_enabled() or _DIRECTIVE_SENTINEL in body:
+        return body
+    return (
+        body
+        + "\n\n"
+        + build_directive(dispatch_id, pr_id=pr_id, model=model, provider=provider)
+    )
+
+
+# A heading written INSIDE a line ("`## Summary` / `## Changes`", "- ## Summary")
+# is a reference to a report heading; one that opens the line is the role file's
+# own structure. Titles stop at the separators such lists use.
+_HEADING_REFERENCE = re.compile(r"##[ \t]+([^`/,;|\n]+)")
+_FENCE = "```"
+_LIST_CONTEXT_LINES = 2
+
+
+def _known_report_headings() -> "set[str]":
+    known = set(_REQUIRED_SECTIONS) | {"## PR"}
+    for aliases in _SECTION_ALIASES.values():
+        known.update(aliases)
+    return known
+
+
+def _heading_reference_lines(text: str) -> "list[tuple[list[str], int | None]]":
+    """Per line of *text*: the report headings it references, and its code fence.
+
+    Outside a code fence a reference is an H2 that does not open the line.
+    Inside a fence every H2 line counts: that is a report skeleton. The second
+    item is the number of the fence the line sits in, None outside one.
+    """
+    fence_id = 0
+    in_fence = False
+    per_line: "list[tuple[list[str], int | None]]" = []
+    for line in text.splitlines():
+        if line.strip().startswith(_FENCE):
+            if not in_fence:
+                fence_id += 1
+            in_fence = not in_fence
+            per_line.append(([], fence_id))
+            continue
+        if in_fence:
+            match = re.match(r"\s*##[ \t]+(.+?)\s*$", line)
+            titles = [match.group(1)] if match else []
+        else:
+            titles = [
+                m.group(1) for m in _HEADING_REFERENCE.finditer(line) if m.start() > 0
+            ]
+        refs = [f"## {t.strip().rstrip('.:').strip()}" for t in titles]
+        per_line.append((refs, fence_id if in_fence else None))
+    return per_line
+
+
+def _report_heading_lists(text: str) -> "list[list[str]]":
+    """Runs of references that read as a report-heading list.
+
+    A run is consecutive lines that reference headings, or one whole code fence
+    (a skeleton has body lines between its headings). It is a list when it names
+    at least two headings and either names one the validator knows or sits in a
+    passage about the report.
+    """
+    lines = text.splitlines()
+    per_line = _heading_reference_lines(text)
+    known = _known_report_headings()
+    lists: "list[list[str]]" = []
+    index = 0
+    while index < len(per_line):
+        if not per_line[index][0]:
+            index += 1
+            continue
+        fence = per_line[index][1]
+        end = index
+        while end < len(per_line) and (
+            per_line[end][1] == fence if fence is not None
+            else per_line[end][0] and per_line[end][1] is None
+        ):
+            end += 1
+        refs = [ref for line_refs, _ in per_line[index:end] for ref in line_refs]
+        context = " ".join(lines[max(0, index - _LIST_CONTEXT_LINES):end]).lower()
+        if len(refs) >= 2 and (any(ref in known for ref in refs) or "report" in context):
+            lists.append(refs)
+        index = end
+    return lists
+
+
+def divergent_report_headings(text: str) -> "tuple[list[str], list[str]]":
+    """How the report-heading lists in *text* differ from what the validator reads.
+
+    Returns ``(unknown, missing)``: headings a list names that are neither in
+    ``_REQUIRED_SECTIONS`` nor one of its aliases, and required sections no
+    listed heading satisfies. Both are empty for text without a list, and for a
+    list that says what the contract says. Case counts, as it does in
+    ``validate_body``.
+    """
+    lists = _report_heading_lists(text)
+    if not lists:
+        return [], []
+    known = _known_report_headings()
+    listed = {ref for refs in lists for ref in refs}
+    unknown: "list[str]" = []
+    for refs in lists:
+        for ref in refs:
+            if ref not in known and ref not in unknown:
+                unknown.append(ref)
+    missing = [
+        section
+        for section in _REQUIRED_SECTIONS
+        if section not in listed
+        and not any(alias in listed for alias in _SECTION_ALIASES.get(section, ()))
+    ]
+    return unknown, missing
+
+
+def warn_on_divergent_headings(text: str, source: str) -> bool:
+    """Log a warning when the role text *source* lists other report headings.
+
+    Never blocks: the directive ``with_directive`` appends after the role text
+    is what the worker reads last, and ``validate_body`` is what judges the
+    report. The warning exists so a role file that drifted from the contract is
+    found on the first dispatch that loads it, not after its reports fail.
+    Returns True when a warning was logged.
+    """
+    unknown, missing = divergent_report_headings(text)
+    if not unknown and not missing:
+        return False
+    logger.warning(
+        "role text %s lists report headings that differ from the report contract "
+        "(not in the contract: %s; contract sections it never names: %s); "
+        "the Report Body Contract directive at the end of the prompt wins",
+        source,
+        ", ".join(unknown) or "none",
+        ", ".join(missing) or "none",
+    )
+    return True
 
 
 def validate_body(text: str, *, pr_id: "str | None" = None) -> BodyResult:

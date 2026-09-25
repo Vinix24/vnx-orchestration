@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import report_body_contract
+
 logger = logging.getLogger(__name__)
 
 # Absolute path to the prompts directory so this module works from any cwd
@@ -242,7 +244,9 @@ class PromptAssembler:
         if role:
             role_path = _PROMPTS_DIR / "roles" / f"{role}.md"
             if role_path.exists():
-                return role_path.read_text().strip(), role
+                content = role_path.read_text().strip()
+                report_body_contract.warn_on_divergent_headings(content, str(role_path))
+                return content, role
             logger.warning(
                 "Role prompt not found for '%s' at %s; falling back to base worker context",
                 role, role_path,

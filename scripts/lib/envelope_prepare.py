@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import report_body_contract
 from envelope_types import EnvelopeSpec
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,11 @@ def _prepare(spec: EnvelopeSpec) -> str:
     try:
         from skill_context import _inject_skill_context  # noqa: PLC0415
 
-        dispatch_metadata: dict = {"dispatch_id": spec.dispatch_id}
+        dispatch_metadata: dict = {
+            "dispatch_id": spec.dispatch_id,
+            "model": spec.model,
+            "provider": spec.provider,
+        }
         if spec.pr_id:
             dispatch_metadata["pr_id"] = spec.pr_id
         instruction = _inject_skill_context(
@@ -73,7 +78,13 @@ def _prepare(spec: EnvelopeSpec) -> str:
                 "## Worker Preamble\n\n"
                 "You are a VNX headless worker executing a dispatch instruction."
             )
-        instruction = f"{header}\n\n{instruction}"
+        instruction = report_body_contract.with_directive(
+            f"{header}\n\n{instruction}",
+            spec.dispatch_id,
+            pr_id=spec.pr_id,
+            model=spec.model,
+            provider=spec.provider,
+        )
 
     return instruction
 

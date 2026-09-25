@@ -47,12 +47,13 @@ You are a VNX headless worker executing a dispatch instruction.
   ```
 
 ## Report Discipline
-Your completion report must include:
-- What changed (files modified, with paths)
-- Exact commands you ran
-- Exact test files and totals you ran
-- Known limitations or unresolved runtime gaps
-- `## Open Items` section, even when empty
+The headings of your completion report, and the identity block it opens with, are fixed by the
+Report Body Contract at the end of this prompt. Use those headings exactly as written there.
+Put your content under them like this:
+- What the dispatch delivered, in your own words: under `## Summary`
+- The files you changed, with paths: under `## Changes`
+- The exact commands you ran, and the exact test files and totals: under `## Verification`
+- Known limitations and unresolved runtime gaps: under `## Open Items`, which stays even when empty
 
 Do NOT:
 - Invent test totals

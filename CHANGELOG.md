@@ -8,6 +8,27 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ### Fixed
 
+- **A worker is told one thing about its report headings, on every lane
+  (OI-1850, #1918).** The validator wants `## Summary`, `## Changes`,
+  `## Verification` and `## Open Items`. The fabric prompt
+  (`prompts/base_worker.md`) asked for "What changed", commands, test totals
+  and "Known limitations", and workers followed the prompt: 175
+  `contract_invalid` receipts in mission-control, probe D-86244666. The
+  directive that states the real headings was only appended by
+  `dispatch_prepare.prepare`, so the headless lane, the provider lanes and the
+  terminal-pinned subprocess lane on its default flag never carried it.
+  `skill_context._inject_skill_context`, the seam every lane's worker prompt
+  passes through, now closes the prompt with `report_body_contract.with_directive`
+  (once, idempotent, read from the same `_REQUIRED_SECTIONS` the validator
+  checks), and the fallback prompts of the headless and provider lanes carry it
+  too. `base_worker.md` names no heading list of its own any more: it points at
+  the directive and says which heading each kind of content goes under. The
+  directive now also asks for the identity block (`**Dispatch-ID**`,
+  `**Model**`, `**Provider**`), because a dispatch report without a real model
+  never becomes a receipt. A role file that lists other report headings makes
+  the door log a warning with its path and the differing headings; the
+  directive stands after the role text and wins, nothing is blocked. Gate
+  reviewers answer with a verdict and stay directive-free.
 - **The merge door judges the project it merges into, not the repo it is
   installed from (OI-1849).** Run from a central install with a consumer
   project as the target, `pr_merge.py` read the YAML on main, the YAML on the PR

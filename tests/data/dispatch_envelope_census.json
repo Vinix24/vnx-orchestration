@@ -1499,6 +1499,20 @@
       "symbol": "_verification_from_report"
     },
     {
+      "file": "tests/test_report_headings_one_source.py",
+      "line": 82,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_report_headings_one_source.py",
+      "line": 93,
+      "mechanism": "direct-call",
+      "module_target": "envelope_prepare",
+      "symbol": "_prepare"
+    },
+    {
       "file": "tests/test_report_path.py",
       "line": 383,
       "mechanism": "direct-call",
