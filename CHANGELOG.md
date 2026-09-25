@@ -6,6 +6,20 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-09-25
+
+Patch release (2 commits since v1.6.4). The merge door now judges a merge
+against the repo of the project it merges into, not the repo it is installed
+from. Strictness is set per project (`enforce`, `warn` or `off`), and the CI
+check stays as the floor under every setting (OI-1849, #1917). Workers also get
+the same report headings on every lane as the validator requires, so consumer
+dispatches no longer end on `contract_invalid` (OI-1850, #1918).
+
+Behaviour change: `pr_merge.py` refuses when `VNX_HOME` points at a different
+checkout than the door that is running. `VNX_PROJECT_ROOT` names the project
+explicitly and is the way to point a door at one. Through the `vnx` shim you
+notice nothing, because it unsets `VNX_HOME` before it resolves.
+
 ### Fixed
 
 - **A worker is told one thing about its report headings, on every lane
@@ -30,7 +44,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   directive stands after the role text and wins, nothing is blocked. Gate
   reviewers answer with a verdict and stay directive-free.
 - **The merge door judges the project it merges into, not the repo it is
-  installed from (OI-1849).** Run from a central install with a consumer
+  installed from (OI-1849, #1917).** Run from a central install with a consumer
   project as the target, `pr_merge.py` read the YAML on main, the YAML on the PR
   head, the live branch protection and the ADR numbers from
   `Vinix24/vnx-orchestration`, while `gh pr merge` and the CI gate went to the
@@ -47,10 +61,10 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   an install no longer applies the fabric's YAML to whichever repo the install's
   remote names.
 
-- **A PR cannot lower the CI gate through `ci_workflow` (OI-1849).** The CI gate
-  asks main's `ci_workflow` of every later PR, so a PR that changed, added or
-  removed it chose the check it was judged on next time, and the preflight
-  said "PR verzwakt niets". `forge_protection_drift.is_weakening` now judges it
+- **A PR cannot lower the CI gate through `ci_workflow` (OI-1849, #1917).** The
+  CI gate asks main's `ci_workflow` of every later PR, so a PR that changed,
+  added or removed it chose the check it was judged on next time, and the
+  preflight said "PR verzwakt niets". `forge_protection_drift.is_weakening` now judges it
   and any change needs `--allow-weaken "<reason>"`; the message names the old
   and the new value. `pre_merge_gate` and the `merge_preflight_ci_check` CLI
   read it from main of the target repo over the contents API
@@ -61,7 +75,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ### Added
 
-- **Strictness per project (OI-1849).** `branch_protection.yaml` accepts
+- **Strictness per project (OI-1849, #1917).** `branch_protection.yaml` accepts
   `enforcement: enforce | warn | off` (absent means `enforce`) and
   `ci_workflow: "<name>"`. The file is `.vnx/branch_protection.yaml`, else
   `scripts/forge/branch_protection.yaml`. `warn` reports drift and merges, `off`
