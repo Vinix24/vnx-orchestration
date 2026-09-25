@@ -104,6 +104,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "far the target lags main; over the threshold the flip needs an explicit "
         "operator reason (OI-1718)."
     ),
+    "t0-context-rotation": (
+        "T0 must rotate at 500K context: measured from the transcript, the guard hook "
+        "stops new work and blocks the turn end until the rotate flow starts a successor."
+    ),
 }
 
 # Ledger row order (framework-status-audit-and-cockpit PR-3). Grouped by
@@ -144,6 +148,7 @@ _ROW_ORDER: List[str] = [
     "smart-router-staging",
     "claude-tmux-serialization",
     "central-install-cutover",
+    "t0-context-rotation",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",
