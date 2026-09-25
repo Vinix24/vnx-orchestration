@@ -115,6 +115,71 @@ class TestApplyDefaults:
         assert seen[0]["project_root"] == tmp_path / "elsewhere"
 
 
+class TestApplyRefusesTheInstallAsTarget:
+    """The merge door refuses a central install as its own target (``resolve_merge_target``).
+    Without the same guard here, a run from inside an install resolves the project root to
+    the install and applies the install's YAML to the repo its remote names (review
+    finding I2 on #1915)."""
+
+    @pytest.fixture()
+    def inside_the_install(self, tmp_path, monkeypatch):
+        install = make_install(tmp_path)
+        _project_yaml(install, consumer_yaml(), "scripts/forge/branch_protection.yaml")
+        isolate_project_env(monkeypatch, install)
+        monkeypatch.chdir(install)
+        monkeypatch.setattr(abp, "ENGINE_ROOT", install, raising=False)
+        install_gh_stub(tmp_path, monkeypatch, [{"match": "repo view", "stdout": CONSUMER_REPO + "\n"}])
+        return install
+
+    @pytest.fixture()
+    def applied(self, monkeypatch) -> List[Dict[str, Any]]:
+        calls: List[Dict[str, Any]] = []
+
+        def fake_run_apply(**kwargs):
+            calls.append(kwargs)
+            return {"verdict": "DRY-RUN", "payload": {}, "weak_fields": []}
+
+        monkeypatch.setattr(abp, "run_apply", fake_run_apply)
+        return calls
+
+    @pytest.mark.parametrize("argv", [[], ["--dry-run"]])
+    def test_a_run_from_inside_a_central_install_is_refused(self, inside_the_install, applied, capsys, argv):
+        rc = abp.main(argv)
+
+        assert rc == 1
+        assert "installatie zelf" in capsys.readouterr().err
+        assert applied == []
+
+    def test_naming_the_install_as_the_project_root_is_refused_too(self, inside_the_install, applied, capsys):
+        rc = abp.main(["--dry-run", "--project-root", str(inside_the_install)])
+
+        assert rc == 1
+        assert "installatie zelf" in capsys.readouterr().err
+        assert applied == []
+
+    def test_a_project_root_outside_the_install_is_still_allowed(self, inside_the_install, applied, tmp_path):
+        consumer = make_consumer(tmp_path)
+        _project_yaml(consumer, consumer_yaml())
+
+        rc = abp.main(["--dry-run", "--project-root", str(consumer)])
+
+        assert rc == 0
+        assert [call["project_root"] for call in applied] == [consumer]
+
+    def test_a_fabric_checkout_is_its_own_project(self, tmp_path, monkeypatch, applied):
+        """No install marker: the checkout the script runs from is the project."""
+        checkout = make_install(tmp_path, central=False)
+        _project_yaml(checkout, consumer_yaml(), "scripts/forge/branch_protection.yaml")
+        isolate_project_env(monkeypatch, checkout)
+        monkeypatch.chdir(checkout)
+        monkeypatch.setattr(abp, "ENGINE_ROOT", checkout, raising=False)
+
+        rc = abp.main(["--dry-run"])
+
+        assert rc == 0
+        assert [call["project_root"] for call in applied] == [checkout]
+
+
 class TestApplyNamesTheRepoItWillChange:
     def test_a_real_apply_states_the_target_repo_before_writing(self, project, tmp_path, monkeypatch, capsys):
         _project_yaml(project, consumer_yaml())

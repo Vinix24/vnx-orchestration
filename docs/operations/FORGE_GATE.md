@@ -352,7 +352,7 @@ Een project **zonder bestand** wordt behandeld als `warn`, en de deur zegt dat l
 
 **Verlagen is verzwakken.** `enforce` naar `warn`, `warn` naar `off` en `enforce` naar `off` gaan via `forge_protection_drift.is_weakening` en vragen `--allow-weaken "<reden>"`. Het veld weghalen is geen verlaging: zonder veld is het `enforce`, dus het kan alleen gelijk blijven of hoger worden.
 
-De CI-poort blijft voor iedereen aan. `enforcement` raakt hem niet.
+De CI-poort blijft voor iedereen aan. `enforcement` raakt hem niet, en een PR kan hem ook niet verzachten door `ci_workflow` te verwisselen (§11.4).
 
 Let op bij `off`: PyYAML leest het kale woord `off` als het boolean `False`. De lezer neemt dat als `off`. `on`, `yes` en `true` noemen geen stand en worden geweigerd met een melding.
 
@@ -364,12 +364,14 @@ De CI-poort zoekt standaard de workflow `VNX CI`. Een consumer heet anders: miss
 ci_workflow: "CI"
 ```
 
-Volgorde: expliciet argument, dan `ci_workflow` in het project-YAML, dan `VNX_CI_WORKFLOW_NAME`, dan `VNX CI`. De deur leest het veld uit `main`'s YAML, nooit uit een lokale kopie: de checkout naast de deur kan op elke branch staan, ook die van de PR. Bestaat het bestand maar is het onleesbaar, dan weigert de CI-poort in plaats van een naam te raden. `vnx pre-merge-gate` en de `merge_preflight_ci_check`-CLI draaien in de checkout die ze beoordelen en lezen het lokale bestand. `pre_merge_gate._resolve_ci_workflow_name` en `merge_preflight_ci_check._resolve_workflow_name` volgen dezelfde volgorde, en `tests/test_ci_workflow_resolution_parity.py` houdt ze daaraan.
+Volgorde: expliciet argument, dan `ci_workflow` in het project-YAML, dan `VNX_CI_WORKFLOW_NAME`, dan `VNX CI`. De deur, `vnx pre-merge-gate` en de `merge_preflight_ci_check`-CLI lezen het veld alle drie uit `main`'s YAML van de doelrepo, over de contents-API, via `forge_protection_drift.fetch_ci_workflow_from_main`. Nooit uit een lokale kopie: de checkout naast de gate staat op gate-tijd op de branch van de PR, dus een lokale kopie laat de PR zelf kiezen welke workflow hem toetst. Bestaat het bestand maar is het onleesbaar (of is `main` zelf niet te lezen), dan weigert de CI-poort in plaats van een naam te raden: `NO-GO` bij de deur en de CLI, `SKIPPED_UNVERIFIED` bij `pre_merge_gate`. Een expliciet argument (`--ci-workflow-name`, `--workflow`) of een override-reden beslist de poort al, en dan wordt `main` niet gelezen. `pre_merge_gate._resolve_ci_workflow_name` en `merge_preflight_ci_check._resolve_workflow_name` volgen dezelfde volgorde, en `tests/test_ci_workflow_resolution_parity.py` houdt ze daaraan.
+
+**Het veld wijzigen is verzwakken.** Na de merge vraagt de CI-poort van elke volgende PR de workflow die `main` noemt. Een PR die het veld verwisselt, toevoegt of weghaalt kiest dus zelf de check waarop hij de volgende keer wordt getoetst. Alle drie gaan via `forge_protection_drift.is_weakening` en vragen `--allow-weaken "<reden>"`, in `warn` net als in `enforce`. De melding noemt beide waarden: `ci_workflow: 'CI' -> 'Always Green'`, of `niet gedeclareerd` waar het veld ontbreekt. Toevoegen en weghalen tellen mee omdat een ontbrekend veld de poort aan `VNX_CI_WORKFLOW_NAME` en `VNX CI` geeft. Een project zonder bestand op `main` dat het voor het eerst inricht heeft niets om te verlagen en gaat vrij via de missing-file-tak van §11.3.
 
 ### 11.5 Een consumer inrichten
 
 1. Zet `.vnx/branch_protection.yaml` in het project. Begin met de stand die past bij wat er op GitHub staat: heeft de repo geen protection (sales-copilot, SEOcrawler_v2), kies dan `enforcement: warn`. Het schema is dat van `scripts/forge/branch_protection.yaml`, inclusief alle verplichte velden. Een minimaal voorbeeld staat in `tests/merge_target_helpers.py::consumer_yaml`.
-2. Voeg `ci_workflow` toe als de workflow niet `VNX CI` heet.
+2. Voeg `ci_workflow` toe als de workflow niet `VNX CI` heet. Doe dat in de PR die het bestand voor het eerst op `main` zet. Staat het bestand er al zonder het veld, dan is toevoegen een verzwakking en vraagt die PR `--allow-weaken "<reden>"` (§11.4).
 3. Bekijk wat er zou gebeuren, vanuit de projectmap: `python3 <install>/scripts/forge/apply_branch_protection.py --dry-run`. Het toont het PUT-object uit het project-YAML en werkt tegen de repo van het project.
 4. Pas toe met `python3 <install>/scripts/forge/apply_branch_protection.py`. Het schrijft `doelrepo: owner/name` op stderr voordat het iets wijzigt en weigert als het die repo niet kan noemen.
 5. Merge via `python3 <install>/scripts/pr_merge.py --pr <n>`, vanuit de projectmap of met `VNX_PROJECT_ROOT` gezet. Controleer de eerste regel: `doelrepo:`.
@@ -386,4 +388,4 @@ De lezer van `enforcement` en `ci_workflow` staat sinds OI-1849 op `main`. Het v
 - Code op `main`: `scripts/forge/branch_protection.yaml`, `scripts/forge/apply_branch_protection.py`, `scripts/lib/forge_protection_drift.py`, `scripts/pr_merge.py::_run_branch_protection_gate`, `scripts/vnx_doctor.py::check_branch_protection_drift`
 - Publicatielaag op `main`: `scripts/lib/forge_check_run.py` (client), `scripts/lib/forge_gate_publisher.py` (afbeelding, samenvattende check, CLI), `tests/test_forge_check_run_client.py`, `tests/test_forge_review_summary.py`
 - Lezer-voor-veld-contract (OI-1672): §10 hierboven, bewaakt door `tests/test_branch_protection_gate_reader_for_field_doc.py`
-- Doelrepo, strengheid en CI-workflow per project (OI-1849): §11 hierboven. Code: `scripts/lib/merge_target.py`, `scripts/pr_merge.py`, `scripts/lib/forge_protection_drift.py`. Tests: `tests/test_merge_target.py`, `tests/test_pr_merge_target_repo.py`, `tests/test_forge_protection_enforcement.py`, `tests/test_branch_protection_project_root.py`, `tests/test_ci_workflow_resolution_parity.py`
+- Doelrepo, strengheid en CI-workflow per project (OI-1849): §11 hierboven. Code: `scripts/lib/merge_target.py`, `scripts/pr_merge.py`, `scripts/lib/forge_protection_drift.py`, `scripts/pre_merge_gate.py`, `scripts/lib/merge_preflight_ci_check.py`, `scripts/forge/apply_branch_protection.py`. Tests: `tests/test_merge_target.py`, `tests/test_pr_merge_target_repo.py`, `tests/test_forge_protection_enforcement.py`, `tests/test_branch_protection_project_root.py`, `tests/test_ci_workflow_resolution_parity.py`

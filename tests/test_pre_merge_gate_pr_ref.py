@@ -273,6 +273,13 @@ class TestRunGateChecksCIHead:
 
     @staticmethod
     def _stub_heavy(monkeypatch):
+        # The project's declared workflow is read from main over the contents API. That read
+        # would be the first `gh` call the router below sees, and this class asserts on the
+        # first one being `gh run list`. Its own coverage is in
+        # test_ci_workflow_resolution_parity.py.
+        monkeypatch.setattr(
+            pre_merge_gate, "fetch_ci_workflow_from_main", lambda project_root, **kw: (None, ""),
+        )
         monkeypatch.setattr(
             pre_merge_gate, "check_pr_size",
             lambda project_root, **kw: {

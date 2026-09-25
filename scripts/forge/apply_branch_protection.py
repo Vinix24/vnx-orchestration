@@ -6,12 +6,13 @@ Reads the project's YAML, fetches live state via
 ``forge_protection_drift.fetch_live_protection``, and writes only what differs.
 The project is the one the merge door would merge into (OI-1849): its root comes
 from ``vnx_paths`` (``VNX_PROJECT_ROOT`` if set, else the git toplevel of the cwd
-for a central install), and the file is ``.vnx/branch_protection.yaml`` in it, or
-``scripts/forge/branch_protection.yaml`` (``PROTECTION_YAML_SEARCH_PATHS``): the
-same root and the same reading order the door and ``vnx doctor`` use. Run from a
-central install without those defaults, this used to apply the FABRIC's YAML to
-whichever repo the install's git remote named. ``--yaml-path`` and
-``--project-root`` still override each.
+for a central install). A central install is refused as the project, dry run or
+not, exactly as the door refuses it as a merge target. The file is
+``.vnx/branch_protection.yaml`` in it, or ``scripts/forge/branch_protection.yaml``
+(``PROTECTION_YAML_SEARCH_PATHS``): the same root and the same reading order the
+door and ``vnx doctor`` use. Run from a central install without those defaults,
+this used to apply the FABRIC's YAML to whichever repo the install's git remote
+named. ``--yaml-path`` and ``--project-root`` still override each.
 
   - any diff among the fields the branch-protection PUT endpoint owns ->
     a single PUT with the FULL object built from the YAML (see
@@ -79,10 +80,14 @@ from forge_protection_drift import (  # noqa: E402
     to_normalized_dict,
 )
 from governance_receipts import emit_governance_receipt  # noqa: E402
-from merge_target import MergeTargetError, resolve_target_repo
+from merge_target import MergeTargetError, ensure_project_is_not_the_install, resolve_target_repo
 from vnx_paths import resolve_paths
 
 DEFAULT_BRANCH = "main"
+
+#: The root of the RUNNING script: a fabric checkout, or an install. Never a target on its
+#: own account: a central install is refused as the project (``ensure_project_is_not_the_install``).
+ENGINE_ROOT = SCRIPTS_DIR.parent
 
 
 def build_put_payload(config: ProtectionConfig) -> Dict[str, Any]:
@@ -368,6 +373,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     project_root = Path(args.project_root) if args.project_root else Path(resolve_paths()["PROJECT_ROOT"])
+    # Same test as the merge door's target resolution. Before the YAML is looked for: from
+    # inside a central install the install's own YAML is right there to be found and applied.
+    try:
+        ensure_project_is_not_the_install(ENGINE_ROOT, project_root)
+    except MergeTargetError as exc:
+        print(f"FOUT: {exc}", file=sys.stderr)
+        return 1
     yaml_path = Path(args.yaml_path) if args.yaml_path else find_local_protection_yaml(project_root)
     if yaml_path is None:
         print(

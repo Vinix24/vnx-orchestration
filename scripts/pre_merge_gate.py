@@ -49,7 +49,7 @@ from quality_advisory import (
 from cqs_calculator import calculate_cqs
 from gate_findings_bridge import record_gate_finding, resolve_gate_finding
 from required_contexts_gate import check_required_contexts
-from forge_protection_drift import ProtectionConfigError, load_local_ci_workflow
+from forge_protection_drift import fetch_ci_workflow_from_main
 
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
@@ -70,7 +70,7 @@ NET_LINE_DELETION_HOLD = 500
 PYTEST_TIMEOUT = 120
 
 # CI workflow name queried via `gh run list --workflow`. Overridable per-repo
-# via `ci_workflow` in the project's branch_protection.yaml, the
+# via `ci_workflow` in the project's branch_protection.yaml on main, the
 # VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag,
 # see _resolve_ci_workflow_name() for why this isn't auto-detected instead.
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
@@ -855,7 +855,7 @@ def _resolve_ci_workflow_name(workflow_name: Optional[str], project_workflow: Op
 
     Resolution order: explicit ``workflow_name`` argument (CLI
     ``--ci-workflow-name`` or a programmatic caller) > ``ci_workflow`` from the
-    project's ``branch_protection.yaml`` (OI-1849) > ``VNX_CI_WORKFLOW_NAME``
+    project's ``branch_protection.yaml`` on main (OI-1849) > ``VNX_CI_WORKFLOW_NAME``
     env var (per-repo operator override) > this fabric's own default,
     "VNX CI".
 
@@ -909,25 +909,31 @@ def check_ci_workflow(
 
     The workflow name is resolved via _resolve_ci_workflow_name() — never
     hardcoded past that point, so a consumer repo whose CI workflow has a
-    different name gets a real answer instead of a silent pass.
+    different name gets a real answer instead of a silent pass. The project's
+    ``ci_workflow`` is read from main of the repo over the contents API
+    (``forge_protection_drift.fetch_ci_workflow_from_main``, the reader the merge
+    door uses), never from ``project_root``: at gate time that checkout is on the
+    PR's branch, so a local copy would let the PR pick the workflow it is judged
+    on. Not read when ``workflow_name`` is given, since the argument wins.
 
     OI-931: ``gh pr checks`` can show all-green while the mandatory CI
     workflow never ran.  This check reads the workflow conclusion directly —
     never the check-names — so the three verified states are distinguishable.
     """
-    try:
-        project_workflow = load_local_ci_workflow(project_root)
-    except (ProtectionConfigError, OSError) as exc:
-        return {
-            "check": "ci_workflow",
-            "status": SKIPPED_UNVERIFIED,
-            "detail": (
-                f"could not read the project's branch_protection.yaml ({exc}); "
-                "CI workflow could not be verified"
-            ),
-            "ci_conclusion": None,
-            "ci_ran_on_sha": False,
-        }
+    project_workflow: Optional[str] = None
+    if not workflow_name:
+        project_workflow, workflow_error = fetch_ci_workflow_from_main(project_root)
+        if workflow_error:
+            return {
+                "check": "ci_workflow",
+                "status": SKIPPED_UNVERIFIED,
+                "detail": (
+                    f"could not read the project's branch_protection.yaml on main ({workflow_error}); "
+                    "CI workflow could not be verified"
+                ),
+                "ci_conclusion": None,
+                "ci_ran_on_sha": False,
+            }
     resolved_workflow_name = _resolve_ci_workflow_name(workflow_name, project_workflow)
 
     # ── Resolve head SHA ──────────────────────────────────────────────────

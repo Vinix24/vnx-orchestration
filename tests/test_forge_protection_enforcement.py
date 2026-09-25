@@ -21,7 +21,15 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import forge_protection_drift as fpd
-from merge_target_helpers import consumer_yaml
+from merge_target_helpers import (
+    CONSUMER_REPO,
+    HEAD_SHA,
+    MAIN_SHA,
+    consumer_yaml,
+    contents_response,
+    install_gh_stub,
+    make_consumer,
+)
 
 SHIPPED_YAML = VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml"
 
@@ -84,7 +92,8 @@ class TestParsingCiWorkflow:
 
 
 class TestEnforcementIsNotProtectionState:
-    """It is a policy about the door. GitHub does not hold it, so it can never be drift."""
+    """``enforcement`` and ``ci_workflow`` are policy about the door. GitHub does not hold
+    them, so they can never be drift."""
 
     def test_the_normalized_dict_carries_the_resolved_value(self):
         assert _norm()["enforcement"] == "enforce"
@@ -94,13 +103,17 @@ class TestEnforcementIsNotProtectionState:
         assert fpd.compare(_norm(enforcement="enforce"), _norm(enforcement="off")) == []
 
     def test_a_live_state_without_the_key_is_not_drift(self):
-        live = {k: v for k, v in _norm().items() if k != "enforcement"}
-        assert fpd.compare(_norm(enforcement="warn"), live) == []
-        assert fpd.compare(live, _norm(enforcement="warn")) == []
+        live = {k: v for k, v in _norm().items() if k not in ("enforcement", "ci_workflow")}
+        assert fpd.compare(_norm(enforcement="warn", ci_workflow="CI"), live) == []
+        assert fpd.compare(live, _norm(enforcement="warn", ci_workflow="CI")) == []
 
-    def test_ci_workflow_never_enters_the_normalized_dict(self):
-        assert "ci_workflow" not in _norm(ci_workflow="CI")
+    def test_the_normalized_dict_carries_the_declared_workflow(self):
+        assert _norm()["ci_workflow"] is None
+        assert _norm(ci_workflow="CI")["ci_workflow"] == "CI"
+
+    def test_compare_never_reports_the_workflow(self):
         assert fpd.compare(_norm(), _norm(ci_workflow="CI")) == []
+        assert fpd.compare(_norm(ci_workflow="CI"), _norm(ci_workflow="Always Green")) == []
 
 
 class TestLoweringIsAWeakening:
@@ -135,8 +148,54 @@ class TestLoweringIsAWeakening:
 
     def test_a_live_state_has_no_policy_to_lower(self):
         """apply_branch_protection asks is_weakening(live, yaml): live carries no key."""
-        live = {k: v for k, v in _norm().items() if k != "enforcement"}
+        live = {k: v for k, v in _norm().items() if k not in ("enforcement", "ci_workflow")}
         assert fpd.is_weakening(live, _norm(enforcement="off")) == (False, [])
+        assert fpd.is_weakening(live, _norm(ci_workflow="Always Green")) == (False, [])
+
+
+class TestChangingTheCiWorkflowIsAWeakening:
+    """The CI gate asks for the workflow main declares. A PR that edits the declaration picks
+    the workflow every later PR is judged on, so changing, adding and removing it all move the
+    gate, and none of them is a strengthening the door can tell apart from a weakening."""
+
+    @pytest.mark.parametrize("old,new", [
+        ("CI", "Always Green"),
+        (None, "Always Green"),
+        ("CI", None),
+    ])
+    def test_a_changed_added_or_removed_workflow_is_a_weakening(self, old, new):
+        weak, fields = fpd.is_weakening(_norm(ci_workflow=old), _norm(ci_workflow=new))
+
+        assert weak is True
+        assert len(fields) == 1 and fields[0].startswith("ci_workflow")
+
+    @pytest.mark.parametrize("old,new,shown_old,shown_new", [
+        ("CI", "Always Green", "'CI'", "'Always Green'"),
+        (None, "Always Green", "niet gedeclareerd", "'Always Green'"),
+        ("CI", None, "'CI'", "niet gedeclareerd"),
+    ])
+    def test_the_message_names_the_field_and_both_values(self, old, new, shown_old, shown_new):
+        _, fields = fpd.is_weakening(_norm(ci_workflow=old), _norm(ci_workflow=new))
+
+        assert fields == [f"ci_workflow: {shown_old} -> {shown_new}"]
+
+    @pytest.mark.parametrize("value", [None, "CI", "CI/CD Pipeline"])
+    def test_an_unchanged_workflow_is_not(self, value):
+        assert fpd.is_weakening(_norm(ci_workflow=value), _norm(ci_workflow=value)) == (False, [])
+
+    def test_a_stray_space_is_not_a_change(self):
+        """The parser trims, so the two sides compare as the same name."""
+        assert fpd.is_weakening(_norm(ci_workflow="CI"), _norm(ci_workflow="  CI  ")) == (False, [])
+
+    def test_it_is_judged_next_to_the_other_fields(self):
+        old = _norm(enforcement="enforce", ci_workflow="CI")
+        new = _norm(enforcement="warn", ci_workflow="Always Green")
+        weak, fields = fpd.is_weakening(old, new)
+
+        assert weak is True
+        assert len(fields) == 2
+        assert "enforcement" in fields
+        assert any(f.startswith("ci_workflow") for f in fields)
 
 
 class TestReadingOrder:
@@ -173,27 +232,139 @@ class TestReadingOrder:
         assert fpd.DEFAULT_ENFORCEMENT == "enforce"
 
 
-class TestLoadLocalCiWorkflow:
-    def _write(self, root, text):
-        path = root / ".vnx" / "branch_protection.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+PROJECT_PATH = ".vnx/branch_protection.yaml"
+FABRIC_PATH = "scripts/forge/branch_protection.yaml"
 
-    def test_no_file_declares_none(self, tmp_path):
-        assert fpd.load_local_ci_workflow(tmp_path) is None
 
-    def test_a_file_without_the_field_declares_none(self, tmp_path):
-        self._write(tmp_path, consumer_yaml())
-        assert fpd.load_local_ci_workflow(tmp_path) is None
+def _found(repo, path, text, ref="main"):
+    return {"match": f"contents/{path}?ref={ref}", "repo": repo, "stdout": contents_response(text)}
 
-    def test_the_declared_name_is_returned(self, tmp_path):
-        self._write(tmp_path, consumer_yaml(ci_workflow="CI"))
-        assert fpd.load_local_ci_workflow(tmp_path) == "CI"
 
-    def test_a_broken_file_is_an_error_not_a_guess(self, tmp_path):
-        self._write(tmp_path, "branch: main\nnot_a_field: 1\n")
-        with pytest.raises(fpd.ProtectionConfigError):
-            fpd.load_local_ci_workflow(tmp_path)
+def _missing(repo, path, ref="main"):
+    return {"match": f"contents/{path}?ref={ref}", "repo": repo, "rc": 1, "stderr": "gh: Not Found (HTTP 404)\n"}
+
+
+def _confirmed_main(repo):
+    return {"match": "commits/main", "repo": repo, "stdout": MAIN_SHA + "\n"}
+
+
+class TestFetchCiWorkflowFromMain:
+    """The one reader of a project's declared workflow: main's copy over the contents API, for
+    the merge door and for every gate that runs beside a checkout (``pre_merge_gate``, the
+    ``merge_preflight_ci_check`` CLI). Never the checkout, which can be on the PR's branch."""
+
+    @pytest.fixture()
+    def project(self, tmp_path):
+        return make_consumer(tmp_path)
+
+    def _read(self, project, tmp_path, monkeypatch, rules):
+        stub = install_gh_stub(tmp_path, monkeypatch, rules)
+        return fpd.fetch_ci_workflow_from_main(project), stub
+
+    def test_the_declared_name_is_returned(self, project, tmp_path, monkeypatch):
+        got, stub = self._read(project, tmp_path, monkeypatch, [_found(CONSUMER_REPO, PROJECT_PATH, consumer_yaml(ci_workflow="CI"))])
+
+        assert got == ("CI", "")
+        assert stub.repos_of("contents/") == {CONSUMER_REPO}
+
+    def test_a_file_that_does_not_say_declares_none(self, project, tmp_path, monkeypatch):
+        got, _ = self._read(project, tmp_path, monkeypatch, [_found(CONSUMER_REPO, PROJECT_PATH, consumer_yaml())])
+
+        assert got == (None, "")
+
+    def test_no_file_on_main_declares_none(self, project, tmp_path, monkeypatch):
+        rules = [_missing(CONSUMER_REPO, PROJECT_PATH), _missing(CONSUMER_REPO, FABRIC_PATH), _confirmed_main(CONSUMER_REPO)]
+
+        got, _ = self._read(project, tmp_path, monkeypatch, rules)
+
+        assert got == (None, "")
+
+    def test_the_fabric_style_path_is_read_when_there_is_no_project_copy(self, project, tmp_path, monkeypatch):
+        rules = [
+            _missing(CONSUMER_REPO, PROJECT_PATH), _confirmed_main(CONSUMER_REPO),
+            _found(CONSUMER_REPO, FABRIC_PATH, consumer_yaml(ci_workflow="CI/CD Pipeline")),
+        ]
+
+        got, _ = self._read(project, tmp_path, monkeypatch, rules)
+
+        assert got == ("CI/CD Pipeline", "")
+
+    def test_the_project_copy_shadows_the_fabric_style_path(self, project, tmp_path, monkeypatch):
+        rules = [
+            _found(CONSUMER_REPO, PROJECT_PATH, consumer_yaml(ci_workflow="CI")),
+            _found(CONSUMER_REPO, FABRIC_PATH, consumer_yaml(ci_workflow="Other")),
+        ]
+
+        got, stub = self._read(project, tmp_path, monkeypatch, rules)
+
+        assert got == ("CI", "")
+        assert stub.calls_with(f"contents/{FABRIC_PATH}") == []
+
+    def test_a_broken_file_is_an_error_not_a_guess(self, project, tmp_path, monkeypatch):
+        rules = [_found(CONSUMER_REPO, PROJECT_PATH, "branch: main\nnot_a_field: 1\n")]
+
+        name, error = self._read(project, tmp_path, monkeypatch, rules)[0]
+
+        assert name is None
+        assert PROJECT_PATH in error and "op main ongeldig" in error
+
+    def test_a_file_that_cannot_be_read_is_an_error_and_stops_the_walk(self, project, tmp_path, monkeypatch):
+        rules = [
+            {"match": f"contents/{PROJECT_PATH}?ref=main", "repo": CONSUMER_REPO, "rc": 1, "stderr": "gh: Server Error (HTTP 500)\n"},
+            _found(CONSUMER_REPO, FABRIC_PATH, consumer_yaml(ci_workflow="CI")),
+        ]
+
+        (name, error), stub = self._read(project, tmp_path, monkeypatch, rules)
+
+        assert name is None
+        assert "op main niet leesbaar" in error and "HTTP 500" in error
+        assert stub.calls_with(f"contents/{FABRIC_PATH}") == []
+
+    def test_a_404_on_a_ref_that_cannot_be_confirmed_is_an_error_not_an_absent_file(self, project, tmp_path, monkeypatch):
+        """``gh`` words a missing path and an unresolvable repo alike, so a 404 alone is not
+        "the project declares nothing"."""
+        rules = [_missing(CONSUMER_REPO, PROJECT_PATH), _missing(CONSUMER_REPO, FABRIC_PATH)]
+
+        name, error = self._read(project, tmp_path, monkeypatch, rules)[0]
+
+        assert name is None
+        assert "niet bevestigd" in error
+
+    def test_a_fetch_of_its_own_replaces_the_read_of_each_path(self, project):
+        seen = []
+
+        def fetch(root, ref, path):
+            seen.append((root, ref, path))
+            return fpd.YamlFetchResult(text=consumer_yaml(ci_workflow="Injected"), not_found=False, error=None)
+
+        assert fpd.fetch_ci_workflow_from_main(project, fetch=fetch) == ("Injected", "")
+        assert seen == [(project, "main", PROJECT_PATH)]
+
+
+class TestFetchProjectYamlFromRef:
+    def test_it_walks_the_reading_order_at_the_ref_it_is_given(self, tmp_path, monkeypatch):
+        project = make_consumer(tmp_path)
+        rules = [
+            _missing(CONSUMER_REPO, PROJECT_PATH, ref=HEAD_SHA), {"match": f"commits/{HEAD_SHA}", "repo": CONSUMER_REPO, "stdout": HEAD_SHA + "\n"},
+            _found(CONSUMER_REPO, FABRIC_PATH, consumer_yaml(), ref=HEAD_SHA),
+        ]
+        install_gh_stub(tmp_path, monkeypatch, rules)
+
+        path, fetched = fpd.fetch_project_yaml_from_ref(project, HEAD_SHA)
+
+        assert path == FABRIC_PATH
+        assert fetched.text == consumer_yaml()
+
+    def test_every_path_missing_is_a_not_found_with_no_path(self, tmp_path, monkeypatch):
+        project = make_consumer(tmp_path)
+        install_gh_stub(tmp_path, monkeypatch, [
+            _missing(CONSUMER_REPO, PROJECT_PATH), _missing(CONSUMER_REPO, FABRIC_PATH), _confirmed_main(CONSUMER_REPO),
+        ])
+
+        path, fetched = fpd.fetch_project_yaml_from_ref(project, "main")
+
+        assert path == ""
+        assert fetched.not_found is True and fetched.error is None
 
 
 class TestDriftCliDefaults:

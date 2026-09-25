@@ -574,6 +574,108 @@ class TestCiWorkflow:
         assert door.merge_kwargs == []
 
 
+class TestChangingTheCiWorkflowIsAWeakening:
+    """After the merge, main's ``ci_workflow`` is what the CI gate asks of every later PR. A PR
+    that edits it therefore chooses the check it is judged on next time, which is the CI gate
+    softened by the PR itself (review finding B1 on #1915)."""
+
+    def test_a_pr_that_swaps_the_workflow_is_refused_without_allow_weaken(self, arrange, capsys):
+        """The probe: main says ``CI``, the head says ``Always Green``, no flag."""
+        door = arrange(
+            main_yaml=consumer_yaml(ci_workflow="CI"),
+            head_yaml=consumer_yaml(ci_workflow="Always Green"),
+        )
+
+        rc = door.run()
+
+        err = capsys.readouterr().err
+        assert rc == pr_merge.EXIT_ERROR
+        assert "--allow-weaken" in err
+        assert "ci_workflow" in err and "'CI'" in err and "'Always Green'" in err
+        assert door.merge_kwargs == []
+
+    def test_a_pr_that_adds_a_workflow_is_refused(self, arrange, capsys):
+        door = arrange(
+            main_yaml=consumer_yaml(),
+            head_yaml=consumer_yaml(ci_workflow="Always Green"),
+        )
+
+        rc = door.run()
+
+        err = capsys.readouterr().err
+        assert rc == pr_merge.EXIT_ERROR
+        assert "--allow-weaken" in err and "ci_workflow" in err and "'Always Green'" in err
+
+    def test_a_pr_that_removes_the_workflow_is_refused(self, arrange, capsys):
+        """Removing it sends the gate back to the environment and the fabric default, which
+        is a different workflow than the one main named."""
+        door = arrange(
+            main_yaml=consumer_yaml(ci_workflow="CI"),
+            head_yaml=consumer_yaml(),
+        )
+
+        rc = door.run()
+
+        err = capsys.readouterr().err
+        assert rc == pr_merge.EXIT_ERROR
+        assert "--allow-weaken" in err and "ci_workflow" in err and "'CI'" in err
+
+    @pytest.mark.parametrize("main_workflow,head_workflow", [
+        ("CI", "Always Green"), (None, "Always Green"), ("CI", None),
+    ])
+    def test_a_reason_lets_it_through_and_the_record_says_so(self, arrange, main_workflow, head_workflow):
+        door = arrange(
+            main_yaml=consumer_yaml(ci_workflow=main_workflow),
+            head_yaml=consumer_yaml(ci_workflow=head_workflow),
+        )
+
+        rc = door.run("--allow-weaken", "workflow hernoemd op GitHub")
+
+        record = door.protection_record()
+        assert rc == pr_merge.EXIT_OK
+        assert record["overridden"] is True
+        assert "workflow hernoemd op GitHub" in record["message"]
+        assert "ci_workflow" in record["message"]
+
+    def test_an_empty_reason_is_refused(self, arrange, capsys):
+        door = arrange(
+            main_yaml=consumer_yaml(ci_workflow="CI"),
+            head_yaml=consumer_yaml(ci_workflow="Always Green"),
+        )
+
+        rc = door.run("--allow-weaken", "  ")
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert "niet-lege reden" in capsys.readouterr().err
+        assert door.merge_kwargs == []
+
+    @pytest.mark.parametrize("workflow", [None, "CI"])
+    def test_an_unchanged_workflow_is_not_a_weakening(self, arrange, workflow):
+        door = arrange(main_yaml=consumer_yaml(ci_workflow=workflow))
+
+        assert door.run() == pr_merge.EXIT_OK
+        assert door.protection_record()["overridden"] is False
+
+    def test_it_is_refused_under_every_enforcement_mode(self, arrange, capsys):
+        """``warn`` softens what the door does about drift, never what a PR does to the
+        declaration."""
+        door = arrange(
+            main_yaml=consumer_yaml(enforcement="warn", ci_workflow="CI"),
+            head_yaml=consumer_yaml(enforcement="warn", ci_workflow="Always Green"),
+        )
+
+        rc = door.run()
+
+        assert rc == pr_merge.EXIT_ERROR
+        assert "ci_workflow" in capsys.readouterr().err
+
+    def test_onboarding_a_project_that_has_no_file_on_main_stays_free(self, arrange):
+        """Nothing on main to lower: the missing-file branch answers before the PR is read."""
+        door = arrange(main_yaml=None, head_yaml=consumer_yaml(ci_workflow="Always Green"))
+
+        assert door.run() == pr_merge.EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 # The door proves itself against the fabric, never against the consumer
 # ---------------------------------------------------------------------------

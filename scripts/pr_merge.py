@@ -175,7 +175,9 @@ file that does not say and blocks on drift. ``warn`` reports drift, in the outpu
 and in the preflight record, and merges. ``off`` does not check, and the record
 says so. A project with no such file at all is treated as ``warn``, loudly. The
 CI gate is not softened by any of it. ``ci_workflow: "<name>"`` in the same file
-names the workflow the CI gate looks for.
+names the workflow the CI gate looks for. Because the gate asks main's value of every
+later PR, a PR that changes, adds or removes ``ci_workflow`` is a weakening of the
+declaration and needs ``--allow-weaken "<reason>"`` like any other.
 
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
@@ -222,7 +224,9 @@ from forge_protection_drift import (
     ProtectionConfigError,
     YamlFetchResult,
     compare as compare_protection_state,
+    fetch_ci_workflow_from_main,
     fetch_live_protection,
+    fetch_project_yaml_from_ref,
     fetch_yaml_from_ref,
     is_weakening as protection_is_weakening,
     parse_protection_config,
@@ -480,43 +484,30 @@ def _query_pr(pr_number: int) -> Optional[Dict[str, Any]]:
 def _fetch_protection_yaml(project_root: Path, ref: str) -> Tuple[str, YamlFetchResult]:
     """The project's ``branch_protection.yaml`` at ``ref``, walking the reading order.
 
-    Returns ``(path, result)`` for the first path that is not a confirmed 404:
-    a found file, or an error, which stops the walk (an unreadable first
-    candidate must not fall through to a second one that says something else).
-    When every candidate is a confirmed 404 the result is ``not_found`` with an
-    empty path: the project has no such file at this ref.
+    ``forge_protection_drift.fetch_project_yaml_from_ref`` does the walk, so the door,
+    ``pre_merge_gate`` and the ``merge_preflight_ci_check`` CLI read the same paths in the
+    same order. The read of each path goes through this module's ``fetch_yaml_from_ref``.
     """
-    for path in PROTECTION_YAML_SEARCH_PATHS:
-        fetched = fetch_yaml_from_ref(project_root, ref, path)
-        if not fetched.not_found:
-            return path, fetched
-    return "", YamlFetchResult(text=None, not_found=True, error=None)
+    return fetch_project_yaml_from_ref(project_root, ref, fetch=fetch_yaml_from_ref)
 
 
 def _project_ci_workflow(override_reason: Optional[str]) -> Tuple[Optional[str], str]:
     """The CI workflow name the project declares on main, as ``(name, error)``.
 
-    ``ci_workflow`` in ``branch_protection.yaml`` on main (never a local copy:
-    the checkout the door runs beside may be on any branch, including the PR's).
-    ``(None, "")`` means "the project declares none", and the workflow name then
-    falls to ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists
-    but cannot be read or parsed is an error: guessing a workflow name would put
-    the CI gate on a workflow the project never named.
+    Read by ``forge_protection_drift.fetch_ci_workflow_from_main``, the one reader every
+    gate that asks for the workflow shares: main's copy, never a local one (the checkout
+    the door runs beside may be on any branch, including the PR's). ``(None, "")`` means
+    "the project declares none", and the workflow name then falls to
+    ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists but cannot be read
+    or parsed is an error: guessing a workflow name would put the CI gate on a workflow the
+    project never named.
 
     Not read at all when the gate is being overridden: the reason alone decides
     that gate then, and the workflow name is not consulted.
     """
     if _resolve_override_reason(override_reason) is not None:
         return None, ""
-    path, fetched = _fetch_protection_yaml(_target_root(), "main")
-    if fetched.error:
-        return None, f"branch-protection-YAML op main niet leesbaar: {fetched.error}"
-    if fetched.not_found:
-        return None, ""
-    try:
-        return parse_protection_config(fetched.text or "").ci_workflow, ""
-    except ProtectionConfigError as exc:
-        return None, f"branch-protection-YAML ({path}) op main ongeldig: {exc}"
+    return fetch_ci_workflow_from_main(_target_root(), fetch=fetch_yaml_from_ref)
 
 
 def _run_ci_gate(
@@ -1079,7 +1070,9 @@ def _run_branch_protection_gate(
     (d) This PR's own version of the YAML (read at the PR's head sha, same
         contents API) must not weaken main's version
         (``forge_protection_drift.is_weakening``, which includes lowering
-        ``enforcement``). Deleting the file counts as the ultimate weakening.
+        ``enforcement`` and changing, adding or removing ``ci_workflow``: the CI
+        gate asks main's value of every later PR). Deleting the file counts as
+        the ultimate weakening.
         Blocks without ``--allow-weaken "<reason>"`` (empty reason refused, no
         silent bypass) under ``enforce`` and ``warn`` alike: ``warn`` softens
         what the door does about DRIFT, never what it lets a PR do to the

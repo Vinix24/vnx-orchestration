@@ -60,7 +60,7 @@ visible in the output rather than hidden.
 This is the merge-preflight counterpart to ``pre_merge_gate.check_ci_workflow``
 (OI-931), which enforces the same invariant at gate time. The two share the
 same workflow-name resolution order (explicit arg > ``ci_workflow`` from the
-project's ``branch_protection.yaml`` > ``VNX_CI_WORKFLOW_NAME`` > "VNX CI");
+project's ``branch_protection.yaml`` on main > ``VNX_CI_WORKFLOW_NAME`` > "VNX CI");
 they differ in verdict vocabulary (GO/NO-GO here) and messaging (merge-preflight
 terms).
 
@@ -69,9 +69,11 @@ The project tier is OI-1849: a consumer's CI workflow is not called "VNX CI"
 an environment variable is a per-shell fix for what is a fact about the project.
 ``check_ci_run_for_head`` takes it as ``project_workflow`` from its caller and
 never reads a file itself: the merge door hands it the value read from main's
-YAML over the API, and this module's own CLI reads the local file
-(``forge_protection_drift.load_local_ci_workflow``). Which file that is, is a
-decision about trust that belongs to the caller.
+YAML over the API, and this module's own CLI reads the same copy the same way
+(``forge_protection_drift.fetch_ci_workflow_from_main``). Neither reads the
+checkout: it can be on the PR's branch, and a PR must not choose the workflow it
+is judged on. Which copy is read is a decision about trust that belongs to the
+caller.
 """
 
 from __future__ import annotations
@@ -463,7 +465,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--head-sha", help="Exact HEAD SHA (defaults to git rev-parse HEAD)")
     parser.add_argument(
         "--workflow",
-        help="CI workflow name (default: ci_workflow from the project's branch_protection.yaml, "
+        help="CI workflow name (default: ci_workflow from the project's branch_protection.yaml on main, "
              "else VNX_CI_WORKFLOW_NAME, else 'VNX CI')",
     )
     parser.add_argument("--gh-bin", default="gh", help="Path/name of the gh binary")
@@ -477,14 +479,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     # Imported here, not at the top: check_ci_run_for_head has no dependency on
-    # the protection schema, and only this CLI reads a local file.
-    from forge_protection_drift import ProtectionConfigError, load_local_ci_workflow
+    # the protection schema, and only this CLI reads the project's declaration.
+    from forge_protection_drift import fetch_ci_workflow_from_main
 
-    try:
-        project_workflow = load_local_ci_workflow(Path(args.project_root))
-    except (ProtectionConfigError, OSError) as exc:
-        print(f"CI-workflow van het project kon niet worden bepaald: {exc}", file=sys.stderr)
-        return 1
+    # Not read when the argument or an override decides: the declaration is not consulted then.
+    project_workflow: Optional[str] = None
+    if not args.workflow and _resolve_override_reason(args.override_reason) is None:
+        project_workflow, workflow_error = fetch_ci_workflow_from_main(
+            Path(args.project_root), gh_bin=args.gh_bin,
+        )
+        if workflow_error:
+            print(f"CI-workflow van het project kon niet worden bepaald: {workflow_error}", file=sys.stderr)
+            return 1
 
     result = check_ci_run_for_head(
         Path(args.project_root),

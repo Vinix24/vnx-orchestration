@@ -104,20 +104,31 @@ def resolve_target_repo(project_root: Path, *, gh_bin: str = "gh") -> str:
     return slug
 
 
+def ensure_project_is_not_the_install(engine_root: Path, project_root: Path) -> None:
+    """Refuse a central install as its own target.
+
+    When the project root resolves to the install (a cwd that is not inside any
+    project), acting on "the project" would act on the fabric's repo for a run
+    the operator meant elsewhere: the door would judge the install's repo for a
+    merge into a project, and ``apply_branch_protection.py`` would apply the
+    install's YAML to whichever repo the install's remote names. Both call this,
+    so the rule is one test and not two.
+    """
+    if is_central_install(engine_root) and Path(project_root).resolve() == Path(engine_root).resolve():
+        raise MergeTargetError(
+            f"het doel is de installatie zelf ({Path(project_root).resolve()}), geen project: start dit "
+            "vanuit de map van het project, of zet VNX_PROJECT_ROOT"
+        )
+
+
 def resolve_merge_target(engine_root: Path, *, gh_bin: str = "gh") -> MergeTarget:
     """The project this merge goes into.
 
     ``engine_root`` is the root of the running door. A central install must not
-    be its own target: when the resolver falls back to the install (a cwd that
-    is not inside any project), merging "the PR of the install" would judge the
-    fabric's repo for a merge the operator meant elsewhere.
+    be its own target (:func:`ensure_project_is_not_the_install`).
     """
     project_root = Path(resolve_paths()["PROJECT_ROOT"]).resolve()
-    if is_central_install(engine_root) and project_root == Path(engine_root).resolve():
-        raise MergeTargetError(
-            f"het doel is de installatie zelf ({project_root}), geen project: start de merge "
-            "vanuit de map van het project, of zet VNX_PROJECT_ROOT"
-        )
+    ensure_project_is_not_the_install(engine_root, project_root)
     return MergeTarget(project_root=project_root, repo=resolve_target_repo(project_root, gh_bin=gh_bin))
 
 

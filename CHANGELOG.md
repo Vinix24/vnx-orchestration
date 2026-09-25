@@ -26,6 +26,18 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   an install no longer applies the fabric's YAML to whichever repo the install's
   remote names.
 
+- **A PR cannot lower the CI gate through `ci_workflow` (OI-1849).** The CI gate
+  asks main's `ci_workflow` of every later PR, so a PR that changed, added or
+  removed it chose the check it was judged on next time, and the preflight
+  said "PR verzwakt niets". `forge_protection_drift.is_weakening` now judges it
+  and any change needs `--allow-weaken "<reason>"`; the message names the old
+  and the new value. `pre_merge_gate` and the `merge_preflight_ci_check` CLI
+  read it from main of the target repo over the contents API
+  (`fetch_ci_workflow_from_main`, one reader shared with the door), not from the
+  checkout, which at gate time is the PR's own branch. `apply_branch_protection.py`
+  refuses a central install as its project, with the test the door already used
+  (`merge_target.ensure_project_is_not_the_install`).
+
 ### Added
 
 - **Strictness per project (OI-1849).** `branch_protection.yaml` accepts
