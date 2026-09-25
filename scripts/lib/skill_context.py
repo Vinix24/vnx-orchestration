@@ -24,6 +24,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import report_body_contract
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,11 +180,38 @@ def _inject_skill_context(
     assembled = _try_prompt_assembler(
         terminal_id, instruction, role, dispatch_metadata, intelligence_section,
     )
-    if assembled is not None:
-        return assembled
+    if assembled is None:
+        assembled = _legacy_claude_md_resolution(
+            terminal_id, instruction, role, intelligence_section,
+        )
+    return _with_report_directive(assembled, dispatch_metadata)
 
-    return _legacy_claude_md_resolution(
-        terminal_id, instruction, role, intelligence_section,
+
+def _with_report_directive(body: str, dispatch_metadata: "dict | None") -> str:
+    """Close *body* with the report-body-contract directive (OI-1850).
+
+    This is the seam every lane's worker prompt passes through (headless
+    envelope, provider lanes, the terminal-pinned subprocess lane), so the
+    directive reaches every worker whichever role source produced the body.
+    The fabric prompt names no report headings of its own; the directive, read
+    from the constant the validator checks, is the only place they are stated.
+
+    Skipped without a dispatch id (a report contract belongs to one dispatch)
+    and when the caller places the directive itself:
+    ``dispatch_metadata["report_directive"] = False`` (dispatch_prepare.prepare).
+    ``with_directive`` is idempotent, so a body that already carries the
+    directive is never given a second one.
+    """
+    meta = dispatch_metadata or {}
+    dispatch_id = meta.get("dispatch_id") or ""
+    if not dispatch_id or meta.get("report_directive") is False:
+        return body
+    return report_body_contract.with_directive(
+        body,
+        dispatch_id,
+        pr_id=meta.get("pr_id") or meta.get("pr"),
+        model=meta.get("model"),
+        provider=meta.get("provider"),
     )
 
 
@@ -294,6 +323,7 @@ def _legacy_claude_md_resolution(
     for path in candidates:
         if path.exists():
             context = path.read_text()
+            report_body_contract.warn_on_divergent_headings(context, str(path))
             if intelligence_section:
                 return (
                     f"{context}\n\n---\n\n"

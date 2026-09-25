@@ -34,6 +34,7 @@ from dispatch_identity import (  # single canonical sentinel (dispatch-20260804-
     _IDENTITY_UNRESOLVED,
     normalize_role,
 )
+from report_body_contract import with_directive as _rbc_with_directive
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
@@ -329,7 +330,11 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
                 "## Worker Preamble\n\n"
                 "You are a VNX headless worker executing a dispatch instruction."
             )
-        enriched = f"{header}\n\n{enriched}"
+        enriched = _rbc_with_directive(
+            f"{header}\n\n{enriched}",
+            args.dispatch_id,
+            pr_id=getattr(args, "pr_id", None),
+        )
 
     # Deterministic control: did the resolved role source actually reach the prompt?
     # OI-983: the verification below runs with the RAW args.role. The resolved _role

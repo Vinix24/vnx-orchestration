@@ -76,7 +76,9 @@ def prepare(
     if repo_map:
         raw = raw + f"\n\n{repo_map}"
 
-    # 2. Skill context: skill body + intelligence wrapping
+    # 2. Skill context: skill body + intelligence wrapping. The report directive is
+    # opted out here: step 5 places it as the last block, after the scope guard and
+    # the worker rules footer (_inject_skill_context appends it itself otherwise).
     body = _inject_skill_context(
         terminal_id or "",
         raw,
@@ -87,6 +89,7 @@ def prepare(
             "dispatch_paths": dispatch_paths or [],
             "pr_id": pr_id,
             "pr": pr_id,
+            "report_directive": False,
         },
     )
 
@@ -104,11 +107,11 @@ def prepare(
         if _WORKER_RULES_FOOTER_SENTINEL not in body:
             body = body + "\n\n" + _wrf.build(role, dispatch_id)
 
-    # 5. Report contract directive — gated by VNX_REPORT_CONTRACT_DIRECTIVE (default on, gap #3b)
-    if os.environ.get("VNX_REPORT_CONTRACT_DIRECTIVE", "1").strip().lower() not in (
-        "0", "false", "no", "off"
-    ):
-        body = body + "\n\n" + _rbc.build_directive(dispatch_id, pr_id=pr_id)
+    # 5. Report contract directive — gated by VNX_REPORT_CONTRACT_DIRECTIVE (default on,
+    # gap #3b). with_directive is the one door every lane appends it through (OI-1850).
+    body = _rbc.with_directive(
+        body, dispatch_id, pr_id=pr_id, model=model, provider="claude"
+    )
 
     # Trailer sentinel is intentionally NOT appended here.
     # Each lane (tmux, subprocess) appends END_OF_INSTRUCTION_SENTINEL as its

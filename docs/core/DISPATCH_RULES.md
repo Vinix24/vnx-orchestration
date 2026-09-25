@@ -167,7 +167,11 @@ Whether a provider emits the four headings on its own, or needs them named in th
 | glm-harness | No (needs an instruction-foot) | 10/168 |
 | kimi | No (needs an instruction-foot) | 7/139 |
 
-For the harness/provider lanes (codex, kimi, glm, deepseek), always append the four headings to the instruction. A deepseek worker does not emit `## Summary` / `## Changes` / `## Verification` / `## Open Items` on its own, and without them there is no receipt (OI-1180). The claude lane delivers them without prompting.
+**How the headings reach the worker (OI-1850).** The door appends the directive on every lane. `skill_context._inject_skill_context` closes each worker prompt with `report_body_contract.with_directive`, which is built from the same `_REQUIRED_SECTIONS` the validator reads, and adds the identity block (`**Dispatch-ID**`, `**Model**`, `**Provider**`). Nobody appends the headings by hand any more. The fabric prompt (`prompts/base_worker.md`) names no heading list of its own and points at the directive. `dispatch_prepare.prepare` opts the seam out and places the directive itself as the last block; `with_directive` is idempotent, so a prompt never carries it twice. Gate reviewers (`gate_runner` prompts, built with `PromptAssembler.assemble`) answer with a verdict and get no directive.
+
+Until OI-1850 only `dispatch_prepare.prepare` added it. The headless lane, the provider lanes and the terminal-pinned subprocess lane on its default flag never did, and the fabric prompt asked for "What changed" and "Known limitations" instead: 175 `contract_invalid` receipts in mission-control, probe D-86244666. A role file (`prompts/roles/<role>.md` or a project `agents/<role>/CLAUDE.md`) that lists other report headings makes the door log a warning with the path and the differing headings. It does not block: the directive stands after the role text and wins.
+
+The table above is the OI-1180 measurement of what each provider emits without the directive. A deepseek worker does not emit the four headings on its own, and without them there is no receipt.
 
 ## 9. Manager-block contract
 
