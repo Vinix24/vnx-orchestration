@@ -808,7 +808,11 @@ def _primary_review_gate() -> str:
         )
 
     try:
-        from gate_recorder import GATE_BILLING, GATE_BILLING_SUBSCRIPTION  # lazy: gate_recorder is heavy
+        from gate_recorder import (  # lazy: gate_recorder is heavy
+            GATE_BILLING_SUBSCRIPTION,
+            UnknownGateProvider,
+            gate_billing,
+        )
     except Exception as exc:  # pragma: no cover - import failure is environmental
         raise ReviewGateConfigError(
             f"{DEFAULT_REVIEW_STACK_KEY}={raw!r} cannot be ranked: the gate billing "
@@ -817,13 +821,23 @@ def _primary_review_gate() -> str:
             "by stack order alone."
         ) from exc
 
-    return max(
-        known,
-        key=lambda name: (
-            _GATE_WEIGHT.get(name, 0),
-            GATE_BILLING.get(name) == GATE_BILLING_SUBSCRIPTION,
-        ),
-    )
+    try:
+        return max(
+            known,
+            key=lambda name: (
+                _GATE_WEIGHT.get(name, 0),
+                gate_billing(name) == GATE_BILLING_SUBSCRIPTION,
+            ),
+        )
+    except UnknownGateProvider as exc:
+        # The strict accessor, not GATE_BILLING.get(): an unclassified gate read as
+        # "not a subscription gate" would rank below every classified one and lose
+        # the seat without anyone being told. Re-raised as the config error the door
+        # already refuses by name (dispatch_cli re-raises only this class; anything
+        # else is treated as an ordinary derivation bug and fails open).
+        raise ReviewGateConfigError(
+            f"{DEFAULT_REVIEW_STACK_KEY}={raw!r} cannot be ranked: {exc}"
+        ) from exc
 
 
 # A change here can alter the dispatch door, the router, the receipt trail, or

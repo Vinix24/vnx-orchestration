@@ -393,6 +393,27 @@ class TestPrimaryReviewSeat:
         import smart_router
         assert smart_router._primary_review_gate() == "codex_gate"
 
+    @pytest.mark.parametrize("gate,stack", [
+        # glm loses the seat on billing anyway: the shape a lenient GATE_BILLING.get()
+        # would have hidden, ranking the unclassified gate below codex and saying nothing.
+        ("glm_gate", "codex_gate,glm_gate"),
+        ("kimi_gate", "codex_gate,kimi_gate"),
+        ("codex_gate", "codex_gate"),
+    ])
+    def test_a_gate_missing_from_the_billing_table_fails_loud_naming_it(self, monkeypatch, gate, stack):
+        from dispatch_spec import ReviewGateConfigError
+
+        assert gate in GATE_PROVIDERS, "the gate must be a registered one; only its billing class is missing"
+        monkeypatch.delitem(GATE_BILLING, gate)
+
+        with pytest.raises(ReviewGateConfigError, match=f"{gate} has no billing class"):
+            self._seat(monkeypatch, stack)
+
+    def test_an_unclassified_gate_outside_the_stack_does_not_block_the_seat(self, monkeypatch):
+        monkeypatch.delitem(GATE_BILLING, "deepseek_gate")
+
+        assert self._seat(monkeypatch, "codex_gate,kimi_gate") == "codex_gate"
+
 
 # ---------------------------------------------------------------------------
 # 3. kimi runs through `vnx gate` (request_and_execute), not a side script
@@ -638,3 +659,125 @@ class TestCodexAtItsLimitGoesToKimi:
 
         assert _requested_gates(result) == ["kimi_gate"]
         assert result["requested"][0]["status"] == "requested"
+
+
+# ---------------------------------------------------------------------------
+# 6. One request per gate counts only the requests that went out
+# ---------------------------------------------------------------------------
+
+class TestOneRequestPerGateCountsOnlyRequestsThatWentOut:
+    """The dedupe is against requests that were DISPATCHED. A request the gate itself
+    refused (binary missing, not configured) asked no reader anything, so a later seat that
+    resolves to the same gate must still try it instead of being skipped behind a refusal."""
+
+    @pytest.fixture
+    def kimi_requests(self, env, monkeypatch):
+        """The real ``_request_kimi``, counted, with the takeover chain off so a seat
+        resolves to exactly the gate it names. Only availability is stubbed."""
+        import gate_request_handler
+
+        monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "")
+        mixin = gate_request_handler.GateRequestHandlerMixin
+        real_request_kimi = mixin._request_kimi
+        calls: list = []
+
+        def counting(self, *args, **kwargs):
+            calls.append(args[0])
+            return real_request_kimi(self, *args, **kwargs)
+
+        monkeypatch.setattr(mixin, "_request_kimi", counting)
+        return calls
+
+    @staticmethod
+    def _kimi_available(monkeypatch, available: bool) -> None:
+        import gate_request_handler
+        monkeypatch.setattr(
+            gate_request_handler.GateRequestHandlerMixin, "_kimi_gate_available", lambda self: available,
+        )
+
+    def test_a_repeat_of_an_accepted_request_is_skipped(self, kimi_requests, monkeypatch):
+        self._kimi_available(monkeypatch, True)
+
+        result = _request(_manager(), ["kimi_gate", "kimi_gate"])
+
+        assert len(kimi_requests) == 1
+        assert [(seat["gate"], seat["status"]) for seat in result["requested"]] == [("kimi_gate", "requested")]
+
+    def test_a_repeat_of_a_refused_request_is_attempted(self, kimi_requests, monkeypatch):
+        self._kimi_available(monkeypatch, False)
+
+        result = _request(_manager(), ["kimi_gate", "kimi_gate"])
+
+        assert len(kimi_requests) == 2, (
+            "the first kimi request was refused at request time (not_executable): it asked no "
+            f"reader anything, so the second seat must try kimi itself. requests={len(kimi_requests)}"
+        )
+        assert [seat["status"] for seat in result["requested"]] == ["not_executable", "not_executable"]
+
+    @staticmethod
+    def _kimi_stub(monkeypatch, statuses: list) -> list:
+        """``_request_kimi`` answering with one status per call and writing nothing, so the
+        second seat's chain walk sees no kimi record of its own."""
+        import gate_request_handler
+
+        calls: list = []
+
+        def stub(self, pr_number, branch, risk_class, changed_files, mode, dispatch_id=""):
+            calls.append(len(calls))
+            return {"gate": "kimi_gate", "status": statuses[len(calls) - 1], "pr_number": pr_number}
+
+        monkeypatch.setattr(gate_request_handler.GateRequestHandlerMixin, "_request_kimi", stub)
+        return calls
+
+    def test_a_seat_taken_over_to_a_gate_whose_earlier_request_was_refused_is_requested(
+        self, env, default_stack, monkeypatch,
+    ):
+        """codex is at its limit, so the codex seat resolves to kimi. kimi's own seat, earlier in
+        the same round, was refused at request time: the takeover must still be attempted."""
+        _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+        calls = self._kimi_stub(monkeypatch, ["not_executable", "requested"])
+
+        result = _request(_manager(), ["kimi_gate", "codex_gate"])
+
+        assert len(calls) == 2
+        assert [seat["status"] for seat in result["requested"]] == ["not_executable", "requested"]
+        assert result["requested"][1]["takeover_from"] == "codex_gate"
+
+    def test_a_seat_taken_over_to_a_gate_whose_earlier_request_was_accepted_is_skipped(
+        self, env, default_stack, monkeypatch,
+    ):
+        _write_result(env, "codex_gate", _CODEX_LIMIT_RECORD)
+        calls = self._kimi_stub(monkeypatch, ["requested", "requested"])
+
+        result = _request(_manager(), ["kimi_gate", "codex_gate"])
+
+        assert len(calls) == 1
+        assert _requested_gates(result) == ["kimi_gate"]
+
+    @pytest.mark.parametrize("status", [
+        "not_executable", "unavailable", "blocked", "not_configured", "chain_exhausted",
+    ])
+    def test_a_refused_status_never_counts_as_requested(self, status):
+        from gate_request_handler import _gates_with_accepted_request
+
+        assert _gates_with_accepted_request([{"gate": "kimi_gate", "status": status}]) == []
+
+    @pytest.mark.parametrize("status", [
+        "requested", "queued", "configured_dry_run", "pass", "fail", "advisory",
+    ])
+    def test_any_other_status_counts_as_requested(self, status):
+        from gate_request_handler import _gates_with_accepted_request
+
+        assert _gates_with_accepted_request([{"gate": "kimi_gate", "status": status}]) == ["kimi_gate"]
+
+    def test_a_payload_without_a_status_counts_as_requested_and_keeps_its_gate(self):
+        from gate_request_handler import _gates_with_accepted_request
+
+        payloads = [
+            {"gate": "codex_gate", "status": "not_executable"},
+            {"gate": "kimi_gate"},
+            {"gate": "glm_gate", "status": "requested"},
+        ]
+
+        assert _gates_with_accepted_request(payloads) == ["kimi_gate", "glm_gate"]
