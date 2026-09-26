@@ -169,11 +169,11 @@ class TestRealWriterThroughRealMergeCheck:
 
         self._fake_gh_pr_view_head(monkeypatch)
 
-        # The production writer: _request_gemini resolves the sha via
+        # The production writer: _request_codex resolves the sha via
         # get_pr_head_sha (gh pr view headRefOid), not git rev-parse HEAD.
         manager = rgm.ReviewGateManager()
-        monkeypatch.setattr(manager, "_gemini_available", lambda: True)
-        request_payload = manager._request_gemini(
+        monkeypatch.setattr(manager, "_codex_headless_available", lambda: True)
+        request_payload = manager._request_codex(
             42, "feature/x", "low", ["scripts/foo.py"], "per_pr", "d-real-writer-1",
         )
 
@@ -182,13 +182,13 @@ class TestRealWriterThroughRealMergeCheck:
         reports_dir = tmp_path / "reports"
         for d in (results_dir, requests_dir, reports_dir):
             d.mkdir(parents=True, exist_ok=True)
-        request_payload["report_path"] = str(reports_dir / "gemini_review-report.md")
+        request_payload["report_path"] = str(reports_dir / "codex_gate-report.md")
 
         materialize_artifacts(
-            gate="gemini_review",
+            gate="codex_gate",
             pr_number=42,
             pr_id="PR-42",
-            stdout="Review complete.\nFindings: none.\nApproved.",
+            stdout='```json\n{"verdict": "pass", "findings": [], "residual_risk": null}\n```',
             request_payload=request_payload,
             duration_seconds=1.0,
             requests_dir=requests_dir,
@@ -204,7 +204,7 @@ class TestRealWriterThroughRealMergeCheck:
         assert request_payload["commit_sha"] == self.KNOWN_HEAD_OID
 
         gate = closure_verifier.check_review_gate_for_merge(
-            "PR-42", "gemini_review", results_dir,
+            "PR-42", "codex_gate", results_dir,
             branch="feature/x",
             head_sha=self.KNOWN_HEAD_OID,
         )
@@ -215,7 +215,7 @@ class TestRealWriterThroughRealMergeCheck:
         _, results_dir = self._materialize_via_real_writer(tmp_path, monkeypatch)
 
         gate = closure_verifier.check_review_gate_for_merge(
-            "PR-42", "gemini_review", results_dir,
+            "PR-42", "codex_gate", results_dir,
             branch="feature/x",
             head_sha="9999999999999999999999999999999999999999",
         )

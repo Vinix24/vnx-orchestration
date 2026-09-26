@@ -93,14 +93,14 @@ def _mock_successful_subprocess():
     return mock_proc
 
 
-def _make_request(gate="gemini_review", pr_number=1, pr_id="", **overrides):
+def _make_request(gate="codex_gate", pr_number=1, pr_id="", **overrides):
     """Build a complete request payload with contract_hash."""
     contract_content = f"Review contract for PR-{pr_number}"
     contract_hash = hashlib.sha256(contract_content.encode("utf-8")).hexdigest()[:16]
     payload = {
         "gate": gate,
         "status": "requested",
-        "provider": "gemini_cli",
+        "provider": "codex_cli",
         "branch": "feature/test-branch",
         "pr_number": pr_number,
         "pr_id": pr_id,
@@ -133,22 +133,22 @@ class TestEndToEndEvidenceChain:
             reports_dir=cert_env["reports_dir"],
         )
 
-        report_path = str(cert_env["reports_dir"] / "20260401-150000-HEADLESS-gemini_review-pr-1.md")
+        report_path = str(cert_env["reports_dir"] / "20260401-150000-HEADLESS-codex_gate-pr-1.md")
         payload, contract_content = _make_request(report_path=report_path)
         contract_hash = payload["contract_hash"]
 
         # Write initial request
-        req_file = cert_env["requests_dir"] / "pr-1-gemini_review.json"
+        req_file = cert_env["requests_dir"] / "pr-1-codex_gate.json"
         req_file.write_text(json.dumps(payload), encoding="utf-8")
 
         mock_proc = _mock_successful_subprocess()
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
         # ARTIFACT 1: Result record exists with terminal status
         assert result["status"] == "completed"
-        result_file = cert_env["results_dir"] / "pr-1-gemini_review.json"
+        result_file = cert_env["results_dir"] / "pr-1-codex_gate.json"
         assert result_file.exists()
         saved_result = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved_result["status"] == "completed"
@@ -158,7 +158,7 @@ class TestEndToEndEvidenceChain:
         assert report_file.exists()
         assert report_file.stat().st_size > 0
         report_content = report_file.read_text(encoding="utf-8")
-        assert "gemini_review" in report_content
+        assert "codex_gate" in report_content
 
         # ARTIFACT 3: Contract hash preserved through chain
         assert saved_result["contract_hash"] == contract_hash
@@ -182,7 +182,7 @@ class TestEndToEndEvidenceChain:
         report_path = str(cert_env["reports_dir"] / "lifecycle-report.md")
         payload, _ = _make_request(report_path=report_path)
 
-        req_file = cert_env["requests_dir"] / "pr-1-gemini_review.json"
+        req_file = cert_env["requests_dir"] / "pr-1-codex_gate.json"
         req_file.write_text(json.dumps(payload), encoding="utf-8")
 
         # Capture state at each point
@@ -199,7 +199,7 @@ class TestEndToEndEvidenceChain:
         mock_proc = _mock_successful_subprocess()
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])):
-            runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+            runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
         # Must see executing then completed (requested is the initial state before run)
         assert "executing" in states_seen
@@ -225,13 +225,13 @@ class TestEndToEndEvidenceChain:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])):
             result = runner.run(
-                gate="gemini_review", request_payload=payload,
+                gate="codex_gate", request_payload=payload,
                 pr_id="PR-5",
             )
 
         assert result["status"] == "completed"
         # Contract-based path uses pr_id slug
-        result_file = cert_env["results_dir"] / "pr5-gemini_review-contract.json"
+        result_file = cert_env["results_dir"] / "pr5-codex_gate-contract.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["pr_id"] == "PR-5"
@@ -248,8 +248,8 @@ class TestTimeoutStallStructuredFailure:
     def test_timeout_failure_has_all_required_fields(self, cert_env, monkeypatch):
         """Timeout failure record must have all fields needed for T0 reasoning."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "300")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -279,7 +279,7 @@ class TestTimeoutStallStructuredFailure:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
         assert result["status"] == "unavailable"
         assert result["reason"] in ("timeout", "stall")
@@ -289,18 +289,18 @@ class TestTimeoutStallStructuredFailure:
         assert "duration_seconds" in result
         assert "runner_pid" in result
         assert "required_reruns" in result
-        assert result["required_reruns"] == ["gemini_review"]
+        assert result["required_reruns"] == ["codex_gate"]
         assert "residual_risk" in result
         assert result["report_path"] == ""  # No report on failure
 
         # Result file written to disk
-        result_file = cert_env["results_dir"] / "pr-1-gemini_review.json"
+        result_file = cert_env["results_dir"] / "pr-1-codex_gate.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "unavailable"
 
         # Request updated to unavailable
-        req_file = cert_env["requests_dir"] / "pr-1-gemini_review.json"
+        req_file = cert_env["requests_dir"] / "pr-1-codex_gate.json"
         assert req_file.exists()
         req = json.loads(req_file.read_text(encoding="utf-8"))
         assert req["status"] == "unavailable"
@@ -308,8 +308,8 @@ class TestTimeoutStallStructuredFailure:
     def test_stall_failure_distinct_from_timeout(self, cert_env, monkeypatch):
         """Stall failure must be distinguishable from timeout in the result."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "1")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "1")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -339,7 +339,7 @@ class TestTimeoutStallStructuredFailure:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=2)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=2)
 
         assert result["status"] == "unavailable"
         assert result["reason"] == "stall"
@@ -369,7 +369,7 @@ class TestTimeoutStallStructuredFailure:
 
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=3)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=3)
 
         assert result["status"] == "unavailable"
         assert result["reason"] == "exit_nonzero"
@@ -423,12 +423,12 @@ class TestSkipRationaleCompleteness:
             reports_dir=cert_env["reports_dir"],
         )
 
-        gates = ["gemini_review", "codex_gate", "claude_github_optional"]
-        expected_binaries = ["gemini", "codex", "gh"]
+        gates = ["codex_gate", "claude_github_optional", "ci_gate"]
+        expected_binaries = ["codex", "gh", "gh"]
         expected_env_flags = [
-            "VNX_GEMINI_REVIEW_ENABLED",
             "VNX_CODEX_HEADLESS_ENABLED",
             "VNX_CLAUDE_GITHUB_REVIEW_ENABLED",
+            "VNX_CI_GATE_REQUIRED",
         ]
 
         for i, gate in enumerate(gates):
@@ -454,11 +454,11 @@ class TestSkipRationaleCompleteness:
             reports_dir=cert_env["reports_dir"],
         )
 
-        payload, _ = _make_request(gate="gemini_review", pr_number=20)
-        runner.run(gate="gemini_review", request_payload=payload, pr_number=20)
+        payload, _ = _make_request(gate="codex_gate", pr_number=20)
+        runner.run(gate="codex_gate", request_payload=payload, pr_number=20)
 
-        req_file = cert_env["requests_dir"] / "pr-20-gemini_review.json"
-        result_file = cert_env["results_dir"] / "pr-20-gemini_review.json"
+        req_file = cert_env["requests_dir"] / "pr-20-codex_gate.json"
+        result_file = cert_env["results_dir"] / "pr-20-codex_gate.json"
 
         assert req_file.exists()
         assert result_file.exists()
@@ -499,14 +499,14 @@ class TestArtifactStability:
         mock_proc = _mock_successful_subprocess()
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=30)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=30)
 
         assert result["status"] == "completed"
 
         # All 3 artifacts present
         assert Path(result["report_path"]).exists()
         assert result["contract_hash"] != ""
-        result_file = cert_env["results_dir"] / "pr-30-gemini_review.json"
+        result_file = cert_env["results_dir"] / "pr-30-codex_gate.json"
         assert result_file.exists()
 
         # Consistency check passes
@@ -517,8 +517,8 @@ class TestArtifactStability:
     def test_failed_execution_has_no_orphan_report(self, cert_env, monkeypatch):
         """Failed gate must not leave an orphan report without a completed result."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "300")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -548,13 +548,13 @@ class TestArtifactStability:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.time.monotonic", side_effect=fake_mono):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=31)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=31)
 
         assert result["status"] == "unavailable"
         # No report should exist for a timeout failure
         assert not Path(report_path).exists()
         # Result file exists but status is unavailable
-        result_file = cert_env["results_dir"] / "pr-31-gemini_review.json"
+        result_file = cert_env["results_dir"] / "pr-31-codex_gate.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "unavailable"
@@ -596,7 +596,7 @@ class TestArtifactStability:
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch.object(Path, "write_text", selective_write):
-            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=32)
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=32)
 
         assert result["status"] == "unavailable"
         assert result["reason"] == "artifact_materialization_failed"
@@ -622,7 +622,7 @@ class TestCrossGateConsistency:
         )
 
         gates_results = {}
-        for gate in ["gemini_review", "codex_gate"]:
+        for gate in ["codex_gate", "claude_github_optional"]:
             report_path = str(cert_env["reports_dir"] / f"cross-{gate}.md")
             payload, _ = _make_request(gate=gate, report_path=report_path, pr_number=40)
 
@@ -634,18 +634,18 @@ class TestCrossGateConsistency:
             gates_results[gate] = result
 
         # Both completed independently
-        assert gates_results["gemini_review"]["status"] == "completed"
         assert gates_results["codex_gate"]["status"] == "completed"
+        assert gates_results["claude_github_optional"]["status"] == "completed"
 
         # Separate result files
-        gemini_result = cert_env["results_dir"] / "pr-40-gemini_review.json"
+        github_result = cert_env["results_dir"] / "pr-40-claude_github_optional.json"
         codex_result = cert_env["results_dir"] / "pr-40-codex_gate.json"
-        assert gemini_result.exists()
+        assert github_result.exists()
         assert codex_result.exists()
 
         # Separate report files
-        gemini_report = json.loads(gemini_result.read_text())["report_path"]
+        github_report = json.loads(github_result.read_text())["report_path"]
         codex_report = json.loads(codex_result.read_text())["report_path"]
-        assert gemini_report != codex_report
-        assert Path(gemini_report).exists()
+        assert github_report != codex_report
+        assert Path(github_report).exists()
         assert Path(codex_report).exists()

@@ -3,9 +3,9 @@
 
 A PR diff is DATA. Until this module existed the review gates treated it as
 prose: ``glm_gate._build_prompt`` and ``kimi_gate._build_prompt`` both ended
-with ``"DIFF:\\n" + diff_text``, and ``gate_runner._build_codex_prompt`` /
-``_build_gemini_prompt`` pasted ``diff_content`` bare between one line of
-instruction and the verdict template. Measured on main f6bb65df,
+with ``"DIFF:\\n" + diff_text``, and ``gate_runner._build_codex_prompt``
+and its gemini twin (since removed) pasted ``diff_content`` bare between one line
+of instruction and the verdict template. Measured on main f6bb65df,
 ``grep -ciE "sanitiz|untrusted"`` over both gate scripts returned 0 and 0.
 
 That shape hands the PR author two advantages at once. The diff has no
@@ -186,7 +186,7 @@ def wrap_untrusted_diff(diff_text: str, *, max_chars: int) -> str:
     the meaning glm_gate/kimi_gate's ``MAX_DIFF_CHARS`` already had (a bound on
     author-supplied bytes) rather than silently becoming a bound on the
     rewritten text. A non-positive value disables truncation: gate_runner's
-    codex/gemini paths never capped their diff, and introducing a cap there
+    codex path never capped its diff, and introducing a cap there
     would be a behaviour change this deliverable did not measure.
     """
     block, _fence_replacements = _wrap_untrusted_diff_with_fence_count(

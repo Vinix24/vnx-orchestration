@@ -84,13 +84,13 @@ def test_codex_final_gate_blocks_when_required_but_not_available(review_env, mon
 def test_record_result_persists_structured_review_output(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
     manager = rgm.ReviewGateManager()
-    report_file = review_env / ".vnx-data" / "unified_reports" / "manual-gemini-report.md"
+    report_file = review_env / ".vnx-data" / "unified_reports" / "manual-codex-report.md"
     report_file.parent.mkdir(parents=True, exist_ok=True)
-    report_file.write_text("# Gemini report\n", encoding="utf-8")
+    report_file.write_text("# Codex report\n", encoding="utf-8")
     report_path = str(report_file.resolve())
 
     payload = manager.record_result(
-        gate="gemini_review",
+        gate="codex_gate",
         pr_number=8,
         branch="feature/docs",
         status="pass",
@@ -101,7 +101,7 @@ def test_record_result_persists_structured_review_output(review_env, monkeypatch
         report_path=report_path,
     )
 
-    result_path = manager.results_dir / "pr-8-gemini_review.json"
+    result_path = manager.results_dir / "pr-8-codex_gate.json"
     assert result_path.exists()
     saved = json.loads(result_path.read_text(encoding="utf-8"))
     assert saved["status"] == "pass"
@@ -172,7 +172,7 @@ def test_record_result_rejects_pass_without_contract_hash(review_env, monkeypatc
 
     with pytest.raises(ValueError, match="contract_hash is required"):
         manager.record_result(
-            gate="gemini_review",
+            gate="codex_gate",
             pr_number=21,
             branch="feature/docs",
             status="pass",
@@ -199,7 +199,6 @@ def test_record_result_rejects_pass_without_report_path_or_request(review_env, m
 def test_changed_files_auto_computed_from_branch(review_env, monkeypatch):
     """When --changed-files is empty and --branch is set, git diff is invoked."""
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
 
     captured_changed_files: list = []
 
@@ -237,7 +236,6 @@ def test_changed_files_auto_computed_from_branch(review_env, monkeypatch):
 def test_changed_files_override_preserves_explicit(review_env, monkeypatch):
     """When --changed-files is provided, no auto-compute git call is made."""
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
 
     captured_changed_files: list = []
 

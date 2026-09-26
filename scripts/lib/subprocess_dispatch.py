@@ -468,7 +468,7 @@ if __name__ == "__main__":
         default=None,
         help=(
             "PR identifier forwarded to IntelligenceSelector so prior_round_finding "
-            "items (codex/gemini gate results) fire in production (CFX-W5-2)."
+            "items (codex gate results) fire in production (CFX-W5-2)."
         ),
     )
     # Wave 7 PR-7.4: cost-routing policy engine (feature-flag gated).

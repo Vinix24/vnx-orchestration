@@ -71,7 +71,7 @@ class TestNormalizeFindingsPreservesAddress:
     def test_uses_shared_normalize_line_not_a_second_copy(self):
         """The canonical import: review_contract._normalize_line is the ONE
         line-coercion function, already reused by claude_github_receipt.py
-        and gemini_prompt_renderer.py (see TestNormalizeLine in
+        and review_receipt.py (see TestNormalizeLine in
         test_review_contract.py). codex_parser must import it too, not
         redefine its own.
         """

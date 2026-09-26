@@ -262,11 +262,11 @@ class TestGateConfigGet:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             sd._operator_post_gate_toggle(
-                {"project": "alpha", "gate": "gemini_review", "enabled": False},
+                {"project": "alpha", "gate": "kimi_gate", "enabled": False},
                 config_path=cfg,
             )
             result = sd._operator_get_gate_config({"project": ["alpha"]}, config_path=cfg)
-        assert result["gates"]["gemini_review"]["enabled"] is False
+        assert result["gates"]["kimi_gate"]["enabled"] is False
 
     def test_queried_at_is_iso_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,7 +278,7 @@ class TestGateConfigGet:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             sd._operator_post_gate_toggle(
-                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                {"project": "alpha", "gate": "kimi_gate", "enabled": True},
                 config_path=cfg,
             )
             sd._operator_post_gate_toggle(
@@ -301,7 +301,7 @@ class TestGateTogglePost:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             result, status = sd._operator_post_gate_toggle(
-                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                {"project": "alpha", "gate": "kimi_gate", "enabled": True},
                 config_path=cfg,
             )
         assert status == 200
@@ -310,7 +310,7 @@ class TestGateTogglePost:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             result, _ = sd._operator_post_gate_toggle(
-                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                {"project": "alpha", "gate": "kimi_gate", "enabled": True},
                 config_path=cfg,
             )
         assert result["status"] == "success"
@@ -351,7 +351,7 @@ class TestGateTogglePost:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             _, status = sd._operator_post_gate_toggle(
-                {"gate": "gemini_review", "enabled": True}, config_path=cfg
+                {"gate": "kimi_gate", "enabled": True}, config_path=cfg
             )
         assert status == 400
 
@@ -367,7 +367,7 @@ class TestGateTogglePost:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             _, status = sd._operator_post_gate_toggle(
-                {"project": "alpha", "gate": "gemini_review", "enabled": "yes"},
+                {"project": "alpha", "gate": "kimi_gate", "enabled": "yes"},
                 config_path=cfg,
             )
         assert status == 400
@@ -376,7 +376,7 @@ class TestGateTogglePost:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             result, _ = sd._operator_post_gate_toggle(
-                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                {"project": "alpha", "gate": "kimi_gate", "enabled": True},
                 config_path=cfg,
             )
         assert result["action"] == "gate/toggle"
@@ -413,7 +413,7 @@ class TestGateTogglePost:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "governance_gates.yaml"
             sd._operator_post_gate_toggle(
-                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                {"project": "alpha", "gate": "kimi_gate", "enabled": True},
                 config_path=cfg,
             )
             sd._operator_post_gate_toggle(
@@ -421,7 +421,7 @@ class TestGateTogglePost:
                 config_path=cfg,
             )
             data = sd._read_gate_config(cfg)
-        assert data["gates"]["alpha"]["gemini_review"]["enabled"] is True
+        assert data["gates"]["alpha"]["kimi_gate"]["enabled"] is True
         assert data["gates"]["beta"]["codex_gate"]["enabled"] is False
 
 

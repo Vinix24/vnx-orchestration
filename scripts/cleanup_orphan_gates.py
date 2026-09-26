@@ -72,7 +72,7 @@ def _find_orphans(max_age_hours: float = 24.0) -> list[dict]:
         if age < max_age_hours:
             continue  # too recent
 
-        stem = req_path.stem  # e.g. "pr-57-gemini_review"
+        stem = req_path.stem  # e.g. "pr-57-codex_gate"
         parts = stem.split("-", 2)
         gate_name = parts[2] if len(parts) == 3 else stem
 
@@ -121,7 +121,7 @@ def _write_abandoned_result(orphan: dict, dry_run: bool) -> bool:
 
 
 def _extract_pr_number_from_stem(stem: str) -> "int | None":
-    """Extract PR number from gate request stem like 'pr-57-gemini_review'."""
+    """Extract PR number from gate request stem like 'pr-57-codex_gate'."""
     import re
     m = re.match(r"^pr-(\d+)-", stem)
     return int(m.group(1)) if m else None

@@ -47,7 +47,6 @@ def manager_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
     monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
     monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
     monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
     return {
@@ -150,7 +149,7 @@ class TestCommitShaInPayloads:
         """commit_sha must come from the PR head on GitHub (``gh pr view headRefOid``),
         never from the local checkout HEAD (``git rev-parse HEAD``)."""
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
         manager = _make_manager()
 
         fake_head_oid = "e" * 40
@@ -186,30 +185,6 @@ class TestCommitShaInPayloads:
             assert payload["commit_sha"] != local_head, (
                 "commit_sha must not resolve to the local checkout HEAD"
             )
-
-    def test_gemini_contract_payload_includes_commit_sha(self, manager_env, monkeypatch):
-        """_build_gemini_contract_payload must embed commit_sha."""
-        monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-
-        from review_contract import ReviewContract
-        manager = _make_manager()
-
-        with patch("governance_receipts.emit_governance_receipt"):
-            with patch("gate_request_handler.render_gemini_prompt", return_value="mock prompt"):
-                payload = manager.request_gemini_with_contract(
-                    contract=ReviewContract(
-                        pr_id="PR-10",
-                        branch="fix/test",
-                        risk_class="low",
-                        changed_files=["scripts/foo.py"],
-                        content_hash="abc123",
-                    ),
-                    mode="per_pr",
-                    dispatch_id="test-sha-contract",
-                )
-
-        assert "commit_sha" in payload, "gemini contract payload must contain commit_sha"
 
     def test_ci_gate_contract_payload_includes_commit_sha(self, manager_env, monkeypatch):
         """_build_ci_gate_contract_payload must embed commit_sha."""
@@ -269,7 +244,7 @@ class TestMarkGateUnavailableDispatchId:
     def test_not_executable_result_omits_dispatch_id_when_not_provided(self, manager_env, monkeypatch):
         """When dispatch_id is not provided, not_executable result omits it."""
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
         manager = _make_manager()
 
         with patch("governance_receipts.emit_governance_receipt"):
@@ -322,59 +297,6 @@ class TestMarkGateUnavailableDispatchId:
 
 class TestContractFlowDispatchIdTopLevel:
     """OI-1129: contract flows must always emit dispatch_id at the top-level of the payload."""
-
-    def test_gemini_contract_always_has_dispatch_id_when_provided(self, manager_env, monkeypatch):
-        monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-
-        from review_contract import ReviewContract
-        manager = _make_manager()
-
-        with patch("governance_receipts.emit_governance_receipt"):
-            with patch("gate_request_handler.render_gemini_prompt", return_value="mock"):
-                payload = manager.request_gemini_with_contract(
-                    contract=ReviewContract(
-                        pr_id="PR-50",
-                        branch="fix/test",
-                        risk_class="low",
-                        changed_files=["f.py"],
-                        content_hash="aaa",
-                    ),
-                    mode="per_pr",
-                    dispatch_id="contract-dispatch-50",
-                )
-
-        assert payload.get("dispatch_id") == "contract-dispatch-50", (
-            "dispatch_id must be at top-level of gemini contract payload"
-        )
-
-    def test_gemini_contract_has_dispatch_id_even_when_empty(self, manager_env, monkeypatch):
-        """When dispatch_id='', it must still appear at top-level (not absent)."""
-        monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-
-        from review_contract import ReviewContract
-        manager = _make_manager()
-
-        with patch("governance_receipts.emit_governance_receipt"):
-            with patch("gate_request_handler.render_gemini_prompt", return_value="mock"):
-                payload = manager.request_gemini_with_contract(
-                    contract=ReviewContract(
-                        pr_id="PR-51",
-                        branch="fix/test",
-                        risk_class="low",
-                        changed_files=["f.py"],
-                        content_hash="bbb",
-                    ),
-                    mode="per_pr",
-                )
-
-        assert "dispatch_id" in payload, (
-            "dispatch_id must always be present at top-level in gemini contract payload"
-        )
-        assert payload["dispatch_id"] == "", (
-            "dispatch_id must be empty string when not provided, not absent"
-        )
 
     def test_claude_github_contract_has_dispatch_id_at_top_level(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])

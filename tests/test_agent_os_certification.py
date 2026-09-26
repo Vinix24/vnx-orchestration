@@ -62,7 +62,7 @@ DOMAIN_MODULES = {
     "codex_final_gate",
     "quality_advisory",
     "claude_github_receipt",
-    "gemini_prompt_renderer",
+    "review_receipt",
 }
 
 

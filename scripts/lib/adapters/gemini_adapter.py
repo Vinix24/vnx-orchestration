@@ -35,7 +35,7 @@ from provider_spawns.gemini_spawn import (  # noqa: E402
     _extract_gemini_usage_metadata as _spawn_extract_usage_metadata,
     _extract_gemini_token_count as _spawn_extract_token_count,
 )
-from vertex_ai_runner import collect_file_contents
+from prompt_file_contents import collect_file_contents
 
 logger = logging.getLogger(__name__)
 

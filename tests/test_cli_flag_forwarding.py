@@ -163,7 +163,7 @@ def test_full_mode_forwards_review_contract(project_env, tmp_path):
     contract_path = tmp_path / "contract.json"
     contract_path.write_text(json.dumps({
         "pr_id": "PR-9",
-        "review_stack": ["gemini_review"],
+        "review_stack": ["kimi_gate"],
         "risk_class": "low",
         "deterministic_findings": [],
         "deliverables": [],
@@ -269,7 +269,7 @@ def test_rgm_request_forwards_all_flags(fake_manager):
         "request",
         "--pr", "42",
         "--branch", "feat/x",
-        "--review-stack", "codex_gate,gemini_review",
+        "--review-stack", "codex_gate,kimi_gate",
         "--risk-class", "high",
         "--changed-files", "a.py,b.py",
         "--mode", "final",
@@ -279,7 +279,7 @@ def test_rgm_request_forwards_all_flags(fake_manager):
     kwargs = fake_manager.request_reviews.call_args.kwargs
     assert kwargs["pr_number"] == 42
     assert kwargs["branch"] == "feat/x"
-    assert kwargs["review_stack"] == ["codex_gate", "gemini_review"]
+    assert kwargs["review_stack"] == ["codex_gate", "kimi_gate"]
     assert kwargs["risk_class"] == "high"
     assert kwargs["changed_files"] == ["a.py", "b.py"]
     assert kwargs["mode"] == "final"

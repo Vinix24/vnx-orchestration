@@ -16,11 +16,10 @@ from review_contract import _normalize_line  # canonical line-coercion, never a 
 # whose stdout :func:`extract_verdict_block` can read, because
 # :func:`_extract_codex_text` unwraps their stream. codex's ``exec --json`` is an
 # NDJSON event stream whose ``agent_message`` items carry the verdict; that is the
-# one unwrap this module has. gemini's ``--output-format json`` is a single
-# envelope object with the reply inside a string field, which nothing here
-# unwraps: a verdict inside such an envelope reads as ``{}`` (probed on a
-# gemini-shaped envelope, 2026-09-19; there is no real gemini_review report to
-# measure against, the one under unified_reports/headless/ is a 25-byte stub).
+# one unwrap this module has. A provider whose stdout is a single envelope object
+# with the reply inside a string field is not readable here: nothing unwraps it, so
+# a verdict inside such an envelope reads as ``{}`` (gemini's ``--output-format json``
+# was one, probed 2026-09-19, before gemini_review was retired).
 #
 # gate_artifacts refuses a run that wrote no verdict only for a gate whose output
 # this reader can see. Refusing a gate it cannot read would book a good review as
@@ -154,7 +153,7 @@ def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     one. This is the one place findings get normalized before landing in the
     result record, so both fields are preserved here rather than dropped;
     :func:`review_contract._normalize_line` is the canonical line-coercion
-    (claude_github_receipt.py and gemini_prompt_renderer.py already import
+    (claude_github_receipt.py and review_receipt.py already import
     the same function rather than each keeping a copy).
     """
     normalized: List[Dict[str, Any]] = []
@@ -231,7 +230,7 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
 
     ``VERDICT_CONTRACT`` (gate_lane_contract.py — glm_gate, kimi_gate and the
     harness-lane strategy in gate_runner) and ``_REVIEWER_VERDICT_TEMPLATE``
-    (gate_runner.py — codex_gate, gemini_review) ask for the SAME shape: a JSON
+    (gate_runner.py — codex_gate) ask for the SAME shape: a JSON
     object containing a ``"verdict"`` key, in a fenced ```json block. This is
     the one place gate_artifacts.materialize_artifacts's OI-1767 fail-closed
     guard checks for that shape, keyed on the shape itself rather than on a
@@ -269,7 +268,7 @@ def extract_verdict_block(stdout: str) -> Dict[str, Any]:
 
     Reuses the NDJSON-unwrap in :func:`_extract_codex_text` so this also
     works on codex's ``exec --json`` stream, not only on the plain-text
-    report bodies glm_gate/kimi_gate/gemini_review stdout actually is.
+    report bodies glm_gate/kimi_gate stdout actually is.
 
     Does NOT delegate to :func:`_extract_codex_verdict`: that helper takes the
     FIRST fenced block, and its bare-object fallback takes the first object

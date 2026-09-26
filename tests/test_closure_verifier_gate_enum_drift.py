@@ -43,6 +43,13 @@ class TestKnownGatesDerivedFromEnum:
             f"{sorted(cv._KNOWN_GATES - legal)}"
         )
 
+    def test_retired_gates_stay_interpretable_but_never_sign(self):
+        """A retired gate is readable history: known to the verifier, outside
+        the enum, and never a review peer signer."""
+        assert RETIRED_GATE_NAMES <= cv._KNOWN_GATES
+        assert not RETIRED_GATE_NAMES & {g.value for g in Gate}
+        assert not RETIRED_GATE_NAMES & cv._REVIEW_PEER_GATES
+
     def test_excluded_gates_is_a_subset_of_enum_members(self):
         """Every explicitly-excluded gate must be a declared Gate enum value."""
         enum_values = {g.value for g in Gate}

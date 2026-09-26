@@ -82,18 +82,26 @@ GATES_OUTSIDE_ENUM = frozenset({"deepseek_gate"})
 # (gate_recorder.GATE_PROVIDERS) so it cannot drift from what actually runs.
 REGISTERED_GATE_NAMES = frozenset(g.value for g in Gate) | GATES_OUTSIDE_ENUM
 
-# Gate names that are RETIRED: no longer a reviewer, never selectable. Absent from
-# REGISTERED_GATE_NAMES on purpose, so every reader of that set (Rule 16 below, the
-# staging bridge, the takeover-chain parser, smart_router's primary-seat pick)
-# refuses the name without a per-site check. The name survives so history stays
-# readable: the closure verifier still interprets an existing result for it.
-# gemini_review: operator decision 2026-09-26, after one record ever and no verdict.
-# Gemini as a provider lane for non-review work is not touched.
+# Gate names that are RETIRED: no longer a reviewer, never selectable. They are
+# deliberately absent from ``REGISTERED_GATE_NAMES``, so every reader that asks
+# "may this gate be declared, staged, requested or chained" (Rule 16 below,
+# dispatch_bridge._canonical_gate, the takeover-chain parser, smart_router's
+# primary-seat pick) refuses the name from that one set, with no per-site check.
+# The name survives only so readers of HISTORICAL records can still tell it from
+# a typo: the closure verifier keeps interpreting an existing ``gemini_review``
+# result, and ``retired_gate_hint`` gives a refusal its reason. gemini_review:
+# operator decision 2026-09-26, after a measurement of one record ever and zero
+# verdicts (its binary was never on PATH). Gemini as a provider for non-review
+# work is a different lane and is not touched by this set.
 RETIRED_GATE_NAMES = frozenset({"gemini_review"})
 
 
 def retired_gate_hint(name: Optional[str]) -> str:
-    """Suffix for a refusal message when ``name`` is a retired gate, else ``""``."""
+    """Suffix for a refusal message when ``name`` is a retired gate, else ``""``.
+
+    Keeps "you named a gate that was retired" distinguishable from "you made a
+    typo" in every message that lists the valid gates.
+    """
     if (name or "").strip() in RETIRED_GATE_NAMES:
         return f" ({name.strip()} is a retired gate, no longer a reviewer)"
     return ""

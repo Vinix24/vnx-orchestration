@@ -58,6 +58,7 @@ RECOVERY_NEEDED_STATES = frozenset({"RECOVERY_PENDING", "CHAIN_HALTED"})
 # Maximum requeue attempts before escalation (contract rule R-2/R-3)
 MAX_REQUEUE_ATTEMPTS = 3
 
+
 def required_signer_gates() -> Tuple[str, ...]:
     """Gate names eligible to certify chain-advancement (F2-4, 06-09).
 
@@ -80,25 +81,27 @@ def required_signer_gates() -> Tuple[str, ...]:
     applies, so an operator's config edit takes effect on the very next
     check instead of needing a process restart.
 
-    ``gemini_review`` is not a signer: it was a legal optional one until it
-    was retired as a reviewer (2026-09-26, ``dispatch_spec.RETIRED_GATE_NAMES``).
-
     Malformed operator config (an unknown gate name, or a name repeated --
     a cycle) raises ``gate_request_handler.ReviewGateTakeoverConfigError``,
     the SAME fail-loud behaviour the takeover chain itself has; never a
     silent fallback to a stale default.
 
+    ``gemini_review`` is not a signer: it was a legal optional one until the
+    2026-09-26 operator decision retired it as a reviewer
+    (``dispatch_spec.RETIRED_GATE_NAMES``), and a chain that still names it is
+    refused by the parse above like any other unknown gate.
+
     An explicit ``VNX_REVIEW_GATE_TAKEOVER_CHAIN=""`` (operator disabled
     automated takeover entirely) leaves NO eligible signer, so advancement
-    stays blocked (fail-closed). Known, narrow edge -- left as an Open Item rather
-    than papered over with a second "gates eligible to sign" knob separate
-    from "gates eligible for takeover", which is exactly the second
-    configuration layer this deliverable was told not to invent.
+    stays blocked. That is fail-closed and the operator's own choice; it is
+    not papered over with a second "gates eligible to sign" knob separate from
+    "gates eligible for takeover", which is exactly the second configuration
+    layer this deliverable was told not to invent.
 
     When ``config_runtime``/``gate_request_handler`` cannot be imported at
     all (e.g. a bare script invocation whose sys.path lacks scripts/lib's
-    sibling modules), degrades to the same empty signer set -- logged
-    as a WARNING, never silent, mirroring ``config_runtime``'s own
+    sibling modules), degrades to the same empty signer set -- logged as a
+    WARNING, never silent, mirroring ``config_runtime``'s own
     fail-soft-but-loud philosophy. It deliberately does NOT fall back to a
     hardcoded copy of the chain's default string: duplicating that literal
     here would recreate the exact two-lists-that-can-drift defect this
@@ -113,8 +116,7 @@ def required_signer_gates() -> Tuple[str, ...]:
     except Exception as exc:  # vnx-silent-except: import-time unavailability of the wider config stack must degrade this gate list, never crash a caller merely checking advancement truth -- logged loudly so the degradation is never silent
         logger.warning(
             "chain_state_projection: kon config_runtime/gate_request_handler niet "
-            "importeren (%s) -- geen enkele geconfigureerde ondertekenaar "
-            "beschikbaar",
+            "importeren (%s) -- geen enkele geconfigureerde ondertekenaar beschikbaar",
             exc,
         )
         names: List[str] = []

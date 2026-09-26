@@ -22,9 +22,8 @@ kind, or a path binary whose stream ``extract_verdict_block`` unwraps. It is not
 decided by a gate name.
 
 Not covered, each for a stated reason (TestOI1770VerdictScope pins the table):
-gemini_review (its output is not one the reader can unwrap, so refusing it would
-book a good review as `unavailable`) and the ``gh`` gates claude_github_optional,
-ci_gate and wiring_gate (they book GitHub state, no model writes a verdict).
+the ``gh`` gates claude_github_optional, ci_gate and wiring_gate (they book GitHub
+state, no model writes a verdict).
 
 The old tests that pinned "plain prose, no verdict block, still completed" for
 codex_gate encoded the defect OI-1767 describes. Their fixtures now end in a
@@ -369,54 +368,6 @@ class TestOI1767VerdictBlockGuard:
         assert result["reason"] == "validation_failed"
         assert "no_verdict_block" in result["reason_detail"]
 
-    def test_gemini_review_is_outside_the_guard(self, env, tmp_path, monkeypatch):
-        """gemini_review is a PATH_BINARY gate on a binary the verdict reader cannot
-        unwrap, so the guard leaves it alone (OI-1770). Its ``--output-format
-        json`` envelope keeps the reply in a string field; a verdict inside reads
-        as ``{}``, and refusing on that would book a good review as `unavailable`.
-        There is no real gemini_review report to measure the reader against (the
-        one under unified_reports/headless/ is a 25-byte stub). Widening onto it
-        is a decision to make after teaching the reader that output, and this test
-        is where that decision has to be made on purpose, not by accident.
-        """
-        state_dir = tmp_path / "state3"
-        reports_dir = tmp_path / "reports3"
-        requests_dir = state_dir / "review_gates" / "requests"
-        results_dir = state_dir / "review_gates" / "results"
-        for d in (requests_dir, results_dir, reports_dir):
-            d.mkdir(parents=True, exist_ok=True)
-        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-
-        report_file = reports_dir / "gemini-no-verdict.md"
-        stdout = "Review line one.\nReview line two.\nReview line three.\n"
-        payload = {
-            "gate": "gemini_review",
-            "status": "requested",
-            "provider": "gemini",
-            "branch": "feat/test",
-            "pr_number": 4343,
-            "review_mode": "per_pr",
-            "risk_class": "medium",
-            "changed_files": ["scripts/foo.py"],
-            "requested_at": "20260917T085500Z",
-            "prompt": "Review this code",
-            "dispatch_id": "test-gemini-dispatch",
-            "report_path": str(report_file),
-        }
-        result = materialize_artifacts(
-            gate="gemini_review",
-            pr_number=4343,
-            pr_id="",
-            stdout=stdout,
-            request_payload=payload,
-            duration_seconds=12.0,
-            requests_dir=requests_dir,
-            results_dir=results_dir,
-            reports_dir=reports_dir,
-        )
-
-        assert result["status"] == "completed"
-
 
 # ---------------------------------------------------------------------------
 # OI-1770: the guard covers codex_gate, decided on the provider registry
@@ -584,7 +535,6 @@ _VERDICT_SCOPE = {
     "kimi_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
     "deepseek_gate": (True, "harness lane: the lane's report text is read fenced or bare"),
     "codex_gate": (True, "path binary `codex`: its exec --json stream is unwrapped by the reader"),
-    "gemini_review": (False, "path binary `gemini`: its --output-format json envelope is not unwrapped by the reader"),
     "claude_github_optional": (False, "path binary `gh`: reads GitHub state, no model writes a verdict block"),
     "ci_gate": (False, "path binary `gh`: reads GitHub state, no model writes a verdict block"),
     "wiring_gate": (False, "path binary `gh`: reads GitHub state, no model writes a verdict block"),
@@ -616,17 +566,17 @@ class TestOI1770VerdictScope:
     def test_a_second_gate_on_the_codex_binary_is_covered_without_an_edit(self, env, monkeypatch):
         """The kenmerk is the provider's output, not the gate's name: a gate
         registered on the ``codex`` binary under any name is held to a verdict,
-        and one registered on ``gemini`` is not."""
+        and one registered on a binary the reader cannot unwrap is not."""
         monkeypatch.setitem(
             gate_recorder.GATE_PROVIDERS, "codex_second_pass",
             (gate_recorder.GATE_PROVIDER_PATH_BINARY, "codex"),
         )
         monkeypatch.setitem(
-            gate_recorder.GATE_PROVIDERS, "gemini_second_pass",
-            (gate_recorder.GATE_PROVIDER_PATH_BINARY, "gemini"),
+            gate_recorder.GATE_PROVIDERS, "other_second_pass",
+            (gate_recorder.GATE_PROVIDER_PATH_BINARY, "otherbin"),
         )
         assert gate_artifacts._verdict_is_required("codex_second_pass") is True
-        assert gate_artifacts._verdict_is_required("gemini_second_pass") is False
+        assert gate_artifacts._verdict_is_required("other_second_pass") is False
 
         result, _ = _run_codex_gate(
             env, "Review line one.\nReview line two.\nReview line three.\n",

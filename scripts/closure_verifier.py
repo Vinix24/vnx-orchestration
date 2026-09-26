@@ -74,9 +74,12 @@ class CheckResult:
 # producer identity (dispatch_id). Pulling wiring_gate in would drop that
 # requirement. When in doubt, the side with more verification wins.
 #
-# RETIRED_GATE_NAMES stay interpretable so a record written before the retirement
-# does not read as a config gap. Outside the Gate enum, they are never selectable
-# and, absent from _REVIEW_PEER_GATES below, never a peer signer.
+# RETIRED_GATE_NAMES (gemini_review, no longer a reviewer) stay INTERPRETABLE:
+# a contract or result record written before the retirement still names the
+# gate, and reading it as "not implemented by the closure verifier" would turn
+# history into a config-gap finding. They are outside the Gate enum, so they are
+# never selectable and, being absent from _REVIEW_PEER_GATES below, never a peer
+# signer either.
 _GATES_NOT_IMPLEMENTED_BY_CLOSURE = frozenset({"wiring_gate"})
 _KNOWN_GATES = frozenset(
     g.value for g in Gate

@@ -43,7 +43,7 @@ CODEX_VERDICT_STREAM = (
 def _fake_gate_worktree(tmp_path, monkeypatch):
     """Default OI-708 worktree checkout to a no-op fake for tests unrelated to it.
 
-    Without this, every `runner.run(gate="codex_gate"/"gemini_review", ...)`
+    Without this, every `runner.run(gate="codex_gate", ...)`
     call in this file would try a REAL `git fetch`/`git worktree add` (see
     gate_worktree.create_gate_worktree), which is neither hermetic nor fast.
     Tests that specifically exercise the worktree-checkout mechanism override
@@ -88,12 +88,12 @@ def gate_env(tmp_path, monkeypatch):
     }
 
 
-def _make_request_payload(gate="gemini_review", pr_number=1, **overrides):
+def _make_request_payload(gate="codex_gate", pr_number=1, **overrides):
     """Build a minimal request payload."""
     payload = {
         "gate": gate,
         "status": "requested",
-        "provider": "gemini_cli",
+        "provider": "codex_cli",
         "branch": "feature/test",
         "pr_number": pr_number,
         "review_mode": "per_pr",
@@ -122,7 +122,7 @@ class TestGateTransitionsToExecuting:
         payload = _make_request_payload(report_path=report_path)
 
         # Write request to disk
-        req_file = gate_env["requests_dir"] / "pr-1-gemini_review.json"
+        req_file = gate_env["requests_dir"] / "pr-1-codex_gate.json"
         req_file.write_text(json.dumps(payload), encoding="utf-8")
 
         # Mock subprocess with binary-mode fd integers
@@ -136,7 +136,7 @@ class TestGateTransitionsToExecuting:
         mock_proc.returncode = 0
         mock_proc.pid = 99999
 
-        review_output = b'{"summary": "LGTM", "findings": []}\nReview complete: no issues found.\nAll deliverables verified.\n'
+        review_output = CODEX_VERDICT_STREAM
 
         # select returns stdout fd as readable on first call, then proc exits
         call_count = [0]
@@ -160,7 +160,7 @@ class TestGateTransitionsToExecuting:
              patch("gate_runner.os.read", side_effect=mock_os_read), \
              patch("gate_runner.os.getpgid", return_value=99999):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
@@ -182,7 +182,7 @@ class TestGateTransitionsToExecuting:
         report_path = str(gate_env["reports_dir"] / "test-report.md")
         payload = _make_request_payload(report_path=report_path)
 
-        req_file = gate_env["requests_dir"] / "pr-1-gemini_review.json"
+        req_file = gate_env["requests_dir"] / "pr-1-codex_gate.json"
         req_file.write_text(json.dumps(payload), encoding="utf-8")
 
         mock_proc = MagicMock()
@@ -202,7 +202,7 @@ class TestGateTransitionsToExecuting:
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.os.read", side_effect=mock_os_read), \
              patch("gate_runner.os.getpgid", return_value=42):
-            runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+            runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
         saved = json.loads(req_file.read_text(encoding="utf-8"))
         assert saved.get("runner_pid") is not None
@@ -221,7 +221,7 @@ class TestGateNotExecutable:
 
         payload = _make_request_payload()
         result = runner.run(
-            gate="gemini_review",
+            gate="codex_gate",
             request_payload=payload,
             pr_number=1,
         )
@@ -238,9 +238,9 @@ class TestGateNotExecutable:
         )
 
         payload = _make_request_payload()
-        runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+        runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
-        result_file = gate_env["results_dir"] / "pr-1-gemini_review.json"
+        result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
         assert result_file.exists()
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "not_executable"
@@ -273,7 +273,7 @@ class TestTimeoutKill:
 
     def test_timeout_kills_subprocess_and_records_failure(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "1")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -312,14 +312,14 @@ class TestTimeoutKill:
              patch("gate_runner.os.getpgid", return_value=12345), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
 
         assert result["status"] == "unavailable"
         assert result["reason"] in ("timeout", "stall")
-        assert result["required_reruns"] == ["gemini_review"]
+        assert result["required_reruns"] == ["codex_gate"]
         assert mock_killpg.called or mock_proc.kill.called
 
 
@@ -328,8 +328,8 @@ class TestStallDetection:
 
     def test_stall_kills_subprocess(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "2")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -367,7 +367,7 @@ class TestStallDetection:
              patch("gate_runner.os.getpgid", return_value=54321), \
              patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
@@ -561,7 +561,7 @@ class TestSkipRationaleAudit:
         )
 
         payload = _make_request_payload()
-        runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+        runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
         audit_file = gate_env["state_dir"] / "gate_execution_audit.ndjson"
         assert audit_file.exists()
@@ -570,7 +570,7 @@ class TestSkipRationaleAudit:
         assert len(lines) >= 1
         record = json.loads(lines[-1])
         assert record["event_type"] == "gate_skip_rationale"
-        assert record["gate"] == "gemini_review"
+        assert record["gate"] == "codex_gate"
         assert record["reason"] == "provider_not_installed"
         assert "provider_check" in record
         assert record["provider_check"]["binary_found"] is False
@@ -585,7 +585,7 @@ class TestSkipRationaleAudit:
 
         for i in range(3):
             payload = _make_request_payload(pr_number=i + 10)
-            runner.run(gate="gemini_review", request_payload=payload, pr_number=i + 10)
+            runner.run(gate="codex_gate", request_payload=payload, pr_number=i + 10)
 
         audit_file = gate_env["state_dir"] / "gate_execution_audit.ndjson"
         lines = audit_file.read_text(encoding="utf-8").strip().split("\n")
@@ -631,7 +631,7 @@ class TestArtifactAtomicity:
              patch("gate_runner.os.read", side_effect=mock_os_read), \
              patch("gate_runner.os.getpgid", return_value=11111):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
@@ -673,7 +673,7 @@ class TestArtifactAtomicity:
              patch("gate_runner.os.read", side_effect=mock_os_read), \
              patch("gate_runner.os.getpgid", return_value=22222):
             result = runner.run(
-                gate="gemini_review",
+                gate="codex_gate",
                 request_payload=payload,
                 pr_number=1,
             )
@@ -687,7 +687,7 @@ class TestStaleContractHash:
 
     def test_stale_hash_detected(self, gate_env):
         result_payload = {
-            "gate": "gemini_review",
+            "gate": "codex_gate",
             "status": "completed",
             "contract_hash": "abc123",
             "report_path": str(gate_env["reports_dir"] / "report.md"),
@@ -698,7 +698,7 @@ class TestStaleContractHash:
         Path(result_payload["report_path"]).write_text("# Report\n", encoding="utf-8")
 
         # Write result
-        result_file = gate_env["results_dir"] / "pr-1-gemini_review.json"
+        result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
         result_file.write_text(json.dumps(result_payload), encoding="utf-8")
 
         # Verify with different contract content → stale
@@ -713,7 +713,7 @@ class TestStaleContractHash:
         expected_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
         result_payload = {
-            "gate": "gemini_review",
+            "gate": "codex_gate",
             "status": "completed",
             "contract_hash": expected_hash,
             "report_path": str(gate_env["reports_dir"] / "report.md"),
@@ -721,7 +721,7 @@ class TestStaleContractHash:
         }
 
         Path(result_payload["report_path"]).write_text("# Report\n", encoding="utf-8")
-        result_file = gate_env["results_dir"] / "pr-1-gemini_review.json"
+        result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
         result_file.write_text(json.dumps(result_payload), encoding="utf-8")
 
         assert GateRunner.verify_artifact_consistency(
@@ -731,14 +731,14 @@ class TestStaleContractHash:
 
     def test_missing_report_fails_consistency(self, gate_env):
         result_payload = {
-            "gate": "gemini_review",
+            "gate": "codex_gate",
             "status": "completed",
             "contract_hash": "abc",
             "report_path": str(gate_env["reports_dir"] / "missing.md"),
             "recorded_at": "2026-04-01T14:00:00Z",
         }
 
-        result_file = gate_env["results_dir"] / "pr-1-gemini_review.json"
+        result_file = gate_env["results_dir"] / "pr-1-codex_gate.json"
         result_file.write_text(json.dumps(result_payload), encoding="utf-8")
 
         assert GateRunner.verify_artifact_consistency(result_file) is False
@@ -870,7 +870,7 @@ class TestCodexGateExecution:
         assert Path(report_path).exists()
 
     def test_codex_enabled_uses_correct_timeout(self, gate_env, monkeypatch):
-        """Codex gate uses 600s timeout (not gemini's 300s)."""
+        """Codex gate uses 600s timeout."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "5")
@@ -925,7 +925,7 @@ class TestCodexGateExecution:
         assert mock_killpg.called or mock_proc.kill.called
 
     def test_codex_model_passed_via_config_flag(self, gate_env, monkeypatch):
-        """Codex gate passes model via -c flag (not --model like gemini)."""
+        """Codex gate passes model via -c flag (not --model)."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_MODEL", "gpt-5.4")
@@ -972,7 +972,7 @@ class TestCodexGateExecution:
             )
 
         call_args = mock_popen.call_args[0][0]
-        assert "--model" not in call_args  # gemini-style --model should NOT be used
+        assert "--model" not in call_args  # a --model flag should NOT be used
         assert "-c" in call_args
         c_idx = call_args.index("-c")
         assert 'model="gpt-5.4"' in call_args[c_idx + 1]
@@ -1011,7 +1011,7 @@ class TestGateTimeoutConfig:
 
 
 class TestGateWorktreeCheckout:
-    """OI-708: codex_gate/gemini_review subprocess must run with cwd at an
+    """OI-708: codex_gate subprocess must run with cwd at an
     isolated worktree checked out from origin/<branch>, never the
     orchestrator's ambient checkout. See scripts/lib/gate_worktree.py.
 
@@ -1133,7 +1133,7 @@ class TestGateWorktreeCheckout:
         self, gate_env, monkeypatch,
     ):
         """No stale-checkout fallback: when the worktree can't be created, the
-        gate must fail loudly and codex/gemini must NEVER run against the
+        gate must fail loudly and codex must NEVER run against the
         orchestrator's ambient (possibly stale) checkout."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
 
@@ -1182,7 +1182,7 @@ class TestGateWorktreeCheckout:
         )
 
         report_path = str(gate_env["reports_dir"] / "project-root-report.md")
-        payload = _make_request_payload(gate="gemini_review", report_path=report_path)
+        payload = _make_request_payload(gate="codex_gate", report_path=report_path)
         fake_worktree = tmp_path / "isolated-worktree-xyz"
         review_output = b"LGTM\nAll clear.\nNo issues.\n"
         mock_proc, mock_os_read = self._mock_completed_proc(review_output, pid=44444)
@@ -1193,10 +1193,10 @@ class TestGateWorktreeCheckout:
              patch("gate_runner.select.select", return_value=([], [], [])), \
              patch("gate_runner.os.read", side_effect=mock_os_read), \
              patch("gate_runner.os.getpgid", return_value=44444):
-            runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
+            runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
 
         mock_create.assert_called_once_with(
-            branch=payload["branch"], gate="gemini_review", identifier="1",
+            branch=payload["branch"], gate="codex_gate", identifier="1",
             project_root=custom_root,
         )
         mock_remove.assert_called_once_with(fake_worktree, project_root=custom_root)
@@ -1209,7 +1209,7 @@ class TestHarnessLaneDelegation:
     dispatcher the standalone glm_gate.py/kimi_gate.py scripts call
     (``plan_gate_panel._make_default_dispatcher``) and materializes the
     returned report into the runner's receipt + unified report, exactly like
-    codex/gemini stdout. The ``Popen`` patch below is the RED guard: an
+    codex stdout. The ``Popen`` patch below is the RED guard: an
     implementation that directly started a subprocess (the old path_binary
     behaviour) would blow up here, while the delegating strategy never touches
     ``Popen``.

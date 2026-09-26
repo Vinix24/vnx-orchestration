@@ -28,7 +28,7 @@ from review_contract import (
 )
 import review_contract_materializer as rcm
 import claude_github_receipt
-import gemini_prompt_renderer
+import review_receipt
 
 
 SAMPLE_FEATURE_PLAN = """\
@@ -495,7 +495,7 @@ class TestNormalizeLine:
     """_normalize_line is the shared coercion behind every gate that turns an
     untrusted model's raw ``"line"`` value into a finding anchor.
 
-    Measured on the pre-fix code (duplicated in gemini_prompt_renderer.py and
+    Measured on the pre-fix code (duplicated in review_receipt.py and
     claude_github_receipt.py): ``_normalize_line("137")`` returned ``0``, not
     ``137`` — a reviewing LLM emitting a numeric string for "line" silently
     lost its anchor.
@@ -520,8 +520,8 @@ class TestNormalizeLine:
     def test_coerces_to_expected_value(self, raw_line, expected):
         assert _normalize_line(raw_line) == expected
 
-    def test_gemini_prompt_renderer_imports_shared_function(self):
-        assert gemini_prompt_renderer._normalize_line is _normalize_line
+    def test_review_receipt_imports_shared_function(self):
+        assert review_receipt._normalize_line is _normalize_line
 
     def test_claude_github_receipt_imports_shared_function(self):
         assert claude_github_receipt._normalize_line is _normalize_line

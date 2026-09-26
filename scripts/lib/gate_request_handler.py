@@ -1,7 +1,7 @@
 """Gate request creation and orchestration (GateRequestHandlerMixin).
 
 Extracted from review_gate_manager.py as part of F27 batch refactor.
-Methods handle creating gate request payloads for Gemini, Codex, and Claude GitHub.
+Methods handle creating gate request payloads for Codex, Kimi, GLM, DeepSeek, and Claude GitHub.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
 from dispatch_spec import REGISTERED_GATE_NAMES, RETIRED_GATE_NAMES, retired_gate_hint
 from review_contract import ReviewContract
-from gemini_prompt_renderer import render_gemini_prompt
 from gate_recorder import (
     QUOTA_REFUSAL_REASON,
     gate_is_available,
@@ -309,9 +308,6 @@ def _lane_exhausted_or_expired(result: Dict[str, Any]) -> str:
 
 class GateRequestHandlerMixin:
     """Mixin providing gate request creation methods for ReviewGateManager."""
-
-    def _gemini_available(self) -> bool:
-        return os.environ.get("VNX_GEMINI_REVIEW_ENABLED", "1") != "0" and shutil.which("gemini") is not None
 
     def _codex_headless_available(self) -> bool:
         return os.environ.get("VNX_CODEX_HEADLESS_ENABLED", "1") != "0" and shutil.which("codex") is not None
@@ -1094,7 +1090,7 @@ class GateRequestHandlerMixin:
 
         OI-1624: ``branch``/``commit_sha`` are read straight off the
         caller's own ``payload`` -- every real caller (``_request_codex``,
-        ``_request_gemini``, ``_request_kimi``, ``_request_ci_gate``, the
+        ``_request_kimi``, ``_request_ci_gate``, the
         contract-flow builders) already stamped both before deciding
         availability, so this never re-resolves anything; it only stops
         dropping what the caller already knew on the way into the RESULT
@@ -1152,126 +1148,6 @@ class GateRequestHandlerMixin:
             reason=reason, reason_detail=detail,
             commit_sha=payload.get("commit_sha") or "",
         )
-
-    def _request_gemini(
-        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
-        dispatch_id: str = "",
-    ) -> Dict[str, Any]:
-        from review_gate_manager import _utc_now
-
-        available = self._gemini_available()
-        requested_at = _utc_now()
-        payload = {
-            "gate": "gemini_review",
-            "status": "requested" if available else "not_executable",
-            "provider": "gemini_cli",
-            "branch": branch,
-            "pr_number": pr_number,
-            "review_mode": mode,
-            "risk_class": risk_class,
-            "changed_files": changed_files,
-            "requested_at": requested_at,
-            "commit_sha": get_pr_head_sha(pr_number),
-            "report_path": self._build_report_path(
-                gate="gemini_review",
-                requested_at=requested_at,
-                pr_number=pr_number,
-            ),
-        }
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
-        if not available:
-            self._mark_gate_unavailable(
-                payload, gate="gemini_review",
-                pr_number=pr_number, pr_id="",
-                dispatch_id=dispatch_id,
-            )
-        atomic_write_json(self._request_path("gemini_review", pr_number), payload)
-        return payload
-
-    def _build_gemini_contract_payload(
-        self,
-        contract: ReviewContract,
-        mode: str,
-        dispatch_id: str,
-        available: bool,
-        requested_at: str,
-        prompt: str,
-        pr_number: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "gate": "gemini_review",
-            "status": "requested" if available else "not_executable",
-            "provider": "gemini_cli",
-            "branch": contract.branch,
-            "pr_id": contract.pr_id,
-            "pr_number": None,
-            "review_mode": mode,
-            "risk_class": contract.risk_class,
-            "changed_files": contract.changed_files,
-            "contract_hash": contract.content_hash,
-            "prompt": prompt,
-            "requested_at": requested_at,
-            "commit_sha": get_pr_head_sha(pr_number),
-            "dispatch_id": dispatch_id,
-            "report_path": self._build_report_path(
-                gate="gemini_review",
-                requested_at=requested_at,
-                pr_id=contract.pr_id,
-            ),
-        }
-        if not available:
-            self._mark_gate_unavailable(
-                payload, gate="gemini_review",
-                pr_number=None, pr_id=contract.pr_id,
-                contract_hash=contract.content_hash,
-                dispatch_id=dispatch_id,
-            )
-        return payload
-
-    def request_gemini_with_contract(
-        self,
-        *,
-        contract: ReviewContract,
-        mode: str = "per_pr",
-        dispatch_id: str = "",
-        pr_number: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Request a Gemini review driven by a canonical ReviewContract.
-
-        Renders a deliverable-aware prompt from the contract and persists the
-        request payload including the rendered prompt text and contract hash.
-
-        Raises:
-            gemini_prompt_renderer.MissingContractFieldError: when the contract is missing required fields.
-        """
-        from review_gate_manager import _utc_now, emit_governance_receipt
-
-        prompt = render_gemini_prompt(contract)
-        available = self._gemini_available()
-        requested_at = _utc_now()
-        payload = self._build_gemini_contract_payload(
-            contract, mode, dispatch_id, available, requested_at, prompt, pr_number=pr_number,
-        )
-
-        request_file = self._contract_request_path("gemini_review", contract.pr_id)
-        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-        emit_governance_receipt(
-            "review_gate_request",
-            receipt_kind="review_gate",
-            status=payload["status"],
-            terminal="T0",
-            pr_id=contract.pr_id,
-            branch=contract.branch,
-            gate="gemini_review",
-            review_mode=mode,
-            risk_class=contract.risk_class,
-            contract_hash=contract.content_hash,
-            changed_files=contract.changed_files,
-            dispatch_id=dispatch_id,
-        )
-        return payload
 
     def _validate_pr_number_for_github(
         self,

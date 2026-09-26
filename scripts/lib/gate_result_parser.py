@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from gemini_prompt_renderer import GeminiReviewReceipt
+from review_receipt import ReviewReceipt
 from claude_github_receipt import ClaudeGitHubReviewReceipt
 from gate_recorder import get_pr_head_sha, stamp_request_identity
 
@@ -137,7 +137,7 @@ class GateResultParserMixin:
         request_payload = self._load_request_payload(gate, pr_number)
         effective_contract_hash = contract_hash or str(request_payload.get("contract_hash", ""))
         effective_report_path = report_path or str(request_payload.get("report_path", ""))
-        receipt = GeminiReviewReceipt.from_raw_findings(
+        receipt = ReviewReceipt.from_raw_findings(
             pr_id=pr_id or str(pr_number),
             raw_findings=raw_findings,
             contract_hash=effective_contract_hash,
@@ -174,7 +174,7 @@ class GateResultParserMixin:
     def _build_result_payload(
         self, *, gate: str, pr_number: int, pr_id: str, branch: str,
         status: str, summary: str, raw_findings: List[Dict[str, Any]],
-        receipt: "GeminiReviewReceipt", residual_risk: str,
+        receipt: "ReviewReceipt", residual_risk: str,
         effective_contract_hash: str, effective_report_path: str,
         required_reruns: Optional[List[str]],
     ) -> Dict[str, Any]:
@@ -211,7 +211,7 @@ class GateResultParserMixin:
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _emit_result_receipt(
-        self, payload: Dict[str, Any], receipt: "GeminiReviewReceipt", *,
+        self, payload: Dict[str, Any], receipt: "ReviewReceipt", *,
         status: str, pr_number: int, pr_id: str, branch: str, gate: str, summary: str,
     ) -> None:
         """Emit governance receipt for the recorded result."""
@@ -260,6 +260,7 @@ class GateResultParserMixin:
         * PATH-binary gate -> the env-flag / which-lookup logic below,
           unchanged, on the registry's name.
         """
+        from dispatch_spec import retired_gate_hint  # noqa: PLC0415
         from gate_recorder import (  # noqa: PLC0415
             GATE_PROVIDER_HARNESS_LANE,
             GATE_PROVIDER_SCRIPT_RUNNER,
@@ -270,7 +271,7 @@ class GateResultParserMixin:
         if provider is None:
             return (
                 "unsupported_gate_type",
-                f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a PATH "
+                f"{gate} is not in gate_recorder.GATE_PROVIDERS{retired_gate_hint(gate)} — register it as a PATH "
                 f"binary, a script runner, or a harness lane; no binary name is guessed "
                 f"from the gate name",
             )
@@ -294,7 +295,6 @@ class GateResultParserMixin:
         # that one does not. Left in place deliberately rather than half-merged
         # into a shape that loses the defaults.
         env_flags = {
-            "gemini_review": ("VNX_GEMINI_REVIEW_ENABLED", "1"),
             "codex_gate": ("VNX_CODEX_HEADLESS_ENABLED", "1"),
             "claude_github_optional": ("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0"),
             "ci_gate": ("VNX_CI_GATE_REQUIRED", "0"),

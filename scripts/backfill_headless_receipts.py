@@ -60,7 +60,8 @@ RESULTS_DIR = VNX_STATE_DIR / "review_gates" / "results"
 REQUESTS_DIR = VNX_STATE_DIR / "review_gates" / "requests"
 DISPATCHES_DIR = VNX_DATA_DIR / "dispatches"
 
-# Filename patterns
+# Filename patterns. gemini_review is a retired gate (2026-09-26); it stays in
+# the pattern so reports written before then still backfill.
 HEADLESS_REPORT_RE = re.compile(
     r"^(?P<date>\d{8})-(?P<time>\d{6})-HEADLESS-"
     r"(?P<gate>codex_gate|gemini_review)-pr-(?P<pr>\d+)\.md$"

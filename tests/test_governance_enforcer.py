@@ -391,14 +391,14 @@ def test_cli_no_command_returns_zero(config_file: Path):
 
 
 # ---------------------------------------------------------------------------
-# build_codex_prompt fix — vertex_ai_runner
+# build_codex_prompt fix — prompt_file_contents
 # ---------------------------------------------------------------------------
 
 
 def test_build_codex_prompt_inlines_file_contents(tmp_path: Path):
     """build_codex_prompt should inline file contents, not mention PR number."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
-    from vertex_ai_runner import build_codex_prompt
+    from prompt_file_contents import build_codex_prompt
 
     test_file = tmp_path / "test_script.py"
     test_file.write_text("def foo(): pass\n")
@@ -432,7 +432,7 @@ def test_build_codex_prompt_inlines_file_contents(tmp_path: Path):
 
 def test_build_codex_prompt_fallback_to_git_diff(tmp_path: Path):
     """When changed_files is empty, fall back to git diff output."""
-    from vertex_ai_runner import build_codex_prompt
+    from prompt_file_contents import build_codex_prompt
 
     def fake_run(cmd, **kwargs):
         class R:

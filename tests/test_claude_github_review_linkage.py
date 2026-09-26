@@ -2,7 +2,7 @@
 """Tests for Claude GitHub review bridge and evidence linkage (PR-4).
 
 Quality gate: gate_pr4_claude_review_linkage
-- Claude GitHub review request state is linked to the same review contract as Gemini and Codex
+- Claude GitHub review request state is linked to the same review contract as Codex
 - Optional review states are explicit and auditable
 - Review evidence linkage tests pass
 """
@@ -75,7 +75,7 @@ def sample_contract():
         track="B",
         risk_class="medium",
         merge_policy="human",
-        review_stack=["gemini_review", "codex_gate", "claude_github_optional"],
+        review_stack=["codex_gate", "claude_github_optional"],
         deliverables=[
             Deliverable(description="Claude GitHub review requests are linked to the same review contract", category="implementation"),
             Deliverable(description="Optional review states are explicit and auditable", category="implementation"),
@@ -83,7 +83,7 @@ def sample_contract():
         quality_gate=QualityGate(
             gate_id="gate_pr4_claude_review_linkage",
             checks=[
-                "Claude GitHub review request state is linked to the same review contract as Gemini and Codex",
+                "Claude GitHub review request state is linked to the same review contract as Codex",
                 "Optional review states are explicit and auditable",
                 "Review evidence linkage tests pass",
             ],
@@ -553,25 +553,25 @@ class TestRecordClaudeGitHubResult:
 
 
 # ---------------------------------------------------------------------------
-# Gate: explicit state auditing across all three reviewers
+# Gate: explicit state auditing across the review stack
 # ---------------------------------------------------------------------------
 
 class TestReviewContractLinkageAcrossStack:
     """Verify that T0 can see whether GitHub review contributed evidence or was absent."""
 
-    def test_all_three_gates_produce_auditable_state(self, review_env, monkeypatch, sample_contract):
-        """Simulate a full review stack request and verify all three gates are linkable."""
+    def test_contract_driven_gates_produce_auditable_state(self, review_env, monkeypatch, sample_contract):
+        """Simulate a contract-driven review request and verify both gates are linkable."""
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
+        monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
 
-        # Gemini — contract-driven path
-        gemini_payload = manager.request_gemini_with_contract(contract=sample_contract)
-        assert gemini_payload["contract_hash"] == sample_contract.content_hash
-        assert gemini_payload["gate"] == "gemini_review"
+        # CI gate — contract-driven path
+        ci_payload = manager.request_ci_gate_with_contract(contract=sample_contract, pr_number=1)
+        assert ci_payload["contract_hash"] == sample_contract.content_hash
+        assert ci_payload["gate"] == "ci_gate"
 
         # Claude GitHub — contract-driven path
         claude_receipt = manager.request_claude_github_with_contract(contract=sample_contract)
@@ -579,7 +579,7 @@ class TestReviewContractLinkageAcrossStack:
         assert claude_receipt.state in VALID_STATES
 
         # Both are linked to the same contract hash
-        assert gemini_payload["contract_hash"] == claude_receipt.contract_hash
+        assert ci_payload["contract_hash"] == claude_receipt.contract_hash
 
     def test_not_configured_state_is_explicit_not_silent(self, review_env, monkeypatch, sample_contract):
         """Ensure absence is never silent — state is always one of the known values."""

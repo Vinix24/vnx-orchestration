@@ -185,10 +185,8 @@ def _verdict_is_required(gate: str) -> bool:
       unwraps. A second gate registered on that binary is covered without an edit
       here, because what makes the guard sound is the provider's output format.
 
-    Everything else is outside it, and each for a reason. gemini_review is a
-    path_binary gate on a binary the reader cannot unwrap (its verdict would read
-    as ``{}``), so refusing it would book a good review as `unavailable`.
-    claude_github_optional, ci_gate and wiring_gate run on ``gh``: what they book
+    Everything else is outside it, and each for a reason. claude_github_optional,
+    ci_gate and wiring_gate run on ``gh``: what they book
     is read from GitHub, and this runner asks no model for a verdict block. An
     unregistered gate is not covered either; the runner refuses it earlier
     (OI-1490).
@@ -328,7 +326,7 @@ def materialize_artifacts(
     # OI-1763: every gate contract asks for the SAME shared shape: a JSON
     # object with a "verdict" key, asked for in a fenced ```json block
     # (VERDICT_CONTRACT for glm_gate/kimi_gate/deepseek_gate,
-    # _REVIEWER_VERDICT_TEMPLATE for codex_gate/gemini_review, both in
+    # _REVIEWER_VERDICT_TEMPLATE for codex_gate, both in
     # gate_lane_contract.py/gate_runner.py) and read fenced or bare. Before
     # this fix, ONLY codex_gate's branch below ever set findings_parsed=True
     # — glm_gate/kimi_gate/deepseek_gate booked findings=[]/residual_risk=""
@@ -468,10 +466,8 @@ def materialize_artifacts(
     # with a "verdict" key, and :func:`extract_verdict_block` checks for that
     # shape, fenced or bare.
     #
-    # gemini_review, claude_github_optional, ci_gate and wiring_gate are NOT
-    # covered; _verdict_is_required says why for each. For gemini_review the
-    # cause is that its output is not one this reader can unwrap, so widening
-    # onto it means teaching the reader first.
+    # claude_github_optional, ci_gate and wiring_gate are NOT covered;
+    # _verdict_is_required says why for each.
     if _verdict_is_required(gate) and not extract_verdict_block(stdout):
         logger.warning(
             "gate_artifacts: REFUSING a %s run with no parseable verdict block "
@@ -519,10 +515,10 @@ def materialize_artifacts(
     # proxy outage) is caught upstream, in
     # ``gate_runner._run_harness_lane_path``, by reading the failure_reason
     # its dispatcher's report carries in real YAML frontmatter — a guarantee
-    # ONLY that caller has. The vertex and subprocess strategies that also
-    # call this function hand it raw model stdout, never a governed report,
-    # so parsing frontmatter out of it here would be a second, weaker check
-    # guessing at a shape those callers never promise. One slot, at the
+    # ONLY that caller has. The subprocess strategy that also calls this
+    # function hands it raw model stdout, never a governed report, so parsing
+    # frontmatter out of it here would be a second, weaker check guessing at a
+    # shape that caller never promises. One slot, at the
     # caller that actually has the signal, beats two half-checks.
     real_dispatch_id = request_payload.get("dispatch_id", "")
     # OI-1851: a clean run on a cut diff it did not read the rest of reviewed
@@ -626,7 +622,7 @@ def materialize_artifacts(
     # OI-1763 note: this name-check is NOT the same defect fixed above. The
     # dispatch register is a separate, codex-specific downstream system
     # (emit_codex_gate_to_register has no equivalent for glm_gate/kimi_gate/
-    # deepseek_gate today — the elif below defers gemini_review/
+    # deepseek_gate today — the elif below defers
     # claude_github_optional register classification too), unrelated to
     # findings/residual_risk landing in the result record. `parsed` here is
     # the SAME variable the codex_gate branch above assigns; it is only ever
@@ -654,7 +650,7 @@ def materialize_artifacts(
             )
         except (ImportError, OSError) as e:
             logger.debug("Failed to emit gate register event: %s", e)
-    elif gate in ("gemini_review", "claude_github_optional"):
+    elif gate == "claude_github_optional":
         logger.info("materialize_artifacts: register classification deferred for gate=%s", gate)
 
     return result_payload

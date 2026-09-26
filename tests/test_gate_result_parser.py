@@ -2,8 +2,8 @@
 """Tests for the finding types gate_result_parser.py produces (OI finding-ankers).
 
 gate_result_parser.record_result / record_claude_github_result classify raw
-verdict-JSON findings into GeminiReviewFinding / ClaudeGitHubReviewFinding
-objects (gemini_prompt_renderer.py / claude_github_receipt.py). Both types
+verdict-JSON findings into ReviewFinding / ClaudeGitHubReviewFinding
+objects (review_receipt.py / claude_github_receipt.py). Both types
 already carried `file_path`/`line` fields, but nothing upstream ever asked a
 reviewer model to fill them in — measured 2026-09-15 over 705 result files
 under ~/.vnx-data/vnx-dev/state/review_gates/results/: 300 raw findings, 634
@@ -24,7 +24,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-from gemini_prompt_renderer import GeminiReviewReceipt
+from review_receipt import ReviewReceipt
 from claude_github_receipt import ClaudeGitHubReviewReceipt
 
 
@@ -33,7 +33,7 @@ from claude_github_receipt import ClaudeGitHubReviewReceipt
 # ---------------------------------------------------------------------------
 #
 # Measured on main (pre-fix) 2026-09-15: this assertion already PASSED —
-# GeminiReviewFinding/ClaudeGitHubReviewFinding have carried file_path/line
+# ReviewFinding/ClaudeGitHubReviewFinding have carried file_path/line
 # since PR-2 (fa275ec8) and PR-4 (98862a7f). Nothing was ever red here at the
 # dataclass level; the gap was entirely upstream (the reviewer was never
 # asked, per the 0-carrying-a-structured-field measurement above) and at the
@@ -41,7 +41,7 @@ from claude_github_receipt import ClaudeGitHubReviewReceipt
 # as the permanent regression guard for the round-trip, now that the contract
 # templates actually ask for these two fields.
 
-def test_gemini_finding_round_trips_file_path_and_line():
+def test_review_finding_round_trips_file_path_and_line():
     raw = [{
         "severity": "blocking",
         "category": "correctness",
@@ -49,7 +49,7 @@ def test_gemini_finding_round_trips_file_path_and_line():
         "file_path": "scripts/lib/gate_result_parser.py",
         "line": 137,
     }]
-    receipt = GeminiReviewReceipt.from_raw_findings(pr_id="PR-X", raw_findings=raw)
+    receipt = ReviewReceipt.from_raw_findings(pr_id="PR-X", raw_findings=raw)
     finding = receipt.to_dict()["blocking_findings"][0]
     assert finding["file_path"] == "scripts/lib/gate_result_parser.py"
     assert finding["line"] == 137
@@ -91,8 +91,8 @@ _REAL_OLD_STYLE_FINDING = {
 }
 
 
-def test_gemini_backward_compat_old_two_key_finding_defaults_file_path_and_line():
-    receipt = GeminiReviewReceipt.from_raw_findings(
+def test_review_backward_compat_old_two_key_finding_defaults_file_path_and_line():
+    receipt = ReviewReceipt.from_raw_findings(
         pr_id="PR-1192", raw_findings=[_REAL_OLD_STYLE_FINDING]
     )
     finding = receipt.to_dict()["blocking_findings"][0]
@@ -116,7 +116,7 @@ def test_claude_github_backward_compat_old_two_key_finding_defaults_file_path_an
 # ---------------------------------------------------------------------------
 #
 # Measured on main (pre-fix) 2026-09-15: `line=int(raw.get("line", 0))` in
-# both gemini_prompt_renderer.GeminiReviewReceipt.from_raw_findings and
+# both review_receipt.ReviewReceipt.from_raw_findings and
 # claude_github_receipt.ClaudeGitHubReviewReceipt.from_result_payload crashed
 # on a non-numeric string and on None, and silently passed a negative int
 # through unnormalized:
@@ -130,22 +130,22 @@ def _bad_line_finding(line_value):
     return {"severity": "blocking", "category": "x", "message": "y", "line": line_value}
 
 
-def test_gemini_nonnumeric_line_normalizes_to_zero_without_crash():
-    receipt = GeminiReviewReceipt.from_raw_findings(
+def test_review_nonnumeric_line_normalizes_to_zero_without_crash():
+    receipt = ReviewReceipt.from_raw_findings(
         pr_id="PR-X", raw_findings=[_bad_line_finding("ergens")]
     )
     assert receipt.to_dict()["blocking_findings"][0]["line"] == 0
 
 
-def test_gemini_negative_line_normalizes_to_zero_without_crash():
-    receipt = GeminiReviewReceipt.from_raw_findings(
+def test_review_negative_line_normalizes_to_zero_without_crash():
+    receipt = ReviewReceipt.from_raw_findings(
         pr_id="PR-X", raw_findings=[_bad_line_finding(-3)]
     )
     assert receipt.to_dict()["blocking_findings"][0]["line"] == 0
 
 
-def test_gemini_null_line_normalizes_to_zero_without_crash():
-    receipt = GeminiReviewReceipt.from_raw_findings(
+def test_review_null_line_normalizes_to_zero_without_crash():
+    receipt = ReviewReceipt.from_raw_findings(
         pr_id="PR-X", raw_findings=[_bad_line_finding(None)]
     )
     assert receipt.to_dict()["blocking_findings"][0]["line"] == 0

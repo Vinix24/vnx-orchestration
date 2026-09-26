@@ -25,7 +25,6 @@ import provider_reachability
 logger = logging.getLogger(__name__)
 
 _GATE_ENV_FLAGS: Dict[str, str] = {
-    "gemini_review": "VNX_GEMINI_REVIEW_ENABLED",
     "codex_gate": "VNX_CODEX_HEADLESS_ENABLED",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_REVIEW_ENABLED",
     "ci_gate": "VNX_CI_GATE_REQUIRED",
@@ -70,7 +69,6 @@ GATE_PROVIDER_SCRIPT_RUNNER = "script_runner"
 GATE_PROVIDER_HARNESS_LANE = "harness_lane"
 
 GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
-    "gemini_review": (GATE_PROVIDER_PATH_BINARY, "gemini"),
     "codex_gate": (GATE_PROVIDER_PATH_BINARY, "codex"),
     "claude_github_optional": (GATE_PROVIDER_PATH_BINARY, "gh"),
     "ci_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
@@ -126,7 +124,7 @@ def is_gate_eigen_dispatch_id(gate: str, dispatch_id: Optional[str]) -> bool:
     runner-refusal slug, an empty id — is not gate-eigen and fails, so a NEW
     form of the same collision fails the same way (OI-1725).
 
-    Scoped to harness-lane gates: a path_binary gate (codex_gate, gemini,
+    Scoped to harness-lane gates: a path_binary gate (codex_gate,
     ci_gate) carries the builder's dispatch-id BY DESIGN and is never judged
     here.
     """
@@ -268,7 +266,9 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     "empty_review_content", "validation_failed",
     # Network / auth
     "network_error", "auth_error",
-    # Vertex REST path (gemini_review) API failures (OI-1178)
+    # Vertex REST path API failures (OI-1178). The path went with gemini_review
+    # (retired 2026-09-26); the reason stays so records already written under it
+    # keep classifying as execution failures.
     "vertex_api_error",
     # The gate ran to completion and investigated nothing (OI-1485). Absence
     # of evidence, exactly like a timeout: the PR was never actually reviewed,
@@ -1728,7 +1728,7 @@ def record_terminal_result(
     """Atomically persist a terminal (pass/fail) gate result at an explicit path.
 
     Single write path for gates outside the built-in review_gate_manager
-    pipeline (codex_gate/gemini_review/ci_gate/claude_github_optional
+    pipeline (codex_gate/ci_gate/claude_github_optional
     already enforce contract_hash + report_path at write time via
     gate_result_parser._validate_and_persist_result). A free-form gate like
     kimi_gate had no such enforcement, so nothing stopped a hand-authored
@@ -1760,7 +1760,7 @@ def record_terminal_result(
     reclassified HERE, unconditionally, to ``unavailable``/
     ``gate_execution_degenerate`` — the SAME reclassification
     :func:`gate_artifacts.materialize_artifacts` already applies to the
-    codex/gemini lane (OI-1485), lifted to the one place every lane's
+    codex lane (OI-1485), lifted to the one place every lane's
     terminal write passes through so a single-shot lane (glm_gate/kimi_gate)
     gets it without reimplementing the check itself. The reclassification
     mutates ``payload`` in place — the same convention

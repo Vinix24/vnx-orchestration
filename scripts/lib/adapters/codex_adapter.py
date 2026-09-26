@@ -34,7 +34,7 @@ from provider_spawns.codex_spawn import (  # noqa: E402
     _extract_token_count_payload as _spawn_extract_token_count_payload,
     _normalize_token_count as _spawn_normalize_token_count,
 )
-from vertex_ai_runner import collect_file_contents
+from prompt_file_contents import collect_file_contents
 
 logger = logging.getLogger(__name__)
 

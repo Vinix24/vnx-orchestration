@@ -43,7 +43,7 @@ MAX_DIFF_CHARS = 50000
 
 # The verdict the gate must end its report with. Verbatim-identical across
 # glm_gate, kimi_gate and gate_runner's harness-lane strategy; this is the one
-# copy. Not gate_runner._REVIEWER_VERDICT_TEMPLATE — the codex/gemini reviewer
+# copy. Not gate_runner._REVIEWER_VERDICT_TEMPLATE — the codex reviewer
 # asks for a different, richer findings shape.
 VERDICT_CONTRACT = (
     "When done, end your report with a structured JSON verdict ONLY, in a fenced block:\n"

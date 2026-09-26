@@ -12,8 +12,8 @@ so that T0 can distinguish:
   - ``completed``          — a result was recorded (pass / fail / advisory)
 
 Every receipt is linked to a ReviewContract via ``contract_hash`` so T0 can
-correlate the GitHub review evidence with the same contract that drove Gemini
-and Codex.
+correlate the GitHub review evidence with the same contract that drove the
+other review gates.
 """
 
 from __future__ import annotations

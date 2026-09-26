@@ -17,19 +17,18 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+from dispatch_spec import retired_gate_hint
 from governance_receipts import utc_now_iso
 from headless_adapter import gate_timeout, gate_stall_threshold
 from unified_report_schema import SchemaViolation, extract_frontmatter, parse_frontmatter
 import gate_recorder as _rec
 import gate_artifacts as _art
-import vertex_ai_runner as _vtx
 from gate_worktree import create_gate_worktree, remove_gate_worktree, GateWorktreeError
 from gate_prompt import build_review_prompt  # OI-1442: the diff is data, not instruction
 import gate_depth  # OI-1851: record what part of the diff each prompt carries
@@ -69,7 +68,6 @@ GATE_BINARIES: Dict[str, str] = dict(_rec._GATE_BINARIES)
 
 # Gate type → CLI args for review execution
 GATE_CLI_ARGS: Dict[str, List[str]] = {
-    "gemini_review": ["--output-format", "json"],
     "codex_gate": ["exec", "--json"],
     "claude_github_optional": [],
 }
@@ -111,9 +109,8 @@ def _tail(text: str, limit: int) -> str:
 def _extract_structured_error_message(stdout: str) -> Optional[str]:
     """Find the last structured JSON error record in `stdout` and return its message.
 
-    Gates that run with machine-readable output (codex_gate: ``exec --json``,
-    gemini_review: ``--output-format json``) emit JSON/JSONL records on real
-    failures, e.g. codex: ``{"type":"error","message":"You've hit your usage
+    Gates that run with machine-readable output (codex_gate: ``exec --json``)
+    emit JSON/JSONL records on real failures, e.g. codex: ``{"type":"error","message":"You've hit your usage
     limit... try again at Aug 21st, 2026 11:22 AM."}``. That message carries
     the exact failure reason (including reset times) — worth lifting forward
     literally instead of leaving the operator to grep the raw tail for it.
@@ -250,105 +247,96 @@ class GateRunner:
         requested -> executing -> completed|failed
         """
         provider = _rec.resolve_gate_provider(gate)
-        using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
         # Harness-lane gates (C6 step 1) delegate to the governed dispatcher
         # instead of a PATH binary or a spawned script. Resolved here so the
         # dispatch below routes to _run_harness_lane_path, never to a PATH
         # lookup on the provider string.
         harness_provider = ""
 
-        if not using_vertex:
-            # OI-1490: three outcomes, not one. Before this, an unregistered
-            # gate and a script-runner gate both collapsed into "binary not
-            # found in PATH" — a name this runner had just invented from the
-            # gate's own name. Each now says what is actually true, and the
-            # two new reasons are PERMANENT: neither is in
-            # gate_obligation_runner._TEMPORARY_NOT_EXECUTABLE_REASONS,
-            # because no amount of waiting installs a binary that was never a
-            # binary. `provider_not_installed` stays temporary and stays
-            # correct for the gates it actually describes.
-            if provider is None:
+        # OI-1490: three outcomes, not one. Before this, an unregistered
+        # gate and a script-runner gate both collapsed into "binary not
+        # found in PATH" — a name this runner had just invented from the
+        # gate's own name. Each now says what is actually true, and the
+        # two new reasons are PERMANENT: neither is in
+        # gate_obligation_runner._TEMPORARY_NOT_EXECUTABLE_REASONS,
+        # because no amount of waiting installs a binary that was never a
+        # binary. `provider_not_installed` stays temporary and stays
+        # correct for the gates it actually describes.
+        if provider is None:
+            return _rec.record_not_executable(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                reason="unsupported_gate_type",
+                reason_detail=(
+                    f"{gate} is not in gate_recorder.GATE_PROVIDERS"
+                    f"{retired_gate_hint(gate)} — register it as a "
+                    f"PATH binary, a script runner, or a harness lane; this runner "
+                    f"will not guess a binary name from the gate name"
+                ),
+                request_payload=request_payload,
+                requests_dir=self._requests_dir,
+                results_dir=self._results_dir,
+                state_dir=self._state_dir,
+            )
+        kind, provider_name = provider
+        if kind == _rec.GATE_PROVIDER_HARNESS_LANE:
+            # C6 step 1: glm_gate/kimi_gate route through the governed
+            # dispatcher, not a PATH binary. The provider string is the
+            # lane's own identifier ("glm-harness"/"kimi") — never a
+            # shutil.which target.
+            harness_provider = provider_name
+        elif kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
+            pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
+            # Not-shipped and not-routable are different answers and the
+            # reader acts differently on each. Availability is kind-based
+            # (gate_recorder.gate_is_available): a script-runner gate is
+            # available only while its runner file is on disk. Reuse
+            # `gate_runner_missing` here rather than mint a second name
+            # for the fact gate_request_handler already books.
+            if not _rec.gate_is_available(gate):
                 return _rec.record_not_executable(
                     gate=gate, pr_number=pr_number, pr_id=pr_id,
-                    reason="unsupported_gate_type",
+                    reason="gate_runner_missing",
                     reason_detail=(
-                        f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
-                        f"PATH binary, a script runner, or a harness lane; this runner "
-                        f"will not guess a binary name from the gate name"
+                        f"{provider_name} is not on disk — {gate} is registered "
+                        f"as a script runner and its runner is unavailable"
                     ),
                     request_payload=request_payload,
                     requests_dir=self._requests_dir,
                     results_dir=self._results_dir,
                     state_dir=self._state_dir,
                 )
-            kind, provider_name = provider
-            if kind == _rec.GATE_PROVIDER_HARNESS_LANE:
-                # C6 step 1: glm_gate/kimi_gate route through the governed
-                # dispatcher, not a PATH binary. The provider string is the
-                # lane's own identifier ("glm-harness"/"kimi") — never a
-                # shutil.which target.
-                harness_provider = provider_name
-            elif kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
-                pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
-                # Not-shipped and not-routable are different answers and the
-                # reader acts differently on each. Availability is kind-based
-                # (gate_recorder.gate_is_available): a script-runner gate is
-                # available only while its runner file is on disk. Reuse
-                # `gate_runner_missing` here rather than mint a second name
-                # for the fact gate_request_handler already books.
-                if not _rec.gate_is_available(gate):
-                    return _rec.record_not_executable(
-                        gate=gate, pr_number=pr_number, pr_id=pr_id,
-                        reason="gate_runner_missing",
-                        reason_detail=(
-                            f"{provider_name} is not on disk — {gate} is registered "
-                            f"as a script runner and its runner is unavailable"
-                        ),
-                        request_payload=request_payload,
-                        requests_dir=self._requests_dir,
-                        results_dir=self._results_dir,
-                        state_dir=self._state_dir,
-                    )
-                return _rec.record_not_executable(
-                    gate=gate, pr_number=pr_number, pr_id=pr_id,
-                    reason="gate_not_subprocess_routable",
-                    reason_detail=(
-                        f"{gate} is a script runner ({provider_name}) with its own "
-                        f"contract, dispatch and result-writing lifecycle; it is not a "
-                        f"CLI this runner can drive with a prompt. Run it directly: "
-                        f"python3 {provider_name} --pr {pr_ref}"
-                    ),
-                    request_payload=request_payload,
-                    requests_dir=self._requests_dir,
-                    results_dir=self._results_dir,
-                    state_dir=self._state_dir,
-                )
-            else:
-                binary = provider_name
-                if shutil.which(binary) is None:
-                    return _rec.record_not_executable(
-                        gate=gate, pr_number=pr_number, pr_id=pr_id,
-                        reason="provider_not_installed",
-                        reason_detail=f"{binary} binary not found in PATH",
-                        request_payload=request_payload,
-                        requests_dir=self._requests_dir,
-                        results_dir=self._results_dir,
-                        state_dir=self._state_dir,
-                    )
+            return _rec.record_not_executable(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                reason="gate_not_subprocess_routable",
+                reason_detail=(
+                    f"{gate} is a script runner ({provider_name}) with its own "
+                    f"contract, dispatch and result-writing lifecycle; it is not a "
+                    f"CLI this runner can drive with a prompt. Run it directly: "
+                    f"python3 {provider_name} --pr {pr_ref}"
+                ),
+                request_payload=request_payload,
+                requests_dir=self._requests_dir,
+                results_dir=self._results_dir,
+                state_dir=self._state_dir,
+            )
         else:
-            binary = GATE_BINARIES.get(gate, "")
+            binary = provider_name
+            if shutil.which(binary) is None:
+                return _rec.record_not_executable(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    reason="provider_not_installed",
+                    reason_detail=f"{binary} binary not found in PATH",
+                    request_payload=request_payload,
+                    requests_dir=self._requests_dir,
+                    results_dir=self._results_dir,
+                    state_dir=self._state_dir,
+                )
 
-        prompt = self._resolve_prompt(gate, request_payload, using_vertex)
+        prompt = self._resolve_prompt(gate, request_payload)
         if prompt and "prompt" not in request_payload:
             request_payload["prompt"] = prompt
 
         self._mark_executing(gate, request_payload, pr_number=pr_number, pr_id=pr_id)
-
-        if using_vertex:
-            return self._run_vertex_path(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                prompt=prompt, request_payload=request_payload, pid=os.getpid(),
-            )
 
         if harness_provider:
             return self._run_harness_lane_path(
@@ -362,36 +350,14 @@ class GateRunner:
         )
 
     def _resolve_prompt(
-        self, gate: str, request_payload: Dict[str, Any], using_vertex: bool,
+        self, gate: str, request_payload: Dict[str, Any],
     ) -> str:
-        """Build or enrich the prompt for the given gate type.
-
-        build_gemini_prompt / build_codex_prompt already inline file contents.
-        When we build the prompt here we must NOT also append
-        collect_file_contents, or each ``--- FILE:`` section will be duplicated
-        in the Vertex prompt. We only enrich with file contents when the caller
-        supplied the prompt externally (e.g. a contract prompt) and the prompt
-        therefore does not yet carry the file bodies.
-        """
-        external_prompt = request_payload.get("prompt", "")
-        prompt = external_prompt
-        if not prompt and gate == "gemini_review":
-            prompt = self._build_gemini_prompt(request_payload)
-        elif not prompt and gate == "codex_gate":
+        """Build the prompt for the given gate type, unless the caller supplied one."""
+        prompt = request_payload.get("prompt", "")
+        if not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
         elif not prompt and gate in ("glm_gate", "kimi_gate"):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
-        if (
-            using_vertex
-            and gate == "gemini_review"
-            and prompt
-            and external_prompt
-        ):
-            file_contents = _vtx.collect_file_contents(
-                request_payload, subprocess_run=subprocess.run,
-            )
-            if file_contents:
-                prompt = prompt + "\n\n" + file_contents
         return prompt
 
     def _mark_executing(
@@ -465,43 +431,6 @@ class GateRunner:
             reports_dir=self._reports_dir,
         )
 
-    def _run_vertex_path(
-        self,
-        *,
-        gate: str,
-        pr_number: Optional[int],
-        pr_id: str,
-        prompt: str,
-        request_payload: Dict[str, Any],
-        pid: int,
-    ) -> Dict[str, Any]:
-        """Run Vertex AI REST path and feed output into artifact pipeline."""
-        _start = time.monotonic()
-        try:
-            raw_text = self._run_vertex_ai(prompt)
-        except Exception as exc:
-            duration = time.monotonic() - _start
-            return _rec.record_failure(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                result={
-                    "reason": "vertex_api_error",
-                    "reason_detail": str(exc),
-                    "duration_seconds": duration,
-                    "partial_output_lines": 0,
-                    "runner_pid": pid,
-                },
-                request_payload=request_payload,
-                requests_dir=self._requests_dir,
-                results_dir=self._results_dir,
-            )
-        return _art.materialize_artifacts(
-            gate=gate, pr_number=pr_number, pr_id=pr_id,
-            stdout=raw_text, request_payload=request_payload,
-            duration_seconds=time.monotonic() - _start,
-            requests_dir=self._requests_dir, results_dir=self._results_dir,
-            reports_dir=self._reports_dir,
-        )
-
     def _run_harness_lane_path(
         self,
         *,
@@ -519,7 +448,7 @@ class GateRunner:
         (``plan_gate_panel._make_default_dispatcher``), which runs the provider
         through its governed lane, writes the unified report, and returns its
         text. That text is then materialized into the runner's receipt + report
-        exactly like codex/gemini stdout. A provider-outage/dispatch failure is
+        exactly like codex stdout. A provider-outage/dispatch failure is
         an execution failure (``unavailable``), never ``failed`` — the same
         OI-1142 separation the standalone gates enforce.
         """
@@ -587,7 +516,7 @@ class GateRunner:
         # outage/verdict separation this file's own docstring promises).
         #
         # This is the ONE slot for this check. materialize_artifacts is
-        # shared by the vertex and subprocess strategies too, whose `stdout`
+        # shared by the subprocess strategy too, whose `stdout`
         # is raw model output, never a governed report with real frontmatter
         # — teaching it to parse YAML frontmatter out of arbitrary model text
         # would be guessing at a shape only the harness lane actually
@@ -668,16 +597,6 @@ class GateRunner:
             reports_dir=self._reports_dir,
         )
 
-    # Vertex AI wrappers — stay here so tests can patch gate_runner.subprocess.run
-
-    def _run_vertex_ai(self, prompt: str) -> str:
-        """Call Vertex AI REST API. Delegates to vertex_ai_runner."""
-        return _vtx.run_vertex_ai(
-            prompt,
-            subprocess_run=subprocess.run,
-            urlopen=urllib.request.urlopen,
-        )
-
     @staticmethod
     def _fetch_gh_pr_diff(pr_number: Optional[int]) -> str:
         """Fetch authoritative PR diff via gh pr diff.
@@ -751,46 +670,6 @@ class GateRunner:
         return format_for_provider(assembled, "codex")["pipe_input"]
 
     @staticmethod
-    def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
-        """Build reviewer prompt for gemini gate using gh pr diff as authoritative diff source.
-
-        Uses subprocess.run so tests can patch gate_runner.subprocess.run.
-        Raises on missing pr_number or gh pr diff failure — no silent empty-diff fallback.
-
-        OI-1442: same untrusted-data sandwich as ``_build_codex_prompt``; see
-        there for why the diff is delimited and why this path stays uncapped.
-        These two builders were verbatim copies of each other before this
-        change and stay verbatim copies after it — the reviewer instruction is
-        identical on purpose, so the two gates review the same PR under the
-        same contract.
-        """
-        branch = request_payload.get("branch", "")
-        risk = (request_payload.get("risk_class") or "medium")
-        pr_number = request_payload.get("pr_number")
-        diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
-        # OI-1851: uncapped, but the record still carries the real size.
-        request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
-        l3 = build_review_prompt(
-            gate_name="reviewer",
-            pr=str(pr_number),
-            diff_text=diff_content,
-            verdict_contract=_REVIEWER_VERDICT_TEMPLATE,
-            max_chars=0,
-            instruction=(
-                f"Review the PR diff in the untrusted-data block, on branch {branch} "
-                f"(risk: {risk}). "
-                "Findings MUST cite specific NEW lines from this diff — "
-                "do not flag pre-existing code."
-            ),
-        )
-        assembled = PromptAssembler().assemble(
-            dispatch_metadata={"role": "reviewer"},
-            instruction=l3,
-        )
-        formatted = format_for_provider(assembled, "gemini")
-        return f"{formatted['system_instruction']}\n\n---\n\n{formatted['prompt']}"
-
-    @staticmethod
     def _build_harness_lane_prompt(gate: str, request_payload: Dict[str, Any]) -> str:
         """Build the diff-review prompt for a harness-lane gate (glm_gate/kimi_gate).
 
@@ -822,10 +701,7 @@ class GateRunner:
     def _build_gate_cmd(self, gate: str, binary: str, request_payload: Dict[str, Any]) -> List[str]:
         """Build CLI command list with model selection for the given gate."""
         cli_args = list(GATE_CLI_ARGS.get(gate, []))
-        if gate == "gemini_review":
-            model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
-            cli_args = ["--model", model] + cli_args
-        elif gate == "codex_gate":
+        if gate == "codex_gate":
             # Model selection: only override if explicitly requested via env/payload.
             # Default path: let codex use ~/.codex/config.toml (currently gpt-5.5).
             # 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;

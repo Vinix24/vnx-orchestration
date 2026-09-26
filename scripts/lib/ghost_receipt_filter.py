@@ -2,8 +2,8 @@
 
 A "ghost receipt" is a receipt whose dispatch_id resolved to the sentinel
 value "unknown" after all enrichment attempts (env-var lookup, metadata
-extraction, etc.).  These arise from headless gate runners (gemini_review,
-codex_gate) that are invoked without a VNX_CURRENT_DISPATCH_ID in scope.
+extraction, etc.).  These arise from headless gate runners (codex_gate, and gemini_review
+before its retirement) that are invoked without a VNX_CURRENT_DISPATCH_ID in scope.
 
 Instead of polluting t0_receipts.ndjson with untraceable events, ghost gate
 receipts are redirected to a separate gate_events.ndjson stream where they
@@ -26,7 +26,7 @@ GATE_EVENTS_FILENAME = "gate_events.ndjson"
 _GHOST_SENTINEL_VALUES = {"unknown", "none", "null", ""}
 
 _KNOWN_GATE_NAMES = {
-    "gemini_review",
+    "gemini_review",  # retired 2026-09-26; kept so receipts written before then still filter
     "codex_gate",
     "claude_github_optional",
     "claude_github_review",

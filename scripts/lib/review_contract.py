@@ -2,7 +2,7 @@
 """Canonical review contract schema and serializer.
 
 A ReviewContract is the structured document that every review gate
-(Gemini advisory, Codex final gate, Claude GitHub optional) consumes
+(Codex final gate, Kimi, Claude GitHub optional) consumes
 to produce deliverable-aware reviews. It is materialized deterministically
 from FEATURE_PLAN.md, PR_QUEUE.md, changed files, declared tests,
 quality gates, and deterministic verifier findings.
@@ -34,7 +34,7 @@ def _normalize_line(raw_line: Any) -> int:
     """Coerce a raw ``line`` value to a non-negative int, defaulting to 0.
 
     Canonical home: every review gate that classifies untrusted findings
-    (Gemini advisory, Claude GitHub optional) already builds those findings
+    (the codex gate, Claude GitHub optional) already builds those findings
     from this contract's schema, and both previously carried an identical
     copy of this function — this is the shared source, imported rather than
     redefined.

@@ -22,7 +22,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-import vertex_ai_runner as _vtx
+import prompt_file_contents as _pfc
 
 
 def _run(cmd, cwd):
@@ -63,41 +63,7 @@ def branched_repo(tmp_path, monkeypatch):
 
 
 class TestPromptBuilderResolvesFromBranch:
-    """build_gemini_prompt and build_codex_prompt must read from the PR branch."""
-
-    def test_gemini_prompt_uses_branch_version_of_modified_file(self, branched_repo):
-        """File modified on PR branch is rendered with branch content, not cwd."""
-        payload = {
-            "branch": "feature/x",
-            "risk_class": "medium",
-            "pr_number": 1,
-            "changed_files": ["existing.py"],
-        }
-        prompt = _vtx.build_gemini_prompt(payload, subprocess_run=subprocess.run)
-
-        assert "feature version" in prompt
-        assert "main version" not in prompt
-        assert "--- FILE: existing.py" in prompt
-
-    def test_gemini_prompt_includes_file_added_only_on_branch(self, branched_repo):
-        """File that exists only on the PR branch is included in the prompt.
-
-        This is the exact PR #375 scenario: the file was added on the feature
-        branch, gate ran from main worktree, prompt section was empty.
-        """
-        # Sanity: the file genuinely does NOT exist on disk in the main worktree.
-        assert not (branched_repo / "new_only.py").exists()
-
-        payload = {
-            "branch": "feature/x",
-            "risk_class": "medium",
-            "pr_number": 1,
-            "changed_files": ["new_only.py"],
-        }
-        prompt = _vtx.build_gemini_prompt(payload, subprocess_run=subprocess.run)
-
-        assert "feature only" in prompt
-        assert "--- FILE: new_only.py" in prompt
+    """build_codex_prompt and collect_file_contents must read from the PR branch."""
 
     def test_codex_prompt_uses_branch_version(self, branched_repo):
         """Codex prompt builder also resolves from the PR branch."""
@@ -107,7 +73,7 @@ class TestPromptBuilderResolvesFromBranch:
             "pr_number": 2,
             "changed_files": ["existing.py", "new_only.py"],
         }
-        prompt = _vtx.build_codex_prompt(payload, subprocess_run=subprocess.run)
+        prompt = _pfc.build_codex_prompt(payload, subprocess_run=subprocess.run)
 
         assert "feature version" in prompt
         assert "feature only" in prompt
@@ -119,7 +85,7 @@ class TestPromptBuilderResolvesFromBranch:
             "branch": "feature/x",
             "changed_files": ["existing.py", "new_only.py"],
         }
-        contents = _vtx.collect_file_contents(payload, subprocess_run=subprocess.run)
+        contents = _pfc.collect_file_contents(payload, subprocess_run=subprocess.run)
 
         assert "feature version" in contents
         assert "feature only" in contents
@@ -140,7 +106,7 @@ class TestPromptBuilderResolvesFromBranch:
             "pr_number": 3,
             "changed_files": ["existing.py", "uncommitted.py"],
         }
-        prompt = _vtx.build_gemini_prompt(payload, subprocess_run=subprocess.run)
+        prompt = _pfc.collect_file_contents(payload, subprocess_run=subprocess.run)
 
         assert "feature version" in prompt  # via git show
         assert "local edit" in prompt        # via filesystem fallback
@@ -153,7 +119,7 @@ class TestPromptBuilderResolvesFromBranch:
             "pr_number": 4,
             "changed_files": ["existing.py"],
         }
-        prompt = _vtx.build_gemini_prompt(payload, subprocess_run=subprocess.run)
+        prompt = _pfc.collect_file_contents(payload, subprocess_run=subprocess.run)
 
         # cwd is on main, so we expect main's content.
         assert "main version" in prompt
@@ -174,7 +140,7 @@ class TestPromptBuilderResolvesFromBranch:
             "pr_number": 5,
             "changed_files": [str(outside)],
         }
-        prompt = _vtx.build_gemini_prompt(payload, subprocess_run=subprocess.run)
+        prompt = _pfc.collect_file_contents(payload, subprocess_run=subprocess.run)
 
         assert "absolute path content" in prompt
 
@@ -199,7 +165,7 @@ class TestBranchResolutionPreservesByteCap:
             "pr_number": 6,
             "changed_files": ["big.py"],
         }
-        prompt = _vtx.build_gemini_prompt(payload, subprocess_run=subprocess.run)
+        prompt = _pfc.collect_file_contents(payload, subprocess_run=subprocess.run)
 
         file_sections = prompt.split("--- FILE:")[1:]
         total = sum(len(s.encode("utf-8")) for s in file_sections)

@@ -20,6 +20,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier
 import dispatch_bridge
+import gate_recorder
 import review_gate_manager
 import smart_router
 from dispatch_spec import (
@@ -51,6 +52,11 @@ def test_the_retired_gate_is_not_registered() -> None:
     assert RETIRED in RETIRED_GATE_NAMES
     assert not RETIRED_GATE_NAMES & REGISTERED_GATE_NAMES
     assert RETIRED not in {g.value for g in Gate}
+
+
+def test_a_retired_gate_is_not_a_runnable_provider() -> None:
+    assert not RETIRED_GATE_NAMES & set(gate_recorder.GATE_PROVIDERS)
+    assert gate_recorder.resolve_gate_provider(RETIRED) is None
 
 
 def test_hint_names_a_retired_gate_and_stays_silent_for_a_typo() -> None:

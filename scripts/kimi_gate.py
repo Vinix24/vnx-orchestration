@@ -754,7 +754,7 @@ def main(argv: "list[str] | None" = None) -> int:
                 )
 
     # OI-1178 (DLv2): a terminal verdict must carry the same evidence pair
-    # codex_gate/gemini_review stamp — contract_hash (gate_artifacts' single
+    # codex_gate stamps — contract_hash (gate_artifacts' single
     # canonical hasher) + report_path. An unavailable result (no readable
     # verdict, or the dispatch itself failed) leaves contract_hash empty —
     # THAT is what keeps OI-1142's outage/verdict separation intact, because

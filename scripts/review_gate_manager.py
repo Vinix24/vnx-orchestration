@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Review gate orchestration for Gemini, Codex, and optional Claude GitHub review.
+"""Review gate orchestration for Codex, Kimi, GLM, DeepSeek, and optional Claude GitHub review.
 
 This module is the public facade. Implementation is split across mixin modules:
 - gate_executor.py: request orchestration and execution

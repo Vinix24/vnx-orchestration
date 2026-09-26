@@ -1,6 +1,6 @@
 """gate_worktree.py — ephemeral git worktree checkout for gate execution (OI-708).
 
-codex_gate and gemini_review spawn a real CLI agent (codex/gemini) that can run
+codex_gate spawns a real CLI agent (codex) that can run
 its own shell tools (sed/rg/cat/...) against whatever `cwd` the subprocess
 inherits. The gate's diff is fetched authoritatively via `gh pr diff`, but the
 agent's OWN file reads previously hit the orchestrator's ambient working

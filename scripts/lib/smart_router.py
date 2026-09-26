@@ -760,11 +760,11 @@ def _primary_review_gate() -> str:
     documented as an unordered set of seats to run (``ci_gate`` is appended
     separately, order carries no meaning), while ``_GATE_BASELINE``'s whole
     reason for existing is that review seats sit on a heaviness ladder. Picking
-    the heaviest keeps the registry default
-    ``codex_gate,claude_github_optional`` resolving to
-    ``codex_gate`` — the rung that table has always named — so a project that
-    never overrode the stack sees no change at all, and only a project that
-    actually re-pointed its review (mission-control -> glm_gate) moves.
+    the heaviest keeps a stack such as ``codex_gate,claude_github_optional``
+    resolving to ``codex_gate`` — the rung that table has always named — so a
+    project that never overrode the stack sees no change at all, and only a
+    project that actually re-pointed its review (mission-control -> glm_gate)
+    moves.
     """
     try:
         import config_runtime  # noqa: PLC0415  (lazy: keeps the module import-light)

@@ -48,11 +48,11 @@ def artifact_env(tmp_path):
     }
 
 
-def _make_request_payload(gate="gemini_review", pr_number=1, **overrides):
+def _make_request_payload(gate="codex_gate", pr_number=1, **overrides):
     base = {
         "gate": gate,
         "status": "requested",
-        "provider": "gemini_cli",
+        "provider": "codex_cli",
         "branch": "fix/test",
         "pr_number": pr_number,
         "review_mode": "per_pr",
@@ -73,7 +73,7 @@ def _make_request_payload(gate="gemini_review", pr_number=1, **overrides):
 class TestMaterializeArtifactsDispatchId:
     """Validates OI-AT-4: real dispatch_id emitted in result and sidecar."""
 
-    def _run_materialize(self, env, request_payload, stdout="Output line one.\nLine two.\nLine three.\n"):
+    def _run_materialize(self, env, request_payload, stdout='```json\n{"verdict": "pass", "findings": [], "residual_risk": null}\n```'):
         report_file = env["reports_dir"] / "test-report.md"
         request_payload.setdefault("report_path", str(report_file))
         return materialize_artifacts(
@@ -123,13 +123,13 @@ class TestMaterializeArtifactsDispatchId:
 
         sidecar = json.loads(sidecar_files[0].read_text())
         # Synthetic fallback format: gate-<gate>-pr-<pr_number>
-        assert sidecar["dispatch_id"] == "gate-gemini_review-pr-42"
+        assert sidecar["dispatch_id"] == "gate-codex_gate-pr-42"
 
     def test_result_file_written_with_dispatch_id(self, artifact_env):
         payload = _make_request_payload(pr_number=10, dispatch_id="20260423-090000-real-dispatch-B")
         self._run_materialize(artifact_env, payload)
 
-        result_file = artifact_env["results_dir"] / "pr-10-gemini_review.json"
+        result_file = artifact_env["results_dir"] / "pr-10-codex_gate.json"
         assert result_file.exists(), "Result JSON file must be written"
         result = json.loads(result_file.read_text())
         assert result["dispatch_id"] == "20260423-090000-real-dispatch-B"
@@ -177,7 +177,6 @@ class TestRequestHandlerDispatchId:
         monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
         monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
         monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
@@ -286,7 +285,6 @@ class TestCLIDispatchIdArg:
         monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
         monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
         monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
@@ -334,7 +332,6 @@ class TestCLIDispatchIdArg:
         monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
         monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
         monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 

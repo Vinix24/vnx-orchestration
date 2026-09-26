@@ -6,8 +6,7 @@ Validates Wave 4.5 PR-2b redo:
   - Non-zero gh pr diff exit raises loudly (no silent empty-diff fallback)
   - Missing pr_number raises ValueError
   - Reviewer role context (from reviewer.md) is present in the assembled prompt
-  - Verdict JSON template is preserved in both codex and gemini paths
-  - Gemini path mirrors all codex constraints
+  - Verdict JSON template is preserved in the codex path
 """
 
 from __future__ import annotations
@@ -141,66 +140,6 @@ class TestCodexPromptContent:
 
 
 # ---------------------------------------------------------------------------
-# Gemini path mirrors
-# ---------------------------------------------------------------------------
-
-class TestGeminiPathMirrors:
-    """Gemini path must apply all the same constraints as the codex path."""
-
-    def test_gemini_uses_gh_pr_diff(self):
-        payload = _make_payload(pr_number=200)
-        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()) as mock_run:
-            GateRunner._build_gemini_prompt(payload)
-
-        mock_run.assert_called_once_with(
-            ["gh", "pr", "diff", "200"],
-            capture_output=True, text=True, timeout=60,
-        )
-
-    def test_gemini_fails_loud_on_gh_diff_failure(self):
-        payload = _make_payload(pr_number=201)
-        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_failure(1, "pr not found")):
-            with pytest.raises(RuntimeError, match="gh pr diff 201 failed"):
-                GateRunner._build_gemini_prompt(payload)
-
-    def test_gemini_no_silent_empty_diff_fallback(self):
-        payload = _make_payload(pr_number=202)
-        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_failure(1, "")):
-            with pytest.raises((RuntimeError, ValueError)):
-                GateRunner._build_gemini_prompt(payload)
-
-    def test_gemini_fails_on_missing_pr_number(self):
-        payload = _make_payload(pr_number=None)
-        with pytest.raises(ValueError, match="pr_number is required"):
-            GateRunner._build_gemini_prompt(payload)
-
-    def test_gemini_prompt_preserves_verdict_template(self):
-        payload = _make_payload(pr_number=203)
-        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
-            result = GateRunner._build_gemini_prompt(payload)
-
-        assert '"verdict"' in result
-        assert '"findings"' in result
-        assert '"out_of_scope"' in result
-        assert '"introduced_by_prior_fix"' in result
-
-    def test_gemini_prompt_has_reviewer_role_context(self):
-        payload = _make_payload(pr_number=204)
-        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
-            result = GateRunner._build_gemini_prompt(payload)
-
-        assert "ADR-003" in result or "ADR-010" in result or "VNX governance" in result.lower()
-
-    def test_gemini_returns_string(self):
-        payload = _make_payload(pr_number=205)
-        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
-            result = GateRunner._build_gemini_prompt(payload)
-
-        assert isinstance(result, str)
-        assert len(result) > 100
-
-
-# ---------------------------------------------------------------------------
 # _fetch_gh_pr_diff unit tests
 # ---------------------------------------------------------------------------
 
@@ -255,7 +194,7 @@ _CANARY_DIFF = (
 )
 
 
-@pytest.mark.parametrize("builder_name", ["_build_codex_prompt", "_build_gemini_prompt"])
+@pytest.mark.parametrize("builder_name", ["_build_codex_prompt"])
 class TestUntrustedDiffSandwich:
 
     def _build(self, builder_name, diff=_CANARY_DIFF, pr_number=1442):

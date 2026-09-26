@@ -10,7 +10,7 @@ would land TWO lines in ``gate_execution_audit.ndjson`` for ONE event
 
 The SAME shape existed, unfixed, on three more production call sites in
 ``gate_request_handler.py``: ``_mark_gate_unavailable`` (shared by
-``_request_codex``/``_request_gemini``/``_request_kimi``/
+``_request_codex``/``_request_kimi``/
 ``_request_ci_gate``), ``_request_glm`` and ``_request_deepseek``. Each
 calls ``self._write_not_executable_result`` (which itself routes through
 ``write_result_guarded``) and then unconditionally calls
@@ -146,7 +146,6 @@ def manager_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
     monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
     monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
     monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
     return {
@@ -159,7 +158,7 @@ def manager_env(tmp_path, monkeypatch):
 
 class TestMarkGateUnavailableAuditCount:
     """Path 2/4: gate_request_handler._mark_gate_unavailable -- shared by
-    _request_codex/_request_gemini/_request_kimi/_request_ci_gate. Called
+    _request_codex/_request_kimi/_request_ci_gate. Called
     directly with gate="kimi_gate" (a harness-lane gate,
     GATE_PROVIDER_HARNESS_LANE) so gate_result_parser._classify_unavailable's
     reason is deterministically "gate_runner_missing" regardless of what

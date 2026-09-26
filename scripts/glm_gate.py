@@ -198,7 +198,7 @@ def _build_prompt(diff_text: str, pr: str) -> str:
     last word. The verdict contract is the shared gate_lane_contract source
     (C6 step 3), identical by design for glm_gate, kimi_gate and gate_runner's
     harness-lane path; gate_runner's ``_REVIEWER_VERDICT_TEMPLATE``
-    (codex/gemini) is a different, richer shape and is not this contract.
+    (codex) is a different, richer shape and is not this contract.
     """
     return build_review_prompt(
         gate_name="glm_gate",

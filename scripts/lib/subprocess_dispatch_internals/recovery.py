@@ -565,7 +565,7 @@ def deliver_with_recovery(
     even when this function is called as a library (not via the CLI __main__ block).
 
     pr_id: when provided, forwarded to IntelligenceSelector.select() so
-    prior_round_finding items (codex/gemini gate results) fire in production.
+    prior_round_finding items (codex gate results) fire in production.
     """
     import subprocess_dispatch as _sd
     chunk_timeout, total_deadline = apply_runtime_overrides(chunk_timeout, total_deadline)
