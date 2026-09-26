@@ -345,7 +345,7 @@ def test_horizon_help_lists_full_surface(monkeypatch, capsys):
     for verb in (
         "add", "list", "show", "sync", "drift", "reconcile",
         "reconcile-review", "reconcile-streak", "close", "reopen",
-        "link-pr", "unlink-pr", "set-lane-hint", "set-goal",
+        "link-pr", "unlink-pr", "unmark-delivery", "set-lane-hint", "set-goal",
         "deliverable", "plan-gate",
     ):
         assert verb in out, f"missing verb in `vnx horizon --help`: {verb}"
@@ -357,7 +357,7 @@ def test_objective_and_deliverable_alias_help(monkeypatch, capsys):
     for verb in (
         "add", "list", "show", "sync", "drift", "reconcile",
         "reconcile-review", "reconcile-streak", "close", "reopen",
-        "link-pr", "unlink-pr", "set-lane-hint", "set-goal",
+        "link-pr", "unlink-pr", "unmark-delivery", "set-lane-hint", "set-goal",
     ):
         assert verb in out
     # objective is the OBJECTIVE-domain alias only — deliverable/plan-gate stay
@@ -663,6 +663,73 @@ def test_objective_unlink_pr_help_matches_engine_arg_surface(monkeypatch, capsys
     assert "TRACK_ID" in out
     assert "PR" in out
     assert "--reason" in out
+
+
+def test_unmark_delivery_resolves_through_verb_dispatch():
+    """`unmark-delivery` (OI-1872) is registered in _VERB_DISPATCH and delegates
+    to the real planning_cli.cmd_objective_unmark_delivery (not reimplemented)."""
+    assert _horizon._VERB_DISPATCH["unmark-delivery"] is _horizon._cmd_unmark_delivery
+    assert hasattr(planning_cli, "cmd_objective_unmark_delivery")
+
+
+def test_horizon_unmark_delivery_round_trips_track_prs_and_reason(project, monkeypatch, capsys):
+    """`vnx horizon unmark-delivery <track> <pr> <pr> --reason ...` parses
+    multiple PR refs and forwards --reason and the tenant-safe state_dir."""
+    project_dir, _ = project
+    captured = _capture_delegate(monkeypatch, "cmd_objective_unmark_delivery")
+
+    rc, _, err = _run(monkeypatch, capsys, [
+        "horizon", "unmark-delivery", "feat-unmark", "#1234", "#1235",
+        "--reason", "OI-1872: back to unmarked",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 0, err
+
+    args = captured["args"]
+    assert args.track_id == "feat-unmark"
+    assert args.pr == ["#1234", "#1235"]
+    assert args.reason == "OI-1872: back to unmarked"
+    assert args.project_id == "horizon-test"
+    assert args.state_dir == str(_engine.resolve_data_root(Path(project_dir)) / "state")
+
+
+def test_objective_unmark_delivery_round_trips_through_the_alias(project, monkeypatch, capsys):
+    """Same round trip via the `vnx objective` alias entrance."""
+    project_dir, _ = project
+    captured = _capture_delegate(monkeypatch, "cmd_objective_unmark_delivery")
+
+    rc, _, err = _run(monkeypatch, capsys, [
+        "objective", "unmark-delivery", "feat-unmark", "#4321",
+        "--reason", "linked as partial by default",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 0, err
+
+    args = captured["args"]
+    assert args.track_id == "feat-unmark"
+    assert args.pr == ["#4321"]
+    assert args.reason == "linked as partial by default"
+
+
+def test_horizon_unmark_delivery_empty_reason_is_refused_by_the_real_handler(project, monkeypatch, capsys):
+    """Unstubbed: no --reason reaches planning_cli's own refusal (exit 2, no
+    silent bypass). The refusal comes before any track lookup."""
+    project_dir, _ = project
+    rc, _, err = _run(monkeypatch, capsys, [
+        "objective", "unmark-delivery", "feat-does-not-exist", "#1",
+        "--project-id", "horizon-test", "--project-dir", str(project_dir),
+    ])
+    assert rc == 2
+    assert "reason" in err
+
+
+def test_horizon_unmark_delivery_help_matches_engine_arg_surface(monkeypatch, capsys):
+    for entrance in ("horizon", "objective"):
+        rc, out, _ = _run(monkeypatch, capsys, [entrance, "unmark-delivery", "--help"])
+        assert rc == 0
+        assert "TRACK_ID" in out
+        assert "PR" in out
+        assert "--reason" in out
 
 
 def test_horizon_set_lane_hint_round_trips_choices(project, monkeypatch, capsys):
