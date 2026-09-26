@@ -873,11 +873,11 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 ### Hooks Wired in `.claude/settings.json` (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
 
 <!-- BEGIN GENERATED: hooks -->
-- **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_block_subagent.sh`
+- **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_block_subagent.sh`, `t0_context_guard.py`
 - **SessionEnd**: `session_reconcile_cleanup.sh`, `build_current_state.py`, `build_doc_indexes.py`
 - **SessionStart**: `session_reconcile_autoclose.sh`, `build_t0_state_hook.sh`, `tmux_signal_session_ready.sh`, `path_parity_check.sh`, `monitor_tripwire.sh`, `sessionstart.sh`, `hookpin_check.sh`
-- **Stop**: `stop_report_hook.sh`, `tmux_signal_stop_receipt.sh`, `session_stop_rotation.py`
-- **UserPromptSubmit**: `tmux_signal_prompt_received.sh`
+- **Stop**: `stop_report_hook.sh`, `tmux_signal_stop_receipt.sh`, `session_stop_rotation.py`, `t0_context_guard.py`
+- **UserPromptSubmit**: `tmux_signal_prompt_received.sh`, `t0_context_guard.py`
 <!-- END GENERATED: hooks -->
 
 `scripts/userpromptsubmit_worker_intelligence_inject.sh` is intentionally

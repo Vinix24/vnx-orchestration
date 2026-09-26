@@ -18,6 +18,7 @@
 - Autonomous production guide: `AUTONOMOUS_PRODUCTION_GUIDE.md`
 - Transcript backup & archive: `TRANSCRIPT_BACKUP_ARCHIVE.md`
 - T0 context rotation (default OFF): `CONTEXT_ROTATION.md`
+- T0 context rotation enforced at 500K (guard hook, spawner, handoff contract): `T0_CONTEXT_ROTATION.md`
 - Producer freshness monitor (silent-failure detection): `PRODUCER_FRESHNESS_MONITOR.md`
 
 > **Note**: `MONITORING_GUIDE.md` was retired. Runtime monitoring is now available

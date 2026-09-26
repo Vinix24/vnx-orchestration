@@ -31,6 +31,16 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "Bash|Skill|SlashCommand",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); exec python3 \"$ROOT/scripts/hooks/t0_context_guard.py\"'",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -130,6 +140,16 @@
             "timeout": 5000
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); exec python3 \"$ROOT/scripts/hooks/t0_context_guard.py\"'",
+            "timeout": 5000
+          }
+        ]
       }
     ],
     "Stop": [
@@ -158,6 +178,16 @@
           {
             "type": "command",
             "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); if [ \"$VNX_T0_ROTATION\" = \"1\" ]; then mkdir -p \"$ROOT/.vnx-data/logs\" 2>/dev/null; python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" 2>>\"$ROOT/.vnx-data/logs/session_stop_rotation.err\"; else python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" >/dev/null 2>&1; fi; exit 0'",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); exec python3 \"$ROOT/scripts/hooks/t0_context_guard.py\"'",
             "timeout": 5000
           }
         ]

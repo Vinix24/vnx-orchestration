@@ -114,8 +114,15 @@ def _decision_emitters(settings: dict) -> List[Tuple[str, str]]:
 
 
 def _user_prompt_submit_command(settings: dict) -> str:
-    commands = [cmd for event, cmd in _command_hooks(settings) if event == "UserPromptSubmit"]
-    assert len(commands) == 1, f"expected exactly one UserPromptSubmit command hook, got {commands!r}"
+    """The terminal-routing intelligence-inject hook. Other UserPromptSubmit hooks may sit
+    next to it (the T0 context guard, dispatch 20260925-t0-context-rotation-enforced); the
+    guard is held to the same no-decision contract by the test above, so this selects by
+    what the hook routes to rather than by count."""
+    commands = [
+        cmd for event, cmd in _command_hooks(settings)
+        if event == "UserPromptSubmit" and (T0_INJECT in cmd or WORKER_INJECT in cmd)
+    ]
+    assert len(commands) == 1, f"expected exactly one intelligence-inject UserPromptSubmit hook, got {commands!r}"
     return commands[0]
 
 

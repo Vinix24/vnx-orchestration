@@ -8,6 +8,9 @@
 > `docs/core/technical/CONTEXT_ROTATION_SYSTEM.md`) plus the operator
 > `/rotate` flow; it is not implemented here.
 >
+> **Enforced T0 rotation at 500K** (operator decision 2026-09-25) is a separate
+> contract with its own handoff (`daily-log/handoff.md`): `T0_CONTEXT_ROTATION.md`.
+>
 > **History (OI-1042).** An earlier in-module control-plane
 > (`checkpoint()` / `decide_rotation()` / `RotationPolicy` / `respawn()`,
 > shipped default-off 2026-07-12) never gained a production caller — the

@@ -321,6 +321,31 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "config-store value as an explicit per-session override.",
         approval=True,
         subsystem="claude-tmux-serialization", status="ACTIVATE"),
+
+    # Operator decision 2026-09-25 (dispatch 20260925-t0-context-rotation-enforced): a T0
+    # orchestrator MUST rotate at 500K context. Measured by scripts/lib/t0_context_budget.py
+    # from the session transcript's last assistant usage block, enforced by
+    # scripts/hooks/t0_context_guard.py. T0 only: workers never read these.
+    "VNX_T0_ROTATE_WARN_TOKENS": _e(
+        "VNX_T0_ROTATE_WARN_TOKENS", "string", "400000", "dispatch",
+        "T0 context size (tokens) at which the guard tells T0 to wind down and prepare the "
+        "rotation (additionalContext on each prompt).",
+        subsystem="t0-context-rotation", status="ACTIVATE"),
+    "VNX_T0_ROTATE_HARD_TOKENS": _e(
+        "VNX_T0_ROTATE_HARD_TOKENS", "string", "600000", "dispatch",
+        "T0 context size (tokens) at which the guard demands the rotation now, even with work "
+        "in flight; the handoff carries that work over.",
+        approval=True,
+        subsystem="t0-context-rotation", status="ACTIVATE"),
+    # FORCE last: vnx_cli/commands/subsystems.py picks the last-inserted flag per subsystem
+    # for the ledger row, config_registry.canonical_flags() the marked one; both say FORCE.
+    "VNX_T0_ROTATE_FORCE_TOKENS": _e(
+        "VNX_T0_ROTATE_FORCE_TOKENS", "string", "500000", "dispatch",
+        "T0 context size (tokens) at which rotation is pending: the guard refuses to start new "
+        "work (dispatch, staging, gh pr create, a new /goal) and blocks the end of each turn "
+        "until the rotate flow ran. Finishing work in flight stays allowed.",
+        approval=True,
+        subsystem="t0-context-rotation", status="ACTIVATE", cockpit_canonical=True),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
