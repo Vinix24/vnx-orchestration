@@ -723,9 +723,12 @@ def test_default_review_stack_includes_ci_gate_when_required(monkeypatch):
     assert "ci_gate" in stack
 
 
-def test_default_review_stack_control_case_codex_glm_combo_unchanged(monkeypatch):
-    """Control case (dispatch 20260914-poorten-punt3-s2): with no config
-    override, the registry default is codex_gate + glm_gate.
+def test_default_review_stack_control_case_codex_kimi_combo_unchanged(monkeypatch):
+    """Control case (dispatch 20260914-poorten-punt3-s2, second seat replaced by
+    dispatch 20260926-review-stack-subscription-first): with no config
+    override, the registry default is codex_gate + kimi_gate, the two reviewers
+    that run on a subscription. glm_gate was the second seat from 20260914 until
+    20260926 and is now a takeover fallback only.
 
     Superseded by this dispatch: the previous default (gemini_review +
     codex_gate + claude_github_optional, dispatch 20260823-beta2-e) named two
@@ -738,13 +741,13 @@ def test_default_review_stack_control_case_codex_glm_combo_unchanged(monkeypatch
     VNX_CI_GATE_REQUIRED is pinned to "0" (not delenv'd) since OI-1385 flipped its
     registry default to "1": this test measures the BASE stack composition, not
     ci_gate's own default, so it must isolate that axis explicitly or it starts
-    asserting a codex/glm-only stack that no longer matches the wired default.
+    asserting a codex/kimi-only stack that no longer matches the wired default.
     """
     monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
     import review_gate_manager as rgm
     stack = rgm._build_default_review_stack()
-    assert stack == ["codex_gate", "glm_gate"]
+    assert stack == ["codex_gate", "kimi_gate"]
 
 
 def test_default_review_stack_excludes_gates_that_are_never_configured(monkeypatch):

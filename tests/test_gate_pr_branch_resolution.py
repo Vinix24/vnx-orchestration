@@ -184,3 +184,26 @@ class TestGateBranchDerivation:
         result = _run_cmd_gate(env, "1281", "--only", "ci")
         assert result.returncode == 0, result.stderr
         assert _captured_review_stack(env) == "ci_gate"
+
+    @pytest.mark.parametrize("short,gate", [
+        ("codex", "codex_gate"),
+        ("kimi", "kimi_gate"),
+        ("glm", "glm_gate"),
+        ("deepseek", "deepseek_gate"),
+        ("kimi_gate", "kimi_gate"),
+    ])
+    def test_only_reviewer_names_reach_review_gate_manager_as_gate_names(self, env, short, gate):
+        """The reviewers read as `--only <short>` and arrive as the registered gate name.
+        kimi is a subscription reviewer and the first fallback behind codex, so
+        `vnx gate <pr> --only kimi` has to work without knowing the suffix."""
+        result = _run_cmd_gate(env, "1281", "--only", short)
+        assert result.returncode == 0, result.stderr
+        assert _captured_review_stack(env) == gate
+
+    def test_help_names_the_kimi_gate_and_marks_api_credit_gates_as_fallback(self, env):
+        result = _run_cmd_gate(env, "--help")
+        assert result.returncode == 0, result.stderr
+        assert "kimi_gate" in result.stdout
+        for gate in ("glm_gate", "deepseek_gate"):
+            line = next(text for text in result.stdout.splitlines() if text.strip().startswith(gate))
+            assert "fallback" in line, f"{gate} must read as a fallback in the help: {line!r}"

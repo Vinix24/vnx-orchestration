@@ -105,7 +105,8 @@ GATE_COST: Dict[str, GateCost] = {
         command="python3 scripts/review_gate_manager.py request-and-execute --gate codex_gate --pr {pr}",
         lane="codex CLI",
         usd="subscription",
-        note="rate-limited; operator policy A1 is to wait for the reset, not to fall back",
+        note="rate-limited; operator policy A1 is to wait for the reset rather than fall back to an "
+             "API-credit gate. kimi_gate, also a subscription, is the seat that takes over",
     ),
     Gate.GEMINI_REVIEW.value: GateCost(
         command="python3 scripts/review_gate_manager.py request-and-execute --gate gemini_review --pr {pr}",
@@ -266,13 +267,19 @@ class Readiness:
             # An undeclared obligation has a cost too, and leaving it off the
             # list was the one place this report said "nothing outstanding"
             # about a PR it had just called NOT READY.
+            # Subscription reviewers first (operator decision 2026-09-26): codex and
+            # kimi cost nothing per run, glm bills API credit and is named last, as
+            # the fallback for the day both are unavailable.
             choices = " or ".join(
                 f"{name} ({GATE_COST[name].usd})"
-                for name in (Gate.GLM_GATE.value, Gate.CODEX_GATE.value)
+                for name in (Gate.CODEX_GATE.value, Gate.KIMI_GATE.value)
+            )
+            fallback = (
+                f"{Gate.GLM_GATE.value} ({GATE_COST[Gate.GLM_GATE.value].usd}) only when both are unavailable"
             )
             out.append(
-                f"declare and run a review gate for #{self.pr_number} — {choices}; "
-                "the door writes the obligation, `vnx dispatch` is the entry"
+                f"declare and run a review gate for #{self.pr_number} — {choices}, "
+                f"or {fallback}; the door writes the obligation, `vnx dispatch` is the entry"
             )
         for gate in self.gates:
             if gate.satisfied:
