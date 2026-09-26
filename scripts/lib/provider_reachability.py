@@ -1,4 +1,4 @@
-"""provider_reachability.py — measured, cached reachability per provider.
+"""provider_reachability.py: measured, cached reachability per provider.
 
 ``is_available()`` used to answer "is the binary on PATH / is the package
 importable". That is presence. Measured 2026-08-23 (OI-1454): three of four
