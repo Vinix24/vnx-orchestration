@@ -659,7 +659,6 @@ class TestRule16GateName:
         assert isinstance(result, ValidatedSpec)
 
     @pytest.mark.parametrize("valid_gate", [
-        "gemini_review",
         "codex_gate",
         "claude_github_optional",
         "ci_gate",

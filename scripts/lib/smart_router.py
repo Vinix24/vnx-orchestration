@@ -27,7 +27,7 @@ from observability_tier import GOVERNANCE_MIN_TIERS
 # cannot be imported, and the legal-name set must be the ONE the door's Rule 16,
 # the staging bridge and the takeover-chain parser read. Re-exported here as
 # ``smart_router.ReviewGateConfigError`` for the callers that already use it.
-from dispatch_spec import REGISTERED_GATE_NAMES, ReviewGateConfigError
+from dispatch_spec import REGISTERED_GATE_NAMES, ReviewGateConfigError, retired_gate_hint
 
 _RECOMMENDATIONS_PATH = Path(__file__).parent / "providers" / "routing_recommendations.yaml"
 
@@ -697,7 +697,6 @@ _GATE_WEIGHT: dict[str, int] = {
     "kimi_gate": 3,
     "glm_gate": 3,
     "deepseek_gate": 3,
-    "gemini_review": 2,
     "claude_github_optional": 1,
     "ci_gate": 0,
     "wiring_gate": 0,
@@ -800,9 +799,10 @@ def _primary_review_gate() -> str:
 
     known = [name for name in names if name in REGISTERED_GATE_NAMES]
     if not known:
+        retired = "".join(retired_gate_hint(name) for name in names)
         raise ReviewGateConfigError(
             f"{DEFAULT_REVIEW_STACK_KEY} names no gate that exists "
-            f"(value={raw!r}); legal gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}. "
+            f"(value={raw!r}{retired}); legal gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}. "
             "The stack must name a real review gate, not a private label — "
             "refusing to guess one."
         )
