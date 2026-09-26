@@ -119,7 +119,7 @@ describe('useGateConfig — hook behaviour', () => {
     mockUseGateConfig.mockReturnValue({
       data: makeGateConfig({
         project: 'alpha',
-        gates: { gemini_review: { enabled: true }, codex_gate: { enabled: false } },
+        gates: { kimi_gate: { enabled: true }, codex_gate: { enabled: false } },
       }),
       isLoading: false,
       error: undefined,

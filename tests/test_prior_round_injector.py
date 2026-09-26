@@ -4,7 +4,7 @@
 Coverage:
   - Graceful empty when no gate results exist
   - Fetches codex_gate blocking findings
-  - Fetches gemini_review blocking findings
+  - Ignores a retired gate (gemini_review) as a prior-round source
   - Blocking before advisory in priority order
   - Scope filter prioritizes dispatch_paths overlap
   - Most recent round first when multiple gate result timestamps differ
@@ -109,7 +109,7 @@ class TestPriorRoundInjector(unittest.TestCase):
             self.assertEqual(findings[0].severity, "blocking")
             self.assertIn("Missing migration", findings[0].message)
 
-    def test_fetches_gemini_blocking_findings(self):
+    def test_ignores_a_retired_gate_as_a_prior_round_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp)
             results_dir = _make_results_dir(state_dir)
@@ -117,10 +117,7 @@ class TestPriorRoundInjector(unittest.TestCase):
                 results_dir, "43", "gemini_review",
                 blocking=["SSE reuse-after-close in dashboard/foo.ts:55."],
             )
-            findings = fetch_prior_findings("43", state_dir=state_dir)
-            self.assertEqual(len(findings), 1)
-            self.assertEqual(findings[0].gate, "gemini_review")
-            self.assertEqual(findings[0].severity, "blocking")
+            self.assertEqual(fetch_prior_findings("43", state_dir=state_dir), [])
 
     def test_blocking_before_advisory_in_priority(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,28 +155,6 @@ class TestPriorRoundInjector(unittest.TestCase):
             # Matched finding should come first
             first = findings[0]
             self.assertIn("target.py", first.message)
-
-    def test_most_recent_round_first_when_multiple_runs(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            state_dir = Path(tmp)
-            results_dir = _make_results_dir(state_dir)
-            # codex_gate has newer recorded_at than gemini_review
-            _write_gate_file(
-                results_dir, "46", "codex_gate",
-                blocking=["Codex recent finding."],
-                recorded_at="2026-04-10T12:00:00Z",
-            )
-            _write_gate_file(
-                results_dir, "46", "gemini_review",
-                blocking=["Gemini older finding."],
-                recorded_at="2026-04-09T08:00:00Z",
-            )
-            findings = fetch_prior_findings("46", state_dir=state_dir)
-            # Codex (newer) findings should appear before Gemini (older)
-            gates = [f.gate for f in findings]
-            self.assertIn("codex_gate", gates)
-            self.assertIn("gemini_review", gates)
-            self.assertEqual(gates.index("codex_gate"), 0)
 
     def test_budget_truncates_at_max_chars(self):
         with tempfile.TemporaryDirectory() as tmp:

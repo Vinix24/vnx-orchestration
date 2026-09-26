@@ -133,7 +133,12 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "include real verdicts. claude_github_optional remains a legal "
         "gate_recorder.GATE_PROVIDERS entry -- removing it there would relabel its historical "
         "records unsupported_gate_type, which reads as a routing bug instead of the "
-        "deliberate design it is. "
+        "deliberate design it is. gemini_review went further on 2026-09-26 (operator "
+        "decision: Gemini is no longer a reviewer): it is a retired gate "
+        "(dispatch_spec.RETIRED_GATE_NAMES), not a registered one. A stack that still "
+        "names it is dropped with a warning by review_gate_manager and refused by every "
+        "other reader of the gate-name registry, while the closure verifier keeps "
+        "interpreting its existing records so history does not read as a config gap. "
         "Lets an operator route review gates to any registered gate name — e.g. "
         "kimi_gate,glm_gate — without editing review_gate_manager.py. ci_gate is appended "
         "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,

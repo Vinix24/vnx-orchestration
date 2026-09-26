@@ -53,7 +53,7 @@ function makeGateConfig(overrides: Partial<Record<string, { enabled: boolean }>>
     config_path: '/projects/my-project/.vnx/gate_config.json',
     queried_at: '2026-04-03T21:42:00Z',
     gates: {
-      gemini_review: { enabled: true },
+      kimi_gate: { enabled: true },
       codex_gate: { enabled: true },
       ...overrides,
     },
@@ -87,10 +87,10 @@ describe('ProjectCard gate toggles — rendering', () => {
     expect(screen.getByTestId('gate-toggles')).toBeInTheDocument();
   });
 
-  test('gemini_review toggle switch renders', () => {
+  test('kimi_gate toggle switch renders', () => {
     setupGateConfig(makeGateConfig());
     renderCard();
-    expect(screen.getByTestId('gate-toggle-gemini_review')).toBeInTheDocument();
+    expect(screen.getByTestId('gate-toggle-kimi_gate')).toBeInTheDocument();
   });
 
   test('codex_gate toggle switch renders', () => {
@@ -102,7 +102,7 @@ describe('ProjectCard gate toggles — rendering', () => {
   test('gate labels are visible', () => {
     setupGateConfig(makeGateConfig());
     renderCard();
-    expect(screen.getByText('Gemini Review')).toBeInTheDocument();
+    expect(screen.getByText('Kimi Gate')).toBeInTheDocument();
     expect(screen.getByText('Codex Gate')).toBeInTheDocument();
   });
 
@@ -120,16 +120,16 @@ describe('ProjectCard gate toggles — rendering', () => {
 
 describe('ProjectCard gate toggles — color indicators', () => {
   test('enabled gate indicator has aria-checked=true on switch', () => {
-    setupGateConfig(makeGateConfig({ gemini_review: { enabled: true } }));
+    setupGateConfig(makeGateConfig({ kimi_gate: { enabled: true } }));
     renderCard();
-    const toggle = screen.getByTestId('gate-toggle-gemini_review');
+    const toggle = screen.getByTestId('gate-toggle-kimi_gate');
     expect(toggle).toHaveAttribute('aria-checked', 'true');
   });
 
   test('disabled gate indicator has aria-checked=false on switch', () => {
-    setupGateConfig(makeGateConfig({ gemini_review: { enabled: false } }));
+    setupGateConfig(makeGateConfig({ kimi_gate: { enabled: false } }));
     renderCard();
-    const toggle = screen.getByTestId('gate-toggle-gemini_review');
+    const toggle = screen.getByTestId('gate-toggle-kimi_gate');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
   });
 
@@ -139,10 +139,10 @@ describe('ProjectCard gate toggles — color indicators', () => {
     expect(screen.getByTestId('gate-toggle-codex_gate')).toHaveAttribute('aria-checked', 'false');
   });
 
-  test('gemini indicator is present for enabled gate', () => {
-    setupGateConfig(makeGateConfig({ gemini_review: { enabled: true } }));
+  test('kimi indicator is present for enabled gate', () => {
+    setupGateConfig(makeGateConfig({ kimi_gate: { enabled: true } }));
     renderCard();
-    expect(screen.getByTestId('gate-indicator-gemini_review')).toBeInTheDocument();
+    expect(screen.getByTestId('gate-indicator-kimi_gate')).toBeInTheDocument();
   });
 
   test('codex indicator is present for enabled gate', () => {
@@ -161,14 +161,14 @@ describe('ProjectCard gate toggles — color indicators', () => {
     } as ReturnType<typeof useGateConfig>);
     renderCard();
     // Should still render — defaults to enabled
-    const toggle = screen.getByTestId('gate-toggle-gemini_review');
+    const toggle = screen.getByTestId('gate-toggle-kimi_gate');
     expect(toggle).toHaveAttribute('aria-checked', 'true');
   });
 
   test('defaults to enabled when gate key is missing from config', () => {
     setupGateConfig({ ...makeGateConfig(), gates: {} });
     renderCard();
-    expect(screen.getByTestId('gate-toggle-gemini_review')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('gate-toggle-kimi_gate')).toHaveAttribute('aria-checked', 'true');
   });
 });
 
@@ -181,21 +181,21 @@ describe('ProjectCard gate toggles — toggle interaction', () => {
     mockPostGateToggle.mockResolvedValue({
       action: 'toggle',
       project: '/projects/my-project',
-      gate: 'gemini_review',
+      gate: 'kimi_gate',
       enabled: false,
       status: 'success',
       message: 'Gate disabled',
       timestamp: '2026-04-03T21:42:00Z',
     });
-    setupGateConfig(makeGateConfig({ gemini_review: { enabled: true } }));
+    setupGateConfig(makeGateConfig({ kimi_gate: { enabled: true } }));
     renderCard();
 
-    fireEvent.click(screen.getByTestId('gate-toggle-gemini_review'));
+    fireEvent.click(screen.getByTestId('gate-toggle-kimi_gate'));
 
     await waitFor(() => {
       expect(mockPostGateToggle).toHaveBeenCalledWith({
         project: '/projects/my-project',
-        gate: 'gemini_review',
+        gate: 'kimi_gate',
         enabled: false,
       });
     });
@@ -205,21 +205,21 @@ describe('ProjectCard gate toggles — toggle interaction', () => {
     mockPostGateToggle.mockResolvedValue({
       action: 'toggle',
       project: '/projects/my-project',
-      gate: 'gemini_review',
+      gate: 'kimi_gate',
       enabled: true,
       status: 'success',
       message: 'Gate enabled',
       timestamp: '2026-04-03T21:42:00Z',
     });
-    setupGateConfig(makeGateConfig({ gemini_review: { enabled: false } }));
+    setupGateConfig(makeGateConfig({ kimi_gate: { enabled: false } }));
     renderCard();
 
-    fireEvent.click(screen.getByTestId('gate-toggle-gemini_review'));
+    fireEvent.click(screen.getByTestId('gate-toggle-kimi_gate'));
 
     await waitFor(() => {
       expect(mockPostGateToggle).toHaveBeenCalledWith({
         project: '/projects/my-project',
-        gate: 'gemini_review',
+        gate: 'kimi_gate',
         enabled: true,
       });
     });
@@ -253,7 +253,7 @@ describe('ProjectCard gate toggles — toggle interaction', () => {
     mockPostGateToggle.mockResolvedValue({
       action: 'toggle',
       project: '/projects/my-project',
-      gate: 'gemini_review',
+      gate: 'kimi_gate',
       enabled: false,
       status: 'success',
       message: 'ok',
@@ -262,7 +262,7 @@ describe('ProjectCard gate toggles — toggle interaction', () => {
     const { mutate } = setupGateConfig(makeGateConfig());
     renderCard();
 
-    fireEvent.click(screen.getByTestId('gate-toggle-gemini_review'));
+    fireEvent.click(screen.getByTestId('gate-toggle-kimi_gate'));
 
     await waitFor(() => {
       expect(mutate).toHaveBeenCalled();
@@ -276,7 +276,7 @@ describe('ProjectCard gate toggles — toggle interaction', () => {
         resolveToggle = () => resolve({
           action: 'toggle',
           project: '/projects/my-project',
-          gate: 'gemini_review',
+          gate: 'kimi_gate',
           enabled: false,
           status: 'success',
           message: 'ok',
@@ -287,29 +287,29 @@ describe('ProjectCard gate toggles — toggle interaction', () => {
     setupGateConfig(makeGateConfig());
     renderCard();
 
-    fireEvent.click(screen.getByTestId('gate-toggle-gemini_review'));
+    fireEvent.click(screen.getByTestId('gate-toggle-kimi_gate'));
 
     // Button should become disabled while pending
-    expect(screen.getByTestId('gate-toggle-gemini_review')).toBeDisabled();
+    expect(screen.getByTestId('gate-toggle-kimi_gate')).toBeDisabled();
 
     // Resolve the promise
     resolveToggle();
     await waitFor(() => {
-      expect(screen.getByTestId('gate-toggle-gemini_review')).not.toBeDisabled();
+      expect(screen.getByTestId('gate-toggle-kimi_gate')).not.toBeDisabled();
     });
   });
 
   test('toggling one gate does not disable the other gate toggle', async () => {
     mockPostGateToggle.mockResolvedValue({
-      action: 'toggle', project: '/projects/my-project', gate: 'gemini_review',
+      action: 'toggle', project: '/projects/my-project', gate: 'kimi_gate',
       enabled: false, status: 'success', message: 'ok', timestamp: '2026-04-03T21:42:00Z',
     });
     setupGateConfig(makeGateConfig());
     renderCard();
 
-    fireEvent.click(screen.getByTestId('gate-toggle-gemini_review'));
+    fireEvent.click(screen.getByTestId('gate-toggle-kimi_gate'));
 
-    // codex_gate should still be enabled/clickable during gemini toggle
+    // codex_gate should still be enabled/clickable during kimi toggle
     expect(screen.getByTestId('gate-toggle-codex_gate')).not.toBeDisabled();
   });
 });

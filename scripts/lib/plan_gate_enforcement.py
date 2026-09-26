@@ -128,7 +128,6 @@ _HEAVY_MARKERS: tuple[str, ...] = (
     "review-floor",
     "evidence_bound_gate",
     "codex_gate",
-    "gemini_review",
     "verify_pr",
     "merge gate",
     "merge-gate",

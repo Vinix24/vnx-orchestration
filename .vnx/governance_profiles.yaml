@@ -5,7 +5,7 @@
 profiles:
   default:
     review_mode: full
-    required_gates: [codex_gate, gemini_review, ci]
+    required_gates: [codex_gate, ci]
     max_pr_lines: 300
     auto_merge: false
 

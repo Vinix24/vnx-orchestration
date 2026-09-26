@@ -15,7 +15,7 @@ Config file (.vnx/governance_profiles.yaml):
   profiles:
     default:
       review_mode: full
-      required_gates: [codex_gate, gemini_review, ci]
+      required_gates: [codex_gate, ci]
       max_pr_lines: 300
       auto_merge: false
     light:
@@ -92,7 +92,7 @@ DEFAULT_PROFILES: dict[str, GovernanceProfile] = {
     "default": GovernanceProfile(
         name="default",
         review_mode="full",
-        required_gates=["codex_gate", "gemini_review", "ci"],
+        required_gates=["codex_gate", "ci"],
         max_pr_lines=300,
         auto_merge=False,
         min_observability_tier=1,
@@ -100,7 +100,7 @@ DEFAULT_PROFILES: dict[str, GovernanceProfile] = {
     "coding-strict": GovernanceProfile(
         name="coding-strict",
         review_mode="full",
-        required_gates=["codex_gate", "gemini_review", "ci"],
+        required_gates=["codex_gate", "ci"],
         max_pr_lines=300,
         auto_merge=False,
         min_observability_tier=1,

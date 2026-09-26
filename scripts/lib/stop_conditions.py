@@ -790,7 +790,6 @@ PROVIDER_LEDGER_ALIASES: Dict[str, FrozenSet[str]] = {
 _ALL_KNOWN_LEDGER_PROVIDER_LABELS: FrozenSet[str] = frozenset().union(*PROVIDER_LEDGER_ALIASES.values())
 
 GATE_LEDGER_PROVIDERS: Dict[str, FrozenSet[str]] = {
-    "gemini_review": frozenset({"gemini", "gemini_cli"}),
     "codex_gate": frozenset({"codex", "codex_cli"}),
     "claude_github_optional": frozenset(),  # runs on gh, no model provider — explicit, not absent
     "ci_gate": frozenset(),  # runs on gh, no model provider — explicit, not absent

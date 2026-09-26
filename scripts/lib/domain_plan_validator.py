@@ -36,7 +36,7 @@ KNOWN_DOMAINS = frozenset({
 })
 
 IMPLEMENTED_GATES = frozenset({
-    "codex_gate", "gemini_review", "claude_github_optional",
+    "codex_gate", "claude_github_optional",
 })
 
 REQUIRED_CAPABILITY_FIELDS = frozenset({

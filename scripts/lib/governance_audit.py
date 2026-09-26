@@ -162,10 +162,10 @@ def log_gate_result(
     findings_count: int,
     dispatch_id: Optional[str] = None,
 ) -> None:
-    """Log a review gate execution result (codex/gemini) to the audit trail.
+    """Log a review gate execution result to the audit trail.
 
     Args:
-        gate:           Gate name (e.g. "codex_gate", "gemini_review").
+        gate:           Gate name (e.g. "codex_gate", "glm_gate").
         pr_number:      GitHub PR number, or None if unavailable.
         status:         Outcome string (e.g. "triggered", "passed", "failed").
         findings_count: Number of findings returned by the gate.

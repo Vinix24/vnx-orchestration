@@ -61,7 +61,7 @@ Process the receipt above. Apply these 5 rules in order:
 
 5. **default with no pending work AND all required review gates have results** → COMPLETE
    *(why: when nothing remains to dispatch, close the PR)*
-   **EXCEPTION:** If any review gate (codex_gate, gemini_review, ci_status) is absent (null) or in status "requested"/"queued", → WAIT instead of COMPLETE. Gate discipline is mandatory.
+   **EXCEPTION:** If any review gate (codex_gate, ci_status) is absent (null) or in status "requested"/"queued", → WAIT instead of COMPLETE. Gate discipline is mandatory.
 
 **HARD CONSTRAINTS (enforced by code before you are invoked — you will never see these):**
 - Ghost/duplicate receipts → WAIT (auto-handled)

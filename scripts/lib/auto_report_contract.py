@@ -48,8 +48,8 @@ Auto-report pipeline fallback policy (V1):
   manually-written report in unified_reports/ is still processed by
   receipt_processor.sh unchanged. Auto-report is additive, never a blocker.
 
-- CODEX/GEMINI GATES: Use a separate report path via gate_artifacts.py and
-  write JSON sidecars to $VNX_STATE_DIR/report_pipeline/. Not affected by
+- CODEX GATE: Uses a separate report path via gate_artifacts.py and
+  writes JSON sidecars to $VNX_STATE_DIR/report_pipeline/. Not affected by
   VNX_AUTO_REPORT.
 
 - DISABLED (VNX_AUTO_REPORT unset or != "1"): Workers must write manual

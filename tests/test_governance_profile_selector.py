@@ -523,7 +523,7 @@ class TestProfileGateResolver:
     Covers:
       - flag off → None (caller uses DEFAULT_REVIEW_STACK unchanged)
       - agents/* → light → [ci_gate]
-      - scripts/ → default → [codex_gate, gemini_review, ci_gate]
+      - scripts/ → default → [codex_gate, ci_gate]
       - mixed files (agents + scripts) → most-restrictive (default) wins
       - empty changed_files → None
     """
@@ -569,7 +569,7 @@ class TestProfileGateResolver:
         )
         assert result is not None
         assert "codex_gate" in result
-        assert "gemini_review" in result
+        assert "gemini_review" not in result
         assert "ci_gate" in result
 
     def test_dashboard_path_resolves_to_default_gates(self, monkeypatch) -> None:
@@ -581,7 +581,7 @@ class TestProfileGateResolver:
         )
         assert result is not None
         assert "codex_gate" in result
-        assert "gemini_review" in result
+        assert "gemini_review" not in result
 
     def test_mixed_files_most_restrictive_wins(self, monkeypatch) -> None:
         """When agents/ (light) + scripts/ (default) are mixed, default wins."""
@@ -594,7 +594,7 @@ class TestProfileGateResolver:
         assert result is not None
         # default profile has more gates than light → it should win
         assert "codex_gate" in result
-        assert "gemini_review" in result
+        assert "gemini_review" not in result
         assert "ci_gate" in result
 
     def test_flag_on_returns_list_not_none(self, monkeypatch) -> None:
