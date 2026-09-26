@@ -11,10 +11,11 @@ with an explicit availability layer that runs at decision time and is cheap:
   - not in cooldown             (a prior quota/auth failure marks the lane
                                  inactive for the provider-outage cooldown,
                                  sourced from the incident taxonomy)
-  - not recorded unreachable    (the shared reachability record, fed by every
-                                 real call the fabric sees: gate results,
-                                 adapters, classifiers, dispatches; OI-1454.
-                                 A lane that was never asked is not blocked)
+  - not recorded unreachable    (the shared reachability record, written by
+                                 gate results, provider-lane dispatches and
+                                 the codex/litellm adapters; classifier
+                                 providers only read it; OI-1454. A lane that
+                                 was never asked is not blocked)
 
 Cooldown state lives in the central state dir, resolved via the existing
 ``vnx_paths.resolve_state_dir`` helper (never a hardcoded ``.vnx-data/`` path)

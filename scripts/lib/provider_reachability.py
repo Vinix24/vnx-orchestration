@@ -21,11 +21,18 @@ dead must stay askable, or nothing would ever produce the first outcome.
 
 Where the evidence comes from
 -----------------------------
-Real outcomes the fabric already sees, so no extra paid call is made per check:
-a gate result booked ``lane_exhausted`` or decided (``gate_recorder``), a
+Real outcomes the fabric already sees, so no extra paid call is made per check.
+Three places write here, each with a ``source`` naming who saw it: a gate
+result booked ``lane_exhausted`` or decided (``gate_recorder``), a
 provider-lane dispatch that failed on credit/auth or succeeded
-(``provider_dispatch._emit_governance``), an adapter or classifier call that
-was refused or answered. Each writes here with a ``source`` naming who saw it.
+(``provider_dispatch._emit_governance``), and a call through the codex or
+litellm adapter (``ProviderAdapter.record_outcome``).
+
+Classifier providers only READ the record and never write it. The codex
+classifier shares the ``codex`` key with codex_gate, so a refusal a gate saw
+already takes it out. Recording from inside ``classify()`` would resolve the
+state dir through a git subprocess (``vnx_paths.resolve_state_dir``) on every
+classification, so that path stays a reader.
 
 There is deliberately NO probe in this module. A probe run with the caller's
 environment does not test the lane: the lane's process loads its key from its

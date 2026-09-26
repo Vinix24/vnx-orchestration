@@ -18,13 +18,17 @@ What these tests hold:
 """
 from __future__ import annotations
 
+import contextlib
+import importlib
 import json
 import logging
+import subprocess
 import sys
 import types
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -407,6 +411,85 @@ class TestClassifierProvidersReadTheSharedRecord:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         with patch("classifier_providers.deepseek_provider.shutil.which", return_value="/usr/bin/claude"):
             assert DeepSeekProvider().is_available() is False
+
+
+# The docs (provider_reachability, smart_router.availability, DISPATCH_RULES,
+# CHANGELOG) name three writers: gate results, provider-lane dispatches and the
+# codex/litellm adapters. Classifier providers only read. Recording from inside
+# classify() would resolve the state dir through a git subprocess on every call,
+# so this class fails the moment a classifier turns into a writer, and the docs
+# cannot drift back to saying it is one without it.
+_RECORD_WRITERS = ("_write", "record_unreachable", "record_failure", "record_success")
+
+# (classifier module, class, reachability key the class reads)
+_CLI_CLASSIFIERS = [
+    ("classifier_providers.haiku_provider", "HaikuProvider", "claude"),
+    ("classifier_providers.codex_provider", "CodexProvider", "codex"),
+    ("classifier_providers.gemini_provider", "GeminiProvider", "gemini"),
+    ("classifier_providers.deepseek_provider", "DeepSeekProvider", "deepseek-harness"),
+]
+
+
+@contextlib.contextmanager
+def _spy_on_every_writer():
+    """Replace each way this module can persist a record, and the state-dir
+    resolver, with a spy. Yields ``{name: spy}``."""
+    with contextlib.ExitStack() as stack:
+        yield {
+            name: stack.enter_context(patch.object(pr, name))
+            for name in (*_RECORD_WRITERS, "_resolve_state_dir")
+        }
+
+
+def _assert_classify_left_the_record_alone(spies, state_dir, key):
+    for name, spy in spies.items():
+        assert not spy.called, f"classify() called provider_reachability.{name}"
+    assert not (state_dir / pr.STATE_SUBDIR).exists()
+    assert pr.get(key, state_dir=state_dir).state is State.UNMEASURED
+
+
+class TestClassifierProvidersNeverWriteTheRecord:
+    @pytest.mark.parametrize("module_name,class_name,key", _CLI_CLASSIFIERS, ids=[c[1] for c in _CLI_CLASSIFIERS])
+    @pytest.mark.parametrize(
+        "returncode,stdout,stderr",
+        [(1, "", _CODEX_QUOTA_TEXT), (1, "", _DEEPSEEK_402_TEXT), (0, '{"ok": true}', "")],
+        ids=["quota_refused", "balance_refused", "answered"],
+    )
+    def test_a_cli_classifier_call_writes_no_record(
+        self, state_dir, monkeypatch, module_name, class_name, key, returncode, stdout, stderr,
+    ):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "placeholder-not-a-real-key")
+        provider = getattr(importlib.import_module(module_name), class_name)()
+        completed = subprocess.CompletedProcess(args=["cli"], returncode=returncode, stdout=stdout, stderr=stderr)
+        with _spy_on_every_writer() as spies, patch(f"{module_name}.subprocess.run", return_value=completed):
+            result = provider.classify("prompt")
+        assert (result.error is not None) == (returncode != 0), "the stub must reach classify()'s real code"
+        _assert_classify_left_the_record_alone(spies, state_dir, key)
+
+    def test_a_refused_ollama_classify_writes_no_record(self, state_dir):
+        from classifier_providers.ollama_provider import OllamaProvider
+
+        with _spy_on_every_writer() as spies, patch(
+            "classifier_providers.ollama_provider.urllib.request.urlopen",
+            side_effect=urllib.error.URLError(_CODEX_QUOTA_TEXT),
+        ):
+            result = OllamaProvider().classify("prompt")
+        assert result.error is not None
+        _assert_classify_left_the_record_alone(spies, state_dir, "ollama")
+
+    def test_an_answered_ollama_classify_writes_no_record(self, state_dir):
+        from classifier_providers.ollama_provider import OllamaProvider
+
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.read.return_value = json.dumps({"response": '{"ok": true}'}).encode("utf-8")
+        with _spy_on_every_writer() as spies, patch(
+            "classifier_providers.ollama_provider.urllib.request.urlopen", return_value=response,
+        ):
+            result = OllamaProvider().classify("prompt")
+        assert result.error is None
+        _assert_classify_left_the_record_alone(spies, state_dir, "ollama")
 
 
 class TestASkippedProviderSaysWhy:

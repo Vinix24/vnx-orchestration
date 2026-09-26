@@ -15,9 +15,10 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   seat with full confidence. `scripts/lib/provider_reachability.py` now keeps one
   record per provider with three states: `reachable`, `unreachable` with a reason
   (`quota_exhausted`, `insufficient_balance`, `auth_401`, `not_present`) and
-  `unmeasured`. The record is fed by outcomes the fabric already sees (gate
+  `unmeasured`. The record is written by outcomes the fabric already sees (gate
   results, provider-lane dispatches, codex and litellm adapter calls) and expires
-  on its own, so no paid call is made per check. `unmeasured` is never reported as
+  on its own, so no paid call is made per check. Classifier providers only read
+  it. `unmeasured` is never reported as
   `reachable`. Adapters and classifier providers split `is_present()` from
   `is_available()`. The review-gate takeover walk and the smart router's
   `lane_available` skip a provider recorded unreachable and name the reason,
