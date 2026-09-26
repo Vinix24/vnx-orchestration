@@ -19,6 +19,25 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   absent instead of failing. Available as `vnx horizon unmark-delivery` and
   through the `vnx objective` alias.
 
+### Changed
+
+- **The default review stack is `codex_gate,kimi_gate`: subscription reviewers
+  first, API-credit reviewers only as a fallback.** Operator decision of
+  2026-09-26. `VNX_DEFAULT_REVIEW_STACK` was `codex_gate,glm_gate` (#1852), which
+  made glm (OpenRouter credit) a standing second seat on every PR. codex (codex
+  CLI) and kimi (kimi CLI OAuth) both run on a subscription. glm and deepseek
+  only read a PR when both are unavailable, which is what the takeover chain
+  `codex_gate,kimi_gate,glm_gate,deepseek_gate` already does and keeps doing.
+  `gate_recorder.GATE_BILLING` classifies every registered gate as
+  subscription, provider-metered or model-free, and a guard test fails when the
+  default stack or the takeover chain puts an API-credit gate before a
+  subscription gate. The obligation the door declares follows the same order:
+  of the full-diff seats in a stack, `_primary_review_gate` now prefers a
+  subscription gate over an API-credit gate when they tie on weight, so
+  `glm_gate,codex_gate` declares `codex_gate`. A stack with a single full-diff
+  gate (mission-control: `glm_gate,claude_github_optional`) resolves as before.
+  A project that set its own stack or chain keeps it.
+
 ### Fixed
 
 - **`vnx objective close --attest --pr` no longer replaces `pr_ref`

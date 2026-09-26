@@ -326,10 +326,12 @@ def test_fixup_feature_review_stack_matches_config_base_stack(roadmap_env, monke
     Confirmed red pre-fix: with the old hardcoded literal
     ("gemini_review,codex_gate,claude_github_optional" at three call sites in
     roadmap_manager.py), this assertion failed because the registry default
-    is "codex_gate,glm_gate" (recomposed by this same dispatch in
+    was "codex_gate,glm_gate" (recomposed by this same dispatch in
     config_registry.py after a 14-day measurement showing gemini_review and
-    claude_github_optional never deliver a verdict) -- the fix-up template
-    would have re-requested exactly the two poorten that measurement dropped.
+    claude_github_optional never deliver a verdict; glm_gate became kimi_gate
+    on 2026-09-26, see tests/test_review_stack_subscription_first.py) -- the
+    fix-up template would have re-requested exactly the two poorten that
+    measurement dropped.
 
     VNX_CI_GATE_REQUIRED is pinned OFF (not delenv'd) since its registry
     default is "1" (OI-1385): this test measures the BASE stack, isolated
@@ -341,7 +343,7 @@ def test_fixup_feature_review_stack_matches_config_base_stack(roadmap_env, monke
 
     import config_registry
     expected_stack = config_registry.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default.split(",")
-    assert expected_stack == ["codex_gate", "glm_gate"], (
+    assert expected_stack == ["codex_gate", "kimi_gate"], (
         "this test assumes the current registry default; if it changed, "
         f"update the expectation here too: {expected_stack}"
     )
