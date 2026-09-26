@@ -68,7 +68,7 @@ These patterns recur in codex_gate findings. Apply preemptively.
 - [ ] **Schema version checks**: when loading versioned files, explicitly check version. `if v != EXPECTED: raise UnsupportedVersionError`. No silent accept.
 
 ### Cross-cutting Consistency
-- [ ] **Same fix to all handlers**: if the bug exists in Handler A (e.g. `gemini_review`), grep for the equivalent code in Handler B (e.g. `codex_gate`) and apply the same fix. Don't ship asymmetric handlers.
+- [ ] **Same fix to all handlers**: if the bug exists in Handler A (e.g. `kimi_gate`), grep for the equivalent code in Handler B (e.g. `codex_gate`) and apply the same fix. Don't ship asymmetric handlers.
 - [ ] **All call sites use the helper**: when introducing a helper (e.g. `_get_project_id()`), grep for ALL inline equivalents and replace them. Partial migration = silent skip in untouched paths.
 - [ ] **Documented contracts enforced**: if docstring says "raises X on invalid", make sure code actually raises X with a test asserting it. Drift between contract and implementation is a primary codex finding.
 

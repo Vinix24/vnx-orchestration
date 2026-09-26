@@ -91,3 +91,14 @@ Concretely:
 - T0 `.claude/terminals/T0/CLAUDE.md` §"Headless Review Enforcement", §"Operator Policies" A1/B1-B4
 - `scripts/review_gate_manager.py`, `scripts/closure_verifier.py`, `scripts/lib/codex_parser.py`
 - `.vnx-data/state/review_gates/{requests,results}/`, `$VNX_DATA_DIR/unified_reports/headless/`
+
+## Amendment (2026-09-26): Gemini is no longer a reviewer
+
+**Decided by:** Operator (Vincent van Deth), "Hele Gemini als reviewer eruit."
+
+The decision above stands as history and is superseded on one point: the second reviewer is no longer `gemini_review`. Measured on 2026-09-26 over the review-gate records of the vnx-dev store: `gemini_review` delivered no verdict. Its binary was never on PATH and it left one record ever.
+
+- **Reviewers.** `codex_gate` and `kimi_gate` on subscription. `glm_gate` and `deepseek_gate` are takeover fallback in `VNX_REVIEW_GATE_TAKEOVER_CHAIN`, never a default seat.
+- **Selection.** `gemini_review` is not a registered gate name. It lives in `dispatch_spec.RETIRED_GATE_NAMES` only, so a stack, chain or dispatch spec that names it is refused with the reason, and an older `VNX_DEFAULT_REVIEW_STACK` that still carries it drops it with a warning.
+- **History.** The closure verifier still interprets `gemini_review` result records, so old PRs do not read as a configuration gap. A retired gate is never a peer signer.
+- **Unchanged.** The `contract_hash` binding, the three evidence surfaces per gate and the rule that a single reviewer is insufficient evidence. Gemini as a provider lane for non-review work is outside this amendment.

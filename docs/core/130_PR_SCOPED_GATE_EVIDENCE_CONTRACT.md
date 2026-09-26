@@ -87,7 +87,7 @@ Within each state, dispatches are ordered by timestamp (GE-1). The most recent d
 
 ### 3.1 The Problem
 
-Gate results are stored as JSON files in `.vnx-data/state/review_gates/results/`. Multiple PRs may share the same gate names (e.g., every PR requires `gemini_review`). Without PR scoping, a gate result for PR-0 could satisfy PR-1's closure check.
+Gate results are stored as JSON files in `.vnx-data/state/review_gates/results/`. Multiple PRs may share the same gate names (e.g., every PR requires `codex_gate`). Without PR scoping, a gate result for PR-0 could satisfy PR-1's closure check.
 
 ### 3.2 Lookup Rules
 
@@ -155,11 +155,10 @@ Gate results use two different fields for their verdict depending on the provide
 
 | Provider | Verdict Field | Values |
 |----------|--------------|--------|
-| Gemini | `status` | `pass`, `fail`, `blocked`, `not_configured`, `configured_dry_run` |
 | Codex | `verdict` | `approve`, `reject`, `pass`, `fail` |
 | Claude GitHub | `status` | `pass`, `fail`, `not_configured` |
 
-**GE-7 (Gate Evidence Rule 7)**: Verdict resolution MUST check both `status` and `verdict` fields. The effective verdict is: `result.get("status") or result.get("verdict")`. This ensures Codex results (which use `verdict`) are subject to the same report_path enforcement as Gemini results (which use `status`).
+**GE-7 (Gate Evidence Rule 7)**: Verdict resolution MUST check both `status` and `verdict` fields. The effective verdict is: `result.get("status") or result.get("verdict")`. This ensures Codex results (which use `verdict`) are subject to the same report_path enforcement as results that use `status`.
 
 ### 4.4 Terminal Verdicts
 
@@ -288,7 +287,7 @@ Every closure verification run produces a list of `CheckResult` entries with:
 
 | Field | Content |
 |-------|---------|
-| `check_name` | What was checked (e.g., `gate_gemini_review`, `merge_state`, `github_checks`) |
+| `check_name` | What was checked (e.g., `gate_codex_gate`, `merge_state`, `github_checks`) |
 | `status` | `PASS`, `FAIL`, or `SKIP` |
 | `detail` | Human-readable explanation of the result |
 

@@ -4,9 +4,12 @@
 **Purpose**: Define the required request, artifact, report, and receipt surfaces for headless review jobs so T0 can enforce review-gate evidence deterministically.
 
 This contract applies to headless review providers used for governance evidence, including:
-- `gemini_review`
 - `codex_gate`
+- `kimi_gate`
+- `glm_gate`
 - `claude_github_optional`
+
+`gemini_review` is retired (operator decision 2026-09-26) and can no longer be requested. Result records written before then keep that gate name and stay readable as history.
 
 It does not replace the generic headless execution contract in [HEADLESS_RUN_CONTRACT.md](../contracts/HEADLESS_RUN_CONTRACT.md). It narrows that contract for review-gate runs that T0 depends on for closure decisions.
 
@@ -34,7 +37,7 @@ Each headless review job MUST be bound to all of the following:
 
 | Field | Required | Description |
 |---|---|---|
-| `gate` | Yes | One of `gemini_review`, `codex_gate`, `claude_github_optional` |
+| `gate` | Yes | One of `codex_gate`, `kimi_gate`, `glm_gate`, `claude_github_optional` |
 | `pr_id` | Yes | Canonical PR id such as `PR-3` |
 | `branch` | Yes | Branch under review |
 | `review_contract_path` | Yes | Path to the canonical review contract input |

@@ -25,7 +25,7 @@ do not yet behave identically.
 | claude-headless | `claude -p` headless, via the door | OAuth subscription (an own `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` switches billing) | the only Claude worker lane (code + commit) | `scripts/lib/dispatch_envelope.py` (`run_envelope_headless_plan`) |
 | claude-subprocess | `claude -p` headless, terminal-pinned | same auth as claude-headless | terminal-pinned single-worker PRs, opt-in per terminal | `scripts/lib/subprocess_dispatch.py` |
 | codex | `codex exec` CLI | OpenAI CLI auth | strict diff-mode review | `scripts/lib/provider_dispatch.py` (`_dispatch_codex`) |
-| gemini | gemini CLI | Google CLI auth | review | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
+| gemini | gemini CLI | Google CLI auth | analysis / non-review work (not a reviewer) | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
 | kimi | Kimi CLI (`kimi login` OAuth) | Kimi CLI OAuth | synthesis / operational review | `scripts/lib/provider_dispatch.py` (`_dispatch_kimi`) |
 | deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
 | ollama | local Ollama resolver | none (local) | privacy-sensitive work, resolver layer | routed via litellm `ollama` sub-provider |
@@ -66,15 +66,20 @@ environment carries an own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL`
 ### codex
 
 `codex exec` for strict diff-mode review. Codex reads a diff and reports
-findings against it. This is the first review gate in the dual-LLM adversarial
-pattern (ADR-008). It wires the event store as its audit sink so a codex
+findings against it. This is the first review gate in the cross-vendor adversarial
+pattern (ADR-008, amended 2026-09-26). It wires the event store as its audit sink so a codex
 dispatch leaves the same NDJSON trail as a Claude dispatch.
 
 ### gemini
 
-The second review gate. Gemini reviews from a different angle than codex; the
-two together plus deterministic CI form the three-gate review stack. Bound to a
-review contract hash like the codex gate.
+A provider lane for non-review work. Gemini is not a reviewer: the operator
+retired it as one on 2026-09-26, after a measurement of one `gemini_review`
+record ever and no verdict among them (its binary was never on PATH). The
+review stack is codex plus kimi on subscription, with glm and deepseek only as
+takeover fallback. `gemini_review` is no longer a registered gate name, so a
+stack, a takeover chain or a dispatch spec that names it is refused, and
+existing `gemini_review` result records stay readable as history
+(`dispatch_spec.RETIRED_GATE_NAMES`).
 
 ### kimi
 
@@ -165,16 +170,16 @@ before concluding the dispatch did nothing.
 | Code change that commits | claude-headless (the only Claude lane) | Subscription-billed; report gate binds before the receipt |
 | Terminal-pinned single-worker PR | claude-subprocess (opt-in per terminal) | Lease management, Wave-5 smart-context |
 | Strict diff review | codex (`codex exec`) | Reads the diff, reports defects against it |
-| Second-angle review | gemini | Different reviewer, contract-bound, pairs with codex |
 | Synthesis / operational review | kimi | Reasons about whether the change makes sense, not just diff defects |
 | Analysis or implementation on a non-Claude model | deepseek-harness | Governed, own-key, account-safe; never on the OAuth subscription |
 | Privacy-sensitive work, resolver layer | ollama | Local; no data leaves the machine |
 
 Code-and-commit work goes to a Claude lane because that is where report
 authorship and receipt quality are strongest. The only Claude lane is
-claude-headless (subscription-billed). Review
-and analysis work goes to codex-exec, gemini, kimi, or the harness, with the
-report-divergence caveat above in mind for analysis-only dispatches.
+claude-headless (subscription-billed). Review work goes to codex-exec or
+kimi (the harness lanes only as takeover fallback), and analysis work also to
+gemini, with the report-divergence caveat above in mind for analysis-only
+dispatches.
 
 ## Lane maturity
 
@@ -184,9 +189,9 @@ I do not claim parity that is not measured.
   to. It is opt-in per terminal.
 - **claude-headless** is the only Claude lane since 2026-09-18. Its isolation and
   report-gate status is in `DISPATCH_RULES.md` §8.
-- **codex / gemini / kimi** are the review lanes. They emit receipts, reports,
-  and an event trail. The synthesized-report thinness on analysis-only dispatches
-  is the open gap (1.1).
+- **codex / kimi** are the review lanes. **gemini** is a non-review provider lane.
+  They emit receipts, reports, and an event trail. The synthesized-report
+  thinness on analysis-only dispatches is the open gap (1.1).
 - **deepseek-harness** is governed and account-safe with the own key. Its
   effectiveness was operator-measured on coding and tool tasks; that measurement
   is internal, not a published benchmark.
