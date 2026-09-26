@@ -15,6 +15,8 @@ from __future__ import annotations
 import warnings
 from typing import Any, Dict, Tuple
 
+import gate_depth
+
 PASS_STATES = frozenset({"approve", "completed", "pass", "passed"})
 FAIL_STATES = frozenset({"failed", "errored", "fail", "blocked"})
 INCOMPLETE_STATES = frozenset({"pending", "running", "queued", "requested"})
@@ -22,10 +24,22 @@ INCOMPLETE_STATES = frozenset({"pending", "running", "queued", "requested"})
 # auth failure, timeout, empty output). Absence of evidence: never a pass, never
 # a fail, and not terminal — a retry against a healthy provider can still decide.
 UNAVAILABLE_STATES = frozenset({"unavailable"})
+# OI-1851: a clean run on a truncated diff it did not demonstrably read the
+# rest of. Not a pass (the unseen part is unreviewed), not a fail (nothing was
+# rejected), not an outage (a rerun cuts the same diff the same way). Terminal:
+# the attempt concluded.
+PARTIAL_REVIEW_STATES = frozenset({"partial_review"})
 
 ALL_KNOWN_STATES = (
-    PASS_STATES | FAIL_STATES | INCOMPLETE_STATES | UNAVAILABLE_STATES | frozenset({"not_executable"})
+    PASS_STATES | FAIL_STATES | INCOMPLETE_STATES | UNAVAILABLE_STATES
+    | PARTIAL_REVIEW_STATES | frozenset({"not_executable"})
 )
+
+
+def review_coverage_gap(result: Dict[str, Any]) -> str:
+    """:func:`gate_depth.coverage_gap` on the record's own ``execution_depth``
+    (OI-1851); ``""`` for a record without one."""
+    return gate_depth.coverage_gap(gate_depth.from_dict(result.get("execution_depth")))
 
 
 def _coerce_status(result: Dict[str, Any]) -> Tuple[str, bool]:
@@ -71,7 +85,13 @@ def is_pass(result: Dict[str, Any]) -> Tuple[bool, str]:
     if not isinstance(blocking_count, int):
         blocking_count = None
 
+    if status in PARTIAL_REVIEW_STATES:
+        gap = review_coverage_gap(result) or (result.get("reason_detail") or "")
+        return False, f"partial_review: {gap or 'the gate saw only part of the diff'}"
     if status in PASS_STATES and blocking_len == 0 and blocking_count in (0, None):
+        gap = review_coverage_gap(result)
+        if gap:
+            return False, f"partial_review: {gap}"
         return True, "passed"
     if status in FAIL_STATES:
         return False, f"status: {status}"
@@ -102,7 +122,12 @@ def is_terminal(result: Dict[str, Any]) -> bool:
     "incomplete evidence", not read the outage as a decided outcome.
     """
     status, _ = _coerce_status(result)
-    return status in PASS_STATES or status in FAIL_STATES or status == "not_executable"
+    return (
+        status in PASS_STATES
+        or status in FAIL_STATES
+        or status in PARTIAL_REVIEW_STATES
+        or status == "not_executable"
+    )
 
 
 def canonical_status(result: Dict[str, Any]) -> str:
@@ -162,8 +187,13 @@ def has_complete_evidence(result: Dict[str, Any]) -> bool:
     BOTH non-empty (on top of terminality) separates "a gate ran and
     decided" from "the gate never ran" — the latter must never be summed up
     as a PASS.
+
+    OI-1851: nor is a review of part of the diff, whatever status the writer
+    stamped (:func:`review_coverage_gap`).
     """
     if not is_terminal(result):
+        return False
+    if canonical_status(result) in PARTIAL_REVIEW_STATES or review_coverage_gap(result):
         return False
     return _is_populated_evidence_field(result.get("contract_hash")) and _is_populated_evidence_field(
         result.get("report_path")

@@ -405,7 +405,11 @@ def materialize_artifacts(
     # same stream the report already embeds, so this adds no new capture path
     # — the numbers were on disk all along and simply never reached the record
     # anyone merges on.
-    depth = gate_depth.measure_execution_depth(stdout)
+    # OI-1851: plus the diff coverage the prompt builder stamped on the payload.
+    depth = gate_depth.with_diff_coverage(
+        gate_depth.measure_execution_depth(stdout),
+        request_payload.get("diff_coverage"),
+    )
 
     # A run that reached a verdict without a single investigative action is an
     # absence of evidence, not a clean review. It books `unavailable` and lands
@@ -521,12 +525,24 @@ def materialize_artifacts(
     # guessing at a shape those callers never promise. One slot, at the
     # caller that actually has the signal, beats two half-checks.
     real_dispatch_id = request_payload.get("dispatch_id", "")
+    # OI-1851: a clean run on a cut diff it did not read the rest of reviewed
+    # PART of the PR (#1915). A rejection of the part it saw still stands.
+    coverage_gap = gate_depth.coverage_gap(depth)
+    partial = bool(coverage_gap) and not blocking
+    if partial:
+        logger.warning(
+            "gate_artifacts: %s run pr=%s covers part of the diff only — %s",
+            gate, pr_id or pr_number, coverage_gap,
+        )
     result_payload: Dict[str, Any] = {
         "gate": gate,
         "pr_id": pr_id or (str(pr_number) if pr_number else ""),
         "pr_number": pr_number,
-        "status": "completed",
-        "summary": f"{gate} execution completed successfully",
+        "status": "partial_review" if partial else "completed",
+        "summary": (
+            f"{gate} PARTIAL_REVIEW ({coverage_gap}) — NOT a pass" if partial
+            else f"{gate} execution completed successfully"
+        ),
         "contract_hash": contract_hash,
         "report_path": str(report_file),
         "findings": findings,
@@ -538,6 +554,9 @@ def materialize_artifacts(
         "execution_depth": depth.to_dict(),
         "recorded_at": now,
     }
+    if partial:
+        result_payload["reason"] = "diff_truncated"
+        result_payload["reason_detail"] = coverage_gap
     # OI-1443: pin the prompt this run actually sent. Two glm_gate runs on the
     # same commit differed by 227 input tokens (26829 against 27056) and there
     # was no way to ask what was different about them, because the record names

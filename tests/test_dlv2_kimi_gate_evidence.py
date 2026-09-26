@@ -348,10 +348,11 @@ def test_pass_verdict_on_whitespace_only_diff_becomes_unavailable_degenerate(tmp
     assert record["execution_depth"]["diff_chars"] == 0
 
 
-def test_pass_verdict_on_truncated_but_nonempty_diff_stays_pass(tmp_path, monkeypatch):
+def test_pass_verdict_on_truncated_diff_is_partial_review_not_unavailable(tmp_path, monkeypatch):
     """A ~60000-character diff capped at MAX_DIFF_CHARS (50000) still handed
-    the model real content to review — truncation alone must never flip a
-    real pass into unavailable."""
+    the model real content to review — truncation must never flip a real pass
+    into unavailable. Since OI-1851 it is not a pass either: the model saw
+    only part of the diff, so the record says partial_review."""
     big_diff = "diff --git a/x b/x\n" + ("+ok\n" * 15000)
     assert len(big_diff) > kimi_gate.MAX_DIFF_CHARS
     diff_file = tmp_path / "x.diff"
@@ -365,7 +366,8 @@ def test_pass_verdict_on_truncated_but_nonempty_diff_stays_pass(tmp_path, monkey
     out = data_dir / "state" / "review_gates" / "results" / "pr-0-kimi_gate.json"
     record = json.loads(out.read_text(encoding="utf-8"))
 
-    assert rc == 0
-    assert record["status"] == "pass"
+    assert rc == 1
+    assert record["status"] == "partial_review"
+    assert record["reason"] == "diff_truncated"
     assert record["execution_depth"]["mode"] == "single_shot"
     assert record["execution_depth"]["diff_truncated"] is True

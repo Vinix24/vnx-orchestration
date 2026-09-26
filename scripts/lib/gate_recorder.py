@@ -1680,7 +1680,8 @@ def record_terminal_result(
     "did it investigate" does not apply to it.
     """
     from gate_status import (  # noqa: PLC0415
-        FAIL_STATES, PASS_STATES, canonical_status, has_producer_identity, is_terminal,
+        FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, canonical_status,
+        has_producer_identity, is_terminal,
     )
 
     if canonical_status(payload) in (PASS_STATES | FAIL_STATES) and gate_depth.is_degenerate(execution_depth):
@@ -1697,6 +1698,19 @@ def record_terminal_result(
         )
         payload["contract_hash"] = ""
         payload["blocking_findings"] = []
+    # OI-1851: a pass on a cut diff covers only the part the gate saw;
+    # reclassified here because every lane's terminal write passes through.
+    # A fail stays a fail. contract_hash/report_path stay: the run happened.
+    coverage_gap = gate_depth.coverage_gap(execution_depth)
+    if canonical_status(payload) in PASS_STATES and coverage_gap:
+        logger.warning(
+            "gate_recorder: %s pass on pr=%s covers part of the diff only — %s",
+            gate, pr_id, coverage_gap,
+        )
+        payload["status"] = "partial_review"
+        payload["reason"] = "diff_truncated"
+        payload["reason_detail"] = coverage_gap
+        payload["summary"] = f"{gate} PARTIAL_REVIEW ({coverage_gap}) — NOT a pass"
     payload["execution_depth"] = execution_depth.to_dict()
 
     if is_terminal(payload) and not has_producer_identity(payload):
@@ -1709,7 +1723,7 @@ def record_terminal_result(
     # non-gate-eigen dispatch-id (the builder's) would be read back as the
     # builder's own report. Scoped to PASS/FAIL only: a ``not_executable``
     # record never ran, so "which identity did it sign under" does not apply.
-    if canonical_status(payload) in (PASS_STATES | FAIL_STATES):
+    if canonical_status(payload) in (PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES):
         identity_error = gate_dispatch_identity_error(gate, payload.get("dispatch_id"))
         if identity_error:
             raise ValueError(identity_error)

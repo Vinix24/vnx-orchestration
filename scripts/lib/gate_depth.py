@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
@@ -99,11 +99,14 @@ class ExecutionDepth:
     lane — glm_gate/kimi_gate — measured by :func:`single_shot_depth`).
     ``investigative_actions``/``shell_calls``/``files_read``/
     ``agent_messages``/``unrecognised_item_types`` only ever mean anything in
-    agentic mode; ``diff_chars``/``diff_truncated`` only ever mean anything in
-    single_shot mode. One dataclass, not two, so
+    agentic mode. One dataclass, not two, so
     :func:`gate_recorder.record_terminal_result` can hold every terminal
     writer to the same requirement without knowing which lane produced the
     measurement.
+
+    ``diff_chars``/``diff_truncated``/``diff_limit``/``truncated_files``
+    describe the diff the gate was handed, on every mode (OI-1851, see
+    :func:`with_diff_coverage`).
     """
 
     parsed: bool = False
@@ -117,6 +120,8 @@ class ExecutionDepth:
     unrecognised_item_types: tuple = ()
     diff_chars: int = 0
     diff_truncated: bool = False
+    diff_limit: int = 0
+    truncated_files: tuple = ()
 
     def to_dict(self) -> Dict[str, Any]:
         """JSON-shaped dict: ``unrecognised_item_types`` normalizes to a list.
@@ -130,6 +135,7 @@ class ExecutionDepth:
         """
         data = asdict(self)
         data["unrecognised_item_types"] = list(data["unrecognised_item_types"])
+        data["truncated_files"] = list(data["truncated_files"])
         return data
 
 
@@ -208,7 +214,83 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
     )
 
 
-def single_shot_depth(diff_chars: int, diff_truncated: bool) -> ExecutionDepth:
+_DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$", re.MULTILINE)
+
+
+def diff_coverage(diff_text: str, max_chars: int) -> Dict[str, Any]:
+    """The coverage fields of :class:`ExecutionDepth` for a diff capped at
+    ``max_chars`` (OI-1851): full post-strip size, whether the raw text exceeds
+    the cap (the test ``gate_prompt.wrap_untrusted_diff`` cuts on), the cap
+    (0 = uncapped), and every file whose section does not end inside the cap.
+    """
+    text = diff_text or ""
+    truncated = max_chars > 0 and len(text) > max_chars
+    files: list = []
+    if truncated:
+        headers = list(_DIFF_FILE_HEADER_RE.finditer(text))
+        for index, match in enumerate(headers):
+            end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+            if end > max_chars:
+                files.append(match.group(2))
+    return {
+        "diff_chars": len(text.strip()),
+        "diff_truncated": truncated,
+        "diff_limit": max(max_chars, 0),
+        "truncated_files": files,
+    }
+
+
+def with_diff_coverage(depth: ExecutionDepth, coverage: Any) -> ExecutionDepth:
+    """Stamp a :func:`diff_coverage` result onto any depth (OI-1851). A
+    non-dict ``coverage`` (no diff in hand) leaves ``depth`` unmeasured."""
+    if not isinstance(coverage, dict):
+        return depth
+    return replace(
+        depth,
+        diff_chars=int(coverage.get("diff_chars") or 0),
+        diff_truncated=bool(coverage.get("diff_truncated")),
+        diff_limit=int(coverage.get("diff_limit") or 0),
+        truncated_files=tuple(coverage.get("truncated_files") or ()),
+    )
+
+
+def coverage_gap(depth: ExecutionDepth) -> str:
+    """Why this run's verdict does not cover the whole diff, or ``""`` (OI-1851).
+
+    Only MEASURED reading closes the gap: an agentic run with a parsed tool
+    stream (no unrecognised item types) and at least one file read per cut
+    file. A count, not a path match: the stream does not name what a
+    ``sed``/``rg`` touched in a form worth trusting. A single-shot run never
+    closes it (the prompt is all it saw), nor does ``parsed: false``.
+    """
+    if not depth.diff_truncated:
+        return ""
+    needed = max(1, len(depth.truncated_files))
+    if (
+        depth.parsed
+        and depth.mode == "agentic"
+        and not depth.unrecognised_item_types
+        and depth.files_read >= needed
+    ):
+        return ""
+    shown = list(depth.truncated_files[:10])
+    more = len(depth.truncated_files) - len(shown)
+    files = ", ".join(shown) + (f" (+{more} more)" if more > 0 else "")
+    return (
+        f"diff of {depth.diff_chars} chars was cut at {depth.diff_limit} chars in the "
+        f"gate prompt; {len(depth.truncated_files)} file(s) seen partially or not at all"
+        f"{': ' + files if files else ''}; the run did not demonstrably read the rest "
+        f"itself (parsed={depth.parsed}, mode={depth.mode}, files_read={depth.files_read})"
+    )
+
+
+def single_shot_depth(
+    diff_chars: int,
+    diff_truncated: bool,
+    *,
+    diff_limit: int = 0,
+    truncated_files: tuple = (),
+) -> ExecutionDepth:
     """Depth for a single-shot review lane (glm_gate/kimi_gate): one API call
     against a diff, no agentic tool loop to count shell calls or file reads
     from (OI-1618). The diff IS the investigation — there is nothing else the
@@ -220,14 +302,17 @@ def single_shot_depth(diff_chars: int, diff_truncated: bool) -> ExecutionDepth:
     rather than re-deriving it, so the "0 chars after strip" rule lives in one
     place (the caller that already has the raw text) instead of two.
     ``diff_truncated`` records whether the gate's own ``MAX_DIFF_CHARS`` cap
-    fired; it is carried for the evidence trail only, never treated as
-    degenerate on its own (see :func:`is_degenerate`).
+    fired; it is never treated as degenerate on its own (see
+    :func:`is_degenerate`), but a truncated single-shot run can never close
+    its own :func:`coverage_gap` (OI-1851).
     """
     return ExecutionDepth(
         parsed=True,
         mode="single_shot",
         diff_chars=diff_chars,
         diff_truncated=diff_truncated,
+        diff_limit=diff_limit,
+        truncated_files=tuple(truncated_files),
     )
 
 
@@ -251,8 +336,9 @@ def from_dict(data: Any) -> ExecutionDepth:
         return ExecutionDepth()
     known = {f.name for f in fields(ExecutionDepth)}
     kwargs = {k: v for k, v in data.items() if k in known}
-    if kwargs.get("unrecognised_item_types") is not None:
-        kwargs["unrecognised_item_types"] = tuple(kwargs["unrecognised_item_types"])
+    for tuple_field in ("unrecognised_item_types", "truncated_files"):
+        if kwargs.get(tuple_field) is not None:
+            kwargs[tuple_field] = tuple(kwargs[tuple_field])
     try:
         return ExecutionDepth(**kwargs)
     except TypeError:
@@ -307,8 +393,11 @@ def degenerate_detail(depth: ExecutionDepth) -> str:
 __all__ = [
     "ExecutionDepth",
     "MIN_INVESTIGATIVE_ACTIONS",
+    "coverage_gap",
     "degenerate_detail",
+    "diff_coverage",
     "from_dict",
+    "with_diff_coverage",
     "is_degenerate",
     "measure_execution_depth",
     "single_shot_depth",

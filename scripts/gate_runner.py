@@ -32,6 +32,7 @@ import gate_artifacts as _art
 import vertex_ai_runner as _vtx
 from gate_worktree import create_gate_worktree, remove_gate_worktree, GateWorktreeError
 from gate_prompt import build_review_prompt  # OI-1442: the diff is data, not instruction
+import gate_depth  # OI-1851: record what part of the diff each prompt carries
 from prompt_assembler import PromptAssembler, format_for_provider
 from gate_lane_contract import (  # C6 step 3: one source, three readers
     MODEL_DEFAULTS as _HARNESS_LANE_MODEL,
@@ -728,6 +729,8 @@ class GateRunner:
         risk = (request_payload.get("risk_class") or "medium")
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        # OI-1851: uncapped, but the record still carries the real size.
+        request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
         l3 = build_review_prompt(
             gate_name="reviewer",
             pr=str(pr_number),
@@ -765,6 +768,8 @@ class GateRunner:
         risk = (request_payload.get("risk_class") or "medium")
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        # OI-1851: uncapped, but the record still carries the real size.
+        request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
         l3 = build_review_prompt(
             gate_name="reviewer",
             pr=str(pr_number),
@@ -799,6 +804,10 @@ class GateRunner:
         """
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        # OI-1851: the one place that knows what the lane was handed.
+        request_payload["diff_coverage"] = gate_depth.diff_coverage(
+            diff_content, _HARNESS_LANE_MAX_DIFF_CHARS,
+        )
         return build_review_prompt(
             gate_name=gate,
             pr=str(pr_number),
