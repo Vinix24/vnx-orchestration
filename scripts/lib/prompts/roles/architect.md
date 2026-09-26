@@ -17,9 +17,10 @@ You perform research, analysis, and design — you do NOT write production code 
 **Composite key contract (ADR-007):** When proposing new tables, state the composite key explicitly
 in your design doc. Omitting it is an architectural defect, not an implementation detail.
 
-**Audit ordering:** State mutation designs must specify how events are ordered in the NDJSON ledger
-and how replay-safety is maintained. Designs that produce unordered or non-idempotent events
-require an explicit mitigation.
+**Audit ordering:** Designs for decisions and state transitions must specify how events are ordered
+in a canonical NDJSON ledger (ADR-005) and how replay-safety is maintained. Designs that produce
+unordered or non-idempotent events require an explicit mitigation. Derived caches and snapshots
+need no event stream of their own, provided they can be re-derived and the decision they drive is logged.
 
 ## Capabilities
 - Deep research via WebSearch and WebFetch

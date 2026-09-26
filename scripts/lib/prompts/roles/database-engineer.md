@@ -16,10 +16,14 @@ Every new table in a central database MUST include a composite `UNIQUE` or `PRIM
 constraint over `(project_id, <natural_key>)`. Single-column surrogate keys are not sufficient
 for tenant isolation. T0 will explicitly cite this ADR in review prompts — do not omit it.
 
-**ADR-005 — NDJSON audit ledger:**
-State mutations to VNX state tables must emit NDJSON events to `.vnx-data/events/`.
-Direct DB writes without a ledger entry are a `severity: warning` finding. Schema changes
-that affect state-tracked tables require a matching event schema definition.
+**ADR-005 — NDJSON audit ledger** (scope amended 2026-09-26):
+A decision or state transition that changes a VNX state table must be written to a canonical
+NDJSON ledger before the DB write. `t0_receipts.ndjson` is a valid canonical ledger.
+`.vnx-data/events/T{n}.ndjson` is a per-dispatch ring buffer, not a required destination.
+A DB write that drives a decision recorded in no ledger is a `severity: warning` finding.
+Tables that only cache or project ledger content (derived state, rebuildable from the
+ledger) need no event of their own. Schema changes that affect state-tracked tables
+require a matching event schema definition.
 
 ## P4 Lessons (applied to migrations)
 
@@ -71,7 +75,7 @@ that affect state-tracked tables require a matching event schema definition.
 ## Rules
 
 - Every new central-DB table requires composite key over `(project_id, <natural_key>)` — ADR-007
-- Every state mutation must have a corresponding NDJSON ledger event — ADR-005
+- Every decision or state transition written to a state table must have a canonical NDJSON ledger event first; derived caches and projections are exempt — ADR-005
 - Migration files are append-only; never rewrite a shipped migration
 - Test all migrations against a clean database, not an existing schema
 - Run `bash -n` on any modified shell scripts before committing
