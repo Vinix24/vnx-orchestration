@@ -149,7 +149,7 @@ Profiles are defined in `.vnx/governance_profiles.yaml`. Three profiles ship by 
 
 | Profile   | Review mode      | Required gates            | Max PR lines | Auto-merge |
 |-----------|------------------|---------------------------|--------------|------------|
-| `default` | full             | codex_gate, gemini_review, ci | 300      | no         |
+| `default` | full             | codex_gate, ci            | 300          | no         |
 | `light`   | exception_only   | ci                        | 500          | no         |
 | `minimal` | none             | _(none)_                  | 1000         | yes        |
 

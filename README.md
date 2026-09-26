@@ -190,7 +190,7 @@ The end-to-end deep dive — intent → single-entry door → bundle assembly �
            +---------+----------+----------+---------+
                      v                     v
               review gates          worktree teardown
-          (codex / gemini / CI)   (clean / pushed / dirty)
+          (codex / kimi / CI)    (clean / pushed / dirty)
                      |
                      v
    append-only NDJSON receipts  (one per dispatch; hash-chain verify via audit_chain)
@@ -220,7 +220,7 @@ The decisions behind VNX are written down, not implied. There are 38 Architectur
 
 - [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
 - [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
-- [ADR-008](docs/governance/decisions/ADR-008-dual-llm-adversarial-review.md): dual-LLM adversarial review (codex plus gemini) bound by a contract hash
+- [ADR-008](docs/governance/decisions/ADR-008-dual-llm-adversarial-review.md): cross-vendor adversarial review (codex plus kimi, amended 2026-09-26) bound by a contract hash
 - [ADR-011](docs/governance/decisions/ADR-011-manager-worker-hierarchy.md): manager plus worker hierarchy with explicit depth, not depth-1 subagents
 - [ADR-012](docs/governance/decisions/ADR-012-hybrid-interactive-headless.md): hybrid interactive and headless execution, no retire-interactive
 - [ADR-014](docs/governance/decisions/ADR-014-autonomous-chain-dispatch.md): autonomous mode is pre-approved chain dispatch, never gate bypass
@@ -237,7 +237,7 @@ VNX is not a thin "supports many models" wrapper. The provider layer is governed
 |---|---|---|
 | **claude** | headless `claude -p` (only lane since the interactive tmux dispatch lane was removed on 2026-09-18, #1868) | subscription (own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` routes outside) |
 | **codex** | CLI subprocess | provider sub/credits · review gate + worker |
-| **gemini** | CLI subprocess | provider sub/credits · review gate + worker |
+| **gemini** | CLI subprocess | provider sub/credits · worker (not a reviewer) |
 | **kimi** | Kimi CLI over OAuth | `kimi-via-cli-only`, no Moonshot SDK |
 | **GLM-5.2** (Zhipu) | OpenRouter (`litellm:zai`) or the `glm-harness` proxy | `zai-via-openrouter-only` |
 | **any OpenRouter / OpenAI-compatible model** | claude-CLI harness or the local litellm proxy lane | routed generically via harness/proxy |

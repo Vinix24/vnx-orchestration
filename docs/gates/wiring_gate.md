@@ -21,7 +21,7 @@ Add `wiring_gate` to the `--review-stack` option of `review_gate_manager.py`:
 ```bash
 python3 scripts/review_gate_manager.py request-and-execute \
   --pr 567 --branch feat/my-feature \
-  --review-stack "gemini_review,codex_gate,wiring_gate"
+  --review-stack "codex_gate,kimi_gate,wiring_gate"
 ```
 
 ## Environment
