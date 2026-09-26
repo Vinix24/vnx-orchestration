@@ -333,17 +333,22 @@ def _cmd_tagger_ab(args) -> int:
 
     # Check provider availability WITHOUT making an LLM call
     provider_available = False
+    unavailable_reason = "provider could not be constructed"
     try:
         import vnx_tagger as _tagger
         from classifier_providers import get_provider
+        from classifier_providers.base import describe_unavailable
         prov = get_provider(_tagger.get_tagger_provider_name())
         provider_available = prov.is_available()
+        if not provider_available:
+            unavailable_reason = describe_unavailable(prov)
     except Exception:
         provider_available = False
 
     if not provider_available:
         print(
-            "tagger-ab: LLM provider not available (check DEEPSEEK_API_KEY or "
+            "tagger-ab: LLM provider not available "
+            f"({unavailable_reason}; check DEEPSEEK_API_KEY or "
             f"VNX_TAGGER_PROVIDER={_tagger.get_tagger_provider_name()!r}).",
             file=sys.stderr,
         )

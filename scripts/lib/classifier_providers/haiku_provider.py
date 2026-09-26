@@ -24,6 +24,7 @@ class HaikuProvider(ClassifierProvider):
     """Run classification via `claude --print --model claude-haiku-4-5`."""
 
     name = "haiku"
+    reachability_key = "claude"
 
     def __init__(
         self,
@@ -46,7 +47,7 @@ class HaikuProvider(ClassifierProvider):
         except (TypeError, ValueError):
             self.flat_cost_usd = _DEFAULT_FLAT_COST_USD
 
-    def is_available(self) -> bool:
+    def is_present(self) -> bool:
         return shutil.which("claude") is not None
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:

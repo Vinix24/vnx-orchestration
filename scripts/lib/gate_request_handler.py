@@ -22,6 +22,7 @@ from gemini_prompt_renderer import render_gemini_prompt
 from gate_recorder import (
     QUOTA_REFUSAL_REASON,
     gate_is_available,
+    gate_provider_reachability,
     get_pr_head_sha,
     result_is_for_head,
     write_result_guarded,
@@ -803,6 +804,35 @@ class GateRequestHandlerMixin:
         atomic_write_json(self._chain_exhausted_path(gate, pr_number), payload)
         return payload
 
+    def _unreachable_seat_hop(self, gate: str) -> Optional[Dict[str, Any]]:
+        """A takeover-path hop for ``gate`` when the provider behind it is
+        recorded unreachable, else ``None`` (OI-1454).
+
+        Reads the MEASURED reachability record (quota spent, credential
+        refused, seen on a real call and still inside its window), the answer
+        to "would asking this seat produce a verdict". Presence is not
+        consulted here: a missing binary is booked by the request itself and
+        taken over next round, as before. An unmeasured provider returns
+        ``None`` (nobody has proven it dead, so it is asked). The hop carries
+        the record's own description as its detail, so the annotation says WHY
+        the seat was passed over and where that was seen.
+        """
+        state_dir = getattr(self, "state_dir", None)
+        if state_dir is None:
+            return None
+        status = gate_provider_reachability(gate, state_dir=Path(state_dir))
+        if status is None or not status.is_known_unreachable:
+            return None
+        logger.info(
+            "gate_request_handler: passing over gate=%s -- %s (OI-1454)", gate, status.describe(),
+        )
+        return {
+            "gate": gate,
+            "reason": status.reason,
+            "detail": status.describe(),
+            "status": "unreachable",
+        }
+
     def _dispatch_review_seat(
         self,
         gate: str,
@@ -857,6 +887,17 @@ class GateRequestHandlerMixin:
         (``_chain_exhausted_result``) -- never a silent fallback to
         re-dispatching the originally-requested ``gate``.
 
+        REACHABILITY (OI-1454): a seat is also passed over when the provider
+        behind it is recorded unreachable (quota spent, credential refused --
+        ``provider_reachability``), even with no result of its own for this
+        PR. That record is a fact about the provider, not about a commit, so
+        it is not head-scoped; it expires (an unreachable record lives one
+        quota-cooldown window) and past that the seat is asked again. It is
+        consulted only where this PR has no answer of its own from the seat:
+        a seat that already produced a verdict (or abstained) on this head is
+        dispatched as before, and reachability never overrules it. Every hop
+        it adds to ``path`` names the reason and the record it came from.
+
         HEAD SCOPING (OI-1668): every one of those decisions rests on a
         candidate's last recorded result, and a result is a statement about
         ONE commit. A record produced against an earlier head says nothing
@@ -896,40 +937,50 @@ class GateRequestHandlerMixin:
         current = gate
         head_sha: Optional[str] = None  # resolved lazily; see docstring
         while True:
+            hop: Optional[Dict[str, Any]] = None
+            consult_reachability = True
             existing_result = self._read_existing_gate_result(current, pr_number)
-            if existing_result is None:
+            if existing_result is not None:
+                if head_sha is None:
+                    head_sha = get_pr_head_sha(pr_number)
+                if not result_is_for_head(existing_result, head_sha):
+                    logger.info(
+                        "gate_request_handler: ignoring gate=%s result for pr=%s "
+                        "recorded against head=%r while the PR head is %r -- a "
+                        "verdict about another commit cannot decide whether this "
+                        "seat is skipped; dispatching it live (OI-1668)",
+                        current, pr_number,
+                        (existing_result.get("commit_sha") or ""), head_sha,
+                    )
+                else:
+                    seat_state = self._classify_review_seat_failure(existing_result)
+                    if seat_state == "lane_exhausted":
+                        # B3: the takeover annotation is a MANDATORY, never-empty field --
+                        # an empty reason here would make this a silent refusal, not a
+                        # documented overname. The detail is the ACTUAL marker-anchored
+                        # snippet _scan_seat_failure_text found (lane log or report),
+                        # embedded here as a value -- never a pointer back to
+                        # existing_result -- so a later overwrite of that gate's own
+                        # result record (a separate, known issue T0 tracks independently)
+                        # cannot erase the reason this hop was recorded on.
+                        hop_reason = existing_result.get("reason", "unknown_reason")
+                        _hop_state, hop_detail = _scan_seat_failure_text(existing_result, self)
+                        hop = {
+                            "gate": current,
+                            "reason": hop_reason,
+                            "detail": hop_detail,
+                            "status": existing_result.get("status", ""),
+                        }
+                    elif seat_state not in ("lane_exhausted_expired", "lane_exhausted_unknown_age"):
+                        # The seat answered (or abstained) on THIS head: its own
+                        # record decides, and a provider-level record does not
+                        # overrule a result this PR already has.
+                        consult_reachability = False
+            if hop is None and consult_reachability:
+                hop = self._unreachable_seat_hop(current)
+            if hop is None:
                 break
-            if head_sha is None:
-                head_sha = get_pr_head_sha(pr_number)
-            if not result_is_for_head(existing_result, head_sha):
-                logger.info(
-                    "gate_request_handler: ignoring gate=%s result for pr=%s "
-                    "recorded against head=%r while the PR head is %r -- a "
-                    "verdict about another commit cannot decide whether this "
-                    "seat is skipped; dispatching it live (OI-1668)",
-                    current, pr_number,
-                    (existing_result.get("commit_sha") or ""), head_sha,
-                )
-                break
-            seat_state = self._classify_review_seat_failure(existing_result)
-            if seat_state != "lane_exhausted":
-                break
-            # B3: the takeover annotation is a MANDATORY, never-empty field --
-            # an empty reason here would make this a silent refusal, not a
-            # documented overname. The detail is the ACTUAL marker-anchored
-            # snippet _scan_seat_failure_text found (lane log or report),
-            # embedded here as a value -- never a pointer back to
-            # existing_result -- so a later overwrite of that gate's own
-            # result record (a separate, known issue T0 tracks independently)
-            # cannot erase the reason this hop was recorded on.
-            hop_reason = existing_result.get("reason", "unknown_reason")
-            _hop_state, hop_detail = _scan_seat_failure_text(existing_result, self)
-            path.append({
-                "gate": current,
-                "reason": hop_reason,
-                "detail": hop_detail,
-                "status": existing_result.get("status", ""),
-            })
+            path.append(hop)
             next_gate = chain.get(current)
             if next_gate is None:
                 return self._chain_exhausted_result(

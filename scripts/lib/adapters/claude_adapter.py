@@ -50,9 +50,14 @@ class ClaudeAdapter(ProviderAdapter):
     def capabilities(self) -> set[Capability]:
         return {Capability.CODE, Capability.REVIEW, Capability.DECISION, Capability.DIGEST}
 
-    def is_available(self) -> bool:
+    def is_present(self) -> bool:
         """Return True when 'claude' binary is found on PATH."""
         return shutil.which("claude") is not None
+
+    def is_available(self) -> bool:
+        """True when 'claude' is on PATH and not recorded unreachable (session
+        limit hit, login rejected). Presence alone is not availability (OI-1454)."""
+        return self.reachability().is_usable
 
     def execute(self, instruction: str, context: dict) -> AdapterResult:
         """Deliver instruction via subprocess_dispatch.deliver_with_recovery().

@@ -46,7 +46,7 @@ class OllamaProvider(ClassifierProvider):
             else os.environ.get("VNX_OLLAMA_TIMEOUT", _DEFAULT_TIMEOUT)
         )
 
-    def is_available(self) -> bool:
+    def is_present(self) -> bool:
         return shutil.which("ollama") is not None
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:

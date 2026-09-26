@@ -18,6 +18,7 @@ class CodexProvider(ClassifierProvider):
     """Run classification via the local `codex` CLI (`codex exec --json`)."""
 
     name = "codex"
+    reachability_key = "codex"
 
     def __init__(
         self,
@@ -38,7 +39,7 @@ class CodexProvider(ClassifierProvider):
         except (TypeError, ValueError):
             self.flat_cost_usd = _DEFAULT_FLAT_COST_USD
 
-    def is_available(self) -> bool:
+    def is_present(self) -> bool:
         return shutil.which("codex") is not None
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:

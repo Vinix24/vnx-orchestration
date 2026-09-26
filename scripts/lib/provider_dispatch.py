@@ -933,6 +933,53 @@ def _maybe_record_provider_lane_cooldown(
         )
 
 
+# failure_classification's class -> the reason recorded for the provider's
+# reachability. Only the two classes that are unambiguous provider refusals,
+# for the same reason as _PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES above; the
+# class is the one already computed from the event payload, never re-detected.
+_PROVIDER_REACHABILITY_REASON_BY_FAILURE_CLASS = {
+    "credit_exhausted": "insufficient_balance",
+    "auth_rejected": "auth_401",
+}
+
+
+def _maybe_record_provider_reachability(
+    *,
+    provider: str,
+    status: str,
+    failure_class: Optional[str],
+    reason: str,
+    state_dir: Path,
+) -> None:
+    """Book this dispatch as an outcome of a real call to ``provider`` in the
+    reachability record: a success confirms it, a credit/auth refusal marks it
+    unreachable, anything else (a timeout, a model error) says nothing.
+
+    ``litellm:<sub-provider>:<model>`` strings are skipped: the record is keyed
+    per provider and does not model the sub-provider behind a litellm route.
+    Best-effort: never raises back into the dispatch.
+    """
+    try:
+        import provider_reachability
+
+        if not provider_reachability.is_valid_provider_key(provider):
+            return
+        source = f"provider_dispatch:{provider}"
+        if status == "success":
+            provider_reachability.record_success(provider, source=source, state_dir=state_dir)
+            return
+        unreachable_reason = _PROVIDER_REACHABILITY_REASON_BY_FAILURE_CLASS.get(failure_class or "")
+        if unreachable_reason:
+            provider_reachability.record_unreachable(
+                provider, unreachable_reason, reason, source=source, state_dir=state_dir,
+            )
+    except Exception as exc:  # vnx-silent-except: logged with provider and reason; reachability bookkeeping must never break a dispatch
+        logger.warning(
+            "_maybe_record_provider_reachability: failed for provider=%r (non-fatal): %s",
+            provider, exc,
+        )
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -1277,6 +1324,16 @@ def _emit_governance(
             reason=_fail_reason or (getattr(result, "error", None) or ""),
             state_dir=state_dir,
         )
+    # OI-1454: the same observation, kept as a reachability record every
+    # consumer reads (adapters, classifiers, the review-gate seat walk), not
+    # only the smart router's lane_available.
+    _maybe_record_provider_reachability(
+        provider=provider,
+        status=status,
+        failure_class=_fail_class,
+        reason=_fail_reason or (getattr(result, "error", None) or ""),
+        state_dir=state_dir,
+    )
 
     # Clear (truncate) the live event file now that the archive + receipt are done.
     # Only when event_store is wired in — otherwise the caller's finally block handles it.

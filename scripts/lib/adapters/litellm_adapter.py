@@ -93,13 +93,19 @@ class LiteLLMAdapter(StreamingDrainerMixin, ProviderAdapter):
     def capabilities(self) -> set[Capability]:
         return {Capability.CODE, Capability.REVIEW}
 
-    def is_available(self) -> bool:
-        """Return True when the litellm package is importable."""
+    def is_present(self) -> bool:
+        """Return True when the litellm package is importable or its CLI is on PATH."""
         try:
             import litellm as _  # noqa: F401, PLC0415
             return True
         except ImportError:
             return bool(shutil.which("litellm"))
+
+    def is_available(self) -> bool:
+        """True when litellm is present and not recorded unreachable (the key it
+        routes with is rejected, or the balance behind it is spent). An
+        importable package is not a working route (OI-1454)."""
+        return self.reachability().is_usable
 
     def health_check(self) -> bool:
         """Run litellm --health-check stub; returns True if CLI exits 0."""
@@ -154,15 +160,21 @@ class LiteLLMAdapter(StreamingDrainerMixin, ProviderAdapter):
 
         duration = time.monotonic() - t0
         output_parts: List[str] = []
+        error_parts: List[str] = []
         for event_dict in collected_dicts:
             evt_type = event_dict.get("event_type", "")
             if evt_type == "text":
                 output_parts.append((event_dict.get("data") or {}).get("content", ""))
             elif evt_type == "error":
                 status = "failed"
+                error_parts.append(str((event_dict.get("data") or {}).get("message", "")))
 
         if result.returncode not in (None, 0) and status != "failed":
             status = "failed"
+
+        if isinstance(result.error, str):
+            error_parts.append(result.error)
+        self.record_outcome(status == "done", "\n".join(part for part in error_parts if part))
 
         return AdapterResult(
             status=status,

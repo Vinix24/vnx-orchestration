@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -19,6 +20,7 @@ from failure_classification import GATE_QUOTA_REFUSAL_REASON
 from governance_emit import _classify_lane_log_text  # the fabric's single quota-marker list — never a second scan
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
+import provider_reachability
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +203,11 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
 
     An unregistered gate raises :class:`UnknownGateProvider` — never ``False``,
     never a fallback to a binary name invented from the gate's own name.
+
+    This is PRESENCE and registration, not reachability: a ``codex_gate`` whose
+    quota is spent is still "available" here (OI-1454). Whether the provider
+    behind a gate answers is measured from real outcomes and read through
+    :func:`gate_provider_reachability`.
     """
     provider = resolve_gate_provider(gate)
     if provider is None:
@@ -218,6 +225,26 @@ def gate_is_available(gate: str, *, repo_root: Optional[Path] = None) -> bool:
     raise UnknownGateProvider(
         f"{gate} has an unknown provider kind {kind!r} — cannot determine availability"
     )
+def gate_provider_reachability(
+    gate: str,
+    *,
+    state_dir: Path,
+    now: Optional[float] = None,
+) -> Optional[provider_reachability.Reachability]:
+    """Measured reachability of the provider behind ``gate``, or ``None`` when
+    the gate has no provider key to measure (unregistered, or a script runner
+    whose registered name is a path, not a provider).
+
+    Reads recorded outcomes only, so an unasked provider is ``unmeasured`` and
+    never ``reachable``. ``state_dir`` is explicit: the caller says whose
+    record to read, this never falls back to ambient environment.
+    """
+    provider = resolve_gate_provider(gate)
+    if provider is None or not provider_reachability.is_valid_provider_key(provider[1]):
+        return None
+    return provider_reachability.get(provider[1], state_dir=state_dir, now=now)
+
+
 # The reason a quota/credit refusal is booked under. Re-exported from
 # failure_classification, which owns it so stop_conditions can reach the same
 # value without importing this module (see that constant's own docstring). The
@@ -1538,6 +1565,70 @@ def _emit_terminal_result_receipt(
         )
 
 
+# Failure reasons whose ``reason_detail`` is the provider's own text about why
+# no verdict came back, and so may say the quota is spent or the key refused.
+# Same population as the write-time quota reclassification, plus the reason it
+# produces.
+_REACHABILITY_TEXT_REASONS: frozenset = _CAUSE_AGNOSTIC_FAILURE_REASONS | {QUOTA_REFUSAL_REASON}
+
+
+def _payload_epoch(payload: Dict[str, Any]) -> Optional[float]:
+    """When the record says its outcome happened, as epoch seconds, else None.
+
+    A rewrite of an existing record (a takeover annotation) must carry the
+    original time, never the time of the rewrite: otherwise re-annotating a
+    quota refusal would refresh its age and pin the seat out for another window.
+    """
+    for key in ("recorded_at", "completed_at", "killed_at"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        text = value.strip()
+        try:
+            parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    return None
+
+
+def _feed_provider_reachability(payload: Dict[str, Any], *, gate: str, result_path: Path) -> None:
+    """Book a landed gate result as an outcome of a real call to the gate's provider.
+
+    A decided verdict with its evidence trail says the provider answered. An
+    ``unavailable`` record whose own failure text names a quota, balance or
+    credential refusal says it did not. Everything else (a timeout, a crash, a
+    runner that never started) says nothing about reachability and writes
+    nothing. Only ``reason_detail`` is read, never ``failure_reason``: that one
+    is the takeover annotation and carries the text of the gate this seat was
+    handed over FROM (see :func:`is_quota_refusal_text`).
+
+    Best-effort and last: the record is already on disk, and bookkeeping about
+    it can never fail or undo it.
+    """
+    from gate_status import (
+        PARTIAL_REVIEW_STATES, canonical_status, has_complete_evidence,
+    )
+
+    provider = resolve_gate_provider(gate)
+    state_dir = _state_dir_from_result_path(result_path)
+    if provider is None or state_dir is None or not provider_reachability.is_valid_provider_key(provider[1]):
+        return
+    key = provider[1]
+    source = f"gate_result:{gate}"
+    measured_at = _payload_epoch(payload)
+    status = canonical_status(payload)
+    if has_complete_evidence(payload) or status in PARTIAL_REVIEW_STATES:
+        provider_reachability.record_success(key, source=source, state_dir=state_dir, measured_at=measured_at)
+    elif status == "unavailable" and payload.get("reason") in _REACHABILITY_TEXT_REASONS:
+        provider_reachability.record_failure(
+            key, str(payload.get("reason_detail") or ""), source=source,
+            state_dir=state_dir, measured_at=measured_at,
+        )
+
+
 def write_result_guarded(
     result_path: Path,
     payload: Dict[str, Any],
@@ -1622,6 +1713,7 @@ def write_result_guarded(
     # register emit on ``written``, OI-1469/OI-1470).
     publish_forge_check_run(payload, gate=gate, result_path=result_path)
     _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_ref)
+    _feed_provider_reachability(payload, gate=gate, result_path=result_path)
     return payload, True
 
 
@@ -1743,6 +1835,7 @@ def record_terminal_result(
     # pass/fail was rewritten to ``unavailable`` above, so
     # _emit_terminal_result_receipt sees no decided verdict and emits nothing.
     _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_id)
+    _feed_provider_reachability(payload, gate=gate, result_path=result_path)
     return result_path
 
 
