@@ -89,13 +89,13 @@ def test_stage_rejects_unknown_gate_lists_valid_names(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         _stage(tmp_path, gate="not-a-real-gate")
     message = str(excinfo.value)
-    for valid in ("gemini_review", "codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"):
+    for valid in ("codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"):
         assert valid in message
 
 
 @pytest.mark.parametrize(
     "valid_gate",
-    ["gemini_review", "codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"],
+    ["codex_gate", "claude_github_optional", "ci_gate", "wiring_gate"],
 )
 def test_stage_accepts_every_canonical_gate_name(tmp_path, valid_gate):
     payload = json.loads(_stage(tmp_path, gate=valid_gate).read_text(encoding="utf-8"))

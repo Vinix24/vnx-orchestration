@@ -54,7 +54,6 @@ class Gate(str, Enum):
     both is what OI-1094 exists to catch — see that test module before adding
     another member.
     """
-    GEMINI_REVIEW           = "gemini_review"
     CODEX_GATE              = "codex_gate"
     CLAUDE_GITHUB_OPTIONAL  = "claude_github_optional"
     CI_GATE                 = "ci_gate"
@@ -82,6 +81,22 @@ GATES_OUTSIDE_ENUM = frozenset({"deepseek_gate"})
 # once, and test_gate_name_registry pins the set against the runnable registry
 # (gate_recorder.GATE_PROVIDERS) so it cannot drift from what actually runs.
 REGISTERED_GATE_NAMES = frozenset(g.value for g in Gate) | GATES_OUTSIDE_ENUM
+
+# Gate names that are RETIRED: no longer a reviewer, never selectable. Absent from
+# REGISTERED_GATE_NAMES on purpose, so every reader of that set (Rule 16 below, the
+# staging bridge, the takeover-chain parser, smart_router's primary-seat pick)
+# refuses the name without a per-site check. The name survives so history stays
+# readable: the closure verifier still interprets an existing result for it.
+# gemini_review: operator decision 2026-09-26, after one record ever and no verdict.
+# Gemini as a provider lane for non-review work is not touched.
+RETIRED_GATE_NAMES = frozenset({"gemini_review"})
+
+
+def retired_gate_hint(name: Optional[str]) -> str:
+    """Suffix for a refusal message when ``name`` is a retired gate, else ``""``."""
+    if (name or "").strip() in RETIRED_GATE_NAMES:
+        return f" ({name.strip()} is a retired gate, no longer a reviewer)"
+    return ""
 
 
 class ReviewGateConfigError(RuntimeError):
@@ -541,7 +556,7 @@ def validate(
     ):
         return Reject(
             "bad-gate",
-            f"gate {spec.gate!r} is not a known review gate; "
+            f"gate {spec.gate!r} is not a known review gate{retired_gate_hint(_gate_name)}; "
             f"valid gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}",
         )
 

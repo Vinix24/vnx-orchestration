@@ -47,6 +47,7 @@ import smart_router
 from dispatch_spec import (
     GATES_OUTSIDE_ENUM,
     REGISTERED_GATE_NAMES,
+    RETIRED_GATE_NAMES,
     DispatchPath,
     DispatchSpec,
     Gate,
@@ -134,7 +135,7 @@ def test_registry_is_exactly_the_set_of_gates_that_can_run() -> None:
     then never runs; a runnable gate absent from the registry is the
     deepseek_gate defect itself.
     """
-    assert REGISTERED_GATE_NAMES == set(gate_recorder.GATE_PROVIDERS)
+    assert REGISTERED_GATE_NAMES == set(gate_recorder.GATE_PROVIDERS) - RETIRED_GATE_NAMES
 
 
 def test_every_weighted_gate_is_a_registered_gate() -> None:

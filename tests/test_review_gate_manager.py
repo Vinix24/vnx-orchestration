@@ -37,28 +37,27 @@ def review_env(tmp_path, monkeypatch):
     return project_root
 
 
-def test_request_reviews_queues_gemini_and_skips_unconfigured_optional(review_env, monkeypatch):
+def test_request_reviews_queues_codex_and_skips_unconfigured_optional(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
-    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
     monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
     manager = rgm.ReviewGateManager()
     result = manager.request_reviews(
         pr_number=12,
         branch="feature/demo",
-        review_stack=["gemini_review", "claude_github_optional"],
+        review_stack=["codex_gate", "claude_github_optional"],
         risk_class="medium",
         changed_files=["docs/guide.md"],
         mode="per_pr",
     )
 
     requested = {item["gate"]: item for item in result["requested"]}
-    assert requested["gemini_review"]["status"] == "requested"
-    assert requested["gemini_review"]["report_path"].startswith(str((review_env / ".vnx-data" / "unified_reports").resolve()))
+    assert requested["codex_gate"]["status"] == "requested"
+    assert requested["codex_gate"]["report_path"].startswith(str((review_env / ".vnx-data" / "unified_reports").resolve()))
     assert requested["claude_github_optional"]["status"] == "not_configured"
-    assert (manager.requests_dir / "pr-12-gemini_review.json").exists()
+    assert (manager.requests_dir / "pr-12-codex_gate.json").exists()
 
 
 def test_codex_final_gate_blocks_when_required_but_not_available(review_env, monkeypatch):
@@ -138,14 +137,14 @@ def test_record_result_canonicalizes_relative_report_path(review_env, monkeypatc
 
 def test_record_result_uses_request_report_path_when_report_path_omitted(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
-    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
 
     manager = rgm.ReviewGateManager()
     requested = manager.request_reviews(
         pr_number=17,
         branch="feature/runtime",
-        review_stack=["gemini_review"],
+        review_stack=["codex_gate"],
         risk_class="high",
         changed_files=["scripts/runtime.py"],
         mode="per_pr",
@@ -153,10 +152,10 @@ def test_record_result_uses_request_report_path_when_report_path_omitted(review_
 
     # Create the report file that the request reserved
     Path(requested["report_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(requested["report_path"]).write_text("# Gemini headless report\n", encoding="utf-8")
+    Path(requested["report_path"]).write_text("# Codex headless report\n", encoding="utf-8")
 
     payload = manager.record_result(
-        gate="gemini_review",
+        gate="codex_gate",
         pr_number=17,
         branch="feature/runtime",
         status="pass",

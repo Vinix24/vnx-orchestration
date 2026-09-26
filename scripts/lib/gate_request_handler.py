@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from atomic_io import atomic_write_json
 from auto_merge_policy import codex_final_gate_required
-from dispatch_spec import REGISTERED_GATE_NAMES
+from dispatch_spec import REGISTERED_GATE_NAMES, RETIRED_GATE_NAMES, retired_gate_hint
 from review_contract import ReviewContract
 from gemini_prompt_renderer import render_gemini_prompt
 from gate_recorder import (
@@ -97,8 +97,8 @@ def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
     for name in names:
         if name not in REGISTERED_GATE_NAMES:
             raise ReviewGateTakeoverConfigError(
-                f"VNX_REVIEW_GATE_TAKEOVER_CHAIN names an unknown gate {name!r} "
-                f"(full chain: {raw!r}); known gates: "
+                f"VNX_REVIEW_GATE_TAKEOVER_CHAIN names an unknown gate {name!r}"
+                f"{retired_gate_hint(name)} (full chain: {raw!r}); known gates: "
                 f"{', '.join(sorted(REGISTERED_GATE_NAMES))}"
             )
         if name in seen:
@@ -417,8 +417,12 @@ class GateRequestHandlerMixin:
         mode: str,
         dispatch_id: str,
     ) -> Dict[str, Any]:
-        if gate == "gemini_review":
-            return self._request_gemini(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate in RETIRED_GATE_NAMES:
+            return {
+                "gate": gate, "status": "blocked", "reason": "retired_review_gate",
+                "reason_detail": f"{gate} is a retired gate and no longer a reviewer; "
+                                 "remove it from the review stack",
+            }
         if gate == "codex_gate":
             return self._request_codex(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if gate == "claude_github_optional":

@@ -107,12 +107,6 @@ GATE_COST: Dict[str, GateCost] = {
         usd="subscription",
         note="rate-limited; operator policy A1 is to wait for the reset, not to fall back",
     ),
-    Gate.GEMINI_REVIEW.value: GateCost(
-        command="python3 scripts/review_gate_manager.py request-and-execute --gate gemini_review --pr {pr}",
-        lane="gemini CLI",
-        usd="subscription",
-        note="no standalone runner script in this repo — goes through the manager",
-    ),
     Gate.CI_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py request-and-execute --gate ci_gate --pr {pr}",
         lane="gh CLI, inline (no provider)",
