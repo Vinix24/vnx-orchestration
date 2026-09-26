@@ -503,19 +503,28 @@ class TestProviderValidation:
         with pytest.raises(ValueError, match="Invalid provider"):
             _registry_from_yaml(bad_yaml)
 
-    def test_default_yaml_providers_all_valid(self):
-        """worker-provider-kimi-flip (2026-07-23): the shipped default yaml mixes
-        providers (T0=claude, T1/T2/T3=kimi) — every one must pass provider validation."""
+    def test_default_yaml_build_workers_default_to_claude_sonnet(self):
+        """Operator decision 2026-09-23: the shipped default yaml carries claude/sonnet for
+        T1/T2/T3 (kimi-k3 is an explicit per-dispatch choice, not the default)."""
         reg = _registry_from_yaml(DEFAULT_YAML_TEXT)
-        by_id = {w.terminal_id: w.provider for w in reg.list_workers()}
-        assert by_id["T0"] == "claude"
-        assert by_id["T1"] == "kimi"
-        assert by_id["T2"] == "kimi"
-        assert by_id["T3"] == "kimi"
+        by_id = {w.terminal_id: (w.provider, w.model) for w in reg.list_workers()}
+        assert by_id["T0"] == ("claude", "opus")
+        for terminal in ("T1", "T2", "T3"):
+            assert by_id[terminal] == ("claude", "sonnet"), terminal
+
+    def test_hardcoded_fallback_mirrors_default_yaml(self):
+        """The import-time fallback must not drift from the shipped default yaml."""
+        from_yaml = _registry_from_yaml(DEFAULT_YAML_TEXT)
+        from_fallback = _build_registry(_HARDCODED_FALLBACK, _ALL_ROLES)
+        assert [(w.terminal_id, w.role, w.provider, w.model) for w in from_fallback.list_workers()] == [
+            (w.terminal_id, w.role, w.provider, w.model) for w in from_yaml.list_workers()
+        ]
 
     def test_kimi_provider_valid(self):
-        reg = _registry_from_yaml(DEFAULT_YAML_TEXT)
-        assert any(w.provider == "kimi" for w in reg.list_workers())
+        """kimi stays a valid provider: it is an explicit choice, just not the default."""
+        worker = {"terminal_id": "T1", "role": "backend-developer", "provider": "kimi", "model": "kimi-k3"}
+        reg = _build_registry({"workers": [worker], "pools": [{"pool_id": "default"}]}, _ALL_ROLES)
+        assert [w.provider for w in reg.list_workers()] == ["kimi"]
 
     def test_litellm_provider_valid(self):
         reg = _registry_from_yaml(PROVIDER_MIX_YAML_TEXT)

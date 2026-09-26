@@ -12,20 +12,20 @@ workers:
     aliases: []
   - terminal_id: T1
     role: backend-developer
-    provider: kimi
-    model: kimi-k3
+    provider: claude
+    model: sonnet
     pool_id: default
     aliases: []
   - terminal_id: T2
     role: backend-developer
-    provider: kimi
-    model: kimi-k3
+    provider: claude
+    model: sonnet
     pool_id: default
     aliases: []
   - terminal_id: T3
     role: reviewer
-    provider: kimi
-    model: kimi-k3
+    provider: claude
+    model: sonnet
     pool_id: default
     aliases: []
 

@@ -150,7 +150,7 @@ def run(terminal_id: str, project_id: str, *,
     """
     _sd = state_dir or _resolve_state_dir()
     _dd = dispatch_dir or _resolve_dispatch_dir()
-    _model = model or os.environ.get("VNX_DISPATCH_MODEL", "kimi-k3")
+    _model = model or os.environ.get("VNX_DISPATCH_MODEL", "sonnet")
 
     with get_connection(_sd) as conn:
         dispatch_id = claim_next_queued_dispatch(conn, terminal_id, project_id)
@@ -193,9 +193,9 @@ def run(terminal_id: str, project_id: str, *,
 
     instruction = prompt_path.read_text(encoding="utf-8")
     tp = bundle.get("target_profile") or {}
-    # worker-provider-kimi-flip (20260723): build workers default to kimi when the
-    # bundle's target_profile doesn't declare a provider (mirrors vnx_workers.default.yaml).
-    provider = (tp.get("provider") or "kimi").lower().strip()
+    # Build workers default to claude (sonnet) when the bundle's target_profile doesn't
+    # declare a provider (mirrors vnx_workers.default.yaml).
+    provider = (tp.get("provider") or "claude").lower().strip()
     role: Optional[str] = tp.get("role") or None
     gate = (bundle.get("gate") or "").strip()
 

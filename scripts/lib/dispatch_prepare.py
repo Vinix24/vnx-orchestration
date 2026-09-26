@@ -56,7 +56,7 @@ def prepare(
     dispatch_id: str,
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
-    model: str = "kimi-k3",
+    model: str = "sonnet",
     repo_map: "str | None" = None,
 ) -> str:
     """Compose the shared enriched instruction body for both Claude lanes.

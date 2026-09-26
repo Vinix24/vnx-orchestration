@@ -52,10 +52,9 @@ parallel path:
 ## 1. Runtime guardrails
 
 - T0 = Claude Opus only (`t0-opus-only`, pin_semantics=floor).
-  T1/T2/T3 = free per-dispatch provider/model choice; kimi-k3 fills in when the
+  T1/T2/T3 = free per-dispatch provider/model choice; sonnet fills in when the
   spec carries no explicit model (`workers-kimi-pinned`, pin_semantics=default).
-  `provider=claude` for a build-worker still requires `VNX_OVERRIDE_WORKER_CLAUDE=1`
-  with an audit reason.
+  kimi-k3 is an explicit choice, not the default.
 - Do not rely on runtime `/model` switching. Re-verify worker readiness before the payload.
 - Tri-file for workers (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`); T0 itself uses `CLAUDE.md`.
 - `Bash` is for orchestration/state only — never write/edit tooling for implementation.
