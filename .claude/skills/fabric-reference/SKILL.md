@@ -41,7 +41,7 @@ vnx dispatch <pending-id>          # the door; decides lane, runs phantom-guard
 
 ## Runbook: gate invocation
 
-Three gates decide what merges: codex + gemini (adversarial review) + deterministic CI.
+Three gates decide what merges: codex + kimi (adversarial review) + deterministic CI.
 
 - Provider gates WRITE to the working tree. After a gate: stage the good changes, `git checkout --` any stray edits.
 - codex = strict diff-mode; kimi = synthesis/operational angle (proven 3x parallel).

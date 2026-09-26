@@ -23,11 +23,11 @@ Gate requests transition to `queued` but no automatic runner executes them. The 
 
 **Defect 2: Unavailable Provider Without Skip Record**
 
-When Codex is unavailable (`VNX_CODEX_HEADLESS_ENABLED=0` or `codex` not in PATH), the gate request records `status: blocked` with `reason: codex_headless_not_available`. But this is a request-time classification, not an execution outcome. There is no structured skip-rationale audit record that T0 can use to distinguish "provider unavailable at request time" from "provider available but execution failed." The Gemini `blocked` status has the same ambiguity.
+When Codex is unavailable (`VNX_CODEX_HEADLESS_ENABLED=0` or `codex` not in PATH), the gate request records `status: blocked` with `reason: codex_headless_not_available`. But this is a request-time classification, not an execution outcome. There is no structured skip-rationale audit record that T0 can use to distinguish "provider unavailable at request time" from "provider available but execution failed."
 
 **Defect 3: Stall Without Timeout**
 
-Gemini CLI has known stdout flush and stall issues (OI-048). A stalled gate produces no output, no error, and no timeout — it hangs indefinitely. The `headless_adapter.py` defines `HeadlessTimeoutError` and `headless_timeout()` (default 600s), but these apply to the general headless adapter, not to review gate execution specifically. No gate-type-specific timeout or stall detection exists.
+A review CLI can stall on stdout flush (OI-048, first measured on the Gemini CLI, since retired as a reviewer). A stalled gate produces no output, no error, and no timeout — it hangs indefinitely. The `headless_adapter.py` defines `HeadlessTimeoutError` and `headless_timeout()` (default 600s), but these apply to the general headless adapter, not to review gate execution specifically. No gate-type-specific timeout or stall detection exists.
 
 ### 1.2 The Fix
 
@@ -68,7 +68,7 @@ not_executable → (terminal)
 
 **GATE-1 (State Machine Rule)**: Every gate request MUST transition from `requested` to a terminal state (`completed`, `failed`, or `not_executable`) within the bounded execution window defined in Section 4. The `requested` state MUST NOT persist indefinitely.
 
-**GATE-2 (No Ambiguous Queue)**: The `queued` status currently used in request records (e.g., `"status": "queued"` in `_request_gemini()`) is an alias for `requested`. PR-1 SHOULD normalize to `requested` for consistency. During the transition period, both `queued` and `requested` are treated as equivalent non-terminal states.
+**GATE-2 (No Ambiguous Queue)**: The `queued` status currently used in request records (e.g., `"status": "queued"` in a request record) is an alias for `requested`. PR-1 SHOULD normalize to `requested` for consistency. During the transition period, both `queued` and `requested` are treated as equivalent non-terminal states.
 
 **GATE-3 (Executing State Record)**: When the gate runner starts execution, it MUST update the request record with:
 
@@ -171,7 +171,6 @@ The current `blocked` status is ambiguous — it could mean "temporarily blocked
 
 | Gate Type | Default Timeout | Env Override | Rationale |
 |-----------|----------------|--------------|-----------|
-| `gemini_review` | 300s (5 min) | `VNX_GEMINI_GATE_TIMEOUT` | Gemini CLI is fast but has stall risk (OI-048) |
 | `codex_gate` | 600s (10 min) | `VNX_CODEX_GATE_TIMEOUT` | Codex analysis may be slow on large diffs |
 | `claude_github_optional` | 300s (5 min) | `VNX_CLAUDE_GITHUB_GATE_TIMEOUT` | GitHub API-bound, should be fast |
 
@@ -185,7 +184,6 @@ A stall is when the subprocess is alive but producing no output. This is distinc
 
 | Gate Type | Stall Threshold | Env Override |
 |-----------|----------------|--------------|
-| `gemini_review` | 60s | `VNX_GEMINI_STALL_THRESHOLD` |
 | `codex_gate` | 120s | `VNX_CODEX_STALL_THRESHOLD` |
 | `claude_github_optional` | 60s | `VNX_CLAUDE_GITHUB_STALL_THRESHOLD` |
 
@@ -195,21 +193,21 @@ When a gate is killed due to timeout or stall, the failure MUST be recorded as:
 
 ```json
 {
-  "gate": "gemini_review",
+  "gate": "codex_gate",
   "pr_id": "PR-0",
   "status": "failed",
   "reason": "timeout",
-  "reason_detail": "Subprocess exceeded 300s timeout",
-  "duration_seconds": 300,
+  "reason_detail": "Subprocess exceeded 600s timeout",
+  "duration_seconds": 600,
   "partial_output_lines": 0,
   "runner_pid": 12345,
   "killed_at": "2026-04-01T14:50:00Z",
-  "summary": "Gate execution timed out after 300s with no output.",
+  "summary": "Gate execution timed out after 600s with no output.",
   "contract_hash": "abc123",
   "report_path": "",
   "blocking_findings": [],
   "advisory_findings": [],
-  "required_reruns": ["gemini_review"],
+  "required_reruns": ["codex_gate"],
   "residual_risk": "Gate timed out. Re-run required.",
   "recorded_at": "2026-04-01T14:50:01Z"
 }
@@ -346,12 +344,12 @@ A result record is stale if:
 
 | # | Non-Goal | Rationale |
 |---|----------|-----------|
-| NG-1 | Adding new gate types beyond gemini_review, codex_gate, claude_github_optional | FEATURE_PLAN scopes this out explicitly |
+| NG-1 | Adding new gate types beyond codex_gate, claude_github_optional | FEATURE_PLAN scopes this out explicitly |
 | NG-2 | Changing the review contract or evidence verification rules | Doc 45 and Doc 130 govern evidence rules; this contract governs execution lifecycle |
 | NG-3 | Modifying PR completion criteria | Those remain per existing contracts |
 | NG-4 | Automatic retry of failed gates | Failed gates require explicit re-request. Automatic retry is a future concern. |
 | NG-5 | Dashboard or alerting for gate status | Structured data enables dashboards; building them is out of scope |
-| NG-6 | Resolving OI-048 (Gemini stdout flush) | PR-1 addresses the symptom with stall detection; root cause fix is in Gemini CLI |
+| NG-6 | Resolving OI-048 (review-CLI stdout flush) | PR-1 addresses the symptom with stall detection; the root cause fix is in the CLI |
 
 ---
 

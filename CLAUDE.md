@@ -61,7 +61,7 @@ See `docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md`.
 T0 must cite this explicitly in review-gate prompts.
 </important>
 
-<important if="working on review-gates or codex/kimi/gemini providers">
+<important if="working on review-gates or codex/kimi review providers">
 Per CC-COMMUNITY-SYNTHESIS-2026-05-29.md: codex for strict diff-mode, kimi for synthesis/operational angle.
 Parallel review pattern proven 3x. Raw vs gate-routed dispatch = different audit trail — audit concern applies.
 </important>

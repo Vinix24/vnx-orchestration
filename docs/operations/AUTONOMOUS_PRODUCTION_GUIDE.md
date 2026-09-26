@@ -16,7 +16,7 @@ This guide still contains older execution examples, but the current production r
 - the default model is **one feature worktree per feature/fix**, not per-terminal worktrees
 - the operator surface is now complemented by the delivered **SEOcrawler Command Center**
 - FP29, FP30, and FP31 have now provided real proving-ground evidence for dashboard operations, paid delivery lifecycle, and production validation
-- interactive defaults remain Sonnet/Opus driven, but optional **Gemini/Codex headless review gates** are now part of the broader VNX evolution and should not be read as forbidden by older examples in this document
+- interactive defaults remain Sonnet/Opus driven, but optional **Codex/Kimi headless review gates** are now part of the broader VNX evolution and should not be read as forbidden by older examples in this document
 - the **default Claude worker lane is the interactive tmux-spawn lane** (subscription); after the June 15, 2026 billing change the headless `claude -p` lane bills API credits and is opt-in / blocked by default (`claude-headless` constraint, `VNX_OVERRIDE_CLAUDE_HEADLESS=1`). Older examples in this doc that shell into `claude -p` predate that default
 - the **single-entry dispatch door** (`scripts/lib/dispatch_cli.py`) is **default-ON** since 2026-06-24 (ADR-024; `VNX_SINGLE_ENTRY_DISPATCH` enabled via `_DEFAULT_ENABLED = True`). Every dispatch routes through the door, which selects the per-lane path; `VNX_DISPATCH_LEGACY=1` is the per-terminal rollback
 
@@ -48,7 +48,7 @@ Use this guide as the production protocol reference, but prefer:
 | **Klein en gefocust** | 1 PR = 1 ding. 30-90 min. Max 150 regels changed. Liever 50 kleine PRs dan 10 grote |
 | **Geen bewijs = reject** | Receipt zonder evidence → direct terug naar terminal |
 | **T0 verifieert zelf** | T0 runt gate commands zelf, vertrouwt NIET op self-reported resultaten |
-| **Interactive default, optional headless review** | T1/T2 = Sonnet (standaard), T3 = Opus (complex). Headless Gemini/Codex review gates are optional and policy-driven, not the default execution path |
+| **Interactive default, optional headless review** | T1/T2 = Sonnet (standaard), T3 = Opus (complex). Headless Codex/Kimi review gates are optional and policy-driven, not the default execution path |
 | **Quality gates overal** | In dispatch (worker moet uitvoeren) + door T0 (onafhankelijk herhaald) |
 | **Single responsibility** | Elke PR doet precies 1 ding. Multi-step = opsplitsen in meerdere PRs |
 

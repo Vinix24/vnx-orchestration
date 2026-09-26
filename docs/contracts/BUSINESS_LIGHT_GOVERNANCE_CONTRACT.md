@@ -36,7 +36,7 @@ The contract exists so that:
 |--------|-----------------|-------------------|
 | Scope model | Git worktree | Folder |
 | Review policy | Every PR reviewed by gate | Review-by-exception |
-| Gate requirement | Codex + Gemini required | No required gates (opt-in) |
+| Gate requirement | Codex required | No required gates (opt-in) |
 | Closure authority | Human only | Manager may close (with audit) |
 | Policy mutation | Blocked | Blocked |
 | Evidence retention | 30 days | 14 days |

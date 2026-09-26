@@ -57,10 +57,10 @@ GET /api/operator/gate/config?project=<path>
 {
   "project": "/path/to/project",
   "gates": {
-    "gemini_review": {
+    "kimi_gate": {
       "enabled": true,
-      "env_var": "VNX_GEMINI_GATE_ENABLED",
-      "description": "Gemini headless code review"
+      "env_var": "VNX_KIMI_GATE_ENABLED",
+      "description": "Kimi headless code review"
     },
     "codex_gate": {
       "enabled": true,
@@ -88,7 +88,7 @@ Content-Type: application/json
 
 {
   "project": "/path/to/project",
-  "gate": "gemini_review",
+  "gate": "kimi_gate",
   "enabled": false
 }
 ```
@@ -97,7 +97,7 @@ Content-Type: application/json
 ```json
 {
   "success": true,
-  "gate": "gemini_review",
+  "gate": "kimi_gate",
   "enabled": false,
   "previous": true,
   "toggled_at": "ISO8601",
@@ -120,7 +120,7 @@ Gate state is per-project, per-gate:
 ```json
 {
   "<project_path>": {
-    "gemini_review": { "enabled": true },
+    "kimi_gate": { "enabled": true },
     "codex_gate": { "enabled": true },
     "claude_github": { "enabled": false }
   }
@@ -129,7 +129,7 @@ Gate state is per-project, per-gate:
 
 **Storage**: `$VNX_STATE_DIR/gate_config.json` (per project). Created with defaults on first query.
 
-**Defaults**: All gates enabled except `claude_github` (matches current behavior — Gemini and Codex default-enabled, Claude GitHub optional).
+**Defaults**: All gates enabled except `claude_github` (matches current behavior — Kimi and Codex default-enabled, Claude GitHub optional).
 
 ### 3.4 Gate Toggle Invariants
 
@@ -164,8 +164,8 @@ Per the dashboard safe-action model (Feature 13), gate toggle is registered as a
 ActionOutcome(
     action="toggle_gate",
     status="success",
-    message="gemini_review disabled",
-    data={"gate": "gemini_review", "enabled": False, "previous": True},
+    message="kimi_gate disabled",
+    data={"gate": "kimi_gate", "enabled": False, "previous": True},
 )
 ```
 

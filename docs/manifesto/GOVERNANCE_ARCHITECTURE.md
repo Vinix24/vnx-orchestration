@@ -66,7 +66,7 @@ The LLM receives a constrained prompt with 5 structured rules and is required to
 
 ## 3. Gate Locks
 
-Gate locks are file-based hard constraints that prevent `COMPLETE` until specific conditions are externally verified. This mechanism governs **dispatch-level** review gates (codex, gemini, CI) — it is one of two independent gate mechanisms in the system, not the only one.
+Gate locks are file-based hard constraints that prevent `COMPLETE` until specific conditions are externally verified. This mechanism governs **dispatch-level** review gates (codex, kimi, CI) — it is one of two independent gate mechanisms in the system, not the only one.
 
 **A second, unrelated mechanism gates PR merges directly: the D1-D5 signed-attestation pipeline.**
 Where a gate lock is a file whose mere presence blocks T0 from outputting `COMPLETE`, the
@@ -81,7 +81,7 @@ attestation gate ships in staged-advisory mode (reports, never blocks) — see
 
 ### How they work
 
-1. When a review gate is required (e.g., `codex_review`, `gemini_review`, `ci_green`), a lock file is written:
+1. When a review gate is required (e.g., `codex_review`, `kimi_review`, `ci_green`), a lock file is written:
    ```
    .vnx-data/state/gate_locks/<gate-id>.lock
    ```
@@ -101,7 +101,7 @@ attestation gate ships in staged-advisory mode (reports, never blocks) — see
 ### Domain-agnostic design
 
 Gate locks are intentionally domain-agnostic. The same mechanism works for:
-- Code quality gates (`codex_review.lock`, `gemini_review.lock`)
+- Code quality gates (`codex_review.lock`, `kimi_review.lock`)
 - CI status (`ci_green.lock`)
 - Business compliance gates (`legal_review.lock`, `gdpr_check.lock`)
 - Any future gate type — no code changes required to add a new gate domain.
@@ -219,7 +219,7 @@ For subprocess-adapter terminals, the skill content is inlined directly into the
 
 ## 7. Review Gate Lifecycle
 
-Review gates follow a strict lifecycle. Every gate must complete all stages before the lock is released. This lifecycle applies to **headless review gates** (codex, gemini, wiring) that block a dispatch via a lock file (§3). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
+Review gates follow a strict lifecycle. Every gate must complete all stages before the lock is released. This lifecycle applies to **headless review gates** (codex, kimi, wiring) that block a dispatch via a lock file (§3). The D3 attestation gate follows a **completely different lifecycle** — no request file, no lock file, no result-record stage. It runs as a GitHub Action on `pull_request`, classifies the diff, resolves a trust anchor from the base branch, and returns a pass/fail signal as the check's exit code (`0` = PASS, EXEMPT, or a validly-signed OVERRIDE; `1` = FAIL; `2` = CONFIG ERROR). A recorded override therefore exits `0` just like a PASS — the PASS-vs-OVERRIDE distinction is carried in the textual verdict message, not the exit code. See `docs/governance/ATTESTATION_ENFORCEMENT.md` for that flow.
 
 ```
 request → execute → report → result record → lock release → completion
@@ -233,7 +233,7 @@ request → execute → report → result record → lock release → completion
    .vnx-data/state/gate_locks/<gate-id>.lock
    ```
 
-2. **Execute**: A headless subprocess runs the review tool (codex CLI, gemini subprocess, CI pipeline). Execution is non-blocking — T0 continues making WAIT decisions until completion.
+2. **Execute**: A headless subprocess runs the review tool (codex CLI, kimi subprocess, CI pipeline). Execution is non-blocking — T0 continues making WAIT decisions until completion.
 
 3. **Report**: The review tool writes a normalized markdown report:
    ```
