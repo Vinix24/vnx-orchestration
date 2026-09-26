@@ -184,7 +184,11 @@ def test_a_pr_with_no_declared_obligation_blocks_and_names_the_choice():
     assert any("no review-gate obligation declared" in b for b in report.blockers)
     costs = report.costs()
     assert any("declare and run a review gate" in c for c in costs)
-    assert any("glm_gate" in c and "codex_gate" in c for c in costs)
+    hint = next(c for c in costs if "declare and run a review gate" in c)
+    # Subscription reviewers first (operator decision 2026-09-26): the API-credit gate is
+    # named last and only as the fallback, never offered ahead of codex or kimi.
+    assert hint.index("codex_gate") < hint.index("kimi_gate") < hint.index("glm_gate")
+    assert "only when both are unavailable" in hint
 
 
 @pytest.mark.parametrize("state,expected", [("MERGED", True), ("CLOSED", True), ("OPEN", False)])

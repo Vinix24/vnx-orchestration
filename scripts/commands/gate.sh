@@ -205,20 +205,24 @@ Arguments:
   pr-number             GitHub PR number to gate
 
 Options:
-  --only <gate>         Run a specific gate only (e.g. codex, gemini)
+  --only <gate>         Run a specific gate only (e.g. codex, kimi, gemini)
   --status              Show current gate results without running
   --mode <mode>         Gate mode: per_pr or final (default: final)
   --risk-class <class>  Risk class: low, medium, high (default: medium)
   -h, --help            Show this help
 
 Gate names:
-  codex_gate            Codex static analysis gate
+  codex_gate            Codex static analysis gate (subscription)
+  kimi_gate             Kimi review gate (subscription)
   gemini_review         Gemini code review gate
+  glm_gate              GLM review gate (API credit, fallback when codex and kimi are unavailable)
+  deepseek_gate         DeepSeek review gate (API credit, fallback when codex and kimi are unavailable)
   ci_gate               CI green check
 
 Examples:
   vnx gate 221
   vnx gate 221 --only codex
+  vnx gate 221 --only kimi
   vnx gate 221 --only gemini
   vnx gate 221 --status
 HELP
@@ -292,11 +296,15 @@ HELP
   if [ -n "$only_gate" ]; then
     # Run a specific gate
     # Normalize short names: codex -> codex_gate, gemini -> gemini_review,
-    # ci -> ci_gate (the name review_gate_manager knows; OI-1265).
+    # ci -> ci_gate (the name review_gate_manager knows; OI-1265), and the
+    # kimi/glm/deepseek reviewers by the same rule.
     case "$only_gate" in
-      codex)  only_gate="codex_gate" ;;
-      gemini) only_gate="gemini_review" ;;
-      ci)     only_gate="ci_gate" ;;
+      codex)    only_gate="codex_gate" ;;
+      gemini)   only_gate="gemini_review" ;;
+      ci)       only_gate="ci_gate" ;;
+      kimi)     only_gate="kimi_gate" ;;
+      glm)      only_gate="glm_gate" ;;
+      deepseek) only_gate="deepseek_gate" ;;
     esac
 
     log "[gate] Running gate '$only_gate' for PR $pr_number (branch: $branch)"

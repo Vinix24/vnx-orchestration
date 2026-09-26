@@ -36,7 +36,11 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   subscription gate over an API-credit gate when they tie on weight, so
   `glm_gate,codex_gate` declares `codex_gate`. A stack with a single full-diff
   gate (mission-control: `glm_gate,claude_github_optional`) resolves as before.
-  A project that set its own stack or chain keeps it.
+  A project that set its own stack or chain keeps it; `vnx gate --only kimi`
+  (and `glm`, `deepseek`) now resolve to the gate names. The PR readiness hint
+  for a PR with no review obligation lists codex_gate and kimi_gate first and
+  names glm_gate last, as the fallback. It used to offer glm_gate ahead of
+  codex_gate.
 
 ### Fixed
 
