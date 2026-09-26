@@ -690,9 +690,8 @@ _GATE_BASELINE = "codex_gate"
 # (VNX_REVIEW_GATE_TAKEOVER_CHAIN, default codex_gate,kimi_gate,glm_gate,
 # deepseek_gate) declares them interchangeable: any one of them may read a PR
 # in place of any other. Giving them different weights would make "heavier/
-# lighter" depend on which seat happened to be free. deepseek_gate is on the
-# same rung even though its own runner is not shipped yet — the rung describes
-# the review the seat stands for, and the chain already treats it as an end-link.
+# lighter" depend on which seat happened to be free. Which of the four fills the
+# obligation is decided by billing, not by weight: see _primary_review_gate.
 _GATE_WEIGHT: dict[str, int] = {
     "codex_gate": 3,
     "kimi_gate": 3,
@@ -755,16 +754,18 @@ def _primary_review_gate() -> str:
     never substitutes a default for a value it could not read: it raises
     ReviewGateConfigError naming the key, the value and the error.
 
-    Which stack entry fills the seat: the heaviest one (``_GATE_WEIGHT``), ties
-    broken by stack order. "Heaviest" and not "first" because the stack is
-    documented as an unordered set of seats to run (``ci_gate`` is appended
-    separately, order carries no meaning), while ``_GATE_BASELINE``'s whole
-    reason for existing is that review seats sit on a heaviness ladder. Picking
-    the heaviest keeps the registry default
-    ``codex_gate,claude_github_optional`` resolving to
-    ``codex_gate`` — the rung that table has always named — so a project that
-    never overrode the stack sees no change at all, and only a project that
-    actually re-pointed its review (mission-control -> glm_gate) moves.
+    Which stack entry fills the seat: the heaviest one (``_GATE_WEIGHT``), then
+    a SUBSCRIPTION-billed gate over an API-credit one (operator decision
+    2026-09-26: codex and kimi read first, glm and deepseek only when both are
+    unavailable), then stack order. "Heaviest" and not "first" because the
+    stack is documented as an unordered set of seats to run (``ci_gate`` is
+    appended separately, order carries no meaning), while ``_GATE_BASELINE``'s
+    whole reason for existing is that review seats sit on a heaviness ladder.
+    Billing sits between weight and order because the four full-diff seats
+    share one weight: without it ``glm_gate,codex_gate`` would declare glm as
+    the obligation purely because it was typed first. A stack with a single
+    full-diff gate (mission-control -> glm_gate) is unaffected: billing only
+    ranks gates that tie on weight.
     """
     try:
         import config_runtime  # noqa: PLC0415  (lazy: keeps the module import-light)
@@ -806,7 +807,37 @@ def _primary_review_gate() -> str:
             "refusing to guess one."
         )
 
-    return max(known, key=lambda name: _GATE_WEIGHT.get(name, 0))
+    try:
+        from gate_recorder import (  # lazy: gate_recorder is heavy
+            GATE_BILLING_SUBSCRIPTION,
+            UnknownGateProvider,
+            gate_billing,
+        )
+    except Exception as exc:  # pragma: no cover - import failure is environmental
+        raise ReviewGateConfigError(
+            f"{DEFAULT_REVIEW_STACK_KEY}={raw!r} cannot be ranked: the gate billing "
+            f"table ({type(exc).__name__}: {exc}) is unavailable, so a subscription "
+            "reviewer cannot be told from an API-credit one. Refusing to pick a seat "
+            "by stack order alone."
+        ) from exc
+
+    try:
+        return max(
+            known,
+            key=lambda name: (
+                _GATE_WEIGHT.get(name, 0),
+                gate_billing(name) == GATE_BILLING_SUBSCRIPTION,
+            ),
+        )
+    except UnknownGateProvider as exc:
+        # The strict accessor, not GATE_BILLING.get(): an unclassified gate read as
+        # "not a subscription gate" would rank below every classified one and lose
+        # the seat without anyone being told. Re-raised as the config error the door
+        # already refuses by name (dispatch_cli re-raises only this class; anything
+        # else is treated as an ordinary derivation bug and fails open).
+        raise ReviewGateConfigError(
+            f"{DEFAULT_REVIEW_STACK_KEY}={raw!r} cannot be ranked: {exc}"
+        ) from exc
 
 
 # A change here can alter the dispatch door, the router, the receipt trail, or

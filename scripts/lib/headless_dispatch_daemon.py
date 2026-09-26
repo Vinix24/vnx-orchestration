@@ -420,7 +420,8 @@ def _deliver(
     sys.path.insert(0, str(scripts_lib))
 
     # worker-provider-kimi-flip (20260723): mirrors pool_worker_runner.py's VNX_DISPATCH_MODEL
-    # default — build workers default to kimi-k3 (vnx_workers.default.yaml).
+    # fallback, which stays kimi-k3. The registry default in vnx_workers.default.yaml is
+    # claude/sonnet; the two are decided separately.
     model = os.environ.get("VNX_DISPATCH_MODEL", "kimi-k3")
 
     # Track effective lease target — updated if reroute + lease swap occurs

@@ -193,8 +193,9 @@ def run(terminal_id: str, project_id: str, *,
 
     instruction = prompt_path.read_text(encoding="utf-8")
     tp = bundle.get("target_profile") or {}
-    # worker-provider-kimi-flip (20260723): build workers default to kimi when the
-    # bundle's target_profile doesn't declare a provider (mirrors vnx_workers.default.yaml).
+    # worker-provider-kimi-flip (20260723): this runtime fallback stays kimi when the
+    # bundle's target_profile doesn't declare a provider. The registry default in
+    # vnx_workers.default.yaml is claude/sonnet; the two are decided separately.
     provider = (tp.get("provider") or "kimi").lower().strip()
     role: Optional[str] = tp.get("role") or None
     gate = (bundle.get("gate") or "").strip()

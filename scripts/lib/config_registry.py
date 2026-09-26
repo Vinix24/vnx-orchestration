@@ -114,35 +114,32 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_DEFAULT_REVIEW_STACK": _e(
-        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,glm_gate", "gate",
-        "Comma-separated default review-gate stack (dispatch 20260823-beta2-e, OI-1435; "
-        "recomposed by dispatch 20260914-poorten-punt3-s2 after a 14-day measurement: "
-        "gemini_review never delivers a verdict -- its binary is not on PATH and it carries "
-        "one record ever -- and claude_github_optional has never been configured -- no "
-        "workflow, 23/23 records claude_github_not_configured. Both are dropped from the "
-        "old default (gemini_review,codex_gate,claude_github_optional). glm_gate is new to "
-        "the default, not a promotion from within it -- it was never a member of the old "
-        "set. It fills the gap because it demonstrably delivers verdicts where the two "
-        "retired gates do not: forge_gate_publisher.py's 2026-09-08 measurement across 1148 "
-        "result records in every project store counts 94 glm_gate records, activity neither "
-        "retired gate can show. That is a record-volume measurement, not a pass/fail rate; "
-        "an earlier version of this entry cited an unscoped '86/94' pass-rate figure sampled "
-        "over 14 days in a single project store and documented nowhere else in the repo -- "
-        "dropped here rather than repeated without that scope. codex_gate stays despite its "
-        "quota outage (through 2026-09-15), since that outage is temporary and its 55 records "
-        "include real verdicts. claude_github_optional remains a legal "
-        "gate_recorder.GATE_PROVIDERS entry -- removing it there would relabel its historical "
-        "records unsupported_gate_type, which reads as a routing bug instead of the "
-        "deliberate design it is. "
-        "Lets an operator route review gates to any registered gate name — e.g. "
-        "kimi_gate,glm_gate — without editing review_gate_manager.py. ci_gate is appended "
-        "separately when VNX_CI_GATE_REQUIRED is on; do not include it here.", approval=True,
+        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,kimi_gate", "gate",
+        "Comma-separated default review-gate stack. Operator decision 2026-09-26: a review "
+        "gate always chooses a SUBSCRIPTION reviewer first (codex_gate on the codex CLI, "
+        "kimi_gate on the kimi CLI OAuth). glm_gate (OpenRouter credit) and deepseek_gate "
+        "(API credit) are not standing seats: they only read a PR when both subscription "
+        "seats are unavailable, which is what VNX_REVIEW_GATE_TAKEOVER_CHAIN does. Do not "
+        "put an API-credit gate before a subscription gate here or in the chain "
+        "(gate_recorder.GATE_BILLING classifies every gate; a guard test pins both). "
+        "History: the default was gemini_review,codex_gate,claude_github_optional until "
+        "20260914, when gemini_review (binary never on PATH) and claude_github_optional "
+        "(never configured) were dropped and glm_gate was added as a second standing seat "
+        "(#1852); 20260926 replaced glm_gate by kimi_gate. claude_github_optional and "
+        "gemini_review remain legal gate_recorder.GATE_PROVIDERS entries, so their "
+        "historical records still read as what they were. "
+        "Lets an operator route review gates to any registered gate name without editing "
+        "review_gate_manager.py. ci_gate is appended separately when VNX_CI_GATE_REQUIRED "
+        "is on; do not include it here.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
         "codex_gate,kimi_gate,glm_gate,deepseek_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision). On "
-        "lane_exhausted a seat rolls over to the NEXT gate named here; deepseek_gate is the "
+        "lane_exhausted a seat rolls over to the NEXT gate named here. The order is "
+        "subscription reviewers first (codex_gate, kimi_gate), API-credit reviewers only "
+        "after both (glm_gate, deepseek_gate); a guard test fails when an API-credit gate "
+        "is placed before a subscription gate. deepseek_gate is the "
         "chain's last configured link -- since OI-1714/OI-1838 it is a real harness-lane gate "
         "(available by registration, requested via gate_request_handler._request_deepseek), not "
         "a skip pending a runner. "

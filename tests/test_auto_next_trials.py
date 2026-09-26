@@ -191,7 +191,7 @@ def _required_gates_for(manager, feature_id: str) -> List[str]:
     pre-s2 default review-gate stack) that every ``_certify()`` call shared.
     That was the fourth hardcoded copy of the old default fixed by dispatch
     20260914-poorten-punt3-s2/-fix2: once ``VNX_DEFAULT_REVIEW_STACK`` became
-    ``codex_gate,glm_gate``, the constant no longer matched the review_stack
+    ``codex_gate,glm_gate`` (now ``codex_gate,kimi_gate``), the constant no longer matched the review_stack
     ``roadmap_manager._insert_fixup_feature`` stamps on a freshly inserted
     fix-up (it reads ``roadmap_manager._base_review_stack()`` live), so
     fix-up certification wrote gate evidence for a stack nothing required
