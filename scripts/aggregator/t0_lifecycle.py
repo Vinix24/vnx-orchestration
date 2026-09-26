@@ -21,9 +21,11 @@ Only RUNNING, TERMINATING, REAPED are persisted; PENDING and STALE are
 in-memory classifications. The SQLite `state` column stays in the
 'leased' | 'released' enum (schema-compat with runtime_core_cli).
 
-ADR-005 invariant: every state mutation emits a structured audit event BEFORE
-the COMMIT. If the audit emit fails, the transaction is rolled back and any
-external side-effect (subprocess spawn) is cleaned up via rollback_action.
+ADR-005 invariant (scope per its 2026-09-26 amendment: decisions and
+transitions, not derived state): every lifecycle transition (spawn, heartbeat,
+kill, force-release, reap) emits a structured audit event BEFORE the COMMIT.
+If the audit emit fails, the transaction is rolled back and any external
+side-effect (subprocess spawn) is cleaned up via rollback_action.
 """
 
 from __future__ import annotations
@@ -235,7 +237,8 @@ class T0LifecycleManager:
     """Manages per-project T0 process lifecycle with explicit state machine.
 
     Construction REQUIRES a StateAggregator instance — no silent fallback to
-    logging. ADR-005 invariant demands every mutation has an audit record.
+    logging. ADR-005 invariant demands every lifecycle transition has an audit
+    record.
     """
 
     def __init__(
@@ -337,8 +340,8 @@ class T0LifecycleManager:
         """Emit audit event BEFORE COMMIT.
 
         On audit-emit failure: ROLLBACK, run rollback_action (if any), then
-        raise T0AuditEmitError. ADR-005 invariant: no DB mutation without
-        a corresponding audit record.
+        raise T0AuditEmitError. ADR-005 invariant: no lifecycle transition
+        committed to the DB without a corresponding audit record.
         """
         try:
             self._emit_event(project_id, event_type, payload)

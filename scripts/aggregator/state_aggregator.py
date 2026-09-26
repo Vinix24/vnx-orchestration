@@ -4,8 +4,11 @@ Receives state-update events from N project T0's and central Control Centre.
 Aggregates into central state.json + per-project facet files. Read-pad remains
 build_central_view.py (Phase 6) — now fed by this write-pad.
 
-ADR-005: every state mutation emits a structured NDJSON record to
-.vnx-data/events/state_aggregator.ndjson. Aggregator events use
+ADR-005 (scope per its 2026-09-26 amendment: decisions and transitions, not
+derived state): every submitted state update is a transition and is emitted as
+a structured NDJSON record to .vnx-data/events/state_aggregator.ndjson BEFORE
+the per-project facet and the central view are written. Those two files are
+re-derivable snapshots and are not ledgers. Aggregator events use
 provider="aggregator" (domain-specific; not a CanonicalEvent stream-provider)
 so we emit raw NDJSON dicts matching the canonical shape instead of
 instantiating CanonicalEvent (which enforces a closed provider set).

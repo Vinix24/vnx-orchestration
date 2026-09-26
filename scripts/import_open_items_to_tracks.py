@@ -95,9 +95,11 @@ Making the mutation+event pair atomic would require a transactional OUTBOX; that
 deliberately OUT OF SCOPE here and tracked as a separate 1.x issue.
 
 ADR-007: all ``track_open_items`` access is (track_id, project_id)-scoped.
-ADR-005: every state mutation carries a matching NDJSON ledger event. Under the
-D3 deviation those events are emitted AFTER the DB commit; a post-commit emit
-failure is logged and recoverable via the reconciler, never silently dropped.
+ADR-005 (scope per its 2026-09-26 amendment: decisions and transitions, not
+derived state): every ``track_open_items`` transition (link, unlink, reopen)
+carries a matching NDJSON ledger event. Under the D3 deviation those events are
+emitted AFTER the DB commit; a post-commit emit failure is logged and
+recoverable via the reconciler, never silently dropped.
 """
 
 from __future__ import annotations
