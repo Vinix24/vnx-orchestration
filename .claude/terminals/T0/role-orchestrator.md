@@ -86,6 +86,7 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
   - To see the lane and the plan warnings before firing: `bin/vnx dispatch <dispatch-id> --dry-run`.
 - Build-worker provider and model are a **free per-dispatch choice**: what the dispatch spec says wins (`workers-kimi-pinned`, pin_semantics=default). kimi-k3 is only the default when the spec carries no explicit model — no override env needed. T0 stays Opus as a governance floor (`t0-opus-only`, pin_semantics=floor).
 - `provider=claude` for a build-worker still routes through a separate gate: `VNX_OVERRIDE_WORKER_CLAUDE=1` with an audit reason in `VNX_OVERRIDE_WORKER_CLAUDE_REASON` (the symbols are `dispatch_cli.WORKER_CLAUDE_OVERRIDE_ENV` and `dispatch_cli.WORKER_CLAUDE_OVERRIDE_REASON_ENV`). Track `worker-provider-free-choice` aims to eventually remove this remaining lock.
+- Default reviewers are `codex_gate` + `kimi_gate`, both on a subscription. `glm_gate` and `deepseek_gate` run on API credit: they are a fallback inside the takeover chain only, never a project default. Do not add an API gate to a review stack, or run one by hand, unless codex and kimi are both unavailable. The mechanism lives in `docs/core/DISPATCH_RULES.md`.
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
 
 **Role selection (hard):**
@@ -178,7 +179,7 @@ for acceptance and queue advancement.
 4. Architectural change OR new dependency OR policy violation → ESCALATE.
 5. All gates passed AND no blockers AND no pending work → COMPLETE.
 6. Never guess state; verify via CLI and state files.
-7. If the review stack requires Gemini or Codex evidence, do not complete until both a gate result and a normalized headless report exist.
+7. If the review stack requires Codex or Kimi evidence, do not complete until both a gate result and a normalized headless report exist.
 8. `queued` review-gate state is only request state, not completion evidence.
 9. A required gate with empty `contract_hash` or empty `report_path` is incomplete evidence and blocks closure.
 
