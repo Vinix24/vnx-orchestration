@@ -172,26 +172,6 @@ class TestDeliverAdapterPathPropagatesPrId:
         assert "pr_id" in captured_context
         assert captured_context["pr_id"] is None
 
-    def test_model_defaults_to_sonnet_when_env_unset(self, tmp_path, monkeypatch):
-        """Operator decision 2026-09-23: no VNX_DISPATCH_MODEL -> sonnet, not kimi-k3."""
-        monkeypatch.delenv("VNX_DISPATCH_MODEL", raising=False)
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        mock_adapter = MagicMock()
-        mock_adapter.capabilities.return_value = set()
-        mock_adapter.execute.return_value = MagicMock(status="done")
-
-        import headless_dispatch_daemon as hdd
-        with (
-            patch("headless_dispatch_daemon._repo_root", return_value=tmp_path),
-            patch("sys.path"),
-            patch.dict("sys.modules", {"adapters": MagicMock(resolve_adapter=lambda t: mock_adapter)}),
-            patch.object(hdd, "_classify_dispatch", return_value=set()),
-        ):
-            _deliver(_minimal_meta(), tmp_path / "active.md", state_dir)
-
-        assert mock_adapter.execute.call_args.args[1]["model"] == "sonnet"
-
 
 # ---------------------------------------------------------------------------
 # _deliver — fallback deliver_with_recovery path

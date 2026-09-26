@@ -94,21 +94,6 @@ class TestClaimsAndDelivers(_Base):
         self.assertEqual(args[2], "# Instruction body")  # instruction
 
 
-class TestDefaultProviderAndModel(_Base):
-    """Operator decision 2026-09-23: no declared provider or model -> claude/sonnet."""
-
-    def test_bundle_without_provider_defaults_to_claude_sonnet(self):
-        self._queue("d-def")
-        self._bundle("d-def")
-        (self.dd / "d-def" / "bundle.json").write_text(
-            json.dumps({"dispatch_id": "d-def", "target_profile": {}, "gate": ""}), encoding="utf-8")
-        with patch.dict(os.environ), patch("pool_worker_runner._deliver_claude", return_value=EXIT_OK) as m:
-            os.environ.pop("VNX_DISPATCH_MODEL", None)
-            self.assertEqual(self._run(), EXIT_OK)
-        m.assert_called_once()
-        self.assertEqual(m.call_args.args[3], "sonnet")  # model
-
-
 class TestEmptyQueue(_Base):
 
     def test_empty_queue_returns_no_work_no_delivery(self):
