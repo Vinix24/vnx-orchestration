@@ -20,8 +20,13 @@ import in non-test source files as `severity: error`.
 LLM calls must go via `subprocess.Popen(["claude", ...])` or equivalent CLI subprocess.
 Direct HTTP to `api.anthropic.com`, embedded API keys, or SDK usage are `severity: error`.
 
-**ADR-005 — NDJSON audit ledger:**
-State mutations without a corresponding NDJSON ledger entry are `severity: warning`.
+**ADR-005 — NDJSON audit ledger** (scope amended 2026-09-26):
+A decision or state transition (lifecycle, gate, lease, dispatch, rotation) recorded in no
+canonical NDJSON ledger is `severity: warning`. `t0_receipts.ndjson` is a valid canonical
+ledger. `.vnx-data/events/T{n}.ndjson` is a per-dispatch ring buffer, not a required
+destination. Derived caches and snapshots (reachability JSON, pending or latch markers,
+digests) are not findings when they can be re-derived from a ledger or a measurement and
+the decision they drive is logged.
 
 ## Vulnerability Patterns to Check
 

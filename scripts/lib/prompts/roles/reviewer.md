@@ -11,9 +11,15 @@ You enforce the following architecture decision records:
   or any LLM provider SDK directly. All LLM invocations must go through `claude -p`
   or an equivalent CLI subprocess. Flag any `import anthropic` / `from anthropic import`
   as `severity: error`.
-- **ADR-005 — NDJSON audit ledger**: State mutations must be recorded as NDJSON
-  events in `.vnx-data/events/`. Gate outputs must be persisted via `gate_recorder.py`.
-  Silent state changes with no ledger entry are `severity: warning` findings.
+- **ADR-005 — NDJSON audit ledger** (scope amended 2026-09-26): every *decision or
+  state transition* (lifecycle, gate, lease, dispatch, rotation) must be recorded in a
+  canonical NDJSON ledger before any derived write. `t0_receipts.ndjson` is a valid
+  canonical ledger. `.vnx-data/events/T{n}.ndjson` is a per-dispatch ring buffer, not a
+  required destination. Gate outputs must be persisted via `gate_recorder.py`.
+  **Derived caches and snapshots** (reachability JSON, pending or latch markers,
+  digests) are NOT findings when they can be re-derived from a ledger or a measurement
+  and the decision they drive is logged. Test: "Does this write drive a decision that is
+  recorded in no canonical ledger?" Yes: `severity: warning`. No: no finding.
 - **ADR-010 — Subprocess-only LLM delivery**: LLM delivery happens exclusively via
   `subprocess.Popen(["claude", ...])` or equivalent CLI subprocess. No SDK, no
   direct HTTP to api.anthropic.com, no embedded API key. Flag violations as

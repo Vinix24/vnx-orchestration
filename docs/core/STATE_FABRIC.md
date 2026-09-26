@@ -18,6 +18,12 @@ Every dispatch leaves an immutable receipt in `t0_receipts.ndjson`; every track
 mutation leaves an event in the track ledger. These are append-only and never
 rewritten (ADR-005). The past is evidence: it is what governance verifies against.
 
+ADR-005 covers decisions and transitions, not derived state (amendment 2026-09-26).
+`t0_receipts.ndjson` is a valid canonical ledger for a transition. A derived cache or
+snapshot (a reachability JSON, a pending or latch marker, a digest) needs no ledger line
+of its own, provided it can be re-derived from a ledger or a measurement and the decision
+it drives is logged.
+
 ### Current — the declared and derived present
 `runtime_coordination.db` holds the live state:
 - `tracks.phase` — the operator-authoritative **declared** status

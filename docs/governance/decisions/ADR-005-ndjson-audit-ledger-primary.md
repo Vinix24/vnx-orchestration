@@ -7,6 +7,14 @@
 
 ## Amendments
 
+**2026-09-26 — Scope: decisions and transitions, not derived state (operator, option C).** The Decision below asks for a ledger line for lifecycle events, receipts, gate outcomes and lease/heartbeat transitions. The reviewer role prompts had drifted into a stricter reading: "state mutations must be recorded as NDJSON events in `.vnx-data/events/`". Three codex gates on one day (#1921, #1923, #1924) raised the same warning on that reading (OI-1867, OI-1870 point 1, OI-1871 point 1). The operator settled the scope:
+
+- **In scope.** Every decision or state transition (lifecycle, gate, lease, dispatch, rotation transitions and the like) writes a line to one of the canonical ledgers **before** any derived write. `t0_receipts.ndjson` is a valid canonical ledger, and a `state_mutation` receipt appended through `append_receipt_payload` is the standard record for a transition there (`scripts/lib/state_mutation.py`). `.vnx-data/events/T{n}.ndjson` is the per-dispatch ring buffer of subprocess-routed terminals. It is **not** the mandatory destination for other writers.
+- **Out of scope.** Derived caches and snapshots: a reachability JSON, a pending or latch marker that refreshes a timestamp, a digest. They stay outside this ADR provided that (a) they can be re-derived from a ledger or a fresh measurement, and (b) the decision they drive is itself logged in a canonical ledger.
+- **Reviewer test, one sentence.** "Does this write drive a decision that is recorded in no canonical ledger?" If yes: `severity: warning`. If no: no finding.
+- **Rejected alternatives.** Option A, every literal state write must appear as a ledger event: rejected, because caches and timestamp refreshes would bury the decisions the ledger exists to show. Option B, every state write goes to a ledger first: rejected, because a re-derivable cache gains no recoverability from a preceding ledger line.
+- **Corrections to the ledger list in the Decision** (facts checked against the code on this date, no change of rule). `dispatch_register.ndjson` lives in `.vnx-data/state/`, not in the data root (the transactional path in `scripts/lib/dispatch_register.py` writes `.vnx-data/events/dispatch_register.ndjson`). `incident_log` is a table in `runtime_coordination.db` and no NDJSON writer of that name exists.
+
 **2026-06-13 — Hash-chain pointer (ADR-023, 1.0.1).** An experimental opt-in hash-chain (ADR-023, 1.0.1) adds tamper-evidence on the append_receipt path.
 
 **2026-06-14 — Open-item → track bridge: at-most-once post-commit events (PR-C #862, D3, 1.0.1).** The open-item → track bridge (`scripts/import_open_items_to_tracks.py`) keeps every `track_open_items` mutation paired with an ADR-005 NDJSON ledger event, but emits those events **after** the DB commit rather than before it. The DB is the authoritative record: a non-transactional NDJSON ledger cannot be both "rollback-on-ledger-failure" (emit-before-commit) and "no-orphaned-events" (emit-after-commit) without a transactional outbox, so the bridge chooses the DB as the single source of truth. The resulting event semantics are **at-most-once, never orphaned**: a post-commit emit failure does not roll back (the DB state is already correct), is logged loudly, is non-fatal, and is recoverable because `track_reconciler` re-derives `tracks.derived_status` from the committed `track_open_items` rows. Such a run reports `ledger_failed` and the CLI exits `4` (see `docs/EXIT_CODES.md`) while the mutation persists. This is an explicit, operator-approved deviation from the general "ledger first" rule of this ADR, scoped to this bridge; **exactly-once via a transactional outbox is deferred to 1.x (#867)**. The bridge writes through the single-writer primitives in `scripts/lib/tracks.py` and is wired into `RoadmapManager.autopilot_tick()` (PR-D #871) under the `VNX_ROADMAP_AUTOPILOT=1` gate.
@@ -17,7 +25,7 @@
 
 VNX records every dispatch lifecycle event, receipt, gate outcome, and lease/heartbeat transition. Two storage shapes exist in the codebase:
 
-1. **Append-only NDJSON ledger files** — `.vnx-data/state/t0_receipts.ndjson`, `.vnx-data/dispatch_register.ndjson`, `.vnx-data/events/T{n}.ndjson` (per-terminal ring buffer with archive in `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`), `.vnx-data/state/review_gates/results/*.json` (one file per gate result).
+1. **Append-only NDJSON ledger files** — `.vnx-data/state/t0_receipts.ndjson`, `.vnx-data/state/dispatch_register.ndjson`, `.vnx-data/events/T{n}.ndjson` (per-terminal ring buffer with archive in `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`), `.vnx-data/state/review_gates/results/*.json` (one file per gate result).
 2. **SQLite tables** — `.vnx-data/state/runtime_coordination.db` (leases, heartbeats, incident log), `.vnx-data/quality_intelligence.db` (cross-project intelligence, dispatch tracker projections), `.vnx-data/dispatch_tracker.db` (per-dispatch state).
 
 Both surfaces have grown organically. Several recent PRs have proposed shifting writes to SQLite-first for query performance (e.g. "we have the DB now, why log NDJSON?") or dropping the ledger entirely. Industry-research synthesis (`claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-industry-research.md` Topic 14) noted that OpenTelemetry GenAI semantic conventions + CloudEvents are the emerging structured-event standard, which raised a separate question of replacing NDJSON with an OTel-shaped wire format.
@@ -33,10 +41,10 @@ Concrete rules:
 - Every new lifecycle event added to VNX (dispatch creation, promote, lease acquire, heartbeat, receipt arrival, gate request, gate result, dispatch close) writes a JSON line to one of the canonical ledger files, **first**, before any SQLite write.
 - The canonical ledger files are:
   - `.vnx-data/state/t0_receipts.ndjson` — receipt arrivals (T0's view of worker output)
-  - `.vnx-data/dispatch_register.ndjson` — dispatch lifecycle (created → promoted → active → closed)
+  - `.vnx-data/state/dispatch_register.ndjson` — dispatch lifecycle (created → promoted → active → closed)
   - `.vnx-data/events/T{n}.ndjson` — per-terminal subprocess events (ring buffer; durable archive at `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`)
   - `.vnx-data/state/review_gates/results/*.json` — one file per review-gate result
-  - `.vnx-data/state/incident_log.ndjson` — incident transitions (where applicable)
+  - `.vnx-data/state/incident_log.ndjson` — incident transitions (where applicable; as of 2026-09-26 no writer of this file exists and incident state lives in the `incident_log` table of `runtime_coordination.db`, see Amendments)
 - SQLite tables that mirror ledger content (e.g. `dispatch_tracker`, `runtime_coordination` projections of leases/heartbeats) are **derived state**. They may be rebuilt from the ledger on disk; the ledger may not be rebuilt from them.
 - If a system crash leaves the SQLite mirror inconsistent with the ledger, the ledger wins. Recovery procedures replay the ledger forward; they do not back-port from SQLite.
 - New observability adapters (OTel CloudEvents export per industry-research Topic 14, Datadog/Honeycomb/Grafana ingest) are **parallel exporters** off the ledger writer — they do not replace the canonical NDJSON files. Per the strategic-replan §5 A6.
@@ -45,7 +53,7 @@ Concrete rules:
 
 Five reinforcing reasons for the ledger-first model:
 
-1. **Operator-readable without a DB client.** The operator (and any human reviewer) can `tail -f .vnx-data/state/t0_receipts.ndjson`, `grep dispatch_id .vnx-data/dispatch_register.ndjson`, or open the file in any editor. SQLite requires a client (`sqlite3` CLI, DB GUI). For a glass-box system per ADR-004, the cheapest path to inspectability is plain text. Every minute of "let me query the DB to find out what happened" friction is a minute the human gate erodes.
+1. **Operator-readable without a DB client.** The operator (and any human reviewer) can `tail -f .vnx-data/state/t0_receipts.ndjson`, `grep dispatch_id .vnx-data/state/dispatch_register.ndjson`, or open the file in any editor. SQLite requires a client (`sqlite3` CLI, DB GUI). For a glass-box system per ADR-004, the cheapest path to inspectability is plain text. Every minute of "let me query the DB to find out what happened" friction is a minute the human gate erodes.
 
 2. **Tamper-evident by construction.** Append-only NDJSON files have a one-way write semantic: new lines only, no in-place mutation. Any retroactive edit shows up in `git diff` (the `.vnx-data/` directory is gitignored runtime state, but the operator's backup workflow and forensic-recovery procedures rely on file-mtime + size monotonicity). SQLite UPDATE/DELETE are silent in comparison; reconstructing a tamper trail from a relational DB requires a separate audit log on top — which is what the NDJSON ledger already is. Append-only file semantics cover accidental mutation; against deliberate tampering the receipt hash-chain (ADR-023, opt-in via `VNX_CHAIN_RECEIPTS=1`) makes integrity an independently verifiable property rather than a trust assumption.
 
@@ -92,4 +100,4 @@ A note on the ring-buffer pattern: `.vnx-data/events/T{n}.ndjson` is per-dispatc
 - `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4 (M1) — strategic-moat justification
 - `CLAUDE.md` "Event Streams" section — ring-buffer + archive convention
 - Memory: `project_ndjson_ring_buffer.md` — per-terminal NDJSON is ring buffer, durable archive in `.vnx-data/events/archive/{terminal}/`
-- `.vnx-data/state/t0_receipts.ndjson`, `.vnx-data/dispatch_register.ndjson`, `.vnx-data/events/archive/` — canonical ledger surfaces
+- `.vnx-data/state/t0_receipts.ndjson`, `.vnx-data/state/dispatch_register.ndjson`, `.vnx-data/events/archive/` — canonical ledger surfaces
