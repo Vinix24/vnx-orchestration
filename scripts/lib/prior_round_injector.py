@@ -29,7 +29,7 @@ _FILE_REF_RE = re.compile(
     r'\b([\w./][\w./]*\.(?:py|md|sql|sh|yaml|yml|ts|js|tsx|jsx)):(\d+)(?:-(\d+))?\b'
 )
 
-_KNOWN_GATES = ("codex_gate", "gemini_review")
+_KNOWN_GATES = ("codex_gate",)
 
 
 @dataclass(frozen=True)

@@ -981,37 +981,28 @@ class TestCodexGateExecution:
 class TestGateTimeoutConfig:
     """Verify gate-specific timeout and stall threshold configuration."""
 
-    def test_default_gemini_timeout(self):
-        from headless_adapter import gate_timeout
-        assert gate_timeout("gemini_review") == 300
-
     def test_default_codex_timeout(self):
         from headless_adapter import gate_timeout
         assert gate_timeout("codex_gate") == 600
 
     def test_env_override_timeout(self, monkeypatch):
         from headless_adapter import gate_timeout
-        monkeypatch.setenv("VNX_GEMINI_GATE_TIMEOUT", "120")
-        assert gate_timeout("gemini_review") == 120
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "120")
+        assert gate_timeout("codex_gate") == 120
 
     def test_default_stall_threshold(self):
         from headless_adapter import gate_stall_threshold
         # Literals, not GATE_STALL_DEFAULTS lookups: comparing the function's
         # output to the dict it reads from would pass no matter what the dict
-        # said. gemini_review's 180s (not the 60s in
-        # 180_GATE_EXECUTION_LIFECYCLE_CONTRACT.md §4.2, which was never
-        # reconciled against the code) has shipped since the gate runner's
-        # introduction (c0957d22) and every OI-105 triage since treats it as
-        # the accepted value (Gemini CLI's stdout-flush stalls, OI-048).
-        assert gate_stall_threshold("gemini_review") == 180
+        # said.
         assert gate_stall_threshold("codex_gate") == 300
         assert gate_stall_threshold("claude_github_optional") == 60
         assert gate_stall_threshold("ci_gate") == 30
 
     def test_env_override_stall_threshold(self, monkeypatch):
         from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_GEMINI_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("gemini_review") == 30
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "30")
+        assert gate_stall_threshold("codex_gate") == 30
 
     def test_unknown_gate_uses_defaults(self):
         from headless_adapter import gate_timeout, gate_stall_threshold

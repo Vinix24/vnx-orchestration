@@ -280,7 +280,7 @@ class TestContractAlignment:
 
     def test_implemented_gates_match_production(self) -> None:
         assert "codex_gate" in IMPLEMENTED_GATES
-        assert "gemini_review" in IMPLEMENTED_GATES
+        assert "gemini_review" not in IMPLEMENTED_GATES
 
     def test_state_transition_spec_immutable(self) -> None:
         spec = coding_lifecycle_spec()

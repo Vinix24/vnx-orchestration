@@ -73,7 +73,6 @@ def evaluate_auto_merge_policy(
     risk_class: str,
     merge_policy: str,
     changed_files: Sequence[str],
-    gemini_review_passed: bool,
     codex_gate_passed: bool,
     required_checks_passed: bool,
     closure_verifier_passed: bool,
@@ -88,8 +87,6 @@ def evaluate_auto_merge_policy(
         blockers.append("risk_class_not_low")
     if codex_final_gate_required(changed_files):
         blockers.append("high_risk_change_scope")
-    if not gemini_review_passed:
-        blockers.append("gemini_review_not_passed")
     if not codex_gate_passed:
         blockers.append("codex_gate_not_passed")
     if not required_checks_passed:

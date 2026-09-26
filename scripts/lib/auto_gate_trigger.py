@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Required gate names from governance_enforcement.yaml (soft/hard mandatory checks)
-_DEFAULT_GATE_STACK = ["codex_gate", "gemini_review"]
+_DEFAULT_GATE_STACK = ["codex_gate"]
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ def _load_required_gates() -> List[str]:
         gates = []
         for name, spec in checks.items():
             level = int(spec.get("level", 0))
-            if level >= 2 and name in {"codex_gate_required", "gemini_review_required"}:
+            if level >= 2 and name == "codex_gate_required":
                 # Map check name → gate stack name
                 gates.append(name.replace("_required", ""))
         return gates if gates else _DEFAULT_GATE_STACK

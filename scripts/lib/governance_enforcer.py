@@ -366,27 +366,6 @@ class GovernanceEnforcer:
             override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
         )
 
-    def _check_gemini_review_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
-        """Gemini review gate result must exist."""
-        pr_number = ctx.get("pr_number")
-        if not pr_number:
-            return EnforcementResult(
-                check_name=cfg.name, level=cfg.level, passed=True,
-                message="No pr_number in context — check skipped",
-                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
-            )
-        result_path = GATE_RESULTS_DIR / f"pr-{pr_number}-gemini_review.json"
-        passed = result_path.exists()
-        return EnforcementResult(
-            check_name=cfg.name, level=cfg.level, passed=passed,
-            message=(
-                f"Gemini review result found: {result_path.name}"
-                if passed
-                else f"Gemini review result not found: {result_path}"
-            ),
-            override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
-        )
-
     def _check_ci_green_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
         """All CI checks on the PR must be passing (gh pr checks)."""
         pr_number = ctx.get("pr_number")
