@@ -38,7 +38,7 @@ from gate_recorder import record_terminal_result, write_result_guarded
 
 # Non-degenerate single-shot depth: just enough that record_terminal_result
 # never trips the (unrelated) gate_execution_degenerate reclassification.
-_OK_DEPTH = gate_depth.single_shot_depth(50000, True)
+_OK_DEPTH = gate_depth.single_shot_depth(50000, False)
 
 
 def _receipts(state_dir: Path) -> list[dict]:

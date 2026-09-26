@@ -461,12 +461,42 @@ def _redirect_dispatch_pattern_offered(
     # the redirect insert. Without this, the re-inserted canonical row falls
     # back to the table default ('vnx-dev' from migration 0010) and a tenant-
     # scoped offering can be silently rebound to the wrong project.
-    if _column_exists(conn, "dispatch_pattern_offered", "project_id"):
+    #
+    # Carry ab_arm through too: the canonical row must keep the arm the
+    # offer was actually made under (treatment / placebo / control). Leaving
+    # it out of the column list would drop the arm to NULL, so a placebo
+    # offer deduped onto a canonical pattern would silently read "unknown" —
+    # the same class of contamination the per-arm report exists to surface.
+    has_project = _column_exists(conn, "dispatch_pattern_offered", "project_id")
+    has_ab_arm = _column_exists(conn, "dispatch_pattern_offered", "ab_arm")
+    if has_project and has_ab_arm:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at, project_id, ab_arm)
+            SELECT dispatch_id, ?, pattern_title, offered_at, project_id, ab_arm
+            FROM   dispatch_pattern_offered
+            WHERE  pattern_id = ?
+            """,
+            (canonical_pattern_id, duplicate_pattern_id),
+        )
+    elif has_project:
         conn.execute(
             """
             INSERT OR IGNORE INTO dispatch_pattern_offered
                 (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
             SELECT dispatch_id, ?, pattern_title, offered_at, project_id
+            FROM   dispatch_pattern_offered
+            WHERE  pattern_id = ?
+            """,
+            (canonical_pattern_id, duplicate_pattern_id),
+        )
+    elif has_ab_arm:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at, ab_arm)
+            SELECT dispatch_id, ?, pattern_title, offered_at, ab_arm
             FROM   dispatch_pattern_offered
             WHERE  pattern_id = ?
             """,

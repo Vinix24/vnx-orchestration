@@ -67,6 +67,7 @@ from gate_status import (  # noqa: E402
     ALL_KNOWN_STATES,
     FAIL_STATES,
     INCOMPLETE_STATES,
+    PARTIAL_REVIEW_STATES,
     PASS_STATES,
     UNAVAILABLE_STATES,
     canonical_status,
@@ -418,6 +419,13 @@ def classify_record(record: Optional[Dict[str, Any]], head_sha: str) -> ForgeVer
             CONCLUSION_ACTION_REQUIRED,
             f"poort kwam niet tot een uitspraak (status={status}): provider-uitval is "
             "afwezigheid van bewijs, geen afkeuring — draai de poort opnieuw",
+        )
+    if status in PARTIAL_REVIEW_STATES:
+        # OI-1851: nothing rejected, nothing reviewed in full.
+        return ForgeVerdict(
+            CONCLUSION_ACTION_REQUIRED,
+            "poort zag maar een deel van de diff (status=partial_review): laat een "
+            "tweede review de hele diff lezen, of splits de PR op",
         )
     if status == "not_executable":
         return ForgeVerdict(

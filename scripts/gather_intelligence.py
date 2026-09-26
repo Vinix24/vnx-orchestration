@@ -158,6 +158,7 @@ def _emit_injection_outcome_event(
     reason: Optional[str],
     project_id: str,
     timestamp: str,
+    ab_arm: Optional[str] = None,
 ) -> None:
     """ADR-005 audit event for the pattern_injection_outcome DB mutation.
 
@@ -170,6 +171,12 @@ def _emit_injection_outcome_event(
     failure here is non-fatal to the adoption contract without being
     swallowed silently in this function. Only called when
     VNX_INJECTION_WHY_ENABLED=1 (the same gate as the row write itself).
+
+    ``ab_arm`` is stamped on the event so the append-only ledger carries
+    the arm label alongside the DB row — the placebo discrimination test
+    reads both. ``None`` means the offer predates the v32 arm label (a
+    historical row); the event records that as-is rather than inventing
+    a ``'treatment'`` arm.
     """
     record_id = hashlib.sha256(
         f"{project_id}:{dispatch_id}:{pattern_id}:{timestamp}".encode("utf-8")
@@ -183,6 +190,7 @@ def _emit_injection_outcome_event(
         "used": used,
         "reason": reason,
         "timestamp": timestamp,
+        "ab_arm": ab_arm,
     }
     path = _pattern_injection_outcome_events_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -521,6 +529,7 @@ class T0IntelligenceGatherer:
         offered: Dict[str, str] = {}  # pattern_id -> file_path
         offered_titles: Dict[str, str] = {}
         offered_content: Dict[str, str] = {}
+        offered_arms: Dict[str, str] = {}  # pattern_id -> ab_arm (treatment/placebo/control)
 
         usage_log = self._usage_log_path()
         if usage_log.exists():
@@ -541,22 +550,33 @@ class T0IntelligenceGatherer:
                                 offered[pid] = fp
                                 offered_titles[pid] = rec.get("title", "") or ""
                                 offered_content[pid] = rec.get("content", "") or ""
+                                # Legacy NDJSON offers predate the arm label and
+                                # carry none — leave as None so the outcome
+                                # row inherits "unknown", not a fabricated arm.
+                                offered_arms.setdefault(pid, None)
             except OSError as e:
                 log.warning("Failed to read usage log %s: %s", usage_log, e)
 
         # Merge DB-junction offers (canonical store).  ndjson entries win on
         # conflict because they carry the file_path needed for the filename
         # signal; DB rows fill in offers the ndjson writer never logged.
+        # The junction is the source of truth for the arm label: it is stamped
+        # at injection time by the selector, so a DB-sourced arm always wins
+        # over the NDJSON default. A NULL DB arm (row predating v32) stays
+        # None — the outcome reads "unknown", not treatment.
         for pid, meta in self._db_offers_for_dispatch(dispatch_id).items():
+            db_arm = meta.get("ab_arm")
             if pid not in offered:
                 offered[pid] = meta["file_path"]
                 offered_titles[pid] = meta["title"]
                 offered_content[pid] = meta["content"]
+                offered_arms[pid] = db_arm
             else:
                 if not offered_titles.get(pid):
                     offered_titles[pid] = meta["title"]
                 if not offered_content.get(pid):
                     offered_content[pid] = meta["content"]
+                offered_arms[pid] = db_arm
 
         if not offered:
             return {"adoptions": 0, "checked": 0}
@@ -600,6 +620,7 @@ class T0IntelligenceGatherer:
                     offered_file_paths=offered,
                     offered_titles=offered_titles,
                     offered_content=offered_content,
+                    offered_arms=offered_arms,
                     report_files=report_files,
                     report_text=text,
                 )
@@ -611,13 +632,18 @@ class T0IntelligenceGatherer:
     def _db_offers_for_dispatch(self, dispatch_id: str) -> Dict[str, Dict[str, str]]:
         """Read per-dispatch offers from dispatch_pattern_offered (canonical store).
 
-        Returns ``pattern_id -> {"file_path", "title", "content"}``.  The
+        Returns ``pattern_id -> {"file_path", "title", "content", "ab_arm"}``.  The
         junction stores no file_path, so ``file_path`` is always empty and
         ``content`` is resolved from the originating catalog row
         (``intel_ap_N`` -> antipatterns.id N, ``intel_sp_N`` ->
         success_patterns.id N) for the token-overlap adoption signal.
-        Never raises; a failed lookup is logged at WARNING because an
-        unreadable offer store silently zeroes the adoption measurement.
+        ``ab_arm`` is the injection arm the offer was made under (treatment /
+        placebo / control), stamped at injection time so the outcome row can
+        inherit it. Absent on DBs predating v32, or NULL on rows that predate
+        the arm label: both read as ``None`` here so the outcome row inherits
+        "unknown" rather than a fabricated ``'treatment'`` arm. Never raises;
+        a failed lookup is logged at WARNING because an unreadable offer
+        store silently zeroes the adoption measurement.
         """
         offers: Dict[str, Dict[str, str]] = {}
         if not self.quality_db:
@@ -629,8 +655,10 @@ class T0IntelligenceGatherer:
             ).fetchone()
             if not table:
                 return offers
+            has_ab_arm = self._dpo_has_ab_arm()
+            select_cols = "pattern_id, pattern_title" + (", ab_arm" if has_ab_arm else "")
             rows = self.quality_db.execute(
-                "SELECT pattern_id, pattern_title FROM dispatch_pattern_offered "
+                f"SELECT {select_cols} FROM dispatch_pattern_offered "
                 "WHERE dispatch_id = ?",
                 (dispatch_id,),
             ).fetchall()
@@ -642,12 +670,28 @@ class T0IntelligenceGatherer:
             title = row["pattern_title"] if isinstance(row, sqlite3.Row) else row[1]
             if not pid:
                 continue
+            arm = None
+            if has_ab_arm:
+                arm = row["ab_arm"] if isinstance(row, sqlite3.Row) else row[2]
             offers[pid] = {
                 "file_path": "",
                 "title": title or "",
                 "content": self._resolve_pattern_content(pid),
+                "ab_arm": arm,
             }
         return offers
+
+    def _dpo_has_ab_arm(self) -> bool:
+        """PRAGMA probe for the dispatch_pattern_offered.ab_arm column (v32)."""
+        if not self.quality_db:
+            return False
+        try:
+            cols = {r[1] for r in self.quality_db.execute(
+                "PRAGMA table_info(dispatch_pattern_offered)"
+            ).fetchall()}
+            return "ab_arm" in cols
+        except sqlite3.Error:
+            return False
 
     def _resolve_pattern_content(self, pattern_id: str) -> str:
         """Resolve display content for a catalog-backed pattern_id.
@@ -692,6 +736,7 @@ class T0IntelligenceGatherer:
         offered_file_paths: Dict[str, str],
         offered_titles: Dict[str, str],
         offered_content: Dict[str, str],
+        offered_arms: Dict[str, str],
         report_files: set,
         report_text: str,
     ) -> None:
@@ -702,6 +747,8 @@ class T0IntelligenceGatherer:
         patterns offered via either mechanism get a WHY row. Determines ``used`` via a
         deterministic content/token-overlap heuristic (stronger than the filename-only
         signal above) and, when not used, classifies a reason via classify_non_adoption_reason.
+        The arm label (``offered_arms``) is stamped onto each outcome row so the
+        placebo/treatment comparison is possible after the fact.
         """
         if not self.quality_db:
             return
@@ -712,6 +759,7 @@ class T0IntelligenceGatherer:
                 "file_path": fp or "",
                 "title": offered_titles.get(pid, ""),
                 "content": offered_content.get(pid, ""),
+                "ab_arm": offered_arms.get(pid),
             }
 
         try:
@@ -719,14 +767,24 @@ class T0IntelligenceGatherer:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='dispatch_pattern_offered'"
             )
             if cur.fetchone():
+                has_ab_arm = self._dpo_has_ab_arm()
+                select_cols = "pattern_id, pattern_title" + (", ab_arm" if has_ab_arm else "")
                 for row in self.quality_db.execute(
-                    "SELECT pattern_id, pattern_title FROM dispatch_pattern_offered WHERE dispatch_id = ?",
+                    f"SELECT {select_cols} FROM dispatch_pattern_offered WHERE dispatch_id = ?",
                     (dispatch_id,),
                 ):
                     pid = row["pattern_id"] if isinstance(row, sqlite3.Row) else row[0]
                     title = row["pattern_title"] if isinstance(row, sqlite3.Row) else row[1]
+                    arm = None
+                    if has_ab_arm:
+                        arm = row["ab_arm"] if isinstance(row, sqlite3.Row) else row[2]
                     if pid and pid not in merged:
-                        merged[pid] = {"file_path": "", "title": title or "", "content": ""}
+                        merged[pid] = {"file_path": "", "title": title or "", "content": "", "ab_arm": arm}
+                    elif pid:
+                        # The junction is the authoritative arm source: it overwrites
+                        # any NDJSON default so a placebo/treatment offer is labelled
+                        # correctly even when the legacy ndjson path also logged it.
+                        merged[pid]["ab_arm"] = arm
         except sqlite3.Error as e:
             log.debug("dispatch_pattern_offered lookup failed for %s: %s", dispatch_id, e)
 
@@ -752,6 +810,18 @@ class T0IntelligenceGatherer:
         except sqlite3.Error as e:
             log.debug("Failed to commit pattern_injection_outcome rows for %s: %s", dispatch_id, e)
 
+    def _pio_has_ab_arm(self) -> bool:
+        """PRAGMA probe for the pattern_injection_outcome.ab_arm column (v32)."""
+        if not self.quality_db:
+            return False
+        try:
+            cols = {r[1] for r in self.quality_db.execute(
+                "PRAGMA table_info(pattern_injection_outcome)"
+            ).fetchall()}
+            return "ab_arm" in cols
+        except sqlite3.Error:
+            return False
+
     def _record_one_injection_outcome(
         self,
         *,
@@ -767,7 +837,8 @@ class T0IntelligenceGatherer:
 
         Single-pattern unit of _record_injection_why's per-offer loop, extracted
         to keep that method's merge/loop/commit shape under the executable-line
-        threshold. No behavior change from the inlined version.
+        threshold. No behavior change from the inlined version beyond carrying
+        the arm label (``meta['ab_arm']``) onto the outcome row.
         """
         fp_lower = meta["file_path"].lower() if meta["file_path"] else ""
         file_touched = bool(fp_lower) and any(
@@ -802,6 +873,10 @@ class T0IntelligenceGatherer:
                 content_overlap=overlap,
             )
 
+        # Inherit the offer's arm verbatim. A NULL offer arm (a row predating
+        # the v32 arm label) stays NULL on the outcome row so the per-arm
+        # report reads it as "unknown" rather than inventing a treatment arm.
+        ab_arm = meta.get("ab_arm")
         _emit_injection_outcome_event(
             dispatch_id=dispatch_id,
             pattern_id=pattern_id,
@@ -809,21 +884,38 @@ class T0IntelligenceGatherer:
             reason=reason,
             project_id=project_id,
             timestamp=now,
+            ab_arm=ab_arm,
         )
 
         try:
-            self.quality_db.execute(
-                """INSERT INTO pattern_injection_outcome
-                    (dispatch_id, pattern_id, pattern_hash, used, reason, evidence, project_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(project_id, dispatch_id, pattern_id) DO UPDATE SET
-                    used = excluded.used,
-                    reason = excluded.reason,
-                    evidence = excluded.evidence,
-                    pattern_hash = excluded.pattern_hash,
-                    created_at = excluded.created_at""",
-                (dispatch_id, pattern_id, pattern_id, used, reason, evidence, project_id, now),
-            )
+            has_ab_arm = self._pio_has_ab_arm()
+            if has_ab_arm:
+                self.quality_db.execute(
+                    """INSERT INTO pattern_injection_outcome
+                        (dispatch_id, pattern_id, pattern_hash, used, reason, evidence, project_id, created_at, ab_arm)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(project_id, dispatch_id, pattern_id) DO UPDATE SET
+                        used = excluded.used,
+                        reason = excluded.reason,
+                        evidence = excluded.evidence,
+                        pattern_hash = excluded.pattern_hash,
+                        created_at = excluded.created_at,
+                        ab_arm = excluded.ab_arm""",
+                    (dispatch_id, pattern_id, pattern_id, used, reason, evidence, project_id, now, ab_arm),
+                )
+            else:
+                self.quality_db.execute(
+                    """INSERT INTO pattern_injection_outcome
+                        (dispatch_id, pattern_id, pattern_hash, used, reason, evidence, project_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(project_id, dispatch_id, pattern_id) DO UPDATE SET
+                        used = excluded.used,
+                        reason = excluded.reason,
+                        evidence = excluded.evidence,
+                        pattern_hash = excluded.pattern_hash,
+                        created_at = excluded.created_at""",
+                    (dispatch_id, pattern_id, pattern_id, used, reason, evidence, project_id, now),
+                )
         except sqlite3.Error as e:
             log.debug("Failed to write pattern_injection_outcome for %s/%s: %s",
                       dispatch_id, pattern_id, e)

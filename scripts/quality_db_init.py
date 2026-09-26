@@ -29,7 +29,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 31
+HIGHEST_QI_VERSION = 32
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1635,6 +1635,40 @@ def _migrate_v31(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v32(conn: sqlite3.Connection) -> None:
+    """V32: ab_arm on pattern_injection_outcome + dispatch_pattern_offered.
+
+    The adoption-metric discrimination test (dispatch
+    20260920-191500-placebo-arm) compares adoption rates between a treatment
+    arm (best-fitting pattern) and a placebo arm (a deliberately cross-domain
+    pattern). The arm is decided at offer time (the selector knows which arm
+    it ran), so the arm label lives on ``dispatch_pattern_offered`` and is
+    carried forward onto the outcome row by ``_record_one_injection_outcome``.
+
+    The column is nullable with NO default. A row that predates the arm
+    label (written before v32 existed) stays NULL, which the per-arm report
+    reads as "unknown" rather than silently inventing a ``'treatment'`` arm
+    for it. Giving three billion rows a fabricated ``'treatment'`` is the
+    measurement defect this migration repairs: a historical offer without an
+    arm is not a treatment offer, it is an offer whose arm we do not know.
+    Rows written after v32 always carry an explicit arm (the selector stamps
+    it), so NULL is never a valid arm for a modern row. Purely additive:
+    two ALTER TABLE ADD COLUMNs, no existing column touched.
+    """
+    pio_cols = {r[1] for r in conn.execute("PRAGMA table_info(pattern_injection_outcome)").fetchall()}
+    if "ab_arm" not in pio_cols:
+        conn.execute(
+            "ALTER TABLE pattern_injection_outcome ADD COLUMN ab_arm TEXT"
+        )
+        log('INFO', "Migrated: added ab_arm column to pattern_injection_outcome (v32)")
+    dpo_cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_pattern_offered)").fetchall()}
+    if "ab_arm" not in dpo_cols:
+        conn.execute(
+            "ALTER TABLE dispatch_pattern_offered ADD COLUMN ab_arm TEXT"
+        )
+        log('INFO', "Migrated: added ab_arm column to dispatch_pattern_offered (v32)")
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1668,6 +1702,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     29: _migrate_v29,
     30: _migrate_v30,
     31: _migrate_v31,
+    32: _migrate_v32,
 }
 
 

@@ -174,7 +174,10 @@ def test_pass_with_degenerate_single_shot_depth_becomes_unavailable(tmp_path):
     assert written["execution_depth"]["diff_chars"] == 0
 
 
-def test_pass_with_truncated_single_shot_diff_stays_pass(tmp_path):
+def test_pass_with_truncated_single_shot_diff_is_partial_review(tmp_path):
+    """OI-1851: truncation is still never degenerate (the record keeps its
+    contract_hash, it is not unavailable), but a single-shot pass on a cut
+    diff is a review of part of the PR and is booked partial_review."""
     depth = gate_depth.single_shot_depth(50000, True)
     payload = {
         "gate": "kimi_gate", "pr_id": "100", "status": "pass",
@@ -187,7 +190,8 @@ def test_pass_with_truncated_single_shot_diff_stays_pass(tmp_path):
         execution_depth=depth,
     )
     written = json.loads(out.read_text(encoding="utf-8"))
-    assert written["status"] == "pass"
+    assert written["status"] == "partial_review"
+    assert written["contract_hash"] == "realhash"
     assert written["execution_depth"]["diff_truncated"] is True
 
 

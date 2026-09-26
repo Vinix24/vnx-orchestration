@@ -55,7 +55,7 @@ def record_injection_audit(
     injection_id = _new_id()
     items_json = json.dumps([item.to_dict() for item in result.items])
     suppressed_json = json.dumps([s.to_dict() for s in result.suppressed])
-    ab_arm = getattr(result, "ab_arm", "treatment") or "treatment"
+    ab_arm = getattr(result, "ab_arm", None)
     try:
         from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
     except ImportError:
@@ -159,6 +159,7 @@ def record_pattern_usage(
     project_id = current_project_id()
     pu_has_project = has_column_fn("pattern_usage", "project_id")
     dpo_has_project = has_column_fn("dispatch_pattern_offered", "project_id")
+    dpo_has_ab_arm = has_column_fn("dispatch_pattern_offered", "ab_arm")
     try:
         from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
     except ImportError:
@@ -184,6 +185,7 @@ def record_pattern_usage(
             )"""
         )
         dpo_has_project = has_column_fn("dispatch_pattern_offered", "project_id")
+        dpo_has_ab_arm = has_column_fn("dispatch_pattern_offered", "ab_arm")
 
         pu_conflict_target = _resolve_conflict_target(
             db, "pattern_usage", _PATTERN_USAGE_CONFLICT_PREFERRED, _PATTERN_USAGE_CONFLICT_FALLBACK,
@@ -211,8 +213,14 @@ def record_pattern_usage(
                 _upsert_pattern_usage(db, item, now, project_id, pu_has_project, pu_conflict_target)
             if dpo_conflict_target is not None:
                 rearm_busy_timeout(db, deadline)
+                # The selector always stamps ab_arm on a new offer (treatment
+                # / placebo / control). getattr's default only fires for a
+                # pre-v32 result object that never carried the field; in that
+                # case None keeps the row readable as "unknown" rather than
+                # fabricating a treatment arm.
                 _upsert_dispatch_pattern_offered(
-                    db, item, result.dispatch_id, now, project_id, dpo_has_project, dpo_conflict_target,
+                    db, item, result.dispatch_id, now, project_id, dpo_has_project, dpo_has_ab_arm,
+                    getattr(result, "ab_arm", None), dpo_conflict_target,
                 )
             _stamp_source_dispatch_id(db, item, result.dispatch_id)
         rearm_busy_timeout(db, deadline)
@@ -352,9 +360,26 @@ def _upsert_pattern_usage(db, item, now, project_id, has_project, conflict_targe
         )
 
 
-def _upsert_dispatch_pattern_offered(db, item, dispatch_id, now, project_id, has_project, conflict_target: Tuple[str, ...]):
+def _upsert_dispatch_pattern_offered(
+    db, item, dispatch_id, now, project_id, has_project, has_ab_arm,
+    ab_arm: str, conflict_target: Tuple[str, ...],
+):
     conflict_clause = ", ".join(conflict_target)
-    if has_project:
+    # ab_arm is stamped at offer time so the outcome row can inherit it. The
+    # ON CONFLICT update writes it back too, so a re-offer under a different
+    # arm (e.g. a dispatch re-injected after an arm flip) is corrected rather
+    # than silently retaining the stale arm label.
+    if has_project and has_ab_arm:
+        db.execute(
+            f"""INSERT INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at, project_id, ab_arm)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT({conflict_clause}) DO UPDATE SET
+                offered_at = excluded.offered_at,
+                ab_arm = excluded.ab_arm""",
+            (dispatch_id, item.item_id, item.title[:255], now, project_id, ab_arm),
+        )
+    elif has_project:
         db.execute(
             f"""INSERT INTO dispatch_pattern_offered
                 (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
@@ -362,6 +387,16 @@ def _upsert_dispatch_pattern_offered(db, item, dispatch_id, now, project_id, has
                ON CONFLICT({conflict_clause}) DO UPDATE SET
                 offered_at = excluded.offered_at""",
             (dispatch_id, item.item_id, item.title[:255], now, project_id),
+        )
+    elif has_ab_arm:
+        db.execute(
+            f"""INSERT INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at, ab_arm)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT({conflict_clause}) DO UPDATE SET
+                offered_at = excluded.offered_at,
+                ab_arm = excluded.ab_arm""",
+            (dispatch_id, item.item_id, item.title[:255], now, ab_arm),
         )
     else:
         db.execute(
