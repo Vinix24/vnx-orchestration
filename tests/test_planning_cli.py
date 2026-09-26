@@ -611,6 +611,374 @@ def test_link_pr_delivery_missing_migration_noop_no_change_branch_fails_closed(t
 
 
 # ---------------------------------------------------------------------------
+# unmark-delivery + unlink-pr delivery cleanup (OI-1872)
+# ---------------------------------------------------------------------------
+
+def _mark_delivery(
+    state_dir: Path, track_id: str, pr_number: int, kind: str, project_id: str = PROJECT_ID
+) -> None:
+    """Seed a track_pr_delivery row directly, independent of the code under test."""
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        "INSERT INTO track_pr_delivery (project_id, track_id, pr_number, delivery_kind, set_by) "
+        "VALUES (?, ?, ?, ?, 'test')",
+        (project_id, track_id, pr_number, kind),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _delivery_prs(state_dir: Path, track_id: str, project_id: str = PROJECT_ID) -> list[int]:
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    rows = conn.execute(
+        "SELECT pr_number FROM track_pr_delivery WHERE project_id = ? AND track_id = ? "
+        "ORDER BY pr_number",
+        (project_id, track_id),
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def _unmark_args(
+    state_dir: Path,
+    track_id: str,
+    *prs: str,
+    project_id: str = PROJECT_ID,
+    json: bool = False,
+    reason: str = "",
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        state_dir=str(state_dir),
+        project_id=project_id,
+        track_id=track_id,
+        pr=list(prs),
+        json=json,
+        reason=reason,
+    )
+
+
+def test_unmark_delivery_removes_the_row_and_leaves_pr_ref_alone(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10,#20"
+    )
+    _mark_delivery(sd, "T", 10, "partial")
+    _mark_delivery(sd, "T", 20, "complete")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "#10", reason="OI-1872: back to unmarked")
+    )
+    assert rc == 0
+    assert _pr_delivery(sd, "T", 10) is None          # unmarked: no row
+    assert _pr_delivery(sd, "T", 20) == "complete"    # other PR untouched
+    assert _pr_ref(sd, "T") == "#10,#20"              # pr_ref left alone
+
+    out = capsys.readouterr().out
+    assert "delivery marker removed: #10" in out
+    assert "no marker to remove" not in out
+
+
+def test_unmark_delivery_reports_removed_and_no_row_separately(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10,#20,#30"
+    )
+    _mark_delivery(sd, "T", 10, "partial")
+    _mark_delivery(sd, "T", 30, "partial")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "10,20", "#30", reason="r", json=True)
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["removed"] == ["#10", "#30"]
+    assert payload["no_row"] == ["#20"]
+    assert payload["action"] == "unmarked"
+    assert payload["applied"] is True
+    assert payload["pr_ref"] == "#10,#20,#30"
+    assert _delivery_prs(sd, "T") == []
+
+
+def test_unmark_delivery_human_output_lists_removed_and_no_row(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    _mark_delivery(sd, "T", 10, "partial")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "#10", "#20", reason="r")
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "delivery marker removed: #10" in out
+    assert "no marker to remove: #20" in out
+
+
+def test_unmark_delivery_writes_audit_event_with_reason(tmp_path):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    _mark_delivery(sd, "T", 10, "partial")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "#10", "#20", reason="herstel OI-1872")
+    )
+    assert rc == 0
+    events = _track_events(sd, "T", "track_delivery_unmarked")
+    assert len(events) == 1
+    assert events[0]["actor"] == "operator"
+    assert events[0]["project_id"] == PROJECT_ID
+    details = events[0]["details"]
+    assert details["removed"] == ["#10"]
+    assert details["no_row"] == ["#20"]
+    assert details["reason"] == "herstel OI-1872"
+
+
+def test_unmark_delivery_is_scoped_to_project_id(tmp_path):
+    """ADR-007: the same track_id and PR under another project_id is a different
+    row. Unmarking in proj-a must never touch proj-b's marker."""
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", "proj-a", title="x", goal_state="y", phase="queued", pr_ref="#10")
+    tracks_lib.create_track(sd, "T", "proj-b", title="x", goal_state="y", phase="queued", pr_ref="#10")
+    _mark_delivery(sd, "T", 10, "partial", project_id="proj-a")
+    _mark_delivery(sd, "T", 10, "complete", project_id="proj-b")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "#10", project_id="proj-a", reason="isolation test")
+    )
+    assert rc == 0
+    assert _pr_delivery(sd, "T", 10, project_id="proj-a") is None
+    assert _pr_delivery(sd, "T", 10, project_id="proj-b") == "complete"   # untouched
+    assert _pr_ref(sd, "T", project_id="proj-b") == "#10"
+
+    events = _track_events(sd, "T", "track_delivery_unmarked")
+    assert len(events) == 1
+    assert events[0]["project_id"] == "proj-a"
+
+
+def test_unmark_delivery_wrong_project_id_removes_nothing(tmp_path, capsys):
+    """A track that exists only under PROJECT_ID is invisible under another
+    project_id: the command stops at 'track not found' before any DELETE."""
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10")
+    _mark_delivery(sd, "T", 10, "partial")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "#10", project_id="other-proj", reason="x")
+    )
+    assert rc == 1
+    assert "not found" in capsys.readouterr().err
+    assert _pr_delivery(sd, "T", 10) == "partial"
+
+
+def test_unmark_delivery_only_no_row_is_a_clean_noop_without_event(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "#10", reason="r", json=True)
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "noop_no_row"
+    assert payload["applied"] is False
+    assert payload["removed"] == []
+    assert payload["no_row"] == ["#10"]
+    # a no-op writes no audit event -- nothing to attest to.
+    assert _track_events(sd, "T", "track_delivery_unmarked") == []
+
+
+def test_unmark_delivery_empty_reason_is_refused(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10")
+    _mark_delivery(sd, "T", 10, "partial")
+
+    for reason in ("", "   "):
+        rc = planning_cli.cmd_objective_unmark_delivery(_unmark_args(sd, "T", "#10", reason=reason))
+        assert rc == 2
+    assert "--reason is required" in capsys.readouterr().err
+    assert _pr_delivery(sd, "T", 10) == "partial"     # no silent bypass
+    assert _track_events(sd, "T", "track_delivery_unmarked") == []
+
+
+def test_unmark_delivery_on_missing_track_is_clean_error(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    rc = planning_cli.cmd_objective_unmark_delivery(_unmark_args(sd, "missing", "#1", reason="x"))
+    assert rc == 1
+    assert "not found" in capsys.readouterr().err
+
+
+def test_unmark_delivery_rejects_input_without_a_valid_pr_ref(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10")
+    _mark_delivery(sd, "T", 10, "partial")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(_unmark_args(sd, "T", "abc", reason="x"))
+    assert rc == 2
+    assert "no valid PR refs" in capsys.readouterr().err
+    assert _pr_delivery(sd, "T", 10) == "partial"
+
+
+def test_unmark_delivery_pre_0032_store_is_legible_not_a_crash(tmp_path, capsys):
+    """A store without migration 0032 has no track_pr_delivery table: no marker
+    can exist, so the command says exactly that (stderr, and a note in --json)
+    instead of crashing on the missing table or claiming a removal."""
+    sd = _build_db(tmp_path)  # deliberately NOT applying 0032
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10")
+
+    rc = planning_cli.cmd_objective_unmark_delivery(_unmark_args(sd, "T", "#10", reason="r"))
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "track_pr_delivery" in captured.err and "0032" in captured.err
+    assert "delivery marker removed" not in captured.out
+    assert _pr_ref(sd, "T") == "#10"
+    assert _track_events(sd, "T", "track_delivery_unmarked") == []
+
+    rc = planning_cli.cmd_objective_unmark_delivery(
+        _unmark_args(sd, "T", "#10", reason="r", json=True)
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "noop_table_absent"
+    assert payload["delivery_table_present"] is False
+    assert payload["applied"] is False
+    assert payload["removed"] == []
+    assert "track_pr_delivery" in payload["note"]
+
+
+def test_unlink_pr_deletes_the_delivery_marker_of_the_removed_pr_only(tmp_path):
+    """OI-1872: unlink-pr used to drop the ref and leave an orphan marker behind."""
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#100,#1790,#200"
+    )
+    _mark_delivery(sd, "T", 100, "complete")
+    _mark_delivery(sd, "T", 1790, "partial")
+    _mark_delivery(sd, "T", 200, "partial")
+
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#1790", reason="r"))
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#100,#200"
+    assert _delivery_prs(sd, "T") == [100, 200]       # #1790's marker is gone, no orphan
+    assert _pr_delivery(sd, "T", 100) == "complete"   # the kept refs keep their marks
+
+
+def test_unlink_pr_removing_several_prs_deletes_each_marker(tmp_path):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#1,#2,#3"
+    )
+    for n in (1, 2):
+        _mark_delivery(sd, "T", n, "partial")     # #3 stays unmarked
+
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#1,#2,#3", reason="r"))
+    assert rc == 0
+    assert _pr_ref(sd, "T") == ""
+    assert _delivery_prs(sd, "T") == []
+
+
+def test_unlink_pr_reports_the_removed_markers(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#1,#2,#3"
+    )
+    _mark_delivery(sd, "T", 1, "partial")
+    _mark_delivery(sd, "T", 2, "complete")
+
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#1,#2", reason="r"))
+    assert rc == 0
+    assert "delivery markers removed: #1, #2" in capsys.readouterr().out
+
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#3", reason="r"))
+    assert rc == 0
+    assert "none had a marker" in capsys.readouterr().out
+
+
+def test_unlink_pr_json_and_audit_event_carry_delivery_removed(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#1,#2"
+    )
+    _mark_delivery(sd, "T", 1, "partial")
+
+    rc = planning_cli.cmd_objective_unlink_pr(
+        _unlink_pr_args(sd, "T", "#1", "#2", reason="r", json=True)
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["removed"] == ["#1", "#2"]
+    assert payload["delivery_removed"] == ["#1"]
+    assert payload["delivery_table_present"] is True
+    details = _track_events(sd, "T", "track_pr_unlinked")[0]["details"]
+    assert details["delivery_removed"] == ["#1"]
+
+
+def test_unlink_pr_delivery_delete_is_scoped_to_project_id(tmp_path):
+    """ADR-007: same track_id and PR under two project_ids -- unlinking in
+    proj-a deletes proj-a's marker and never proj-b's."""
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", "proj-a", title="x", goal_state="y", phase="queued", pr_ref="#1790")
+    tracks_lib.create_track(sd, "T", "proj-b", title="x", goal_state="y", phase="queued", pr_ref="#1790")
+    _mark_delivery(sd, "T", 1790, "partial", project_id="proj-a")
+    _mark_delivery(sd, "T", 1790, "complete", project_id="proj-b")
+
+    rc = planning_cli.cmd_objective_unlink_pr(
+        _unlink_pr_args(sd, "T", "#1790", project_id="proj-a", reason="isolation test")
+    )
+    assert rc == 0
+    assert _delivery_prs(sd, "T", "proj-a") == []
+    assert _pr_delivery(sd, "T", 1790, project_id="proj-b") == "complete"   # untouched
+    assert _pr_ref(sd, "T", project_id="proj-b") == "#1790"
+
+
+def test_unlink_pr_pre_0032_store_still_unlinks_and_says_no_marker_table(tmp_path, capsys):
+    sd = _build_db(tmp_path)  # deliberately NOT applying 0032
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#1,#2")
+
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#1", reason="r"))
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#2"
+    assert "track_pr_delivery table is absent" in capsys.readouterr().out
+
+    rc = planning_cli.cmd_objective_unlink_pr(_unlink_pr_args(sd, "T", "#2", reason="r", json=True))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["delivery_table_present"] is False
+    assert payload["delivery_removed"] == []
+
+
+def test_unmark_delivery_is_reachable_through_the_planning_cli_parser(tmp_path, capsys):
+    """The subcommand is wired into planning_cli's own argparse tree (what
+    `bin/vnx objective ...` execs), with the flags the handler reads."""
+    sd = _build_db(tmp_path)
+    _apply_migration_0032(sd)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10")
+    _mark_delivery(sd, "T", 10, "partial")
+
+    rc = planning_cli.main([
+        "objective", "unmark-delivery", "T", "#10", "--reason", "via parser",
+        "--state-dir", str(sd), "--project-id", PROJECT_ID, "--json",
+    ])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["removed"] == ["#10"]
+    assert _pr_delivery(sd, "T", 10) is None
+
+
+# ---------------------------------------------------------------------------
 # close --attest
 # ---------------------------------------------------------------------------
 
@@ -718,6 +1086,139 @@ def test_close_attest_pr_scoped_to_project_id(tmp_path):
     assert _pr_ref(sd, "T", PROJECT_ID) == "#1234"
     assert _pr_ref(sd, "T", "other-proj") == ""
     assert _phase(sd, "T", "other-proj") == "queued"
+
+
+# ---------------------------------------------------------------------------
+# close --attest APPENDS to pr_ref (OI-1872: a replace lost 17 refs)
+# ---------------------------------------------------------------------------
+
+def test_close_attest_pr_appends_to_existing_refs_not_replaces(tmp_path):
+    """The OI-1872 regression: a track with 3 refs closed with `--attest --pr 9`
+    ends with 4 refs, the 3 earlier ones first and in their original order."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10,#20,#30"
+    )
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="r", pr=["9"])
+    )
+    assert rc == 0
+    assert _phase(sd, "T") == "done"
+    assert _pr_ref(sd, "T") == "#10,#20,#30,#9"
+    assert len(_pr_ref(sd, "T").split(",")) == 4
+
+
+def test_close_attest_pr_dedupes_against_existing_refs(tmp_path):
+    """`--pr` uses the link-pr merge: a ref already on the track is not added
+    twice, however it is spelled, and the new ones land after the old ones."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10,#20"
+    )
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="r", pr=["20,#40", "10", "40"])
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#10,#20,#40"
+
+
+def test_close_attest_without_pr_keeps_existing_refs_and_adds_the_stamp(tmp_path):
+    """The ops-attest fail-open (no --pr) must not wipe a non-empty pr_ref."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10,#20"
+    )
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="r")
+    )
+    assert rc == 0
+    refs = _pr_ref(sd, "T").split(",")
+    assert refs[:2] == ["#10", "#20"]
+    assert len(refs) == 3
+    assert refs[2].startswith("ops-attest:")
+
+
+def test_close_attest_pr_keeps_an_earlier_ops_attest_stamp(tmp_path):
+    """An earlier attestation is part of the record: appending a real PR to a
+    track that carries `ops-attest:<date>` keeps the stamp, verbatim and in
+    place. `_merge_pr_refs` alone would drop it (it only understands PR refs)."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued",
+        pr_ref="#10,ops-attest:2026-08-01",
+    )
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="r", pr=["9"])
+    )
+    assert rc == 0
+    assert _pr_ref(sd, "T") == "#10,ops-attest:2026-08-01,#9"
+
+
+def test_close_attest_stamp_is_not_duplicated_on_an_identical_stamp(tmp_path):
+    """Attesting twice on the same day must not stack two identical stamps."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued")
+    assert planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="first")
+    ) == 0
+    first = _pr_ref(sd, "T")
+    assert first.startswith("ops-attest:")
+
+    conn = sqlite3.connect(str(sd / "runtime_coordination.db"))
+    conn.execute(
+        "UPDATE tracks SET phase = 'queued' WHERE track_id = 'T' AND project_id = ?",
+        (PROJECT_ID,),
+    )
+    conn.commit()
+    conn.close()
+
+    assert planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="second")
+    ) == 0
+    assert _pr_ref(sd, "T") == first
+
+
+def test_close_attest_audit_event_records_pr_ref_before(tmp_path):
+    """The audit event carries what pr_ref was before the close, so the record
+    itself shows nothing was lost."""
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10,#20,#30"
+    )
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="r", pr=["9"])
+    )
+    assert rc == 0
+    details = _track_events(sd, "T", "track_ops_attest")[0]["details"]
+    assert details["pr_ref_before"] == "#10,#20,#30"
+    assert details["pr_ref"] == "#10,#20,#30,#9"
+    assert details["pr_arg_resolved"] == "#9"
+
+
+def test_close_attest_invalid_pr_leaves_existing_refs_untouched(tmp_path, capsys):
+    sd = _build_db(tmp_path)
+    tracks_lib.create_track(
+        sd, "T", PROJECT_ID, title="x", goal_state="y", phase="queued", pr_ref="#10,#20"
+    )
+    rc = planning_cli.cmd_objective_close(
+        _close_args(sd, "T", apply=True, approval_id="A", attest="r", pr=["not-a-pr"])
+    )
+    assert rc == 2
+    assert "no valid PR refs" in capsys.readouterr().out
+    assert _pr_ref(sd, "T") == "#10,#20"
+    assert _phase(sd, "T") == "queued"
+    assert _track_events(sd, "T", "track_ops_attest") == []
+
+
+def test_close_attest_help_says_append_not_replace(capsys):
+    """The help text is the operator's only documentation of this flag: it must
+    say what happens to the refs already on the track."""
+    with pytest.raises(SystemExit) as exc:
+        planning_cli._build_parser().parse_args(["objective", "close", "--help"])
+    assert exc.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "APPENDS the real PR to the track's existing pr_ref" in out
+    assert "nothing replaced" in out
 
 
 def test_close_attest_without_apply_or_approval_is_rejected(tmp_path, capsys):

@@ -716,13 +716,14 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     p_close.add_argument(
         "--attest", default=None, metavar="REASON",
         help="operator attestation for ops-tracks with no PR evidence (requires --apply "
-             "--approval-id). Records the real PR via --pr when given, else fails open to "
-             "ops-attest:<date>",
+             "--approval-id). Appends the real PR via --pr when given, else fails open by "
+             "appending ops-attest:<date>; refs already on the track are kept",
     )
     p_close.add_argument(
         "--pr", action="append", default=None, metavar="NNN",
         help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
-             "with --attest: records the real PR as pr_ref instead of ops-attest:<date>. "
+             "with --attest: APPENDS the real PR to the track's existing pr_ref (deduplicated, "
+             "order kept, nothing replaced) instead of ops-attest:<date>. "
              "Without --attest, use `vnx objective link-pr` instead.",
     )
     p_close.add_argument(
@@ -762,7 +763,7 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     p_unlink_pr = subs.add_parser(
         "unlink-pr",
         help="manually unlink PR ref(s) from a track (operator-gated inverse of "
-             "link-pr; audited)",
+             "link-pr; audited); also removes their delivery markers",
     )
     _common_horizon_args(p_unlink_pr)
     p_unlink_pr.add_argument("track_id", metavar="TRACK_ID")
@@ -773,6 +774,23 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     p_unlink_pr.add_argument(
         "--reason", default="",
         help="REQUIRED, non-empty: why this PR reference is being removed "
+             "(audited; no silent bypass — an empty reason is refused)",
+    )
+
+    p_unmark_delivery = subs.add_parser(
+        "unmark-delivery",
+        help="remove the delivery marker (partial|complete) of PR(s) on a track, "
+             "returning them to unmarked; pr_ref is left alone (operator-gated; audited)",
+    )
+    _common_horizon_args(p_unmark_delivery)
+    p_unmark_delivery.add_argument("track_id", metavar="TRACK_ID")
+    p_unmark_delivery.add_argument(
+        "pr", nargs="+", metavar="PR",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unmark_delivery.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this delivery marker is being removed "
              "(audited; no silent bypass — an empty reason is refused)",
     )
 

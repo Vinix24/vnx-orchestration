@@ -320,6 +320,7 @@ _OBJECTIVE_ARGV = {
     "reopen": ["delegate-track"],
     "link-pr": ["delegate-track", "#1234", "#1235", "--delivery", "complete"],
     "unlink-pr": ["delegate-track", "#1234", "#1235", "--reason", "superseded by #1240"],
+    "unmark-delivery": ["delegate-track", "#1234", "#1235", "--reason", "back to unmarked"],
     "set-lane-hint": ["delegate-track", "governed"],
     "set-goal": ["delegate-track", "Delegate goal state"],
 }

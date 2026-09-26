@@ -6,8 +6,33 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Added
+
+- **`vnx objective unmark-delivery <track> <pr> [<pr> ...] --reason ...`
+  (OI-1872).** `link-pr` always writes a `track_pr_delivery` row (default
+  `partial`, fail-closed) and nothing could take one back, so a PR could
+  never return to unmarked. The new verb deletes the row for each PR on that
+  track and project, leaves `pr_ref` alone, and prints which PRs had a marker
+  and which had none. Like `unlink-pr` it requires a non-empty `--reason` and
+  records a `track_delivery_unmarked` audit event; a run that removes nothing
+  writes no event. On a store without migration 0032 it says the table is
+  absent instead of failing. Available as `vnx horizon unmark-delivery` and
+  through the `vnx objective` alias.
+
 ### Fixed
 
+- **`vnx objective close --attest --pr` no longer replaces `pr_ref`
+  (OI-1872).** On track `absence-is-loud` a close with `--pr 1922 --pr 1924`
+  cut `pr_ref` from 17 refs to `#1922,#1924`, and the 17 earlier refs were gone
+  from the record. `--pr` now appends to the existing refs with the same merge
+  `link-pr` uses (deduplicated, order kept). The `ops-attest:<date>` fail-open
+  without `--pr` also keeps the existing refs and adds the stamp, and an
+  earlier `ops-attest` stamp survives a later `--pr`. The audit event carries
+  `pr_ref_before`. The help text says what happens to the existing list.
+- **`vnx objective unlink-pr` no longer leaves an orphan delivery marker
+  (OI-1872).** It now deletes the `track_pr_delivery` row of every PR it
+  removes from `pr_ref`, in the same transaction as the `pr_ref` update. The
+  output and the `track_pr_unlinked` event list the markers removed.
 - **`is_available()` measures reachability, not presence (OI-1454).** On
   2026-08-23 three of four reader adapters reported available while none could
   answer a call: codex had its quota spent and litellm's key was rejected, but

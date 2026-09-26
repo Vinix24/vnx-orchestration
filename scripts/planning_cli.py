@@ -877,6 +877,27 @@ def _remove_pr_refs(existing: Optional[str], to_remove: list[str]) -> tuple[Opti
     return new_ref, removed, not_present
 
 
+def _existing_pr_ref_tokens(existing: Optional[str]) -> list[str]:
+    """Every token of an existing pr_ref, in order and deduplicated.
+
+    PR refs come back normalized to '#N' (deduplicated by number); anything that
+    is not a PR ref, such as an 'ops-attest:<date>' stamp, is kept verbatim.
+    `_merge_pr_refs` cannot do this on its own: it only understands PR refs and
+    drops every other token, which is fine for `link-pr` but would erase an
+    earlier attestation when `close --attest` appends to the same column.
+    """
+    tokens: list[str] = []
+    for tok in str(existing or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        norm = _normalize_pr_ref(tok)
+        keep = norm if norm is not None else tok
+        if keep not in tokens:
+            tokens.append(keep)
+    return tokens
+
+
 # OI-1167: link-pr's pr_ref write and its delivery-marking write are two
 # separate facts. Linking the PR reference genuinely succeeds even when
 # track_pr_delivery is absent (pre-0032 store) -- that is legitimate
@@ -897,6 +918,12 @@ _DELIVERY_TABLE_MISSING_MSG = (
     "fail-closed auto-close gate has nothing to check for this track's PR(s) "
     "until 0032 is applied -- apply the migration, then re-run this command "
     "with --delivery to record the marking."
+)
+# The mirror image for the commands that REMOVE a marker: on a pre-0032 store
+# no marker can exist, so there is nothing to remove and the output says so.
+_DELIVERY_TABLE_ABSENT_MSG = (
+    "track_pr_delivery table is absent (migration 0032 not applied to this DB), "
+    "so no delivery marker exists to remove"
 )
 
 
@@ -933,6 +960,55 @@ def _write_pr_delivery(
             (project_id, track_id, n, kind, set_by),
         )
     return True
+
+
+def _delete_pr_delivery(
+    conn: sqlite3.Connection,
+    project_id: str,
+    track_id: str,
+    pr_numbers: list[int],
+) -> Optional[tuple[list[int], list[int]]]:
+    """Delete the delivery marker of each PR — inverse of `_write_pr_delivery`.
+
+    "Unmarked" means no row, so removing the marker is a DELETE, scoped to
+    (project_id, track_id, pr_number) per ADR-007: the same track_id and PR
+    under another project_id is a different row and is never touched.
+
+    Returns (removed, no_row) in request order, or None when migration 0032
+    hasn't been applied to this DB (no table, hence no marker to remove) — the
+    caller must say so rather than report a removal that could not happen.
+    """
+    if not _has_table(conn, "track_pr_delivery"):
+        return None
+    removed: list[int] = []
+    no_row: list[int] = []
+    for n in pr_numbers:
+        cur = conn.execute(
+            "DELETE FROM track_pr_delivery "
+            "WHERE project_id = ? AND track_id = ? AND pr_number = ?",
+            (project_id, track_id, n),
+        )
+        (removed if cur.rowcount else no_row).append(n)
+    return removed, no_row
+
+
+def _pr_numbers_from_refs(refs: list[str]) -> list[int]:
+    """PR numbers of comma-separated or repeated refs ('#5', '5', '5,6'), in
+    request order and deduplicated. Tokens that are not PR refs are skipped."""
+    numbers: list[int] = []
+    for raw in refs:
+        for tok in str(raw).split(","):
+            norm = _normalize_pr_ref(tok.strip())
+            if norm is None:
+                continue
+            n = int(norm.lstrip("#"))
+            if n not in numbers:
+                numbers.append(n)
+    return numbers
+
+
+def _fmt_prs(numbers: list[int]) -> str:
+    return ", ".join(f"#{n}" for n in numbers)
 
 
 def cmd_objective_link_pr(args: argparse.Namespace) -> int:
@@ -1072,6 +1148,11 @@ def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
     REQUIRED: an empty reason is a refusal, not a silent bypass, mirroring
     `pr_merge.py`'s `--override-contract-invalid` shape. Unlinking a PR that
     is not currently present is a no-op that says so -- not an error.
+
+    The delivery marker (`track_pr_delivery` row) of every PR removed from
+    pr_ref is deleted in the same transaction, so no orphan marker outlives its
+    ref (OI-1872). A store without that table (pre-0032) has no marker to
+    delete, and the output says so.
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -1117,16 +1198,22 @@ def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
             print(f"  none of the provided PR refs are present; no change made.\n")
         return 0
 
-    # ADR-007: write is scoped to (track_id, project_id) -- same shape as link-pr.
+    # ADR-007: writes are scoped to (track_id, project_id) -- same shape as link-pr.
+    # The pr_ref update and the delivery-marker delete share one transaction: a
+    # ref must not leave without its marker, nor a marker without its ref.
+    removed_numbers = _pr_numbers_from_refs(removed)
     conn = _db_conn(state_dir)
     try:
         conn.execute(
             "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
             (new_ref, track_id, project_id),
         )
+        delivery_result = _delete_pr_delivery(conn, project_id, track_id, removed_numbers)
         conn.commit()
     finally:
         conn.close()
+    delivery_table_present = delivery_result is not None
+    delivery_removed = delivery_result[0] if delivery_result else []
 
     # ADR-005 audit event: specific operator action, reason recorded.
     tracks_lib._emit_track_event(
@@ -1135,7 +1222,13 @@ def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
         track_id,
         project_id,
         "operator",
-        {"removed": removed, "not_present": not_present, "pr_ref": new_ref, "reason": reason},
+        {
+            "removed": removed,
+            "not_present": not_present,
+            "pr_ref": new_ref,
+            "reason": reason,
+            "delivery_removed": [f"#{n}" for n in delivery_removed],
+        },
     )
 
     payload = {
@@ -1144,6 +1237,8 @@ def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
         "pr_ref": new_ref,
         "removed": removed,
         "not_present": not_present,
+        "delivery_removed": [f"#{n}" for n in delivery_removed],
+        "delivery_table_present": delivery_table_present,
         "reason": reason,
         "action": "unlinked",
         "applied": True,
@@ -1156,6 +1251,116 @@ def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
         print(f"  - removed: {', '.join(removed)}")
         if not_present:
             print(f"  = not present: {', '.join(not_present)}")
+        if not delivery_table_present:
+            print(f"  delivery markers: none removed ({_DELIVERY_TABLE_ABSENT_MSG})")
+        elif delivery_removed:
+            print(f"  - delivery markers removed: {_fmt_prs(delivery_removed)}")
+        else:
+            print("  delivery markers: none had a marker")
+        print(f"  reason: {reason}")
+        print()
+    return 0
+
+
+def cmd_objective_unmark_delivery(args: argparse.Namespace) -> int:
+    """Remove the delivery marker of PR(s) on a track (operator-gated; audited).
+
+    `track_pr_delivery` holds one row per (project_id, track_id, pr_number) with
+    delivery_kind partial|complete; "unmarked" means no row. `link-pr` always
+    writes a row (default 'partial', fail-closed) and, until now, nothing could
+    take one back: `unlink-pr` dropped the ref and left the marker behind, and a
+    PR could never return to unmarked (OI-1872). This deletes the row(s) for the
+    given PR(s) on this track, scoped to (project_id, track_id) per ADR-007, and
+    leaves `tracks.pr_ref` alone. A PR without a row is reported as such, not an
+    error. Like `unlink-pr` it removes evidence, so a non-empty --reason is
+    REQUIRED; the removal is recorded as a `track_delivery_unmarked` audit event
+    carrying that reason. Only an actual removal writes an event.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+    reason = (args.reason or "").strip()
+
+    if not reason:
+        print(
+            "objective unmark-delivery: --reason is required and must not be empty "
+            "(no silent bypass). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"objective unmark-delivery: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 1
+
+    numbers = _pr_numbers_from_refs(list(args.pr))
+    if not numbers:
+        print(
+            f"objective unmark-delivery: no valid PR refs provided for {track_id!r}. "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    conn = _db_conn(state_dir)
+    try:
+        result = _delete_pr_delivery(conn, project_id, track_id, numbers)
+        conn.commit()
+    finally:
+        conn.close()
+
+    payload: dict[str, Any] = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "pr_ref": track.get("pr_ref") or "",
+        "reason": reason,
+        "delivery_table_present": result is not None,
+    }
+    if result is None:
+        # Pre-0032 store: no marker can exist, so the requested state (unmarked)
+        # already holds. Say why nothing was removed instead of claiming a removal.
+        payload.update(
+            removed=[], no_row=[f"#{n}" for n in numbers],
+            action="noop_table_absent", applied=False, note=_DELIVERY_TABLE_ABSENT_MSG,
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2, default=str))
+        else:
+            print(f"\nvnx objective unmark-delivery — {track_id} (project '{project_id}')")
+            print(f"  nothing to remove: {_DELIVERY_TABLE_ABSENT_MSG}\n", file=sys.stderr)
+        return 0
+
+    removed, no_row = result
+    payload.update(
+        removed=[f"#{n}" for n in removed], no_row=[f"#{n}" for n in no_row],
+        action="unmarked" if removed else "noop_no_row", applied=bool(removed),
+    )
+
+    if removed:
+        # ADR-005 audit event: same shape as `track_pr_unlinked`, reason recorded.
+        tracks_lib._emit_track_event(
+            state_dir,
+            "track_delivery_unmarked",
+            track_id,
+            project_id,
+            "operator",
+            {"removed": payload["removed"], "no_row": payload["no_row"], "reason": reason},
+        )
+
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective unmark-delivery — {track_id} (project '{project_id}')")
+        print(f"  pr_ref (unchanged): {track.get('pr_ref') or '(none)'}")
+        if removed:
+            print(f"  - delivery marker removed: {_fmt_prs(removed)}")
+        if no_row:
+            print(f"  = no marker to remove: {_fmt_prs(no_row)}")
         print(f"  reason: {reason}")
         print()
     return 0
@@ -1172,10 +1377,12 @@ def _close_with_attest(
     """Attested close path for ops-tracks with no PR evidence.
 
     Human-gated: --attest REQUIRES --apply AND --approval-id. When --pr is given,
-    stamps the real delivering PR ref (normalized via `_merge_pr_refs`, same
-    shape as `link-pr`) as tracks.pr_ref instead of the date stamp — this
-    grounds the track for the reconciler. Without --pr, fails open to
-    tracks.pr_ref = 'ops-attest:<YYYY-MM-DD>' exactly as before. Either way an
+    APPENDS the real delivering PR ref(s) (normalized and deduplicated via
+    `_merge_pr_refs`, the same merge `link-pr` uses) to the track's existing
+    pr_ref instead of the date stamp — this grounds the track for the
+    reconciler. Without --pr, fails open by appending 'ops-attest:<YYYY-MM-DD>'
+    to the existing pr_ref. Neither path ever replaces refs already on the
+    track (OI-1872: a replace lost 17 refs from the record). Either way an
     audit event is emitted, then the track's declared phase is walked to 'done'
     through tracks.transition_phase (the single-writer). This is an explicit
     operator override; it does NOT resolve blocker open-items.
@@ -1251,12 +1458,15 @@ def _close_with_attest(
         return 2
     payload["path"] = [declared, *path]
 
-    # Resolve the ref to stamp: a real PR (via --pr, normalized like `link-pr`)
-    # when given, else the fail-open ops-attest date stamp (unchanged default).
+    # Resolve what to append to pr_ref: the real PR(s) (via --pr, normalized and
+    # deduplicated like `link-pr`) when given, else the fail-open ops-attest date
+    # stamp. Both APPEND to the refs already on the track, never replace them.
+    existing_ref = track.get("pr_ref")
     raw_pr_args = list(getattr(args, "pr", None) or [])
     resolved_pr_ref: Optional[str] = None
+    ref_tokens = _existing_pr_ref_tokens(existing_ref)
     if raw_pr_args:
-        resolved_pr_ref, _pr_added, _pr_already = _merge_pr_refs(None, raw_pr_args)
+        resolved_pr_ref, _, _ = _merge_pr_refs(None, raw_pr_args)
         if resolved_pr_ref is None:
             payload["action"] = "rejected_invalid_pr"
             if args.json:
@@ -1268,9 +1478,15 @@ def _close_with_attest(
                     "No change made.\n"
                 )
             return 2
+        _, pr_added, _ = _merge_pr_refs(existing_ref, raw_pr_args)
+        ref_tokens.extend(pr_added)
+    else:
+        stamp = f"ops-attest:{date.today().isoformat()}"
+        if stamp not in ref_tokens:
+            ref_tokens.append(stamp)
 
     # Stamp the explicit attestation on the track.
-    attest_ref = resolved_pr_ref or f"ops-attest:{date.today().isoformat()}"
+    attest_ref = ",".join(ref_tokens)
     conn = _db_conn(state_dir)
     try:
         conn.execute(
@@ -1293,6 +1509,7 @@ def _close_with_attest(
             "reason": reason,
             "approval_id": approval_id,
             "pr_ref": attest_ref,
+            "pr_ref_before": existing_ref or "",
             "pr_arg_raw": raw_pr_args,
             "pr_arg_resolved": resolved_pr_ref,
         },
@@ -1390,10 +1607,11 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     --attest <reason> is the escape hatch for ops-tracks with no PR evidence
     (e.g. a fleet-sync or docs-sweep). It still requires --apply + --approval-id,
     emits an audit event, then walks the phase to 'done'. It does NOT resolve
-    blocker open-items. When --pr is also given, it records the real delivering
-    PR (normalized like `link-pr`) as tracks.pr_ref, so the track can later be
-    grounded by the reconciler instead of carrying a date stamp forever. Without
-    --pr, it fails open to tracks.pr_ref = 'ops-attest:<date>' exactly as before.
+    blocker open-items. When --pr is also given, it appends the real delivering
+    PR (normalized and deduplicated like `link-pr`) to tracks.pr_ref, so the
+    track can later be grounded by the reconciler instead of carrying a date
+    stamp forever. Without --pr, it fails open by appending
+    'ops-attest:<date>'. Neither path replaces refs already on the track.
     --pr without --attest is rejected — use `link-pr` to link a ref without
     closing.
     """
@@ -4918,13 +5136,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_close.add_argument(
         "--attest", default=None, metavar="REASON",
         help="operator attestation for ops-tracks with no PR evidence (requires --apply "
-             "--approval-id). Records the real PR via --pr when given, else fails open to "
-             "ops-attest:<date>",
+             "--approval-id). Appends the real PR via --pr when given, else fails open by "
+             "appending ops-attest:<date>; refs already on the track are kept",
     )
     p_close.add_argument(
         "--pr", action="append", default=None, metavar="NNN",
         help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
-             "with --attest: records the real PR as pr_ref instead of ops-attest:<date>. "
+             "with --attest: APPENDS the real PR to the track's existing pr_ref (deduplicated, "
+             "order kept, nothing replaced) instead of ops-attest:<date>. "
              "Without --attest, use `vnx objective link-pr` instead.",
     )
     p_close.add_argument(
@@ -4960,7 +5179,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_unlink_pr = obj_sub.add_parser(
         "unlink-pr",
-        help="manually unlink PR ref(s) from a track (inverse of link-pr; operator-gated; audited)",
+        help="manually unlink PR ref(s) from a track (inverse of link-pr; operator-gated; "
+             "audited); also removes their delivery markers",
     )
     _common(p_unlink_pr)
     p_unlink_pr.add_argument("track_id")
@@ -4974,6 +5194,24 @@ def _build_parser() -> argparse.ArgumentParser:
              "no silent bypass -- an empty reason is refused)",
     )
     p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
+
+    p_unmark_delivery = obj_sub.add_parser(
+        "unmark-delivery",
+        help="remove the delivery marker (partial|complete) of PR(s) on a track, returning "
+             "them to unmarked; pr_ref is left alone (operator-gated; audited)",
+    )
+    _common(p_unmark_delivery)
+    p_unmark_delivery.add_argument("track_id")
+    p_unmark_delivery.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unmark_delivery.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this delivery marker is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_unmark_delivery.set_defaults(func=cmd_objective_unmark_delivery)
 
     p_reopen = obj_sub.add_parser(
         "reopen",
