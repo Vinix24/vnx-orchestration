@@ -307,6 +307,30 @@ def _lane_exhausted_or_expired(result: Dict[str, Any]) -> str:
     return "lane_exhausted"
 
 
+# Statuses of a request payload that say the seat was REFUSED at request time:
+# nothing was asked of a reader (binary missing, gate not configured, a hook that
+# would not fire, a chain that ran out). ``_dispatch_review_seat`` de-duplicates a
+# round against the requests that WENT OUT, and a refusal is not one of them -- a
+# later seat that resolves to the same gate must still try it.
+_REVIEW_REQUEST_REFUSED_STATUSES = frozenset({
+    "not_executable",
+    "unavailable",
+    "chain_exhausted",
+    STATE_BLOCKED,
+    STATE_NOT_CONFIGURED,
+})
+
+
+def _gates_with_accepted_request(requested: Iterable[Dict[str, Any]]) -> List[str]:
+    """Gates whose request in this ``request_reviews`` round was actually
+    dispatched, in the order requested. A payload the request itself refused
+    (see ``_REVIEW_REQUEST_REFUSED_STATUSES``) does not appear."""
+    return [
+        payload["gate"] for payload in requested
+        if payload.get("status") not in _REVIEW_REQUEST_REFUSED_STATUSES
+    ]
+
+
 class GateRequestHandlerMixin:
     """Mixin providing gate request creation methods for ReviewGateManager."""
 
@@ -833,6 +857,73 @@ class GateRequestHandlerMixin:
             "status": "unreachable",
         }
 
+    def _walk_takeover_chain(
+        self, gate: str, pr_number: int, chain: Dict[str, str],
+    ) -> "tuple[Optional[str], List[Dict[str, Any]]]":
+        """Walk the takeover ``chain`` from ``gate`` and return ``(reader, path)``.
+
+        ``reader`` is the first gate on the chain that is not recorded as
+        exhausted or unreachable for this PR, and ``path`` is one hop per
+        seat passed over on the way (empty when ``gate`` itself reads).
+        ``reader`` is ``None`` when the chain ran out with the last hop still
+        dead: a named terminal end-state the caller books via
+        ``_chain_exhausted_result``, never a fall-back to ``gate``. The rules the
+        walk applies (lane exhaustion, head scoping, reachability) are
+        documented on ``_dispatch_review_seat``.
+        """
+        path: List[Dict[str, Any]] = []
+        current = gate
+        head_sha: Optional[str] = None  # resolved lazily; see _dispatch_review_seat
+        while True:
+            hop: Optional[Dict[str, Any]] = None
+            consult_reachability = True
+            existing_result = self._read_existing_gate_result(current, pr_number)
+            if existing_result is not None:
+                if head_sha is None:
+                    head_sha = get_pr_head_sha(pr_number)
+                if not result_is_for_head(existing_result, head_sha):
+                    logger.info(
+                        "gate_request_handler: ignoring gate=%s result for pr=%s "
+                        "recorded against head=%r while the PR head is %r -- a "
+                        "verdict about another commit cannot decide whether this "
+                        "seat is skipped; dispatching it live (OI-1668)",
+                        current, pr_number,
+                        (existing_result.get("commit_sha") or ""), head_sha,
+                    )
+                else:
+                    seat_state = self._classify_review_seat_failure(existing_result)
+                    if seat_state == "lane_exhausted":
+                        # B3: the takeover annotation is a MANDATORY, never-empty field --
+                        # an empty reason here would make this a silent refusal, not a
+                        # documented overname. The detail is the ACTUAL marker-anchored
+                        # snippet _scan_seat_failure_text found (lane log or report),
+                        # embedded here as a value -- never a pointer back to
+                        # existing_result -- so a later overwrite of that gate's own
+                        # result record (a separate, known issue T0 tracks independently)
+                        # cannot erase the reason this hop was recorded on.
+                        hop_reason = existing_result.get("reason", "unknown_reason")
+                        _hop_state, hop_detail = _scan_seat_failure_text(existing_result, self)
+                        hop = {
+                            "gate": current,
+                            "reason": hop_reason,
+                            "detail": hop_detail,
+                            "status": existing_result.get("status", ""),
+                        }
+                    elif seat_state not in ("lane_exhausted_expired", "lane_exhausted_unknown_age"):
+                        # The seat answered (or abstained) on THIS head: its own
+                        # record decides, and a provider-level record does not
+                        # overrule a result this PR already has.
+                        consult_reachability = False
+            if hop is None and consult_reachability:
+                hop = self._unreachable_seat_hop(current)
+            if hop is None:
+                return current, path
+            path.append(hop)
+            next_gate = chain.get(current)
+            if next_gate is None:
+                return None, path
+            current = next_gate
+
     def _dispatch_review_seat(
         self,
         gate: str,
@@ -843,7 +934,8 @@ class GateRequestHandlerMixin:
         mode: str,
         dispatch_id: str,
         chain: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
+        dispatched: Optional[Iterable[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Dispatch one review-stack seat, walking the configured takeover
         CHAIN (BETA3-E1) forward while every candidate's own last-recorded
         result is ``lane_exhausted``, then dispatching the first candidate
@@ -919,74 +1011,51 @@ class GateRequestHandlerMixin:
         ``result_is_for_head`` answers True so the walk behaves exactly as it
         did before -- a failed lookup must never silently redirect a takeover
         decision.
+
+        ONE REQUEST PER GATE (``dispatched``): the gates that earlier seats of
+        the SAME ``request_reviews`` round actually got dispatched
+        (``_gates_with_accepted_request``). A seat whose walk lands on one of
+        them returns ``None`` and requests nothing. This is not cosmetic: with
+        the default stack ``codex_gate,kimi_gate`` a codex seat that is at its
+        limit is taken over by kimi, and the second seat then names kimi as
+        well. Requesting it again re-wrote the request record (dropping the
+        takeover annotation the first request carried) and made the executor
+        run the same reader twice, once more for every hop of an exhausted
+        chain. The first request stands, with its takeover path.
+
+        Only a request that went out counts. An earlier request the gate itself
+        refused (``not_executable``, ``unavailable``, ``blocked``,
+        ``not_configured``, ``chain_exhausted``) asked no reader anything, so a
+        later seat that resolves to the same gate is dispatched, not skipped: a
+        refusal must not suppress the one seat that could still get a verdict.
         """
+        already = set(dispatched or ())
         if chain is None:
             chain = _build_review_gate_takeover_chain()
 
-        if gate not in chain:
-            # This gate has no configured successor at all -- either the
-            # chain is empty (operator explicitly disabled takeover) or this
-            # particular gate was never wired into it. Dispatch normally,
-            # exactly as a gate with no takeover mechanism always has --
-            # NEVER a chain_exhausted terminal state for a gate that was
-            # never part of a configured chain to begin with (that state is
-            # reserved for a chain that WAS entered and then ran out).
-            return self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
-
+        # A gate with no configured successor -- the chain is empty (operator
+        # explicitly disabled takeover) or this gate was never wired into it --
+        # dispatches normally, exactly as it always has. NEVER a chain_exhausted
+        # terminal state for a gate that was never part of a configured chain to
+        # begin with (that state is reserved for a chain that WAS entered and then
+        # ran out).
+        current: str = gate
         path: List[Dict[str, Any]] = []
-        current = gate
-        head_sha: Optional[str] = None  # resolved lazily; see docstring
-        while True:
-            hop: Optional[Dict[str, Any]] = None
-            consult_reachability = True
-            existing_result = self._read_existing_gate_result(current, pr_number)
-            if existing_result is not None:
-                if head_sha is None:
-                    head_sha = get_pr_head_sha(pr_number)
-                if not result_is_for_head(existing_result, head_sha):
-                    logger.info(
-                        "gate_request_handler: ignoring gate=%s result for pr=%s "
-                        "recorded against head=%r while the PR head is %r -- a "
-                        "verdict about another commit cannot decide whether this "
-                        "seat is skipped; dispatching it live (OI-1668)",
-                        current, pr_number,
-                        (existing_result.get("commit_sha") or ""), head_sha,
-                    )
-                else:
-                    seat_state = self._classify_review_seat_failure(existing_result)
-                    if seat_state == "lane_exhausted":
-                        # B3: the takeover annotation is a MANDATORY, never-empty field --
-                        # an empty reason here would make this a silent refusal, not a
-                        # documented overname. The detail is the ACTUAL marker-anchored
-                        # snippet _scan_seat_failure_text found (lane log or report),
-                        # embedded here as a value -- never a pointer back to
-                        # existing_result -- so a later overwrite of that gate's own
-                        # result record (a separate, known issue T0 tracks independently)
-                        # cannot erase the reason this hop was recorded on.
-                        hop_reason = existing_result.get("reason", "unknown_reason")
-                        _hop_state, hop_detail = _scan_seat_failure_text(existing_result, self)
-                        hop = {
-                            "gate": current,
-                            "reason": hop_reason,
-                            "detail": hop_detail,
-                            "status": existing_result.get("status", ""),
-                        }
-                    elif seat_state not in ("lane_exhausted_expired", "lane_exhausted_unknown_age"):
-                        # The seat answered (or abstained) on THIS head: its own
-                        # record decides, and a provider-level record does not
-                        # overrule a result this PR already has.
-                        consult_reachability = False
-            if hop is None and consult_reachability:
-                hop = self._unreachable_seat_hop(current)
-            if hop is None:
-                break
-            path.append(hop)
-            next_gate = chain.get(current)
-            if next_gate is None:
+        if gate in chain:
+            walked, path = self._walk_takeover_chain(gate, pr_number, chain)
+            if walked is None:
                 return self._chain_exhausted_result(
                     gate=gate, pr_number=pr_number, branch=branch, dispatch_id=dispatch_id, path=path,
                 )
-            current = next_gate
+            current = walked
+
+        if current in already:
+            logger.info(
+                "gate_request_handler: seat %s resolves to %s for pr=%s, which an earlier "
+                "seat of this round already requested -- not requesting it a second time",
+                gate, current, pr_number,
+            )
+            return None
 
         payload = self._dispatch_one_review(current, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if not path:
@@ -1038,7 +1107,10 @@ class GateRequestHandlerMixin:
         for gate in review_stack_list:
             payload = self._dispatch_review_seat(
                 gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id, chain=chain,
+                dispatched=_gates_with_accepted_request(requested),
             )
+            if payload is None:
+                continue
             requested.append(payload)
             receipt_fields: Dict[str, Any] = {}
             if payload.get("takeover"):
