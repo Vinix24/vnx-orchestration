@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import random
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,12 +43,39 @@ logger = logging.getLogger(__name__)
 
 AB_CONTROL_FRACTION = 0.10  # 10% control arm when A/B testing is active
 
+# Negative-control (placebo) arm for the adoption-metric discrimination test
+# (dispatch 20260920-191500-placebo-arm). Default OFF — this is build-only
+# instrumentation; it is never activated without an explicit operator opt-in.
+# When ON, a dispatch still receives an injection, but the offered pattern is
+# deliberately drawn from a DIFFERENT domain than the dispatch context, so the
+# adoption metric can be tested against "same subject, no actual adoption".
+PLACEBO_ARM = "placebo"
+
+
+def _placebo_arm_enabled() -> bool:
+    """VNX_INTEL_PLACEBO_ARM — off by default; resolved via config_runtime so an
+    operator's dashboard toggle is honoured the same way as every other
+    VNX_INTEL_* runtime flag. Direct env read as a fail-soft fallback only."""
+    try:
+        import config_runtime
+        return config_runtime.get_bool("VNX_INTEL_PLACEBO_ARM")
+    except Exception:
+        return os.environ.get("VNX_INTEL_PLACEBO_ARM", "0") in {"1", "true", "yes", "on"}
+
 
 def _ab_arm() -> str:
-    """Return 'control' (10%) or 'treatment' (90%) based on VNX_INTEL_AB_TEST env flag.
+    """Return 'placebo' | 'control' | 'treatment'.
 
-    When VNX_INTEL_AB_TEST is not set or '0', always returns 'treatment' (no-op).
+    The placebo arm is a negative control: a dispatch in it still gets an
+    injection, but the offered pattern is deliberately drawn from a different
+    domain (see ``_select_placebo_pattern``). It is gated by its OWN flag
+    (``VNX_INTEL_PLACEBO_ARM``) and takes precedence over the A/B control arm so
+    a placebo measurement run is never contaminated by control-arm suppression.
+
+    When neither flag is set: always 'treatment' (the no-op default).
     """
+    if _placebo_arm_enabled():
+        return PLACEBO_ARM
     if os.environ.get("VNX_INTEL_AB_TEST", "0") != "1":
         return "treatment"
     return "control" if random.random() < AB_CONTROL_FRACTION else "treatment"
@@ -70,6 +98,37 @@ try:
 except ImportError:
     def _derive_tags(text, paths=None):  # type: ignore[misc]
         return []
+
+# --- Placebo-arm text overlap helpers -------------------------------------
+# Local tokenizer + overlap ratio, mirroring gather_intelligence._token_overlap_ratio.
+# Duplicated here (rather than imported) to keep the selector free of the
+# gather_intelligence dependency chain and avoid an import cycle through
+# project_root/vnx_paths at selector-import time. The adoption metric this arm
+# exists to test (gather_intelligence._record_one_injection_outcome) uses the
+# SAME token-definition, so a low overlap here is the same condition the metric
+# will evaluate post-dispatch — the discrimination test stays apples-to-apples.
+_PLACEBO_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]{3,}")
+_PLACEBO_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "this", "that", "from", "into", "have",
+    "has", "was", "were", "are", "not", "but", "you", "your", "will",
+})
+
+
+def _placebo_tokenize(text: str) -> set:
+    if not text:
+        return set()
+    return {t.lower() for t in _PLACEBO_TOKEN_RE.findall(text) if t.lower() not in _PLACEBO_STOPWORDS}
+
+
+def _placebo_overlap_ratio(source_text: str, target_text: str) -> float:
+    """Fraction of source_text's meaningful tokens also present in target_text."""
+    source_tokens = _placebo_tokenize(source_text)
+    if not source_tokens:
+        return 0.0
+    target_tokens = _placebo_tokenize(target_text)
+    if not target_tokens:
+        return 0.0
+    return len(source_tokens & target_tokens) / len(source_tokens)
 
 try:
     from qi_db_health import is_empty_schema as _qi_db_is_empty_schema
@@ -300,6 +359,137 @@ class IntelligenceSelector:
                     selected = self._enforce_payload_limit(selected, suppressed, list(reversed(ITEM_CLASS_PRIORITY)) + extra_drop)
 
         return InjectionResult(injection_point=injection_point, injected_at=now_ts, items=selected, suppressed=suppressed, task_class=resolved_class, dispatch_id=dispatch_id)
+
+    # ------------------------------------------------------------------
+    # Placebo arm — negative control for the adoption-metric discrimination
+    # test (dispatch 20260920-191500-placebo-arm). A placebo dispatch still
+    # receives an injection, but the offered pattern is deliberately drawn
+    # from a DIFFERENT domain than the dispatch context, so the adoption
+    # metric can be tested against "same subject, no actual adoption".
+    # ------------------------------------------------------------------
+    def _dispatch_context_text(self, instruction_text, scope_tags, dispatch_paths, skill_name, gate) -> str:
+        """Build a single text blob representing the dispatch's subject.
+
+        The adoption metric (gather_intelligence._record_one_injection_outcome)
+        compares pattern content to the WORKER REPORT, but the discrimination
+        test asks whether shared-subject words drive that. The placebo must
+        therefore be selected on MINIMAL overlap with the dispatch's own
+        subject text, so the worker (writing about that same subject) shares
+        as few pattern-content words with the placebo as possible.
+        """
+        parts = [
+            instruction_text or "",
+            " ".join(scope_tags or []),
+            " ".join(dispatch_paths or []),
+            skill_name or "",
+            gate or "",
+        ]
+        return "\n".join(p for p in parts if p)
+
+    def _select_placebo_pattern(
+        self,
+        candidates: Dict[str, List["IntelligenceItem"]],
+        dispatch_context: str,
+        effective_scope: List[str],
+    ) -> tuple:
+        """Pick one pattern from a demonstrably different domain.
+
+        Operationalisation of "aantoonbaar ander domein":
+          1. From all standard-class candidates the selector already fetched,
+             score each by token-overlap of its (title + content) with the
+             dispatch context text. The placebo is the pattern with the
+             LOWEST such overlap — i.e. the fewest subject-words in common.
+          2. Tie-break against the dispatch's own scope: prefer a pattern
+             whose scope_tags share NO element with effective_scope (a
+             different tag-group), so the placebo comes from a different
+             domain even when two patterns have equally low word overlap.
+          3. Require the chosen pattern to be a real catalog item
+             (proven_pattern / failure_prevention / recent_comparable) so the
+             worker would be CAPABLE of reflecting it if it were relevant —
+             a no-op placeholder would make the test pass trivially.
+
+        Why this does not stack the test by construction: the metric under
+        test measures token-overlap of pattern content with the REPORT, not
+        with the dispatch context. A treatment pattern is chosen for HIGH
+        context-overlap (that is what makes it relevant); a placebo for LOW.
+        If the metric measures adoption, treatment reports should show
+        materially higher content-overlap than placebo reports. If the metric
+        only measures "worked on the same subject", placebo reports will
+        show the SAME overlap as treatment reports (both share the subject)
+        — and the test exposes that. The selection criterion mirrors the
+        metric's own token definition, so the comparison is apples-to-apples.
+        """
+        scope_set = set(effective_scope or [])
+        pool: List["IntelligenceItem"] = []
+        for cls in ITEM_CLASS_PRIORITY:
+            for item in candidates.get(cls, []):
+                pool.append(item)
+        if not pool:
+            return [], []
+
+        def _item_text(item) -> str:
+            return f"{item.title or ''}\n{item.content or ''}"
+
+        def _scope_overlap(item) -> int:
+            return len(set(item.scope_tags or []) & scope_set)
+
+        scored = []
+        for item in pool:
+            overlap = _placebo_overlap_ratio(_item_text(item), dispatch_context)
+            scored.append((overlap, _scope_overlap(item), item))
+        # Lowest content-overlap first; on a tie, lowest scope-overlap first
+        # (different domain). Stable sort keeps original (confidence-ranked)
+        # order among ties.
+        scored.sort(key=lambda triple: (triple[0], triple[1]))
+        chosen = scored[0][2]
+        suppressed = [
+            SuppressionRecord(
+                item_class=it.item_class,
+                reason=f"placebo arm: not offered (kept {chosen.item_class} {chosen.item_id} as placebo)",
+            )
+            for _, _, it in scored[1:]
+        ]
+        return [chosen], suppressed
+
+    def select_placebo(
+        self,
+        dispatch_id: str,
+        injection_point: str,
+        *,
+        task_class=None, skill_name=None, scope_tags=None,
+        track=None, gate=None, pr_id=None,
+        dispatch_paths=None, instruction_text=None,
+    ) -> InjectionResult:
+        """Run selection in the placebo arm: offer one cross-domain pattern.
+
+        Returns an InjectionResult with exactly one item (the lowest-overlap
+        cross-domain candidate) and ``ab_arm='placebo'``. Direct-injection
+        classes (code anchors, ADRs, scout sketches, etc.) are NOT injected
+        in the placebo arm: they are derived from the dispatch's own
+        paths/instruction, so by construction they share the dispatch's
+        subject and would contaminate the negative control.
+        """
+        if injection_point not in VALID_INJECTION_POINTS:
+            raise ValueError(f"Invalid injection_point: {injection_point!r}. Must be one of {sorted(VALID_INJECTION_POINTS)}")
+        resolved_class = resolve_task_class(task_class, skill_name, dispatch_paths, instruction_text)
+        effective_scope: List[str] = list(scope_tags or [])
+        for tag in [skill_name, (f"Track-{track}" if track and not track.startswith("Track-") else track), gate, resolved_class]:
+            if tag and tag not in effective_scope:
+                effective_scope.append(tag)
+
+        candidates = apply_candidate_diversity(self._query_candidates(resolved_class, effective_scope), resolved_class)
+        dispatch_context = self._dispatch_context_text(instruction_text, scope_tags, dispatch_paths, skill_name, gate)
+        selected, suppressed = self._select_placebo_pattern(candidates, dispatch_context, effective_scope)
+        now_ts = _now_utc()
+        return InjectionResult(
+            injection_point=injection_point,
+            injected_at=now_ts,
+            items=selected,
+            suppressed=suppressed,
+            task_class=resolved_class,
+            dispatch_id=dispatch_id,
+            ab_arm=PLACEBO_ARM,
+        )
 
     _SUPPRESS_WINDOW_DEFAULT = 10
 
@@ -599,6 +789,25 @@ def select_intelligence(
             selector.emit_event(result)
             selector.record_injection(result)
             return result
+        if ab_arm == PLACEBO_ARM:
+            logger.info(
+                "intelligence_selector: placebo arm — cross-domain injection for dispatch %s",
+                dispatch_id,
+            )
+            result = selector.select_placebo(
+                dispatch_id=dispatch_id,
+                injection_point=injection_point,
+                task_class=task_class,
+                skill_name=skill_name,
+                scope_tags=scope_tags,
+                track=track,
+                gate=gate,
+                dispatch_paths=dispatch_paths,
+                instruction_text=instruction_text,
+            )
+            selector.emit_event(result)
+            selector.record_injection(result)
+            return result
         result = selector.select(
             dispatch_id=dispatch_id,
             injection_point=injection_point,
@@ -663,6 +872,20 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
                 ab_arm="control",
             )
             _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir, log_suffix=" (control)")
+            return IntelligenceContext(result=result, dispatch_id=dispatch_id)
+        if ab_arm == PLACEBO_ARM:
+            logger.info(
+                "intelligence_selector: placebo arm — cross-domain context build for dispatch %s",
+                dispatch_id,
+            )
+            result = selector.select_placebo(
+                dispatch_id=dispatch_id,
+                injection_point="dispatch_create",
+                skill_name=role or "",
+                dispatch_paths=dispatch_paths or [],
+                pr_id=pr_id,
+            )
+            _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir, log_suffix=" (placebo)")
             return IntelligenceContext(result=result, dispatch_id=dispatch_id)
         result = selector.select(dispatch_id=dispatch_id, injection_point="dispatch_create", skill_name=role or "", dispatch_paths=dispatch_paths or [], pr_id=pr_id)
         result.ab_arm = "treatment"
