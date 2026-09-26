@@ -803,8 +803,9 @@ project-root/
 │   │   └── dashboard_status.json    # Real-time metrics
 │   │
 │   ├── dispatches/                  # Task dispatches
-│   │   ├── staging/                 # Batch proposals (no popup)
-│   │   ├── queue/                   # Approved (popup trigger)
+│   │   ├── pending/                 # Door bundles (<id>/dispatch-spec.json) and promoted *.md dispatches
+│   │   ├── staging/                 # PR-queue proposals, written by pr_queue_manager.py init-feature
+│   │   ├── queue/                   # Promoted PR-queue dispatches awaiting the popup watcher
 │   │   ├── active/                  # In progress
 │   │   └── completed/              # Finished
 │   │
@@ -851,7 +852,7 @@ removed in `start_all()` fails this file's generation instead of silently
 going stale here.
 
 Running/absent state is deliberately **not** stored in this file — it
-changes by the minute, and a committed "✅ Active" checkmark is exactly the
+changes by the minute, and a committed "Active" checkmark is exactly the
 claim that drifted (measured 2026-08-30: 0 of these 9 processes were running
 while all 15 old checklist items still said "Active"). Check current
 liveness with `bash scripts/vnx_supervisor_simple.sh status` or
@@ -1077,44 +1078,72 @@ ADR-007 and `docs/MIGRATION_GUIDE.md` for the operator runbook.
 
 ## Staging Workflow
 
-### Purpose
-Separates proposal review (staging) from approved work (queue), preventing premature popup notifications.
+Two staging paths exist in the tree. The single-entry door is the canonical
+one. The PR-queue path is older and still live: the roadmap autopilot drives
+it and the daemon dispatcher still consumes what it produces.
 
-### Architecture
-```
-dispatches/
-├── staging/     # Proposals (no popup) - Batch PR dispatches generated here
-├── queue/       # Approved (popup trigger) - Promoted PRs ready for execution
-├── active/      # In progress
-└── completed/   # Finished
-```
+### The door: a staged bundle in the central pending dir
 
-### PR Queue Batch Dispatch Workflow (PRIMARY METHOD)
-
-**Batch Generation → Staging Review → Selective Promotion → Popup Approval**
+`vnx dispatch <dispatch-id>` is the one entry that decides the lane. It reads a
+staged bundle from the central data dir, not from the repo:
 
 ```
-FEATURE_PLAN.md  →  init-feature  →  staging/  →  T0 review  →  promote  →  queue/  →  popup
-                     (all PRs)         (7 files)   (show/patch)   (1 PR)     (1 file)   (appears)
+<data_dir>/dispatches/pending/<dispatch-id>/
+├── instruction.md
+└── dispatch-spec.json
 ```
 
-**Key Principles**:
-- ✅ **Batch init**: Generate ALL PR dispatches upfront (once per feature)
-- ✅ **Staging review**: T0 reviews dispatches before they trigger popup
-- ✅ **Dependency-aware**: Promotion blocked if dependencies unmet
-- ✅ **Popup trigger**: Only promoted dispatches appear in popup
-- ❌ **NO auto-dispatch**: No automatic dispatch generation per PR
-- ❌ **NO terminal output**: Manager blocks only created via CLI, not printed to terminal
+The staged bundle is the staging gate (ADR-006). `vnx dispatch stage ...`
+writes it and never fires. `vnx dispatch <dispatch-id> --dry-run` prints the
+compiled plan and permit and spawns nothing. `vnx dispatch <dispatch-id>`
+fires. The door then picks the lane: `claude_headless` for claude,
+`provider_dispatch.py` for kimi, glm and deepseek, `subprocess_dispatch.py` for
+a terminal-pinned single-worker PR. No popup sits in this path.
+
+The ruleset lives in one place, `docs/core/DISPATCH_RULES.md`: lane selection
+in §5, provider routing in §8, the staging flow in §12. This document does not
+repeat them. Decision records:
+`docs/governance/decisions/ADR-024-single-entry-door-default-dispatch-lane.md`
+(the door as default lane) and
+`docs/governance/decisions/ADR-025-raw-file-dispatch-deprecation.md` (the
+markdown path below).
+
+### The PR-queue path: FEATURE_PLAN.md to markdown dispatches
+
+`scripts/pr_queue_manager.py` turns a `FEATURE_PLAN.md` into markdown
+dispatches under `dispatches/`. Its verbs are `init-feature`, `staging-list`,
+`show`, `patch`, `promote` and `reject`.
+
+```
+FEATURE_PLAN.md → init-feature → staging/ → promote → queue/ → pending/ → dispatcher_minimal.sh
+                  (all PRs)      (proposals) (1 PR)    (popup)  (*.md)
+```
+
+- `init-feature` writes one file per PR into `staging/`. Nothing in `staging/`
+  is delivered.
+- `promote <dispatch-id>` refuses while the PR's dependencies are incomplete.
+  `--force` skips that check.
+- A promoted file lands in `queue/` for the popup watcher, where accepting it
+  moves it to `pending/`. With `VNX_QUEUE_POPUP_ENABLED=0` it goes straight to
+  `pending/`, and `queue_auto_accept.sh` does the same for files already in
+  `queue/`.
+- `dispatcher_minimal.sh` scans `pending/*.md`. That markdown path does not go
+  through the door. ADR-025 deprecates its raw-file form and names the daemon
+  path as a structural-consolidation follow-up.
+- The roadmap autopilot (`RoadmapManager.run_feature_step` in
+  `scripts/roadmap_manager.py`, ticked under `VNX_ROADMAP_AUTOPILOT=1`) calls
+  `create_dispatch_from_pr` and then `promote_dispatch` for the next
+  dependency-ready PR. This path is not T0-only.
 
 **CLI Commands**:
 ```bash
-# ONE TIME: Generate all PR dispatches to staging/
+# Generate all PR dispatches to staging/
 python scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md
 
 # Review staging with dependency status
 python scripts/pr_queue_manager.py staging-list
 
-# Promote individual PR to queue (triggers popup)
+# Promote one PR (to queue/, or to pending/ when the popup is disabled)
 python scripts/pr_queue_manager.py promote <dispatch-id>
 ```
 
@@ -1125,14 +1154,17 @@ python scripts/pr_queue_manager.py promote <dispatch-id>
 - Dependency validation during promotion
 - Evidence attachment via receipt processor (T0 reviews and completes PRs)
 
-### Notification System
-- **Staging**: Batch-generated PR dispatches (no popup)
-- **Queue**: Promoted dispatches (operator-driven promotion)
-- **Seen Cache**: `state/staging_seen.json` prevents duplicate notifications
+### Staging Notification
+
+The recommendations engine (`scripts/generate_t0_recommendations.py`,
+`check_staging_dispatches`) emits a `STAGING_READY` recommendation for each new
+file in `staging/`, with the `show`, `patch`, `promote` and `reject` commands
+attached. `state/staging_seen.json` records which file versions it already
+announced, so an unchanged file raises one recommendation.
 
 ### T0 Decision Tree
 ```
-📥 STAGING_READY notification (from init-feature)
+STAGING_READY recommendation (new file in staging/)
     ↓
 [Review dispatch?]
     ├─ YES → `pr_queue_manager.py show <id>`
@@ -1146,13 +1178,13 @@ python scripts/pr_queue_manager.py promote <dispatch-id>
     │ `pr_queue_manager.py staging-list` (shows ready vs waiting)
     │    ↓
     │ [Approve?]
-    │    ├─ YES → `pr_queue_manager.py promote <id>` → Popup appears
+    │    ├─ YES → `pr_queue_manager.py promote <id>` → queue/ (popup) or pending/ (popup disabled)
     │    └─ NO → `pr_queue_manager.py reject <id> --reason "X"`
     │
     └─ NO → Ignore (stays in staging)
 ```
 
-**Reference**: See [DISPATCH_GUIDE.md](../DISPATCH_GUIDE.md) for the current workflow guide
+**Reference**: `docs/core/DISPATCH_RULES.md` is the enforced dispatch ruleset.
 
 ---
 

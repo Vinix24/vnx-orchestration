@@ -12,8 +12,9 @@ table is sourced from start_all() (via daemon_register.read_daemon_register,
 D2) with no stale aliases; the generated hooks table is sourced from
 .claude/settings.json and correctly excludes the unwired script; a daemon
 that the registry and the doc's description map disagree about fails
-generation instead of silently drifting; and the committed doc's generated
-sections match the live registry right now.
+generation instead of silently drifting; the committed doc's generated
+sections match the live registry right now; and no hand-typed checkmark
+survives outside those generated sections.
 """
 from __future__ import annotations
 
@@ -125,6 +126,65 @@ def test_committed_doc_no_longer_claims_a_static_active_components_list():
     committed_text = DOC_PATH.read_text(encoding="utf-8")
     assert "### Active Components" not in committed_text
     assert "### Supervised Components" in committed_text
+
+
+# ---------------------------------------------------------------------------
+# No hand-typed checkmark outside the generated sections
+# ---------------------------------------------------------------------------
+
+# A checkmark is a status claim. Inside a generated section it resolves to a
+# measurement; anywhere else it is typed by hand and nothing re-checks it. The
+# old "Active Components" list and the four staging bullets ("Batch init",
+# "Staging review", "Dependency-aware", "Popup trigger") were exactly that.
+# The set is the checkmark family, not just U+2705, so swapping the glyph is
+# not a way around the guard.
+_CHECKMARKS = ("✅", "✔", "✓", "☑")
+
+
+def _checkmarks_outside_generated(text: str) -> list[tuple[int, str]]:
+    """Return (1-based line, line text) for every checkmark outside the
+    generated sections. Each generated block is blanked to the same number of
+    newlines so the reported line numbers stay those of the real file."""
+    for name in gen._MARKERS:
+        text = gen._marker_re(name).sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    return [
+        (number, line)
+        for number, line in enumerate(text.splitlines(), start=1)
+        if any(mark in line for mark in _CHECKMARKS)
+    ]
+
+
+def test_committed_doc_has_no_checkmark_outside_generated_sections():
+    committed_text = DOC_PATH.read_text(encoding="utf-8")
+    offenders = _checkmarks_outside_generated(committed_text)
+    assert offenders == [], (
+        "a hand-typed checkmark is a status claim nothing measures; put it in a "
+        "generated section or remove it: "
+        + "; ".join(f"{DOC_PATH.name}:{number}: {line.strip()}" for number, line in offenders)
+    )
+
+
+@pytest.mark.parametrize("mark", _CHECKMARKS)
+def test_checkmark_guard_flags_every_glyph_outside_a_generated_block(mark):
+    text = f"intro\n- {mark} **Batch init**: claim\nouter\n"
+    assert _checkmarks_outside_generated(text) == [(2, f"- {mark} **Batch init**: claim")]
+
+
+def test_checkmark_guard_allows_a_checkmark_inside_a_generated_block_only():
+    """The blanking must not shift line numbers: the offender after the
+    generated block is reported at its real line."""
+    text = (
+        "intro\n"
+        "<!-- BEGIN GENERATED: supervised-components -->\n"
+        "- measured ✅\n"
+        "<!-- END GENERATED: supervised-components -->\n"
+        "- typed ✅\n"
+    )
+    assert _checkmarks_outside_generated(text) == [(5, "- typed ✅")]
+
+
+def test_checkmark_guard_passes_a_doc_without_checkmarks():
+    assert _checkmarks_outside_generated("plain prose\n- a bullet\n❌ not a checkmark\n") == []
 
 
 def test_splice_block_raises_on_missing_markers():
