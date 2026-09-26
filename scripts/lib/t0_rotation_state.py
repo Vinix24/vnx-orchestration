@@ -23,6 +23,13 @@ LATCH TTL. A latch older than ``LATCH_TTL_SECONDS`` no longer counts. The succes
 old window within its first turn; an old session that is still alive half an hour after its
 rotation started means the successor died during boot, and the guard should re-arm.
 
+LEDGER FIRST (ADR-005). A transition is a ``state_mutation`` receipt in ``t0_receipts.ndjson``,
+the first canonical ledger of the ADR, and that append comes BEFORE the state file it describes
+changes: the ledger wins, so a crash between the two may duplicate an event on the retry but can
+never lose one. The marker changes only on a transition; a repeat call in the same band writes
+nothing at all. The read-decide-write of the marker is one critical section under
+``atomic_io.slot_lock``, because parallel tool calls each start their own hook process.
+
 HANDOFF CONTRACT (docs/operations/T0_CONTEXT_ROTATION.md): numbered next steps under a
 ``## Next steps`` (or ``## Volgende stappen``) heading, and — when a /goal was running — a
 ``## Actief /goal`` section with a ``Directive:`` line and the remaining tasks as a list.
@@ -38,13 +45,15 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent
 for _p in (str(_LIB_DIR), str(_SCRIPTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+from atomic_io import atomic_write_json, slot_lock
 
 STATE_DIR_ENV = "VNX_T0_ROTATION_STATE_DIR"
 RECEIPTS_FILE_ENV = "VNX_T0_ROTATION_RECEIPTS_FILE"
@@ -73,13 +82,6 @@ def state_dir(project_root: Optional[str] = None) -> Path:
     return resolve_central_data_dir(project_id) / "state" / "t0_rotation"
 
 
-def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-
-
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -96,25 +98,41 @@ def pending_path(sdir: Path, pane: str) -> Path:
 
 
 def write_pending(sdir: Path, *, pane: str, session_id: str, tokens: int,
-                  level: str, transcript_path: str) -> bool:
-    """Record that ``session_id`` in ``pane`` is rotation-pending. True when this is a
-    transition worth a receipt — the first crossing for that session, or a change of band
-    (force -> hard) — and False when the marker already said the same."""
+                  level: str, transcript_path: str,
+                  record_transition: Optional[Callable[[], bool]] = None) -> bool:
+    """Record that ``session_id`` in ``pane`` is rotation-pending. True when this call is a
+    transition and the marker was written: the first crossing for that session, or a change
+    of band (force -> hard). False when the marker already said the same, or when the ledger
+    refused the transition.
+
+    The marker changes ONLY on a transition. A repeat call in the same band leaves the file
+    exactly as it was: no rewrite, no fresh timestamp, no event.
+
+    ``record_transition`` is the ledger append (ADR-005: ledger first). It runs after the
+    decision and before the marker changes, inside the marker's lock, so parallel hook
+    processes cannot both read "new" and both record it. It returns True when the ledger holds
+    the event. On False the marker stays as it was, and the next hook call decides again and
+    retries the ledger: a transition the ledger did not take is not recorded as done.
+    """
     path = pending_path(sdir, pane or "no-pane")
-    existing = _read_json(path)
-    is_new = not existing or existing.get("session_id") != session_id
-    changed = is_new or existing.get("level") != level
-    first_seen = _utc_now_iso() if is_new else existing.get("first_seen")
-    _write_json_atomic(path, {
-        "session_id": session_id,
-        "pane": pane,
-        "tokens": tokens,
-        "level": level,
-        "transcript_path": transcript_path,
-        "first_seen": first_seen,
-        "updated": _utc_now_iso(),
-    })
-    return changed
+    with slot_lock(path):
+        existing = _read_json(path) or {}
+        is_new = not existing or existing.get("session_id") != session_id
+        if not is_new and existing.get("level") == level:
+            return False
+        if record_transition is not None and not record_transition():
+            return False
+        now = _utc_now_iso()
+        atomic_write_json(path, {
+            "session_id": session_id,
+            "pane": pane,
+            "tokens": tokens,
+            "level": level,
+            "transcript_path": transcript_path,
+            "first_seen": now if is_new else existing.get("first_seen"),
+            "transitioned": now,
+        })
+    return True
 
 
 def pending_session_id(sdir: Path, pane: str) -> Optional[str]:
@@ -148,6 +166,16 @@ def is_latched(sdir: Path, *, session_id: str, pane: str) -> bool:
     return bool(pane) and _fresh(latch_path_for_pane(sdir, pane))
 
 
+def latch_targets(sdir: Path, *, session_id: Optional[str], pane: str) -> List[Path]:
+    """The latch files ``write_latch`` writes for this session/pane, session latch first."""
+    targets: List[Path] = []
+    if session_id:
+        targets.append(latch_path_for_session(sdir, session_id))
+    if pane:
+        targets.append(latch_path_for_pane(sdir, pane))
+    return targets
+
+
 def write_latch(sdir: Path, *, session_id: Optional[str], pane: str,
                 old_window: str, new_window: str) -> List[Path]:
     payload = {
@@ -157,24 +185,22 @@ def write_latch(sdir: Path, *, session_id: Optional[str], pane: str,
         "new_window": new_window,
         "started": _utc_now_iso(),
     }
-    written: List[Path] = []
-    if session_id:
-        path = latch_path_for_session(sdir, session_id)
-        _write_json_atomic(path, payload)
-        written.append(path)
-    if pane:
-        path = latch_path_for_pane(sdir, pane)
-        _write_json_atomic(path, payload)
-        written.append(path)
-    return written
+    targets = latch_targets(sdir, session_id=session_id, pane=pane)
+    for path in targets:
+        atomic_write_json(path, payload)
+    return targets
 
 
 # ── receipts ─────────────────────────────────────────────────────────────────
 
 
 def emit_event(trigger: str, *, file: str, **fields: Any) -> bool:
-    """Append a ``state_mutation`` receipt for a rotation transition. Best-effort: a receipt
-    failure is reported on stderr and never breaks the guard or the rotation."""
+    """Append a ``state_mutation`` receipt for a rotation transition: the ADR-005 ledger append
+    (``t0_receipts.ndjson``). True when the ledger holds the event (freshly appended, or already
+    there under the same idempotency key). A failure is reported on stderr and returned as
+    False; it never raises, so the guard and the rotation carry on. What a False means for the
+    state file that follows is the caller's call: the pending marker waits for a retry, the
+    latch is written anyway."""
     receipt: Dict[str, Any] = {
         "timestamp": _utc_now_iso(),
         "event_type": "state_mutation",
@@ -388,15 +414,23 @@ def _cmd_latch(args: argparse.Namespace) -> int:
             f"t0_rotation_state: no session id for pane {args.pane!r} (no --session-id, no "
             "pending marker); latching by pane only\n"
         )
-    written = write_latch(sdir, session_id=session_id, pane=args.pane,
-                          old_window=args.old_window, new_window=args.new_window)
-    emit_event(
+    targets = latch_targets(sdir, session_id=session_id, pane=args.pane)
+    # Ledger first (ADR-005). The successor is already up when this runs, so a ledger that
+    # refuses does not withhold the latch: that would only make the old session nag, and
+    # nothing can retry this transition. The failure is reported instead.
+    if not emit_event(
         "t0_context_rotation_started",
-        file=str(written[0]) if written else str(sdir),
+        file=str(targets[0]) if targets else str(sdir),
         session_id=session_id, pane=args.pane or None,
         old_window=args.old_window, new_window=args.new_window,
         handoff=args.handoff, goal_followup=bool(args.goal_followup),
-    )
+    ):
+        sys.stderr.write(
+            "t0_rotation_state: the ledger did not take t0_context_rotation_started; "
+            "latching anyway, the successor is already up\n"
+        )
+    write_latch(sdir, session_id=session_id, pane=args.pane,
+                old_window=args.old_window, new_window=args.new_window)
     sys.stdout.write(f"{session_id or ''}\n")
     return 0
 

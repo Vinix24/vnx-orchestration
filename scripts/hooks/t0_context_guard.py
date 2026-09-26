@@ -223,16 +223,20 @@ def _emit(obj: dict) -> None:
 
 def _mark_pending(cwd: str, session_id: str, pane: str, tokens: int, level: str,
                   transcript_path: str) -> bool:
-    """Write the pending marker (receipt on a transition). Returns the latch state."""
+    """Record the pending marker on a transition, ledger first (ADR-005): the receipt is
+    appended before the marker changes, and a repeat in the same band touches nothing.
+    Returns the latch state."""
     try:
         sdir = rotation_state.state_dir(cwd)
-        if rotation_state.write_pending(sdir, pane=pane, session_id=session_id, tokens=tokens,
-                                        level=level, transcript_path=transcript_path):
-            rotation_state.emit_event(
-                "t0_context_rotation_pending",
-                file=str(rotation_state.pending_path(sdir, pane or "no-pane")),
+        marker = str(rotation_state.pending_path(sdir, pane or "no-pane"))
+        rotation_state.write_pending(
+            sdir, pane=pane, session_id=session_id, tokens=tokens, level=level,
+            transcript_path=transcript_path,
+            record_transition=lambda: rotation_state.emit_event(
+                "t0_context_rotation_pending", file=marker,
                 session_id=session_id or None, pane=pane or None, tokens=tokens, level=level,
-            )
+            ),
+        )
         return rotation_state.is_latched(sdir, session_id=session_id, pane=pane)
     except Exception as exc:  # vnx-silent-except: state trouble must not break the session; reported
         sys.stderr.write(f"t0_context_guard: rotation state unavailable: {exc}\n")

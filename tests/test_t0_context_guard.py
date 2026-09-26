@@ -206,6 +206,36 @@ def test_force_writes_pending_marker_and_one_receipt_per_transition(tmp_path, en
     assert [r["level"] for r in _receipts(env_base)] == ["force", "hard"]
 
 
+def test_a_repeat_in_the_same_band_does_not_touch_the_marker(tmp_path, env_base):
+    _run(tmp_path, env_base, "Stop", 500_000)
+    marker = rotation_state.pending_path(Path(env_base["VNX_T0_ROTATION_STATE_DIR"]), PANE)
+    before = marker.read_bytes()
+    os.utime(marker, (1_000_000_000, 1_000_000_000))
+
+    _run(tmp_path, env_base, "PreToolUse", 530_000, tool_name="Bash", tool_input={"command": "ls"})
+    _run(tmp_path, env_base, "Stop", 560_000)
+
+    assert marker.read_bytes() == before
+    assert marker.stat().st_mtime == 1_000_000_000
+    assert len(_receipts(env_base)) == 1
+
+
+def test_a_refusing_ledger_keeps_the_guard_working_and_the_transition_retries(tmp_path, env_base):
+    """Ledger first (ADR-005): with no receipt there is no marker, and the guard still blocks.
+    Once the ledger takes the append, the same crossing is recorded exactly once."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("a file where the receipts directory should be", encoding="utf-8")
+    broken = {**env_base, "VNX_T0_ROTATION_RECEIPTS_FILE": str(blocker / "t0_receipts.ndjson")}
+    marker = rotation_state.pending_path(Path(env_base["VNX_T0_ROTATION_STATE_DIR"]), PANE)
+
+    assert _run(tmp_path, broken, "Stop", 500_000)["decision"] == "block"
+    assert not marker.exists()
+
+    assert _run(tmp_path, env_base, "Stop", 505_000)["decision"] == "block"
+    assert marker.exists()
+    assert [r["trigger"] for r in _receipts(env_base)] == ["t0_context_rotation_pending"]
+
+
 # ── worker sessions are always a no-op ──────────────────────────────────────
 
 

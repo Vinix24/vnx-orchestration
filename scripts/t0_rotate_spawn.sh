@@ -182,9 +182,11 @@ fi
 HANDOFF="${HANDOFF:-$PROJECT_ROOT/daily-log/handoff.md}"
 
 [ -f "$HANDOFF" ] || die 3 "handoff not found: $HANDOFF (run /build-log wrap first)"
-now="$(date +%s)"
-mtime="$(stat -f %m "$HANDOFF" 2>/dev/null || stat -c %Y "$HANDOFF")"
-age=$((now - mtime))
+# Age via python, not stat: `stat -f %m` is BSD, but GNU stat reads -f as "filesystem status" and
+# prints a block on stdout before failing, which then lands in the arithmetic (`File: unbound
+# variable` under set -u on Linux).
+age="$("$PYTHON" -c 'import os, sys, time; print(int(time.time() - os.stat(sys.argv[1]).st_mtime))' "$HANDOFF")" \
+  || die 3 "cannot read the modification time of $HANDOFF"
 if [ "$age" -gt $((MAX_AGE_MIN * 60)) ]; then
   die 3 "handoff $HANDOFF is $((age / 60)) min old (limit $MAX_AGE_MIN); run /build-log wrap again so the successor gets the current state"
 fi

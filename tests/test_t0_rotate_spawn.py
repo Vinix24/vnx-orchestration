@@ -98,6 +98,43 @@ STUB_CLAUDE = '''#!/usr/bin/env bash
 echo "$@" >> "$STUB_DIR/claude_invoked"
 '''
 
+# The two `stat` families the spawner meets. GNU coreutils reads -f as "filesystem status", so
+# `stat -f %m FILE` treats BOTH operands as files: `%m` fails, FILE prints its filesystem block
+# ("  File: ...") on stdout, and the status is 1. That block is what reached the spawner's
+# arithmetic on the ubuntu CI runner (`File: unbound variable`). BSD stat (macOS) takes
+# `-f FORMAT` and has no -c.
+STUB_STAT_GNU = r'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if args[:1] == ["-c"]:
+    if args[1] == "%Y":
+        print(int(os.stat(args[2]).st_mtime))
+        sys.exit(0)
+    sys.exit(1)
+if args[:1] == ["-f"]:
+    rc = 0
+    for operand in args[1:]:
+        if os.path.exists(operand):
+            print('  File: "%s"\n    ID: 0        Namelen: 255     Type: ext2/ext3\n'
+                  'Block size: 4096       Fundamental block size: 4096' % operand)
+        else:
+            sys.stderr.write("stat: cannot read file system information for '%s': "
+                             "No such file or directory\n" % operand)
+            rc = 1
+    sys.exit(rc)
+sys.exit(1)
+'''
+
+STUB_STAT_BSD = r'''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if args[:1] == ["-f"] and args[1] == "%m":
+    print(int(os.stat(args[2]).st_mtime))
+    sys.exit(0)
+sys.stderr.write("stat: illegal option -- %s\n" % args[0].lstrip("-")[:1])
+sys.exit(1)
+'''
+
 HANDOFF_BASE = """# Handoff — vnx-orchestration — 25 september
 
 ## Waar we middenin zitten
@@ -212,6 +249,27 @@ def test_refuses_a_stale_handoff(rig):
 def test_max_age_is_configurable(rig):
     _handoff(rig, HANDOFF_BASE, age_seconds=20 * 60)
     assert _spawn(rig, "--max-age-minutes", "30").returncode == 0
+
+
+@pytest.mark.parametrize("flavor", ["gnu", "bsd"])
+def test_handoff_age_does_not_depend_on_the_platform_stat(rig, flavor):
+    """The age check ran `stat -f %m ... || stat -c %Y ...`; on GNU stat the first call prints a
+    filesystem block and only then fails, so the block became the mtime and `set -u` aborted the
+    spawner with rc 1 on every Linux runner. Whichever stat is on PATH, a fresh handoff spawns
+    and a stale one is refused with the age in the message."""
+    stat = rig["tmp"] / "bin" / "stat"
+    stat.write_text(STUB_STAT_GNU if flavor == "gnu" else STUB_STAT_BSD)
+    stat.chmod(0o755)
+
+    _handoff(rig, HANDOFF_BASE)
+    fresh = _spawn(rig)
+    assert fresh.returncode == 0, fresh.stderr
+    assert "unbound variable" not in fresh.stderr
+
+    _handoff(rig, HANDOFF_BASE, age_seconds=20 * 60)
+    stale = _spawn(rig)
+    assert stale.returncode == 3, stale.stderr
+    assert "20 min old" in stale.stderr
 
 
 def test_refuses_a_missing_handoff(rig):

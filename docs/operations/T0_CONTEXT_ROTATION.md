@@ -119,7 +119,8 @@ state with full confidence.
 2. After the footer (`auto mode`) shows, one line of natural language: close the old window
    (`tmux kill-window -t <old>`), run the kickoff skill on the handoff, then take up step 1:
    `<first next step>`. Natural language, because a leading `/` opens the slash autocomplete.
-3. The latch and a `state_mutation` receipt (`t0_context_rotation_started`).
+3. A `state_mutation` receipt (`t0_context_rotation_started`), then the latch (ledger first, see
+   "Receipts and the state files").
 4. With an active goal: `/goal <directive>, hervat na context-rotatie; resterend: <tasks>`
    (shortened to stay within the 4000-character `/goal` limit).
 
@@ -168,6 +169,29 @@ All `state_mutation`, `source: t0_context_rotation`:
 | `t0_context_rotation_pending` | a T0 session first crosses force, and again when it crosses hard |
 | `t0_context_rotation_started` | the successor window is up and the kickoff was typed |
 | `t0_context_rotation_goal_followup` | the `/goal` follow-up ended: `outcome` = `confirmed`, `unconfirmed` or `turn_timeout` |
+
+### Receipts and the state files (ADR-005)
+
+A transition is a `state_mutation` receipt in `t0_receipts.ndjson`, appended through
+`append_receipt_payload`. That file is the first canonical ledger in the Decision of
+`docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md`, and the path is the one
+`scripts/lib/state_mutation.py`, `roadmap_manager.py` and `pr_merge.py` already use for
+state-file writes. The receipt is written BEFORE the state file it describes changes. The ledger
+wins: a crash between the two can duplicate an event on the retry and cannot lose one.
+
+- **Pending marker** (`pending-pane-<pane>.json`): written only on a transition, the first
+  crossing for a session or a change of band (force to hard). A repeat call in the same band
+  leaves the file as it was: no rewrite, no new timestamp, no receipt. When the ledger refuses
+  the receipt the marker is not written, and the next hook call decides again and retries.
+  The read, the decision and the write run as one critical section under `atomic_io.slot_lock`,
+  because parallel tool calls each start their own hook process (OI-1486).
+- **Latch**: receipt first, then the latch. The latch is written even when the ledger refuses,
+  because the successor is already up: withholding it would only make the old session nag, and
+  nothing can retry that transition. The refusal is reported on stderr.
+- **Why not `.vnx-data/events/`:** `events/T{n}.ndjson` is the per-dispatch ring buffer of
+  subprocess-routed terminals, truncated after every dispatch (ADR-005, Reasoning 5, and
+  CLAUDE.md "Event Streams"). T0 is tmux-routed and produces no such stream, and a rotation
+  is a session event, not a dispatch event.
 
 ## The retired worker monitor
 
