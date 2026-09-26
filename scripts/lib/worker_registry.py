@@ -51,12 +51,12 @@ _HARDCODED_FALLBACK = {
     "workers": [
         {"terminal_id": "T0", "role": "orchestrator", "provider": "claude",
          "model": "opus", "pool_id": "default", "aliases": []},
-        {"terminal_id": "T1", "role": "backend-developer", "provider": "kimi",
-         "model": "kimi-k3", "pool_id": "default", "aliases": []},
-        {"terminal_id": "T2", "role": "backend-developer", "provider": "kimi",
-         "model": "kimi-k3", "pool_id": "default", "aliases": []},
-        {"terminal_id": "T3", "role": "reviewer", "provider": "kimi",
-         "model": "kimi-k3", "pool_id": "default", "aliases": []},
+        {"terminal_id": "T1", "role": "backend-developer", "provider": "claude",
+         "model": "sonnet", "pool_id": "default", "aliases": []},
+        {"terminal_id": "T2", "role": "backend-developer", "provider": "claude",
+         "model": "sonnet", "pool_id": "default", "aliases": []},
+        {"terminal_id": "T3", "role": "reviewer", "provider": "claude",
+         "model": "sonnet", "pool_id": "default", "aliases": []},
     ],
     "pools": [
         {"pool_id": "default", "min_workers": 4, "max_workers": 4,

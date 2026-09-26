@@ -38,12 +38,12 @@ dispatch here: `dispatch_envelope.run_envelope_headless_plan` runs `claude -p` i
 fresh isolated worktree, and the report gate and the receipt bind before the
 dispatch counts as done. Isolation and report-gate status: `DISPATCH_RULES.md` §8.
 
-**Worker model pin (worker-provider-kimi-flip, 2026-07-23):** T1/T2/T3 default to
-`kimi-k3` on the provider lane (`workers-kimi-pinned` in `provider_constraints.yaml`,
-renamed from `workers-sonnet-pinned`); T0 stays on Opus. Since the pin now resolves
-to a non-Claude model, an explicit `provider=claude` override for a T1/T2/T3 build
-worker on the claude lane is rejected (fail-loud, no silent claude/sonnet fallback) rather
-than resolving to `claude-sonnet-5`.
+**Worker model pin (operator decision 2026-09-23):** T1/T2/T3 default to `sonnet`
+(`workers-kimi-pinned` in `provider_constraints.yaml`, `pin_semantics: default`; the id
+keeps the name from the 2026-07-23 kimi flip). T0 stays on Opus. The pin is advisory:
+`kimi-k3` on the provider lane is an explicit per-dispatch choice, and a build-worker
+dispatch with `provider=claude` and no explicit model resolves to `sonnet` on the
+headless lane without an override.
 
 **Worker permissions:** see `docs/operations/WORKER_PERMISSIONS.md`.
 

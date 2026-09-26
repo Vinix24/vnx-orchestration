@@ -17,7 +17,7 @@ Two reasons, both measured:
    symlink resolution, so path-prefix deny rules do not catch it.
 2. The capability binding in ``.vnx/worker_permissions.yaml`` is
    claude-bound.  A kimi or codex worker via the native CLI never sees
-   those rules; kimi is the fleet default build-worker.
+   those rules.
 
 A read-only bit is OS-enforced and effective across providers, tools,
 and symlinks.
