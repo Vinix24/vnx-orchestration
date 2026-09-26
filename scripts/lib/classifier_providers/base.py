@@ -13,6 +13,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+import provider_reachability
+from provider_reachability import Reachability
+
 
 @dataclass
 class ClassifierResult:
@@ -42,6 +45,10 @@ class ClassifierProvider(ABC):
     """Abstract receipt classifier provider."""
 
     name: str = "base"
+    # Key of the shared reachability record. Providers that ride the same
+    # account or quota as another lane share its key (the codex classifier and
+    # codex_gate are one quota), so one refusal is seen by every consumer.
+    reachability_key: str = ""
 
     @abstractmethod
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
@@ -52,6 +59,40 @@ class ClassifierProvider(ABC):
         - never import Anthropic / OpenAI SDKs
         - cap execution with a timeout
         """
+
+    def is_present(self) -> bool:
+        """Cheap precondition: the CLI is on PATH / the key is set. Not availability."""
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement is_present() to use the measured reachability record"
+        )
+
+    def reachability(self) -> Reachability:
+        """Presence, then the outcome recorded for this provider's lane."""
+        return provider_reachability.assess(
+            self.reachability_key or self.name, present=self.is_present(),
+        )
+
+    def is_available(self) -> bool:
+        """True when present AND not recorded unreachable (quota spent, credential
+        refused). A CLI on PATH with no quota left is not available (OI-1454)."""
+        return self.reachability().is_usable
+
+
+def describe_unavailable(provider: Any) -> str:
+    """Why ``provider`` is not available, in one line, for a log or a message.
+
+    Says what the reachability record knows (unreachable because the quota is
+    spent, seen where and until when). A provider that does not carry the
+    record (a fake, a third-party class) gets a plain "not available" rather
+    than an error: this only explains a decision already made.
+    """
+    reachability = getattr(provider, "reachability", None)
+    if reachability is None:
+        return "not available"
+    try:
+        return reachability().describe()
+    except NotImplementedError:
+        return "not available"
 
 
 _JSON_BLOCK_RE = re.compile(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", re.DOTALL)

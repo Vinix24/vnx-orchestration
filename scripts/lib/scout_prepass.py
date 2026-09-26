@@ -431,6 +431,7 @@ def _invoke_scout_model(
     """
     try:
         from classifier_providers import get_provider
+        from classifier_providers.base import describe_unavailable
     except ImportError:
         return None, "", 0.0, 0
     try:
@@ -439,7 +440,7 @@ def _invoke_scout_model(
         logger.debug("scout: unknown provider %r", provider_name)
         return None, "", 0.0, 0
     if not provider.is_available():
-        logger.debug("scout: provider %r unavailable (no key / CLI)", provider_name)
+        logger.debug("scout: provider %r unavailable (%s)", provider_name, describe_unavailable(provider))
         return None, "", 0.0, 0
     result = provider.classify(prompt)
     model = str((result.extra or {}).get("model") or "")

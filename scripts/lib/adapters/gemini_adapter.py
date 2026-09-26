@@ -85,9 +85,14 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
     def capabilities(self) -> set[Capability]:
         return {Capability.REVIEW, Capability.DIGEST}
 
-    def is_available(self) -> bool:
+    def is_present(self) -> bool:
         """Return True when the `gemini` binary is found on PATH."""
         return shutil.which("gemini") is not None
+
+    def is_available(self) -> bool:
+        """True when `gemini` is on PATH and not recorded unreachable (quota spent,
+        credential refused). Presence alone is not availability (OI-1454)."""
+        return self.reachability().is_usable
 
     def execute(self, instruction: str, context: dict) -> AdapterResult:
         """Run a Gemini review. Delegates spawn+stream to spawn_gemini() (Wave 4.6 PR-4.6.4).

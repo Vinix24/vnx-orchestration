@@ -76,9 +76,14 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
     def capabilities(self) -> set[Capability]:
         return {Capability.REVIEW, Capability.DECISION}
 
-    def is_available(self) -> bool:
+    def is_present(self) -> bool:
         """Return True when the `codex` binary is found on PATH."""
         return shutil.which("codex") is not None
+
+    def is_available(self) -> bool:
+        """True when codex is on PATH and not recorded unreachable (quota spent,
+        credential refused). Presence alone is not availability (OI-1454)."""
+        return self.reachability().is_usable
 
     def execute(self, instruction: str, context: dict) -> AdapterResult:
         """Run a Codex review with inline file contents and return findings.
@@ -135,6 +140,14 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             self._write_token_cache(spawn_result.token_usage)
 
         status = "done" if spawn_result.returncode == 0 else "failed"
+
+        self.record_outcome(
+            status == "done",
+            "\n".join(
+                part for part in (spawn_result.error, spawn_result.completion_text)
+                if isinstance(part, str) and part
+            ),
+        )
 
         return AdapterResult(
             status=status,

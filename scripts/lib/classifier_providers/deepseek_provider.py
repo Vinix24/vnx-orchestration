@@ -32,6 +32,7 @@ class DeepSeekProvider(ClassifierProvider):
     """Run classification via the DeepSeek harness lane (own-key, hardened)."""
 
     name = "deepseek"
+    reachability_key = "deepseek-harness"
 
     def __init__(
         self,
@@ -54,7 +55,7 @@ class DeepSeekProvider(ClassifierProvider):
         except (TypeError, ValueError):
             self.flat_cost_usd = _DEFAULT_FLAT_COST_USD
 
-    def is_available(self) -> bool:
+    def is_present(self) -> bool:
         # Requires the claude CLI AND the operator's own DeepSeek key (never the
         # production OAuth subscription — constraint deepseek-harness-subscription-blocked).
         return shutil.which("claude") is not None and bool(os.environ.get("DEEPSEEK_API_KEY"))

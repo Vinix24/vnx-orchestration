@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from canonical_event import CanonicalEvent
 from provider_adapter import AdapterResult, Capability, ProviderAdapter
+from provider_reachability import Reachability, ReachabilityState
 from _streaming_drainer import StreamingDrainerMixin
 
 logger = logging.getLogger(__name__)
@@ -93,14 +94,32 @@ class OllamaAdapter(StreamingDrainerMixin, ProviderAdapter):
     def capabilities(self) -> set[Capability]:
         return {Capability.DECISION, Capability.DIGEST}
 
-    def is_available(self) -> bool:
-        """Return True when Ollama /api/tags responds with HTTP 200."""
+    def is_present(self) -> bool:
+        """An HTTP endpoint has no install to look for: present when a host is configured."""
+        return bool(self._host)
+
+    def reachability(self) -> Reachability:
+        """Measured live: Ollama is local and keyless, so asking it costs nothing
+        and there is no quota or credential outcome to record."""
         url = f"{self._host}/api/tags"
         try:
             with urllib.request.urlopen(url, timeout=5) as resp:
-                return resp.status == 200
-        except (urllib.error.URLError, OSError, TimeoutError):
-            return False
+                answered = resp.status == 200
+                detail = f"GET /api/tags answered HTTP {resp.status}"
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            answered, detail = False, f"GET /api/tags failed: {exc}"
+        return Reachability(
+            provider=self.name(),
+            state=ReachabilityState.REACHABLE if answered else ReachabilityState.UNREACHABLE,
+            reason="" if answered else "endpoint_unreachable",
+            detail=detail,
+            measured_at=time.time(),
+            source="probe:ollama",
+        )
+
+    def is_available(self) -> bool:
+        """Return True when Ollama /api/tags responds with HTTP 200."""
+        return self.reachability().is_reachable
 
     def execute(self, instruction: str, context: dict) -> AdapterResult:
         """POST instruction to /api/generate via HTTP streaming and collect events.

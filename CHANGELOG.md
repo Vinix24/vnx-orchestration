@@ -6,6 +6,26 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Fixed
+
+- **`is_available()` measures reachability, not presence (OI-1454).** On
+  2026-08-23 three of four reader adapters reported available while none could
+  answer a call: codex had its quota spent and litellm's key was rejected, but
+  both were on PATH and importable. A fallback that chose on that picked a dead
+  seat with full confidence. `scripts/lib/provider_reachability.py` now keeps one
+  record per provider with three states: `reachable`, `unreachable` with a reason
+  (`quota_exhausted`, `insufficient_balance`, `auth_401`, `not_present`) and
+  `unmeasured`. The record is written by outcomes the fabric already sees (gate
+  results, provider-lane dispatches, codex and litellm adapter calls) and expires
+  on its own, so no paid call is made per check. Classifier providers only read
+  it. `unmeasured` is never reported as
+  `reachable`. Adapters and classifier providers split `is_present()` from
+  `is_available()`. The review-gate takeover walk and the smart router's
+  `lane_available` skip a provider recorded unreachable and name the reason,
+  instead of asking a seat that cannot give a verdict. OI-1507's second half, a
+  check that a running process holds a different key than the one on disk, is not
+  part of this change.
+
 ## [1.6.5] - 2026-09-25
 
 Patch release (2 commits since v1.6.4). The merge door now judges a merge

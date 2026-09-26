@@ -11,6 +11,11 @@ with an explicit availability layer that runs at decision time and is cheap:
   - not in cooldown             (a prior quota/auth failure marks the lane
                                  inactive for the provider-outage cooldown,
                                  sourced from the incident taxonomy)
+  - not recorded unreachable    (the shared reachability record, written by
+                                 gate results, provider-lane dispatches and
+                                 the codex/litellm adapters; classifier
+                                 providers only read it; OI-1454. A lane that
+                                 was never asked is not blocked)
 
 Cooldown state lives in the central state dir, resolved via the existing
 ``vnx_paths.resolve_state_dir`` helper (never a hardcoded ``.vnx-data/`` path)
@@ -57,6 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+import provider_reachability
 from incident_taxonomy import IncidentClass
 
 logger = logging.getLogger(__name__)
@@ -325,6 +331,9 @@ def lane_available(
         remaining = lane_cooldown_remaining(lane, state_dir=state_dir, now=now)
         if remaining > 0:
             return False, f"lane in cooldown ({remaining:.0f}s remaining)"
+        reachability = provider_reachability.get(lane, state_dir=state_dir, now=now)
+        if reachability.is_known_unreachable:
+            return False, f"lane unreachable ({reachability.describe()})"
         return True, "available"
     except Exception as exc:  # vnx-silent-except: broken availability layer must fail open, never decline a lane
         logger.warning(
