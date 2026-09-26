@@ -19,8 +19,43 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   absent instead of failing. Available as `vnx horizon unmark-delivery` and
   through the `vnx objective` alias.
 
+### Changed
+
+- **The default review stack is `codex_gate,kimi_gate`: subscription reviewers
+  first, API-credit reviewers only as a fallback.** Operator decision of
+  2026-09-26. `VNX_DEFAULT_REVIEW_STACK` was `codex_gate,glm_gate` (#1852), which
+  made glm (OpenRouter credit) a standing second seat on every PR. codex (codex
+  CLI) and kimi (kimi CLI OAuth) both run on a subscription. glm and deepseek
+  only read a PR when both are unavailable, which is what the takeover chain
+  `codex_gate,kimi_gate,glm_gate,deepseek_gate` already does and keeps doing.
+  `gate_recorder.GATE_BILLING` classifies every registered gate as
+  subscription, provider-metered or model-free, and a guard test fails when the
+  default stack or the takeover chain puts an API-credit gate before a
+  subscription gate. The obligation the door declares follows the same order:
+  of the full-diff seats in a stack, `_primary_review_gate` now prefers a
+  subscription gate over an API-credit gate when they tie on weight, so
+  `glm_gate,codex_gate` declares `codex_gate`. A stack with a single full-diff
+  gate (mission-control: `glm_gate,claude_github_optional`) resolves as before.
+  A project that set its own stack or chain keeps it; `vnx gate --only kimi`
+  (and `glm`, `deepseek`) now resolve to the gate names. kimi_gate has run
+  through `gate_runner`'s harness lane since v1.6.2 (#1837), so it no longer
+  books `not_executable` / `gate_not_subprocess_routable`. The records of that
+  kind that remain in the stores were written by an engine older than that
+  version. Tests now pin the path from `vnx gate --only kimi_gate` to a booked
+  pass, and the merge door's acceptance of it. The PR readiness hint for a PR
+  with no review obligation lists codex_gate and kimi_gate first and names
+  glm_gate last, as the fallback. It used to offer glm_gate ahead of codex_gate.
+
 ### Fixed
 
+- **A takeover no longer requests the same reader twice.** With the stack
+  `codex_gate,kimi_gate` and codex at its limit, the codex seat is taken over by
+  kimi and the second seat names kimi as well. `request_reviews` requested it
+  again, which rewrote the request record without the takeover path and made the
+  executor run the same reader twice. It also ran glm twice when codex and kimi
+  were both exhausted. A seat that resolves to a gate an earlier seat of the same
+  round already requested now requests nothing, and the first request keeps its
+  takeover path.
 - **`vnx objective close --attest --pr` no longer replaces `pr_ref`
   (OI-1872).** On track `absence-is-loud` a close with `--pr 1922 --pr 1924`
   cut `pr_ref` from 17 refs to `#1922,#1924`, and the 17 earlier refs were gone

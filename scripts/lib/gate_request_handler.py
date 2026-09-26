@@ -843,7 +843,8 @@ class GateRequestHandlerMixin:
         mode: str,
         dispatch_id: str,
         chain: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
+        dispatched: Optional[Iterable[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Dispatch one review-stack seat, walking the configured takeover
         CHAIN (BETA3-E1) forward while every candidate's own last-recorded
         result is ``lane_exhausted``, then dispatching the first candidate
@@ -919,7 +920,18 @@ class GateRequestHandlerMixin:
         ``result_is_for_head`` answers True so the walk behaves exactly as it
         did before -- a failed lookup must never silently redirect a takeover
         decision.
+
+        ONE REQUEST PER GATE (``dispatched``): the gates already requested by
+        earlier seats of the SAME ``request_reviews`` round. A seat whose walk
+        lands on one of them returns ``None`` and requests nothing. This is not
+        cosmetic: with the default stack ``codex_gate,kimi_gate`` a codex seat
+        that is at its limit is taken over by kimi, and the second seat then
+        names kimi as well. Requesting it again re-wrote the request record
+        (dropping the takeover annotation the first request carried) and made
+        the executor run the same reader twice, once more for every hop of an
+        exhausted chain. The first request stands, with its takeover path.
         """
+        already = set(dispatched or ())
         if chain is None:
             chain = _build_review_gate_takeover_chain()
 
@@ -931,6 +943,8 @@ class GateRequestHandlerMixin:
             # NEVER a chain_exhausted terminal state for a gate that was
             # never part of a configured chain to begin with (that state is
             # reserved for a chain that WAS entered and then ran out).
+            if gate in already:
+                return None
             return self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
 
         path: List[Dict[str, Any]] = []
@@ -988,6 +1002,14 @@ class GateRequestHandlerMixin:
                 )
             current = next_gate
 
+        if current in already:
+            logger.info(
+                "gate_request_handler: seat %s resolves to %s for pr=%s, which an earlier "
+                "seat of this round already requested -- not requesting it a second time",
+                gate, current, pr_number,
+            )
+            return None
+
         payload = self._dispatch_one_review(current, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if not path:
             return payload
@@ -1038,7 +1060,10 @@ class GateRequestHandlerMixin:
         for gate in review_stack_list:
             payload = self._dispatch_review_seat(
                 gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id, chain=chain,
+                dispatched=[item["gate"] for item in requested],
             )
+            if payload is None:
+                continue
             requested.append(payload)
             receipt_fields: Dict[str, Any] = {}
             if payload.get("takeover"):

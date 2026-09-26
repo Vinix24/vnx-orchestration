@@ -390,6 +390,7 @@ Dispatch commands (one-liner delivery):
 Gate commands (pre-merge verification):
   gate <pr>                Run all required gates (from governance_enforcement.yaml)
   gate <pr> --only codex   Run only the Codex gate
+  gate <pr> --only kimi    Run only the Kimi review gate
   gate <pr> --only gemini  Run only the Gemini review gate
   gate <pr> --status       Show gate results without running
 
