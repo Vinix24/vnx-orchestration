@@ -6,10 +6,31 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.6.6] - 2026-09-27
+
+Feature release (16 commits since v1.6.5). The default review stack is
+`codex_gate,kimi_gate`: subscription readers first, `glm_gate` and
+`deepseek_gate` run only as takeover-chain fallback when both are
+unavailable (#1928). Gemini is retired as a reviewer everywhere a review
+gate is selected — default stacks, profiles, enforcement yaml, the
+dashboard toggle, docs and the T0 role — while an existing `gemini_review`
+result stays readable in history (#1932, #1934, #1935, #1936). Every
+harness-lane review gate now has its own diff-char cap instead of one
+shared 50000-char constant: kimi 400000, glm 50000, deepseek 50000
+(OI-1874, #1937). A PASS booked on a diff the gate could not fully read is
+`partial_review`, not a pass, and the merge door refuses it (OI-1851,
+#1920).
+
+Behaviour change for projects: a project that already sets its own review
+stack or takeover chain keeps it unchanged. A project whose stack or chain
+names `gemini_review` must remove it — the name is refused everywhere a
+review gate is selected, though an existing `gemini_review` record in
+history still reads as a verdict.
+
 ### Added
 
 - **`vnx objective unmark-delivery <track> <pr> [<pr> ...] --reason ...`
-  (OI-1872).** `link-pr` always writes a `track_pr_delivery` row (default
+  (OI-1872, #1925).** `link-pr` always writes a `track_pr_delivery` row (default
   `partial`, fail-closed) and nothing could take one back, so a PR could
   never return to unmarked. The new verb deletes the row for each PR on that
   track and project, leaves `pr_ref` alone, and prints which PRs had a marker
@@ -18,11 +39,47 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   writes no event. On a store without migration 0032 it says the table is
   absent instead of failing. Available as `vnx horizon unmark-delivery` and
   through the `vnx objective` alias.
+- **T0 context rotation is enforced at 500K, not just recommended (#1923).**
+  A PreToolUse/Stop/UserPromptSubmit guard hook
+  (`scripts/hooks/t0_context_guard.py`) and `scripts/lib/t0_context_budget.py`
+  measure a T0 session's context budget; crossing 500K lets work in flight
+  finish, starts nothing new, and carries a running `/goal` over to the next
+  T0 through `scripts/t0_rotate_spawn.sh` and
+  `scripts/lib/t0_rotation_state.py`. The pending marker and latch write
+  through `atomic_io.atomic_write_json` and change only on a transition, so a
+  repeat crossing in the same band leaves the file byte for byte untouched.
+  Docs: `docs/operations/T0_CONTEXT_ROTATION.md`.
+- **A placebo arm gives the adoption metric a negative control (#1883).**
+  `pattern_injection_outcome.used` decides adoption from a 25% token-overlap
+  threshold between a pattern's content and a worker's report, which cannot
+  tell "worked on the same topic" apart from "actually applied the pattern".
+  `VNX_INTEL_PLACEBO_ARM` (default off) makes `intelligence_selector` inject,
+  instead of the real candidate, the offered pattern with the lowest token
+  overlap against the dispatch context — tie-broken to a different scope-tag
+  group, and never a direct-injection class (code anchors, ADRs, scout
+  sketches), since those share the dispatch topic by definition. Migration
+  v32 adds `ab_arm` to `pattern_injection_outcome` and
+  `dispatch_pattern_offered`; `intel_injection_join.py placebo` compares the
+  adoption rate per arm side by side. Build-out only: the flag defaults off
+  and nothing runs differently until an operator turns it on.
+- **Each harness-lane review gate has its own diff-char cap (OI-1874,
+  #1937).** `MAX_DIFF_CHARS` was one fixed 50000-char constant shared by
+  `glm_gate`, `kimi_gate` and `deepseek_gate`, dating from the first kimi
+  gate and never chosen per model. `gate_lane_contract.max_diff_chars(gate)`
+  is now the one resolver, read at runtime through `config_runtime.get()`:
+  kimi 400000 (its 1M-token context and kimi-CLI-OAuth subscription cost
+  nothing extra), glm 50000 and deepseek 50000 (API-credit fallback seats,
+  kept conservative). A missing or invalid config value falls back to that
+  gate's own default, never to unlimited; an unknown gate name gets the
+  conservative 50000. `kimi_gate.py`, `glm_gate.py`, `gate_runner.py`'s
+  harness-lane path and `gate_reanchor_cli.py`'s offline hash recompute all
+  read the same resolver; `MAX_DIFF_CHARS` itself is gone, no alias left
+  behind.
 
 ### Changed
 
 - **The default review stack is `codex_gate,kimi_gate`: subscription reviewers
-  first, API-credit reviewers only as a fallback.** Operator decision of
+  first, API-credit reviewers only as a fallback (#1928).** Operator decision of
   2026-09-26. `VNX_DEFAULT_REVIEW_STACK` was `codex_gate,glm_gate` (#1852), which
   made glm (OpenRouter credit) a standing second seat on every PR. codex (codex
   CLI) and kimi (kimi CLI OAuth) both run on a subscription. glm and deepseek
@@ -45,10 +102,43 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   pass, and the merge door's acceptance of it. The PR readiness hint for a PR
   with no review obligation lists codex_gate and kimi_gate first and names
   glm_gate last, as the fallback. It used to offer glm_gate ahead of codex_gate.
+- **Docs and defaults name sonnet as the standard build worker, not kimi-k3
+  (#1930, #1935).** Operator decision of 2026-09-23, confirmed 2026-09-26: the
+  routing code already pinned T1/T2/T3 to sonnet by default
+  (`workers-kimi-pinned`, `pin_semantics: default`); this brought the text in
+  line. `DISPATCH_RULES.md`, `PROVIDER_LANES.md`, the `fabric-reference` and
+  `t0-orchestrator` skills, `.vnx/vnx_workers.default.yaml`, the
+  `worker_registry` fallback, `pool_worker_runner`, the headless dispatch
+  daemon's `VNX_DISPATCH_MODEL` default, `canonical_state_views` and
+  `dispatch_prepare` all now read sonnet where they read kimi-k3 before.
+  kimi-k3 stays an explicit, available choice. The protected
+  `.claude/terminals/T0/role-orchestrator.md` and the two skill copies inside
+  `.claude/` needed a separate operator-applied edit (#1935), since a worker
+  may not write those paths.
+
+### Removed
+
+- **Gemini is no longer a reviewer (operator decision 2026-09-26; #1932,
+  #1934, #1935, #1936).** `Gate.GEMINI_REVIEW` is out of the closed
+  gate-name enum, so every reader that picks a review gate — dispatch spec
+  Rule 16, the staging bridge, the takeover-chain parser, the primary-seat
+  pick in `smart_router` — refuses it. It survives once, as
+  `dispatch_spec.RETIRED_GATE_NAMES`, so a refusal names the reason instead
+  of reading like a typo, and `closure_verifier` still reads an existing
+  `gemini_review` result as a verdict rather than "not implemented".
+  `review_gate_manager` drops a retired name from a stale project's own
+  stack with a warning. Also dropped: gemini from default governance
+  profiles and enforcement yaml, `auto_gate_trigger`, the auto-merge policy,
+  stop conditions, plan-gate enforcement, `vnx gate --only gemini`, and the
+  dashboard gate toggle (#1936). Docs, skills copies, `PROVIDER_LANES.md`,
+  gate contracts, the README, an ADR-008 amendment and the T0 role file
+  follow the same decision (#1934, #1935, #1929). The gemini **worker** lane
+  (`gemini_cli` provider, `claude-gemini` profile) is untouched — this is
+  the reviewer role only.
 
 ### Fixed
 
-- **A takeover no longer requests the same reader twice.** With the stack
+- **A takeover no longer requests the same reader twice (#1933).** With the stack
   `codex_gate,kimi_gate` and codex at its limit, the codex seat is taken over by
   kimi and the second seat names kimi as well. `request_reviews` requested it
   again, which rewrote the request record without the takeover path and made the
@@ -57,7 +147,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   round already requested now requests nothing, and the first request keeps its
   takeover path.
 - **`vnx objective close --attest --pr` no longer replaces `pr_ref`
-  (OI-1872).** On track `absence-is-loud` a close with `--pr 1922 --pr 1924`
+  (OI-1872, #1925).** On track `absence-is-loud` a close with `--pr 1922 --pr 1924`
   cut `pr_ref` from 17 refs to `#1922,#1924`, and the 17 earlier refs were gone
   from the record. `--pr` now appends to the existing refs with the same merge
   `link-pr` uses (deduplicated, order kept). The `ops-attest:<date>` fail-open
@@ -65,10 +155,10 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   earlier `ops-attest` stamp survives a later `--pr`. The audit event carries
   `pr_ref_before`. The help text says what happens to the existing list.
 - **`vnx objective unlink-pr` no longer leaves an orphan delivery marker
-  (OI-1872).** It now deletes the `track_pr_delivery` row of every PR it
+  (OI-1872, #1925).** It now deletes the `track_pr_delivery` row of every PR it
   removes from `pr_ref`, in the same transaction as the `pr_ref` update. The
   output and the `track_pr_unlinked` event list the markers removed.
-- **`is_available()` measures reachability, not presence (OI-1454).** On
+- **`is_available()` measures reachability, not presence (OI-1454, #1924).** On
   2026-08-23 three of four reader adapters reported available while none could
   answer a call: codex had its quota spent and litellm's key was rejected, but
   both were on PATH and importable. A fallback that chose on that picked a dead
@@ -85,6 +175,47 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
   instead of asking a seat that cannot give a verdict. OI-1507's second half, a
   check that a running process holds a different key than the one on disk, is not
   part of this change.
+- **A PASS booked on a diff the gate could not fully read is
+  `partial_review`, and the merge door refuses it (OI-1851, #1920).** PR
+  #1915 had a 176,860-char diff against a 50,000-char cap; `glm_gate` booked
+  `completed` with 0 blocking findings while its own residual_risk said the
+  `pr_merge.py` part was cut off, and the record read `diff_chars: 0,
+  diff_truncated: false`. Two full reviews then found a real blocker in the
+  part glm never saw; the same happened on #1916 and #1917. The record now
+  carries the real diff size on every mode (`gate_depth.diff_coverage`), and
+  a booked result outside PASS/FAIL — `partial_review` — closes only on a
+  measured re-read: an agentic run with a parsed tool stream and at least
+  one file read per cut file. The merge door returns NO-GO with the cut
+  size, the cut files and the way out (a peer's full pass on the same head,
+  or split the PR); `is_pass`/`has_complete_evidence` refuse any `completed`
+  record whose `execution_depth` shows an unread truncation. A fail stays a
+  fail, and a diff under the cap behaves exactly as before.
+
+### Documentation
+
+- **Every checkmark in `docs/core/00_VNX_ARCHITECTURE.md` now resolves to a
+  generated measurement or is gone (#1922).** The four hand-typed checkmarks
+  in the Staging Workflow section, and two "NO ..." bullets (one of them
+  wrong: the roadmap autopilot does call `create_dispatch_from_pr` and
+  `promote_dispatch` on its own), are replaced by a section rewritten
+  against the code: the dispatch door as canonical for the described path,
+  and the PR-queue path (`pr_queue_manager.py`, `dispatcher_minimal.sh`)
+  with its real popup condition and ADR-025 status.
+  `tests/test_architecture_doc_drift.py` now fails when a checkmark glyph
+  appears outside the generated sections.
+- **ADR-005 is scoped to decisions and transitions, not derived state
+  (#1927, #1929).** Three codex gates warned on the same day (OI-1867,
+  OI-1870, OI-1871) that a write "must be recorded as NDJSON events in
+  `.vnx-data/events/`", stricter than the ADR itself. The amendment states
+  the reviewer test — does this write drive a decision recorded in no
+  canonical ledger — and exempts re-derivable caches (reachability JSON,
+  pending/latch markers, digests) as long as the decision they drive is
+  logged elsewhere. Reviewer-role prompts, `STATE_FABRIC.md` and three
+  docstrings follow the amended wording. A follow-up (#1929) strikes the
+  `incident_log.ndjson` line from the canonical ledger list (no writer
+  exists) and updates `FORGE_GATE.md` and `agents/review-gate/CLAUDE.md` to
+  name `codex_gate`/`kimi_gate` instead of `glm_gate` as the default-stack
+  reviewers.
 
 ## [1.6.5] - 2026-09-25
 
