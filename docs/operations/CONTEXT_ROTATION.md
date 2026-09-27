@@ -5,8 +5,8 @@
 > it lives under, and the `vnx handoff` CLI that reads it. Rotation
 > **execution** — deciding when to rotate, `/clear`, resuming the session —
 > is the worker rotation system (`hooks/vnx_rotate.sh`,
-> `docs/core/technical/CONTEXT_ROTATION_SYSTEM.md`) plus the operator
-> `/rotate` flow; it is not implemented here.
+> `docs/_archive/core/technical/CONTEXT_ROTATION_SYSTEM.md`, archived) plus the
+> operator `/rotate` flow; it is not implemented here.
 >
 > **Enforced T0 rotation at 500K** (operator decision 2026-09-25) is a separate
 > contract with its own handoff (`daily-log/handoff.md`): `T0_CONTEXT_ROTATION.md`.

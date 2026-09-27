@@ -95,3 +95,17 @@ Not archived by operator decision (open item): `docs/operations/TRANSCRIPT_BACKU
 workstation-level (Mac Mini) backup mechanism outside VNX's runtime scope, a candidate for removal from
 this repo entirely rather than archival — left in place pending that decision. `docs/operations/TMUX_SPAWN_LANE.md`
 also stays: it is the tombstone every removed-lane reference above points to.
+
+## Docs-verversing sweep (archived 2026-09-27, PR-3) — 5 files, operator directive
+
+Same operator directive as PR-4 above, scoped to `docs/core` and `docs/contracts`. None were
+rewritten — only moved. The `docs/contracts/f36-r12-*` artifacts assigned to this dispatch were
+already archived by PR-4 (see the row above); no further action was needed for them here.
+
+| Path (now) | Path (before) | Reason |
+|---|---|---|
+| `core/190_RESIDUAL_BUGFIX_SWEEP_CONTRACT.md` | `docs/core/190_RESIDUAL_BUGFIX_SWEEP_CONTRACT.md` | PR-0 contract for a governance bugfix sweep completed in April 2026 ("All downstream PRs implement against this contract"); the certification test that reads it (`tests/test_residual_sweep_certification.py`) still needs the file's content, so it moves rather than being retired, and the test's path constant is updated in this PR |
+| `core/framework-status-audit-and-cockpit_PRD.md` | `docs/core/framework-status-audit-and-cockpit_PRD.md` | PRD for the `framework-status-audit-and-cockpit` track, delivered: `docs/core/SUBSYSTEMS.md`, `vnx_cli/commands/subsystems.py`, and `.github/workflows/subsystems-drift.yml` all exist on `main`. Code comments citing `:89` for the governance-drift rationale (`dashboard/api_subsystems.py`, `scripts/lib/governance_enforcer.py`, `scripts/lib/migration_inventory.py`, `tests/dashboard/test_api_subsystems.py`) are repointed to the archived path in this PR |
+| `core/VNX_SYSTEM_BOUNDARIES.md` | `docs/core/VNX_SYSTEM_BOUNDARIES.md` | January 2026 separation plan (`vnx-system/`, `terminals/library/`, `T-MANAGER`, `sessionstart_tmanager.sh`, `t0_pre_dispatch_intelligence.sh`, `sessionstart_t0.sh`); none of those exact paths are tracked in the repo (verified via `git ls-files`). Superseded by ADR-026 (per-project store) and ADR-032 (fabric artifacts in consumers) |
+| `core/technical/DISPATCHER_SYSTEM.md` | `docs/core/technical/DISPATCHER_SYSTEM.md` | Self-marked "V7.3 — LEGACY REFERENCE", 1437 lines; `dispatcher_v7_compilation.sh` does not exist, its cited `.claude/vnx-system/...` and `.claude/terminals/library/...` paths are not tracked, and its `src/crawler/core/browser_pool.py` example is from the unrelated SEOcrawler repo |
+| `core/technical/CONTEXT_ROTATION_SYSTEM.md` | `docs/core/technical/CONTEXT_ROTATION_SYSTEM.md` | Describes a v2.5 worker context-rotation mechanism (`vnx_context_monitor.sh`, `vnx_handover_detector.sh`, `vnx_rotate.sh`) that is not wired into `.claude/settings.json`'s generated hook list (`docs/core/00_VNX_ARCHITECTURE.md`'s generated hooks block); `vnx_rotation_recovery.sh` and `.claude/vnx-system/scripts/*` it cites are not tracked either. T0 rotation (the live mechanism) is documented in `docs/operations/T0_CONTEXT_ROTATION.md` |
