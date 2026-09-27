@@ -17,6 +17,13 @@ checks:
     description: "Codex gate result must exist with non-empty contract_hash"
     scope: [scripts/, dashboard/, .github/]
 
+  kimi_gate_required:
+    level: 2
+    description: "Kimi gate result must exist with non-empty contract_hash (a takeover successor via VNX_REVIEW_GATE_TAKEOVER_CHAIN also satisfies it)"
+    scope: [scripts/, dashboard/, .github/]
+    # Per-project dial: set level to 0 to turn the kimi seat off entirely, or
+    # to 1 to make it advisory (logs a warning, never blocks).
+
   ci_green_required:
     level: 3
     description: "All CI checks on the PR must be passing"
@@ -54,6 +61,7 @@ presets:
   strict:
     gate_before_next_feature: 3
     codex_gate_required: 3
+    kimi_gate_required: 3
     ci_green_required: 3
     pr_must_exist_before_next_dispatch: 3
     receipt_must_have_commit: 3
@@ -68,6 +76,7 @@ presets:
   relaxed:
     gate_before_next_feature: 1
     codex_gate_required: 1
+    kimi_gate_required: 1
     ci_green_required: 3
     pr_must_exist_before_next_dispatch: 1
     receipt_must_have_commit: 1
@@ -80,6 +89,7 @@ presets:
   off:
     gate_before_next_feature: 0
     codex_gate_required: 0
+    kimi_gate_required: 0
     ci_green_required: 0
     max_pr_lines: 0
     pr_must_exist_before_next_dispatch: 0

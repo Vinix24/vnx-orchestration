@@ -39,6 +39,16 @@ except ImportError:  # pragma: no cover — audit module optional at import time
     _log_enforcement_audit = None  # type: ignore[assignment]
     _ga_get_recent = None  # type: ignore[assignment]
 
+try:
+    # Same source t0_gate_enforcement's gate_enforcement_verify.py uses to
+    # resolve a takeover seat: the "gate" fields of a takeover_path list.
+    # Reused here so a kimi (or codex) seat read by a successor in
+    # VNX_REVIEW_GATE_TAKEOVER_CHAIN is recognised the same way in both
+    # places, instead of a second takeover interpretation.
+    from gate_enforcement_verify import _hop_gates as _takeover_hop_gates
+except ImportError:  # pragma: no cover — verify module optional at import time
+    _takeover_hop_gates = None  # type: ignore[assignment]
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -330,8 +340,18 @@ class GovernanceEnforcer:
             override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
         )
 
-    def _check_codex_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
-        """Codex gate result must exist with non-empty contract_hash."""
+    def _check_review_gate_required(
+        self, cfg: CheckConfig, ctx: Dict[str, Any], gate_name: str,
+    ) -> EnforcementResult:
+        """``<gate_name>`` gate result must exist with non-empty contract_hash.
+
+        A seat also counts as satisfied when a successor in the takeover chain
+        (``VNX_REVIEW_GATE_TAKEOVER_CHAIN``, e.g. glm_gate/deepseek_gate reading
+        in kimi_gate's place) read it instead of ``gate_name`` itself. Resolved
+        from the SAME source ``gate_enforcement_verify.py`` uses for
+        ``t0_gate_enforcement``: the ``takeover_path`` hops recorded on the
+        successor's own result file — never a second takeover interpretation.
+        """
         pr_number = ctx.get("pr_number")
         if not pr_number:
             return EnforcementResult(
@@ -339,32 +359,68 @@ class GovernanceEnforcer:
                 message="No pr_number in context — check skipped",
                 override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
             )
-        result_path = GATE_RESULTS_DIR / f"pr-{pr_number}-codex_gate.json"
-        if not result_path.exists():
+        result_path = GATE_RESULTS_DIR / f"pr-{pr_number}-{gate_name}.json"
+        direct_data: Optional[Dict[str, Any]] = None
+        if result_path.exists():
+            try:
+                direct_data = json.loads(result_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as e:
+                return EnforcementResult(
+                    check_name=cfg.name, level=cfg.level, passed=False,
+                    message=f"Failed to parse {gate_name} result: {e}",
+                    override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+                )
+            contract_hash = direct_data.get("contract_hash", "")
+            if contract_hash:
+                return EnforcementResult(
+                    check_name=cfg.name, level=cfg.level, passed=True,
+                    message=f"{gate_name} passed — contract_hash: {contract_hash[:12]}...",
+                    override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+                )
+
+        if _takeover_hop_gates is not None:
+            for candidate in sorted(GATE_RESULTS_DIR.glob(f"pr-{pr_number}-*.json")):
+                if candidate == result_path:
+                    continue
+                try:
+                    data = json.loads(candidate.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if gate_name not in _takeover_hop_gates(data.get("takeover_path")):
+                    continue
+                contract_hash = data.get("contract_hash", "")
+                if contract_hash:
+                    successor = data.get("gate") or candidate.stem
+                    return EnforcementResult(
+                        check_name=cfg.name, level=cfg.level, passed=True,
+                        message=(
+                            f"{gate_name} seat taken over by {successor} — "
+                            f"contract_hash: {contract_hash[:12]}..."
+                        ),
+                        override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+                    )
+
+        if direct_data is not None:
             return EnforcementResult(
                 check_name=cfg.name, level=cfg.level, passed=False,
-                message=f"Codex gate result not found: {result_path}",
+                message=f"{gate_name} result has empty contract_hash and no takeover successor found",
                 override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
             )
-        try:
-            data = json.loads(result_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            return EnforcementResult(
-                check_name=cfg.name, level=cfg.level, passed=False,
-                message=f"Failed to parse codex gate result: {e}",
-                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
-            )
-        contract_hash = data.get("contract_hash", "")
-        passed = bool(contract_hash)
         return EnforcementResult(
-            check_name=cfg.name, level=cfg.level, passed=passed,
-            message=(
-                f"Codex gate passed — contract_hash: {contract_hash[:12]}..."
-                if passed
-                else "Codex gate result has empty contract_hash"
-            ),
+            check_name=cfg.name, level=cfg.level, passed=False,
+            message=f"{gate_name} result not found: {result_path} (no takeover successor found)",
             override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
         )
+
+    def _check_codex_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
+        """Codex gate result must exist with non-empty contract_hash."""
+        return self._check_review_gate_required(cfg, ctx, "codex_gate")
+
+    def _check_kimi_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
+        """Kimi gate result must exist with non-empty contract_hash (or its
+        seat was read by a takeover successor — see
+        ``_check_review_gate_required``)."""
+        return self._check_review_gate_required(cfg, ctx, "kimi_gate")
 
     def _check_ci_green_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
         """All CI checks on the PR must be passing (gh pr checks)."""

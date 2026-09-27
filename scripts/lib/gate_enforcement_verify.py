@@ -163,7 +163,10 @@ def verify_report(
             else:
                 outcome.verified.append(gate)
                 outcome.not_completed.append(f"{gate} status={_CHAIN_EXHAUSTED}")
-            hops: List[str] = _hop_gates((entry.get("detail") or {}).get("takeover_path"))
+            chain_detail = entry.get("detail")
+            hops: List[str] = _hop_gates(
+                chain_detail.get("takeover_path") if isinstance(chain_detail, dict) else None
+            )
         else:
             result_file = results_dir / f"pr-{pr_number}-{gate}.json"
             if not request_file.is_file():

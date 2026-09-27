@@ -124,3 +124,46 @@ def test_config_naming_no_required_gate_falls_back_to_the_default_review_stack(e
 def test_fallback_stack_holds_no_retired_gate(env):
     result = _run_required_gates(env)
     assert "gemini_review" not in result.stdout
+
+
+CONFIG_CODEX_AND_KIMI = """\
+version: 1
+mode: standard
+checks:
+  codex_gate_required:
+    level: 2
+  kimi_gate_required:
+    level: 2
+"""
+
+
+def test_kimi_gate_required_level_2_requests_both_seats(env):
+    """kimi_gate_required is a peer of codex_gate_required: at level >= 2 both
+    seats are requested (operator decision 2026-09-27)."""
+    _write_enforcement_config(env, CONFIG_CODEX_AND_KIMI)
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    gates = [g for g in result.stdout.strip().split(",") if g]
+    assert set(gates) == {"codex_gate", "kimi_gate"}
+
+
+CONFIG_KIMI_OFF = """\
+version: 1
+mode: standard
+checks:
+  codex_gate_required:
+    level: 2
+  kimi_gate_required:
+    level: 0
+"""
+
+
+def test_kimi_gate_required_at_level_0_requests_codex_only(env):
+    """A project that dials kimi_gate_required off (level 0) keeps codex_gate
+    as the sole required seat, not the default stack (which would re-add
+    kimi)."""
+    _write_enforcement_config(env, CONFIG_KIMI_OFF)
+    result = _run_required_gates(env)
+    assert result.returncode == 0, result.stderr
+    gates = [g for g in result.stdout.strip().split(",") if g]
+    assert gates == ["codex_gate"]

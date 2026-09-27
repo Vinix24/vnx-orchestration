@@ -73,24 +73,34 @@ DEFAULT_TIMEOUT = 600  # 10 minutes
 
 GATE_TIMEOUT_DEFAULTS: Dict[str, int] = {
     "codex_gate": 600,
+    # kimi_gate is now a standing seat (VNX_DEFAULT_REVIEW_STACK); recent
+    # kimi_gate results run ~365s, so it gets the same 600s budget as codex
+    # rather than falling through to DEFAULT_TIMEOUT.
+    "kimi_gate": 600,
     "claude_github_optional": 300,
     "ci_gate": 60,
 }
 
 GATE_TIMEOUT_ENV: Dict[str, str] = {
     "codex_gate": "VNX_CODEX_GATE_TIMEOUT",
+    "kimi_gate": "VNX_KIMI_GATE_TIMEOUT",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_GATE_TIMEOUT",
     "ci_gate": "VNX_CI_GATE_TIMEOUT",
 }
 
 GATE_STALL_DEFAULTS: Dict[str, int] = {
     "codex_gate": 300,
+    # Same 300s stall threshold as codex_gate: below its 600s timeout, so a
+    # genuinely stuck kimi_gate run (no output for 300s) is caught well before
+    # the timeout fires, without false-triggering on a normal ~365s run.
+    "kimi_gate": 300,
     "claude_github_optional": 60,
     "ci_gate": 30,
 }
 
 GATE_STALL_ENV: Dict[str, str] = {
     "codex_gate": "VNX_CODEX_STALL_THRESHOLD",
+    "kimi_gate": "VNX_KIMI_STALL_THRESHOLD",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_STALL_THRESHOLD",
     "ci_gate": "VNX_CI_GATE_STALL_THRESHOLD",
 }

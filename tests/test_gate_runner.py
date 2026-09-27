@@ -987,10 +987,21 @@ class TestGateTimeoutConfig:
         from headless_adapter import gate_timeout
         assert gate_timeout("codex_gate") == 600
 
+    def test_default_kimi_timeout(self):
+        from headless_adapter import gate_timeout
+        # kimi_gate is a standing seat (VNX_DEFAULT_REVIEW_STACK); it must not
+        # fall through to the generic DEFAULT_TIMEOUT lookup.
+        assert gate_timeout("kimi_gate") == 600
+
     def test_env_override_timeout(self, monkeypatch):
         from headless_adapter import gate_timeout
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "120")
         assert gate_timeout("codex_gate") == 120
+
+    def test_env_override_kimi_timeout(self, monkeypatch):
+        from headless_adapter import gate_timeout
+        monkeypatch.setenv("VNX_KIMI_GATE_TIMEOUT", "120")
+        assert gate_timeout("kimi_gate") == 120
 
     def test_default_stall_threshold(self):
         from headless_adapter import gate_stall_threshold
@@ -998,6 +1009,7 @@ class TestGateTimeoutConfig:
         # output to the dict it reads from would pass no matter what the dict
         # said.
         assert gate_stall_threshold("codex_gate") == 300
+        assert gate_stall_threshold("kimi_gate") == 300
         assert gate_stall_threshold("claude_github_optional") == 60
         assert gate_stall_threshold("ci_gate") == 30
 
@@ -1005,6 +1017,11 @@ class TestGateTimeoutConfig:
         from headless_adapter import gate_stall_threshold
         monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "30")
         assert gate_stall_threshold("codex_gate") == 30
+
+    def test_env_override_kimi_stall_threshold(self, monkeypatch):
+        from headless_adapter import gate_stall_threshold
+        monkeypatch.setenv("VNX_KIMI_STALL_THRESHOLD", "30")
+        assert gate_stall_threshold("kimi_gate") == 30
 
     def test_unknown_gate_uses_defaults(self):
         from headless_adapter import gate_timeout, gate_stall_threshold

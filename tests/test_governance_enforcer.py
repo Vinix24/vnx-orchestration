@@ -37,6 +37,9 @@ checks:
   codex_gate_required:
     level: 2
     description: "Codex gate result must exist"
+  kimi_gate_required:
+    level: 2
+    description: "Kimi gate result must exist"
   ci_green_required:
     level: 3
     description: "CI must be green"
@@ -47,12 +50,15 @@ checks:
 presets:
   strict:
     codex_gate_required: 3
+    kimi_gate_required: 3
     ci_green_required: 3
   relaxed:
     codex_gate_required: 0
+    kimi_gate_required: 0
     ci_green_required: 1
   off:
     codex_gate_required: 0
+    kimi_gate_required: 0
     ci_green_required: 0
     dead_code_check: 0
   standard: {}
@@ -112,6 +118,7 @@ def test_load_config_standard_mode(config_file: Path):
     assert enforcer._mode == "standard"
     assert "codex_gate_required" in enforcer._checks
     assert enforcer._checks["codex_gate_required"].level == 2
+    assert enforcer._checks["kimi_gate_required"].level == 2
     assert enforcer._checks["ci_green_required"].level == 3
 
 
@@ -120,12 +127,14 @@ def test_load_config_strict_preset(config_file: Path):
     enforcer.load_config(config_file, mode_override="strict")
     assert enforcer._mode == "strict"
     assert enforcer._checks["codex_gate_required"].level == 3
+    assert enforcer._checks["kimi_gate_required"].level == 3
 
 
 def test_load_config_relaxed_preset(config_file: Path):
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file, mode_override="relaxed")
     assert enforcer._checks["codex_gate_required"].level == 0
+    assert enforcer._checks["kimi_gate_required"].level == 0
     assert enforcer._checks["ci_green_required"].level == 1
 
 
@@ -206,6 +215,90 @@ def test_codex_gate_required_empty_hash(config_file: Path, gate_results_dir: Pat
         result = enforcer.check("codex_gate_required", {"pr_number": 42})
     assert result.passed is False
     assert "empty contract_hash" in result.message
+
+
+# ---------------------------------------------------------------------------
+# Check: kimi_gate_required
+# ---------------------------------------------------------------------------
+
+
+def test_kimi_gate_required_no_pr_number(config_file: Path, gate_results_dir: Path):
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {})
+    assert result.passed is True
+    assert "skipped" in result.message
+
+
+def test_kimi_gate_required_file_missing(config_file: Path, gate_results_dir: Path):
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 999})
+    assert result.passed is False
+    assert "not found" in result.message
+
+
+def test_kimi_gate_required_file_present_with_hash(config_file: Path, gate_results_dir: Path):
+    gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
+        json.dumps({"contract_hash": "abc123xyz"})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42})
+    assert result.passed is True
+
+
+def test_kimi_gate_required_empty_hash_no_takeover(config_file: Path, gate_results_dir: Path):
+    gate_results_dir.joinpath("pr-42-kimi_gate.json").write_text(
+        json.dumps({"contract_hash": ""})
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42})
+    assert result.passed is False
+    assert "empty contract_hash" in result.message
+
+
+def test_kimi_gate_required_satisfied_by_takeover_successor(config_file: Path, gate_results_dir: Path):
+    """A kimi seat read by glm_gate through VNX_REVIEW_GATE_TAKEOVER_CHAIN
+    satisfies the check the same way gate_enforcement_verify.py resolves a
+    takeover seat: via the takeover_path hop recorded on the successor's own
+    result, not a second takeover interpretation."""
+    gate_results_dir.joinpath("pr-42-glm_gate.json").write_text(
+        json.dumps({
+            "gate": "glm_gate",
+            "contract_hash": "deadbeef1234",
+            "takeover_path": [{"gate": "kimi_gate", "reason": "unavailable", "status": "unavailable"}],
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42})
+    assert result.passed is True
+    assert "taken over" in result.message
+
+
+def test_kimi_gate_required_fails_without_result_or_takeover(config_file: Path, gate_results_dir: Path):
+    """A takeover result for a DIFFERENT seat (codex_gate here) must never
+    satisfy the kimi seat."""
+    gate_results_dir.joinpath("pr-42-glm_gate.json").write_text(
+        json.dumps({
+            "gate": "glm_gate",
+            "contract_hash": "deadbeef1234",
+            "takeover_path": [{"gate": "codex_gate", "reason": "unavailable", "status": "unavailable"}],
+        })
+    )
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("kimi_gate_required", {"pr_number": 42})
+    assert result.passed is False
+    assert "not found" in result.message
 
 
 # ---------------------------------------------------------------------------

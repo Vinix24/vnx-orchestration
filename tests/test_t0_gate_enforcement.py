@@ -307,6 +307,26 @@ def test_a_recorded_exhausted_chain_accounts_for_its_seat(state_dir: Path) -> No
     assert outcome.not_completed == ["codex_gate status=chain_exhausted"]
 
 
+def test_a_chain_exhausted_entry_with_non_dict_detail_does_not_crash(state_dir: Path) -> None:
+    """``entry['detail']`` is not guaranteed to be a dict; a bare
+    ``(entry.get("detail") or {}).get(...)`` raises AttributeError on a
+    truthy non-dict value (e.g. a string) instead of treating the
+    takeover_path as absent, same as the dict-guarded path above."""
+    _write_chain_exhausted(state_dir, "codex_gate")
+    entry = {
+        "gate": "codex_gate",
+        "request_status": "chain_exhausted",
+        "execution_status": "completed",
+        "passed": True,
+        "detail": "not-a-dict",
+    }
+    outcome = verify_report(
+        _report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir,
+    )
+    assert outcome.ok, outcome.missing
+    assert outcome.not_completed == ["codex_gate status=chain_exhausted"]
+
+
 def test_an_exhausted_chain_without_its_record_is_missing(state_dir: Path) -> None:
     entry = _entry("codex_gate", request_status="chain_exhausted", takeover_path=["codex_gate"])
     outcome = verify_report(_report(entry), pr_number=7, seats=["codex_gate"], state_dir=state_dir)

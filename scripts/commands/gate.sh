@@ -88,6 +88,7 @@ except Exception as e:
 # enforces (OI-1265).
 gate_map = {
     'codex_gate_required': 'codex_gate',
+    'kimi_gate_required': 'kimi_gate',
     'ci_green_required': 'ci_gate',
 }
 result = []

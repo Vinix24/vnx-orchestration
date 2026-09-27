@@ -53,11 +53,13 @@ def _load_required_gates() -> List[str]:
         with open(config_path, encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
         checks = cfg.get("checks", {})
-        # Collect gate-style checks at level >= 2 (soft/hard mandatory)
+        # Collect gate-style checks at level >= 2 (soft/hard mandatory). Both
+        # standing subscription seats are recognised here — codex_gate_required
+        # and kimi_gate_required — each independently dialled per project.
         gates = []
         for name, spec in checks.items():
             level = int(spec.get("level", 0))
-            if level >= 2 and name == "codex_gate_required":
+            if level >= 2 and name in ("codex_gate_required", "kimi_gate_required"):
                 # Map check name → gate stack name
                 gates.append(name.replace("_required", ""))
         return gates if gates else _DEFAULT_GATE_STACK
