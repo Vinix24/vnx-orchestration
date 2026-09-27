@@ -1,10 +1,13 @@
 # Unified Supervisor — Operator Guide
 
-> **Prerequisites:** SUP-PR1 (`cleanup_worker_exit`), SUP-PR2 (`lease_sweep`),
-> SUP-PR3 (`runtime_supervise`), SUP-PR4 (`receipt_processor_supervisor`) must
-> all be merged before enabling `VNX_SUPERVISOR_MODE=unified`.
+> SUP-PR1 (`cleanup_worker_exit`), SUP-PR2 (`lease_sweep`), SUP-PR3
+> (`runtime_supervise`), and SUP-PR4 (`receipt_processor_supervisor`) are all
+> on `main`. There is no remaining prerequisite before enabling
+> `VNX_SUPERVISOR_MODE=unified` per project.
 >
-> Background: see `claudedocs/2026-04-29-unified-supervisor-research.md`.
+> Background: the original research note lived at
+> `claudedocs/2026-04-29-unified-supervisor-research.md`; `claudedocs/` is
+> gitignored and that file never shipped in the repo.
 
 ---
 
@@ -174,7 +177,7 @@ nohup bash scripts/dispatcher_supervisor.sh \
 Symptom: `LEASE_SWEEP_ERROR` entries in `.vnx-data/logs/lease_sweep.log`.
 
 Check that `scripts/lib/lease_sweep.py` and `scripts/lib/project_root.py` are
-present (require SUP-PR2 merged). Then inspect the error detail:
+present. Then inspect the error detail:
 
 ```bash
 tail -40 .vnx-data/logs/lease_sweep.log
@@ -279,4 +282,5 @@ Logs: `.vnx-data/logs/dispatcher_supervisor.log`,
 `.vnx-data/logs/lease_sweep.log`,
 `.vnx-data/logs/objective_reconcile.log`.
 
-Full design rationale: `claudedocs/2026-04-29-unified-supervisor-research.md`.
+Full design rationale: private research note, not shipped in the repo (see the
+note at the top of this file).

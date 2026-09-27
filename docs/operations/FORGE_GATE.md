@@ -1,6 +1,6 @@
 # FORGE_GATE.md — vnx-gate: van lokale review-poort naar afgedwongen check-run
 
-Operator-runbook voor golf B (`gate-enforcement-to-forge`). Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md` (deliverables B4, OP-B3, B5). Doel: GitHub weigert elke merge naar `main` zonder een gepubliceerd poortoordeel op exact de PR-head, ook een kale `gh pr merge`, ook van de operator zelf.
+Operator-runbook voor golf B (`gate-enforcement-to-forge`). Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md` (deliverables B4, OP-B3, B5). Privé planningsdocument: `claudedocs/` is gitignored en staat niet in de repo. Doel: GitHub weigert elke merge naar `main` zonder een gepubliceerd poortoordeel op exact de PR-head, ook een kale `gh pr merge`, ook van de operator zelf.
 
 ## 0. Wat bestaat er vandaag, wat nog niet (gemeten 2026-09-08)
 
@@ -11,7 +11,7 @@ Dit runbook beschrijft twee lagen.
 | **1. Branch-protection als YAML** (B1, #1807, **gemerged**) — `scripts/forge/branch_protection.yaml`, `scripts/forge/apply_branch_protection.py`, `scripts/lib/forge_protection_drift.py`, de preflight in `scripts/pr_merge.py`, de doctor-check in `scripts/vnx_doctor.py` | **Op `main`.** | Geverifieerd tegen elk script zijn eigen `--help`, en tegen een echte `gh api`-meting op de repo (zie §4). |
 | **2a. Forge-client** (`scripts/lib/forge_check_run.py`) | **Op `main`** (B2a, #1808, plus de keychain-fix #1813). Bracht ook het `app:`-blok uit §3 en de schema-aanpassing in `forge_protection_drift.py` mee. Het App ID staat inmiddels ingevuld: `4869217`, slug `vnx-gate`. | De client heeft **geen CLI**, alleen library-functies — de toets in §2 is dus een directe library-aanroep. |
 | **2b. Publicatie + de samenvattende check** (B2b #1812, B3 #1814) — `scripts/lib/forge_gate_publisher.py`, aangeroepen door de gate-recorder na elk schijf-record | **Op `main`.** De afbeelding van poortstatus naar `conclusion`, de `--pr`-CLI (`publish`, `review`, `pending-preview`) en `vnx-gate/review` als samenvattend oordeel bestaan en zijn getest. | Geverifieerd tegen de broncode op `main` en tegen `pending-preview`, dat niets schrijft en niets opvraagt. |
-| **3. `vnx-gate/review` als VEREISTE check** (OP-B3) | **Half.** De entry staat sinds OP-B3 in `required_status_checks.checks` van `branch_protection.yaml` op `main` (15 checks), gebonden aan app_id `4869217`. De **apply is nog niet gedraaid**: de live bescherming vereist nog 14 checks. Zie §5 — tussen die twee momenten staat de merge-deur dicht. | §5. |
+| **3. `vnx-gate/review` als VEREISTE check** (OP-B3) | **Gedaan.** De entry staat sinds OP-B3 in `required_status_checks.checks` van `branch_protection.yaml` op `main` (15 checks), gebonden aan app_id `4869217`. De apply is gedraaid: gemeten 2026-09-27 via `gh api repos/Vinix24/vnx-orchestration/branches/main/protection/required_status_checks` vereist de live bescherming ook 15 checks, met `vnx-gate/review` erbij. | §5 (historisch, de migratie-window is voorbij). |
 | **4. Terugweg één keer live bewijzen** (B5) | **Niet gedaan.** | §7 beschrijft de stappen; B5 voert ze één keer uit en quoteert de API-feiten. |
 
 **Meetcorrectie op de aanname achter §4:** de dispatch-instructie voor dit runbook noemt de eerste apply als het moment waarop de bescherming ontstaat. Gemeten op 2026-09-07 via `gh api repos/Vinix24/vnx-orchestration/branches/main/protection` (+ `.../required_signatures`, `repos/{owner}/{repo}`, `.../rulesets`) staat de bescherming al live en komt hij op elk veld overeen met `branch_protection.yaml` (14/14 checks, `enforce_admins: true`, `allow_auto_merge: false`, `required_signatures: false`, 0 rulesets) — precies zoals de YAML's eigen kopregel zegt ("Measured live ... on 2026-09-07"). Een `--dry-run` bevestigt dit: `verdict: DRY-RUN, changed: False, diffs: []`. De eerste apply-run is dus vandaag een **no-op**: hij schrijft de eerste receipt en bewijst idempotentie, hij legt de bescherming niet voor het eerst vast — die staat er al.
@@ -188,7 +188,7 @@ Herken dus `vnx-gate/review` in een `SKIPPED_UNVERIFIED`-regel als "publiceer he
 
 ## 6. Werkgevolg voor iedereen, na OP-B3
 
-Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait — ook een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → de standaardpoort `codex_gate` (of de opvolger in de overnameketen) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
+Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait — ook een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → de standaard review-stack `codex_gate,kimi_gate` (of de opvolger in de overnameketen: codex → kimi → glm → deepseek) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
 
 ### Wie publiceert wat, en wanneer
 

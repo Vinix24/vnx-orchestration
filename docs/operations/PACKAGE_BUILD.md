@@ -1,7 +1,9 @@
 # PACKAGE_BUILD — vnx-orchestration operator runbook
 
-Covers local development builds, editable installs, and test execution for the
-`vnx-orchestration` pip package (Wave 2).
+Covers local development builds, editable installs, and packaging smoke tests
+for the `vnx-orchestration` pip package. Published to PyPI 2026-07-02
+(`pip install vnx-orchestration`, `v1.0.0`); this runbook covers building and
+verifying a wheel locally, not the publish step itself.
 
 ## Prerequisites
 
@@ -18,22 +20,25 @@ pip install build pytest
 
 ## Build a wheel locally
 
+The package builds from the repo root. There is no separate `dist/`
+source subdirectory:
+
 ```bash
-cd dist/vnx-orchestration
-python -m build --wheel
+python -m build --wheel .
 ```
 
-Output appears in `dist/vnx-orchestration/dist/*.whl`.
+Output appears in `dist/*.whl` at the repo root (gitignored).
 
-The version string is derived from `setuptools_scm` via the nearest git tag.
-In a clean checkout without a matching tag, `fallback_version = "1.0.0-rc1.dev0"`
-is used.
+The version string is single-sourced from the root `VERSION` file
+(`[tool.setuptools.dynamic] version = {file = ["VERSION"]}` in
+`pyproject.toml`), which `vnx_cli.__version__` also reads back at runtime.
+There is no `setuptools_scm` fallback version.
 
 ## Editable install (development mode)
 
 ```bash
 # From repo root:
-pip install -e dist/vnx-orchestration
+pip install -e .
 ```
 
 Editable installs link directly to the source tree, so code changes take effect
@@ -42,41 +47,39 @@ immediately without reinstalling.
 ## Verify imports and entry point
 
 ```bash
-python -c 'import vnx_core; import vnx_cli; print(vnx_core.__version__)'
+python -c 'import vnx_cli; print(vnx_cli.__version__)'
 vnx --version
 ```
 
-## Run smoke tests
+## Packaging smoke tests
+
+Two scripts exercise the built wheel end to end, each building it from repo
+root if no wheel path is supplied:
 
 ```bash
-cd dist/vnx-orchestration
-python -m pytest tests/test_smoke.py -v
+# Profile D (CI): wheel hygiene (no __pycache__/.pyc), pip-install-mode
+# path resolution (catches hardcoded Path(__file__).parents[N] regressions)
+bash scripts/ci/pip_install_smoke.sh
+
+# Fresh-venv functional smoke: vnx --version, vnx doctor, VNX_HOME
+# resolution into site-packages, pip-native state layout in a pristine HOME
+bash scripts/test_wheel_install.sh
 ```
 
-Expected output (Phase 0a):
-
-```
-PASSED tests/test_smoke.py::test_vnx_core_import
-PASSED tests/test_smoke.py::test_vnx_cli_import
-PASSED tests/test_smoke.py::test_vnx_cli_runs
-PASSED tests/test_smoke.py::test_vnx_cli_version_flag
-4 passed
-```
-
-## Phase roadmap
-
-| Phase | Scope |
-|-------|-------|
-| **0a** (this file) | Package skeleton — empty `vnx_core` / `vnx_cli`, smoke tests, build validation |
-| **1** | Migrate `scripts/lib/` core modules into `vnx_core`; wire `dependencies` in pyproject.toml |
-| **2** | Shim layer in `scripts/lib/` imports from `vnx_core` (backward-compat bridge) |
-| **3** | PyPI publish via CI; versioned releases from git tags |
+`scripts/ci/pip_install_smoke.sh` runs in CI as Profile D (`.github/workflows/vnx-ci.yml`).
 
 ## Notes
 
-- `dist/vnx-orchestration/dist/` (wheel output) is gitignored via
-  `dist/vnx-orchestration/.gitignore`. Do not commit built artifacts.
-- The `[tool.setuptools_scm] root = "../.."` setting anchors version detection to
-  the repository root, not the package subdirectory.
-- Do not add real runtime dependencies to `pyproject.toml` until Phase 1 module
-  migration; premature deps bloat the install surface.
+- `dist/` (wheel output) is gitignored at the repo root. Do not commit built
+  artifacts.
+- Two distributions ship from the same wheel: `vnx_cli` (the importable
+  console-script package) and `vnx_orchestration` (a PEP 420 namespace package
+  mapped onto the repo root via `[tool.setuptools.package-dir]`, carrying the
+  engine trees `scripts/`, `schemas/`, `skills/`, `templates/`, `configs/`,
+  `hooks/`, `examples/`, `agents/` as package data). The engine is loaded by
+  path injection (`sys.path.insert` on `scripts/lib`), not imported as
+  `vnx_orchestration.scripts.*`.
+- `[tool.setuptools.exclude-package-data]` strips `__pycache__`, `.pyc`, logs,
+  tests, and the benchmark suite (`scripts/benchmark/`, `scripts/benchmarks/`,
+  `scripts/llm_benchmark.py`) from the wheel: dev/research tooling that stays
+  repo-only.

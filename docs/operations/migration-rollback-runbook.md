@@ -1,6 +1,10 @@
 # Migration Rollback Runbook
 
-Wave 2a safety companion. Use when a schema migration must be reversed during the rc2/rc3 rollout window or after an accidental apply.
+Wave 2a safety companion. Covers the rollback chain for migrations 0010
+through 0021 only. The schema has since grown to 0033 (13 further migrations,
+2 with their own `_down.sql`), which this runbook does not cover. Use when one
+of the 0010-0021 migrations must be reversed, or after an accidental apply of
+one of them.
 
 All DB restores use atomic pattern (temp file + verify + mv) to prevent corruption on interrupted restore.
 
@@ -8,7 +12,7 @@ All DB restores use atomic pattern (temp file + verify + mv) to prevent corrupti
 
 ## When to roll back
 
-- A new migration introduced a UNIQUE or NOT NULL constraint that breaks rc2-era writes.
+- A migration in the 0010-0021 chain introduced a UNIQUE or NOT NULL constraint that breaks pre-migration writes.
 - A central DB migration was applied out of order (schema_version mismatch detected by `scripts/lib/schema_versioning.py`).
 - Data corruption is detected after `apply_migration_0010 / 0015 / 0016` ran against a central DB.
 - Operator decision: wave rollback to the previous release.
@@ -424,6 +428,10 @@ Expected: one `service_paused` event and one `service_resumed` event.
 ---
 
 ## Open Items
+
+None of the three below is filed in the open-items ledger
+(`scripts/open_items_manager.py`): they exist only as this list. File them
+there before treating this section as the source of truth:
 
 - OI-ROLLBACK-1: Wire `--rollback-fts5` flag into `migrate_to_central_vnx.py` for
   Python-driven 0016 rollback (current _down.sql drops FTS5 data without repopulation).

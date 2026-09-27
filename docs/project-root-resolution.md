@@ -14,7 +14,7 @@ export VNX_CANONICAL_ROOT=/Users/me/project-a
 
 # Then cd into project-B and run a VNX script:
 cd /Users/me/project-b
-python3 scripts/dispatcher.py   # resolves to project-A's data dir — wrong!
+python3 scripts/health_check.py   # resolves to project-A's data dir — wrong!
 ```
 
 ## Solution
@@ -186,14 +186,14 @@ Pass `caller_file=__file__` (Python) or `"${BASH_SOURCE[0]}"` (bash). Without a 
 
 ```bash
 cd /Users/me/my-project
-python3 scripts/dispatcher.py          # resolves to /Users/me/my-project
+python3 scripts/health_check.py          # resolves to /Users/me/my-project
 ```
 
 ### Running a script from a worktree
 
 ```bash
 cd /Users/me/my-project-wt            # git worktree of my-project
-python3 scripts/dispatcher.py          # resolves to /Users/me/my-project-wt
+python3 scripts/health_check.py          # resolves to /Users/me/my-project-wt
 ```
 
 Both cases produce the correct `.vnx-data/` path for their respective tree.
