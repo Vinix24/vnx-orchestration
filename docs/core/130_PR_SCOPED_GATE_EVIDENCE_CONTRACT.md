@@ -157,6 +157,7 @@ Gate results use two different fields for their verdict depending on the provide
 |----------|--------------|--------|
 | Codex | `verdict` | `approve`, `reject`, `pass`, `fail` |
 | Claude GitHub | `status` | `pass`, `fail`, `not_configured` |
+| Gemini (historical, retired 2026-09-26 — ADR-008 amendment) | `status` | `pass`, `fail` |
 
 **GE-7 (Gate Evidence Rule 7)**: Verdict resolution MUST check both `status` and `verdict` fields. The effective verdict is: `result.get("status") or result.get("verdict")`. This ensures Codex results (which use `verdict`) are subject to the same report_path enforcement as results that use `status`.
 

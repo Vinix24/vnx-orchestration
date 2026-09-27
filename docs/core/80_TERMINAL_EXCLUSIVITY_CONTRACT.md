@@ -369,8 +369,8 @@ A PR is out of scope for terminal exclusivity if it:
 - [ ] Contract requires fail-closed behavior on runtime or lease uncertainty (Section 3: FC-1, FC-2, FC-3)
 - [ ] Contract blocks silent second dispatch to an already occupied terminal (Section 3: FC-4, Section 5.1)
 - [ ] Contract defines retry or requeue behavior for blocked dispatch attempts (Section 4)
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+- [ ] `codex_gate` receipt and normalized report exist with no unresolved blocking findings
+- [ ] `kimi_gate` receipt and normalized report exist with no unresolved blocking findings
 
 ---
 

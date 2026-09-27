@@ -81,7 +81,7 @@ attestation gate ships in staged-advisory mode (reports, never blocks) — see
 
 ### How they work
 
-1. When a review gate is required (e.g., `codex_review`, `kimi_review`, `ci_green`), a lock file is written:
+1. When a review gate is required (e.g., `codex_gate`, `kimi_gate`, `ci_gate`), a lock file is written:
    ```
    .vnx-data/state/gate_locks/<gate-id>.lock
    ```
@@ -101,8 +101,8 @@ attestation gate ships in staged-advisory mode (reports, never blocks) — see
 ### Domain-agnostic design
 
 Gate locks are intentionally domain-agnostic. The same mechanism works for:
-- Code quality gates (`codex_review.lock`, `kimi_review.lock`)
-- CI status (`ci_green.lock`)
+- Code quality gates (`codex_gate.lock`, `kimi_gate.lock`)
+- CI status (`ci_gate.lock`)
 - Business compliance gates (`legal_review.lock`, `gdpr_check.lock`)
 - Any future gate type — no code changes required to add a new gate domain.
 

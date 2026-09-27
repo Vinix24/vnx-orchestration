@@ -371,8 +371,8 @@ elif retry_decision == "auto_retry":
 - [x] Contract defines unique failure codes for all delivery substeps (Section 2: 22 codes across 3 phases + 3 cleanup codes)
 - [x] Contract defines structured fields required in logs and audit artifacts (Section 3: event schema, reason format, audit enrichment, annotation mapping, cleanup audit)
 - [x] Contract defines retryable vs non-retryable semantics by failure type (Section 4: per-code retry decision matrix with 3 decisions)
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+- [ ] `codex_gate` receipt and normalized report exist with no unresolved blocking findings
+- [ ] `kimi_gate` receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
