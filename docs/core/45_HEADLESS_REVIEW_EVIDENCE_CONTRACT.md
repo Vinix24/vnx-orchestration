@@ -7,6 +7,7 @@ This contract applies to headless review providers used for governance evidence,
 - `codex_gate`
 - `kimi_gate`
 - `glm_gate`
+- `deepseek_gate`
 - `claude_github_optional`
 
 `gemini_review` is retired (operator decision 2026-09-26) and can no longer be requested. Result records written before then keep that gate name and stay readable as history.
@@ -37,7 +38,7 @@ Each headless review job MUST be bound to all of the following:
 
 | Field | Required | Description |
 |---|---|---|
-| `gate` | Yes | One of `codex_gate`, `kimi_gate`, `glm_gate`, `claude_github_optional` |
+| `gate` | Yes | One of `codex_gate`, `kimi_gate`, `glm_gate`, `deepseek_gate`, `claude_github_optional` |
 | `pr_id` | Yes | Canonical PR id such as `PR-3` |
 | `branch` | Yes | Branch under review |
 | `review_contract_path` | Yes | Path to the canonical review contract input |

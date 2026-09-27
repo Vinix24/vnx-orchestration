@@ -36,7 +36,7 @@ The contract exists so that:
 |--------|-----------------|-------------------|
 | Scope model | Git worktree | Folder |
 | Review policy | Every PR reviewed by gate | Review-by-exception |
-| Gate requirement | Codex required | No required gates (opt-in) |
+| Gate requirement | Codex + Kimi required | No required gates (opt-in) |
 | Closure authority | Human only | Manager may close (with audit) |
 | Policy mutation | Blocked | Blocked |
 | Evidence retention | 30 days | 14 days |
@@ -54,7 +54,7 @@ Business-light dispatches are **not** reviewed by quality gates by default. Inst
    - The dispatch touches a path listed in `review_required_paths` in the scope config
    - An operator manually requests review
    - A recurrence signal (from governance feedback loop) flags the pattern
-3. **Exception review**: When triggered, the dispatch is held and routed to a gate (Codex or operator) before closure.
+3. **Exception review**: When triggered, the dispatch is held and routed to a gate (Codex, Kimi, or operator) before closure.
 
 ### 2.3 Closure Rules
 

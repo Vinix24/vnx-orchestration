@@ -76,10 +76,11 @@ A provider lane for non-review work. Gemini is not a reviewer: the operator
 retired it as one on 2026-09-26, after a measurement of one `gemini_review`
 record ever and no verdict among them (its binary was never on PATH). The
 review stack is codex plus kimi on subscription, with glm and deepseek only as
-takeover fallback. `gemini_review` is no longer a registered gate name, so a
-stack, a takeover chain or a dispatch spec that names it is refused, and
-existing `gemini_review` result records stay readable as history
-(`dispatch_spec.RETIRED_GATE_NAMES`).
+takeover fallback. `gemini_review` is no longer a registered gate name
+(`dispatch_spec.RETIRED_GATE_NAMES`): a `VNX_DEFAULT_REVIEW_STACK` that still
+carries it drops the name with a warning, while a takeover chain or a
+dispatch spec's declared gate that names it is refused outright. Existing
+`gemini_review` result records stay readable as history.
 
 ### kimi
 

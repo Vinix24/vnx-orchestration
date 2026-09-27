@@ -1,4 +1,13 @@
-# Gemini Vertex AI Routing — Operator Runbook
+# Gemini Vertex AI Routing — Operator Runbook (retired)
+
+**Retired 2026-09-26.** `gemini_review` is no longer a registered gate
+(`dispatch_spec.RETIRED_GATE_NAMES`); the operator decision was "Gemini is no
+longer a reviewer." Nothing in VNX can request a `gemini_review` gate run
+anymore, so there is no live review quota to route through Vertex. This
+runbook is kept for historical reference only — do not follow it to set up
+review-gate quota routing.
+
+The rest of this document describes the pre-retirement setup, unchanged.
 
 Use this guide when the Gemini API quota is exhausted (or to pre-emptively route
 reviews through a higher-tier quota) via Vertex AI.
