@@ -17,7 +17,7 @@ dispatch's ``--dispatch-paths``) is resolved via
 ``match_file_write_scope`` as an additional, ANDed constraint — a dispatch
 can only narrow the role's scope, never widen it.
 
-Feasibility proven by docs/investigations/spike-worker-scope-hook-feasibility.md
+Feasibility proven by docs/_archive/investigations/spike-worker-scope-hook-feasibility.md
 (E1-E4): PreToolUse hooks fire under --dangerously-skip-permissions, worktree-
 local settings are honored via cwd-based discovery, and config live-reloads.
 
