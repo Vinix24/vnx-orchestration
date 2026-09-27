@@ -229,7 +229,7 @@ def test_contract_hash_byte_equal_to_existing_route_for_same_contract(tmp_path, 
     # via the SAME function the existing (codex_gate) route calls — gate name
     # only affects the fallback branch (no "prompt" key), so a different gate
     # name here still proves it is the same hash for the same contract.
-    prompt = kimi_gate._build_prompt(_FAKE_DIFF, pr)
+    prompt = kimi_gate._build_prompt(_FAKE_DIFF, pr, gate_lane_contract.max_diff_chars("kimi_gate"))
     existing_route_hash = gate_artifacts._compute_contract_hash({"prompt": prompt}, "codex_gate")
 
     assert record["contract_hash"] != ""

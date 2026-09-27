@@ -68,6 +68,11 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Receipt hash-chain + signed attestation + evidence-bound merge gate. "
         "SURFACED here; enforcement wiring deferred."
     ),
+    "harness-lane-review-gates": (
+        "Per-gate diff-char cap for the harness-lane review gates "
+        "(glm_gate/kimi_gate/deepseek_gate), read at runtime by "
+        "gate_lane_contract.max_diff_chars() (OI-1874)."
+    ),
     "receipt-hash-chain": "Tamper-evident NDJSON hash-chain (ADR-029).",
     "signed-attestation": "SSH-signed PR attestation manifests (ADR-027).",
     "evidence-bound-gate": "D3 evidence-bound merge gate.",
@@ -123,6 +128,7 @@ _ROW_ORDER: List[str] = [
     "zero-llm-injection",
     "dispatch-plan",
     "test-suite",
+    "harness-lane-review-gates",
     # PARK-with-trigger / CUT
     "migration-mechanisms",
     "within-db-tenancy",

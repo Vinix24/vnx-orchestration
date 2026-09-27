@@ -10,6 +10,7 @@ object, so ``is`` fails and the copy can no longer go unnoticed.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -107,6 +108,41 @@ def test_model_timeout_and_diff_cap_are_one_source():
     assert gate_runner._harness_lane_max_diff_chars is gate_lane_contract.max_diff_chars
 
 
+@pytest.fixture
+def isolate_config_runtime(monkeypatch):
+    """kimi_gate finding (round 2): ``max_diff_chars`` reads through
+    ``config_runtime.get``, whose ``autowire()`` binds ``config_registry``'s
+    DB resolver to whatever project this process's environment /
+    ``vnx_paths.resolve_paths()`` finds -- on this repo's own dev machine
+    that is a real, already-populated ``project_config``. ``config_registry.
+    get``'s precedence puts that DB layer ABOVE env vars (see
+    ``config_registry.py``'s ``get()``), so deleting the env vars alone does
+    not stop a stored operator value from winning. Mirror ``tests/
+    test_config_runtime.py``'s own isolation: block the canonical resolver
+    so autowire can never find a real store, and reset the DB layer around
+    each test.
+
+    Module-level and importable (OI-1874 r3) so any test file that dispatches
+    a real ``glm_gate``/``kimi_gate`` run and needs its ``max_diff_chars``
+    resolution held to a known value can request this fixture instead of
+    re-deriving the same env-var/DB isolation -- see its reuse in
+    ``tests/test_oi1851_truncated_gate_not_a_pass.py``.
+    """
+    for key, _default in gate_lane_contract.DIFF_CHAR_CONFIG.values():
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv(f"VNX_OVERRIDE_{config_registry._bare(key)}", raising=False)
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {})
+    config_runtime._wired_for.clear()
+    config_registry.set_db_resolver(None)
+    config_registry.set_default_project_id(None)
+    yield
+    config_runtime._wired_for.clear()
+    config_registry.set_db_resolver(None)
+    config_registry.set_default_project_id(None)
+
+
 class TestMaxDiffChars:
     """OI-1874: the per-gate diff-char cap resolver.
 
@@ -120,32 +156,10 @@ class TestMaxDiffChars:
     """
 
     @pytest.fixture(autouse=True)
-    def _isolate_config_runtime(self, monkeypatch):
-        """kimi_gate finding (round 2): ``max_diff_chars`` reads through
-        ``config_runtime.get``, whose ``autowire()`` binds
-        ``config_registry``'s DB resolver to whatever project this process's
-        environment / ``vnx_paths.resolve_paths()`` finds -- on this repo's
-        own dev machine that is a real, already-populated ``project_config``.
-        ``config_registry.get``'s precedence puts that DB layer ABOVE env
-        vars (see ``config_registry.py``'s ``get()``), so deleting the env
-        vars alone (as the tests below do) does not stop a stored operator
-        value from winning. Mirror ``tests/test_config_runtime.py``'s own
-        isolation: block the canonical resolver so autowire can never find a
-        real store, and reset the DB layer around each test.
-        """
-        for key, _default in gate_lane_contract.DIFF_CHAR_CONFIG.values():
-            monkeypatch.delenv(key, raising=False)
-            monkeypatch.delenv(f"VNX_OVERRIDE_{config_registry._bare(key)}", raising=False)
-        monkeypatch.delenv("VNX_STATE_DIR", raising=False)
-        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
-        monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {})
-        config_runtime._wired_for.clear()
-        config_registry.set_db_resolver(None)
-        config_registry.set_default_project_id(None)
-        yield
-        config_runtime._wired_for.clear()
-        config_registry.set_db_resolver(None)
-        config_registry.set_default_project_id(None)
+    def _isolate_config_runtime(self, isolate_config_runtime):
+        """Apply the shared isolation fixture automatically for every test in
+        this class -- the class used to own this isolation directly; it now
+        just requests the module-level, reusable fixture above."""
 
     def test_stored_project_config_value_overrides_but_other_gates_keep_defaults(
         self, tmp_path, monkeypatch
@@ -215,6 +229,101 @@ class TestMaxDiffChars:
             entry = config_registry.CONFIG_REGISTRY.get(key)
             assert entry is not None, f"{key} (for {gate}) is missing from CONFIG_REGISTRY"
             assert int(entry.default) == default, f"{key} default drifted from DIFF_CHAR_CONFIG"
+
+
+def _run_gate_capturing_prompt(module, gate: str, tmp_path, monkeypatch, *, diff: str, pr: str):
+    """Drive ``module.main()`` end to end (like ``glm_gate``/``kimi_gate``'s own
+    CLI entrypoint) and hand back both the recorded terminal result AND the
+    literal prompt text the governed dispatcher received — the only way to
+    check the record's ``diff_truncated``/``diff_limit`` against what the
+    model actually saw, rather than trusting the two agree.
+    """
+    data_dir = tmp_path / f"data-{gate}"
+    captured: dict = {}
+
+    def _make(*_a, **_k):
+        def _dispatch(provider, model_arg, instruction, dispatch_id):
+            captured["prompt"] = instruction
+            reports = data_dir / "unified_reports"
+            reports.mkdir(parents=True, exist_ok=True)
+            report = (
+                "Reviewed the diff.\nNo issues found.\n\n"
+                "```json\n"
+                '{"verdict": "pass", "findings": [], "residual_risk": null}\n'
+                "```\n"
+            )
+            (reports / f"{dispatch_id}.md").write_text(report, encoding="utf-8")
+            return report
+        return _dispatch
+
+    monkeypatch.setattr(module, "_get_diff", lambda pr_arg, diff_file: diff)
+    monkeypatch.setattr(module, "_make_default_dispatcher", _make)
+    monkeypatch.setattr(module, "get_pr_head_branch", lambda pr_number: "feature/oi1874-r3")
+    monkeypatch.setattr(module, "get_pr_head_sha", lambda pr_number: "cafedeadbeef")
+    module.main(["--pr", pr, "--data-dir", str(data_dir)])
+    results_dir = data_dir / "state" / "review_gates" / "results"
+    record = json.loads((results_dir / f"pr-{pr}-{gate}.json").read_text(encoding="utf-8"))
+    return record, captured["prompt"]
+
+
+def test_resolver_read_once_per_run_prompt_and_recorded_cap_never_disagree(
+    tmp_path, monkeypatch, isolate_config_runtime,
+):
+    """OI-1874 r3 regression: ``glm_gate.main()``/``kimi_gate.main()`` used to
+    call ``gate_lane_contract.max_diff_chars`` TWICE per run — once (via
+    ``gate_depth.diff_coverage``) to compute the ``execution_depth`` recorded
+    on the terminal result, and again inside ``_build_prompt`` to build the
+    actual prompt handed to the model. ``max_diff_chars`` reads through
+    ``config_runtime.get``, which can legitimately return a different value
+    on the second call if a project-config write (or an operator override)
+    races the run — the two calls are not guaranteed to agree just because
+    they happen a few lines apart in the same process.
+
+    Simulate exactly that race: monkeypatch each gate's OWN ``max_diff_chars``
+    alias (the object identity ``test_model_timeout_and_diff_cap_are_one_source``
+    pins above) to hand back a LOW cap on its first call and a much higher one
+    on any further call, over a diff sized to sit strictly between the two.
+    Red on the pre-fix code (two calls: coverage sees the low cap and books
+    ``diff_truncated=True``, but the prompt is then built with the high cap
+    and is NOT actually truncated — the assertion below catches exactly that
+    disagreement). Green once each gate resolves the cap exactly once per run
+    and reuses the same value for both the coverage record and the prompt.
+    """
+    monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
+    monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+
+    from gate_prompt import TRUNCATION_NOTICE
+
+    low_cap = 2000
+    high_cap = 999_000
+    # Sized so a resolution at low_cap truncates it and a resolution at
+    # high_cap does not — the only way the two caps produce different prompts.
+    head = "diff --git a/scripts/head.py b/scripts/head.py\n" + "+x = 1\n" * 50
+    tail_line = "+y = 2\n"
+    tail = "diff --git a/scripts/tail.py b/scripts/tail.py\n" + tail_line * (
+        (low_cap // len(tail_line)) + 100
+    )
+    diff = head + tail
+    assert len(head) < low_cap < len(diff.strip()) < high_cap
+
+    for module, gate in ((glm_gate, "glm_gate"), (kimi_gate, "kimi_gate")):
+        calls = iter([low_cap, high_cap, high_cap, high_cap])
+        monkeypatch.setattr(module, "max_diff_chars", lambda _gate, _calls=calls: next(_calls))
+
+        record, prompt = _run_gate_capturing_prompt(
+            module, gate, tmp_path, monkeypatch, diff=diff, pr="1874",
+        )
+        depth = record["execution_depth"]
+        prompt_was_truncated = TRUNCATION_NOTICE in prompt
+
+        assert prompt_was_truncated == depth["diff_truncated"], (
+            f"{gate}: the prompt's actual truncation ({prompt_was_truncated}) "
+            f"disagrees with the recorded diff_truncated ({depth['diff_truncated']}) "
+            "-- max_diff_chars was read more than once for this run and the "
+            "resolver's return value changed between the two calls"
+        )
+        if prompt_was_truncated:
+            assert depth["diff_limit"] == low_cap
 
 
 def test_model_env_var_names_come_from_the_shared_map():

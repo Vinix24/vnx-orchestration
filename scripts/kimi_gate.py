@@ -169,7 +169,7 @@ DEFAULT_TIMEOUT = TIMEOUT_SECONDS
 _VERDICT_CONTRACT = VERDICT_CONTRACT
 
 
-def _build_prompt(diff_text: str, pr: str) -> str:
+def _build_prompt(diff_text: str, pr: str, max_chars: int) -> str:
     """Build the review prompt with the diff as delimited, untrusted DATA.
 
     OI-1442, identical defect and identical fix to ``glm_gate._build_prompt``:
@@ -177,13 +177,20 @@ def _build_prompt(diff_text: str, pr: str) -> str:
     sits in an explicitly delimited block with the instruction restated after
     it. ``_VERDICT_CONTRACT`` is the shared gate_lane_contract source (C6
     step 3).
+
+    ``max_chars`` is resolved ONCE by the caller (``main()``) and passed in —
+    same fix, same reason as ``glm_gate._build_prompt`` (OI-1874 r3): a second
+    ``max_diff_chars`` call here could read a config value that changed since
+    the caller's own ``gate_depth.diff_coverage`` call, letting the prompt's
+    actual truncation and the recorded ``diff_truncated``/``diff_limit``
+    disagree.
     """
     return build_review_prompt(
         gate_name="kimi_gate",
         pr=pr,
         diff_text=diff_text,
         verdict_contract=_VERDICT_CONTRACT,
-        max_chars=max_diff_chars("kimi_gate"),
+        max_chars=max_chars,
     )
 
 
@@ -545,7 +552,11 @@ def main(argv: "list[str] | None" = None) -> int:
         # per-gate cap (OI-1874: gate_lane_contract.max_diff_chars) gate_prompt.
         # wrap_untrusted_diff applies to the raw (pre-strip) text. OI-1851: plus
         # the cap and the cut files.
-        coverage = gate_depth.diff_coverage(diff, max_diff_chars("kimi_gate"))
+        # OI-1874 r3: resolved ONCE — see glm_gate.py's identical fix. `diff_cap`
+        # is the single source passed to both `gate_depth.diff_coverage` and
+        # `_build_prompt` below.
+        diff_cap = max_diff_chars("kimi_gate")
+        coverage = gate_depth.diff_coverage(diff, diff_cap)
         execution_depth = gate_depth.single_shot_depth(
             coverage["diff_chars"], coverage["diff_truncated"],
             diff_limit=coverage["diff_limit"],
@@ -565,7 +576,7 @@ def main(argv: "list[str] | None" = None) -> int:
         # this gate's OWN role: none of the three conflicts. A role-level
         # split, not a dispatch_id string check.
         dispatcher = _make_default_dispatcher(str(base_data_dir), args.timeout, role="review-gate")
-        prompt = _build_prompt(diff, args.pr)
+        prompt = _build_prompt(diff, args.pr, diff_cap)
         # OI-1442: the deterministic half — see glm_gate's identical call site.
         # The prompt asks the model to report instruction-shaped text in the
         # diff; this scan does not depend on it having done so.

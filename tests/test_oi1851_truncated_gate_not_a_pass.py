@@ -30,6 +30,17 @@ import gate_runner
 from gate_runner import GateRunner
 from gate_status import has_complete_evidence, is_pass
 
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+# OI-1874 r3: reuse test_gate_lane_contract's config_runtime isolation fixture
+# for the two cross-gate tests below instead of copying it — env-var deletion
+# alone does not stop a real, already-populated project_config DB from
+# overriding the resolved cap on this repo's own dev machine (see that
+# fixture's own docstring).
+from test_gate_lane_contract import isolate_config_runtime  # noqa: E402,F401
+
 BRANCH = "feature/oi1851"
 HEAD_SHA = "cafedeadbeef"
 
@@ -155,7 +166,9 @@ def test_single_shot_fail_on_a_truncated_diff_stays_a_fail(standalone_gate, tmp_
     assert rc == 2
 
 
-def test_glm_gate_truncates_kimi_gate_does_not_on_the_same_diff(tmp_path, monkeypatch):
+def test_glm_gate_truncates_kimi_gate_does_not_on_the_same_diff(
+    tmp_path, monkeypatch, isolate_config_runtime,
+):
     """OI-1874, the exact PR #1936 shape: one diff, two harness-lane gates.
 
     On the OLD code (one shared MAX_DIFF_CHARS=50000) kimi_gate would have
@@ -166,8 +179,6 @@ def test_glm_gate_truncates_kimi_gate_does_not_on_the_same_diff(tmp_path, monkey
     """
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
-    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
-    monkeypatch.delenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", raising=False)
     import glm_gate
     import kimi_gate
 
@@ -189,20 +200,20 @@ def test_glm_gate_truncates_kimi_gate_does_not_on_the_same_diff(tmp_path, monkey
     assert kimi_record["status"] == "pass"
 
 
-def test_kimi_gate_prompt_carries_the_full_diff_glm_gate_truncates_it(monkeypatch):
+def test_kimi_gate_prompt_carries_the_full_diff_glm_gate_truncates_it(
+    monkeypatch, isolate_config_runtime,
+):
     """Same scenario as above, checked at the prompt level: the diff that
     actually reaches the model, not just the recorded coverage numbers.
     """
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
-    monkeypatch.delenv("VNX_GLM_GATE_MAX_DIFF_CHARS", raising=False)
-    monkeypatch.delenv("VNX_KIMI_GATE_MAX_DIFF_CHARS", raising=False)
     import glm_gate
     import kimi_gate
     from gate_prompt import TRUNCATION_NOTICE
 
-    kimi_prompt = kimi_gate._build_prompt(BIG_DIFF, "1936")
-    glm_prompt = glm_gate._build_prompt(BIG_DIFF, "1936")
+    kimi_prompt = kimi_gate._build_prompt(BIG_DIFF, "1936", KIMI_CAP)
+    glm_prompt = glm_gate._build_prompt(BIG_DIFF, "1936", GLM_CAP)
 
     assert TRUNCATION_NOTICE not in kimi_prompt
     assert BIG_DIFF in kimi_prompt  # the whole diff made it into kimi's prompt

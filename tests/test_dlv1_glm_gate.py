@@ -320,7 +320,8 @@ def test_contract_hash_byte_equal_for_same_contract_and_different_for_another(gl
     # via the SAME function the existing (codex_gate) route calls — gate name
     # only affects the fallback branch (no "prompt" key), so a different gate
     # name here still proves it is the same hash for the same contract.
-    prompt = glm_gate._build_prompt(_FAKE_DIFF, pr)
+    cap = gate_lane_contract.max_diff_chars("glm_gate")
+    prompt = glm_gate._build_prompt(_FAKE_DIFF, pr, cap)
     existing_route_hash = gate_artifacts._compute_contract_hash({"prompt": prompt}, "codex_gate")
     assert record["contract_hash"] != ""
     assert record["contract_hash"] == existing_route_hash
@@ -328,7 +329,7 @@ def test_contract_hash_byte_equal_for_same_contract_and_different_for_another(gl
     # A DIFFERENT contract must hash differently — a hasher that always
     # returns the same value would also satisfy the equality assertion
     # above, proving nothing on its own.
-    different_prompt = glm_gate._build_prompt("diff --git a/y b/y\n+different\n", pr)
+    different_prompt = glm_gate._build_prompt("diff --git a/y b/y\n+different\n", pr, cap)
     different_hash = gate_artifacts._compute_contract_hash({"prompt": different_prompt}, "codex_gate")
     assert different_hash != existing_route_hash
 
