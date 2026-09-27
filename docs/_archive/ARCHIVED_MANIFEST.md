@@ -28,3 +28,28 @@ A file reachable from `DOCS_INDEX.md`/`README.md`, directly or transitively, is 
 ## Pre-existing archive contents (prior sweeps, unchanged by this PR)
 
 40 files, moved in four earlier sweeps. Per-sweep provenance is in [`README.md`](README.md); this PR does not touch them.
+
+## Docs-verversing sweep (archived 2026-09-27, PR-4) — 22 files, operator directive
+
+Operator directive 2026-09-27: refresh all VNX documentation to the state of `main` (v1.6.6), move
+non-relevant docs to the archive, merge overlapping docs. Every row below is either a completed,
+one-off operational procedure; a runbook for a mechanism that was retired; a duplicate of an active
+doc; or an unreferenced design artifact from a feature that shipped without adopting it. None were
+rewritten — only moved, per the ADR-style rule that archived docs keep their content.
+
+| Path (now) | Path (before) | Reason |
+|---|---|---|
+| `operations/AUTONOMOUS_PRODUCTION_GUIDE.md` | `docs/operations/AUTONOMOUS_PRODUCTION_GUIDE.md` | Describes a 70-PR/24-wave autonomous execution plan sourced from a private, not-in-repo planning doc; cites scripts that never shipped (`vnx_preflight.sh`, `t0_evidence_validator.py`) and a `.claude/vnx-system/` layout that no longer exists. Its own "Current State Delta" already flags the default-lane claim as stale — the tmux-spawn lane it describes as default was removed 2026-09-18 |
+| `operations/SUPERVISOR_CUTOVER_PER_PROJECT.md` | `docs/operations/SUPERVISOR_CUTOVER_PER_PROJECT.md` | One-off per-project cutover steps for the unified supervisor, gated on "SUP-PR1..PR4 merged" — those PRs are long since on `main`. General ongoing guidance already lives in `UNIFIED_SUPERVISOR.md` |
+| `operations/GEMINI_VERTEX_ROUTING.md` | `docs/operations/GEMINI_VERTEX_ROUTING.md` | Self-marked "Retired 2026-09-26" in its own header: `gemini_review` is in `dispatch_spec.RETIRED_GATE_NAMES` and can no longer be requested, so there is no review-gate quota left to route through Vertex |
+| `operations/RECEIPT_PROCESSING_FLOW.md` | `docs/operations/RECEIPT_PROCESSING_FLOW.md` | Self-marked "HISTORICAL" in its own header: describes the deprecated `report_watcher.sh` flow. Duplicate of the active `RECEIPT_PIPELINE.md`, which documents the current `receipt_processor.sh` flow |
+| `operations/RUNTIME_LIVENESS.md` | `docs/operations/RUNTIME_LIVENESS.md` | Point-in-time liveness measurement dated 2026-07-30, with operator-machine-specific hardcoded paths (`/Users/vincentvandeth/...`) and a tmux-spawn-worker measurement for a lane removed 2026-09-18. The generated, repeatable successor for daemon liveness is `docs/core/DAEMON_LIVENESS.md` |
+| `lane-conformity-matrix.md` | `docs/lane-conformity-matrix.md` | Measurement taken at commit `6157a254` (2026-08-08); the doc's own header admits "De tmux-rijen en regelverwijzingen hieronder ... zijn niet bijgewerkt" and all four OI gates it tracked are since closed. The `claude_tmux_subscription` lane it lists as one of "exact drie lanes" was removed 2026-09-18 |
+| `operations/MULTI_MODEL_GUIDE.md` | `docs/operations/MULTI_MODEL_GUIDE.md` | A 15-line pointer stub with no content of its own; cites a CLAUDE.md heading ("Subprocess Adapter Feature Flag") that does not exist and a `docs/research/` directory that does not exist. The real per-provider lane map lives in `docs/core/PROVIDER_LANES.md` |
+| `contracts/f36-r12/rpc-schemas/*.json` (14 files) | `docs/contracts/f36-r12-rpc-schemas/*.json` | JSON-RPC schema design artifacts for the F36 R12 track. Zero references from code, tests, or any active doc (only a historical `claudedocs/` triage note mentions one filename) |
+| `contracts/f36-r12/structured-index.sql` | `docs/contracts/f36-r12-structured-index.sql` | SQL index design paired with the schemas above; same zero-reference status |
+
+Not archived by operator decision (open item): `docs/operations/TRANSCRIPT_BACKUP_ARCHIVE.md` documents a
+workstation-level (Mac Mini) backup mechanism outside VNX's runtime scope, a candidate for removal from
+this repo entirely rather than archival — left in place pending that decision. `docs/operations/TMUX_SPAWN_LANE.md`
+also stays: it is the tombstone every removed-lane reference above points to.

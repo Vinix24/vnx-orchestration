@@ -67,7 +67,6 @@ These scripts process worker outputs into auditable receipts:
 Related docs:
 
 - `docs/operations/RECEIPT_PIPELINE.md`
-- `docs/operations/RECEIPT_PROCESSING_FLOW.md`
 - `docs/core/11_RECEIPT_FORMAT.md`
 
 ## Intelligence And Governance
