@@ -96,7 +96,7 @@ Before requesting review:
 
 Your PR triggers the GitHub Actions in `.github/workflows/` — the pytest profiles, the ADR-003 "no Anthropic SDK" block, the lint-patterns (silent-except / atomic-write) gate, the dispatch-ID slug-match and trace-token gates, and a secret scan. Make those green.
 
-Separately, maintainer review uses adversarial LLM review gates (a codex/kimi diff-gate and, when run, a Gemini pass) as part of the local dispatch flow before merge. Those are **not** GitHub Actions that run on your PR — they are a maintainer-side step. Expect review feedback derived from them; respond by amending the PR.
+Separately, maintainer review uses adversarial LLM review gates (a codex/kimi diff-gate) as part of the local dispatch flow before merge. Those are **not** GitHub Actions that run on your PR — they are a maintainer-side step. Expect review feedback derived from them; respond by amending the PR.
 
 **First-time contributors:** CI requires maintainer approval before running on external PRs. This is a GitHub security policy for public repos, not a manual delay.
 

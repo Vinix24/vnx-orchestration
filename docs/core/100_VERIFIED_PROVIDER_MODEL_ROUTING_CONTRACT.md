@@ -71,7 +71,7 @@ A **required** routing constraint means: if the system cannot satisfy this requi
 **When to use required**: When the work product depends on the specific provider or model. Examples:
 - A Codex-specific code review that uses Codex-only features
 - An Opus-grade architecture analysis where Sonnet would produce insufficient depth
-- A Gemini review gate that must produce Gemini-sourced evidence
+- A `codex_gate`/`kimi_gate` review gate that must produce provider-sourced evidence (historical note: `gemini_review` held this seat before it was retired 2026-09-26 — ADR-008 amendment)
 
 ### 3.2 Advisory (Operator Warning)
 
@@ -386,7 +386,7 @@ This section maps contract rules to implementation work. It is guidance, not spe
 - Run mixed-provider scenario: dispatch requiring `codex_cli` on a `claude_code` chain
 - Run mixed-model scenario: dispatch requiring `opus` on a Sonnet-pinned terminal
 - Verify blocking, evidence recording, and receipt completeness
-- Require Gemini review gate and Codex final gate on routing-core PRs
+- Require `codex_gate` and `kimi_gate` review on routing-core PRs, with the takeover chain (`glm_gate`/`deepseek_gate`) as fallback (historical note: `gemini_review` held the second reviewer seat before it was retired 2026-09-26 — ADR-008 amendment)
 
 ---
 

@@ -318,8 +318,8 @@ A PR is out of scope for this feature if it:
 - [ ] Contract defines deterministic rules for completed, active, pending, and blocked queue state (Section 3)
 - [ ] Contract explains how projection drift is detected and surfaced (Section 4)
 - [ ] Contract blocks silent reliance on stale queue projections during active execution (Section 4.4, 4.5)
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+- [ ] `codex_gate` receipt and normalized report exist with no unresolved blocking findings
+- [ ] `kimi_gate` receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
