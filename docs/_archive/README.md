@@ -9,6 +9,10 @@ Rules:
 
 The archival rule and the full per-file provenance ledger (this sweep plus every prior sweep) live in [`ARCHIVED_MANIFEST.md`](ARCHIVED_MANIFEST.md).
 
+## docs/investigations sweep (archived 2026-09-27)
+
+Moved during the 2026-09-27 docs refresh to the v1.6.6 tree. All 11 files under `docs/investigations/` were dated triage/spike reports with zero inbound links from any live doc. See `ARCHIVED_MANIFEST.md` for the per-file table and the note on which of the three overlapping 2026-08-01 OI-existence triages (T6/T8/R1) is the latest stand. `docs/investigations/` is now empty and was removed.
+
 ## Docs bloat cleanup sweep (archived 2026-07-12)
 
 Moved as part of the framework-status-audit-and-cockpit track, PR-11 (`docs bloat cleanup by rule, not volume`).
