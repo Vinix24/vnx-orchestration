@@ -183,7 +183,8 @@ def wrap_untrusted_diff(diff_text: str, *, max_chars: int) -> str:
     """Return the diff inside the delimited untrusted-data block.
 
     ``max_chars`` caps the RAW diff, before neutralization — so the cap keeps
-    the meaning glm_gate/kimi_gate's ``MAX_DIFF_CHARS`` already had (a bound on
+    the meaning glm_gate/kimi_gate's per-gate diff-char cap (OI-1874:
+    ``gate_lane_contract.max_diff_chars``) already had (a bound on
     author-supplied bytes) rather than silently becoming a bound on the
     rewritten text. A non-positive value disables truncation: gate_runner's
     codex/gemini paths never capped their diff, and introducing a cap there

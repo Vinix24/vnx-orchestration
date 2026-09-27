@@ -37,8 +37,8 @@ from prompt_assembler import PromptAssembler, format_for_provider
 from gate_lane_contract import (  # C6 step 3: one source, three readers
     MODEL_DEFAULTS as _HARNESS_LANE_MODEL,
     TIMEOUT_SECONDS as _HARNESS_LANE_TIMEOUT_SECONDS,
-    MAX_DIFF_CHARS as _HARNESS_LANE_MAX_DIFF_CHARS,
     VERDICT_CONTRACT as _HARNESS_LANE_VERDICT_CONTRACT,
+    max_diff_chars as _harness_lane_max_diff_chars,
 )
 
 _REVIEWER_VERDICT_TEMPLATE = (
@@ -379,7 +379,7 @@ class GateRunner:
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-        elif not prompt and gate in ("glm_gate", "kimi_gate"):
+        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate"):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
         if (
             using_vertex
@@ -718,9 +718,10 @@ class GateRunner:
         ```json fence or block marker inside it, restates the instruction
         after the block, and states the deterministic pre-scan's findings
         there. ``max_chars=0`` keeps this path uncapped, as it has always been:
-        glm_gate/kimi_gate cap at their own ``MAX_DIFF_CHARS``, but starting to
+        glm_gate/kimi_gate/deepseek_gate cap at their own per-gate diff-char
+        cap (OI-1874: ``gate_lane_contract.max_diff_chars``), but starting to
         truncate large PRs here would be a behaviour change this deliverable
-        did not measure. Unlike those two gates this one does not parse its own
+        did not measure. Unlike those gates this one does not parse its own
         verdict (``gate_artifacts.materialize_artifacts`` does), so the scan's
         findings reach the reviewer through the prompt rather than by being
         merged into a result record.
@@ -792,28 +793,29 @@ class GateRunner:
 
     @staticmethod
     def _build_harness_lane_prompt(gate: str, request_payload: Dict[str, Any]) -> str:
-        """Build the diff-review prompt for a harness-lane gate (glm_gate/kimi_gate).
+        """Build the diff-review prompt for a harness-lane gate (glm_gate/kimi_gate/deepseek_gate).
 
         Mirrors ``glm_gate._build_prompt`` / ``kimi_gate._build_prompt``: the PR
         diff is delimited untrusted data (OI-1442), the verdict contract is the
-        pass|fail|blocked shape both standalone gates share verbatim, and the
-        diff is capped at the same MAX_DIFF_CHARS those scripts apply. The
+        pass|fail|blocked shape all three standalone gates share verbatim, and
+        the diff is capped at the SAME per-gate cap those scripts resolve
+        (OI-1874: ``gate_lane_contract.max_diff_chars``, keyed by ``gate`` —
+        never a fixed constant, since kimi's cap is not glm's/deepseek's). The
         prompt is what the governed dispatcher hands to the lane, so a
         harness-lane run must not silently diverge from the same gate run
         directly through its own script.
         """
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        diff_cap = _harness_lane_max_diff_chars(gate)
         # OI-1851: the one place that knows what the lane was handed.
-        request_payload["diff_coverage"] = gate_depth.diff_coverage(
-            diff_content, _HARNESS_LANE_MAX_DIFF_CHARS,
-        )
+        request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, diff_cap)
         return build_review_prompt(
             gate_name=gate,
             pr=str(pr_number),
             diff_text=diff_content,
             verdict_contract=_HARNESS_LANE_VERDICT_CONTRACT,
-            max_chars=_HARNESS_LANE_MAX_DIFF_CHARS,
+            max_chars=diff_cap,
         )
 
     # Subprocess execution — stays here so tests can patch gate_runner.subprocess.Popen,

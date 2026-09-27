@@ -112,13 +112,19 @@ def current_contract_hash(gate: str, pr_number: int) -> str:
 
     No model call: the prompt is deterministic and the diff comes from ``gh``.
     Builds the prompt the way the harness lane does — ``build_review_prompt``
-    with the shared gate_lane_contract verdict contract and diff cap (C6 step
-    3) — instead of importing the standalone gate module. Verified against PR
-    #1691, whose recorded hash ``dd5ac45f7e84535e`` this reproduces exactly.
+    with the shared gate_lane_contract verdict contract and per-gate diff cap
+    (OI-1874: ``gate_lane_contract.max_diff_chars``, keyed by ``gate`` — never
+    a fixed constant) — instead of importing the standalone gate module.
+    Verified against PR #1691, whose recorded hash ``dd5ac45f7e84535e`` this
+    reproduces exactly. Historical ``kimi_gate`` records over 50000 chars were
+    hashed under the old shared cap (pre-OI-1874); reanchoring one of those
+    recomputes the hash under kimi_gate's current 400000-char cap instead, so
+    a diff between 50000 and 400000 chars now hashes byte-identically to how
+    it was originally reviewed rather than to a truncated version of itself.
     """
     if gate not in DIFF_DERIVED_HASH_GATES:
         raise ValueError(f"{gate} has no diff-derived contract hash")
-    from gate_lane_contract import MAX_DIFF_CHARS, VERDICT_CONTRACT
+    from gate_lane_contract import VERDICT_CONTRACT, max_diff_chars
     from gate_prompt import build_review_prompt
 
     diff = _gh(["pr", "diff", str(pr_number)])
@@ -127,7 +133,7 @@ def current_contract_hash(gate: str, pr_number: int) -> str:
         pr=str(pr_number),
         diff_text=diff,
         verdict_contract=VERDICT_CONTRACT,
-        max_chars=MAX_DIFF_CHARS,
+        max_chars=max_diff_chars(gate),
     )
     return _compute_contract_hash({"prompt": prompt}, gate)
 

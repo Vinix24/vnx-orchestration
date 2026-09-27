@@ -12,7 +12,18 @@ copy can no longer sneak back in unnoticed.
 
 from __future__ import annotations
 
+import logging
+import sys
+from pathlib import Path
 from typing import Dict
+
+_LIB = str(Path(__file__).resolve().parent)
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+
+import config_runtime  # noqa: E402  (after the scripts/lib path guard above)
+
+logger = logging.getLogger(__name__)
 
 # gate name -> (model env var, default model).
 #
@@ -39,7 +50,64 @@ TIMEOUT_SECONDS = 900
 
 # Diff cap applied by gate_prompt.build_review_prompt: the diff is delimited,
 # untrusted DATA, and this bounds how much of it enters the prompt.
-MAX_DIFF_CHARS = 50000
+#
+# OI-1874: one fixed cap shared by all three harness-lane gates was never
+# chosen per model. kimi-k3 carries a 1M-token context (wave7_models.yaml) and
+# runs on the kimi CLI OAuth subscription, so raising its cap costs nothing;
+# glm_gate (OpenRouter) and deepseek_gate (deepseek-harness) are API-credit
+# fallback seats and stay at the original conservative cap. gate name -> (config
+# key, default chars). config_registry carries the same defaults and the
+# per-gate rationale; a project may raise or lower either via config or env.
+DIFF_CHAR_CONFIG: Dict[str, tuple] = {
+    "kimi_gate": ("VNX_KIMI_GATE_MAX_DIFF_CHARS", 400000),
+    "glm_gate": ("VNX_GLM_GATE_MAX_DIFF_CHARS", 50000),
+    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", 50000),
+}
+
+# The conservative fallback for a gate name this table does not know at all —
+# never unlimited, never a crash.
+_UNKNOWN_GATE_MAX_DIFF_CHARS = 50000
+
+
+def max_diff_chars(gate: str) -> int:
+    """Resolve the diff-char cap for *gate*, the ONLY place that knows both the
+    per-gate config keys and their defaults (OI-1874).
+
+    Read at runtime via ``config_runtime.get`` so a project config (or an env
+    var, or the operator override brake) can raise or lower it per gate — see
+    ``config_runtime``'s precedence chain. A gate this table does not carry
+    (``_UNKNOWN_GATE_MAX_DIFF_CHARS``), a missing/unset config value (falls
+    back to that gate's own default), and an invalid or non-positive config
+    value (same fallback, plus a logged warning) all resolve to a bounded,
+    positive cap — never to "no limit", and never by raising.
+    """
+    entry = DIFF_CHAR_CONFIG.get(gate)
+    if entry is None:
+        logger.warning(
+            "gate_lane_contract.max_diff_chars: unknown gate %r, falling back "
+            "to the conservative default %d", gate, _UNKNOWN_GATE_MAX_DIFF_CHARS,
+        )
+        return _UNKNOWN_GATE_MAX_DIFF_CHARS
+    key, default = entry
+    raw = config_runtime.get(key)
+    if raw is None:
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "gate_lane_contract.max_diff_chars: invalid config value %r for "
+            "%s, falling back to the %s default %d", raw, key, gate, default,
+        )
+        return default
+    if value <= 0:
+        logger.warning(
+            "gate_lane_contract.max_diff_chars: non-positive config value %d "
+            "for %s, falling back to the %s default %d", value, key, gate, default,
+        )
+        return default
+    return value
+
 
 # The verdict the gate must end its report with. Verbatim-identical across
 # glm_gate, kimi_gate and gate_runner's harness-lane strategy; this is the one

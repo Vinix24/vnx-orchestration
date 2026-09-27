@@ -343,6 +343,79 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "until the rotate flow ran. Finishing work in flight stays allowed.",
         approval=True,
         subsystem="t0-context-rotation", status="ACTIVATE", cockpit_canonical=True),
+
+    # OI-1874: per-gate diff-char cap for the harness-lane review gates, read at
+    # runtime by gate_lane_contract.max_diff_chars(). One fixed cap shared by all
+    # three (MAX_DIFF_CHARS=50000, consolidated in #1846) was never chosen per
+    # model -- kimi-k3 carries a 1M-token context (wave7_models.yaml) and runs on
+    # the kimi CLI OAuth subscription, so a much larger cap costs nothing there;
+    # glm_gate (OpenRouter) and deepseek_gate (deepseek-harness) bill per token as
+    # API-credit fallback seats and stay at the original conservative default.
+    #
+    # OI-1874 r3: subsystem="harness-lane-review-gates", NOT
+    # "governance-enforcement-stack" -- these three keys used to carry that tag,
+    # and vnx_cli/commands/subsystems.py's cockpit generator picks a subsystem's
+    # ledger row by LAST-INSERTED flag, so adding them after
+    # governance-enforcement-stack's existing entries silently flipped that row's
+    # displayed flag/status to one of these (LIVE) while its "what" text still
+    # said enforcement wiring is deferred -- a real subsystem's cockpit row
+    # changed shape without a single edit to its own text. These three describe a
+    # different, already-live mechanism (the harness-lane diff cap, not the
+    # deferred hash-chain/attestation/evidence-bound stack), so they get their
+    # own row instead of borrowing one. VNX_KIMI_GATE_MAX_DIFF_CHARS is marked
+    # cockpit_canonical=True: config_registry.canonical_flags() requires exactly
+    # one explicit tie-breaker once a subsystem has more than one
+    # read_site_wired candidate (see that function's own docstring) -- kimi_gate
+    # is picked as the default review stack's subscription-priority reviewer
+    # (VNX_DEFAULT_REVIEW_STACK, DISPATCH_RULES.md).
+    #
+    # OI-1874 r4: status="ACTIVATE", NOT "LIVE". check_live_requires_measured_health.py
+    # (D6b) refuses LIVE paired with unmeasured health, and no effectiveness
+    # probe exists yet for this brand-new row (its only seed health is "unknown
+    # -- no probe yet"). This is not a demotion of a broken feature: the cap IS
+    # wired and read at every harness-lane gate run right now, the SAME shape as
+    # sibling rows "t0-context-rotation" and "central-install-cutover" -- both
+    # real, currently-enforcing mechanisms that also carry status="ACTIVATE"
+    # for the identical reason (no probe registered yet). "ACTIVATE-and-measure"
+    # describes "dormant until measured" for some rows and "live but
+    # unmeasured" for these; the guard cares only about the LIVE+unmeasured
+    # combination, not about which of those two this row actually is.
+    #
+    # OI-1874 r4: VNX_KIMI_GATE_MAX_DIFF_CHARS is defined LAST of these three
+    # keys, deliberately -- vnx_cli/commands/subsystems.py's ``_canonical_flags``
+    # (the ledger/CLI generator) still picks a subsystem's displayed flag by
+    # LAST-INSERTED dict order, a separate, older implementation from this
+    # module's own ``canonical_flags()`` below (which correctly honors
+    # ``cockpit_canonical``; ``dashboard/api_subsystems.py`` already delegates to
+    # it, OI-1385). Making the ledger generator delegate too is the real fix,
+    # but it is NOT done here: governance-enforcement-stack already has its own
+    # pre-existing last-inserted-vs-cockpit_canonical mismatch (VNX_GOVERNANCE_ENFORCED
+    # vs VNX_CI_GATE_REQUIRED) that predates this dispatch, and switching the
+    # generator's selection algorithm would silently change that unrelated,
+    # already-committed row too. Ordering these three so last-inserted already
+    # agrees with cockpit_canonical is the narrow fix that only touches this
+    # new row.
+    "VNX_GLM_GATE_MAX_DIFF_CHARS": _e(
+        "VNX_GLM_GATE_MAX_DIFF_CHARS", "string", "50000", "gate",
+        "Diff-char cap for the prompt glm_gate builds from a PR diff. glm_gate is an "
+        "OpenRouter API-credit fallback seat, billed per token, so the default stays "
+        "conservative; a project may raise or lower it.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE"),
+    "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS": _e(
+        "VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", "string", "50000", "gate",
+        "Diff-char cap for the prompt deepseek_gate builds from a PR diff. "
+        "deepseek_gate is an API-credit fallback seat, billed per token, so the "
+        "default stays conservative; a project may raise or lower it.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE"),
+    "VNX_KIMI_GATE_MAX_DIFF_CHARS": _e(
+        "VNX_KIMI_GATE_MAX_DIFF_CHARS", "string", "400000", "gate",
+        "Diff-char cap for the prompt kimi_gate builds from a PR diff. kimi-k3's "
+        "1M-token context and subscription billing make a much larger cap free; a "
+        "project may raise or lower it.",
+        approval=True,
+        subsystem="harness-lane-review-gates", status="ACTIVATE", cockpit_canonical=True),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems

@@ -149,8 +149,9 @@ def test_single_shot_empty_diff_is_degenerate():
 
 
 def test_single_shot_truncated_but_nonempty_diff_is_not_degenerate():
-    """A 60000-character diff capped at MAX_DIFF_CHARS still handed the model
-    real content — truncation is a fact about size, never about content."""
+    """A 60000-character diff capped at gate_lane_contract.max_diff_chars
+    still handed the model real content — truncation is a fact about size,
+    never about content."""
     depth = gate_depth.single_shot_depth(50000, True)
     assert gate_depth.is_degenerate(depth) is False
 
